@@ -26,7 +26,7 @@
 </p>
 
 ## Introduction
-**KiteSQL** is a lightweight embedded database inspired by **MyRocks** and **SQLite** and completely coded in Rust. It aims to provide a more user-friendly, lightweight, and low-loss RDBMS for Rust programming so that the APP does not rely on other complex components. can perform complex relational data operations
+**KiteSQL** is a lightweight embedded database inspired by **MyRocks** and **SQLite** and completely coded in Rust. It aims to provide a more user-friendly, lightweight, and low-loss RDBMS for Rust programming so that the APP does not rely on other complex components. It can perform complex relational data operations.
 
 ## Key Features
 - A lightweight embedded SQL database fully rewritten in Rust
