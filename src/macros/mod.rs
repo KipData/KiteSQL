@@ -24,16 +24,16 @@
 #[macro_export]
 macro_rules! implement_from_tuple {
     ($struct_name:ident, ($($field_name:ident : $field_type:ty => $closure:expr),+)) => {
-        impl From<(&::fnck_sql::types::tuple::SchemaRef, ::fnck_sql::types::tuple::Tuple)> for $struct_name {
-            fn from((schema, mut tuple): (&::fnck_sql::types::tuple::SchemaRef, ::fnck_sql::types::tuple::Tuple)) -> Self {
-                fn try_get<T: 'static>(tuple: &mut ::fnck_sql::types::tuple::Tuple, schema: &::fnck_sql::types::tuple::SchemaRef, field_name: &str) -> Option<::fnck_sql::types::value::DataValue> {
-                    let ty = ::fnck_sql::types::LogicalType::type_trans::<T>()?;
+        impl From<(&::kite_sql::types::tuple::SchemaRef, ::kite_sql::types::tuple::Tuple)> for $struct_name {
+            fn from((schema, mut tuple): (&::kite_sql::types::tuple::SchemaRef, ::kite_sql::types::tuple::Tuple)) -> Self {
+                fn try_get<T: 'static>(tuple: &mut ::kite_sql::types::tuple::Tuple, schema: &::kite_sql::types::tuple::SchemaRef, field_name: &str) -> Option<::kite_sql::types::value::DataValue> {
+                    let ty = ::kite_sql::types::LogicalType::type_trans::<T>()?;
                     let (idx, _) = schema
                         .iter()
                         .enumerate()
                         .find(|(_, col)| col.name() == field_name)?;
 
-                    std::mem::replace(&mut tuple.values[idx], ::fnck_sql::types::value::DataValue::Null).cast(&ty).ok()
+                    std::mem::replace(&mut tuple.values[idx], ::kite_sql::types::value::DataValue::Null).cast(&ty).ok()
                 }
 
                 let mut struct_instance = $struct_name::default();
@@ -58,7 +58,7 @@ macro_rules! implement_from_tuple {
 ///     DataValue::binary_op(&v1, &v2, &BinaryOperator::Plus)
 /// });
 ///
-/// let fnck_sql = DataBaseBuilder::path("./example")
+/// let kite_sql = DataBaseBuilder::path("./example")
 ///     .register_scala_function(TestFunction::new())
 ///     .build()
 ///     ?;
@@ -68,7 +68,7 @@ macro_rules! scala_function {
     ($struct_name:ident::$function_name:ident($($arg_ty:expr),*) -> $return_ty:expr => $closure:expr) => {
         #[derive(Debug, ::serde::Serialize, ::serde::Deserialize)]
         pub(crate) struct $struct_name {
-            summary: ::fnck_sql::expression::function::FunctionSummary
+            summary: ::kite_sql::expression::function::FunctionSummary
         }
 
         impl $struct_name {
@@ -82,7 +82,7 @@ macro_rules! scala_function {
                 })*
 
                 Arc::new(Self {
-                    summary: ::fnck_sql::expression::function::FunctionSummary {
+                    summary: ::kite_sql::expression::function::FunctionSummary {
                         name: function_name,
                         arg_types
                     }
@@ -91,9 +91,9 @@ macro_rules! scala_function {
         }
 
         #[typetag::serde]
-        impl ::fnck_sql::expression::function::scala::ScalarFunctionImpl for $struct_name {
+        impl ::kite_sql::expression::function::scala::ScalarFunctionImpl for $struct_name {
             #[allow(unused_variables, clippy::redundant_closure_call)]
-            fn eval(&self, args: &[::fnck_sql::expression::ScalarExpression], tuple: Option<(&::fnck_sql::types::tuple::Tuple, &[::fnck_sql::catalog::column::ColumnRef])>) -> Result<::fnck_sql::types::value::DataValue, ::fnck_sql::errors::DatabaseError> {
+            fn eval(&self, args: &[::kite_sql::expression::ScalarExpression], tuple: Option<(&::kite_sql::types::tuple::Tuple, &[::kite_sql::catalog::column::ColumnRef])>) -> Result<::kite_sql::types::value::DataValue, ::kite_sql::errors::DatabaseError> {
                 let mut _index = 0;
 
                 $closure($({
@@ -107,15 +107,15 @@ macro_rules! scala_function {
                 }, )*)
             }
 
-            fn monotonicity(&self) -> Option<::fnck_sql::expression::function::scala::FuncMonotonicity> {
+            fn monotonicity(&self) -> Option<::kite_sql::expression::function::scala::FuncMonotonicity> {
                 todo!()
             }
 
-            fn return_type(&self) -> &::fnck_sql::types::LogicalType {
+            fn return_type(&self) -> &::kite_sql::types::LogicalType {
                 &$return_ty
             }
 
-            fn summary(&self) -> &::fnck_sql::expression::function::FunctionSummary {
+            fn summary(&self) -> &::kite_sql::expression::function::FunctionSummary {
                 &self.summary
             }
         }
@@ -136,7 +136,7 @@ macro_rules! scala_function {
 ///             ])))) as Box<dyn Iterator<Item = Result<Tuple, DatabaseError>>>)
 ///     }));
 ///
-///     let fnck_sql = DataBaseBuilder::path("./example")
+///     let kite_sql = DataBaseBuilder::path("./example")
 ///         .register_table_function(MyTableFunction::new())
 ///         .build()
 ///     ?;
@@ -144,18 +144,18 @@ macro_rules! scala_function {
 #[macro_export]
 macro_rules! table_function {
     ($struct_name:ident::$function_name:ident($($arg_ty:expr),*) -> [$($output_name:ident: $output_ty:expr),*] => $closure:expr) => {
-        static $function_name: ::std::sync::LazyLock<::fnck_sql::catalog::table::TableCatalog> = ::std::sync::LazyLock::new(|| {
+        static $function_name: ::std::sync::LazyLock<::kite_sql::catalog::table::TableCatalog> = ::std::sync::LazyLock::new(|| {
             let mut columns = Vec::new();
 
             $({
-                columns.push(::fnck_sql::catalog::column::ColumnCatalog::new(stringify!($output_name).to_lowercase(), true, ::fnck_sql::catalog::column::ColumnDesc::new($output_ty, None, false, None).unwrap()));
+                columns.push(::kite_sql::catalog::column::ColumnCatalog::new(stringify!($output_name).to_lowercase(), true, ::kite_sql::catalog::column::ColumnDesc::new($output_ty, None, false, None).unwrap()));
             })*
-            ::fnck_sql::catalog::table::TableCatalog::new(Arc::new(stringify!($function_name).to_lowercase()), columns).unwrap()
+            ::kite_sql::catalog::table::TableCatalog::new(Arc::new(stringify!($function_name).to_lowercase()), columns).unwrap()
         });
 
         #[derive(Debug, ::serde::Serialize, ::serde::Deserialize)]
         pub(crate) struct $struct_name {
-            summary: ::fnck_sql::expression::function::FunctionSummary
+            summary: ::kite_sql::expression::function::FunctionSummary
         }
 
         impl $struct_name {
@@ -169,7 +169,7 @@ macro_rules! table_function {
                 })*
 
                 Arc::new(Self {
-                    summary: ::fnck_sql::expression::function::FunctionSummary {
+                    summary: ::kite_sql::expression::function::FunctionSummary {
                         name: function_name,
                         arg_types
                     }
@@ -178,9 +178,9 @@ macro_rules! table_function {
         }
 
         #[typetag::serde]
-        impl ::fnck_sql::expression::function::table::TableFunctionImpl for $struct_name {
+        impl ::kite_sql::expression::function::table::TableFunctionImpl for $struct_name {
             #[allow(unused_variables, clippy::redundant_closure_call)]
-            fn eval(&self, args: &[::fnck_sql::expression::ScalarExpression]) -> Result<Box<dyn Iterator<Item=Result<::fnck_sql::types::tuple::Tuple, ::fnck_sql::errors::DatabaseError>>>, ::fnck_sql::errors::DatabaseError> {
+            fn eval(&self, args: &[::kite_sql::expression::ScalarExpression]) -> Result<Box<dyn Iterator<Item=Result<::kite_sql::types::tuple::Tuple, ::kite_sql::errors::DatabaseError>>>, ::kite_sql::errors::DatabaseError> {
                 let mut _index = 0;
 
                 $closure($({
@@ -194,15 +194,15 @@ macro_rules! table_function {
                 }, )*)
             }
 
-            fn output_schema(&self) -> &::fnck_sql::types::tuple::SchemaRef {
+            fn output_schema(&self) -> &::kite_sql::types::tuple::SchemaRef {
                 $function_name.schema_ref()
             }
 
-            fn summary(&self) -> &::fnck_sql::expression::function::FunctionSummary {
+            fn summary(&self) -> &::kite_sql::expression::function::FunctionSummary {
                 &self.summary
             }
 
-            fn table(&self) -> &'static ::fnck_sql::catalog::table::TableCatalog {
+            fn table(&self) -> &'static ::kite_sql::catalog::table::TableCatalog {
                 &$function_name
             }
         }

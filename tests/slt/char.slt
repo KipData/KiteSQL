@@ -2,42 +2,42 @@ statement ok
 create table t1(id int primary key, v1 char, v2 char(5 characters), v3 char(5 octets))
 
 statement ok
-insert into t1 values(0, '🖕', '🖕🖕🖕🖕🖕', '🖕');
+insert into t1 values(0, '🪁', '🪁🪁🪁🪁🪁', '🪁');
 
 statement ok
 insert into t1 values(1, null, null, null);
 
 statement error
-insert into t1 values(1, '🖕', '🖕🖕🖕🖕🖕🖕', '🖕');
+insert into t1 values(1, '🪁', '🪁🪁🪁🪁🪁🪁', '🪁');
 
 statement error
-insert into t1 values(1, '🖕', '🖕🖕🖕🖕🖕', '🖕🖕');
+insert into t1 values(1, '🪁', '🪁🪁🪁🪁🪁', '🪁🪁');
 
 query ITT
 select * from t1;
 ----
-0 🖕 🖕🖕🖕🖕🖕 🖕
+0 🪁 🪁🪁🪁🪁🪁 🪁
 1 null null null
 
 statement ok
 create table t2(id int primary key, v1 varchar, v2 varchar(5 characters), v3 varchar(5 octets))
 
 statement ok
-insert into t2 values(0, '🖕', '🖕🖕🖕🖕🖕', '🖕');
+insert into t2 values(0, '🪁', '🪁🪁🪁🪁🪁', '🪁');
 
 statement ok
 insert into t2 values(1, null, null, null);
 
 statement error
-insert into t2 values(1, '🖕', '🖕🖕🖕🖕🖕🖕', '🖕');
+insert into t2 values(1, '🪁', '🪁🪁🪁🪁🪁🪁', '🪁');
 
 statement error
-insert into t2 values(1, '🖕', '🖕🖕🖕🖕🖕', '🖕🖕');
+insert into t2 values(1, '🪁', '🪁🪁🪁🪁🪁', '🪁🪁');
 
 query ITT
 select * from t2;
 ----
-0 🖕 🖕🖕🖕🖕🖕 🖕
+0 🪁 🪁🪁🪁🪁🪁 🪁
 1 null null null
 
 statement ok

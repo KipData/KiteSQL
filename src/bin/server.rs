@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 use clap::Parser;
-use fnck_sql::db::{DBTransaction, DataBaseBuilder, Database, ResultIter};
-use fnck_sql::errors::DatabaseError;
-use fnck_sql::storage::rocksdb::RocksStorage;
-use fnck_sql::types::tuple::{Schema, SchemaRef, Tuple};
-use fnck_sql::types::LogicalType;
 use futures::stream;
+use kite_sql::db::{DBTransaction, DataBaseBuilder, Database, ResultIter};
+use kite_sql::errors::DatabaseError;
+use kite_sql::storage::rocksdb::RocksStorage;
+use kite_sql::types::tuple::{Schema, SchemaRef, Tuple};
+use kite_sql::types::LogicalType;
 use log::{error, info, LevelFilter};
 use parking_lot::Mutex;
 use pgwire::api::auth::noop::NoopStartupHandler;
@@ -25,25 +25,14 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 
 pub(crate) const BANNER: &str = "
-███████╗███╗   ██╗ ██████╗██╗  ██╗    ███████╗ ██████╗ ██╗
-██╔════╝████╗  ██║██╔════╝██║ ██╔╝    ██╔════╝██╔═══██╗██║
-█████╗  ██╔██╗ ██║██║     █████╔╝     ███████╗██║   ██║██║
-██╔══╝  ██║╚██╗██║██║     ██╔═██╗     ╚════██║██║▄▄ ██║██║
-██║     ██║ ╚████║╚██████╗██║  ██╗    ███████║╚██████╔╝███████╗
-╚═╝     ╚═╝  ╚═══╝ ╚═════╝╚═╝  ╚═╝    ╚══════╝ ╚══▀▀═╝ ╚══════╝
+oooo    oooo  o8o      .                 .oooooo..o   .oooooo.      ooooo
+`888   .8P'   `\"'    .o8                d8P'    `Y8  d8P'  `Y8b     `888'
+ 888  d8'    oooo  .o888oo  .ooooo.     Y88bo.      888      888     888
+ 88888[      `888    888   d88' `88b     `\"Y8888o.  888      888     888
+ 888`88b.     888    888   888ooo888         `\"Y88b 888      888     888
+ 888  `88b.   888    888 . 888    .o    oo     .d8P `88b    d88b     888       o
+o888o  o888o o888o   \"888\" `Y8bod8P'    8\"\"88888P'   `Y8bood8P'Ybd' o888ooooood8
 
-";
-
-pub const BLOOM: &str = "
-          _ ._  _ , _ ._
-        (_ ' ( `  )_  .__)
-      ( (  (    )   `)  ) _)
-- --=(;;(----(-----)-----);;)==-- -
-     (__ (_   (_ . _) _) ,__)
-         `~~`\\ ' . /`~~`
-              ;   ;
-              /   \\
-_____________/_ __ \\_____________
 ";
 
 #[derive(Parser, Debug)]
@@ -53,7 +42,7 @@ struct Args {
     ip: String,
     #[clap(long, default_value = "5432")]
     port: u16,
-    #[clap(long, default_value = "./fncksql_data")]
+    #[clap(long, default_value = "./kitesql_data")]
     path: String,
 }
 
@@ -76,15 +65,15 @@ impl DerefMut for TransactionPtr {
 unsafe impl Send for TransactionPtr {}
 unsafe impl Sync for TransactionPtr {}
 
-pub struct FnckSQLBackend {
+pub struct KiteSQLBackend {
     inner: Arc<Database<RocksStorage>>,
 }
 
-impl FnckSQLBackend {
-    pub fn new(path: impl Into<PathBuf> + Send) -> Result<FnckSQLBackend, DatabaseError> {
+impl KiteSQLBackend {
+    pub fn new(path: impl Into<PathBuf> + Send) -> Result<KiteSQLBackend, DatabaseError> {
         let database = DataBaseBuilder::path(path).build()?;
 
-        Ok(FnckSQLBackend {
+        Ok(KiteSQLBackend {
             inner: Arc::new(database),
         })
     }
@@ -350,15 +339,15 @@ async fn main() {
 
     let args = Args::parse();
     info!("{} \nVersion: {}\n", BANNER, env!("CARGO_PKG_VERSION"));
-    info!(":) Welcome to the FnckSQL🖕");
+    info!(":) Welcome to the KiteSQL🪁");
     info!("Listen on port {}", args.port);
-    info!("Tips🔞: ");
+    info!("Tips: ");
     info!(
         "1. all data is in the \'{}\' folder in the directory where the application is run",
         args.path
     );
 
-    let backend = FnckSQLBackend::new(args.path).unwrap();
+    let backend = KiteSQLBackend::new(args.path).unwrap();
     let factory = Arc::new(CustomBackendFactory::new(Arc::new(SessionBackend::new(
         backend.inner,
     ))));
@@ -371,7 +360,7 @@ async fn main() {
                 error!("[Listener][Failed To Accept]: {}", err);
             }
         }
-        _ = quit() => info!("{BLOOM}")
+        _ = quit() => info!("Bye!")
     }
 }
 

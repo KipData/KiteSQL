@@ -1,8 +1,8 @@
 use crate::TpccError;
 use chrono::Utc;
-use fnck_sql::db::{Database, ResultIter};
-use fnck_sql::storage::Storage;
 use indicatif::{ProgressBar, ProgressStyle};
+use kite_sql::db::{Database, ResultIter};
+use kite_sql::storage::Storage;
 use rand::rngs::ThreadRng;
 use rand::Rng;
 use rust_decimal::Decimal;

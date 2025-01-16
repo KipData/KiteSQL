@@ -7,9 +7,9 @@ use crate::rt_hist::RtHist;
 use crate::slev::SlevTest;
 use crate::utils::SeqGen;
 use clap::Parser;
-use fnck_sql::db::{DBTransaction, DataBaseBuilder, Statement};
-use fnck_sql::errors::DatabaseError;
-use fnck_sql::storage::Storage;
+use kite_sql::db::{DBTransaction, DataBaseBuilder, Statement};
+use kite_sql::errors::DatabaseError;
+use kite_sql::storage::Storage;
 use rand::prelude::ThreadRng;
 use rand::Rng;
 use std::time::{Duration, Instant};
@@ -64,7 +64,7 @@ struct TpccArgs {
 struct Args {
     #[clap(long, default_value = "false")]
     joins: bool,
-    #[clap(long, default_value = "fnck_sql_tpcc")]
+    #[clap(long, default_value = "kite_sql_tpcc")]
     path: String,
     #[clap(long, default_value = "5")]
     max_retry: usize,
@@ -306,7 +306,7 @@ fn other_ware(rng: &mut ThreadRng, home_ware: usize, num_ware: usize) -> usize {
 
 #[derive(thiserror::Error, Debug)]
 pub enum TpccError {
-    #[error("fnck_sql: {0}")]
+    #[error("kite_sql: {0}")]
     Database(
         #[source]
         #[from]
@@ -321,9 +321,9 @@ pub enum TpccError {
 #[ignore]
 #[test]
 fn explain_tpcc() -> Result<(), DatabaseError> {
-    use fnck_sql::types::tuple::create_table;
+    use kite_sql::types::tuple::create_table;
 
-    let database = DataBaseBuilder::path("./fnck_sql_tpcc").build()?;
+    let database = DataBaseBuilder::path("./kite_sql_tpcc").build()?;
     let mut tx = database.new_transaction()?;
 
     let customer_tuple = tx

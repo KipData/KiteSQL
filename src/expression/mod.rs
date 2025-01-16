@@ -6,8 +6,8 @@ use crate::expression::function::table::TableFunction;
 use crate::types::evaluator::{BinaryEvaluatorBox, EvaluatorFactory, UnaryEvaluatorBox};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
-use fnck_sql_serde_macros::ReferenceSerialization;
 use itertools::Itertools;
+use kite_sql_serde_macros::ReferenceSerialization;
 use sqlparser::ast::TrimWhereField;
 use sqlparser::ast::{
     BinaryOperator as SqlBinaryOperator, CharLengthUnits, UnaryOperator as SqlUnaryOperator,

@@ -249,19 +249,19 @@ mod test {
     #[test]
     fn test_index_iter_pk() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let fnck_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
 
-        fnck_sql
+        kite_sql
             .run("create table t1 (a int primary key)")?
             .done()?;
-        fnck_sql
+        kite_sql
             .run("insert into t1 (a) values (0), (1), (2), (3), (4)")?
             .done()?;
-        let transaction = fnck_sql.storage.transaction()?;
+        let transaction = kite_sql.storage.transaction()?;
 
         let table_name = Arc::new("t1".to_string());
         let table = transaction
-            .table(fnck_sql.state.table_cache(), table_name.clone())?
+            .table(kite_sql.state.table_cache(), table_name.clone())?
             .unwrap()
             .clone();
         let a_column_id = table.get_column_id_by_name("a").unwrap();
@@ -317,23 +317,23 @@ mod test {
     #[test]
     fn test_read_by_index() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let fnck_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
-        fnck_sql
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        kite_sql
             .run("create table t1 (a int primary key, b int unique)")?
             .done()?;
-        fnck_sql
+        kite_sql
             .run("insert into t1 (a, b) values (0, 0), (1, 1), (2, 2)")?
             .done()?;
-        let transaction = fnck_sql.storage.transaction().unwrap();
+        let transaction = kite_sql.storage.transaction().unwrap();
 
         let table = transaction
-            .table(fnck_sql.state.table_cache(), Arc::new("t1".to_string()))?
+            .table(kite_sql.state.table_cache(), Arc::new("t1".to_string()))?
             .unwrap()
             .clone();
         let columns = table.columns().cloned().enumerate().collect_vec();
         let mut iter = transaction
             .read_by_index(
-                fnck_sql.state.table_cache(),
+                kite_sql.state.table_cache(),
                 Arc::new("t1".to_string()),
                 (Some(0), Some(1)),
                 columns,

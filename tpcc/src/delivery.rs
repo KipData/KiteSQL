@@ -1,9 +1,9 @@
 use crate::load::DIST_PER_WARE;
 use crate::{TpccArgs, TpccError, TpccTest, TpccTransaction};
 use chrono::Utc;
-use fnck_sql::db::{DBTransaction, ResultIter, Statement};
-use fnck_sql::storage::Storage;
-use fnck_sql::types::value::DataValue;
+use kite_sql::db::{DBTransaction, ResultIter, Statement};
+use kite_sql::storage::Storage;
+use kite_sql::types::value::DataValue;
 use rand::prelude::ThreadRng;
 use rand::Rng;
 

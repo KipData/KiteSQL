@@ -1,11 +1,11 @@
-//! FnckSQL is a high-performance SQL database
+//! KiteSQL is a high-performance SQL database
 //! that can be embedded in Rust code (based on RocksDB by default),
 //! making it possible to call SQL just like calling a function.
 //! It supports most of the syntax of SQL 2016.
 //!
-//! FnckSQL provides thread-safe API: [`DataBase::run`](db::Database::run) for running SQL
+//! KiteSQL provides thread-safe API: [`DataBase::run`](db::Database::run) for running SQL
 //!
-//! FnckSQL uses [`DataBaseBuilder`](db::DataBaseBuilder) for instance construction,
+//! KiteSQL uses [`DataBaseBuilder`](db::DataBaseBuilder) for instance construction,
 //! configuration in builder mode
 //!
 //! Support type
@@ -37,10 +37,10 @@
 //! # Examples
 //!
 //! ```ignore
-//! use fnck_sql::db::{DataBaseBuilder, ResultIter};
-//! use fnck_sql::errors::DatabaseError;
-//! use fnck_sql::implement_from_tuple;
-//! use fnck_sql::types::value::DataValue;
+//! use kite_sql::db::{DataBaseBuilder, ResultIter};
+//! use kite_sql::errors::DatabaseError;
+//! use kite_sql::implement_from_tuple;
+//! use kite_sql::types::value::DataValue;
 //!
 //! #[derive(Default, Debug, PartialEq)]
 //! struct MyStruct {

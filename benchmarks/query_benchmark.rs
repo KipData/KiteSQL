@@ -1,15 +1,15 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use fnck_sql::db::{DataBaseBuilder, ResultIter};
-use fnck_sql::errors::DatabaseError;
 use indicatif::{ProgressBar, ProgressStyle};
 use itertools::Itertools;
+use kite_sql::db::{DataBaseBuilder, ResultIter};
+use kite_sql::errors::DatabaseError;
 #[cfg(unix)]
 use pprof::criterion::{Output, PProfProfiler};
 use sqlite::Error;
 use std::fs;
 use std::path::Path;
 
-const QUERY_BENCH_FNCK_SQL_PATH: &'static str = "./fncksql_bench";
+const QUERY_BENCH_kite_sql_PATH: &'static str = "./kitesql_bench";
 const QUERY_BENCH_SQLITE_PATH: &'static str = "./sqlite_bench";
 const TABLE_ROW_NUM: u64 = 200_000;
 
@@ -24,8 +24,8 @@ fn query_cases() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-fn init_fncksql_query_bench() -> Result<(), DatabaseError> {
-    let database = DataBaseBuilder::path(QUERY_BENCH_FNCK_SQL_PATH).build()?;
+fn init_kitesql_query_bench() -> Result<(), DatabaseError> {
+    let database = DataBaseBuilder::path(QUERY_BENCH_kite_sql_PATH).build()?;
     database
         .run("create table t1 (c1 int primary key, c2 int)")?
         .done()?;
@@ -84,21 +84,21 @@ fn query_on_execute(c: &mut Criterion) {
 
         init_sqlite_query_bench().unwrap();
     }
-    if !path_exists_and_is_directory(QUERY_BENCH_FNCK_SQL_PATH) {
+    if !path_exists_and_is_directory(QUERY_BENCH_kite_sql_PATH) {
         println!(
-            "FnckSQL: The table is not initialized and data insertion is started. => {}",
+            "KiteSQL: The table is not initialized and data insertion is started. => {}",
             TABLE_ROW_NUM
         );
 
-        init_fncksql_query_bench().unwrap();
+        init_kitesql_query_bench().unwrap();
     }
-    let database = DataBaseBuilder::path(QUERY_BENCH_FNCK_SQL_PATH)
+    let database = DataBaseBuilder::path(QUERY_BENCH_kite_sql_PATH)
         .build()
         .unwrap();
     println!("Table initialization completed");
 
     for (name, case) in query_cases() {
-        c.bench_function(format!("FnckSQL: {} by '{}'", name, case).as_str(), |b| {
+        c.bench_function(format!("KiteSQL: {} by '{}'", name, case).as_str(), |b| {
             b.iter(|| {
                 for tuple in database.run(case).unwrap() {
                     let _ = tuple.unwrap();

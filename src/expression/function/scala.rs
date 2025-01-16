@@ -5,7 +5,7 @@ use crate::expression::ScalarExpression;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
-use fnck_sql_serde_macros::ReferenceSerialization;
+use kite_sql_serde_macros::ReferenceSerialization;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};

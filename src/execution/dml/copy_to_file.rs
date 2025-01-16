@@ -174,7 +174,7 @@ mod tests {
             .done()?;
         db.run("insert into t1 values (1, 1.1, 'foo')")?.done()?;
         db.run("insert into t1 values (2, 2.0, 'fooo')")?.done()?;
-        db.run("insert into t1 values (3, 2.1, 'fnck')")?.done()?;
+        db.run("insert into t1 values (3, 2.1, 'Kite')")?.done()?;
 
         let storage = db.storage;
         let mut transaction = storage.transaction()?;
@@ -212,7 +212,7 @@ mod tests {
         assert_eq!(record2, vec!["2", "2.0", "fooo"]);
 
         let record3 = records.next().unwrap()?;
-        assert_eq!(record3, vec!["3", "2.1", "fnck"]);
+        assert_eq!(record3, vec!["3", "2.1", "Kite"]);
 
         assert!(records.next().is_none());
 

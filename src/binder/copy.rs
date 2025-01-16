@@ -9,7 +9,7 @@ use crate::planner::operator::copy_to_file::CopyToFileOperator;
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::Operator;
 use crate::planner::Childrens;
-use fnck_sql_serde_macros::ReferenceSerialization;
+use kite_sql_serde_macros::ReferenceSerialization;
 use serde::{Deserialize, Serialize};
 use sqlparser::ast::{CopyOption, CopySource, CopyTarget};
 

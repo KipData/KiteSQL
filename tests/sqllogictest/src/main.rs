@@ -1,5 +1,5 @@
 use clap::Parser;
-use fnck_sql::db::DataBaseBuilder;
+use kite_sql::db::DataBaseBuilder;
 use sqllogictest::Runner;
 use sqllogictest_test::SQLBase;
 use std::fs::File;
@@ -22,7 +22,7 @@ fn main() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
     std::env::set_current_dir(path).unwrap();
 
-    println!("FnckSQL Test Start!\n");
+    println!("KiteSQL Test Start!\n");
     init_20000_row_csv().expect("failed to init csv");
     let mut file_num = 0;
     let start = Instant::now();

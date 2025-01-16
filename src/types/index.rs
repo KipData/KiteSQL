@@ -4,7 +4,7 @@ use crate::expression::range_detacher::Range;
 use crate::expression::ScalarExpression;
 use crate::types::value::DataValue;
 use crate::types::{ColumnId, LogicalType};
-use fnck_sql_serde_macros::ReferenceSerialization;
+use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::fmt::Formatter;
 use std::sync::Arc;

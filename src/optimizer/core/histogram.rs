@@ -9,7 +9,7 @@ use crate::types::index::{IndexId, IndexMeta};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use bumpalo::Bump;
-use fnck_sql_serde_macros::ReferenceSerialization;
+use kite_sql_serde_macros::ReferenceSerialization;
 use ordered_float::OrderedFloat;
 use std::collections::Bound;
 use std::{cmp, mem};

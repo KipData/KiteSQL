@@ -72,7 +72,7 @@ select * from t1 where a not in (select 1) and b = 3
 statement ok
 drop table t1;
 
-# https://github.com/KipData/FnckSQL/issues/169
+# https://github.com/KipData/KiteSQL/issues/169
 statement ok
 create table t2(id int primary key, a int not null, b int not null);
 

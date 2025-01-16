@@ -1,8 +1,8 @@
 use crate::load::{last_name, nu_rand, CUST_PER_DIST, DIST_PER_WARE};
 use crate::{TpccArgs, TpccError, TpccTest, TpccTransaction};
-use fnck_sql::db::{DBTransaction, Statement};
-use fnck_sql::storage::Storage;
-use fnck_sql::types::value::DataValue;
+use kite_sql::db::{DBTransaction, Statement};
+use kite_sql::storage::Storage;
+use kite_sql::types::value::DataValue;
 use rand::prelude::ThreadRng;
 use rand::Rng;
 use rust_decimal::Decimal;

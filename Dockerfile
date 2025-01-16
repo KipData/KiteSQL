@@ -15,12 +15,12 @@ RUN echo "deb https://mirrors.tuna.tsinghua.edu.cn/debian/ buster main contrib n
     echo "deb-src https://mirrors.tuna.tsinghua.edu.cn/debian/ buster main contrib non-free" >> /etc/apt/sources.list
 RUN apt-get update && apt-get install -y postgresql-client
 
-ARG APP_SERVER=fnck_sql
+ARG APP_SERVER=kite_sql
 
-WORKDIR /fnck_sql
+WORKDIR /kite_sql
 
 EXPOSE 5432
 
 COPY --from=builder /builder/target/release/${APP_SERVER} ${APP_SERVER}
 
-ENTRYPOINT ["./fnck_sql", "--ip", "0.0.0.0"]
+ENTRYPOINT ["./kite_sql", "--ip", "0.0.0.0"]

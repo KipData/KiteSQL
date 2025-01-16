@@ -37,7 +37,7 @@ scala_function!(TestFunction::test(LogicalType::Integer, LogicalType::Integer) -
     Ok(plus_unary_evaluator.unary_eval(&value))
 });
 
-let fnck_sql = DataBaseBuilder::path("./data")
+let kite_sql = DataBaseBuilder::path("./data")
     .register_scala_function(TestFunction::new())
     .build()?;
 ```
@@ -57,7 +57,7 @@ table_function!(MyTableFunction::test_numbers(LogicalType::Integer) -> [c1: Logi
             ]
         }))) as Box<dyn Iterator<Item = Result<Tuple, DatabaseError>>>)
 }));
-let fnck_sql = DataBaseBuilder::path("./data")
+let kite_sql = DataBaseBuilder::path("./data")
    .register_table_function(MyTableFunction::new())
    .build()?;
 ```

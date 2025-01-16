@@ -1,5 +1,5 @@
-use fnck_sql::db::{DataBaseBuilder, ResultIter};
-use fnck_sql::errors::DatabaseError;
+use kite_sql::db::{DataBaseBuilder, ResultIter};
+use kite_sql::errors::DatabaseError;
 
 fn main() -> Result<(), DatabaseError> {
     let database = DataBaseBuilder::path("./transaction").build()?;

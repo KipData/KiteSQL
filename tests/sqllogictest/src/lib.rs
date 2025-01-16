@@ -1,6 +1,6 @@
-use fnck_sql::db::{Database, ResultIter};
-use fnck_sql::errors::DatabaseError;
-use fnck_sql::storage::rocksdb::RocksStorage;
+use kite_sql::db::{Database, ResultIter};
+use kite_sql::errors::DatabaseError;
+use kite_sql::storage::rocksdb::RocksStorage;
 use sqllogictest::{DBOutput, DefaultColumnType, DB};
 use std::time::Instant;
 

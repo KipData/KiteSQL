@@ -3,7 +3,7 @@ use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::types::value::DataValue;
 use crate::types::{ColumnId, LogicalType};
-use fnck_sql_serde_macros::ReferenceSerialization;
+use kite_sql_serde_macros::ReferenceSerialization;
 use sqlparser::ast::CharLengthUnits;
 use std::hash::Hash;
 use std::ops::Deref;

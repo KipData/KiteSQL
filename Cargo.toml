@@ -1,21 +1,21 @@
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [package]
-name          = "fnck_sql"
-version       = "0.0.10"
+name          = "kite_sql"
+version       = "0.1.0"
 edition       = "2021"
 authors       = ["Kould <kould2333@gmail.com>", "Xwg <loloxwg@gmail.com>"]
 description   = "SQL as a Function for Rust"
-documentation = "https://docs.rs/fnck_sql/latest/fnck_sql/"
+documentation = "https://docs.rs/kite_sql/latest/kite_sql/"
 license       = "Apache-2.0"
 repository    = "https://github.com/KipData/KipSQL"
 readme        = "README.md"
 keywords      = ["sql", "sqlite", "database", "mysql"]
 categories    = ["development-tools", "database"]
-default-run   = "fnck_sql"
+default-run   = "kite_sql"
 
 [[bin]]
-name              = "fnck_sql"
+name              = "kite_sql"
 path              = "src/bin/server.rs"
 required-features = ["net"]
 
@@ -51,7 +51,7 @@ regex                 = { version = "1" }
 rocksdb               = { version = "0.22" }
 rust_decimal          = { version = "1" }
 serde                 = { version = "1", features = ["derive", "rc"] }
-fnck_sql_serde_macros = { version = "0.1.0", path = "fnck_sql_serde_macros" }
+kite_sql_serde_macros = { version = "0.1.0", path = "kite_sql_serde_macros" }
 siphasher             = { version = "1", features = ["serde"] }
 sqlparser             = { version = "0.34", features = ["serde"] }
 thiserror             = { version = "1" }
@@ -82,7 +82,7 @@ pprof = { version = "0.13", features = ["flamegraph", "criterion"] }
 members = [
   "tests/sqllogictest",
   "tests/macros-test",
-  "fnck_sql_serde_macros",
+  "kite_sql_serde_macros",
   "tpcc"]
 
 [profile.release]

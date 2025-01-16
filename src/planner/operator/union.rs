@@ -1,8 +1,8 @@
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::types::tuple::SchemaRef;
-use fnck_sql_serde_macros::ReferenceSerialization;
 use itertools::Itertools;
+use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::fmt::Formatter;
 

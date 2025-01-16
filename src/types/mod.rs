@@ -11,7 +11,7 @@ use std::any::TypeId;
 use std::cmp;
 
 use crate::errors::DatabaseError;
-use fnck_sql_serde_macros::ReferenceSerialization;
+use kite_sql_serde_macros::ReferenceSerialization;
 use sqlparser::ast::{CharLengthUnits, ExactNumberInfo, TimezoneInfo};
 use ulid::Ulid;
 

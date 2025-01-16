@@ -4,7 +4,7 @@ version = "0.4.0"
 edition = "2021"
 
 [dev-dependencies]
-"fnck_sql"  = { path = "../.." }
+"kite_sql"  = { path = "../.." }
 lazy_static = { version = "1" }
 serde       = { version = "1", features = ["derive", "rc"] }
 sqlparser   = { version = "0.34", features = ["serde"] }

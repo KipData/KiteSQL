@@ -1,9 +1,9 @@
 use crate::load::{nu_rand, CUST_PER_DIST, DIST_PER_WARE, MAX_ITEMS, MAX_NUM_ITEMS};
 use crate::{other_ware, TpccArgs, TpccError, TpccTest, TpccTransaction, ALLOW_MULTI_WAREHOUSE_TX};
 use chrono::Utc;
-use fnck_sql::db::{DBTransaction, ResultIter, Statement};
-use fnck_sql::storage::Storage;
-use fnck_sql::types::value::DataValue;
+use kite_sql::db::{DBTransaction, ResultIter, Statement};
+use kite_sql::storage::Storage;
+use kite_sql::types::value::DataValue;
 use rand::prelude::ThreadRng;
 use rand::Rng;
 use rust_decimal::Decimal;

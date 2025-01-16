@@ -23,10 +23,10 @@ Cargo.lock
 /hello_world
 /transaction
 
-fncksql_data
-fncksql_bench
+kitesql_data
+kitesql_bench
 sqlite_bench
-fnck_sql_tpcc
+kite_sql_tpcc
 copy.csv
 
 tests/data/row_20000.csv

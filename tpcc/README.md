@@ -1,4 +1,4 @@
-# TPCC on FnckSQL
+# TPCC on KiteSQL
 run `cargo run -p tpcc --release` to run tpcc
 
 - i9-13900HX

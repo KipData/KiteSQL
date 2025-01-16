@@ -1,7 +1,7 @@
-use fnck_sql::db::{DataBaseBuilder, ResultIter};
-use fnck_sql::errors::DatabaseError;
-use fnck_sql::implement_from_tuple;
-use fnck_sql::types::value::DataValue;
+use kite_sql::db::{DataBaseBuilder, ResultIter};
+use kite_sql::errors::DatabaseError;
+use kite_sql::implement_from_tuple;
+use kite_sql::types::value::DataValue;
 
 #[derive(Default, Debug, PartialEq)]
 struct MyStruct {

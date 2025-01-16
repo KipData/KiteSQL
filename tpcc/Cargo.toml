@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 clap            = { version = "4", features = ["derive"] }
 chrono          = { version = "0.4" }
-fnck_sql        = { version = "0.0.10", path = "..", package = "fnck_sql" }
+kite_sql        = { path = "..", package = "kite_sql" }
 indicatif       = { version = "0.17" }
 ordered-float   = { version = "4" }
 rand            = { version = "0.8" }

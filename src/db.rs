@@ -515,8 +515,8 @@ pub(crate) mod test {
     #[test]
     fn test_udf() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let fnck_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
-        let mut iter = fnck_sql.run("select current_date()")?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let mut iter = kite_sql.run("select current_date()")?;
 
         assert_eq!(
             iter.schema(),
@@ -542,8 +542,8 @@ pub(crate) mod test {
     #[test]
     fn test_udtf() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let fnck_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
-        let mut iter = fnck_sql.run(
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let mut iter = kite_sql.run(
             "SELECT * FROM (select * from table(numbers(10)) a ORDER BY number LIMIT 5) OFFSET 3",
         )?;
 
@@ -570,20 +570,20 @@ pub(crate) mod test {
     #[test]
     fn test_prepare_statment() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let fnck_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
 
-        fnck_sql
+        kite_sql
             .run("create table t1 (a int primary key, b int)")?
             .done()?;
-        fnck_sql.run("insert into t1 values(0, 0)")?.done()?;
-        fnck_sql.run("insert into t1 values(1, 1)")?.done()?;
-        fnck_sql.run("insert into t1 values(2, 2)")?.done()?;
+        kite_sql.run("insert into t1 values(0, 0)")?.done()?;
+        kite_sql.run("insert into t1 values(1, 1)")?.done()?;
+        kite_sql.run("insert into t1 values(2, 2)")?.done()?;
 
         // Filter
         {
-            let statement = fnck_sql.prepare("explain select * from t1 where b > ?1")?;
+            let statement = kite_sql.prepare("explain select * from t1 where b > ?1")?;
 
-            let mut iter = fnck_sql.execute(&statement, &[("?1", DataValue::Int32(0))])?;
+            let mut iter = kite_sql.execute(&statement, &[("?1", DataValue::Int32(0))])?;
 
             assert_eq!(
                 iter.next().unwrap()?.values[0].utf8().unwrap(),
@@ -594,11 +594,11 @@ pub(crate) mod test {
         }
         // Aggregate
         {
-            let statement = fnck_sql.prepare(
+            let statement = kite_sql.prepare(
                 "explain select a + ?1, max(b + ?2) from t1 where b > ?3 group by a + ?4",
             )?;
 
-            let mut iter = fnck_sql.execute(
+            let mut iter = kite_sql.execute(
                 &statement,
                 &[
                     ("?1", DataValue::Int32(0)),
@@ -616,9 +616,9 @@ pub(crate) mod test {
             )
         }
         {
-            let statement = fnck_sql.prepare("explain select *, ?1 from (select * from t1 where b > ?2) left join (select * from t1 where a > ?3) on a > ?4")?;
+            let statement = kite_sql.prepare("explain select *, ?1 from (select * from t1 where b > ?2) left join (select * from t1 where a > ?3) on a > ?4")?;
 
-            let mut iter = fnck_sql.execute(
+            let mut iter = kite_sql.execute(
                 &statement,
                 &[
                     ("?1", DataValue::Int32(9)),
@@ -646,14 +646,14 @@ pub(crate) mod test {
     #[test]
     fn test_transaction_sql() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let fnck_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
 
-        fnck_sql
+        kite_sql
             .run("create table t1 (a int primary key, b int)")?
             .done()?;
 
-        let mut tx_1 = fnck_sql.new_transaction()?;
-        let mut tx_2 = fnck_sql.new_transaction()?;
+        let mut tx_1 = kite_sql.new_transaction()?;
+        let mut tx_2 = kite_sql.new_transaction()?;
 
         tx_1.run("insert into t1 values(0, 0)")?.done()?;
         tx_1.run("insert into t1 values(1, 1)")?.done()?;
@@ -688,7 +688,7 @@ pub(crate) mod test {
 
         assert!(tx_2.commit().is_err());
 
-        let mut tx_3 = fnck_sql.new_transaction()?;
+        let mut tx_3 = kite_sql.new_transaction()?;
         let res = tx_3.run("create table t2 (a int primary key, b int)");
         assert!(res.is_err());
 

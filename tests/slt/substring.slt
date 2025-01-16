@@ -38,7 +38,7 @@ select substring(null from 1 for 4 )
 ----
 null
 
-# issue: https://github.com/KipData/FnckSQL/issues/160
+# issue: https://github.com/KipData/KiteSQL/issues/160
 query T
 select substring('abc', 1, 10);
 ----

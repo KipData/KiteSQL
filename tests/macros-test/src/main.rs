@@ -2,18 +2,18 @@ fn main() {}
 
 #[cfg(test)]
 mod test {
-    use fnck_sql::catalog::column::{ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation};
-    use fnck_sql::errors::DatabaseError;
-    use fnck_sql::expression::function::scala::ScalarFunctionImpl;
-    use fnck_sql::expression::function::table::TableFunctionImpl;
-    use fnck_sql::expression::function::FunctionSummary;
-    use fnck_sql::expression::BinaryOperator;
-    use fnck_sql::expression::ScalarExpression;
-    use fnck_sql::types::evaluator::EvaluatorFactory;
-    use fnck_sql::types::tuple::{SchemaRef, Tuple};
-    use fnck_sql::types::value::{DataValue, Utf8Type};
-    use fnck_sql::types::LogicalType;
-    use fnck_sql::{implement_from_tuple, scala_function, table_function};
+    use kite_sql::catalog::column::{ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation};
+    use kite_sql::errors::DatabaseError;
+    use kite_sql::expression::function::scala::ScalarFunctionImpl;
+    use kite_sql::expression::function::table::TableFunctionImpl;
+    use kite_sql::expression::function::FunctionSummary;
+    use kite_sql::expression::BinaryOperator;
+    use kite_sql::expression::ScalarExpression;
+    use kite_sql::types::evaluator::EvaluatorFactory;
+    use kite_sql::types::tuple::{SchemaRef, Tuple};
+    use kite_sql::types::value::{DataValue, Utf8Type};
+    use kite_sql::types::LogicalType;
+    use kite_sql::{implement_from_tuple, scala_function, table_function};
     use sqlparser::ast::CharLengthUnits;
     use std::sync::Arc;
 

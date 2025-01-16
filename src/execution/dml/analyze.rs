@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::{fmt, fs};
 
 const DEFAULT_NUM_OF_BUCKETS: usize = 100;
-const DEFAULT_STATISTICS_META_PATH: &str = "fnck_sql_statistics_metas";
+const DEFAULT_STATISTICS_META_PATH: &str = "kite_sql_statistics_metas";
 
 pub struct Analyze {
     table_name: TableName,
@@ -180,20 +180,20 @@ mod test {
 
     fn test_statistics_meta() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let fnck_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
 
-        fnck_sql
+        kite_sql
             .run("create table t1 (a int primary key, b int)")?
             .done()?;
-        fnck_sql.run("create index b_index on t1 (b)")?.done()?;
-        fnck_sql.run("create index p_index on t1 (a, b)")?.done()?;
+        kite_sql.run("create index b_index on t1 (b)")?.done()?;
+        kite_sql.run("create index p_index on t1 (a, b)")?.done()?;
 
         for i in 0..DEFAULT_NUM_OF_BUCKETS + 1 {
-            fnck_sql
+            kite_sql
                 .run(format!("insert into t1 values({i}, {})", i % 20))?
                 .done()?;
         }
-        fnck_sql.run("analyze table t1")?.done()?;
+        kite_sql.run("analyze table t1")?.done()?;
 
         let dir_path = dirs::home_dir()
             .expect("Your system does not have a Config directory!")
@@ -227,20 +227,20 @@ mod test {
 
     fn test_clean_expired_index() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let fnck_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
 
-        fnck_sql
+        kite_sql
             .run("create table t1 (a int primary key, b int)")?
             .done()?;
-        fnck_sql.run("create index b_index on t1 (b)")?.done()?;
-        fnck_sql.run("create index p_index on t1 (a, b)")?.done()?;
+        kite_sql.run("create index b_index on t1 (b)")?.done()?;
+        kite_sql.run("create index p_index on t1 (a, b)")?.done()?;
 
         for i in 0..DEFAULT_NUM_OF_BUCKETS + 1 {
-            fnck_sql
+            kite_sql
                 .run(format!("insert into t1 values({i}, {i})"))?
                 .done()?;
         }
-        fnck_sql.run("analyze table t1")?.done()?;
+        kite_sql.run("analyze table t1")?.done()?;
 
         let dir_path = dirs::home_dir()
             .expect("Your system does not have a Config directory!")
@@ -259,8 +259,8 @@ mod test {
         assert_eq!(file_names[1], OsStr::new("1"));
         assert_eq!(file_names[2], OsStr::new("2"));
 
-        fnck_sql.run("alter table t1 drop column b")?.done()?;
-        fnck_sql.run("analyze table t1")?.done()?;
+        kite_sql.run("alter table t1 drop column b")?.done()?;
+        kite_sql.run("analyze table t1")?.done()?;
 
         let mut entries = fs::read_dir(&dir_path)?;
 

@@ -7,7 +7,7 @@ use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use crate::storage::{StatisticsMetaCache, Transaction};
 use crate::types::index::IndexId;
 use crate::types::value::DataValue;
-use fnck_sql_serde_macros::ReferenceSerialization;
+use kite_sql_serde_macros::ReferenceSerialization;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
