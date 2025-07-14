@@ -14,9 +14,10 @@ mod explain;
 pub mod expr;
 mod insert;
 mod select;
-mod show;
+mod show_table;
 mod truncate;
 mod update;
+mod show_view;
 
 use sqlparser::ast::{Ident, ObjectName, ObjectType, SetExpr, Statement};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -55,7 +56,8 @@ pub fn command_type(stmt: &Statement) -> Result<CommandType, DatabaseError> {
         Statement::Query(_)
         | Statement::Explain { .. }
         | Statement::ExplainTable { .. }
-        | Statement::ShowTables { .. } => Ok(CommandType::DQL),
+        | Statement::ShowTables { .. }
+        | Statement::ShowVariable { .. } => Ok(CommandType::DQL),
         Statement::Analyze { .. }
         | Statement::Truncate { .. }
         | Statement::Update { .. }
@@ -409,6 +411,13 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
             Statement::Analyze { table_name, .. } => self.bind_analyze(table_name)?,
             Statement::Truncate { table_name, .. } => self.bind_truncate(table_name)?,
             Statement::ShowTables { .. } => self.bind_show_tables()?,
+            Statement::ShowVariable { variable } => {
+                let value = variable[0].value.clone();
+                match &value[..] {
+                    "views" => self.bind_show_views()?,
+                    _ => return Err(DatabaseError::UnsupportedStmt(stmt.to_string()))
+                }
+            },
             Statement::Copy {
                 source,
                 to,

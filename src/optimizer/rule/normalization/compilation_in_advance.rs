@@ -90,7 +90,8 @@ impl ExpressionRemapper {
             | Operator::TableScan(_)
             | Operator::Limit(_)
             | Operator::Values(_)
-            | Operator::Show
+            | Operator::ShowTable
+            | Operator::ShowView
             | Operator::Explain
             | Operator::Describe(_)
             | Operator::Insert(_)
@@ -197,7 +198,8 @@ impl EvaluatorBind {
             | Operator::TableScan(_)
             | Operator::Limit(_)
             | Operator::Values(_)
-            | Operator::Show
+            | Operator::ShowTable
+            | Operator::ShowView
             | Operator::Explain
             | Operator::Describe(_)
             | Operator::Insert(_)

@@ -67,7 +67,8 @@ pub enum Operator {
     Sort(SortOperator),
     Limit(LimitOperator),
     Values(ValuesOperator),
-    Show,
+    ShowTable,
+    ShowView,
     Explain,
     Describe(DescribeOperator),
     Union(UnionOperator),
@@ -159,7 +160,8 @@ impl Operator {
                     .map(|column| ScalarExpression::ColumnRef(column.clone()))
                     .collect_vec(),
             ),
-            Operator::Show
+            Operator::ShowTable
+            | Operator::ShowView
             | Operator::Explain
             | Operator::Describe(_)
             | Operator::Insert(_)
@@ -239,7 +241,8 @@ impl Operator {
             Operator::Delete(op) => op.primary_keys.clone(),
             Operator::Dummy
             | Operator::Limit(_)
-            | Operator::Show
+            | Operator::ShowTable
+            | Operator::ShowView
             | Operator::Explain
             | Operator::Describe(_)
             | Operator::Insert(_)
@@ -271,7 +274,8 @@ impl fmt::Display for Operator {
             Operator::Sort(op) => write!(f, "{}", op),
             Operator::Limit(op) => write!(f, "{}", op),
             Operator::Values(op) => write!(f, "{}", op),
-            Operator::Show => write!(f, "Show Tables"),
+            Operator::ShowTable => write!(f, "Show Tables"),
+            Operator::ShowView => write!(f, "Show Views"),
             Operator::Explain => unreachable!(),
             Operator::Describe(op) => write!(f, "{}", op),
             Operator::Insert(op) => write!(f, "{}", op),

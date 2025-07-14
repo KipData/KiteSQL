@@ -174,8 +174,11 @@ impl LogicalPlan {
                 ..
             }) => SchemaOutput::SchemaRef(schema_ref.clone()),
             Operator::Dummy => SchemaOutput::Schema(vec![]),
-            Operator::Show => SchemaOutput::Schema(vec![ColumnRef::from(
+            Operator::ShowTable => SchemaOutput::Schema(vec![ColumnRef::from(
                 ColumnCatalog::new_dummy("TABLE".to_string()),
+            )]),
+            Operator::ShowView => SchemaOutput::Schema(vec![ColumnRef::from(
+                ColumnCatalog::new_dummy("VIEW".to_string()),
             )]),
             Operator::Explain => SchemaOutput::Schema(vec![ColumnRef::from(
                 ColumnCatalog::new_dummy("PLAN".to_string()),

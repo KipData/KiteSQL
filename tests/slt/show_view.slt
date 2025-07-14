@@ -1,0 +1,44 @@
+statement ok
+create table t1(id int primary key, a int, b int, c int)
+
+statement ok
+insert into t1 values(0, 0, 0, 0)
+
+statement ok
+insert into t1 values(1, 1, 1, 1)
+
+statement ok
+insert into t1 values(2, 2, 2, 2)
+
+statement ok
+create view v1 as select * from t1
+
+query I
+show views
+----
+v1
+
+statement ok
+create view v2 as select * from t1 where a != 1
+
+query I
+show views
+----
+v1
+v2
+
+statement ok
+drop view v1
+
+query I
+show views
+----
+v2
+
+statement ok
+drop view v2
+
+query I
+show views
+----
+

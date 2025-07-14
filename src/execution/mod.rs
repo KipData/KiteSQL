@@ -42,6 +42,7 @@ use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::types::index::IndexInfo;
 use crate::types::tuple::Tuple;
 use std::ops::Coroutine;
+use crate::execution::dql::show_view::ShowViews;
 
 pub type Executor<'a> =
     Box<dyn Coroutine<Yield = Result<Tuple, DatabaseError>, Return = ()> + 'a + Unpin>;
@@ -131,7 +132,8 @@ pub fn build_read<'a, T: Transaction + 'a>(
             Limit::from((op, input)).execute(cache, transaction)
         }
         Operator::Values(op) => Values::from(op).execute(cache, transaction),
-        Operator::Show => ShowTables.execute(cache, transaction),
+        Operator::ShowTable => ShowTables.execute(cache, transaction),
+        Operator::ShowView => ShowViews.execute(cache, transaction),
         Operator::Explain => {
             let input = childrens.pop_only();
 
