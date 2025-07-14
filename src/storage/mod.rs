@@ -16,13 +16,13 @@ use crate::types::value::DataValue;
 use crate::types::{ColumnId, LogicalType};
 use crate::utils::lru::SharedLruCache;
 use itertools::Itertools;
+use sqlparser::keywords::NULL;
 use std::collections::Bound;
 use std::io::Cursor;
 use std::mem;
 use std::ops::SubAssign;
 use std::sync::Arc;
 use std::vec::IntoIter;
-use sqlparser::keywords::NULL;
 use ulid::Generator;
 
 pub(crate) type StatisticsMetaCache = SharedLruCache<(TableName, IndexId), StatisticsMeta>;

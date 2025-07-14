@@ -32,6 +32,7 @@ use crate::execution::dql::limit::Limit;
 use crate::execution::dql::projection::Projection;
 use crate::execution::dql::seq_scan::SeqScan;
 use crate::execution::dql::show_table::ShowTables;
+use crate::execution::dql::show_view::ShowViews;
 use crate::execution::dql::sort::Sort;
 use crate::execution::dql::union::Union;
 use crate::execution::dql::values::Values;
@@ -42,7 +43,6 @@ use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::types::index::IndexInfo;
 use crate::types::tuple::Tuple;
 use std::ops::Coroutine;
-use crate::execution::dql::show_view::ShowViews;
 
 pub type Executor<'a> =
     Box<dyn Coroutine<Yield = Result<Tuple, DatabaseError>, Return = ()> + 'a + Unpin>;

@@ -15,9 +15,9 @@ pub mod expr;
 mod insert;
 mod select;
 mod show_table;
+mod show_view;
 mod truncate;
 mod update;
-mod show_view;
 
 use sqlparser::ast::{Ident, ObjectName, ObjectType, SetExpr, Statement};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -415,9 +415,9 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
                 let value = variable[0].value.clone();
                 match &value[..] {
                     "views" => self.bind_show_views()?,
-                    _ => return Err(DatabaseError::UnsupportedStmt(stmt.to_string()))
+                    _ => return Err(DatabaseError::UnsupportedStmt(stmt.to_string())),
                 }
-            },
+            }
             Statement::Copy {
                 source,
                 to,
