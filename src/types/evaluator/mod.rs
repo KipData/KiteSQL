@@ -188,6 +188,7 @@ impl EvaluatorFactory {
             LogicalType::UInteger => numeric_binary_evaluator!(UInt32, op, LogicalType::UInteger),
             LogicalType::UBigint => numeric_binary_evaluator!(UInt64, op, LogicalType::UBigint),
             LogicalType::Float => numeric_binary_evaluator!(Float32, op, LogicalType::Float),
+            LogicalType::Real => numeric_binary_evaluator!(Float32, op, LogicalType::Real),
             LogicalType::Double => numeric_binary_evaluator!(Float64, op, LogicalType::Double),
             LogicalType::Date => numeric_binary_evaluator!(Date, op, LogicalType::Date),
             LogicalType::DateTime => numeric_binary_evaluator!(DateTime, op, LogicalType::DateTime),

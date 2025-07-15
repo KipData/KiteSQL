@@ -399,6 +399,7 @@ impl DataValue {
             LogicalType::Bigint => DataValue::Int64(0),
             LogicalType::UBigint => DataValue::UInt64(0),
             LogicalType::Float => DataValue::Float32(OrderedFloat(0.0)),
+            LogicalType::Real => DataValue::Float32(OrderedFloat(0.0)),
             LogicalType::Double => DataValue::Float64(OrderedFloat(0.0)),
             LogicalType::Char(len, unit) => DataValue::Utf8 {
                 value: String::new(),
@@ -599,6 +600,13 @@ impl DataValue {
                 DataValue::UInt64(reader.read_u64::<LittleEndian>()?)
             }
             LogicalType::Float => {
+                if !is_projection {
+                    reader.seek(SeekFrom::Current(4))?;
+                    return Ok(None);
+                }
+                DataValue::Float32(OrderedFloat(reader.read_f32::<LittleEndian>()?))
+            }
+            LogicalType::Real => {
                 if !is_projection {
                     reader.seek(SeekFrom::Current(4))?;
                     return Ok(None);
