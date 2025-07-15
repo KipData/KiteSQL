@@ -180,7 +180,10 @@ impl LogicalType {
     }
 
     pub fn is_floating_point_numeric(&self) -> bool {
-        matches!(self, LogicalType::Float | LogicalType::Real | LogicalType::Double)
+        matches!(
+            self,
+            LogicalType::Float | LogicalType::Real | LogicalType::Double
+        )
     }
 
     pub fn max_logical_type(
@@ -352,11 +355,17 @@ impl LogicalType {
             ),
             LogicalType::Bigint => matches!(
                 to,
-                LogicalType::Float | LogicalType::Real | LogicalType::Double | LogicalType::Decimal(_, _)
+                LogicalType::Float
+                    | LogicalType::Real
+                    | LogicalType::Double
+                    | LogicalType::Decimal(_, _)
             ),
             LogicalType::UBigint => matches!(
                 to,
-                LogicalType::Float | LogicalType::Real | LogicalType::Double | LogicalType::Decimal(_, _)
+                LogicalType::Float
+                    | LogicalType::Real
+                    | LogicalType::Double
+                    | LogicalType::Decimal(_, _)
             ),
             LogicalType::Float => matches!(to, LogicalType::Double | LogicalType::Decimal(_, _)),
             LogicalType::Real => matches!(to, LogicalType::Double | LogicalType::Decimal(_, _)),
