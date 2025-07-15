@@ -411,13 +411,10 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
             Statement::Analyze { table_name, .. } => self.bind_analyze(table_name)?,
             Statement::Truncate { table_name, .. } => self.bind_truncate(table_name)?,
             Statement::ShowTables { .. } => self.bind_show_tables()?,
-            Statement::ShowVariable { variable } => {
-                let value = variable[0].value.clone();
-                match &value[..] {
-                    "views" => self.bind_show_views()?,
-                    _ => return Err(DatabaseError::UnsupportedStmt(stmt.to_string())),
-                }
-            }
+            Statement::ShowVariable { variable } => match &variable[0].value.to_lowercase()[..] {
+                "views" => self.bind_show_views()?,
+                _ => return Err(DatabaseError::UnsupportedStmt(stmt.to_string())),
+            },
             Statement::Copy {
                 source,
                 to,

@@ -1,5 +1,4 @@
 use crate::catalog::view::View;
-use crate::catalog::TableMeta;
 use crate::execution::{Executor, ReadExecutor};
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::throw;
@@ -18,7 +17,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ShowViews {
         Box::new(
             #[coroutine]
             move || {
-                let metas = throw!(unsafe { &mut (*transaction) }.view_metas(TableCache));
+                let metas = throw!(unsafe { &mut (*transaction) }.views(TableCache));
 
                 for View { name, .. } in metas {
                     let values = vec![DataValue::Utf8 {

@@ -467,7 +467,7 @@ pub trait Transaction: Sized {
         })?))
     }
 
-    fn view_metas(&self, table_cache: &TableCache) -> Result<Vec<View>, DatabaseError> {
+    fn views(&self, table_cache: &TableCache) -> Result<Vec<View>, DatabaseError> {
         let mut metas = vec![];
         let (min, max) = unsafe { &*self.table_codec() }.view_bound();
         let mut iter = self.range(Bound::Included(min), Bound::Included(max))?;
