@@ -35,7 +35,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             .source_and_bind(table_name.clone(), None, None, false)?
             .ok_or(DatabaseError::SourceNotFound)?;
         let plan = match source {
-            Source::Table(table) => TableScanOperator::build(table_name.clone(), table),
+            Source::Table(table) => TableScanOperator::build(table_name.clone(), table, true),
             Source::View(view) => LogicalPlan::clone(&view.plan),
         };
         let mut columns = Vec::with_capacity(exprs.len());

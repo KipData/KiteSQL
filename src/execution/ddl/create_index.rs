@@ -72,7 +72,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateIndex {
                 let mut coroutine = build_read(self.input, cache, transaction);
 
                 while let CoroutineState::Yielded(tuple) = Pin::new(&mut coroutine).resume(()) {
-                    let mut tuple: Tuple = throw!(tuple);
+                    let tuple: Tuple = throw!(tuple);
 
                     let Some(value) = DataValue::values_to_tuple(throw!(Projection::projection(
                         &tuple,
@@ -81,7 +81,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateIndex {
                     ))) else {
                         continue;
                     };
-                    let tuple_id = if let Some(tuple_id) = tuple.id().take() {
+                    let tuple_id = if let Some(tuple_id) = tuple.pk.as_ref() {
                         tuple_id
                     } else {
                         continue;

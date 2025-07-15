@@ -538,13 +538,12 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 if args.len() != 1 {
                     return Err(DatabaseError::MisMatch("number of avg() parameters", "1"));
                 }
-                let ty = args[0].return_type();
 
                 return Ok(ScalarExpression::AggCall {
                     distinct: func.distinct,
                     kind: AggKind::Avg,
                     args,
-                    ty,
+                    ty: LogicalType::Double,
                 });
             }
             "if" => {

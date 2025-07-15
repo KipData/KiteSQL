@@ -38,11 +38,8 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Projection {
 
                 while let CoroutineState::Yielded(tuple) = Pin::new(&mut coroutine).resume(()) {
                     let tuple = throw!(tuple);
-
-                    yield Ok(Tuple::new(
-                        None,
-                        throw!(Self::projection(&tuple, &exprs, &schema)),
-                    ));
+                    let values = throw!(Self::projection(&tuple, &exprs, &schema));
+                    yield Ok(Tuple::new(tuple.pk, values));
                 }
             },
         )
@@ -53,12 +50,12 @@ impl Projection {
     pub fn projection(
         tuple: &Tuple,
         exprs: &[ScalarExpression],
-        schmea: &[ColumnRef],
+        schema: &[ColumnRef],
     ) -> Result<Vec<DataValue>, DatabaseError> {
         let mut values = Vec::with_capacity(exprs.len());
 
         for expr in exprs.iter() {
-            values.push(expr.eval(Some((tuple, schmea)))?);
+            values.push(expr.eval(Some((tuple, schema)))?);
         }
         Ok(values)
     }

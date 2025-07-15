@@ -159,12 +159,9 @@ impl LogicalPlan {
                     .map(|expr| expr.output_column())
                     .collect_vec(),
             ),
-            Operator::TableScan(op) => SchemaOutput::Schema(
-                op.columns
-                    .iter()
-                    .map(|(_, column)| column.clone())
-                    .collect_vec(),
-            ),
+            Operator::TableScan(op) => {
+                SchemaOutput::Schema(op.columns.values().cloned().collect_vec())
+            }
             Operator::FunctionScan(op) => {
                 SchemaOutput::SchemaRef(op.table_function.output_schema().clone())
             }

@@ -184,7 +184,7 @@ mod tests {
 
         let executor = CopyToFile {
             op: op.clone(),
-            input: TableScanOperator::build(Arc::new("t1".to_string()), table),
+            input: TableScanOperator::build(Arc::new("t1".to_string()), table, true),
         };
         let mut coroutine = executor.execute(
             (

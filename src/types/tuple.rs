@@ -1,4 +1,4 @@
-use crate::catalog::{ColumnRef, PrimaryKeyIndices};
+use crate::catalog::ColumnRef;
 use crate::db::ResultIter;
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::BumpBytes;
@@ -25,48 +25,26 @@ pub fn types(schema: &Schema) -> Vec<LogicalType> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tuple {
-    pub(crate) pk_indices: Option<PrimaryKeyIndices>,
+    pub pk: Option<TupleId>,
     pub values: Vec<DataValue>,
-    id_buf: Option<Option<TupleId>>,
 }
 
 impl Tuple {
-    pub fn new(pk_indices: Option<PrimaryKeyIndices>, values: Vec<DataValue>) -> Self {
-        Tuple {
-            pk_indices,
-            values,
-            id_buf: None,
-        }
-    }
-
-    pub fn id(&mut self) -> Option<&TupleId> {
-        self.id_buf
-            .get_or_insert_with(|| {
-                self.pk_indices.as_ref().map(|pk_indices| {
-                    if pk_indices.len() == 1 {
-                        self.values[0].clone()
-                    } else {
-                        let mut values = Vec::with_capacity(pk_indices.len());
-
-                        for i in pk_indices.iter() {
-                            values.push(self.values[*i].clone());
-                        }
-                        DataValue::Tuple(values, false)
-                    }
-                })
-            })
-            .as_ref()
+    pub fn new(pk: Option<TupleId>, values: Vec<DataValue>) -> Self {
+        Tuple { pk, values }
     }
 
     #[inline]
     pub fn deserialize_from(
         table_types: &[LogicalType],
-        pk_indices: &PrimaryKeyIndices,
+        pk_indices: &[usize],
         projections: &[usize],
         schema: &Schema,
         bytes: &[u8],
+        with_pk: bool,
     ) -> Result<Self, DatabaseError> {
         debug_assert!(!schema.is_empty());
+        debug_assert!(projections.is_sorted());
         debug_assert_eq!(projections.len(), schema.len());
 
         fn is_none(bits: u8, i: usize) -> bool {
@@ -96,10 +74,10 @@ impl Tuple {
                 projection_i += 1;
             }
         }
+
         Ok(Tuple {
-            pk_indices: Some(pk_indices.clone()),
+            pk: with_pk.then(|| Tuple::primary_projection(pk_indices, &values)),
             values,
-            id_buf: None,
         })
     }
 
@@ -135,8 +113,15 @@ impl Tuple {
         Ok(bytes)
     }
 
-    pub(crate) fn clear_id(&mut self) {
-        self.id_buf = None;
+    pub fn primary_projection(pk_indices: &[usize], values: &[DataValue]) -> TupleId {
+        if pk_indices.len() > 1 {
+            DataValue::Tuple(
+                pk_indices.iter().map(|i| values[*i].clone()).collect_vec(),
+                false,
+            )
+        } else {
+            values[pk_indices[0]].clone()
+        }
     }
 }
 
@@ -290,7 +275,7 @@ mod tests {
 
         let tuples = vec![
             Tuple::new(
-                Some(Arc::new(vec![0])),
+                Some(DataValue::Int32(0)),
                 vec![
                     DataValue::Int32(0),
                     DataValue::UInt32(1),
@@ -327,7 +312,7 @@ mod tests {
                 ],
             ),
             Tuple::new(
-                Some(Arc::new(vec![0])),
+                Some(DataValue::Int32(1)),
                 vec![
                     DataValue::Int32(1),
                     DataValue::Null,
@@ -361,6 +346,7 @@ mod tests {
                 &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
                 &columns,
                 &tuples[0].serialize_to(&types, &arena).unwrap(),
+                true,
             )
             .unwrap();
 
@@ -373,6 +359,7 @@ mod tests {
                 &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
                 &columns,
                 &tuples[1].serialize_to(&types, &arena).unwrap(),
+                true,
             )
             .unwrap();
 

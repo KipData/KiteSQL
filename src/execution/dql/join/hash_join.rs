@@ -199,13 +199,13 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
                             JoinType::LeftAnti => continue,
                             _ => (),
                         }
-                        for (i, Tuple { values, .. }) in tuples.iter().enumerate() {
+                        for (i, Tuple { values, pk }) in tuples.iter().enumerate() {
                             let full_values = values
                                 .iter()
                                 .chain(tuple.values.iter())
                                 .cloned()
                                 .collect_vec();
-                            let tuple = Tuple::new(None, full_values);
+                            let tuple = Tuple::new(pk.clone(), full_values);
                             if let Some(tuple) = throw!(Self::filter(
                                 tuple,
                                 &full_schema_ref,
@@ -235,7 +235,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
                             .map(|_| NULL_VALUE.clone())
                             .chain(tuple.values)
                             .collect_vec();
-                        let tuple = Tuple::new(None, values);
+                        let tuple = Tuple::new(tuple.pk, values);
                         if let Some(tuple) = throw!(Self::filter(
                             tuple,
                             &full_schema_ref,

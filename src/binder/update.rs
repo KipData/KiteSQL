@@ -21,6 +21,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         self.context.allow_default = true;
         if let TableFactor::Table { name, .. } = &to.relation {
             let table_name = Arc::new(lower_case_name(name)?);
+            self.with_pk(table_name.clone());
 
             let mut plan = self.bind_table_ref(to)?;
 

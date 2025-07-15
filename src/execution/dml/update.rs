@@ -1,4 +1,5 @@
 use crate::catalog::{ColumnRef, TableName};
+use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
 use crate::execution::{build_read, Executor, WriteExecutor};
 use crate::expression::ScalarExpression;
@@ -80,7 +81,8 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Update {
 
                         let mut is_overwrite = true;
 
-                        let old_pk = tuple.id().cloned().unwrap();
+                        let old_pk =
+                            throw!(tuple.pk.clone().ok_or(DatabaseError::PrimaryKeyNotFound));
                         for (index_meta, exprs) in index_metas.iter() {
                             let values =
                                 throw!(Projection::projection(&tuple, exprs, &input_schema));
@@ -99,10 +101,15 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Update {
                                 tuple.values[i] = throw!(expr.eval(Some((&tuple, &input_schema))));
                             }
                         }
-                        tuple.clear_id();
-                        let new_pk = tuple.id().unwrap().clone();
 
-                        if new_pk != old_pk {
+                        tuple.pk = Some(Tuple::primary_projection(
+                            table_catalog.primary_keys_indices(),
+                            &tuple.values,
+                        ));
+                        let new_pk =
+                            throw!(tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound));
+
+                        if new_pk != &old_pk {
                             throw!(
                                 unsafe { &mut (*transaction) }.remove_tuple(&table_name, &old_pk)
                             );
@@ -118,7 +125,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Update {
                             throw!(unsafe { &mut (*transaction) }.add_index(
                                 &table_name,
                                 index,
-                                &new_pk
+                                new_pk
                             ));
                         }
 

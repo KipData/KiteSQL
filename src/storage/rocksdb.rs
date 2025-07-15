@@ -169,7 +169,7 @@ mod test {
     use crate::types::LogicalType;
     use crate::utils::lru::SharedLruCache;
     use itertools::Itertools;
-    use std::collections::Bound;
+    use std::collections::{BTreeMap, Bound};
     use std::hash::RandomState;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -214,7 +214,7 @@ mod test {
         transaction.append_tuple(
             &"test".to_string(),
             Tuple::new(
-                Some(Arc::new(vec![0])),
+                Some(DataValue::Int32(1)),
                 vec![DataValue::Int32(1), DataValue::Boolean(true)],
             ),
             &[LogicalType::Integer, LogicalType::Boolean],
@@ -223,22 +223,26 @@ mod test {
         transaction.append_tuple(
             &"test".to_string(),
             Tuple::new(
-                Some(Arc::new(vec![0])),
+                Some(DataValue::Int32(2)),
                 vec![DataValue::Int32(2), DataValue::Boolean(true)],
             ),
             &[LogicalType::Integer, LogicalType::Boolean],
             false,
         )?;
 
+        let mut read_columns = BTreeMap::new();
+        read_columns.insert(0, columns[0].clone());
+
         let mut iter = transaction.read(
             &table_cache,
             Arc::new("test".to_string()),
             (Some(1), Some(1)),
-            vec![(0, columns[0].clone())],
+            read_columns,
+            true,
         )?;
 
         let option_1 = iter.next_tuple()?;
-        assert_eq!(option_1.unwrap().pk_indices, Some(Arc::new(vec![0])));
+        assert_eq!(option_1.unwrap().pk, Some(DataValue::Int32(2)));
 
         let option_2 = iter.next_tuple()?;
         assert_eq!(option_2, None);
@@ -271,11 +275,10 @@ mod test {
             DataValue::Int32(3),
             DataValue::Int32(4),
         ];
-        let pk_indices = Arc::new(vec![0]);
         let mut iter = IndexIter {
             offset: 0,
             limit: None,
-            pk_indices: &pk_indices,
+            remap_pk_indices: vec![0],
             params: IndexImplParams {
                 tuple_schema_ref: table.schema_ref().clone(),
                 projections: vec![0],
@@ -290,6 +293,7 @@ mod test {
                 }),
                 table_name: &table.name,
                 table_types: table.types(),
+                with_pk: true,
                 tx: &transaction,
             },
             ranges: vec![
@@ -305,8 +309,8 @@ mod test {
         };
         let mut result = Vec::new();
 
-        while let Some(mut tuple) = iter.next_tuple()? {
-            result.push(tuple.id().unwrap().clone());
+        while let Some(tuple) = iter.next_tuple()? {
+            result.push(tuple.pk.unwrap());
         }
 
         assert_eq!(result, tuple_ids);
@@ -330,7 +334,7 @@ mod test {
             .table(kite_sql.state.table_cache(), Arc::new("t1".to_string()))?
             .unwrap()
             .clone();
-        let columns = table.columns().cloned().enumerate().collect_vec();
+        let columns = table.columns().cloned().enumerate().collect();
         let mut iter = transaction
             .read_by_index(
                 kite_sql.state.table_cache(),
@@ -342,11 +346,12 @@ mod test {
                     min: Bound::Excluded(DataValue::Int32(0)),
                     max: Bound::Unbounded,
                 }],
+                true,
             )
             .unwrap();
 
         while let Some(tuple) = iter.next_tuple()? {
-            assert_eq!(tuple.pk_indices, Some(Arc::new(vec![0])));
+            assert_eq!(tuple.pk, Some(DataValue::Int32(1)));
             assert_eq!(tuple.values, vec![DataValue::Int32(1), DataValue::Int32(1)])
         }
 

@@ -37,7 +37,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 .iter()
                 .map(|(_, column)| column.clone())
                 .collect_vec();
-            let mut plan = TableScanOperator::build(table_name.clone(), table);
+            let mut plan = TableScanOperator::build(table_name.clone(), table, true);
 
             if let Some(alias_idents) = alias_idents {
                 plan =

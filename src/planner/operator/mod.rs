@@ -135,9 +135,8 @@ impl Operator {
             Operator::Project(op) => Some(op.exprs.clone()),
             Operator::TableScan(op) => Some(
                 op.columns
-                    .iter()
-                    .cloned()
-                    .map(|(_, column)| ScalarExpression::ColumnRef(column))
+                    .values()
+                    .map(|column| ScalarExpression::ColumnRef(column.clone()))
                     .collect_vec(),
             ),
             Operator::Sort(_) | Operator::Limit(_) => None,
@@ -210,12 +209,7 @@ impl Operator {
                 .iter()
                 .flat_map(|expr| expr.referenced_columns(only_column_ref))
                 .collect_vec(),
-            Operator::TableScan(op) => op
-                .columns
-                .iter()
-                .map(|(_, column)| column)
-                .cloned()
-                .collect_vec(),
+            Operator::TableScan(op) => op.columns.values().cloned().collect_vec(),
             Operator::FunctionScan(op) => op
                 .table_function
                 .args

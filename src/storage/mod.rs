@@ -2,9 +2,7 @@ pub mod rocksdb;
 pub(crate) mod table_codec;
 
 use crate::catalog::view::View;
-use crate::catalog::{
-    ColumnCatalog, ColumnRef, PrimaryKeyIndices, TableCatalog, TableMeta, TableName,
-};
+use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog, TableMeta, TableName};
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::Range;
 use crate::optimizer::core::statistics_meta::{StatisticMetaLoader, StatisticsMeta};
@@ -16,8 +14,8 @@ use crate::types::value::DataValue;
 use crate::types::{ColumnId, LogicalType};
 use crate::utils::lru::SharedLruCache;
 use itertools::Itertools;
+use std::collections::{BTreeMap, Bound};
 use sqlparser::keywords::NULL;
-use std::collections::Bound;
 use std::io::Cursor;
 use std::mem;
 use std::ops::SubAssign;
@@ -55,19 +53,18 @@ pub trait Transaction: Sized {
         table_cache: &'a TableCache,
         table_name: TableName,
         bounds: Bounds,
-        mut columns: Vec<(usize, ColumnRef)>,
+        mut columns: BTreeMap<usize, ColumnRef>,
+        with_pk: bool,
     ) -> Result<TupleIter<'a, Self>, DatabaseError> {
-        debug_assert!(columns.is_sorted_by_key(|(i, _)| i));
-        debug_assert!(columns.iter().map(|(i, _)| i).all_unique());
+        debug_assert!(columns.keys().all_unique());
 
         let table = self
             .table(table_cache, table_name.clone())?
             .ok_or(DatabaseError::TableNotFound)?;
-        let pk_indices = table.primary_keys_indices();
         let table_types = table.types();
-        if columns.is_empty() {
+        if columns.is_empty() || with_pk {
             for (i, column) in table.primary_keys() {
-                columns.push((*i, column.clone()));
+                columns.insert(*i, column.clone());
             }
         }
         let mut tuple_columns = Vec::with_capacity(columns.len());
@@ -76,6 +73,7 @@ pub trait Transaction: Sized {
             tuple_columns.push(column);
             projections.push(projection);
         }
+        let remap_pk_indices = remap_pk_indices(&projections, table.primary_keys_indices());
 
         let (min, max) = unsafe { &*self.table_codec() }.tuple_bound(&table_name);
         let iter = self.range(Bound::Included(min), Bound::Included(max))?;
@@ -85,50 +83,58 @@ pub trait Transaction: Sized {
             limit: bounds.1,
             table_types,
             tuple_columns: Arc::new(tuple_columns),
-            pk_indices,
+            remap_pk_indices,
             projections,
+            with_pk,
             iter,
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn read_by_index<'a>(
         &'a self,
         table_cache: &'a TableCache,
         table_name: TableName,
         (offset_option, limit_option): Bounds,
-        columns: Vec<(usize, ColumnRef)>,
+        mut columns: BTreeMap<usize, ColumnRef>,
         index_meta: IndexMetaRef,
         ranges: Vec<Range>,
+        with_pk: bool,
     ) -> Result<IndexIter<'a, Self>, DatabaseError> {
-        debug_assert!(columns.is_sorted_by_key(|(i, _)| i));
-        debug_assert!(columns.iter().map(|(i, _)| i).all_unique());
+        debug_assert!(columns.keys().all_unique());
 
         let table = self
             .table(table_cache, table_name.clone())?
             .ok_or(DatabaseError::TableNotFound)?;
-        let pk_indices = table.primary_keys_indices();
         let table_types = table.types();
         let table_name = table.name.as_str();
         let offset = offset_option.unwrap_or(0);
 
+        if columns.is_empty() || with_pk {
+            for (i, column) in table.primary_keys() {
+                columns.insert(*i, column.clone());
+            }
+        }
         let mut tuple_columns = Vec::with_capacity(columns.len());
         let mut projections = Vec::with_capacity(columns.len());
         for (projection, column) in columns {
             tuple_columns.push(column);
             projections.push(projection);
         }
+        let remap_pk_indices = remap_pk_indices(&projections, table.primary_keys_indices());
         let inner = IndexImplEnum::instance(index_meta.ty);
 
         Ok(IndexIter {
             offset,
             limit: limit_option,
-            pk_indices,
+            remap_pk_indices,
             params: IndexImplParams {
                 tuple_schema_ref: Arc::new(tuple_columns),
                 projections,
                 index_meta,
                 table_name,
                 table_types,
+                with_pk,
                 tx: self,
             },
             inner,
@@ -676,14 +682,14 @@ trait IndexImpl<'bytes, T: Transaction + 'bytes> {
     fn index_lookup(
         &self,
         bytes: &Bytes,
-        pk_indices: &PrimaryKeyIndices,
+        pk_indices: &[usize],
         params: &IndexImplParams<T>,
     ) -> Result<Tuple, DatabaseError>;
 
     fn eq_to_res<'a>(
         &self,
         value: &DataValue,
-        pk_indices: &PrimaryKeyIndices,
+        pk_indices: &[usize],
         params: &IndexImplParams<'a, T>,
     ) -> Result<IndexResult<'a, T>, DatabaseError>;
 
@@ -725,6 +731,7 @@ struct IndexImplParams<'a, T: Transaction> {
     index_meta: IndexMetaRef,
     table_name: &'a str,
     table_types: Vec<LogicalType>,
+    with_pk: bool,
     tx: &'a T,
 }
 
@@ -750,7 +757,7 @@ impl<T: Transaction> IndexImplParams<'_, T> {
 
     fn get_tuple_by_id(
         &self,
-        pk_indices: &PrimaryKeyIndices,
+        pk_indices: &[usize],
         tuple_id: &TupleId,
     ) -> Result<Option<Tuple>, DatabaseError> {
         let key = unsafe { &*self.table_codec() }.encode_tuple_key(self.table_name, tuple_id)?;
@@ -764,6 +771,7 @@ impl<T: Transaction> IndexImplParams<'_, T> {
                     &self.projections,
                     &self.tuple_schema_ref,
                     &bytes,
+                    self.with_pk,
                 )
             })
             .transpose()
@@ -779,7 +787,7 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for IndexImplEnum {
     fn index_lookup(
         &self,
         bytes: &Bytes,
-        pk_indices: &PrimaryKeyIndices,
+        pk_indices: &[usize],
         params: &IndexImplParams<T>,
     ) -> Result<Tuple, DatabaseError> {
         match self {
@@ -793,7 +801,7 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for IndexImplEnum {
     fn eq_to_res<'a>(
         &self,
         value: &DataValue,
-        pk_indices: &PrimaryKeyIndices,
+        pk_indices: &[usize],
         params: &IndexImplParams<'a, T>,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
         match self {
@@ -823,7 +831,7 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for PrimaryKeyIndexIm
     fn index_lookup(
         &self,
         bytes: &Bytes,
-        pk_indices: &PrimaryKeyIndices,
+        pk_indices: &[usize],
         params: &IndexImplParams<T>,
     ) -> Result<Tuple, DatabaseError> {
         TableCodec::decode_tuple(
@@ -832,13 +840,14 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for PrimaryKeyIndexIm
             &params.projections,
             &params.tuple_schema_ref,
             bytes,
+            params.with_pk,
         )
     }
 
     fn eq_to_res<'a>(
         &self,
         value: &DataValue,
-        pk_indices: &PrimaryKeyIndices,
+        pk_indices: &[usize],
         params: &IndexImplParams<'a, T>,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
         let tuple = params
@@ -851,6 +860,7 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for PrimaryKeyIndexIm
                     &params.projections,
                     &params.tuple_schema_ref,
                     &bytes,
+                    params.with_pk,
                 )
             })
             .transpose()?;
@@ -869,7 +879,7 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for PrimaryKeyIndexIm
 
 fn secondary_index_lookup<T: Transaction>(
     bytes: &Bytes,
-    pk_indices: &PrimaryKeyIndices,
+    pk_indices: &[usize],
     params: &IndexImplParams<T>,
 ) -> Result<Tuple, DatabaseError> {
     let tuple_id = TableCodec::decode_index(bytes)?;
@@ -882,7 +892,7 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for UniqueIndexImpl {
     fn index_lookup(
         &self,
         bytes: &Bytes,
-        pk_indices: &PrimaryKeyIndices,
+        pk_indices: &[usize],
         params: &IndexImplParams<T>,
     ) -> Result<Tuple, DatabaseError> {
         secondary_index_lookup(bytes, pk_indices, params)
@@ -891,7 +901,7 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for UniqueIndexImpl {
     fn eq_to_res<'a>(
         &self,
         value: &DataValue,
-        pk_indices: &PrimaryKeyIndices,
+        pk_indices: &[usize],
         params: &IndexImplParams<'a, T>,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
         let Some(bytes) = params.tx.get(&self.bound_key(params, value, false)?)? else {
@@ -920,7 +930,7 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for NormalIndexImpl {
     fn index_lookup(
         &self,
         bytes: &Bytes,
-        pk_indices: &PrimaryKeyIndices,
+        pk_indices: &[usize],
         params: &IndexImplParams<T>,
     ) -> Result<Tuple, DatabaseError> {
         secondary_index_lookup(bytes, pk_indices, params)
@@ -929,7 +939,7 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for NormalIndexImpl {
     fn eq_to_res<'a>(
         &self,
         value: &DataValue,
-        _: &PrimaryKeyIndices,
+        _: &[usize],
         params: &IndexImplParams<'a, T>,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
         let min = self.bound_key(params, value, false)?;
@@ -961,7 +971,7 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for CompositeIndexImp
     fn index_lookup(
         &self,
         bytes: &Bytes,
-        pk_indices: &PrimaryKeyIndices,
+        pk_indices: &[usize],
         params: &IndexImplParams<T>,
     ) -> Result<Tuple, DatabaseError> {
         secondary_index_lookup(bytes, pk_indices, params)
@@ -970,7 +980,7 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for CompositeIndexImp
     fn eq_to_res<'a>(
         &self,
         value: &DataValue,
-        _: &PrimaryKeyIndices,
+        _: &[usize],
         params: &IndexImplParams<'a, T>,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
         let min = self.bound_key(params, value, false)?;
@@ -1003,8 +1013,9 @@ pub struct TupleIter<'a, T: Transaction + 'a> {
     limit: Option<usize>,
     table_types: Vec<LogicalType>,
     tuple_columns: Arc<Vec<ColumnRef>>,
-    pk_indices: &'a PrimaryKeyIndices,
+    remap_pk_indices: Vec<usize>,
     projections: Vec<usize>,
+    with_pk: bool,
     iter: T::IterType<'a>,
 }
 
@@ -1027,10 +1038,11 @@ impl<'a, T: Transaction + 'a> Iter for TupleIter<'a, T> {
             }
             let tuple = TableCodec::decode_tuple(
                 &self.table_types,
-                self.pk_indices,
+                &self.remap_pk_indices,
                 &self.projections,
                 &self.tuple_columns,
                 &value,
+                self.with_pk,
             )?;
 
             return Ok(Some(tuple));
@@ -1044,7 +1056,7 @@ pub struct IndexIter<'a, T: Transaction> {
     offset: usize,
     limit: Option<usize>,
 
-    pk_indices: &'a PrimaryKeyIndices,
+    remap_pk_indices: Vec<usize>,
     params: IndexImplParams<'a, T>,
     inner: IndexImplEnum,
     // for buffering data
@@ -1099,7 +1111,7 @@ impl<T: Transaction> Iter for IndexIter<'_, T> {
                     };
                     match binary {
                         Range::Scope { min, max } => {
-                            let table_name = self.params.table_name;
+                            let table_name = &self.params.table_name;
                             let index_meta = &self.params.index_meta;
                             let bound_encode =
                                 |bound: Bound<DataValue>,
@@ -1146,7 +1158,11 @@ impl<T: Transaction> Iter for IndexIter<'_, T> {
                         Range::Eq(mut val) => {
                             val = self.params.try_cast(val)?;
 
-                            match self.inner.eq_to_res(&val, self.pk_indices, &self.params)? {
+                            match self.inner.eq_to_res(
+                                &val,
+                                &self.remap_pk_indices,
+                                &self.params,
+                            )? {
                                 IndexResult::Tuple(tuple) => {
                                     if Self::offset_move(&mut self.offset) {
                                         continue;
@@ -1168,9 +1184,11 @@ impl<T: Transaction> Iter for IndexIter<'_, T> {
                             continue;
                         }
                         Self::limit_sub(&mut self.limit);
-                        let tuple =
-                            self.inner
-                                .index_lookup(&bytes, self.pk_indices, &self.params)?;
+                        let tuple = self.inner.index_lookup(
+                            &bytes,
+                            &self.remap_pk_indices,
+                            &self.params,
+                        )?;
 
                         return Ok(Some(tuple));
                     }
@@ -1188,6 +1206,22 @@ pub trait InnerIter {
 
 pub trait Iter {
     fn next_tuple(&mut self) -> Result<Option<Tuple>, DatabaseError>;
+}
+
+fn remap_pk_indices(projection: &[usize], pk_indices: &[usize]) -> Vec<usize> {
+    let mut result = Vec::with_capacity(pk_indices.len());
+    let mut proj_idx = 0;
+    let mut pk_idx = 0;
+
+    while pk_idx < pk_indices.len() && proj_idx < projection.len() {
+        if projection[proj_idx] == pk_indices[pk_idx] {
+            result.push(proj_idx);
+            pk_idx += 1;
+        } else {
+            proj_idx += 1;
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -1208,43 +1242,44 @@ mod test {
     use crate::types::value::DataValue;
     use crate::types::{ColumnId, LogicalType};
     use crate::utils::lru::SharedLruCache;
-    use std::collections::Bound;
+    use std::collections::{BTreeMap, Bound};
     use std::hash::RandomState;
     use std::sync::Arc;
     use tempfile::TempDir;
 
-    fn full_columns() -> Vec<(usize, ColumnRef)> {
-        vec![
-            (
-                0,
-                ColumnRef::from(ColumnCatalog::new(
-                    "c1".to_string(),
-                    false,
-                    ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
-                )),
-            ),
-            (
-                1,
-                ColumnRef::from(ColumnCatalog::new(
-                    "c2".to_string(),
-                    false,
-                    ColumnDesc::new(LogicalType::Boolean, None, false, None).unwrap(),
-                )),
-            ),
-            (
-                2,
-                ColumnRef::from(ColumnCatalog::new(
-                    "c3".to_string(),
-                    false,
-                    ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
-                )),
-            ),
-        ]
+    fn full_columns() -> BTreeMap<usize, ColumnRef> {
+        let mut columns = BTreeMap::new();
+
+        columns.insert(
+            0,
+            ColumnRef::from(ColumnCatalog::new(
+                "c1".to_string(),
+                false,
+                ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
+            )),
+        );
+        columns.insert(
+            1,
+            ColumnRef::from(ColumnCatalog::new(
+                "c2".to_string(),
+                false,
+                ColumnDesc::new(LogicalType::Boolean, None, false, None).unwrap(),
+            )),
+        );
+        columns.insert(
+            2,
+            ColumnRef::from(ColumnCatalog::new(
+                "c3".to_string(),
+                false,
+                ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
+            )),
+        );
+        columns
     }
     fn build_tuples() -> Vec<Tuple> {
         vec![
             Tuple::new(
-                Some(Arc::new(vec![0])),
+                Some(DataValue::Int32(0)),
                 vec![
                     DataValue::Int32(0),
                     DataValue::Boolean(true),
@@ -1252,7 +1287,7 @@ mod test {
                 ],
             ),
             Tuple::new(
-                Some(Arc::new(vec![0])),
+                Some(DataValue::Int32(1)),
                 vec![
                     DataValue::Int32(1),
                     DataValue::Boolean(true),
@@ -1260,7 +1295,7 @@ mod test {
                 ],
             ),
             Tuple::new(
-                Some(Arc::new(vec![0])),
+                Some(DataValue::Int32(2)),
                 vec![
                     DataValue::Int32(2),
                     DataValue::Boolean(false),
@@ -1401,6 +1436,7 @@ mod test {
                 Arc::new("t1".to_string()),
                 (None, None),
                 full_columns(),
+                true,
             )?;
 
             assert_eq!(tuple_iter.next_tuple()?.unwrap(), tuples[0]);
@@ -1426,6 +1462,7 @@ mod test {
                 Arc::new("t1".to_string()),
                 (None, None),
                 full_columns(),
+                true,
             )?;
 
             assert_eq!(tuple_iter.next_tuple()?.unwrap(), tuples[0]);
@@ -1550,6 +1587,7 @@ mod test {
                     min: Bound::Unbounded,
                     max: Bound::Unbounded,
                 }],
+                true,
             )
         }
 

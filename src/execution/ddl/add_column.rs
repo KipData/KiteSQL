@@ -1,3 +1,4 @@
+use crate::errors::DatabaseError;
 use crate::execution::{build_read, Executor, WriteExecutor};
 use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, ViewCache};
@@ -55,7 +56,10 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for AddColumn {
 
                     if let Some(value) = throw!(column.default_value()) {
                         if let Some(unique_values) = &mut unique_values {
-                            unique_values.push((tuple.id().unwrap().clone(), value.clone()));
+                            unique_values.push((
+                                throw!(tuple.pk.clone().ok_or(DatabaseError::PrimaryKeyNotFound)),
+                                value.clone(),
+                            ));
                         }
                         tuple.values.push(value);
                     } else {

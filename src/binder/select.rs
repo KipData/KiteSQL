@@ -386,12 +386,13 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             alias_idents = Some(columns);
         }
 
+        let with_pk = self.is_scan_with_pk(&table_name);
         let source = self
             .context
             .source_and_bind(table_name.clone(), table_alias.as_ref(), join_type, false)?
             .ok_or(DatabaseError::SourceNotFound)?;
         let mut plan = match source {
-            Source::Table(table) => TableScanOperator::build(table_name.clone(), table),
+            Source::Table(table) => TableScanOperator::build(table_name.clone(), table, with_pk),
             Source::View(view) => LogicalPlan::clone(&view.plan),
         };
 

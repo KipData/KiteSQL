@@ -99,7 +99,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert {
                     }
 
                     let types = table_catalog.types();
-                    let indices = table_catalog.primary_keys_indices();
+                    let pk_indices = table_catalog.primary_keys_indices();
                     let mut coroutine = build_read(input, cache, transaction);
 
                     while let CoroutineState::Yielded(tuple) = Pin::new(&mut coroutine).resume(()) {
@@ -126,16 +126,16 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert {
                             }
                             values.push(value)
                         }
-                        let mut tuple = Tuple::new(Some(indices.clone()), values);
+                        let pk = Tuple::primary_projection(pk_indices, &values);
+                        let tuple = Tuple::new(Some(pk), values);
 
                         for (index_meta, exprs) in index_metas.iter() {
                             let values = throw!(Projection::projection(&tuple, exprs, &schema));
                             let Some(value) = DataValue::values_to_tuple(values) else {
                                 continue;
                             };
-                            let Some(tuple_id) = tuple.id() else {
-                                unreachable!()
-                            };
+                            let tuple_id =
+                                throw!(tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound));
                             let index = Index::new(index_meta.id, &value, index_meta.ty);
                             throw!(unsafe { &mut (*transaction) }.add_index(
                                 &table_name,

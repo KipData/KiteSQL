@@ -319,6 +319,7 @@ pub struct Binder<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>>
     context: BinderContext<'a, T>,
     table_schema_buf: HashMap<TableName, Option<SchemaOutput>>,
     args: &'a A,
+    with_pk: Option<TableName>,
     pub(crate) parent: Option<&'b Binder<'a, 'b, T, A>>,
 }
 
@@ -332,8 +333,20 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
             context,
             table_schema_buf: Default::default(),
             args,
+            with_pk: None,
             parent,
         }
+    }
+
+    pub fn with_pk(&mut self, table_name: TableName) {
+        self.with_pk = Some(table_name);
+    }
+
+    pub fn is_scan_with_pk(&self, table_name: &TableName) -> bool {
+        if let Some(with_pk_table) = self.with_pk.as_ref() {
+            return with_pk_table == table_name;
+        }
+        false
     }
 
     pub fn bind(&mut self, stmt: &Statement) -> Result<LogicalPlan, DatabaseError> {

@@ -44,6 +44,10 @@ impl<'a> TupleBuilder<'a> {
             return Err(DatabaseError::MisMatch("types", "values"));
         }
 
-        Ok(Tuple::new(self.pk_indices.cloned(), values))
+        let pk = self
+            .pk_indices
+            .map(|indices| Tuple::primary_projection(indices, &values));
+
+        Ok(Tuple::new(pk, values))
     }
 }

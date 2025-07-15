@@ -51,7 +51,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Delete {
                 let mut coroutine = build_read(input, cache, transaction);
 
                 while let CoroutineState::Yielded(tuple) = Pin::new(&mut coroutine).resume(()) {
-                    let mut tuple: Tuple = throw!(tuple);
+                    let tuple: Tuple = throw!(tuple);
 
                     for index_meta in table.indexes() {
                         if let Some(Value { exprs, values, .. }) = indexes.get_mut(&index_meta.id) {
@@ -81,7 +81,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Delete {
                             );
                         }
                     }
-                    if let Some(tuple_id) = tuple.id() {
+                    if let Some(tuple_id) = &tuple.pk {
                         for (
                             index_id,
                             Value {

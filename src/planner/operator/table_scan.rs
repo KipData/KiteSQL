@@ -6,6 +6,7 @@ use crate::types::index::IndexInfo;
 use crate::types::ColumnId;
 use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::Formatter;
 
@@ -13,17 +14,22 @@ use std::fmt::Formatter;
 pub struct TableScanOperator {
     pub(crate) table_name: TableName,
     pub(crate) primary_keys: Vec<ColumnId>,
-    pub(crate) columns: Vec<(usize, ColumnRef)>,
+    pub(crate) columns: BTreeMap<usize, ColumnRef>,
     // Support push down limit.
     pub(crate) limit: Bounds,
 
     // Support push down predicate.
     // If pre_where is simple predicate, for example:  a > 1 then can calculate directly when read data.
     pub(crate) index_infos: Vec<IndexInfo>,
+    pub(crate) with_pk: bool,
 }
 
 impl TableScanOperator {
-    pub fn build(table_name: TableName, table_catalog: &TableCatalog) -> LogicalPlan {
+    pub fn build(
+        table_name: TableName,
+        table_catalog: &TableCatalog,
+        with_pk: bool,
+    ) -> LogicalPlan {
         let primary_keys = table_catalog
             .primary_keys()
             .iter()
@@ -34,7 +40,7 @@ impl TableScanOperator {
             .columns()
             .enumerate()
             .map(|(i, column)| (i, column.clone()))
-            .collect_vec();
+            .collect();
         let index_infos = table_catalog
             .indexes
             .iter()
@@ -51,6 +57,7 @@ impl TableScanOperator {
                 primary_keys,
                 columns,
                 limit: (None, None),
+                with_pk,
             }),
             Childrens::None,
         )
@@ -61,8 +68,8 @@ impl fmt::Display for TableScanOperator {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         let projection_columns = self
             .columns
-            .iter()
-            .map(|(_, column)| column.name().to_string())
+            .values()
+            .map(|column| column.name().to_string())
             .join(", ");
         let (offset, limit) = self.limit;
 

@@ -270,7 +270,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
                             let mut values = vec![NULL_VALUE.clone(); right_schema_len];
                             values.append(&mut right_tuple.values);
 
-                            yield Ok(Tuple::new(None, values))
+                            yield Ok(Tuple::new(right_tuple.pk, values))
                         }
                         idx += 1;
                     }
@@ -328,16 +328,20 @@ impl NestedLoopJoin {
             return None;
         }
 
-        Some(Tuple::new(None, values))
+        Some(Tuple::new(
+            left_tuple.pk.as_ref().or(right_tuple.pk.as_ref()).cloned(),
+            values,
+        ))
     }
 
     /// Merge the two tuples.
     /// `left_tuple` must be from the `NestedLoopJoin.left_input`
     /// `right_tuple` must be from the `NestedLoopJoin.right_input`
     fn merge_tuple(left_tuple: &Tuple, right_tuple: &Tuple, ty: &JoinType) -> Tuple {
+        let pk = left_tuple.pk.as_ref().or(right_tuple.pk.as_ref()).cloned();
         match ty {
             JoinType::RightOuter => Tuple::new(
-                None,
+                pk,
                 right_tuple
                     .values
                     .iter()
@@ -346,7 +350,7 @@ impl NestedLoopJoin {
                     .collect_vec(),
             ),
             _ => Tuple::new(
-                None,
+                pk,
                 left_tuple
                     .values
                     .iter()

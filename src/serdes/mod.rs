@@ -1,5 +1,6 @@
 mod boolean;
 mod bound;
+mod btree_map;
 mod char;
 mod char_length_units;
 mod column;

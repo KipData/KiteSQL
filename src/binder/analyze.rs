@@ -26,7 +26,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             .ok_or(DatabaseError::TableNotFound)?;
         let index_metas = table.indexes.clone();
 
-        let scan_op = TableScanOperator::build(table_name.clone(), table);
+        let scan_op = TableScanOperator::build(table_name.clone(), table, false);
         Ok(LogicalPlan::new(
             Operator::Analyze(AnalyzeOperator {
                 table_name,

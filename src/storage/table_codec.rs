@@ -1,5 +1,5 @@
 use crate::catalog::view::View;
-use crate::catalog::{ColumnRef, ColumnRelation, PrimaryKeyIndices, TableMeta};
+use crate::catalog::{ColumnRef, ColumnRelation, TableMeta};
 use crate::errors::DatabaseError;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use crate::storage::{TableCache, Transaction};
@@ -260,7 +260,7 @@ impl TableCodec {
         tuple: &mut Tuple,
         types: &[LogicalType],
     ) -> Result<(BumpBytes, BumpBytes), DatabaseError> {
-        let tuple_id = tuple.id().ok_or(DatabaseError::PrimaryKeyNotFound)?;
+        let tuple_id = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
         let key = self.encode_tuple_key(table_name, tuple_id)?;
 
         Ok((key, tuple.serialize_to(types, &self.arena)?))
@@ -284,12 +284,13 @@ impl TableCodec {
     #[inline]
     pub fn decode_tuple(
         table_types: &[LogicalType],
-        pk_indices: &PrimaryKeyIndices,
+        pk_indices: &[usize],
         projections: &[usize],
         schema: &Schema,
         bytes: &[u8],
+        with_pk: bool,
     ) -> Result<Tuple, DatabaseError> {
-        Tuple::deserialize_from(table_types, pk_indices, projections, schema, bytes)
+        Tuple::deserialize_from(table_types, pk_indices, projections, schema, bytes, with_pk)
     }
 
     /// Key: {TableName}{INDEX_META_TAG}{BOUND_MIN_TAG}{IndexID}
@@ -568,7 +569,7 @@ mod tests {
         let table_catalog = build_table_codec();
 
         let mut tuple = Tuple::new(
-            Some(Arc::new(vec![0])),
+            Some(DataValue::Int32(0)),
             vec![DataValue::Int32(0), DataValue::Decimal(Decimal::new(1, 0))],
         );
         let (_, bytes) = table_codec.encode_tuple(
@@ -579,9 +580,16 @@ mod tests {
         let schema = table_catalog.schema_ref();
         let pk_indices = table_catalog.primary_keys_indices();
 
-        tuple.clear_id();
+        tuple.pk = None;
         assert_eq!(
-            TableCodec::decode_tuple(&table_catalog.types(), pk_indices, &[0, 1], schema, &bytes)?,
+            TableCodec::decode_tuple(
+                &table_catalog.types(),
+                pk_indices,
+                &[0, 1],
+                schema,
+                &bytes,
+                false
+            )?,
             tuple
         );
 

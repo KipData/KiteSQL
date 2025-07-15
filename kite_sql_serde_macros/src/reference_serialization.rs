@@ -47,6 +47,26 @@ fn process_type(ty: &Type) -> TokenStream {
                     }
                 }
             }
+            "BTreeMap" => {
+                if let PathArguments::AngleBracketed(AngleBracketedGenericArguments {
+                    args, ..
+                }) = &path.segments.last().unwrap().arguments
+                {
+                    let mut iter = args.iter();
+                    if let (
+                        Some(GenericArgument::Type(inner_ty_0)),
+                        Some(GenericArgument::Type(inner_ty_1)),
+                    ) = (iter.next(), iter.next())
+                    {
+                        let inner_processed_0 = process_type(inner_ty_0);
+                        let inner_processed_1 = process_type(inner_ty_1);
+
+                        return quote! {
+                            #ident::<#inner_processed_0, #inner_processed_1>
+                        };
+                    }
+                }
+            }
             _ => {}
         }
 
@@ -72,7 +92,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 
                 let field_name = field_opts
                     .ident
-                    .unwrap_or_else(|| Ident::new(&format!("filed_{}", i), Span::call_site()));
+                    .unwrap_or_else(|| Ident::new(&format!("field_{}", i), Span::call_site()));
                 let ty = process_type(&field_opts.ty);
 
                 encode_fields.push(quote! {
@@ -135,7 +155,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 
                     let field_name = field_opts
                         .ident
-                        .unwrap_or_else(|| Ident::new(&format!("filed_{}", i), Span::call_site()));
+                        .unwrap_or_else(|| Ident::new(&format!("field_{}", i), Span::call_site()));
                     let ty = process_type(&field_opts.ty);
 
                     encode_fields.push(quote! {

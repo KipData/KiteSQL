@@ -1501,7 +1501,7 @@ mod test {
                 distinct: true,
                 kind: AggKind::Avg,
                 args: vec![ScalarExpression::Empty],
-                ty: LogicalType::Integer,
+                ty: LogicalType::Double,
             },
             Some((&transaction, &table_cache)),
             &mut reference_tables,

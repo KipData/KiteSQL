@@ -99,7 +99,7 @@ impl ColumnPruning {
             Operator::TableScan(op) => {
                 if !all_referenced {
                     op.columns
-                        .retain(|(_, column)| column_references.contains(column.summary()));
+                        .retain(|_, column| column_references.contains(column.summary()));
                 }
             }
             Operator::Sort(_)

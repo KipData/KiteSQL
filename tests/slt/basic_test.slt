@@ -116,3 +116,16 @@ drop table if exists t
 
 statement ok
 drop table if exists t
+
+statement ok
+create table t2 (c1 int primary key, c2 int, c3 int primary key)
+
+statement ok
+insert into t2 values(0, 0, 0), (1, 1, 1), (2, 2, 2);
+
+query III
+select c1 from t2;
+----
+0
+1
+2

@@ -39,6 +39,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for IndexScan {
                     table_name,
                     columns,
                     limit,
+                    with_pk,
                     ..
                 } = self.op;
 
@@ -50,6 +51,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for IndexScan {
                         columns,
                         self.index_by,
                         self.ranges,
+                        with_pk,
                     )
                     .unwrap();
 

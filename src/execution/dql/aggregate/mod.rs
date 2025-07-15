@@ -38,7 +38,7 @@ fn create_accumulator(expr: &ScalarExpression) -> Result<Box<dyn Accumulator>, D
             (AggKind::Sum, true) => Box::new(DistinctSumAccumulator::new(ty)?),
             (AggKind::Min, _) => Box::new(MinMaxAccumulator::new(false)),
             (AggKind::Max, _) => Box::new(MinMaxAccumulator::new(true)),
-            (AggKind::Avg, _) => Box::new(AvgAccumulator::new(ty)?),
+            (AggKind::Avg, _) => Box::new(AvgAccumulator::new()),
         })
     } else {
         unreachable!(

@@ -26,6 +26,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SeqScan {
                     table_name,
                     columns,
                     limit,
+                    with_pk,
                     ..
                 } = self.op;
 
@@ -33,7 +34,8 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SeqScan {
                     table_cache,
                     table_name,
                     limit,
-                    columns
+                    columns,
+                    with_pk
                 ));
 
                 while let Some(tuple) = throw!(iter.next_tuple()) {
