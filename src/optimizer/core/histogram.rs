@@ -353,6 +353,7 @@ impl Histogram {
                 | LogicalType::Bigint
                 | LogicalType::UBigint
                 | LogicalType::Float
+                | LogicalType::Real
                 | LogicalType::Double
                 | LogicalType::Decimal(_, _) => value.clone().cast(&LogicalType::Double)?.double(),
                 LogicalType::Tuple(_) => match value {
