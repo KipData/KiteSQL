@@ -15,7 +15,6 @@ use crate::types::{ColumnId, LogicalType};
 use crate::utils::lru::SharedLruCache;
 use itertools::Itertools;
 use std::collections::{BTreeMap, Bound};
-use sqlparser::keywords::NULL;
 use std::io::Cursor;
 use std::mem;
 use std::ops::SubAssign;
