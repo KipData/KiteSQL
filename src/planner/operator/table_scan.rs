@@ -14,7 +14,8 @@ use std::fmt::Formatter;
 pub struct TableScanOperator {
     pub(crate) table_name: TableName,
     pub(crate) primary_keys: Vec<ColumnId>,
-    pub(crate) columns: BTreeMap<usize, ColumnRef>,
+    #[rustfmt::skip]
+    pub(crate) columns: BTreeMap::<usize, ColumnRef>,
     // Support push down limit.
     pub(crate) limit: Bounds,
 
