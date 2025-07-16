@@ -43,17 +43,15 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for IndexScan {
                     ..
                 } = self.op;
 
-                let mut iter = unsafe { &(*transaction) }
-                    .read_by_index(
-                        table_cache,
-                        table_name,
-                        limit,
-                        columns,
-                        self.index_by,
-                        self.ranges,
-                        with_pk,
-                    )
-                    .unwrap();
+                let mut iter = throw!(unsafe { &(*transaction) }.read_by_index(
+                    table_cache,
+                    table_name,
+                    limit,
+                    columns,
+                    self.index_by,
+                    self.ranges,
+                    with_pk,
+                ));
 
                 while let Some(tuple) = throw!(iter.next_tuple()) {
                     yield Ok(tuple);

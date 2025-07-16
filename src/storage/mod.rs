@@ -1208,19 +1208,10 @@ pub trait Iter {
 }
 
 fn remap_pk_indices(projection: &[usize], pk_indices: &[usize]) -> Vec<usize> {
-    let mut result = Vec::with_capacity(pk_indices.len());
-    let mut proj_idx = 0;
-    let mut pk_idx = 0;
-
-    while pk_idx < pk_indices.len() && proj_idx < projection.len() {
-        if projection[proj_idx] == pk_indices[pk_idx] {
-            result.push(proj_idx);
-            pk_idx += 1;
-        } else {
-            proj_idx += 1;
-        }
-    }
-    result
+    pk_indices
+        .iter()
+        .filter_map(|pk| projection.binary_search(pk).ok())
+        .collect()
 }
 
 #[cfg(test)]
