@@ -2,7 +2,7 @@
 
 [package]
 name          = "kite_sql"
-version       = "0.1.1"
+version       = "0.1.2"
 edition       = "2021"
 authors       = ["Kould <kould2333@gmail.com>", "Xwg <loloxwg@gmail.com>"]
 description   = "SQL as a Function for Rust"
