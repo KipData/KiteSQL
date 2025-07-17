@@ -43,7 +43,6 @@ pub enum LogicalType {
     Bigint,
     UBigint,
     Float,
-    Real,
     Double,
     Char(u32, CharLengthUnits),
     Varchar(Option<u32>, CharLengthUnits),
@@ -77,8 +76,6 @@ impl LogicalType {
             Some(LogicalType::UBigint)
         } else if type_id == TypeId::of::<f32>() {
             Some(LogicalType::Float)
-        } else if type_id == TypeId::of::<f32>() {
-            Some(LogicalType::Real)
         } else if type_id == TypeId::of::<f64>() {
             Some(LogicalType::Double)
         } else if type_id == TypeId::of::<NaiveDate>() {
@@ -109,7 +106,6 @@ impl LogicalType {
             LogicalType::Bigint => Some(8),
             LogicalType::UBigint => Some(8),
             LogicalType::Float => Some(4),
-            LogicalType::Real => Some(4),
             LogicalType::Double => Some(8),
             /// Note: The non-fixed length type's raw_len is None e.g. Varchar
             LogicalType::Varchar(_, _) => None,
@@ -136,7 +132,6 @@ impl LogicalType {
             LogicalType::Bigint,
             LogicalType::UBigint,
             LogicalType::Float,
-            LogicalType::Real,
             LogicalType::Double,
         ]
     }
@@ -153,7 +148,6 @@ impl LogicalType {
                 | LogicalType::Bigint
                 | LogicalType::UBigint
                 | LogicalType::Float
-                | LogicalType::Real
                 | LogicalType::Double
                 | LogicalType::Decimal(_, _)
         )
@@ -180,10 +174,7 @@ impl LogicalType {
     }
 
     pub fn is_floating_point_numeric(&self) -> bool {
-        matches!(
-            self,
-            LogicalType::Float | LogicalType::Real | LogicalType::Double
-        )
+        matches!(self, LogicalType::Float | LogicalType::Double)
     }
 
     pub fn max_logical_type(
@@ -299,7 +290,6 @@ impl LogicalType {
                     | LogicalType::Integer
                     | LogicalType::Bigint
                     | LogicalType::Float
-                    | LogicalType::Real
                     | LogicalType::Double
                     | LogicalType::Decimal(_, _)
             ),
@@ -312,7 +302,6 @@ impl LogicalType {
                     | LogicalType::Integer
                     | LogicalType::Bigint
                     | LogicalType::Float
-                    | LogicalType::Real
                     | LogicalType::Double
                     | LogicalType::Decimal(_, _)
             ),
@@ -321,7 +310,6 @@ impl LogicalType {
                 LogicalType::Integer
                     | LogicalType::Bigint
                     | LogicalType::Float
-                    | LogicalType::Real
                     | LogicalType::Double
                     | LogicalType::Decimal(_, _)
             ),
@@ -332,7 +320,6 @@ impl LogicalType {
                     | LogicalType::Integer
                     | LogicalType::Bigint
                     | LogicalType::Float
-                    | LogicalType::Real
                     | LogicalType::Double
                     | LogicalType::Decimal(_, _)
             ),
@@ -340,7 +327,6 @@ impl LogicalType {
                 to,
                 LogicalType::Bigint
                     | LogicalType::Float
-                    | LogicalType::Real
                     | LogicalType::Double
                     | LogicalType::Decimal(_, _)
             ),
@@ -349,26 +335,18 @@ impl LogicalType {
                 LogicalType::UBigint
                     | LogicalType::Bigint
                     | LogicalType::Float
-                    | LogicalType::Real
                     | LogicalType::Double
                     | LogicalType::Decimal(_, _)
             ),
             LogicalType::Bigint => matches!(
                 to,
-                LogicalType::Float
-                    | LogicalType::Real
-                    | LogicalType::Double
-                    | LogicalType::Decimal(_, _)
+                LogicalType::Float | LogicalType::Double | LogicalType::Decimal(_, _)
             ),
             LogicalType::UBigint => matches!(
                 to,
-                LogicalType::Float
-                    | LogicalType::Real
-                    | LogicalType::Double
-                    | LogicalType::Decimal(_, _)
+                LogicalType::Float | LogicalType::Double | LogicalType::Decimal(_, _)
             ),
             LogicalType::Float => matches!(to, LogicalType::Double | LogicalType::Decimal(_, _)),
-            LogicalType::Real => matches!(to, LogicalType::Double | LogicalType::Decimal(_, _)),
             LogicalType::Double => matches!(to, LogicalType::Decimal(_, _)),
             LogicalType::Char(..) => false,
             LogicalType::Varchar(..) => false,
@@ -428,7 +406,7 @@ impl TryFrom<sqlparser::ast::DataType> for LogicalType {
                 Ok(LogicalType::Varchar(None, CharLengthUnits::Characters))
             }
             sqlparser::ast::DataType::Float(_) => Ok(LogicalType::Float),
-            sqlparser::ast::DataType::Real => Ok(LogicalType::Real),
+            sqlparser::ast::DataType::Real => Ok(LogicalType::Float),
             sqlparser::ast::DataType::Double | sqlparser::ast::DataType::DoublePrecision => {
                 Ok(LogicalType::Double)
             }
@@ -496,7 +474,6 @@ impl std::fmt::Display for LogicalType {
             LogicalType::Bigint => write!(f, "Bigint")?,
             LogicalType::UBigint => write!(f, "UBigint")?,
             LogicalType::Float => write!(f, "Float")?,
-            LogicalType::Real => write!(f, "Real")?,
             LogicalType::Double => write!(f, "Double")?,
             LogicalType::Char(len, units) => write!(f, "Char({}, {})", len, units)?,
             LogicalType::Varchar(len, units) => write!(f, "Varchar({:?}, {})", len, units)?,
@@ -566,7 +543,6 @@ pub(crate) mod test {
         fn_assert(&mut cursor, &mut reference_tables, LogicalType::Bigint)?;
         fn_assert(&mut cursor, &mut reference_tables, LogicalType::UBigint)?;
         fn_assert(&mut cursor, &mut reference_tables, LogicalType::Float)?;
-        fn_assert(&mut cursor, &mut reference_tables, LogicalType::Real)?;
         fn_assert(&mut cursor, &mut reference_tables, LogicalType::Double)?;
         fn_assert(
             &mut cursor,
