@@ -1,11 +1,10 @@
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
-use crate::expression::function::scala::ScalarFunction;
-use crate::expression::function::table::TableFunction;
+use crate::expression::visitor_mut::{walk_mut_expr, VisitorMut};
 use crate::expression::{BinaryOperator, ScalarExpression, UnaryOperator};
 use crate::types::evaluator::EvaluatorFactory;
 use crate::types::value::DataValue;
-use crate::types::{ColumnId, LogicalType};
+use crate::types::LogicalType;
 use std::mem;
 
 #[derive(Debug)]
@@ -30,221 +29,20 @@ struct ReplaceUnary {
     ty: LogicalType,
 }
 
-impl ScalarExpression {
-    pub fn exist_column(&self, table_name: &str, col_id: &ColumnId) -> bool {
-        match self {
-            ScalarExpression::ColumnRef(col) => {
-                Self::_is_belong(table_name, col) && col.id() == Some(*col_id)
-            }
-            ScalarExpression::Alias { expr, .. } => expr.exist_column(table_name, col_id),
-            ScalarExpression::TypeCast { expr, .. } => expr.exist_column(table_name, col_id),
-            ScalarExpression::IsNull { expr, .. } => expr.exist_column(table_name, col_id),
-            ScalarExpression::Unary { expr, .. } => expr.exist_column(table_name, col_id),
-            ScalarExpression::Binary {
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                left_expr.exist_column(table_name, col_id)
-                    || right_expr.exist_column(table_name, col_id)
-            }
-            ScalarExpression::AggCall { args, .. }
-            | ScalarExpression::Tuple(args)
-            | ScalarExpression::ScalaFunction(ScalarFunction { args, .. })
-            | ScalarExpression::TableFunction(TableFunction { args, .. })
-            | ScalarExpression::Coalesce { exprs: args, .. } => args
-                .iter()
-                .any(|expr| expr.exist_column(table_name, col_id)),
-            ScalarExpression::In { expr, args, .. } => {
-                expr.exist_column(table_name, col_id)
-                    || args
-                        .iter()
-                        .any(|expr| expr.exist_column(table_name, col_id))
-            }
-            ScalarExpression::Between {
-                expr,
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                expr.exist_column(table_name, col_id)
-                    || left_expr.exist_column(table_name, col_id)
-                    || right_expr.exist_column(table_name, col_id)
-            }
-            ScalarExpression::SubString {
-                expr,
-                for_expr,
-                from_expr,
-            } => {
-                expr.exist_column(table_name, col_id)
-                    || for_expr
-                        .as_ref()
-                        .map(|expr| expr.exist_column(table_name, col_id))
-                        == Some(true)
-                    || from_expr
-                        .as_ref()
-                        .map(|expr| expr.exist_column(table_name, col_id))
-                        == Some(true)
-            }
-            ScalarExpression::Position { expr, in_expr } => {
-                expr.exist_column(table_name, col_id) || in_expr.exist_column(table_name, col_id)
-            }
-            ScalarExpression::Trim {
-                expr,
-                trim_what_expr,
-                ..
-            } => {
-                expr.exist_column(table_name, col_id)
-                    || trim_what_expr
-                        .as_ref()
-                        .map(|expr| expr.exist_column(table_name, col_id))
-                        == Some(true)
-            }
-            ScalarExpression::Constant(_) => false,
-            ScalarExpression::Reference { .. } | ScalarExpression::Empty => unreachable!(),
-            ScalarExpression::If {
-                condition,
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                condition.exist_column(table_name, col_id)
-                    || left_expr.exist_column(table_name, col_id)
-                    || right_expr.exist_column(table_name, col_id)
-            }
-            ScalarExpression::IfNull {
-                left_expr,
-                right_expr,
-                ..
-            }
-            | ScalarExpression::NullIf {
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                left_expr.exist_column(table_name, col_id)
-                    || right_expr.exist_column(table_name, col_id)
-            }
-            ScalarExpression::CaseWhen {
-                operand_expr,
-                expr_pairs,
-                else_expr,
-                ..
-            } => {
-                matches!(
-                    operand_expr
-                        .as_ref()
-                        .map(|expr| expr.exist_column(table_name, col_id)),
-                    Some(true)
-                ) || expr_pairs.iter().any(|(expr_1, expr_2)| {
-                    expr_1.exist_column(table_name, col_id)
-                        || expr_2.exist_column(table_name, col_id)
-                }) || matches!(
-                    else_expr
-                        .as_ref()
-                        .map(|expr| expr.exist_column(table_name, col_id)),
-                    Some(true)
-                )
-            }
-        }
-    }
+pub struct ConstantCalculator;
 
-    pub(crate) fn unpack_val(&self) -> Option<DataValue> {
-        match self {
-            ScalarExpression::Constant(val) => Some(val.clone()),
-            ScalarExpression::Alias { expr, .. } => expr.unpack_val(),
-            ScalarExpression::TypeCast { expr, ty, .. } => {
-                expr.unpack_val().and_then(|val| val.cast(ty).ok())
-            }
-            ScalarExpression::IsNull { expr, .. } => expr
-                .unpack_val()
-                .map(|val| DataValue::Boolean(val.is_null())),
+impl VisitorMut<'_> for ConstantCalculator {
+    fn visit(&mut self, expr: &'_ mut ScalarExpression) -> Result<(), DatabaseError> {
+        match expr {
             ScalarExpression::Unary {
-                expr,
                 op,
+                expr: arg_expr,
                 evaluator,
                 ty,
-                ..
             } => {
-                let value = expr.unpack_val()?;
-                let unary_value = if let Some(evaluator) = evaluator {
-                    evaluator.0.unary_eval(&value)
-                } else {
-                    EvaluatorFactory::unary_create(ty.clone(), *op)
-                        .ok()?
-                        .0
-                        .unary_eval(&value)
-                };
-                Some(unary_value)
-            }
-            ScalarExpression::Binary {
-                left_expr,
-                right_expr,
-                op,
-                ty,
-                evaluator,
-                ..
-            } => {
-                let mut left = left_expr.unpack_val()?;
-                let mut right = right_expr.unpack_val()?;
-                if &left.logical_type() != ty {
-                    left = left.cast(ty).ok()?;
-                }
-                if &right.logical_type() != ty {
-                    right = right.cast(ty).ok()?;
-                }
-                let binary_value = if let Some(evaluator) = evaluator {
-                    evaluator.0.binary_eval(&left, &right)
-                } else {
-                    EvaluatorFactory::binary_create(ty.clone(), *op)
-                        .ok()?
-                        .0
-                        .binary_eval(&left, &right)
-                };
-                Some(binary_value)
-            }
-            _ => None,
-        }
-    }
+                self.visit(arg_expr)?;
 
-    pub(crate) fn unpack_col(&self, is_deep: bool) -> Option<ColumnRef> {
-        match self {
-            ScalarExpression::ColumnRef(col) => Some(col.clone()),
-            ScalarExpression::Alias { expr, .. } => expr.unpack_col(is_deep),
-            ScalarExpression::Unary { expr, .. } => expr.unpack_col(is_deep),
-            ScalarExpression::Binary {
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                if !is_deep {
-                    return None;
-                }
-
-                left_expr
-                    .unpack_col(true)
-                    .or_else(|| right_expr.unpack_col(true))
-            }
-            _ => None,
-        }
-    }
-
-    pub fn simplify(&mut self) -> Result<(), DatabaseError> {
-        self._simplify(&mut Vec::new())
-    }
-
-    pub fn constant_calculation(&mut self) -> Result<(), DatabaseError> {
-        match self {
-            ScalarExpression::Unary {
-                expr,
-                op,
-                evaluator,
-                ty,
-                ..
-            } => {
-                expr.constant_calculation()?;
-
-                if let ScalarExpression::Constant(unary_val) = expr.as_ref() {
+                if let ScalarExpression::Constant(unary_val) = arg_expr.as_ref() {
                     let value = if let Some(evaluator) = evaluator {
                         evaluator.0.unary_eval(unary_val)
                     } else {
@@ -252,21 +50,21 @@ impl ScalarExpression {
                             .0
                             .unary_eval(unary_val)
                     };
-                    let _ = mem::replace(self, ScalarExpression::Constant(value));
+                    let _ = mem::replace(expr, ScalarExpression::Constant(value));
                 }
             }
             ScalarExpression::Binary {
+                op,
                 left_expr,
                 right_expr,
-                op,
                 ..
             } => {
                 let ty = LogicalType::max_logical_type(
                     &left_expr.return_type(),
                     &right_expr.return_type(),
                 )?;
-                left_expr.constant_calculation()?;
-                right_expr.constant_calculation()?;
+                self.visit(left_expr)?;
+                self.visit(right_expr)?;
 
                 if let (
                     ScalarExpression::Constant(left_val),
@@ -282,139 +80,59 @@ impl ScalarExpression {
                         *right_val = right_val.clone().cast(&ty)?;
                     }
                     let value = evaluator.0.binary_eval(left_val, right_val);
-                    let _ = mem::replace(self, ScalarExpression::Constant(value));
+                    let _ = mem::replace(expr, ScalarExpression::Constant(value));
                 }
             }
-            ScalarExpression::Alias { expr, .. } => expr.constant_calculation()?,
-            ScalarExpression::TypeCast { expr, .. } => expr.constant_calculation()?,
-            ScalarExpression::IsNull { expr, .. } => expr.constant_calculation()?,
-            ScalarExpression::AggCall { args, .. } => {
-                for expr in args {
-                    expr.constant_calculation()?;
-                }
-            }
-            ScalarExpression::In { expr, args, .. } => {
-                expr.constant_calculation()?;
-                for arg in args {
-                    arg.constant_calculation()?;
-                }
-            }
-            ScalarExpression::Between {
-                expr,
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                expr.constant_calculation()?;
-                left_expr.constant_calculation()?;
-                right_expr.constant_calculation()?;
-            }
-            ScalarExpression::SubString {
-                expr,
-                from_expr,
-                for_expr,
-            } => {
-                expr.constant_calculation()?;
-                if let Some(from_expr) = from_expr {
-                    from_expr.constant_calculation()?;
-                }
-                if let Some(for_expr) = for_expr {
-                    for_expr.constant_calculation()?;
-                }
-            }
-            ScalarExpression::Position { expr, in_expr } => {
-                expr.constant_calculation()?;
-                in_expr.constant_calculation()?;
-            }
-            ScalarExpression::Trim {
-                expr,
-                trim_what_expr,
-                ..
-            } => {
-                expr.constant_calculation()?;
-                if let Some(trim_what_expr) = trim_what_expr {
-                    trim_what_expr.constant_calculation()?;
-                }
-            }
-            ScalarExpression::Tuple(exprs) | ScalarExpression::Coalesce { exprs, .. } => {
-                for expr in exprs {
-                    expr.constant_calculation()?;
-                }
-            }
-            ScalarExpression::If {
-                condition,
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                condition.constant_calculation()?;
-                left_expr.constant_calculation()?;
-                right_expr.constant_calculation()?;
-            }
-            ScalarExpression::IfNull {
-                left_expr,
-                right_expr,
-                ..
-            }
-            | ScalarExpression::NullIf {
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                left_expr.constant_calculation()?;
-                right_expr.constant_calculation()?;
-            }
-            ScalarExpression::CaseWhen {
-                operand_expr,
-                expr_pairs,
-                else_expr,
-                ..
-            } => {
-                if let Some(operand_expr) = operand_expr {
-                    operand_expr.constant_calculation()?;
-                }
-                for (left_expr, right_expr) in expr_pairs {
-                    left_expr.constant_calculation()?;
-                    right_expr.constant_calculation()?;
-                }
-                if let Some(else_expr) = else_expr {
-                    else_expr.constant_calculation()?;
-                }
-            }
-            ScalarExpression::ScalaFunction(ScalarFunction { args, .. })
-            | ScalarExpression::TableFunction(TableFunction { args, .. }) => {
-                for expr in args {
-                    expr.constant_calculation()?;
-                }
-            }
-            ScalarExpression::Constant(_)
-            | ScalarExpression::ColumnRef(_)
-            | ScalarExpression::Empty
-            | ScalarExpression::Reference { .. } => (),
+            _ => walk_mut_expr(self, expr)?,
         }
 
         Ok(())
     }
+}
 
-    // Tips: Indirect expressions like `ScalarExpression:：Alias` will be lost
-    fn _simplify(&mut self, replaces: &mut Vec<Replace>) -> Result<(), DatabaseError> {
-        match self {
-            ScalarExpression::Binary {
-                left_expr,
-                right_expr,
+#[derive(Debug, Default)]
+pub struct Simplify {
+    replaces: Vec<Replace>,
+}
+
+impl VisitorMut<'_> for Simplify {
+    fn visit(&mut self, expr: &'_ mut ScalarExpression) -> Result<(), DatabaseError> {
+        match expr {
+            ScalarExpression::Unary {
                 op,
+                expr: arg_expr,
                 ty,
                 ..
             } => {
-                Self::fix_expr(replaces, left_expr, right_expr, op)?;
+                let op = *op;
+                let ty = ty.clone();
+                let arg_expr = arg_expr.as_ref().clone();
+                if let Some(value) = expr.unpack_val() {
+                    let _ = mem::replace(expr, ScalarExpression::Constant(value));
+                } else {
+                    self.replaces.push(Replace::Unary(ReplaceUnary {
+                        child_expr: arg_expr,
+                        op,
+                        ty,
+                    }));
+                }
+            }
+            ScalarExpression::Binary {
+                op,
+                left_expr,
+                right_expr,
+                ty,
+                ..
+            } => {
+                self.fix_expr(left_expr, right_expr, op)?;
 
                 // `(c1 - 1) and (c1 + 2)` cannot fix!
-                Self::fix_expr(replaces, right_expr, left_expr, op)?;
+                self.fix_expr(right_expr, left_expr, op)?;
 
                 if Self::is_arithmetic(op) {
                     match (left_expr.unpack_col(false), right_expr.unpack_col(false)) {
                         (Some(col), None) => {
-                            replaces.push(Replace::Binary(ReplaceBinary {
+                            self.replaces.push(Replace::Binary(ReplaceBinary {
                                 column_expr: ScalarExpression::ColumnRef(col),
                                 val_expr: mem::replace(right_expr, ScalarExpression::Empty),
                                 op: *op,
@@ -423,7 +141,7 @@ impl ScalarExpression {
                             }));
                         }
                         (None, Some(col)) => {
-                            replaces.push(Replace::Binary(ReplaceBinary {
+                            self.replaces.push(Replace::Binary(ReplaceBinary {
                                 column_expr: ScalarExpression::ColumnRef(col),
                                 val_expr: mem::replace(left_expr, ScalarExpression::Empty),
                                 op: *op,
@@ -432,13 +150,13 @@ impl ScalarExpression {
                             }));
                         }
                         (None, None) => {
-                            if replaces.is_empty() {
+                            if self.replaces.is_empty() {
                                 return Ok(());
                             }
 
                             match (left_expr.unpack_col(true), right_expr.unpack_col(true)) {
                                 (Some(col), None) => {
-                                    replaces.push(Replace::Binary(ReplaceBinary {
+                                    self.replaces.push(Replace::Binary(ReplaceBinary {
                                         column_expr: ScalarExpression::ColumnRef(col),
                                         val_expr: mem::replace(right_expr, ScalarExpression::Empty),
                                         op: *op,
@@ -447,7 +165,7 @@ impl ScalarExpression {
                                     }));
                                 }
                                 (None, Some(col)) => {
-                                    replaces.push(Replace::Binary(ReplaceBinary {
+                                    self.replaces.push(Replace::Binary(ReplaceBinary {
                                         column_expr: ScalarExpression::ColumnRef(col),
                                         val_expr: mem::replace(left_expr, ScalarExpression::Empty),
                                         op: *op,
@@ -462,48 +180,22 @@ impl ScalarExpression {
                     }
                 }
             }
-            ScalarExpression::Alias { expr, .. } => expr._simplify(replaces)?,
-            ScalarExpression::TypeCast { expr, .. } => {
+            ScalarExpression::TypeCast { .. } => {
                 if let Some(val) = expr.unpack_val() {
-                    let _ = mem::replace(self, ScalarExpression::Constant(val));
+                    let _ = mem::replace(expr, ScalarExpression::Constant(val));
                 }
             }
-            ScalarExpression::IsNull { expr, .. } => {
+            ScalarExpression::IsNull { .. } => {
                 if let Some(val) = expr.unpack_val() {
                     let _ = mem::replace(
-                        self,
+                        expr,
                         ScalarExpression::Constant(DataValue::Boolean(val.is_null())),
                     );
                 }
             }
-            ScalarExpression::Unary {
-                expr,
-                op,
-                ty,
-                evaluator,
-                ..
-            } => {
-                if let Some(value) = expr.unpack_val() {
-                    let value = if let Some(evaluator) = evaluator {
-                        evaluator.0.unary_eval(&value)
-                    } else {
-                        EvaluatorFactory::unary_create(ty.clone(), *op)?
-                            .0
-                            .unary_eval(&value)
-                    };
-                    let new_expr = ScalarExpression::Constant(value);
-                    let _ = mem::replace(self, new_expr);
-                } else {
-                    replaces.push(Replace::Unary(ReplaceUnary {
-                        child_expr: expr.as_ref().clone(),
-                        op: *op,
-                        ty: ty.clone(),
-                    }));
-                }
-            }
             ScalarExpression::In {
-                expr,
                 negated,
+                expr: arg_expr,
                 args,
             } => {
                 if args.is_empty() {
@@ -517,7 +209,7 @@ impl ScalarExpression {
                 };
                 let mut new_expr = ScalarExpression::Binary {
                     op: op_1,
-                    left_expr: expr.clone(),
+                    left_expr: arg_expr.clone(),
                     right_expr: Box::new(args.remove(0)),
                     evaluator: None,
                     ty: LogicalType::Boolean,
@@ -528,7 +220,7 @@ impl ScalarExpression {
                         op: op_2,
                         left_expr: Box::new(ScalarExpression::Binary {
                             op: op_1,
-                            left_expr: expr.clone(),
+                            left_expr: arg_expr.clone(),
                             right_expr: Box::new(arg),
                             evaluator: None,
                             ty: LogicalType::Boolean,
@@ -538,14 +230,15 @@ impl ScalarExpression {
                         ty: LogicalType::Boolean,
                     }
                 }
+                let _ = mem::replace(expr, new_expr);
 
-                let _ = mem::replace(self, new_expr);
+                walk_mut_expr(self, expr)?;
             }
             ScalarExpression::Between {
-                expr,
+                negated,
+                expr: arg_expr,
                 left_expr,
                 right_expr,
-                negated,
             } => {
                 let (op, left_op, right_op) = if *negated {
                     (BinaryOperator::Or, BinaryOperator::Lt, BinaryOperator::Gt)
@@ -560,14 +253,14 @@ impl ScalarExpression {
                     op,
                     left_expr: Box::new(ScalarExpression::Binary {
                         op: left_op,
-                        left_expr: expr.clone(),
+                        left_expr: arg_expr.clone(),
                         right_expr: mem::replace(left_expr, Box::new(ScalarExpression::Empty)),
                         evaluator: None,
                         ty: LogicalType::Boolean,
                     }),
                     right_expr: Box::new(ScalarExpression::Binary {
                         op: right_op,
-                        left_expr: mem::replace(expr, Box::new(ScalarExpression::Empty)),
+                        left_expr: mem::replace(arg_expr, Box::new(ScalarExpression::Empty)),
                         right_expr: mem::replace(right_expr, Box::new(ScalarExpression::Empty)),
                         evaluator: None,
                         ty: LogicalType::Boolean,
@@ -576,15 +269,18 @@ impl ScalarExpression {
                     ty: LogicalType::Boolean,
                 };
 
-                let _ = mem::replace(self, new_expr);
+                let _ = mem::replace(expr, new_expr);
+
+                walk_mut_expr(self, expr)?;
             }
-            // FIXME: Maybe `ScalarExpression::Tuple` can be replaced?
-            _ => (),
+            _ => walk_mut_expr(self, expr)?,
         }
 
         Ok(())
     }
+}
 
+impl Simplify {
     fn is_arithmetic(op: &mut BinaryOperator) -> bool {
         matches!(
             op,
@@ -596,22 +292,22 @@ impl ScalarExpression {
     }
 
     fn fix_expr(
-        replaces: &mut Vec<Replace>,
+        &mut self,
         left_expr: &mut Box<ScalarExpression>,
         right_expr: &mut Box<ScalarExpression>,
         op: &mut BinaryOperator,
     ) -> Result<(), DatabaseError> {
-        left_expr._simplify(replaces)?;
+        self.visit(left_expr)?;
 
         if Self::is_arithmetic(op) {
             return Ok(());
         }
-        while let Some(replace) = replaces.pop() {
+        while let Some(replace) = self.replaces.pop() {
             match replace {
                 Replace::Binary(binary) => Self::fix_binary(binary, left_expr, right_expr, op),
                 Replace::Unary(unary) => {
                     Self::fix_unary(unary, left_expr, right_expr, op);
-                    Self::fix_expr(replaces, left_expr, right_expr, op)?;
+                    self.fix_expr(left_expr, right_expr, op)?;
                 }
             }
         }
@@ -723,5 +419,87 @@ impl ScalarExpression {
             col.table_name().map(|name| table_name == name.as_str()),
             Some(true)
         )
+    }
+}
+
+impl ScalarExpression {
+    pub(crate) fn unpack_val(&self) -> Option<DataValue> {
+        match self {
+            ScalarExpression::Constant(val) => Some(val.clone()),
+            ScalarExpression::Alias { expr, .. } => expr.unpack_val(),
+            ScalarExpression::TypeCast { expr, ty, .. } => {
+                expr.unpack_val().and_then(|val| val.cast(ty).ok())
+            }
+            ScalarExpression::IsNull { expr, .. } => expr
+                .unpack_val()
+                .map(|val| DataValue::Boolean(val.is_null())),
+            ScalarExpression::Unary {
+                expr,
+                op,
+                evaluator,
+                ty,
+                ..
+            } => {
+                let value = expr.unpack_val()?;
+                let unary_value = if let Some(evaluator) = evaluator {
+                    evaluator.0.unary_eval(&value)
+                } else {
+                    EvaluatorFactory::unary_create(ty.clone(), *op)
+                        .ok()?
+                        .0
+                        .unary_eval(&value)
+                };
+                Some(unary_value)
+            }
+            ScalarExpression::Binary {
+                left_expr,
+                right_expr,
+                op,
+                ty,
+                evaluator,
+                ..
+            } => {
+                let mut left = left_expr.unpack_val()?;
+                let mut right = right_expr.unpack_val()?;
+                if &left.logical_type() != ty {
+                    left = left.cast(ty).ok()?;
+                }
+                if &right.logical_type() != ty {
+                    right = right.cast(ty).ok()?;
+                }
+                let binary_value = if let Some(evaluator) = evaluator {
+                    evaluator.0.binary_eval(&left, &right)
+                } else {
+                    EvaluatorFactory::binary_create(ty.clone(), *op)
+                        .ok()?
+                        .0
+                        .binary_eval(&left, &right)
+                };
+                Some(binary_value)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn unpack_col(&self, is_deep: bool) -> Option<ColumnRef> {
+        match self {
+            ScalarExpression::ColumnRef(col) => Some(col.clone()),
+            ScalarExpression::Alias { expr, .. } => expr.unpack_col(is_deep),
+            ScalarExpression::Unary { expr, .. } => expr.unpack_col(is_deep),
+            ScalarExpression::Binary {
+                left_expr,
+                right_expr,
+                ..
+            } => {
+                if !is_deep {
+                    return None;
+                }
+
+                left_expr
+                    .unpack_col(true)
+                    .or_else(|| right_expr.unpack_col(true))
+            }
+            _ => None,
+        }
     }
 }

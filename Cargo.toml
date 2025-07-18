@@ -49,6 +49,7 @@ ordered-float         = { version = "4", features = ["serde"] }
 paste                 = { version = "1" }
 parking_lot           = { version = "0.12", features = ["arc_lock"] }
 petgraph              = { version = "0.6" }
+recursive             = { version = "0.1" }
 regex                 = { version = "1" }
 rocksdb               = { version = "0.22" }
 rust_decimal          = { version = "1" }

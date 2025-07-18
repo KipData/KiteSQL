@@ -1,5 +1,6 @@
 use crate::errors::DatabaseError;
-use crate::expression::ScalarExpression;
+use crate::expression::visitor_mut::VisitorMut;
+use crate::expression::{BindEvaluator, ScalarExpression, TryReference};
 use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
 use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
 use crate::optimizer::heuristic::graph::{HepGraph, HepNodeId};
@@ -40,17 +41,16 @@ impl ExpressionRemapper {
             output_exprs.append(&mut second_output_exprs);
         }
         let operator = graph.operator_mut(node_id);
-
         match operator {
             Operator::Join(op) => {
                 match &mut op.on {
                     JoinCondition::On { on, filter } => {
                         for (left_expr, right_expr) in on {
-                            left_expr.try_reference(&output_exprs[0..left_len]);
-                            right_expr.try_reference(&output_exprs[left_len..]);
+                            TryReference::new(&output_exprs[0..left_len]).visit(left_expr)?;
+                            TryReference::new(&output_exprs[left_len..]).visit(right_expr)?;
                         }
                         if let Some(expr) = filter {
-                            expr.try_reference(output_exprs);
+                            TryReference::new(output_exprs).visit(expr)?;
                         }
                     }
                     JoinCondition::None => {}
@@ -60,30 +60,30 @@ impl ExpressionRemapper {
             }
             Operator::Aggregate(op) => {
                 for expr in op.agg_calls.iter_mut().chain(op.groupby_exprs.iter_mut()) {
-                    expr.try_reference(output_exprs);
+                    TryReference::new(output_exprs).visit(expr)?;
                 }
             }
             Operator::Filter(op) => {
-                op.predicate.try_reference(output_exprs);
+                TryReference::new(output_exprs).visit(&mut op.predicate)?;
             }
             Operator::Project(op) => {
                 for expr in op.exprs.iter_mut() {
-                    expr.try_reference(output_exprs);
+                    TryReference::new(output_exprs).visit(expr)?;
                 }
             }
             Operator::Sort(op) => {
                 for sort_field in op.sort_fields.iter_mut() {
-                    sort_field.expr.try_reference(output_exprs);
+                    TryReference::new(output_exprs).visit(&mut sort_field.expr)?;
                 }
             }
             Operator::FunctionScan(op) => {
                 for expr in op.table_function.args.iter_mut() {
-                    expr.try_reference(output_exprs);
+                    TryReference::new(output_exprs).visit(expr)?;
                 }
             }
             Operator::Update(op) => {
                 for (_, expr) in op.value_exprs.iter_mut() {
-                    expr.try_reference(output_exprs);
+                    TryReference::new(output_exprs).visit(expr)?;
                 }
             }
             Operator::Dummy
@@ -154,11 +154,11 @@ impl EvaluatorBind {
                 match &mut op.on {
                     JoinCondition::On { on, filter } => {
                         for (left_expr, right_expr) in on {
-                            left_expr.bind_evaluator()?;
-                            right_expr.bind_evaluator()?;
+                            BindEvaluator.visit(left_expr)?;
+                            BindEvaluator.visit(right_expr)?;
                         }
                         if let Some(expr) = filter {
-                            expr.bind_evaluator()?;
+                            BindEvaluator.visit(expr)?;
                         }
                     }
                     JoinCondition::None => {}
@@ -168,30 +168,30 @@ impl EvaluatorBind {
             }
             Operator::Aggregate(op) => {
                 for expr in op.agg_calls.iter_mut().chain(op.groupby_exprs.iter_mut()) {
-                    expr.bind_evaluator()?;
+                    BindEvaluator.visit(expr)?;
                 }
             }
             Operator::Filter(op) => {
-                op.predicate.bind_evaluator()?;
+                BindEvaluator.visit(&mut op.predicate)?;
             }
             Operator::Project(op) => {
                 for expr in op.exprs.iter_mut() {
-                    expr.bind_evaluator()?;
+                    BindEvaluator.visit(expr)?;
                 }
             }
             Operator::Sort(op) => {
                 for sort_field in op.sort_fields.iter_mut() {
-                    sort_field.expr.bind_evaluator()?;
+                    BindEvaluator.visit(&mut sort_field.expr)?;
                 }
             }
             Operator::FunctionScan(op) => {
                 for expr in op.table_function.args.iter_mut() {
-                    expr.bind_evaluator()?;
+                    BindEvaluator.visit(expr)?;
                 }
             }
             Operator::Update(op) => {
                 for (_, expr) in op.value_exprs.iter_mut() {
-                    expr.bind_evaluator()?;
+                    BindEvaluator.visit(expr)?;
                 }
             }
             Operator::Dummy

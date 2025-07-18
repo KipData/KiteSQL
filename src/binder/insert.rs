@@ -1,5 +1,7 @@
 use crate::binder::{lower_case_name, Binder};
 use crate::errors::DatabaseError;
+use crate::expression::simplify::ConstantCalculator;
+use crate::expression::visitor_mut::VisitorMut;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::insert::InsertOperator;
 use crate::planner::operator::values::ValuesOperator;
@@ -69,8 +71,8 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
 
             for (i, expr) in expr_row.iter().enumerate() {
                 let mut expression = self.bind_expr(expr)?;
-
-                expression.constant_calculation()?;
+                
+                ConstantCalculator.visit(&mut expression)?;
                 match expression {
                     ScalarExpression::Constant(value) => {
                         let ty = schema_ref[i].datatype();

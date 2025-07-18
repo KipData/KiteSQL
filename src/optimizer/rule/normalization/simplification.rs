@@ -1,4 +1,6 @@
 use crate::errors::DatabaseError;
+use crate::expression::simplify::{ConstantCalculator, Simplify};
+use crate::expression::visitor_mut::VisitorMut;
 use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
 use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
 use crate::optimizer::heuristic::graph::{HepGraph, HepNodeId};
@@ -30,31 +32,31 @@ impl ConstantCalculation {
         match operator {
             Operator::Aggregate(op) => {
                 for expr in op.agg_calls.iter_mut().chain(op.groupby_exprs.iter_mut()) {
-                    expr.constant_calculation()?;
+                    ConstantCalculator.visit(expr)?;
                 }
             }
             Operator::Filter(op) => {
-                op.predicate.constant_calculation()?;
+                ConstantCalculator.visit(&mut op.predicate)?;
             }
             Operator::Join(op) => {
                 if let JoinCondition::On { on, filter } = &mut op.on {
                     for (left_expr, right_expr) in on {
-                        left_expr.constant_calculation()?;
-                        right_expr.constant_calculation()?;
+                        ConstantCalculator.visit(left_expr)?;
+                        ConstantCalculator.visit(right_expr)?;
                     }
                     if let Some(expr) = filter {
-                        expr.constant_calculation()?;
+                        ConstantCalculator.visit(expr)?;
                     }
                 }
             }
             Operator::Project(op) => {
                 for expr in &mut op.exprs {
-                    expr.constant_calculation()?;
+                    ConstantCalculator.visit(expr)?;
                 }
             }
             Operator::Sort(op) => {
                 for field in &mut op.sort_fields {
-                    field.expr.constant_calculation()?;
+                    ConstantCalculator.visit(&mut field.expr)?;
                 }
             }
             _ => (),
@@ -99,8 +101,8 @@ impl NormalizationRule for SimplifyFilter {
             if filter_op.is_optimized {
                 return Ok(());
             }
-            filter_op.predicate.simplify()?;
-            filter_op.predicate.constant_calculation()?;
+            ConstantCalculator.visit(&mut filter_op.predicate)?;
+            Simplify::default().visit(&mut filter_op.predicate)?;
             filter_op.is_optimized = true;
             is_optimized = true;
         }

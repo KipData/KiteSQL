@@ -33,7 +33,6 @@ use crate::planner::{Childrens, LogicalPlan, SchemaOutput};
 use crate::storage::Transaction;
 use crate::types::tuple::{Schema, SchemaRef};
 use crate::types::value::Utf8Type;
-use crate::types::LogicalType::Char;
 use crate::types::{ColumnId, LogicalType};
 use itertools::Itertools;
 use sqlparser::ast::{

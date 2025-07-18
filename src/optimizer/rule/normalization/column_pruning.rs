@@ -1,7 +1,8 @@
 use crate::catalog::ColumnSummary;
 use crate::errors::DatabaseError;
 use crate::expression::agg::AggKind;
-use crate::expression::ScalarExpression;
+use crate::expression::visitor::Visitor;
+use crate::expression::{HasCountStar, ScalarExpression};
 use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
 use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
 use crate::optimizer::heuristic::graph::{HepGraph, HepNodeId};
@@ -48,7 +49,7 @@ impl ColumnPruning {
         all_referenced: bool,
         node_id: HepNodeId,
         graph: &mut HepGraph,
-    ) {
+    ) -> Result<(), DatabaseError> {
         let operator = graph.operator_mut(node_id);
 
         match operator {
@@ -82,18 +83,21 @@ impl ColumnPruning {
                     }
                 }
 
-                Self::recollect_apply(new_column_references, false, node_id, graph);
+                Self::recollect_apply(new_column_references, false, node_id, graph)?;
             }
             Operator::Project(op) => {
-                let has_count_star = op.exprs.iter().any(ScalarExpression::has_count_star);
-                if !has_count_star {
+                let mut has_count_star = HasCountStar::default();
+                for expr in &op.exprs {
+                    has_count_star.visit(expr)?;
+                }
+                if !has_count_star.value {
                     if !all_referenced {
                         Self::clear_exprs(&column_references, &mut op.exprs);
                     }
                     let referenced_columns = operator.referenced_columns(false);
                     let new_column_references = trans_references!(&referenced_columns);
 
-                    Self::recollect_apply(new_column_references, false, node_id, graph);
+                    Self::recollect_apply(new_column_references, false, node_id, graph)?;
                 }
             }
             Operator::TableScan(op) => {
@@ -116,14 +120,14 @@ impl ColumnPruning {
                 for child_id in graph.children_at(node_id).collect_vec() {
                     let copy_references = column_references.clone();
 
-                    Self::_apply(copy_references, all_referenced, child_id, graph);
+                    Self::_apply(copy_references, all_referenced, child_id, graph)?;
                 }
             }
             // Last Operator
             Operator::Dummy | Operator::Values(_) | Operator::FunctionScan(_) => (),
             Operator::Explain => {
                 if let Some(child_id) = graph.eldest_child_at(node_id) {
-                    Self::_apply(column_references, true, child_id, graph);
+                    Self::_apply(column_references, true, child_id, graph)?;
                 } else {
                     unreachable!()
                 }
@@ -137,7 +141,7 @@ impl ColumnPruning {
                 let new_column_references = trans_references!(&referenced_columns);
 
                 if let Some(child_id) = graph.eldest_child_at(node_id) {
-                    Self::recollect_apply(new_column_references, true, child_id, graph);
+                    Self::recollect_apply(new_column_references, true, child_id, graph)?;
                 } else {
                     unreachable!();
                 }
@@ -157,6 +161,8 @@ impl ColumnPruning {
             | Operator::DropColumn(_)
             | Operator::Describe(_) => (),
         }
+
+        Ok(())
     }
 
     fn recollect_apply(
@@ -164,12 +170,13 @@ impl ColumnPruning {
         all_referenced: bool,
         node_id: HepNodeId,
         graph: &mut HepGraph,
-    ) {
+    ) -> Result<(), DatabaseError> {
         for child_id in graph.children_at(node_id).collect_vec() {
             let copy_references: HashSet<&ColumnSummary> = referenced_columns.clone();
 
-            Self::_apply(copy_references, all_referenced, child_id, graph);
+            Self::_apply(copy_references, all_referenced, child_id, graph)?;
         }
+        Ok(())
     }
 }
 
@@ -181,7 +188,7 @@ impl MatchPattern for ColumnPruning {
 
 impl NormalizationRule for ColumnPruning {
     fn apply(&self, node_id: HepNodeId, graph: &mut HepGraph) -> Result<(), DatabaseError> {
-        Self::_apply(HashSet::new(), true, node_id, graph);
+        Self::_apply(HashSet::new(), true, node_id, graph)?;
         // mark changed to skip this rule batch
         graph.version += 1;
 

@@ -3,15 +3,17 @@ use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
 use crate::errors::DatabaseError;
 use crate::expression::function::scala::ScalarFunction;
 use crate::expression::function::table::TableFunction;
+use crate::expression::visitor::{walk_expr, Visitor};
+use crate::expression::visitor_mut::{walk_mut_expr, VisitorMut};
 use crate::types::evaluator::{BinaryEvaluatorBox, EvaluatorFactory, UnaryEvaluatorBox};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
-use sqlparser::ast::TrimWhereField;
 use sqlparser::ast::{
     BinaryOperator as SqlBinaryOperator, CharLengthUnits, UnaryOperator as SqlUnaryOperator,
 };
+use sqlparser::ast::TrimWhereField;
 use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
 use std::{fmt, mem};
@@ -21,6 +23,8 @@ mod evaluator;
 pub mod function;
 pub mod range_detacher;
 pub mod simplify;
+pub mod visitor;
+pub mod visitor_mut;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub enum AliasType {
@@ -129,6 +133,130 @@ pub enum ScalarExpression {
     },
 }
 
+#[derive(Clone)]
+pub struct TryReference<'a> {
+    output_exprs: &'a [ScalarExpression],
+}
+
+impl<'a> VisitorMut<'a> for TryReference<'a> {
+    fn visit(&mut self, expr: &'a mut ScalarExpression) -> Result<(), DatabaseError> {
+        let mut clone_expr = mem::replace(expr, ScalarExpression::Empty);
+        walk_mut_expr(&mut self.clone(), &mut clone_expr)?;
+
+        let fn_output_column = |expr: &ScalarExpression| expr.output_column();
+        let self_column = fn_output_column(&clone_expr);
+
+        *expr = if let Some((pos, _)) = self
+            .output_exprs
+            .iter()
+            .find_position(|expr| self_column.summary() == fn_output_column(expr).summary())
+        {
+            ScalarExpression::Reference {
+                expr: Box::new(clone_expr),
+                pos,
+            }
+        } else {
+            clone_expr
+        };
+        Ok(())
+    }
+}
+
+impl<'a> TryReference<'a> {
+    pub fn new(output_exprs: &'a [ScalarExpression]) -> TryReference<'a> {
+        TryReference { output_exprs }
+    }
+}
+
+pub struct BindEvaluator;
+
+impl VisitorMut<'_> for BindEvaluator {
+    fn visit_unary(
+        &mut self,
+        op: &'_ mut UnaryOperator,
+        expr: &'_ mut ScalarExpression,
+        evaluator: &'_ mut Option<UnaryEvaluatorBox>,
+        _ty: &'_ mut LogicalType,
+    ) -> Result<(), DatabaseError> {
+        self.visit(expr)?;
+
+        let ty = expr.return_type();
+        if ty.is_unsigned_numeric() {
+            *expr = ScalarExpression::TypeCast {
+                expr: Box::new(mem::replace(expr, ScalarExpression::Empty)),
+                ty: match ty {
+                    LogicalType::UTinyint => LogicalType::Tinyint,
+                    LogicalType::USmallint => LogicalType::Smallint,
+                    LogicalType::UInteger => LogicalType::Integer,
+                    LogicalType::UBigint => LogicalType::Bigint,
+                    _ => unreachable!(),
+                },
+            }
+        }
+        *evaluator = Some(EvaluatorFactory::unary_create(ty, *op)?);
+
+        Ok(())
+    }
+
+    fn visit_binary(
+        &mut self,
+        op: &'_ mut BinaryOperator,
+        left_expr: &'_ mut ScalarExpression,
+        right_expr: &'_ mut ScalarExpression,
+        evaluator: &'_ mut Option<BinaryEvaluatorBox>,
+        _ty: &'_ mut LogicalType,
+    ) -> Result<(), DatabaseError> {
+        self.visit(left_expr)?;
+        self.visit(right_expr)?;
+
+        let ty =
+            LogicalType::max_logical_type(&left_expr.return_type(), &right_expr.return_type())?;
+        let fn_cast = |expr: &mut ScalarExpression, ty: LogicalType| {
+            if expr.return_type() != ty {
+                *expr = ScalarExpression::TypeCast {
+                    expr: Box::new(mem::replace(expr, ScalarExpression::Empty)),
+                    ty,
+                }
+            }
+        };
+        fn_cast(left_expr, ty.clone());
+        fn_cast(right_expr, ty.clone());
+
+        *evaluator = Some(EvaluatorFactory::binary_create(ty, *op)?);
+
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct HasCountStar {
+    pub value: bool,
+}
+
+impl Visitor<'_> for HasCountStar {
+    fn visit_agg(
+        &mut self,
+        _distinct: bool,
+        _kind: &'_ AggKind,
+        args: &'_ [ScalarExpression],
+        _ty: &'_ LogicalType,
+    ) -> Result<(), DatabaseError> {
+        if args.len() == 1 {
+            if let ScalarExpression::Constant(value) = &args[0] {
+                self.value = matches!(value.utf8(), Some("*"));
+            }
+        }
+        Ok(())
+    }
+
+    fn visit(&mut self, expr: &'_ ScalarExpression) -> Result<(), DatabaseError> {
+        if !self.value {
+            walk_expr(self, expr)?;
+        }
+        Ok(())
+    }
+}
+
 impl ScalarExpression {
     pub fn unpack_alias(self) -> ScalarExpression {
         if let ScalarExpression::Alias {
@@ -155,419 +283,6 @@ impl ScalarExpression {
             expr.unpack_alias_ref()
         } else {
             self
-        }
-    }
-
-    pub fn try_reference(&mut self, output_exprs: &[ScalarExpression]) {
-        let fn_output_column = |expr: &ScalarExpression| expr.output_column();
-        let self_column = fn_output_column(self);
-        if let Some((pos, _)) = output_exprs
-            .iter()
-            .find_position(|expr| self_column.summary() == fn_output_column(expr).summary())
-        {
-            let expr = Box::new(mem::replace(self, ScalarExpression::Empty));
-            *self = ScalarExpression::Reference { expr, pos };
-            return;
-        }
-
-        match self {
-            ScalarExpression::Alias { expr, .. } => {
-                expr.try_reference(output_exprs);
-            }
-            ScalarExpression::TypeCast { expr, .. } => {
-                expr.try_reference(output_exprs);
-            }
-            ScalarExpression::IsNull { expr, .. } => {
-                expr.try_reference(output_exprs);
-            }
-            ScalarExpression::Unary { expr, .. } => {
-                expr.try_reference(output_exprs);
-            }
-            ScalarExpression::Binary {
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                left_expr.try_reference(output_exprs);
-                right_expr.try_reference(output_exprs);
-            }
-            ScalarExpression::AggCall { args, .. }
-            | ScalarExpression::Coalesce { exprs: args, .. }
-            | ScalarExpression::Tuple(args) => {
-                for arg in args {
-                    arg.try_reference(output_exprs);
-                }
-            }
-            ScalarExpression::In { expr, args, .. } => {
-                expr.try_reference(output_exprs);
-                for arg in args {
-                    arg.try_reference(output_exprs);
-                }
-            }
-            ScalarExpression::Between {
-                expr,
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                expr.try_reference(output_exprs);
-                left_expr.try_reference(output_exprs);
-                right_expr.try_reference(output_exprs);
-            }
-            ScalarExpression::SubString {
-                expr,
-                for_expr,
-                from_expr,
-            } => {
-                expr.try_reference(output_exprs);
-                if let Some(expr) = for_expr {
-                    expr.try_reference(output_exprs);
-                }
-                if let Some(expr) = from_expr {
-                    expr.try_reference(output_exprs);
-                }
-            }
-            ScalarExpression::Position { expr, in_expr } => {
-                expr.try_reference(output_exprs);
-                in_expr.try_reference(output_exprs);
-            }
-            ScalarExpression::Trim {
-                expr,
-                trim_what_expr,
-                ..
-            } => {
-                expr.try_reference(output_exprs);
-                if let Some(trim_what_expr) = trim_what_expr {
-                    trim_what_expr.try_reference(output_exprs);
-                }
-            }
-            ScalarExpression::Empty => unreachable!(),
-            ScalarExpression::Constant(_)
-            | ScalarExpression::ColumnRef(_)
-            | ScalarExpression::Reference { .. } => (),
-            ScalarExpression::ScalaFunction(function) => {
-                for expr in function.args.iter_mut() {
-                    expr.try_reference(output_exprs);
-                }
-            }
-            ScalarExpression::TableFunction(function) => {
-                for expr in function.args.iter_mut() {
-                    expr.try_reference(output_exprs);
-                }
-            }
-            ScalarExpression::If {
-                condition,
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                condition.try_reference(output_exprs);
-                left_expr.try_reference(output_exprs);
-                right_expr.try_reference(output_exprs);
-            }
-            ScalarExpression::IfNull {
-                left_expr,
-                right_expr,
-                ..
-            }
-            | ScalarExpression::NullIf {
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                left_expr.try_reference(output_exprs);
-                right_expr.try_reference(output_exprs);
-            }
-            ScalarExpression::CaseWhen {
-                operand_expr,
-                expr_pairs,
-                else_expr,
-                ..
-            } => {
-                if let Some(expr) = operand_expr {
-                    expr.try_reference(output_exprs);
-                }
-                for (expr_1, expr_2) in expr_pairs {
-                    expr_1.try_reference(output_exprs);
-                    expr_2.try_reference(output_exprs);
-                }
-                if let Some(expr) = else_expr {
-                    expr.try_reference(output_exprs);
-                }
-            }
-        }
-    }
-
-    pub fn bind_evaluator(&mut self) -> Result<(), DatabaseError> {
-        match self {
-            ScalarExpression::Binary {
-                left_expr,
-                right_expr,
-                op,
-                evaluator,
-                ..
-            } => {
-                left_expr.bind_evaluator()?;
-                right_expr.bind_evaluator()?;
-
-                let ty = LogicalType::max_logical_type(
-                    &left_expr.return_type(),
-                    &right_expr.return_type(),
-                )?;
-                let fn_cast = |expr: &mut ScalarExpression, ty: LogicalType| {
-                    if expr.return_type() != ty {
-                        *expr = ScalarExpression::TypeCast {
-                            expr: Box::new(mem::replace(expr, ScalarExpression::Empty)),
-                            ty,
-                        }
-                    }
-                };
-                fn_cast(left_expr, ty.clone());
-                fn_cast(right_expr, ty.clone());
-
-                *evaluator = Some(EvaluatorFactory::binary_create(ty, *op)?);
-            }
-            ScalarExpression::Unary {
-                expr,
-                op,
-                evaluator,
-                ..
-            } => {
-                expr.bind_evaluator()?;
-
-                let ty = expr.return_type();
-                if ty.is_unsigned_numeric() {
-                    *expr.as_mut() = ScalarExpression::TypeCast {
-                        expr: Box::new(mem::replace(expr, ScalarExpression::Empty)),
-                        ty: match ty {
-                            LogicalType::UTinyint => LogicalType::Tinyint,
-                            LogicalType::USmallint => LogicalType::Smallint,
-                            LogicalType::UInteger => LogicalType::Integer,
-                            LogicalType::UBigint => LogicalType::Bigint,
-                            _ => unreachable!(),
-                        },
-                    }
-                }
-                *evaluator = Some(EvaluatorFactory::unary_create(ty, *op)?);
-            }
-            ScalarExpression::Alias { expr, .. } => {
-                expr.bind_evaluator()?;
-            }
-            ScalarExpression::TypeCast { expr, .. } => {
-                expr.bind_evaluator()?;
-            }
-            ScalarExpression::IsNull { expr, .. } => {
-                expr.bind_evaluator()?;
-            }
-            ScalarExpression::AggCall { args, .. }
-            | ScalarExpression::Coalesce { exprs: args, .. }
-            | ScalarExpression::Tuple(args) => {
-                for arg in args {
-                    arg.bind_evaluator()?;
-                }
-            }
-            ScalarExpression::In { expr, args, .. } => {
-                expr.bind_evaluator()?;
-                for arg in args {
-                    arg.bind_evaluator()?;
-                }
-            }
-            ScalarExpression::Between {
-                expr,
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                expr.bind_evaluator()?;
-                left_expr.bind_evaluator()?;
-                right_expr.bind_evaluator()?;
-            }
-            ScalarExpression::SubString {
-                expr,
-                for_expr,
-                from_expr,
-            } => {
-                expr.bind_evaluator()?;
-                if let Some(expr) = for_expr {
-                    expr.bind_evaluator()?;
-                }
-                if let Some(expr) = from_expr {
-                    expr.bind_evaluator()?;
-                }
-            }
-            ScalarExpression::Position { expr, in_expr } => {
-                expr.bind_evaluator()?;
-                in_expr.bind_evaluator()?;
-            }
-            ScalarExpression::Trim {
-                expr,
-                trim_what_expr,
-                ..
-            } => {
-                expr.bind_evaluator()?;
-                if let Some(trim_what_expr) = trim_what_expr {
-                    trim_what_expr.bind_evaluator()?;
-                }
-            }
-            ScalarExpression::Empty => unreachable!(),
-            ScalarExpression::Constant(_)
-            | ScalarExpression::ColumnRef(_)
-            | ScalarExpression::Reference { .. } => (),
-            ScalarExpression::ScalaFunction(function) => {
-                for expr in function.args.iter_mut() {
-                    expr.bind_evaluator()?;
-                }
-            }
-            ScalarExpression::TableFunction(function) => {
-                for expr in function.args.iter_mut() {
-                    expr.bind_evaluator()?;
-                }
-            }
-            ScalarExpression::If {
-                condition,
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                condition.bind_evaluator()?;
-                left_expr.bind_evaluator()?;
-                right_expr.bind_evaluator()?;
-            }
-            ScalarExpression::IfNull {
-                left_expr,
-                right_expr,
-                ..
-            }
-            | ScalarExpression::NullIf {
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                left_expr.bind_evaluator()?;
-                right_expr.bind_evaluator()?;
-            }
-            ScalarExpression::CaseWhen {
-                operand_expr,
-                expr_pairs,
-                else_expr,
-                ..
-            } => {
-                if let Some(expr) = operand_expr {
-                    expr.bind_evaluator()?;
-                }
-                for (expr_1, expr_2) in expr_pairs {
-                    expr_1.bind_evaluator()?;
-                    expr_2.bind_evaluator()?;
-                }
-                if let Some(expr) = else_expr {
-                    expr.bind_evaluator()?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn has_count_star(&self) -> bool {
-        match self {
-            ScalarExpression::Alias { expr, .. } => expr.has_count_star(),
-            ScalarExpression::TypeCast { expr, .. } => expr.has_count_star(),
-            ScalarExpression::IsNull { expr, .. } => expr.has_count_star(),
-            ScalarExpression::Unary { expr, .. } => expr.has_count_star(),
-            ScalarExpression::Binary {
-                left_expr,
-                right_expr,
-                ..
-            } => left_expr.has_count_star() || right_expr.has_count_star(),
-            ScalarExpression::AggCall { args, .. } => {
-                if args.len() == 1 {
-                    if let ScalarExpression::Constant(value) = &args[0] {
-                        return matches!(value.utf8(), Some("*"));
-                    }
-                }
-                args.iter().any(Self::has_count_star)
-            }
-            ScalarExpression::ScalaFunction(ScalarFunction { args, .. })
-            | ScalarExpression::Coalesce { exprs: args, .. } => {
-                args.iter().any(Self::has_count_star)
-            }
-            ScalarExpression::TableFunction(_) => unreachable!(),
-            ScalarExpression::Constant(_) | ScalarExpression::ColumnRef(_) => false,
-            ScalarExpression::In { expr, args, .. } => {
-                expr.has_count_star() || args.iter().any(Self::has_count_star)
-            }
-            ScalarExpression::Between {
-                expr,
-                left_expr,
-                right_expr,
-                ..
-            } => expr.has_count_star() || left_expr.has_count_star() || right_expr.has_count_star(),
-            ScalarExpression::SubString {
-                expr,
-                from_expr,
-                for_expr,
-            } => {
-                expr.has_count_star()
-                    || matches!(
-                        from_expr.as_ref().map(|expr| expr.has_count_star()),
-                        Some(true)
-                    )
-                    || matches!(
-                        for_expr.as_ref().map(|expr| expr.has_count_star()),
-                        Some(true)
-                    )
-            }
-            ScalarExpression::Position { expr, in_expr } => {
-                expr.has_count_star() || in_expr.has_count_star()
-            }
-            ScalarExpression::Trim {
-                expr,
-                trim_what_expr,
-                ..
-            } => {
-                expr.has_count_star()
-                    || trim_what_expr.as_ref().map(|expr| expr.has_count_star()) == Some(true)
-            }
-            ScalarExpression::Empty => unreachable!(),
-            ScalarExpression::Reference { expr, .. } => expr.has_count_star(),
-            ScalarExpression::Tuple(args) => args.iter().any(Self::has_count_star),
-            ScalarExpression::If {
-                condition,
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                condition.has_count_star()
-                    || left_expr.has_count_star()
-                    || right_expr.has_count_star()
-            }
-            ScalarExpression::IfNull {
-                left_expr,
-                right_expr,
-                ..
-            }
-            | ScalarExpression::NullIf {
-                left_expr,
-                right_expr,
-                ..
-            } => left_expr.has_count_star() || right_expr.has_count_star(),
-            ScalarExpression::CaseWhen {
-                operand_expr,
-                expr_pairs,
-                else_expr,
-                ..
-            } => {
-                matches!(
-                    operand_expr.as_ref().map(|expr| expr.has_count_star()),
-                    Some(true)
-                ) || expr_pairs
-                    .iter()
-                    .any(|(expr_1, expr_2)| expr_1.has_count_star() || expr_2.has_count_star())
-                    || matches!(
-                        else_expr.as_ref().map(|expr| expr.has_count_star()),
-                        Some(true)
-                    )
-            }
         }
     }
 
