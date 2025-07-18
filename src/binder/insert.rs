@@ -71,7 +71,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
 
             for (i, expr) in expr_row.iter().enumerate() {
                 let mut expression = self.bind_expr(expr)?;
-                
+
                 ConstantCalculator.visit(&mut expression)?;
                 match expression {
                     ScalarExpression::Constant(value) => {

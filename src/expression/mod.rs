@@ -10,10 +10,10 @@ use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
+use sqlparser::ast::TrimWhereField;
 use sqlparser::ast::{
     BinaryOperator as SqlBinaryOperator, CharLengthUnits, UnaryOperator as SqlUnaryOperator,
 };
-use sqlparser::ast::TrimWhereField;
 use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
 use std::{fmt, mem};
