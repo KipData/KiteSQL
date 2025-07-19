@@ -10,6 +10,7 @@ pub mod int64;
 pub mod int8;
 pub mod null;
 pub mod time;
+pub mod time64;
 pub mod tuple;
 pub mod uint16;
 pub mod uint32;
@@ -31,6 +32,7 @@ use crate::types::evaluator::int64::*;
 use crate::types::evaluator::int8::*;
 use crate::types::evaluator::null::NullBinaryEvaluator;
 use crate::types::evaluator::time::*;
+use crate::types::evaluator::time64::*;
 use crate::types::evaluator::tuple::{
     TupleEqBinaryEvaluator, TupleGtBinaryEvaluator, TupleGtEqBinaryEvaluator,
     TupleLtBinaryEvaluator, TupleLtEqBinaryEvaluator, TupleNotEqBinaryEvaluator,
@@ -191,7 +193,32 @@ impl EvaluatorFactory {
             LogicalType::Double => numeric_binary_evaluator!(Float64, op, LogicalType::Double),
             LogicalType::Date => numeric_binary_evaluator!(Date, op, LogicalType::Date),
             LogicalType::DateTime => numeric_binary_evaluator!(DateTime, op, LogicalType::DateTime),
-            LogicalType::Time => numeric_binary_evaluator!(Time, op, LogicalType::Time),
+            LogicalType::Time(_, _) => match op {
+                BinaryOperator::Plus => Ok(BinaryEvaluatorBox(Arc::new(TimePlusBinaryEvaluator))),
+                BinaryOperator::Minus => Ok(BinaryEvaluatorBox(Arc::new(TimeMinusBinaryEvaluator))),
+                BinaryOperator::Gt => Ok(BinaryEvaluatorBox(Arc::new(TimeGtBinaryEvaluator))),
+                BinaryOperator::GtEq => Ok(BinaryEvaluatorBox(Arc::new(TimeGtEqBinaryEvaluator))),
+                BinaryOperator::Lt => Ok(BinaryEvaluatorBox(Arc::new(TimeLtBinaryEvaluator))),
+                BinaryOperator::LtEq => Ok(BinaryEvaluatorBox(Arc::new(TimeLtEqBinaryEvaluator))),
+                BinaryOperator::Eq => Ok(BinaryEvaluatorBox(Arc::new(TimeEqBinaryEvaluator))),
+                BinaryOperator::NotEq => Ok(BinaryEvaluatorBox(Arc::new(TimeNotEqBinaryEvaluator))),
+                _ => Err(DatabaseError::UnsupportedBinaryOperator(ty, op)),
+            },
+            LogicalType::TimeStamp(_, _) => match op {
+                BinaryOperator::Plus => Ok(BinaryEvaluatorBox(Arc::new(Time64PlusBinaryEvaluator))),
+                BinaryOperator::Minus => {
+                    Ok(BinaryEvaluatorBox(Arc::new(Time64MinusBinaryEvaluator)))
+                }
+                BinaryOperator::Gt => Ok(BinaryEvaluatorBox(Arc::new(Time64GtBinaryEvaluator))),
+                BinaryOperator::GtEq => Ok(BinaryEvaluatorBox(Arc::new(Time64GtEqBinaryEvaluator))),
+                BinaryOperator::Lt => Ok(BinaryEvaluatorBox(Arc::new(Time64LtBinaryEvaluator))),
+                BinaryOperator::LtEq => Ok(BinaryEvaluatorBox(Arc::new(Time64LtEqBinaryEvaluator))),
+                BinaryOperator::Eq => Ok(BinaryEvaluatorBox(Arc::new(Time64EqBinaryEvaluator))),
+                BinaryOperator::NotEq => {
+                    Ok(BinaryEvaluatorBox(Arc::new(Time64NotEqBinaryEvaluator)))
+                }
+                _ => Err(DatabaseError::UnsupportedBinaryOperator(ty, op)),
+            },
             LogicalType::Decimal(_, _) => numeric_binary_evaluator!(Decimal, op, ty),
             LogicalType::Boolean => match op {
                 BinaryOperator::And => Ok(BinaryEvaluatorBox(Arc::new(BooleanAndBinaryEvaluator))),

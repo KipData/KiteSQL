@@ -1,0 +1,56 @@
+statement ok
+CREATE TABLE t1 ( ID INT PRIMARY KEY, A TIME(3) )
+
+statement ok
+INSERT INTO t1(id,A) VALUES (1,'15:12:55.123')
+
+query II
+SELECT * FROM t1
+----
+1 15:12:55.123
+
+statement ok
+INSERT INTO t1(id,A) VALUES (2,'16:12:55.123456')
+
+query II
+SELECT * FROM t1
+----
+1 15:12:55.123
+2 16:12:55.123
+
+statement ok
+INSERT INTO t1(id,A) VALUES (3,'17:12:55.12')
+
+query II
+SELECT * FROM t1
+----
+1 15:12:55.123
+2 16:12:55.123
+3 17:12:55.120
+
+statement ok
+DROP TABLE t1
+
+query I
+SELECT CAST(TIME '05:42:55' AS VARCHAR(50))
+----
+05:42:55
+
+query I
+SELECT CAST(TIME(3) '05:42:55.154' AS VARCHAR(50))
+----
+05:42:55.154
+
+statement ok
+CREATE TABLE t2 ( ID INT PRIMARY KEY, A TIME )
+
+statement ok
+INSERT INTO t2(id,A) VALUES (1,'15:12:55')
+
+query II
+SELECT * FROM t2
+----
+1 15:12:55
+
+statement ok
+DROP TABLE t2

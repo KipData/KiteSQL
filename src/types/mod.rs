@@ -48,7 +48,8 @@ pub enum LogicalType {
     Varchar(Option<u32>, CharLengthUnits),
     Date,
     DateTime,
-    Time,
+    Time(Option<u64>, bool),
+    TimeStamp(Option<u64>, bool),
     // decimal (precision, scale)
     Decimal(Option<u8>, Option<u8>),
     Tuple(Vec<LogicalType>),
@@ -83,7 +84,7 @@ impl LogicalType {
         } else if type_id == TypeId::of::<NaiveDateTime>() {
             Some(LogicalType::DateTime)
         } else if type_id == TypeId::of::<NaiveTime>() {
-            Some(LogicalType::Time)
+            Some(LogicalType::Time(Some(0), false))
         } else if type_id == TypeId::of::<Decimal>() {
             Some(LogicalType::Decimal(None, None))
         } else if type_id == TypeId::of::<String>() {
@@ -116,7 +117,8 @@ impl LogicalType {
             LogicalType::Decimal(_, _) => Some(16),
             LogicalType::Date => Some(4),
             LogicalType::DateTime => Some(8),
-            LogicalType::Time => Some(4),
+            LogicalType::Time(_, _) => Some(4),
+            LogicalType::TimeStamp(_, _) => Some(8),
             LogicalType::Tuple(_) => unreachable!(),
         }
     }
@@ -354,14 +356,14 @@ impl LogicalType {
                 to,
                 LogicalType::DateTime | LogicalType::Varchar(..) | LogicalType::Char(..)
             ),
-            LogicalType::DateTime => matches!(
+            LogicalType::DateTime | LogicalType::TimeStamp(_, _) => matches!(
                 to,
                 LogicalType::Date
-                    | LogicalType::Time
+                    | LogicalType::Time(..)
                     | LogicalType::Varchar(..)
                     | LogicalType::Char(..)
             ),
-            LogicalType::Time => {
+            LogicalType::Time(..) => {
                 matches!(to, LogicalType::Varchar(..) | LogicalType::Char(..))
             }
             LogicalType::Decimal(_, _) | LogicalType::Tuple(_) => false,
@@ -432,17 +434,35 @@ impl TryFrom<sqlparser::ast::DataType> for LogicalType {
                 Ok(LogicalType::DateTime)
             }
             sqlparser::ast::DataType::Time(precision, info) => {
-                if precision.is_some() {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "time's precision".to_string(),
-                    ));
+                match precision {
+                    Some(0..5) | None => (),
+                    _ => {
+                        return Err(DatabaseError::UnsupportedStmt(
+                            "time's precision must less than 5".to_string(),
+                        ))
+                    }
                 }
                 if !matches!(info, TimezoneInfo::None) {
                     return Err(DatabaseError::UnsupportedStmt(
-                        "time's time zone".to_string(),
+                        "time's zone is not supported".to_string(),
                     ));
                 }
-                Ok(LogicalType::Time)
+                Ok(LogicalType::Time(precision, false))
+            }
+            sqlparser::ast::DataType::Timestamp(precision, info) => {
+                let mut zone = false;
+                match precision {
+                    Some(3 | 6 | 9) | None => (),
+                    _ => {
+                        return Err(DatabaseError::UnsupportedStmt(
+                            "timestamp's precision must 3,6,9".to_string(),
+                        ))
+                    }
+                }
+                if matches!(info, TimezoneInfo::WithTimeZone) {
+                    zone = true;
+                }
+                Ok(LogicalType::TimeStamp(precision, zone))
             }
             sqlparser::ast::DataType::Decimal(info) | sqlparser::ast::DataType::Dec(info) => {
                 match info {
@@ -479,7 +499,10 @@ impl std::fmt::Display for LogicalType {
             LogicalType::Varchar(len, units) => write!(f, "Varchar({:?}, {})", len, units)?,
             LogicalType::Date => write!(f, "Date")?,
             LogicalType::DateTime => write!(f, "DateTime")?,
-            LogicalType::Time => write!(f, "Time")?,
+            LogicalType::TimeStamp(precision, zone) => {
+                write!(f, "TimeStamp({:?}, {:?})", precision, zone)?
+            }
+            LogicalType::Time(precision, zone) => write!(f, "Time({:?}, {:?})", precision, zone)?,
             LogicalType::Decimal(precision, scale) => {
                 write!(f, "Decimal({:?}, {:?})", precision, scale)?
             }
@@ -576,7 +599,46 @@ pub(crate) mod test {
         )?;
         fn_assert(&mut cursor, &mut reference_tables, LogicalType::Date)?;
         fn_assert(&mut cursor, &mut reference_tables, LogicalType::DateTime)?;
-        fn_assert(&mut cursor, &mut reference_tables, LogicalType::Time)?;
+        fn_assert(
+            &mut cursor,
+            &mut reference_tables,
+            LogicalType::Time(Some(3), true),
+        )?;
+        fn_assert(
+            &mut cursor,
+            &mut reference_tables,
+            LogicalType::Time(Some(3), false),
+        )?;
+        fn_assert(
+            &mut cursor,
+            &mut reference_tables,
+            LogicalType::Time(None, true),
+        )?;
+        fn_assert(
+            &mut cursor,
+            &mut reference_tables,
+            LogicalType::Time(None, false),
+        )?;
+        fn_assert(
+            &mut cursor,
+            &mut reference_tables,
+            LogicalType::TimeStamp(Some(3), true),
+        )?;
+        fn_assert(
+            &mut cursor,
+            &mut reference_tables,
+            LogicalType::TimeStamp(Some(3), false),
+        )?;
+        fn_assert(
+            &mut cursor,
+            &mut reference_tables,
+            LogicalType::TimeStamp(None, true),
+        )?;
+        fn_assert(
+            &mut cursor,
+            &mut reference_tables,
+            LogicalType::TimeStamp(None, false),
+        )?;
         fn_assert(
             &mut cursor,
             &mut reference_tables,
