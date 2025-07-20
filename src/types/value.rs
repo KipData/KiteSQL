@@ -1783,10 +1783,7 @@ impl DataValue {
                     Ok(DataValue::Date64(value))
                 }
                 LogicalType::Time(p) => {
-                    let p = match p {
-                        Some(p) => *p,
-                        None => 0,
-                    };
+                    let p = p.unwrap_or(0);
                     let (value, nano) = Self::from_timestamp_precision(value, precision)
                         .map(|date_time| {
                             (

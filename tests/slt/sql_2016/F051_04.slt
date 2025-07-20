@@ -30,66 +30,62 @@ SELECT DATE '2016-03-26' >= DATE '2016-03-26'
 ----
 true
 
-# TODO: TIME
+query B
+SELECT TIME '01:02:03' < TIME '01:02:03'
+----
+false
 
-# query B
-# SELECT TIME '01:02:03' < TIME '01:02:03'
-# ----
-# false
+query B
+SELECT TIME '01:02:03' <= TIME '01:02:03'
+----
+true
 
-# query B
-# SELECT TIME '01:02:03' <= TIME '01:02:03'
-# ----
-# true
+query B
+SELECT TIME '01:02:03' <> TIME '01:02:03'
+----
+false
 
-# query B
-# SELECT TIME '01:02:03' <> TIME '01:02:03'
-# ----
-# false
+query B
+SELECT TIME '01:02:03' = TIME '01:02:03'
+----
+true
 
-# query B
-# SELECT TIME '01:02:03' = TIME '01:02:03'
-# ----
-# true
+query B
+SELECT TIME '01:02:03' > TIME '01:02:03'
+----
+false
 
-# query B
-# SELECT TIME '01:02:03' > TIME '01:02:03'
-# ----
-# false
+query B
+SELECT TIME '01:02:03' >= TIME '01:02:03'
+----
+true
 
-# query B
-# SELECT TIME '01:02:03' >= TIME '01:02:03'
-# ----
-# true
+query B
+SELECT TIMESTAMP '2016-03-26 01:02:03' < TIMESTAMP '2016-03-26 01:02:03'
+----
+false
 
-# TODO: TIMESTAMP
+query B
+SELECT TIMESTAMP '2016-03-26 01:02:03' <= TIMESTAMP '2016-03-26 01:02:03'
+----
+true
 
-# query B
-# SELECT TIMESTAMP '2016-03-26 01:02:03' < TIMESTAMP '2016-03-26 01:02:03'
-# ----
-# false
+query B
+SELECT TIMESTAMP '2016-03-26 01:02:03' <> TIMESTAMP '2016-03-26 01:02:03'
+----
+false
 
-# query B
-# SELECT TIMESTAMP '2016-03-26 01:02:03' <= TIMESTAMP '2016-03-26 01:02:03'
-# ----
-# true
+query B
+SELECT TIMESTAMP '2016-03-26 01:02:03' = TIMESTAMP '2016-03-26 01:02:03'
+----
+true
 
-# query B
-# SELECT TIMESTAMP '2016-03-26 01:02:03' <> TIMESTAMP '2016-03-26 01:02:03'
-# ----
-# false
+query B
+SELECT TIMESTAMP '2016-03-26 01:02:03' > TIMESTAMP '2016-03-26 01:02:03'
+----
+false
 
-# query B
-# SELECT TIMESTAMP '2016-03-26 01:02:03' = TIMESTAMP '2016-03-26 01:02:03'
-# ----
-# true
-
-# query B
-# SELECT TIMESTAMP '2016-03-26 01:02:03' > TIMESTAMP '2016-03-26 01:02:03'
-# ----
-# false
-
-# query B
-# SELECT TIMESTAMP '2016-03-26 01:02:03' >= TIMESTAMP '2016-03-26 01:02:03'
-# ----
-# true
+query B
+SELECT TIMESTAMP '2016-03-26 01:02:03' >= TIMESTAMP '2016-03-26 01:02:03'
+----
+true

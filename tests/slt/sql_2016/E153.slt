@@ -1,21 +1,19 @@
 # E153: Updatable queries with subqueries
 
-# TODO: Updatable queries with subqueries
+statement ok
+CREATE TABLE TABLE_E153_01_01 ( A INT PRIMARY KEY, B INT );
 
-# statement ok
-# TABLE TABLE_E153_01_01 ( A INT, B INT );
+statement ok
+INSERT INTO TABLE_E153_01_01 VALUES ( 1, 2 );
 
-# statement ok
-# INSERT INTO TABLE_E153_01_01 VALUES ( 1, 2 );
+statement ok
+UPDATE TABLE_E153_01_01 SET A = 3, B = 4 WHERE A = ( SELECT 1 )
 
-# statement ok
-# UPDATE TABLE_E153_01_01 SET A = 3, B = 4 WHERE A = ( SELECT 1 )
+statement ok
+CREATE TABLE TABLE_E153_02_01 ( A INT PRIMARY KEY, B INT );
 
-# statement ok
-# CREATE TABLE TABLE_E153_02_01 ( A INT, B INT );
+statement ok
+INSERT INTO TABLE_E153_02_01 VALUES ( 1, 2 );
 
-# statement ok
-# INSERT INTO TABLE_E153_02_01 VALUES ( 1, 2 );
-
-# statement ok
-# DELETE FROM TABLE_E153_02_01 WHERE A = ( SELECT 1 )
+statement ok
+DELETE FROM TABLE_E153_02_01 WHERE A = ( SELECT 1 )
