@@ -26,7 +26,7 @@ pub struct TimeNotEqBinaryEvaluator;
 impl BinaryEvaluator for TimePlusBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
-            (DataValue::Time32(v1, p1), DataValue::Time32(v2, p2, ..)) => {
+            (DataValue::Time32(v1, p1), DataValue::Time32(v2, p2)) => {
                 let (mut v1, n1) = DataValue::unpack(*v1, *p1);
                 let (v2, n2) = DataValue::unpack(*v2, *p2);
                 let mut n = n1 + n2;
