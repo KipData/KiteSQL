@@ -48,7 +48,7 @@ pub enum LogicalType {
     Varchar(Option<u32>, CharLengthUnits),
     Date,
     DateTime,
-    Time(Option<u64>, bool),
+    Time(Option<u64>),
     TimeStamp(Option<u64>, bool),
     // decimal (precision, scale)
     Decimal(Option<u8>, Option<u8>),
@@ -84,7 +84,7 @@ impl LogicalType {
         } else if type_id == TypeId::of::<NaiveDateTime>() {
             Some(LogicalType::DateTime)
         } else if type_id == TypeId::of::<NaiveTime>() {
-            Some(LogicalType::Time(Some(0), false))
+            Some(LogicalType::Time(Some(0)))
         } else if type_id == TypeId::of::<Decimal>() {
             Some(LogicalType::Decimal(None, None))
         } else if type_id == TypeId::of::<String>() {
@@ -117,7 +117,7 @@ impl LogicalType {
             LogicalType::Decimal(_, _) => Some(16),
             LogicalType::Date => Some(4),
             LogicalType::DateTime => Some(8),
-            LogicalType::Time(_, _) => Some(4),
+            LogicalType::Time(_) => Some(4),
             LogicalType::TimeStamp(_, _) => Some(8),
             LogicalType::Tuple(_) => unreachable!(),
         }
@@ -447,7 +447,7 @@ impl TryFrom<sqlparser::ast::DataType> for LogicalType {
                         "time's zone is not supported".to_string(),
                     ));
                 }
-                Ok(LogicalType::Time(precision, false))
+                Ok(LogicalType::Time(precision))
             }
             sqlparser::ast::DataType::Timestamp(precision, info) => {
                 let mut zone = false;
@@ -502,7 +502,7 @@ impl std::fmt::Display for LogicalType {
             LogicalType::TimeStamp(precision, zone) => {
                 write!(f, "TimeStamp({:?}, {:?})", precision, zone)?
             }
-            LogicalType::Time(precision, zone) => write!(f, "Time({:?}, {:?})", precision, zone)?,
+            LogicalType::Time(precision) => write!(f, "Time({:?})", precision)?,
             LogicalType::Decimal(precision, scale) => {
                 write!(f, "Decimal({:?}, {:?})", precision, scale)?
             }
@@ -602,23 +602,9 @@ pub(crate) mod test {
         fn_assert(
             &mut cursor,
             &mut reference_tables,
-            LogicalType::Time(Some(3), true),
+            LogicalType::Time(Some(3)),
         )?;
-        fn_assert(
-            &mut cursor,
-            &mut reference_tables,
-            LogicalType::Time(Some(3), false),
-        )?;
-        fn_assert(
-            &mut cursor,
-            &mut reference_tables,
-            LogicalType::Time(None, true),
-        )?;
-        fn_assert(
-            &mut cursor,
-            &mut reference_tables,
-            LogicalType::Time(None, false),
-        )?;
+        fn_assert(&mut cursor, &mut reference_tables, LogicalType::Time(None))?;
         fn_assert(
             &mut cursor,
             &mut reference_tables,

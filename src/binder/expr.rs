@@ -143,22 +143,22 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 })
             }
             Expr::Exists { subquery, negated } => {
-                let (sub_query, column) = self.bind_subquery(subquery)?;
+                let (sub_query, column) = self.bind_subquery(None, subquery)?;
                 let (_, sub_query) = if !self.context.is_step(&QueryBindStep::Where) {
                     self.bind_temp_table(column, sub_query)?
                 } else {
-                    (ScalarExpression::ColumnRef(column), sub_query)
+                    (column, sub_query)
                 };
                 self.context
                     .sub_query(SubQueryType::ExistsSubQuery(*negated, sub_query));
                 Ok(ScalarExpression::Constant(DataValue::Boolean(true)))
             }
             Expr::Subquery(subquery) => {
-                let (sub_query, column) = self.bind_subquery(subquery)?;
+                let (sub_query, column) = self.bind_subquery(None, subquery)?;
                 let (expr, sub_query) = if !self.context.is_step(&QueryBindStep::Where) {
                     self.bind_temp_table(column, sub_query)?
                 } else {
-                    (ScalarExpression::ColumnRef(column), sub_query)
+                    (column, sub_query)
                 };
                 self.context.sub_query(SubQueryType::SubQuery(sub_query));
                 Ok(expr)
@@ -169,7 +169,8 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 negated,
             } => {
                 let left_expr = Box::new(self.bind_expr(expr)?);
-                let (sub_query, column) = self.bind_subquery(subquery)?;
+                let (sub_query, column) =
+                    self.bind_subquery(Some(left_expr.return_type()), subquery)?;
 
                 if !self.context.is_step(&QueryBindStep::Where) {
                     return Err(DatabaseError::UnsupportedStmt(
@@ -250,14 +251,14 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
 
     fn bind_temp_table(
         &mut self,
-        column: ColumnRef,
+        expr: ScalarExpression,
         sub_query: LogicalPlan,
     ) -> Result<(ScalarExpression, LogicalPlan), DatabaseError> {
-        let mut alias_column = ColumnCatalog::clone(&column);
+        let mut alias_column = ColumnCatalog::clone(&expr.output_column());
         alias_column.set_ref_table(self.context.temp_table(), ColumnId::new(), true);
 
         let alias_expr = ScalarExpression::Alias {
-            expr: Box::new(ScalarExpression::ColumnRef(column)),
+            expr: Box::new(expr),
             alias: AliasType::Expr(Box::new(ScalarExpression::ColumnRef(ColumnRef::from(
                 alias_column,
             )))),
@@ -268,8 +269,9 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
 
     fn bind_subquery(
         &mut self,
+        in_ty: Option<LogicalType>,
         subquery: &Query,
-    ) -> Result<(LogicalPlan, ColumnRef), DatabaseError> {
+    ) -> Result<(LogicalPlan, ScalarExpression), DatabaseError> {
         let BinderContext {
             table_cache,
             view_cache,
@@ -294,14 +296,30 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         let mut sub_query = binder.bind_query(subquery)?;
         let sub_query_schema = sub_query.output_schema();
 
-        if sub_query_schema.len() != 1 {
-            return Err(DatabaseError::MisMatch(
-                "expects only one expression to be returned",
-                "the expression returned by the subquery",
-            ));
-        }
-        let column = sub_query_schema[0].clone();
-        Ok((sub_query, column))
+        let fn_check = |len: usize| {
+            if sub_query_schema.len() != len {
+                return Err(DatabaseError::MisMatch(
+                    "expects only one expression to be returned",
+                    "the expression returned by the subquery",
+                ));
+            }
+            Ok(())
+        };
+
+        let expr = if let Some(LogicalType::Tuple(tys)) = in_ty {
+            fn_check(tys.len())?;
+
+            let columns = sub_query_schema
+                .iter()
+                .map(|column| ScalarExpression::ColumnRef(column.clone()))
+                .collect::<Vec<_>>();
+            ScalarExpression::Tuple(columns)
+        } else {
+            fn_check(1)?;
+
+            ScalarExpression::ColumnRef(sub_query_schema[0].clone())
+        };
+        Ok((sub_query, expr))
     }
 
     pub fn bind_like(

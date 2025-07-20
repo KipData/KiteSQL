@@ -226,10 +226,10 @@ impl NormalizationRule for PushPredicateIntoScan {
                             | IndexType::Unique
                             | IndexType::Normal => {
                                 RangeDetacher::new(meta.table_name.as_str(), &meta.column_ids[0])
-                                    .detach(&op.predicate)
+                                    .detach(&op.predicate)?
                             }
                             IndexType::PrimaryKey { is_multiple: true } | IndexType::Composite => {
-                                Self::composite_range(&op, meta)
+                                Self::composite_range(&op, meta)?
                             }
                         };
                     }
@@ -242,14 +242,17 @@ impl NormalizationRule for PushPredicateIntoScan {
 }
 
 impl PushPredicateIntoScan {
-    fn composite_range(op: &FilterOperator, meta: &mut IndexMetaRef) -> Option<Range> {
+    fn composite_range(
+        op: &FilterOperator,
+        meta: &mut IndexMetaRef,
+    ) -> Result<Option<Range>, DatabaseError> {
         let mut res = None;
         let mut eq_ranges = Vec::with_capacity(meta.column_ids.len());
         let mut apply_column_count = 0;
 
         for column_id in meta.column_ids.iter() {
             if let Some(range) =
-                RangeDetacher::new(meta.table_name.as_str(), column_id).detach(&op.predicate)
+                RangeDetacher::new(meta.table_name.as_str(), column_id).detach(&op.predicate)?
             {
                 apply_column_count += 1;
 
@@ -266,7 +269,7 @@ impl PushPredicateIntoScan {
                 res = range.combining_eqs(&eq_ranges);
             }
         }
-        res.map(|range| {
+        Ok(res.map(|range| {
             if range.only_eq() && apply_column_count != meta.column_ids.len() {
                 fn eq_to_scope(range: Range) -> Range {
                     match range {
@@ -289,7 +292,7 @@ impl PushPredicateIntoScan {
                 return eq_to_scope(range);
             }
             range
-        })
+        }))
     }
 }
 

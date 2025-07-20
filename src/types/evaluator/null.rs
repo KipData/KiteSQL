@@ -1,3 +1,4 @@
+use crate::errors::DatabaseError;
 use crate::types::evaluator::BinaryEvaluator;
 use crate::types::evaluator::DataValue;
 use serde::{Deserialize, Serialize};
@@ -9,7 +10,7 @@ pub struct NullBinaryEvaluator;
 
 #[typetag::serde]
 impl BinaryEvaluator for NullBinaryEvaluator {
-    fn binary_eval(&self, _: &DataValue, _: &DataValue) -> DataValue {
-        DataValue::Null
+    fn binary_eval(&self, _: &DataValue, _: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(DataValue::Null)
     }
 }

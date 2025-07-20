@@ -56,6 +56,6 @@ impl Accumulator for AvgAccumulator {
             value = value.cast(&quantity_ty)?
         }
         let evaluator = EvaluatorFactory::binary_create(quantity_ty, BinaryOperator::Divide)?;
-        Ok(evaluator.0.binary_eval(&value, &quantity))
+        evaluator.0.binary_eval(&value, &quantity)
     }
 }

@@ -1,3 +1,4 @@
+use crate::errors::DatabaseError;
 use crate::types::evaluator::DataValue;
 use crate::types::evaluator::{BinaryEvaluator, UnaryEvaluator};
 use serde::{Deserialize, Serialize};
@@ -50,44 +51,44 @@ pub struct Float32ModBinaryEvaluator;
 
 #[typetag::serde]
 impl BinaryEvaluator for Float32PlusBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Float32(v1), DataValue::Float32(v2)) => DataValue::Float32(*v1 + *v2),
             (DataValue::Float32(_), DataValue::Null)
             | (DataValue::Null, DataValue::Float32(_))
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for Float32MinusBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Float32(v1), DataValue::Float32(v2)) => DataValue::Float32(*v1 - *v2),
             (DataValue::Float32(_), DataValue::Null)
             | (DataValue::Null, DataValue::Float32(_))
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for Float32MultiplyBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Float32(v1), DataValue::Float32(v2)) => DataValue::Float32(*v1 * *v2),
             (DataValue::Float32(_), DataValue::Null)
             | (DataValue::Null, DataValue::Float32(_))
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for Float32DivideBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Float32(v1), DataValue::Float32(v2)) => {
                 DataValue::Float64(ordered_float::OrderedFloat(**v1 as f64 / **v2 as f64))
             }
@@ -95,90 +96,90 @@ impl BinaryEvaluator for Float32DivideBinaryEvaluator {
             | (DataValue::Null, DataValue::Float32(_))
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for Float32GtBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Float32(v1), DataValue::Float32(v2)) => DataValue::Boolean(v1 > v2),
             (DataValue::Float32(_), DataValue::Null)
             | (DataValue::Null, DataValue::Float32(_))
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for Float32GtEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Float32(v1), DataValue::Float32(v2)) => DataValue::Boolean(v1 >= v2),
             (DataValue::Float32(_), DataValue::Null)
             | (DataValue::Null, DataValue::Float32(_))
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for Float32LtBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Float32(v1), DataValue::Float32(v2)) => DataValue::Boolean(v1 < v2),
             (DataValue::Float32(_), DataValue::Null)
             | (DataValue::Null, DataValue::Float32(_))
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for Float32LtEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Float32(v1), DataValue::Float32(v2)) => DataValue::Boolean(v1 <= v2),
             (DataValue::Float32(_), DataValue::Null)
             | (DataValue::Null, DataValue::Float32(_))
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for Float32EqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Float32(v1), DataValue::Float32(v2)) => DataValue::Boolean(v1 == v2),
             (DataValue::Float32(_), DataValue::Null)
             | (DataValue::Null, DataValue::Float32(_))
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for Float32NotEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Float32(v1), DataValue::Float32(v2)) => DataValue::Boolean(v1 != v2),
             (DataValue::Float32(_), DataValue::Null)
             | (DataValue::Null, DataValue::Float32(_))
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for Float32ModBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Float32(v1), DataValue::Float32(v2)) => DataValue::Float32(*v1 % *v2),
             (DataValue::Float32(_), DataValue::Null)
             | (DataValue::Null, DataValue::Float32(_))
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }

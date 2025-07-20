@@ -79,7 +79,7 @@ impl VisitorMut<'_> for ConstantCalculator {
                     if right_val.logical_type() != ty {
                         *right_val = right_val.clone().cast(&ty)?;
                     }
-                    let value = evaluator.0.binary_eval(left_val, right_val);
+                    let value = evaluator.0.binary_eval(left_val, right_val)?;
                     let _ = mem::replace(expr, ScalarExpression::Constant(value));
                 }
             }
@@ -467,15 +467,15 @@ impl ScalarExpression {
                 if &right.logical_type() != ty {
                     right = right.cast(ty).ok()?;
                 }
-                let binary_value = if let Some(evaluator) = evaluator {
+                if let Some(evaluator) = evaluator {
                     evaluator.0.binary_eval(&left, &right)
                 } else {
                     EvaluatorFactory::binary_create(ty.clone(), *op)
                         .ok()?
                         .0
                         .binary_eval(&left, &right)
-                };
-                Some(binary_value)
+                }
+                .ok()
             }
             _ => None,
         }

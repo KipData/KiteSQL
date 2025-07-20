@@ -74,8 +74,12 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
 
                 ConstantCalculator.visit(&mut expression)?;
                 match expression {
-                    ScalarExpression::Constant(value) => {
+                    ScalarExpression::Constant(mut value) => {
                         let ty = schema_ref[i].datatype();
+
+                        if &value.logical_type() != ty {
+                            value = value.cast(ty)?;
+                        }
                         // Check if the value length is too long
                         value.check_len(ty)?;
 

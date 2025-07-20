@@ -1,3 +1,4 @@
+use crate::errors::DatabaseError;
 use crate::types::evaluator::BinaryEvaluator;
 use crate::types::evaluator::DataValue;
 use serde::{Deserialize, Serialize};
@@ -50,32 +51,32 @@ fn tuple_cmp(
 
 #[typetag::serde]
 impl BinaryEvaluator for TupleEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Tuple(v1, ..), DataValue::Tuple(v2, ..)) => DataValue::Boolean(*v1 == *v2),
             (DataValue::Null, DataValue::Boolean(_))
             | (DataValue::Boolean(_), DataValue::Null)
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for TupleNotEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Tuple(v1, ..), DataValue::Tuple(v2, ..)) => DataValue::Boolean(*v1 != *v2),
             (DataValue::Null, DataValue::Boolean(_))
             | (DataValue::Boolean(_), DataValue::Null)
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for TupleGtBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Tuple(v1, is_upper1), DataValue::Tuple(v2, is_upper2)) => {
                 tuple_cmp((v1, is_upper1), (v2, is_upper2))
                     .map(|order| DataValue::Boolean(order.is_gt()))
@@ -85,13 +86,13 @@ impl BinaryEvaluator for TupleGtBinaryEvaluator {
             | (DataValue::Boolean(_), DataValue::Null)
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for TupleGtEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Tuple(v1, is_upper1), DataValue::Tuple(v2, is_upper2)) => {
                 tuple_cmp((v1, is_upper1), (v2, is_upper2))
                     .map(|order| DataValue::Boolean(order.is_ge()))
@@ -101,13 +102,13 @@ impl BinaryEvaluator for TupleGtEqBinaryEvaluator {
             | (DataValue::Boolean(_), DataValue::Null)
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for TupleLtBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Tuple(v1, is_upper1), DataValue::Tuple(v2, is_upper2)) => {
                 tuple_cmp((v1, is_upper1), (v2, is_upper2))
                     .map(|order| DataValue::Boolean(order.is_lt()))
@@ -117,13 +118,13 @@ impl BinaryEvaluator for TupleLtBinaryEvaluator {
             | (DataValue::Boolean(_), DataValue::Null)
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for TupleLtEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Tuple(v1, is_upper1), DataValue::Tuple(v2, is_upper2)) => {
                 tuple_cmp((v1, is_upper1), (v2, is_upper2))
                     .map(|order| DataValue::Boolean(order.is_le()))
@@ -133,6 +134,6 @@ impl BinaryEvaluator for TupleLtEqBinaryEvaluator {
             | (DataValue::Boolean(_), DataValue::Null)
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }

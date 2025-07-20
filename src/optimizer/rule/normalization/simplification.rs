@@ -163,7 +163,7 @@ mod test {
         let filter_op = best_plan.childrens.pop_only();
         if let Operator::Filter(filter_op) = filter_op.operator {
             let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
-                .detach(&filter_op.predicate)
+                .detach(&filter_op.predicate)?
                 .unwrap();
             assert_eq!(
                 range,
@@ -217,7 +217,7 @@ mod test {
             if let Operator::Filter(filter_op) = filter_op.operator {
                 Ok(
                     RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
-                        .detach(&filter_op.predicate),
+                        .detach(&filter_op.predicate)?,
                 )
             } else {
                 Ok(None)
@@ -332,7 +332,7 @@ mod test {
 
         let filter_op = best_plan.childrens.pop_only();
         if let Operator::Filter(filter_op) = filter_op.operator {
-            Ok(RangeDetacher::new("t1", &column_id).detach(&filter_op.predicate))
+            Ok(RangeDetacher::new("t1", &column_id).detach(&filter_op.predicate)?)
         } else {
             Ok(None)
         }

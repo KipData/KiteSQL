@@ -1,3 +1,4 @@
+use crate::errors::DatabaseError;
 use crate::types::evaluator::BinaryEvaluator;
 use crate::types::evaluator::DataValue;
 use crate::types::value::Utf8Type;
@@ -31,8 +32,8 @@ pub struct Utf8NotLikeBinaryEvaluator {
 
 #[typetag::serde]
 impl BinaryEvaluator for Utf8GtBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Utf8 { value: v1, .. }, DataValue::Utf8 { value: v2, .. }) => {
                 DataValue::Boolean(v1 > v2)
             }
@@ -40,13 +41,13 @@ impl BinaryEvaluator for Utf8GtBinaryEvaluator {
             | (DataValue::Null, DataValue::Utf8 { .. })
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for Utf8GtEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Utf8 { value: v1, .. }, DataValue::Utf8 { value: v2, .. }) => {
                 DataValue::Boolean(v1 >= v2)
             }
@@ -54,13 +55,13 @@ impl BinaryEvaluator for Utf8GtEqBinaryEvaluator {
             | (DataValue::Null, DataValue::Utf8 { .. })
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for Utf8LtBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Utf8 { value: v1, .. }, DataValue::Utf8 { value: v2, .. }) => {
                 DataValue::Boolean(v1 < v2)
             }
@@ -68,13 +69,13 @@ impl BinaryEvaluator for Utf8LtBinaryEvaluator {
             | (DataValue::Null, DataValue::Utf8 { .. })
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for Utf8LtEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Utf8 { value: v1, .. }, DataValue::Utf8 { value: v2, .. }) => {
                 DataValue::Boolean(v1 <= v2)
             }
@@ -82,13 +83,13 @@ impl BinaryEvaluator for Utf8LtEqBinaryEvaluator {
             | (DataValue::Null, DataValue::Utf8 { .. })
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for Utf8EqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Utf8 { value: v1, .. }, DataValue::Utf8 { value: v2, .. }) => {
                 DataValue::Boolean(v1 == v2)
             }
@@ -96,13 +97,13 @@ impl BinaryEvaluator for Utf8EqBinaryEvaluator {
             | (DataValue::Null, DataValue::Utf8 { .. })
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for Utf8NotEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Utf8 { value: v1, .. }, DataValue::Utf8 { value: v2, .. }) => {
                 DataValue::Boolean(v1 != v2)
             }
@@ -110,13 +111,13 @@ impl BinaryEvaluator for Utf8NotEqBinaryEvaluator {
             | (DataValue::Null, DataValue::Utf8 { .. })
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for Utf8StringConcatBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Utf8 { value: v1, .. }, DataValue::Utf8 { value: v2, .. }) => {
                 DataValue::Utf8 {
                     value: v1.clone() + v2,
@@ -128,13 +129,13 @@ impl BinaryEvaluator for Utf8StringConcatBinaryEvaluator {
             | (DataValue::Null, DataValue::Utf8 { .. })
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for Utf8LikeBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Utf8 { value, .. }, DataValue::Utf8 { value: pattern, .. }) => {
                 DataValue::Boolean(string_like(value, pattern, self.escape_char))
             }
@@ -142,13 +143,13 @@ impl BinaryEvaluator for Utf8LikeBinaryEvaluator {
             | (DataValue::Null, DataValue::Utf8 { .. })
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 #[typetag::serde]
 impl BinaryEvaluator for Utf8NotLikeBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-        match (left, right) {
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(match (left, right) {
             (DataValue::Utf8 { value, .. }, DataValue::Utf8 { value: pattern, .. }) => {
                 DataValue::Boolean(!string_like(value, pattern, self.escape_char))
             }
@@ -156,7 +157,7 @@ impl BinaryEvaluator for Utf8NotLikeBinaryEvaluator {
             | (DataValue::Null, DataValue::Utf8 { .. })
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
-        }
+        })
     }
 }
 

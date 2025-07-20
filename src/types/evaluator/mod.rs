@@ -52,11 +52,12 @@ use paste::paste;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
+use std::ops::Deref;
 use std::sync::Arc;
 
 #[typetag::serde(tag = "binary")]
 pub trait BinaryEvaluator: Send + Sync + Debug {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue;
+    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError>;
 }
 
 #[typetag::serde(tag = "unary")]
@@ -67,8 +68,20 @@ pub trait UnaryEvaluator: Send + Sync + Debug {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BinaryEvaluatorBox(pub Arc<dyn BinaryEvaluator>);
 
+impl Deref for BinaryEvaluatorBox {
+    type Target = Arc<dyn BinaryEvaluator>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 impl BinaryEvaluatorBox {
-    pub fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
+    pub fn binary_eval(
+        &self,
+        left: &DataValue,
+        right: &DataValue,
+    ) -> Result<DataValue, DatabaseError> {
         self.0.binary_eval(left, right)
     }
 }
@@ -193,7 +206,7 @@ impl EvaluatorFactory {
             LogicalType::Double => numeric_binary_evaluator!(Float64, op, LogicalType::Double),
             LogicalType::Date => numeric_binary_evaluator!(Date, op, LogicalType::Date),
             LogicalType::DateTime => numeric_binary_evaluator!(DateTime, op, LogicalType::DateTime),
-            LogicalType::Time(_, _) => match op {
+            LogicalType::Time(_) => match op {
                 BinaryOperator::Plus => Ok(BinaryEvaluatorBox(Arc::new(TimePlusBinaryEvaluator))),
                 BinaryOperator::Minus => Ok(BinaryEvaluatorBox(Arc::new(TimeMinusBinaryEvaluator))),
                 BinaryOperator::Gt => Ok(BinaryEvaluatorBox(Arc::new(TimeGtBinaryEvaluator))),
@@ -324,112 +337,112 @@ macro_rules! numeric_binary_evaluator_definition {
 
             #[typetag::serde]
             impl BinaryEvaluator for [<$value_type PlusBinaryEvaluator>] {
-                fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-                    match (left, right) {
-                        ($compute_type(v1), $compute_type(v2)) => $compute_type(*v1 + *v2),
+                fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+                    Ok(match (left, right) {
+                        ($compute_type(v1), $compute_type(v2)) => $compute_type(v1.checked_add(*v2).ok_or(DatabaseError::OverFlow)?),
                         ($compute_type(_), DataValue::Null) | (DataValue::Null, $compute_type(_)) | (DataValue::Null, DataValue::Null) => DataValue::Null,
                         _ => unsafe { hint::unreachable_unchecked() },
-                    }
+                    })
                 }
             }
             #[typetag::serde]
             impl BinaryEvaluator for [<$value_type MinusBinaryEvaluator>] {
-                fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-                    match (left, right) {
-                        ($compute_type(v1), $compute_type(v2)) => $compute_type(*v1 - *v2),
+                fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+                    Ok(match (left, right) {
+                        ($compute_type(v1), $compute_type(v2)) => $compute_type(v1.checked_sub(*v2).ok_or(DatabaseError::OverFlow)?),
                         ($compute_type(_), DataValue::Null) | (DataValue::Null, $compute_type(_)) | (DataValue::Null, DataValue::Null) => DataValue::Null,
                         _ => unsafe { hint::unreachable_unchecked() },
-                    }
+                    })
                 }
             }
             #[typetag::serde]
             impl BinaryEvaluator for [<$value_type MultiplyBinaryEvaluator>] {
-                fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-                    match (left, right) {
-                        ($compute_type(v1), $compute_type(v2)) => $compute_type(*v1 * *v2),
+                fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+                    Ok(match (left, right) {
+                        ($compute_type(v1), $compute_type(v2)) => $compute_type(v1.checked_mul(*v2).ok_or(DatabaseError::OverFlow)?),
                         ($compute_type(_), DataValue::Null) | (DataValue::Null, $compute_type(_)) | (DataValue::Null, DataValue::Null) => DataValue::Null,
                         _ => unsafe { hint::unreachable_unchecked() },
-                    }
+                    })
                 }
             }
             #[typetag::serde]
             impl BinaryEvaluator for [<$value_type DivideBinaryEvaluator>] {
-                fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-                    match (left, right) {
+                fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+                    Ok(match (left, right) {
                         ($compute_type(v1), $compute_type(v2)) => DataValue::Float64(ordered_float::OrderedFloat(*v1 as f64 / *v2 as f64)),
                         ($compute_type(_), DataValue::Null) | (DataValue::Null, $compute_type(_)) | (DataValue::Null, DataValue::Null) => DataValue::Null,
                         _ => unsafe { hint::unreachable_unchecked() },
-                    }
+                    })
                 }
             }
             #[typetag::serde]
             impl BinaryEvaluator for [<$value_type GtBinaryEvaluator>] {
-                fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-                    match (left, right) {
+                fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+                    Ok(match (left, right) {
                         ($compute_type(v1), $compute_type(v2)) => DataValue::Boolean(v1 > v2),
                         ($compute_type(_), DataValue::Null) | (DataValue::Null, $compute_type(_)) | (DataValue::Null, DataValue::Null) => DataValue::Null,
                         _ => unsafe { hint::unreachable_unchecked() },
-                    }
+                    })
                 }
             }
             #[typetag::serde]
             impl BinaryEvaluator for [<$value_type GtEqBinaryEvaluator>] {
-                fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-                    match (left, right) {
+                fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+                    Ok(match (left, right) {
                         ($compute_type(v1), $compute_type(v2)) => DataValue::Boolean(v1 >= v2),
                         ($compute_type(_), DataValue::Null) | (DataValue::Null, $compute_type(_)) | (DataValue::Null, DataValue::Null) => DataValue::Null,
                         _ => unsafe { hint::unreachable_unchecked() },
-                    }
+                    })
                 }
             }
             #[typetag::serde]
             impl BinaryEvaluator for [<$value_type LtBinaryEvaluator>] {
-                fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-                    match (left, right) {
+                fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+                    Ok(match (left, right) {
                         ($compute_type(v1), $compute_type(v2)) => DataValue::Boolean(v1 < v2),
                         ($compute_type(_), DataValue::Null) | (DataValue::Null, $compute_type(_)) | (DataValue::Null, DataValue::Null) => DataValue::Null,
                         _ => unsafe { hint::unreachable_unchecked() },
-                    }
+                    })
                 }
             }
             #[typetag::serde]
             impl BinaryEvaluator for [<$value_type LtEqBinaryEvaluator>] {
-                fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-                    match (left, right) {
+                fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+                    Ok(match (left, right) {
                         ($compute_type(v1), $compute_type(v2)) => DataValue::Boolean(v1 <= v2),
                         ($compute_type(_), DataValue::Null) | (DataValue::Null, $compute_type(_)) | (DataValue::Null, DataValue::Null) => DataValue::Null,
                         _ => unsafe { hint::unreachable_unchecked() },
-                    }
+                    })
                 }
             }
             #[typetag::serde]
             impl BinaryEvaluator for [<$value_type EqBinaryEvaluator>] {
-                fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-                    match (left, right) {
+                fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+                    Ok(match (left, right) {
                         ($compute_type(v1), $compute_type(v2)) => DataValue::Boolean(v1 == v2),
                         ($compute_type(_), DataValue::Null) | (DataValue::Null, $compute_type(_)) | (DataValue::Null, DataValue::Null) => DataValue::Null,
                         _ => unsafe { hint::unreachable_unchecked() },
-                    }
+                    })
                 }
             }
             #[typetag::serde]
             impl BinaryEvaluator for [<$value_type NotEqBinaryEvaluator>] {
-                fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-                    match (left, right) {
+                fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+                    Ok(match (left, right) {
                         ($compute_type(v1), $compute_type(v2)) => DataValue::Boolean(v1 != v2),
                         ($compute_type(_), DataValue::Null) | (DataValue::Null, $compute_type(_)) | (DataValue::Null, DataValue::Null) => DataValue::Null,
                         _ => unsafe { hint::unreachable_unchecked() },
-                    }
+                    })
                 }
             }
             #[typetag::serde]
             impl BinaryEvaluator for [<$value_type ModBinaryEvaluator>] {
-                fn binary_eval(&self, left: &DataValue, right: &DataValue) -> DataValue {
-                    match (left, right) {
+                fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+                    Ok(match (left, right) {
                         ($compute_type(v1), $compute_type(v2)) => $compute_type(*v1 % *v2),
                         ($compute_type(_), DataValue::Null) | (DataValue::Null, $compute_type(_)) | (DataValue::Null, DataValue::Null) => DataValue::Null,
                         _ => unsafe { hint::unreachable_unchecked() },
-                    }
+                    })
                 }
             }
         }
@@ -457,16 +470,16 @@ mod test {
             EvaluatorFactory::binary_create(LogicalType::Integer, BinaryOperator::Plus)?;
         let plus_i32_1 = plus_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Null);
+            .binary_eval(&DataValue::Null, &DataValue::Null)?;
         let plus_i32_2 = plus_evaluator
             .0
-            .binary_eval(&DataValue::Int32(1), &DataValue::Null);
+            .binary_eval(&DataValue::Int32(1), &DataValue::Null)?;
         let plus_i32_3 = plus_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Int32(1));
+            .binary_eval(&DataValue::Null, &DataValue::Int32(1))?;
         let plus_i32_4 = plus_evaluator
             .0
-            .binary_eval(&DataValue::Int32(1), &DataValue::Int32(1));
+            .binary_eval(&DataValue::Int32(1), &DataValue::Int32(1))?;
 
         assert_eq!(plus_i32_1, plus_i32_2);
         assert_eq!(plus_i32_2, plus_i32_3);
@@ -476,16 +489,16 @@ mod test {
             EvaluatorFactory::binary_create(LogicalType::Bigint, BinaryOperator::Plus)?;
         let plus_i64_1 = plus_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Null);
+            .binary_eval(&DataValue::Null, &DataValue::Null)?;
         let plus_i64_2 = plus_evaluator
             .0
-            .binary_eval(&DataValue::Int64(1), &DataValue::Null);
+            .binary_eval(&DataValue::Int64(1), &DataValue::Null)?;
         let plus_i64_3 = plus_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Int64(1));
+            .binary_eval(&DataValue::Null, &DataValue::Int64(1))?;
         let plus_i64_4 = plus_evaluator
             .0
-            .binary_eval(&DataValue::Int64(1), &DataValue::Int64(1));
+            .binary_eval(&DataValue::Int64(1), &DataValue::Int64(1))?;
 
         assert_eq!(plus_i64_1, plus_i64_2);
         assert_eq!(plus_i64_2, plus_i64_3);
@@ -495,17 +508,17 @@ mod test {
             EvaluatorFactory::binary_create(LogicalType::Double, BinaryOperator::Plus)?;
         let plus_f64_1 = plus_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Null);
+            .binary_eval(&DataValue::Null, &DataValue::Null)?;
         let plus_f64_2 = plus_evaluator
             .0
-            .binary_eval(&DataValue::Float64(OrderedFloat(1.0)), &DataValue::Null);
+            .binary_eval(&DataValue::Float64(OrderedFloat(1.0)), &DataValue::Null)?;
         let plus_f64_3 = plus_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Float64(OrderedFloat(1.0)));
+            .binary_eval(&DataValue::Null, &DataValue::Float64(OrderedFloat(1.0)))?;
         let plus_f64_4 = plus_evaluator.0.binary_eval(
             &DataValue::Float64(OrderedFloat(1.0)),
             &DataValue::Float64(OrderedFloat(1.0)),
-        );
+        )?;
 
         assert_eq!(plus_f64_1, plus_f64_2);
         assert_eq!(plus_f64_2, plus_f64_3);
@@ -520,16 +533,16 @@ mod test {
             EvaluatorFactory::binary_create(LogicalType::Integer, BinaryOperator::Minus)?;
         let minus_i32_1 = minus_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Null);
+            .binary_eval(&DataValue::Null, &DataValue::Null)?;
         let minus_i32_2 = minus_evaluator
             .0
-            .binary_eval(&DataValue::Int32(1), &DataValue::Null);
+            .binary_eval(&DataValue::Int32(1), &DataValue::Null)?;
         let minus_i32_3 = minus_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Int32(1));
+            .binary_eval(&DataValue::Null, &DataValue::Int32(1))?;
         let minus_i32_4 = minus_evaluator
             .0
-            .binary_eval(&DataValue::Int32(1), &DataValue::Int32(1));
+            .binary_eval(&DataValue::Int32(1), &DataValue::Int32(1))?;
 
         assert_eq!(minus_i32_1, minus_i32_2);
         assert_eq!(minus_i32_2, minus_i32_3);
@@ -539,16 +552,16 @@ mod test {
             EvaluatorFactory::binary_create(LogicalType::Bigint, BinaryOperator::Minus)?;
         let minus_i64_1 = minus_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Null);
+            .binary_eval(&DataValue::Null, &DataValue::Null)?;
         let minus_i64_2 = minus_evaluator
             .0
-            .binary_eval(&DataValue::Int64(1), &DataValue::Null);
+            .binary_eval(&DataValue::Int64(1), &DataValue::Null)?;
         let minus_i64_3 = minus_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Int64(1));
+            .binary_eval(&DataValue::Null, &DataValue::Int64(1))?;
         let minus_i64_4 = minus_evaluator
             .0
-            .binary_eval(&DataValue::Int64(1), &DataValue::Int64(1));
+            .binary_eval(&DataValue::Int64(1), &DataValue::Int64(1))?;
 
         assert_eq!(minus_i64_1, minus_i64_2);
         assert_eq!(minus_i64_2, minus_i64_3);
@@ -558,17 +571,17 @@ mod test {
             EvaluatorFactory::binary_create(LogicalType::Double, BinaryOperator::Minus)?;
         let minus_f64_1 = minus_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Null);
+            .binary_eval(&DataValue::Null, &DataValue::Null)?;
         let minus_f64_2 = minus_evaluator
             .0
-            .binary_eval(&DataValue::Float64(OrderedFloat(1.0)), &DataValue::Null);
+            .binary_eval(&DataValue::Float64(OrderedFloat(1.0)), &DataValue::Null)?;
         let minus_f64_3 = minus_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Float64(OrderedFloat(1.0)));
+            .binary_eval(&DataValue::Null, &DataValue::Float64(OrderedFloat(1.0)))?;
         let minus_f64_4 = minus_evaluator.0.binary_eval(
             &DataValue::Float64(OrderedFloat(1.0)),
             &DataValue::Float64(OrderedFloat(1.0)),
-        );
+        )?;
 
         assert_eq!(minus_f64_1, minus_f64_2);
         assert_eq!(minus_f64_2, minus_f64_3);
@@ -583,16 +596,16 @@ mod test {
             EvaluatorFactory::binary_create(LogicalType::Integer, BinaryOperator::Multiply)?;
         let multiply_i32_1 = multiply_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Null);
+            .binary_eval(&DataValue::Null, &DataValue::Null)?;
         let multiply_i32_2 = multiply_evaluator
             .0
-            .binary_eval(&DataValue::Int32(1), &DataValue::Null);
+            .binary_eval(&DataValue::Int32(1), &DataValue::Null)?;
         let multiply_i32_3 = multiply_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Int32(1));
+            .binary_eval(&DataValue::Null, &DataValue::Int32(1))?;
         let multiply_i32_4 = multiply_evaluator
             .0
-            .binary_eval(&DataValue::Int32(1), &DataValue::Int32(1));
+            .binary_eval(&DataValue::Int32(1), &DataValue::Int32(1))?;
 
         assert_eq!(multiply_i32_1, multiply_i32_2);
         assert_eq!(multiply_i32_2, multiply_i32_3);
@@ -602,16 +615,16 @@ mod test {
             EvaluatorFactory::binary_create(LogicalType::Bigint, BinaryOperator::Multiply)?;
         let multiply_i64_1 = multiply_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Null);
+            .binary_eval(&DataValue::Null, &DataValue::Null)?;
         let multiply_i64_2 = multiply_evaluator
             .0
-            .binary_eval(&DataValue::Int64(1), &DataValue::Null);
+            .binary_eval(&DataValue::Int64(1), &DataValue::Null)?;
         let multiply_i64_3 = multiply_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Int64(1));
+            .binary_eval(&DataValue::Null, &DataValue::Int64(1))?;
         let multiply_i64_4 = multiply_evaluator
             .0
-            .binary_eval(&DataValue::Int64(1), &DataValue::Int64(1));
+            .binary_eval(&DataValue::Int64(1), &DataValue::Int64(1))?;
 
         assert_eq!(multiply_i64_1, multiply_i64_2);
         assert_eq!(multiply_i64_2, multiply_i64_3);
@@ -621,17 +634,17 @@ mod test {
             EvaluatorFactory::binary_create(LogicalType::Double, BinaryOperator::Multiply)?;
         let multiply_f64_1 = multiply_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Null);
+            .binary_eval(&DataValue::Null, &DataValue::Null)?;
         let multiply_f64_2 = multiply_evaluator
             .0
-            .binary_eval(&DataValue::Float64(OrderedFloat(1.0)), &DataValue::Null);
+            .binary_eval(&DataValue::Float64(OrderedFloat(1.0)), &DataValue::Null)?;
         let multiply_f64_3 = multiply_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Float64(OrderedFloat(1.0)));
+            .binary_eval(&DataValue::Null, &DataValue::Float64(OrderedFloat(1.0)))?;
         let multiply_f64_4 = multiply_evaluator.0.binary_eval(
             &DataValue::Float64(OrderedFloat(1.0)),
             &DataValue::Float64(OrderedFloat(1.0)),
-        );
+        )?;
 
         assert_eq!(multiply_f64_1, multiply_f64_2);
         assert_eq!(multiply_f64_2, multiply_f64_3);
@@ -646,16 +659,16 @@ mod test {
             EvaluatorFactory::binary_create(LogicalType::Integer, BinaryOperator::Divide)?;
         let divide_i32_1 = divide_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Null);
+            .binary_eval(&DataValue::Null, &DataValue::Null)?;
         let divide_i32_2 = divide_evaluator
             .0
-            .binary_eval(&DataValue::Int32(1), &DataValue::Null);
+            .binary_eval(&DataValue::Int32(1), &DataValue::Null)?;
         let divide_i32_3 = divide_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Int32(1));
+            .binary_eval(&DataValue::Null, &DataValue::Int32(1))?;
         let divide_i32_4 = divide_evaluator
             .0
-            .binary_eval(&DataValue::Int32(1), &DataValue::Int32(1));
+            .binary_eval(&DataValue::Int32(1), &DataValue::Int32(1))?;
 
         assert_eq!(divide_i32_1, divide_i32_2);
         assert_eq!(divide_i32_2, divide_i32_3);
@@ -665,16 +678,16 @@ mod test {
             EvaluatorFactory::binary_create(LogicalType::Bigint, BinaryOperator::Divide)?;
         let divide_i64_1 = divide_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Null);
+            .binary_eval(&DataValue::Null, &DataValue::Null)?;
         let divide_i64_2 = divide_evaluator
             .0
-            .binary_eval(&DataValue::Int64(1), &DataValue::Null);
+            .binary_eval(&DataValue::Int64(1), &DataValue::Null)?;
         let divide_i64_3 = divide_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Int64(1));
+            .binary_eval(&DataValue::Null, &DataValue::Int64(1))?;
         let divide_i64_4 = divide_evaluator
             .0
-            .binary_eval(&DataValue::Int64(1), &DataValue::Int64(1));
+            .binary_eval(&DataValue::Int64(1), &DataValue::Int64(1))?;
 
         assert_eq!(divide_i64_1, divide_i64_2);
         assert_eq!(divide_i64_2, divide_i64_3);
@@ -684,17 +697,17 @@ mod test {
             EvaluatorFactory::binary_create(LogicalType::Double, BinaryOperator::Divide)?;
         let divide_f64_1 = divide_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Null);
+            .binary_eval(&DataValue::Null, &DataValue::Null)?;
         let divide_f64_2 = divide_evaluator
             .0
-            .binary_eval(&DataValue::Float64(OrderedFloat(1.0)), &DataValue::Null);
+            .binary_eval(&DataValue::Float64(OrderedFloat(1.0)), &DataValue::Null)?;
         let divide_f64_3 = divide_evaluator
             .0
-            .binary_eval(&DataValue::Null, &DataValue::Float64(OrderedFloat(1.0)));
+            .binary_eval(&DataValue::Null, &DataValue::Float64(OrderedFloat(1.0)))?;
         let divide_f64_4 = divide_evaluator.0.binary_eval(
             &DataValue::Float64(OrderedFloat(1.0)),
             &DataValue::Float64(OrderedFloat(1.0)),
-        );
+        )?;
 
         assert_eq!(divide_f64_1, divide_f64_2);
         assert_eq!(divide_f64_2, divide_f64_3);
@@ -709,14 +722,14 @@ mod test {
         assert_eq!(
             evaluator
                 .0
-                .binary_eval(&DataValue::Int32(1), &DataValue::Int32(0),),
+                .binary_eval(&DataValue::Int32(1), &DataValue::Int32(0),)?,
             DataValue::Boolean(true)
         );
         let evaluator = EvaluatorFactory::binary_create(LogicalType::Integer, BinaryOperator::Lt)?;
         assert_eq!(
             evaluator
                 .0
-                .binary_eval(&DataValue::Int32(1), &DataValue::Int32(0),),
+                .binary_eval(&DataValue::Int32(1), &DataValue::Int32(0),)?,
             DataValue::Boolean(false)
         );
         let evaluator =
@@ -724,7 +737,7 @@ mod test {
         assert_eq!(
             evaluator
                 .0
-                .binary_eval(&DataValue::Int32(1), &DataValue::Int32(1),),
+                .binary_eval(&DataValue::Int32(1), &DataValue::Int32(1),)?,
             DataValue::Boolean(true)
         );
         let evaluator =
@@ -732,7 +745,7 @@ mod test {
         assert_eq!(
             evaluator
                 .0
-                .binary_eval(&DataValue::Int32(1), &DataValue::Int32(1),),
+                .binary_eval(&DataValue::Int32(1), &DataValue::Int32(1),)?,
             DataValue::Boolean(true)
         );
         let evaluator =
@@ -740,28 +753,28 @@ mod test {
         assert_eq!(
             evaluator
                 .0
-                .binary_eval(&DataValue::Int32(1), &DataValue::Int32(1),),
+                .binary_eval(&DataValue::Int32(1), &DataValue::Int32(1),)?,
             DataValue::Boolean(false)
         );
         let evaluator = EvaluatorFactory::binary_create(LogicalType::Integer, BinaryOperator::Eq)?;
         assert_eq!(
             evaluator
                 .0
-                .binary_eval(&DataValue::Int32(1), &DataValue::Int32(1),),
+                .binary_eval(&DataValue::Int32(1), &DataValue::Int32(1),)?,
             DataValue::Boolean(true)
         );
         let evaluator = EvaluatorFactory::binary_create(LogicalType::Integer, BinaryOperator::Gt)?;
         assert_eq!(
             evaluator
                 .0
-                .binary_eval(&DataValue::Null, &DataValue::Int32(0),),
+                .binary_eval(&DataValue::Null, &DataValue::Int32(0),)?,
             DataValue::Null
         );
         let evaluator = EvaluatorFactory::binary_create(LogicalType::Integer, BinaryOperator::Lt)?;
         assert_eq!(
             evaluator
                 .0
-                .binary_eval(&DataValue::Null, &DataValue::Int32(0),),
+                .binary_eval(&DataValue::Null, &DataValue::Int32(0),)?,
             DataValue::Null
         );
         let evaluator =
@@ -769,7 +782,7 @@ mod test {
         assert_eq!(
             evaluator
                 .0
-                .binary_eval(&DataValue::Null, &DataValue::Int32(1),),
+                .binary_eval(&DataValue::Null, &DataValue::Int32(1),)?,
             DataValue::Null
         );
         let evaluator =
@@ -777,7 +790,7 @@ mod test {
         assert_eq!(
             evaluator
                 .0
-                .binary_eval(&DataValue::Null, &DataValue::Int32(1),),
+                .binary_eval(&DataValue::Null, &DataValue::Int32(1),)?,
             DataValue::Null
         );
         let evaluator =
@@ -785,19 +798,21 @@ mod test {
         assert_eq!(
             evaluator
                 .0
-                .binary_eval(&DataValue::Null, &DataValue::Int32(1),),
+                .binary_eval(&DataValue::Null, &DataValue::Int32(1),)?,
             DataValue::Null
         );
         let evaluator = EvaluatorFactory::binary_create(LogicalType::Integer, BinaryOperator::Eq)?;
         assert_eq!(
             evaluator
                 .0
-                .binary_eval(&DataValue::Null, &DataValue::Int32(1),),
+                .binary_eval(&DataValue::Null, &DataValue::Int32(1),)?,
             DataValue::Null
         );
         let evaluator = EvaluatorFactory::binary_create(LogicalType::Integer, BinaryOperator::Eq)?;
         assert_eq!(
-            evaluator.0.binary_eval(&DataValue::Null, &DataValue::Null,),
+            evaluator
+                .0
+                .binary_eval(&DataValue::Null, &DataValue::Null,)?,
             DataValue::Null
         );
 
@@ -810,50 +825,50 @@ mod test {
         assert_eq!(
             evaluator
                 .0
-                .binary_eval(&DataValue::Boolean(true), &DataValue::Boolean(true),),
+                .binary_eval(&DataValue::Boolean(true), &DataValue::Boolean(true),)?,
             DataValue::Boolean(true)
         );
         assert_eq!(
             evaluator
                 .0
-                .binary_eval(&DataValue::Boolean(false), &DataValue::Boolean(true),),
+                .binary_eval(&DataValue::Boolean(false), &DataValue::Boolean(true),)?,
             DataValue::Boolean(false)
         );
         assert_eq!(
             evaluator
                 .0
-                .binary_eval(&DataValue::Boolean(false), &DataValue::Boolean(false),),
+                .binary_eval(&DataValue::Boolean(false), &DataValue::Boolean(false),)?,
             DataValue::Boolean(false)
         );
         assert_eq!(
             evaluator
                 .0
-                .binary_eval(&DataValue::Null, &DataValue::Boolean(true),),
+                .binary_eval(&DataValue::Null, &DataValue::Boolean(true),)?,
             DataValue::Null
         );
         let evaluator = EvaluatorFactory::binary_create(LogicalType::Boolean, BinaryOperator::Or)?;
         assert_eq!(
             evaluator
                 .0
-                .binary_eval(&DataValue::Boolean(true), &DataValue::Boolean(true),),
+                .binary_eval(&DataValue::Boolean(true), &DataValue::Boolean(true),)?,
             DataValue::Boolean(true)
         );
         assert_eq!(
             evaluator
                 .0
-                .binary_eval(&DataValue::Boolean(false), &DataValue::Boolean(true),),
+                .binary_eval(&DataValue::Boolean(false), &DataValue::Boolean(true),)?,
             DataValue::Boolean(true)
         );
         assert_eq!(
             evaluator
                 .0
-                .binary_eval(&DataValue::Boolean(false), &DataValue::Boolean(false),),
+                .binary_eval(&DataValue::Boolean(false), &DataValue::Boolean(false),)?,
             DataValue::Boolean(false)
         );
         assert_eq!(
             evaluator
                 .0
-                .binary_eval(&DataValue::Null, &DataValue::Boolean(true),),
+                .binary_eval(&DataValue::Null, &DataValue::Boolean(true),)?,
             DataValue::Boolean(true)
         );
 
@@ -878,7 +893,7 @@ mod test {
                     ty: Utf8Type::Variable(None),
                     unit: CharLengthUnits::Characters,
                 },
-            ),
+            )?,
             DataValue::Boolean(false)
         );
         let evaluator = EvaluatorFactory::binary_create(
@@ -897,7 +912,7 @@ mod test {
                     ty: Utf8Type::Variable(None),
                     unit: CharLengthUnits::Characters,
                 },
-            ),
+            )?,
             DataValue::Boolean(true)
         );
         let evaluator = EvaluatorFactory::binary_create(
@@ -916,7 +931,7 @@ mod test {
                     ty: Utf8Type::Variable(None),
                     unit: CharLengthUnits::Characters,
                 },
-            ),
+            )?,
             DataValue::Boolean(true)
         );
         let evaluator = EvaluatorFactory::binary_create(
@@ -935,7 +950,7 @@ mod test {
                     ty: Utf8Type::Variable(None),
                     unit: CharLengthUnits::Characters,
                 },
-            ),
+            )?,
             DataValue::Boolean(true)
         );
         let evaluator = EvaluatorFactory::binary_create(
@@ -954,7 +969,7 @@ mod test {
                     ty: Utf8Type::Variable(None),
                     unit: CharLengthUnits::Characters,
                 },
-            ),
+            )?,
             DataValue::Boolean(false)
         );
         let evaluator = EvaluatorFactory::binary_create(
@@ -973,7 +988,7 @@ mod test {
                     ty: Utf8Type::Variable(None),
                     unit: CharLengthUnits::Characters,
                 },
-            ),
+            )?,
             DataValue::Boolean(true)
         );
         let evaluator = EvaluatorFactory::binary_create(
@@ -988,7 +1003,7 @@ mod test {
                     ty: Utf8Type::Variable(None),
                     unit: CharLengthUnits::Characters,
                 },
-            ),
+            )?,
             DataValue::Null
         );
         let evaluator = EvaluatorFactory::binary_create(
@@ -1003,7 +1018,7 @@ mod test {
                     ty: Utf8Type::Variable(None),
                     unit: CharLengthUnits::Characters,
                 },
-            ),
+            )?,
             DataValue::Null
         );
         let evaluator = EvaluatorFactory::binary_create(
@@ -1018,7 +1033,7 @@ mod test {
                     ty: Utf8Type::Variable(None),
                     unit: CharLengthUnits::Characters,
                 },
-            ),
+            )?,
             DataValue::Null
         );
         let evaluator = EvaluatorFactory::binary_create(
@@ -1033,7 +1048,7 @@ mod test {
                     ty: Utf8Type::Variable(None),
                     unit: CharLengthUnits::Characters,
                 },
-            ),
+            )?,
             DataValue::Null
         );
         let evaluator = EvaluatorFactory::binary_create(
@@ -1048,7 +1063,7 @@ mod test {
                     ty: Utf8Type::Variable(None),
                     unit: CharLengthUnits::Characters,
                 },
-            ),
+            )?,
             DataValue::Null
         );
 
@@ -1058,155 +1073,155 @@ mod test {
     #[test]
     fn test_binary_op_time32_and_time64() -> Result<(), DatabaseError> {
         let evaluator_time32 =
-            EvaluatorFactory::binary_create(LogicalType::Time(None, false), BinaryOperator::Plus)?;
+            EvaluatorFactory::binary_create(LogicalType::Time(None), BinaryOperator::Plus)?;
         assert_eq!(
             evaluator_time32.0.binary_eval(
-                &DataValue::Time32(4190119896, 3, false),
-                &DataValue::Time32(2621204256, 4, false),
-            ),
-            DataValue::Time32(2618593017, 4, false)
+                &DataValue::Time32(4190119896, 3),
+                &DataValue::Time32(2621204256, 4),
+            )?,
+            DataValue::Time32(2618593017, 4)
         );
         assert_eq!(
             evaluator_time32.0.binary_eval(
-                &DataValue::Time32(4190175696, 3, false),
-                &DataValue::Time32(2621224256, 4, false),
-            ),
+                &DataValue::Time32(4190175696, 3),
+                &DataValue::Time32(2621224256, 4),
+            )?,
             DataValue::Null
         );
 
         let evaluator_time32 =
-            EvaluatorFactory::binary_create(LogicalType::Time(None, false), BinaryOperator::Minus)?;
+            EvaluatorFactory::binary_create(LogicalType::Time(None), BinaryOperator::Minus)?;
         assert_eq!(
             evaluator_time32.0.binary_eval(
-                &DataValue::Time32(4190119896, 3, false),
-                &DataValue::Time32(2621204256, 4, false),
-            ),
+                &DataValue::Time32(4190119896, 3),
+                &DataValue::Time32(2621204256, 4),
+            )?,
             DataValue::Null
         );
         assert_eq!(
             evaluator_time32.0.binary_eval(
-                &DataValue::Time32(2621204256, 4, false),
-                &DataValue::Time32(4190119896, 3, false),
-            ),
-            DataValue::Time32(2375496, 4, false)
+                &DataValue::Time32(2621204256, 4),
+                &DataValue::Time32(4190119896, 3),
+            )?,
+            DataValue::Time32(2375496, 4)
         );
 
         let evaluator_time32 =
-            EvaluatorFactory::binary_create(LogicalType::Time(None, false), BinaryOperator::Gt)?;
+            EvaluatorFactory::binary_create(LogicalType::Time(None), BinaryOperator::Gt)?;
         let evaluator_time64 = EvaluatorFactory::binary_create(
             LogicalType::TimeStamp(None, false),
             BinaryOperator::Gt,
         )?;
         assert_eq!(
             evaluator_time32.0.binary_eval(
-                &DataValue::Time32(2621204256, 4, false),
-                &DataValue::Time32(4190119896, 3, false),
-            ),
+                &DataValue::Time32(2621204256, 4),
+                &DataValue::Time32(4190119896, 3),
+            )?,
             DataValue::Boolean(true)
         );
         assert_eq!(
             evaluator_time32.0.binary_eval(
-                &DataValue::Time32(4190119896, 3, false),
-                &DataValue::Time32(2621204256, 4, false),
-            ),
+                &DataValue::Time32(4190119896, 3),
+                &DataValue::Time32(2621204256, 4),
+            )?,
             DataValue::Boolean(false)
         );
         assert_eq!(
             evaluator_time64.0.binary_eval(
                 &DataValue::Time64(1736055775154814, 6, false),
                 &DataValue::Time64(1738734177256, 3, false),
-            ),
+            )?,
             DataValue::Boolean(false)
         );
         assert_eq!(
             evaluator_time64.0.binary_eval(
                 &DataValue::Time64(1738734177256, 3, false),
                 &DataValue::Time64(1736055775154814, 6, false),
-            ),
+            )?,
             DataValue::Boolean(true)
         );
 
         let evaluator_time32 =
-            EvaluatorFactory::binary_create(LogicalType::Time(None, false), BinaryOperator::GtEq)?;
+            EvaluatorFactory::binary_create(LogicalType::Time(None), BinaryOperator::GtEq)?;
         let evaluator_time64 = EvaluatorFactory::binary_create(
             LogicalType::TimeStamp(None, false),
             BinaryOperator::GtEq,
         )?;
         assert_eq!(
             evaluator_time32.0.binary_eval(
-                &DataValue::Time32(2621204256, 4, false),
-                &DataValue::Time32(4190119896, 3, false),
-            ),
+                &DataValue::Time32(2621204256, 4),
+                &DataValue::Time32(4190119896, 3),
+            )?,
             DataValue::Boolean(true)
         );
         assert_eq!(
             evaluator_time32.0.binary_eval(
-                &DataValue::Time32(4190119896, 3, false),
-                &DataValue::Time32(2621204256, 4, false),
-            ),
+                &DataValue::Time32(4190119896, 3),
+                &DataValue::Time32(2621204256, 4),
+            )?,
             DataValue::Boolean(false)
         );
         assert_eq!(
             evaluator_time32.0.binary_eval(
-                &DataValue::Time32(4190119896, 3, false),
-                &DataValue::Time32(2618828760, 4, false),
-            ),
+                &DataValue::Time32(4190119896, 3),
+                &DataValue::Time32(2618828760, 4),
+            )?,
             DataValue::Boolean(true)
         );
         assert_eq!(
             evaluator_time64.0.binary_eval(
                 &DataValue::Time64(1736055775154814, 6, false),
                 &DataValue::Time64(1738734177256, 3, false),
-            ),
+            )?,
             DataValue::Boolean(false)
         );
         assert_eq!(
             evaluator_time64.0.binary_eval(
                 &DataValue::Time64(1738734177256, 3, false),
                 &DataValue::Time64(1736055775154814, 6, false),
-            ),
+            )?,
             DataValue::Boolean(true)
         );
         assert_eq!(
             evaluator_time64.0.binary_eval(
                 &DataValue::Time64(1738734177256, 3, false),
                 &DataValue::Time64(1738734177256000, 6, false),
-            ),
+            )?,
             DataValue::Boolean(true)
         );
 
         let evaluator_time32 =
-            EvaluatorFactory::binary_create(LogicalType::Time(None, false), BinaryOperator::Eq)?;
+            EvaluatorFactory::binary_create(LogicalType::Time(None), BinaryOperator::Eq)?;
         let evaluator_time64 = EvaluatorFactory::binary_create(
             LogicalType::TimeStamp(None, false),
             BinaryOperator::Eq,
         )?;
         assert_eq!(
             evaluator_time32.0.binary_eval(
-                &DataValue::Time32(4190119896, 3, false),
-                &DataValue::Time32(2621204256, 4, false),
-            ),
+                &DataValue::Time32(4190119896, 3),
+                &DataValue::Time32(2621204256, 4),
+            )?,
             DataValue::Boolean(false)
         );
         assert_eq!(
             evaluator_time32.0.binary_eval(
-                &DataValue::Time32(4190119896, 3, false),
-                &DataValue::Time32(2618828760, 4, false),
-            ),
+                &DataValue::Time32(4190119896, 3),
+                &DataValue::Time32(2618828760, 4),
+            )?,
             DataValue::Boolean(true)
         );
         assert_eq!(
             evaluator_time64.0.binary_eval(
                 &DataValue::Time64(1738734177256, 3, false),
                 &DataValue::Time64(1736055775154814, 6, false),
-            ),
+            )?,
             DataValue::Boolean(false)
         );
         assert_eq!(
             evaluator_time64.0.binary_eval(
                 &DataValue::Time64(1738734177256, 3, false),
                 &DataValue::Time64(1738734177256000, 6, false),
-            ),
+            )?,
             DataValue::Boolean(true)
         );
 

@@ -215,7 +215,7 @@ fn is_under(
                 BinaryOperator::LtEq
             },
         )?;
-        let value = evaluator.0.binary_eval(value, target);
+        let value = evaluator.0.binary_eval(value, target)?;
         Ok::<bool, DatabaseError>(matches!(value, DataValue::Boolean(true)))
     };
 
@@ -240,7 +240,7 @@ fn is_above(
                 BinaryOperator::Gt
             },
         )?;
-        let value = evaluator.0.binary_eval(value, target);
+        let value = evaluator.0.binary_eval(value, target)?;
         Ok::<bool, DatabaseError>(matches!(value, DataValue::Boolean(true)))
     };
     Ok(match target {
@@ -331,7 +331,7 @@ impl Histogram {
                 },
                 LogicalType::Date
                 | LogicalType::DateTime
-                | LogicalType::Time(_, _)
+                | LogicalType::Time(_)
                 | LogicalType::TimeStamp(_, _) => match value {
                     DataValue::Date32(value) => DataValue::Int32(*value)
                         .cast(&LogicalType::Double)?

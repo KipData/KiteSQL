@@ -76,11 +76,11 @@ impl ScalarExpression {
                 let left = left_expr.eval(tuple)?;
                 let right = right_expr.eval(tuple)?;
 
-                Ok(evaluator
+                evaluator
                     .as_ref()
                     .ok_or(DatabaseError::EvaluatorNotFound)?
                     .0
-                    .binary_eval(&left, &right))
+                    .binary_eval(&left, &right)
             }
             ScalarExpression::IsNull { expr, negated } => {
                 let mut is_null = expr.eval(tuple)?.is_null();
@@ -340,7 +340,7 @@ impl ScalarExpression {
                         }
                         evaluator
                             .0
-                            .binary_eval(operand_value, &when_value)
+                            .binary_eval(operand_value, &when_value)?
                             .is_true()?
                     } else {
                         when_value.is_true()?

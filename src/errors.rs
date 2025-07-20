@@ -19,8 +19,8 @@ pub enum DatabaseError {
     ),
     #[error("cache size overflow")]
     CacheSizeOverFlow,
-    #[error("cast fail")]
-    CastFail,
+    #[error("cast fail: {from} -> {to}")]
+    CastFail { from: LogicalType, to: LogicalType },
     #[error("channel close")]
     ChannelClose,
     #[error("columns empty")]
@@ -89,8 +89,10 @@ pub enum DatabaseError {
     ParametersNotFound(String),
     #[error("no transaction begin")]
     NoTransactionBegin,
-    #[error("cannot be Null")]
+    #[error("cannot be null")]
     NotNull,
+    #[error("over flow")]
+    OverFlow,
     #[error("parser bool: {0}")]
     ParseBool(
         #[source]
