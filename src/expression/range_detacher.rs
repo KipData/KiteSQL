@@ -450,6 +450,7 @@ impl<'a> RangeDetacher<'a> {
         }
     }
 
+    #[allow(unreachable_code)]
     fn extract_merge_ranges(
         op: BinaryOperator,
         mut binary: Option<Range>,
@@ -562,9 +563,12 @@ impl<'a> RangeDetacher<'a> {
                     );
                 }
                 (None, _) => break,
-                w => {
-                    println!("{:#?}", w);
-                    unreachable!()
+                _ => {
+                    #[cfg(debug_assertions)]
+                    {
+                        unreachable!();
+                    }
+                    return vec![];
                 }
             }
         }
