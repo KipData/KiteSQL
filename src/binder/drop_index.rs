@@ -14,7 +14,10 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         name: &ObjectName,
         if_exists: &bool,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name = name.0.first().ok_or(DatabaseError::InvalidIndex)?;
+        let table_name = name
+            .0
+            .first()
+            .ok_or(DatabaseError::InvalidTable(name.to_string()))?;
         let index_name = name.0.get(1).ok_or(DatabaseError::InvalidIndex)?;
 
         let table_name = Arc::new(lower_ident(table_name));
