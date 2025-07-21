@@ -4,6 +4,7 @@ pub(crate) mod table_codec;
 use crate::catalog::view::View;
 use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog, TableMeta, TableName};
 use crate::errors::DatabaseError;
+use crate::execution::dml::analyze::Analyze;
 use crate::expression::range_detacher::Range;
 use crate::optimizer::core::statistics_meta::{StatisticMetaLoader, StatisticsMeta};
 use crate::serdes::ReferenceTables;
@@ -16,10 +17,10 @@ use crate::utils::lru::SharedLruCache;
 use itertools::Itertools;
 use std::collections::{BTreeMap, Bound};
 use std::io::Cursor;
-use std::mem;
 use std::ops::SubAssign;
 use std::sync::Arc;
 use std::vec::IntoIter;
+use std::{fs, mem};
 use ulid::Generator;
 
 pub(crate) type StatisticsMetaCache = SharedLruCache<(TableName, IndexId), StatisticsMeta>;
@@ -302,7 +303,7 @@ pub trait Transaction: Sized {
                 self.remove(&index_meta_key)?;
 
                 let (index_min, index_max) =
-                    unsafe { &*self.table_codec() }.index_bound(table_name, &index_meta.id)?;
+                    unsafe { &*self.table_codec() }.index_bound(table_name, index_meta.id)?;
                 self._drop_data(index_min, index_max)?;
 
                 self.remove_table_meta(meta_cache, table_name, index_meta.id)?;
@@ -410,13 +411,55 @@ pub trait Transaction: Sized {
         Ok(())
     }
 
+    fn drop_index(
+        &mut self,
+        table_cache: &TableCache,
+        table_name: TableName,
+        index_name: &str,
+        if_exists: bool,
+    ) -> Result<(), DatabaseError> {
+        let table = self
+            .table(table_cache, table_name.clone())?
+            .ok_or(DatabaseError::TableNotFound)?;
+        let Some(index_meta) = table.indexes.iter().find(|index| index.name == index_name) else {
+            if if_exists {
+                return Ok(());
+            } else {
+                return Err(DatabaseError::TableNotFound);
+            }
+        };
+        match index_meta.ty {
+            IndexType::PrimaryKey { .. } | IndexType::Unique => {
+                return Err(DatabaseError::InvalidIndex)
+            }
+            IndexType::Normal | IndexType::Composite => (),
+        }
+
+        let index_id = index_meta.id;
+        let index_meta_key =
+            unsafe { &*self.table_codec() }.encode_index_meta_key(table_name.as_str(), index_id)?;
+        self.remove(&index_meta_key)?;
+
+        let (index_min, index_max) =
+            unsafe { &*self.table_codec() }.index_bound(table_name.as_str(), index_id)?;
+        self._drop_data(index_min, index_max)?;
+
+        let statistics_min_key = unsafe { &*self.table_codec() }
+            .encode_statistics_path_key(table_name.as_str(), index_id);
+        self.remove(&statistics_min_key)?;
+
+        table_cache.remove(&table_name);
+        //  When dropping Index, the statistics file corresponding to the Index is not cleaned up and is processed uniformly by the Analyze Table.
+
+        Ok(())
+    }
+
     fn drop_table(
         &mut self,
         table_cache: &TableCache,
         table_name: TableName,
         if_exists: bool,
     ) -> Result<(), DatabaseError> {
-        self.drop_name_hash(&table_name)?;
         if self.table(table_cache, table_name.clone())?.is_none() {
             if if_exists {
                 return Ok(());
@@ -424,6 +467,7 @@ pub trait Transaction: Sized {
                 return Err(DatabaseError::TableNotFound);
             }
         }
+        self.drop_name_hash(&table_name)?;
         self.drop_data(table_name.as_str())?;
 
         let (column_min, column_max) =
@@ -436,6 +480,8 @@ pub trait Transaction: Sized {
 
         self.remove(&unsafe { &*self.table_codec() }.encode_root_table_key(table_name.as_str()))?;
         table_cache.remove(&table_name);
+
+        let _ = fs::remove_dir(Analyze::build_statistics_meta_path(&table_name));
 
         Ok(())
     }
@@ -1143,7 +1189,7 @@ impl<T: Transaction> Iter for IndexIter<'_, T> {
                                     unsafe { &*self.params.table_codec() }.tuple_bound(table_name)
                                 } else {
                                     unsafe { &*self.params.table_codec() }
-                                        .index_bound(table_name, &index_meta.id)?
+                                        .index_bound(table_name, index_meta.id)?
                                 };
                             let mut encode_min = bound_encode(min, false)?;
                             check_bound(&mut encode_min, bound_min);
@@ -1548,6 +1594,32 @@ mod test {
             dbg!(value);
             assert!(iter.try_next()?.is_none());
         }
+        match transaction.drop_index(&table_cache, Arc::new("t1".to_string()), "pk_index", false) {
+            Err(DatabaseError::InvalidIndex) => (),
+            _ => unreachable!(),
+        }
+        transaction.drop_index(&table_cache, Arc::new("t1".to_string()), "i1", false)?;
+        {
+            let table = transaction
+                .table(&table_cache, Arc::new("t1".to_string()))?
+                .unwrap();
+            let i2_meta = table.indexes[1].clone();
+            assert_eq!(i2_meta.id, 2);
+            assert_eq!(i2_meta.column_ids, vec![c3_column_id, c2_column_id]);
+            assert_eq!(i2_meta.table_name, Arc::new("t1".to_string()));
+            assert_eq!(i2_meta.pk_ty, LogicalType::Integer);
+            assert_eq!(i2_meta.name, "i2".to_string());
+            assert_eq!(i2_meta.ty, IndexType::Composite);
+
+            let (min, max) = table_codec.index_meta_bound("t1");
+            let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+
+            let (_, value) = iter.try_next()?.unwrap();
+            dbg!(value);
+            let (_, value) = iter.try_next()?.unwrap();
+            dbg!(value);
+            assert!(iter.try_next()?.is_none());
+        }
 
         Ok(())
     }
@@ -1638,7 +1710,7 @@ mod test {
             assert_eq!(index_iter.next_tuple()?.unwrap(), tuples[2]);
             assert_eq!(index_iter.next_tuple()?.unwrap(), tuples[1]);
 
-            let (min, max) = table_codec.index_bound("t1", &1)?;
+            let (min, max) = table_codec.index_bound("t1", 1)?;
             let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
 
             let (_, value) = iter.try_next()?.unwrap();
@@ -1656,7 +1728,7 @@ mod test {
         assert_eq!(index_iter.next_tuple()?.unwrap(), tuples[2]);
         assert_eq!(index_iter.next_tuple()?.unwrap(), tuples[1]);
 
-        let (min, max) = table_codec.index_bound("t1", &1)?;
+        let (min, max) = table_codec.index_bound("t1", 1)?;
         let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
 
         let (_, value) = iter.try_next()?.unwrap();
