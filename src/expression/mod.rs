@@ -343,138 +343,34 @@ impl ScalarExpression {
     }
 
     pub fn referenced_columns(&self, only_column_ref: bool) -> Vec<ColumnRef> {
-        fn columns_collect(
-            expr: &ScalarExpression,
-            vec: &mut Vec<ColumnRef>,
+        struct ColumnCollector {
+            columns: Vec<ColumnRef>,
             only_column_ref: bool,
-        ) {
-            // When `ScalarExpression` is a complex type, it itself is also a special Column
-            if !only_column_ref {
-                vec.push(expr.output_column());
+        }
+
+        impl<'a> Visitor<'a> for ColumnCollector {
+            fn visit(&mut self, expr: &ScalarExpression) -> Result<(), DatabaseError> {
+                if !self.only_column_ref {
+                    self.columns.push(expr.output_column());
+                }
+                    walk_expr(self, expr)
             }
-            match expr {
-                ScalarExpression::ColumnRef(col) => {
-                    vec.push(col.clone());
+
+            fn visit_column_ref(&mut self, col: &ColumnRef) -> Result<(), DatabaseError> {
+                if self.only_column_ref {
+                    self.columns.push(col.clone());
+
                 }
-                ScalarExpression::Alias { expr, .. } => {
-                    columns_collect(expr, vec, only_column_ref);
-                }
-                ScalarExpression::TypeCast { expr, .. } => {
-                    columns_collect(expr, vec, only_column_ref)
-                }
-                ScalarExpression::IsNull { expr, .. } => {
-                    columns_collect(expr, vec, only_column_ref)
-                }
-                ScalarExpression::Unary { expr, .. } => columns_collect(expr, vec, only_column_ref),
-                ScalarExpression::Binary {
-                    left_expr,
-                    right_expr,
-                    ..
-                } => {
-                    columns_collect(left_expr, vec, only_column_ref);
-                    columns_collect(right_expr, vec, only_column_ref);
-                }
-                ScalarExpression::AggCall { args, .. }
-                | ScalarExpression::ScalaFunction(ScalarFunction { args, .. })
-                | ScalarExpression::TableFunction(TableFunction { args, .. })
-                | ScalarExpression::Tuple(args)
-                | ScalarExpression::Coalesce { exprs: args, .. } => {
-                    for expr in args {
-                        columns_collect(expr, vec, only_column_ref)
-                    }
-                }
-                ScalarExpression::In { expr, args, .. } => {
-                    columns_collect(expr, vec, only_column_ref);
-                    for arg in args {
-                        columns_collect(arg, vec, only_column_ref)
-                    }
-                }
-                ScalarExpression::Between {
-                    expr,
-                    left_expr,
-                    right_expr,
-                    ..
-                } => {
-                    columns_collect(expr, vec, only_column_ref);
-                    columns_collect(left_expr, vec, only_column_ref);
-                    columns_collect(right_expr, vec, only_column_ref);
-                }
-                ScalarExpression::SubString {
-                    expr,
-                    for_expr,
-                    from_expr,
-                } => {
-                    columns_collect(expr, vec, only_column_ref);
-                    if let Some(for_expr) = for_expr {
-                        columns_collect(for_expr, vec, only_column_ref);
-                    }
-                    if let Some(from_expr) = from_expr {
-                        columns_collect(from_expr, vec, only_column_ref);
-                    }
-                }
-                ScalarExpression::Position { expr, in_expr } => {
-                    columns_collect(expr, vec, only_column_ref);
-                    columns_collect(in_expr, vec, only_column_ref);
-                }
-                ScalarExpression::Trim {
-                    expr,
-                    trim_what_expr,
-                    ..
-                } => {
-                    columns_collect(expr, vec, only_column_ref);
-                    if let Some(trim_what_expr) = trim_what_expr {
-                        columns_collect(trim_what_expr, vec, only_column_ref);
-                    }
-                }
-                ScalarExpression::Constant(_) => (),
-                ScalarExpression::Reference { .. } | ScalarExpression::Empty => unreachable!(),
-                ScalarExpression::If {
-                    condition,
-                    left_expr,
-                    right_expr,
-                    ..
-                } => {
-                    columns_collect(condition, vec, only_column_ref);
-                    columns_collect(left_expr, vec, only_column_ref);
-                    columns_collect(right_expr, vec, only_column_ref);
-                }
-                ScalarExpression::IfNull {
-                    left_expr,
-                    right_expr,
-                    ..
-                }
-                | ScalarExpression::NullIf {
-                    left_expr,
-                    right_expr,
-                    ..
-                } => {
-                    columns_collect(left_expr, vec, only_column_ref);
-                    columns_collect(right_expr, vec, only_column_ref);
-                }
-                ScalarExpression::CaseWhen {
-                    operand_expr,
-                    expr_pairs,
-                    else_expr,
-                    ..
-                } => {
-                    if let Some(expr) = operand_expr {
-                        columns_collect(expr, vec, only_column_ref);
-                    }
-                    for (expr_1, expr_2) in expr_pairs {
-                        columns_collect(expr_1, vec, only_column_ref);
-                        columns_collect(expr_2, vec, only_column_ref);
-                    }
-                    if let Some(expr) = else_expr {
-                        columns_collect(expr, vec, only_column_ref);
-                    }
-                }
+                Ok(())
             }
         }
-        let mut exprs = Vec::new();
 
-        columns_collect(self, &mut exprs, only_column_ref);
-
-        exprs
+        let mut collector = ColumnCollector {
+            columns: Vec::new(),
+            only_column_ref,
+        };
+        collector.visit(self).unwrap();
+        collector.columns
     }
 
     pub fn has_table_ref_column(&self) -> bool {
