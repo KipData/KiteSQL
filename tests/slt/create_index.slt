@@ -4,6 +4,9 @@ create table t(id int primary key, v1 int, v2 int, v3 int);
 statement ok
 create index index_1 on t (v1);
 
+statement ok
+create index if not exists index_1 on t (v1);
+
 statement error
 create index index_1 on t (v1);
 
@@ -23,6 +26,18 @@ query IIII
 select * from t;
 ----
 0 0 0 0
+
+statement ok
+drop index t.index_1
+
+statement ok
+drop index t.index_2
+
+statement error
+drop index t.pk_index
+
+statement error
+drop index t.index_3
 
 statement ok
 drop table t

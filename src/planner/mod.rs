@@ -221,6 +221,9 @@ impl LogicalPlan {
             Operator::DropView(_) => SchemaOutput::Schema(vec![ColumnRef::from(
                 ColumnCatalog::new_dummy("DROP VIEW SUCCESS".to_string()),
             )]),
+            Operator::DropIndex(_) => SchemaOutput::Schema(vec![ColumnRef::from(
+                ColumnCatalog::new_dummy("DROP INDEX SUCCESS".to_string()),
+            )]),
             Operator::Truncate(_) => SchemaOutput::Schema(vec![ColumnRef::from(
                 ColumnCatalog::new_dummy("TRUNCATE TABLE SUCCESS".to_string()),
             )]),

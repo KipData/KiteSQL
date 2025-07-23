@@ -8,6 +8,7 @@ mod create_view;
 mod delete;
 mod describe;
 mod distinct;
+mod drop_index;
 mod drop_table;
 mod drop_view;
 mod explain;
@@ -375,6 +376,7 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
                 match object_type {
                     ObjectType::Table => self.bind_drop_table(&names[0], if_exists)?,
                     ObjectType::View => self.bind_drop_view(&names[0], if_exists)?,
+                    ObjectType::Index => self.bind_drop_index(&names[0], if_exists)?,
                     _ => {
                         return Err(DatabaseError::UnsupportedStmt(
                             "only `Table` and `View` are allowed to be Dropped".to_string(),

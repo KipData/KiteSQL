@@ -8,6 +8,7 @@ pub mod create_table;
 pub mod create_view;
 pub mod delete;
 pub mod describe;
+pub mod drop_index;
 pub mod drop_table;
 pub mod drop_view;
 pub mod filter;
@@ -39,6 +40,7 @@ use crate::planner::operator::create_table::CreateTableOperator;
 use crate::planner::operator::create_view::CreateViewOperator;
 use crate::planner::operator::delete::DeleteOperator;
 use crate::planner::operator::describe::DescribeOperator;
+use crate::planner::operator::drop_index::DropIndexOperator;
 use crate::planner::operator::drop_table::DropTableOperator;
 use crate::planner::operator::drop_view::DropViewOperator;
 use crate::planner::operator::function_scan::FunctionScanOperator;
@@ -85,6 +87,7 @@ pub enum Operator {
     CreateView(CreateViewOperator),
     DropTable(DropTableOperator),
     DropView(DropViewOperator),
+    DropIndex(DropIndexOperator),
     Truncate(TruncateOperator),
     // Copy
     CopyFromFile(CopyFromFileOperator),
@@ -174,6 +177,7 @@ impl Operator {
             | Operator::CreateView(_)
             | Operator::DropTable(_)
             | Operator::DropView(_)
+            | Operator::DropIndex(_)
             | Operator::Truncate(_)
             | Operator::CopyFromFile(_)
             | Operator::CopyToFile(_) => None,
@@ -248,6 +252,7 @@ impl Operator {
             | Operator::CreateView(_)
             | Operator::DropTable(_)
             | Operator::DropView(_)
+            | Operator::DropIndex(_)
             | Operator::Truncate(_)
             | Operator::CopyFromFile(_)
             | Operator::CopyToFile(_) => vec![],
@@ -283,6 +288,7 @@ impl fmt::Display for Operator {
             Operator::CreateView(op) => write!(f, "{}", op),
             Operator::DropTable(op) => write!(f, "{}", op),
             Operator::DropView(op) => write!(f, "{}", op),
+            Operator::DropIndex(op) => write!(f, "{}", op),
             Operator::Truncate(op) => write!(f, "{}", op),
             Operator::CopyFromFile(op) => write!(f, "{}", op),
             Operator::CopyToFile(op) => write!(f, "{}", op),
