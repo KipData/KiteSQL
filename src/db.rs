@@ -17,7 +17,7 @@ use crate::optimizer::rule::implementation::ImplementationRuleImpl;
 use crate::optimizer::rule::normalization::NormalizationRuleImpl;
 use crate::parser::parse_sql;
 use crate::planner::LogicalPlan;
-use crate::storage::rocksdb::RocksStorage;
+use crate::storage::rocksdb::{OptimisticRocksStorage, RocksStorage};
 use crate::storage::{StatisticsMetaCache, Storage, TableCache, Transaction, ViewCache};
 use crate::types::tuple::{SchemaRef, Tuple};
 use crate::types::value::DataValue;
@@ -86,6 +86,21 @@ impl DataBaseBuilder {
 
     pub fn build(self) -> Result<Database<RocksStorage>, DatabaseError> {
         let storage = RocksStorage::new(self.path)?;
+
+        Self::_build::<RocksStorage>(storage, self.scala_functions, self.table_functions)
+    }
+
+    pub fn build_optimistic(self) -> Result<Database<OptimisticRocksStorage>, DatabaseError> {
+        let storage = OptimisticRocksStorage::new(self.path)?;
+
+        Self::_build::<OptimisticRocksStorage>(storage, self.scala_functions, self.table_functions)
+    }
+
+    fn _build<T: Storage>(
+        storage: T,
+        scala_functions: ScalaFunctions,
+        table_functions: TableFunctions,
+    ) -> Result<Database<T>, DatabaseError> {
         let meta_cache = SharedLruCache::new(256, 8, RandomState::new())?;
         let table_cache = SharedLruCache::new(48, 4, RandomState::new())?;
         let view_cache = SharedLruCache::new(12, 4, RandomState::new())?;
@@ -94,8 +109,8 @@ impl DataBaseBuilder {
             storage,
             mdl: Default::default(),
             state: Arc::new(State {
-                scala_functions: self.scala_functions,
-                table_functions: self.table_functions,
+                scala_functions,
+                table_functions,
                 meta_cache,
                 table_cache,
                 view_cache,
@@ -651,6 +666,53 @@ pub(crate) mod test {
     fn test_transaction_sql() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+
+        kite_sql
+            .run("create table t1 (a int primary key, b int)")?
+            .done()?;
+
+        let mut tx_1 = kite_sql.new_transaction()?;
+        let mut tx_2 = kite_sql.new_transaction()?;
+
+        tx_1.run("insert into t1 values(0, 0)")?.done()?;
+        tx_1.run("insert into t1 values(1, 1)")?.done()?;
+
+        assert!(tx_2.run("insert into t1 values(0, 0)")?.done().is_err());
+        tx_2.run("insert into t1 values(3, 3)")?.done()?;
+
+        let mut iter_1 = tx_1.run("select * from t1")?;
+        let mut iter_2 = tx_2.run("select * from t1")?;
+
+        assert_eq!(
+            iter_1.next().unwrap()?.values,
+            vec![DataValue::Int32(0), DataValue::Int32(0)]
+        );
+        assert_eq!(
+            iter_1.next().unwrap()?.values,
+            vec![DataValue::Int32(1), DataValue::Int32(1)]
+        );
+
+        assert_eq!(
+            iter_2.next().unwrap()?.values,
+            vec![DataValue::Int32(3), DataValue::Int32(3)]
+        );
+        drop(iter_1);
+        drop(iter_2);
+
+        tx_1.commit()?;
+        tx_2.commit()?;
+
+        let mut tx_3 = kite_sql.new_transaction()?;
+        let res = tx_3.run("create table t2 (a int primary key, b int)");
+        assert!(res.is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_optimistic_transaction_sql() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_optimistic()?;
 
         kite_sql
             .run("create table t1 (a int primary key, b int)")?

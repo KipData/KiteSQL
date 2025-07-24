@@ -2,7 +2,7 @@ use kite_sql::db::{DataBaseBuilder, ResultIter};
 use kite_sql::errors::DatabaseError;
 
 fn main() -> Result<(), DatabaseError> {
-    let database = DataBaseBuilder::path("./transaction").build()?;
+    let database = DataBaseBuilder::path("./transaction").build_optimistic()?;
     let mut transaction = database.new_transaction()?;
 
     transaction

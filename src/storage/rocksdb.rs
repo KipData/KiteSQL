@@ -2,32 +2,66 @@ use crate::errors::DatabaseError;
 use crate::storage::table_codec::{BumpBytes, Bytes, TableCodec};
 use crate::storage::{InnerIter, Storage, Transaction};
 use rocksdb::{
-    DBIteratorWithThreadMode, Direction, IteratorMode, OptimisticTransactionDB, SliceTransform,
+    DBIteratorWithThreadMode, Direction, IteratorMode, OptimisticTransactionDB, Options,
+    SliceTransform, TransactionDB,
 };
 use std::collections::Bound;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Clone)]
-pub struct RocksStorage {
+pub struct OptimisticRocksStorage {
     pub inner: Arc<OptimisticTransactionDB>,
+}
+
+impl OptimisticRocksStorage {
+    pub fn new(path: impl Into<PathBuf> + Send) -> Result<Self, DatabaseError> {
+        let storage = OptimisticTransactionDB::open(&default_opts(), path.into())?;
+
+        Ok(OptimisticRocksStorage {
+            inner: Arc::new(storage),
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct RocksStorage {
+    pub inner: Arc<TransactionDB>,
 }
 
 impl RocksStorage {
     pub fn new(path: impl Into<PathBuf> + Send) -> Result<Self, DatabaseError> {
-        let mut bb = rocksdb::BlockBasedOptions::default();
-        bb.set_block_cache(&rocksdb::Cache::new_lru_cache(40 * 1_024 * 1_024));
-        bb.set_whole_key_filtering(false);
-
-        let mut opts = rocksdb::Options::default();
-        opts.set_block_based_table_factory(&bb);
-        opts.create_if_missing(true);
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(4));
-
-        let storage = OptimisticTransactionDB::open(&opts, path.into())?;
+        let txn_opts = rocksdb::TransactionDBOptions::default();
+        let storage = TransactionDB::open(&default_opts(), &txn_opts, path.into())?;
 
         Ok(RocksStorage {
             inner: Arc::new(storage),
+        })
+    }
+}
+
+fn default_opts() -> Options {
+    let mut bb = rocksdb::BlockBasedOptions::default();
+    bb.set_block_cache(&rocksdb::Cache::new_lru_cache(40 * 1_024 * 1_024));
+    bb.set_whole_key_filtering(false);
+
+    let mut opts = rocksdb::Options::default();
+    opts.set_block_based_table_factory(&bb);
+    opts.create_if_missing(true);
+    opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(4));
+    opts
+}
+
+impl Storage for OptimisticRocksStorage {
+    type TransactionType<'a>
+        = OptimisticRocksTransaction<'a>
+    where
+        Self: 'a;
+
+    fn transaction(&self) -> Result<Self::TransactionType<'_>, DatabaseError> {
+        Ok(OptimisticRocksTransaction {
+            tx: self.inner.transaction(),
+            table_codec: Default::default(),
         })
     }
 }
@@ -46,110 +80,145 @@ impl Storage for RocksStorage {
     }
 }
 
-pub struct RocksTransaction<'db> {
+pub struct OptimisticRocksTransaction<'db> {
     tx: rocksdb::Transaction<'db, OptimisticTransactionDB>,
     table_codec: TableCodec,
 }
 
-impl<'txn> Transaction for RocksTransaction<'txn> {
-    type IterType<'iter>
-        = RocksIter<'txn, 'iter>
-    where
-        Self: 'iter;
+pub struct RocksTransaction<'db> {
+    tx: rocksdb::Transaction<'db, TransactionDB>,
+    table_codec: TableCodec,
+}
 
-    #[inline]
-    fn table_codec(&self) -> *const TableCodec {
-        &self.table_codec
-    }
+#[macro_export]
+macro_rules! impl_transaction {
+    ($tx:ident, $iter:ident) => {
+        impl<'txn> Transaction for $tx<'txn> {
+            type IterType<'iter>
+                = $iter<'txn, 'iter>
+            where
+                Self: 'iter;
 
-    #[inline]
-    fn get(&self, key: &[u8]) -> Result<Option<Bytes>, DatabaseError> {
-        Ok(self.tx.get(key)?)
-    }
-
-    #[inline]
-    fn set(&mut self, key: BumpBytes, value: BumpBytes) -> Result<(), DatabaseError> {
-        self.tx.put(key, value)?;
-
-        Ok(())
-    }
-
-    #[inline]
-    fn remove(&mut self, key: &[u8]) -> Result<(), DatabaseError> {
-        self.tx.delete(key)?;
-
-        Ok(())
-    }
-
-    // Tips: rocksdb has weak support for `Include` and `Exclude`, so precision will be lost
-    #[inline]
-    fn range<'a>(
-        &'a self,
-        min: Bound<BumpBytes<'a>>,
-        max: Bound<BumpBytes<'a>>,
-    ) -> Result<Self::IterType<'a>, DatabaseError> {
-        let min = match min {
-            Bound::Included(bytes) => Some(bytes),
-            Bound::Excluded(mut bytes) => {
-                // the prefix is the same, but the length is larger
-                bytes.push(0u8);
-                Some(bytes)
+            #[inline]
+            fn table_codec(&self) -> *const TableCodec {
+                &self.table_codec
             }
-            Bound::Unbounded => None,
-        };
-        let lower = min
-            .as_ref()
-            .map(|bytes| IteratorMode::From(bytes, Direction::Forward))
-            .unwrap_or(IteratorMode::Start);
 
-        if let (Some(min_bytes), Bound::Included(max_bytes) | Bound::Excluded(max_bytes)) =
-            (&min, &max)
-        {
-            let len = min_bytes
-                .iter()
-                .zip(max_bytes.iter())
-                .take_while(|(x, y)| x == y)
-                .count();
+            #[inline]
+            fn get(&self, key: &[u8]) -> Result<Option<Bytes>, DatabaseError> {
+                Ok(self.tx.get(key)?)
+            }
 
-            debug_assert!(len > 0);
-            let mut iter = self.tx.prefix_iterator(&min_bytes[..len]);
-            iter.set_mode(lower);
+            #[inline]
+            fn set(&mut self, key: BumpBytes, value: BumpBytes) -> Result<(), DatabaseError> {
+                self.tx.put(key, value)?;
 
-            return Ok(RocksIter { upper: max, iter });
+                Ok(())
+            }
+
+            #[inline]
+            fn remove(&mut self, key: &[u8]) -> Result<(), DatabaseError> {
+                self.tx.delete(key)?;
+
+                Ok(())
+            }
+
+            // Tips: rocksdb has weak support for `Include` and `Exclude`, so precision will be lost
+            #[inline]
+            fn range<'a>(
+                &'a self,
+                min: Bound<BumpBytes<'a>>,
+                max: Bound<BumpBytes<'a>>,
+            ) -> Result<Self::IterType<'a>, DatabaseError> {
+                let min = match min {
+                    Bound::Included(bytes) => Some(bytes),
+                    Bound::Excluded(mut bytes) => {
+                        // the prefix is the same, but the length is larger
+                        bytes.push(0u8);
+                        Some(bytes)
+                    }
+                    Bound::Unbounded => None,
+                };
+                let lower = min
+                    .as_ref()
+                    .map(|bytes| IteratorMode::From(bytes, Direction::Forward))
+                    .unwrap_or(IteratorMode::Start);
+
+                if let (Some(min_bytes), Bound::Included(max_bytes) | Bound::Excluded(max_bytes)) =
+                    (&min, &max)
+                {
+                    let len = min_bytes
+                        .iter()
+                        .zip(max_bytes.iter())
+                        .take_while(|(x, y)| x == y)
+                        .count();
+
+                    debug_assert!(len > 0);
+                    let mut iter = self.tx.prefix_iterator(&min_bytes[..len]);
+                    iter.set_mode(lower);
+
+                    return Ok($iter { upper: max, iter });
+                }
+                let iter = self.tx.iterator(lower);
+
+                Ok($iter { upper: max, iter })
+            }
+
+            fn commit(self) -> Result<(), DatabaseError> {
+                self.tx.commit()?;
+                Ok(())
+            }
         }
-        let iter = self.tx.iterator(lower);
+    };
+}
 
-        Ok(RocksIter { upper: max, iter })
-    }
+impl_transaction!(RocksTransaction, RocksIter);
+impl_transaction!(OptimisticRocksTransaction, OptimisticRocksIter);
 
-    fn commit(self) -> Result<(), DatabaseError> {
-        self.tx.commit()?;
-        Ok(())
+pub struct OptimisticRocksIter<'txn, 'iter> {
+    upper: Bound<BumpBytes<'iter>>,
+    iter: DBIteratorWithThreadMode<'iter, rocksdb::Transaction<'txn, OptimisticTransactionDB>>,
+}
+
+impl InnerIter for OptimisticRocksIter<'_, '_> {
+    #[inline]
+    fn try_next(&mut self) -> Result<Option<(Bytes, Bytes)>, DatabaseError> {
+        if let Some(result) = self.iter.by_ref().next() {
+            return next(self.upper.as_ref(), result?);
+        }
+        Ok(None)
     }
 }
 
 pub struct RocksIter<'txn, 'iter> {
     upper: Bound<BumpBytes<'iter>>,
-    iter: DBIteratorWithThreadMode<'iter, rocksdb::Transaction<'txn, OptimisticTransactionDB>>,
+    iter: DBIteratorWithThreadMode<'iter, rocksdb::Transaction<'txn, TransactionDB>>,
 }
 
 impl InnerIter for RocksIter<'_, '_> {
     #[inline]
     fn try_next(&mut self) -> Result<Option<(Bytes, Bytes)>, DatabaseError> {
         if let Some(result) = self.iter.by_ref().next() {
-            let (key, value) = result?;
-            let upper_bound_check = match &self.upper {
-                Bound::Included(ref upper) => key.as_ref() <= upper.as_slice(),
-                Bound::Excluded(ref upper) => key.as_ref() < upper.as_slice(),
-                Bound::Unbounded => true,
-            };
-            if !upper_bound_check {
-                return Ok(None);
-            }
-            return Ok(Some((Vec::from(key), Vec::from(value))));
+            return next(self.upper.as_ref(), result?);
         }
         Ok(None)
     }
+}
+
+#[inline]
+fn next(
+    upper: Bound<&BumpBytes<'_>>,
+    (key, value): (Box<[u8]>, Box<[u8]>),
+) -> Result<Option<(Bytes, Bytes)>, DatabaseError> {
+    let upper_bound_check = match upper {
+        Bound::Included(upper) => key.as_ref() <= upper.as_slice(),
+        Bound::Excluded(upper) => key.as_ref() < upper.as_slice(),
+        Bound::Unbounded => true,
+    };
+    if !upper_bound_check {
+        return Ok(None);
+    }
+    Ok(Some((Vec::from(key), Vec::from(value))))
 }
 
 #[cfg(test)]

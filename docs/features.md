@@ -70,6 +70,7 @@ let kite_sql = DataBaseBuilder::path("./data")
 - Volcano
 
 ### MVCC Transaction
+- Pessimistic (Default)
 - Optimistic
 
 ### Field options
