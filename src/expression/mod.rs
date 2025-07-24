@@ -387,7 +387,6 @@ impl ScalarExpression {
         checker.found
     }
 
-
     pub fn has_agg_call(&self) -> bool {
         struct AggCallChecker {
             has_agg: bool,
@@ -399,19 +398,19 @@ impl ScalarExpression {
                 }
                 walk_expr(self, expr)
             }
-            fn visit_agg(&mut self,
-                         _distinct: bool,
-                         _kind: &'a AggKind,
-                         args: &'a [ScalarExpression],
-                         _ty: &'a LogicalType) -> Result<(), DatabaseError> {
+            fn visit_agg(
+                &mut self,
+                _distinct: bool,
+                _kind: &'a AggKind,
+                args: &'a [ScalarExpression],
+                _ty: &'a LogicalType,
+            ) -> Result<(), DatabaseError> {
                 for arg in args {
                     self.visit(arg)?;
                 }
                 self.has_agg = true;
                 Ok(())
             }
-
-
         }
         let mut checker = AggCallChecker { has_agg: false };
         checker.visit(self).unwrap();
