@@ -353,18 +353,15 @@ impl ScalarExpression {
                 if !self.only_column_ref {
                     self.columns.push(expr.output_column());
                 }
-                    walk_expr(self, expr)
+                walk_expr(self, expr)
             }
-
             fn visit_column_ref(&mut self, col: &ColumnRef) -> Result<(), DatabaseError> {
                 if self.only_column_ref {
                     self.columns.push(col.clone());
-
                 }
                 Ok(())
             }
         }
-
         let mut collector = ColumnCollector {
             columns: Vec::new(),
             only_column_ref,
@@ -374,213 +371,51 @@ impl ScalarExpression {
     }
 
     pub fn has_table_ref_column(&self) -> bool {
-        match self {
-            ScalarExpression::Constant(_) => false,
-            ScalarExpression::ColumnRef(column) => {
-                column.table_name().is_some() && column.id().is_some()
-            }
-            ScalarExpression::Alias { expr, .. } => expr.has_table_ref_column(),
-            ScalarExpression::TypeCast { expr, .. } | ScalarExpression::IsNull { expr, .. } => {
-                expr.has_table_ref_column()
-            }
-            ScalarExpression::Unary { expr, .. } => expr.has_table_ref_column(),
-            ScalarExpression::Binary {
-                left_expr,
-                right_expr,
-                ..
-            } => left_expr.has_table_ref_column() || right_expr.has_table_ref_column(),
-            ScalarExpression::AggCall { args, .. } => {
-                args.iter().any(ScalarExpression::has_table_ref_column)
-            }
-            ScalarExpression::In { expr, args, .. } => {
-                expr.has_table_ref_column()
-                    || args.iter().any(ScalarExpression::has_table_ref_column)
-            }
-            ScalarExpression::Between {
-                expr,
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                expr.has_table_ref_column()
-                    || left_expr.has_table_ref_column()
-                    || right_expr.has_table_ref_column()
-            }
-            ScalarExpression::SubString {
-                expr,
-                for_expr,
-                from_expr,
-            } => {
-                expr.has_table_ref_column()
-                    || for_expr
-                        .as_deref()
-                        .map(ScalarExpression::has_table_ref_column)
-                        .unwrap_or(false)
-                    || from_expr
-                        .as_deref()
-                        .map(ScalarExpression::has_table_ref_column)
-                        .unwrap_or(false)
-            }
-            ScalarExpression::Position { expr, in_expr } => {
-                expr.has_table_ref_column() || in_expr.has_table_ref_column()
-            }
-            ScalarExpression::Trim {
-                expr,
-                trim_what_expr,
-                ..
-            } => {
-                expr.has_table_ref_column()
-                    || trim_what_expr
-                        .as_deref()
-                        .map(ScalarExpression::has_table_ref_column)
-                        .unwrap_or(false)
-            }
-            ScalarExpression::Empty => false,
-            ScalarExpression::Reference { expr, .. } => expr.has_table_ref_column(),
-            ScalarExpression::Tuple(exprs) => {
-                exprs.iter().any(ScalarExpression::has_table_ref_column)
-            }
-            ScalarExpression::ScalaFunction(function) => function
-                .args
-                .iter()
-                .any(ScalarExpression::has_table_ref_column),
-            ScalarExpression::TableFunction(function) => function
-                .args
-                .iter()
-                .any(ScalarExpression::has_table_ref_column),
-            ScalarExpression::If {
-                condition,
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                condition.has_table_ref_column()
-                    || left_expr.has_table_ref_column()
-                    || right_expr.has_table_ref_column()
-            }
-            ScalarExpression::IfNull {
-                left_expr,
-                right_expr,
-                ..
-            } => left_expr.has_table_ref_column() || right_expr.has_table_ref_column(),
-            ScalarExpression::NullIf {
-                left_expr,
-                right_expr,
-                ..
-            } => left_expr.has_table_ref_column() || right_expr.has_table_ref_column(),
-            ScalarExpression::Coalesce { exprs, .. } => {
-                exprs.iter().any(ScalarExpression::has_table_ref_column)
-            }
-            ScalarExpression::CaseWhen {
-                operand_expr,
-                expr_pairs,
-                else_expr,
-                ..
-            } => {
-                operand_expr
-                    .as_deref()
-                    .map(ScalarExpression::has_table_ref_column)
-                    .unwrap_or(false)
-                    || else_expr
-                        .as_deref()
-                        .map(ScalarExpression::has_table_ref_column)
-                        .unwrap_or(false)
-                    || expr_pairs.iter().any(|(left_expr, right_expr)| {
-                        left_expr.has_table_ref_column() || right_expr.has_table_ref_column()
-                    })
+        struct TableRefChecker {
+            found: bool,
+        }
+        impl<'a> Visitor<'a> for TableRefChecker {
+            fn visit_column_ref(&mut self, col: &ColumnRef) -> Result<(), DatabaseError> {
+                if col.table_name().is_some() && col.id().is_some() {
+                    self.found = true;
+                }
+                Ok(())
             }
         }
+        let mut checker = TableRefChecker { found: false };
+        checker.visit(self).unwrap();
+        checker.found
     }
 
+
     pub fn has_agg_call(&self) -> bool {
-        match self {
-            ScalarExpression::AggCall { .. } => true,
-            ScalarExpression::Constant(_) => false,
-            ScalarExpression::ColumnRef(_) => false,
-            ScalarExpression::Alias { expr, .. } => expr.has_agg_call(),
-            ScalarExpression::TypeCast { expr, .. } => expr.has_agg_call(),
-            ScalarExpression::IsNull { expr, .. } => expr.has_agg_call(),
-            ScalarExpression::Unary { expr, .. } => expr.has_agg_call(),
-            ScalarExpression::Binary {
-                left_expr,
-                right_expr,
-                ..
-            } => left_expr.has_agg_call() || right_expr.has_agg_call(),
-            ScalarExpression::In { expr, args, .. } => {
-                expr.has_agg_call() || args.iter().any(|arg| arg.has_agg_call())
-            }
-            ScalarExpression::Between {
-                expr,
-                left_expr,
-                right_expr,
-                ..
-            } => expr.has_agg_call() || left_expr.has_agg_call() || right_expr.has_agg_call(),
-            ScalarExpression::SubString {
-                expr,
-                for_expr,
-                from_expr,
-            } => {
-                expr.has_agg_call()
-                    || matches!(
-                        for_expr.as_ref().map(|expr| expr.has_agg_call()),
-                        Some(true)
-                    )
-                    || matches!(
-                        from_expr.as_ref().map(|expr| expr.has_agg_call()),
-                        Some(true)
-                    )
-            }
-            ScalarExpression::Position { expr, in_expr } => {
-                expr.has_agg_call() || in_expr.has_agg_call()
-            }
-            ScalarExpression::Trim {
-                expr,
-                trim_what_expr,
-                ..
-            } => {
-                expr.has_agg_call()
-                    || trim_what_expr.as_ref().map(|expr| expr.has_agg_call()) == Some(true)
-            }
-            ScalarExpression::Reference { .. }
-            | ScalarExpression::Empty
-            | ScalarExpression::TableFunction(_) => unreachable!(),
-            ScalarExpression::Tuple(args)
-            | ScalarExpression::ScalaFunction(ScalarFunction { args, .. })
-            | ScalarExpression::Coalesce { exprs: args, .. } => args.iter().any(Self::has_agg_call),
-            ScalarExpression::If {
-                condition,
-                left_expr,
-                right_expr,
-                ..
-            } => condition.has_agg_call() || left_expr.has_agg_call() || right_expr.has_agg_call(),
-            ScalarExpression::IfNull {
-                left_expr,
-                right_expr,
-                ..
-            }
-            | ScalarExpression::NullIf {
-                left_expr,
-                right_expr,
-                ..
-            } => left_expr.has_agg_call() || right_expr.has_agg_call(),
-            ScalarExpression::CaseWhen {
-                operand_expr,
-                expr_pairs,
-                else_expr,
-                ..
-            } => {
-                matches!(
-                    operand_expr.as_ref().map(|expr| expr.has_agg_call()),
-                    Some(true)
-                ) || expr_pairs
-                    .iter()
-                    .any(|(expr_1, expr_2)| expr_1.has_agg_call() || expr_2.has_agg_call())
-                    || matches!(
-                        else_expr.as_ref().map(|expr| expr.has_agg_call()),
-                        Some(true)
-                    )
-            }
+        struct AggCallChecker {
+            has_agg: bool,
         }
+        impl<'a> Visitor<'a> for AggCallChecker {
+            fn visit(&mut self, expr: &'a ScalarExpression) -> Result<(), DatabaseError> {
+                if self.has_agg {
+                    return Ok(());
+                }
+                walk_expr(self, expr)
+            }
+            fn visit_agg(&mut self,
+                         _distinct: bool,
+                         _kind: &'a AggKind,
+                         args: &'a [ScalarExpression],
+                         _ty: &'a LogicalType) -> Result<(), DatabaseError> {
+                for arg in args {
+                    self.visit(arg)?;
+                }
+                self.has_agg = true;
+                Ok(())
+            }
+
+
+        }
+        let mut checker = AggCallChecker { has_agg: false };
+        checker.visit(self).unwrap();
+        checker.has_agg
     }
 
     pub fn output_name(&self) -> String {
