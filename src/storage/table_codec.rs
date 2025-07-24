@@ -171,13 +171,13 @@ impl TableCodec {
     pub fn index_bound(
         &self,
         table_name: &str,
-        index_id: &IndexId,
+        index_id: IndexId,
     ) -> Result<(BumpBytes, BumpBytes), DatabaseError> {
         let op = |bound_id| -> Result<BumpBytes, DatabaseError> {
             let mut key_prefix = self.key_prefix(CodecType::Index, table_name);
 
             key_prefix.write_all(&[BOUND_MIN_TAG])?;
-            key_prefix.write_all(&index_id.to_be_bytes()[..])?;
+            key_prefix.write_all(&index_id.to_le_bytes()[..])?;
             key_prefix.write_all(&[bound_id])?;
             Ok(key_prefix)
         };
@@ -293,6 +293,18 @@ impl TableCodec {
         Tuple::deserialize_from(table_types, pk_indices, projections, schema, bytes, with_pk)
     }
 
+    pub fn encode_index_meta_key(
+        &self,
+        table_name: &str,
+        index_id: IndexId,
+    ) -> Result<BumpBytes, DatabaseError> {
+        let mut key_prefix = self.key_prefix(CodecType::IndexMeta, table_name);
+
+        key_prefix.write_all(&[BOUND_MIN_TAG])?;
+        key_prefix.write_all(&index_id.to_le_bytes()[..])?;
+        Ok(key_prefix)
+    }
+
     /// Key: {TableName}{INDEX_META_TAG}{BOUND_MIN_TAG}{IndexID}
     /// Value: IndexMeta
     pub fn encode_index_meta(
@@ -300,15 +312,12 @@ impl TableCodec {
         table_name: &str,
         index_meta: &IndexMeta,
     ) -> Result<(BumpBytes, BumpBytes), DatabaseError> {
-        let mut key_prefix = self.key_prefix(CodecType::IndexMeta, table_name);
-
-        key_prefix.write_all(&[BOUND_MIN_TAG])?;
-        key_prefix.write_all(&index_meta.id.to_be_bytes()[..])?;
+        let key_bytes = self.encode_index_meta_key(table_name, index_meta.id)?;
 
         let mut value_bytes = BumpBytes::new_in(&self.arena);
         index_meta.encode(&mut value_bytes, true, &mut ReferenceTables::new())?;
 
-        Ok((key_prefix, value_bytes))
+        Ok((key_bytes, value_bytes))
     }
 
     pub fn decode_index_meta<T: Transaction>(bytes: &[u8]) -> Result<IndexMeta, DatabaseError> {
@@ -347,7 +356,7 @@ impl TableCodec {
     ) -> Result<BumpBytes, DatabaseError> {
         let mut key_prefix = self.key_prefix(CodecType::Index, name);
         key_prefix.push(BOUND_MIN_TAG);
-        key_prefix.extend_from_slice(&index.id.to_be_bytes());
+        key_prefix.extend_from_slice(&index.id.to_le_bytes());
         key_prefix.push(BOUND_MIN_TAG);
 
         index.value.memcomparable_encode(&mut key_prefix)?;
@@ -900,7 +909,7 @@ mod tests {
 
         println!("{:#?}", set);
 
-        let (min, max) = table_codec.index_bound(&table_catalog.name, &1).unwrap();
+        let (min, max) = table_codec.index_bound(&table_catalog.name, 1).unwrap();
 
         println!("{:?}", min);
         println!("{:?}", max);

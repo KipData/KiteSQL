@@ -105,7 +105,8 @@ let kite_sql = DataBaseBuilder::path("./data")
     - [x] View
 - Drop
     - [x] Table
-    - [ ] Index
+    - [x] Index
+      - Tips: `Drop Index table_name.index_name`
     - [x] View
 - Alert
     - [x] Add Column

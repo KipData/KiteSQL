@@ -19,6 +19,7 @@ use std::fmt::Formatter;
 use std::fs::DirEntry;
 use std::ops::Coroutine;
 use std::ops::CoroutineState;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::{fmt, fs};
@@ -98,10 +99,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze {
                 }
                 drop(coroutine);
                 let mut values = Vec::with_capacity(builders.len());
-                let dir_path = dirs::home_dir()
-                    .expect("Your system does not have a Config directory!")
-                    .join(DEFAULT_STATISTICS_META_PATH)
-                    .join(table_name.as_str());
+                let dir_path = Self::build_statistics_meta_path(&table_name);
                 // For DEBUG
                 // println!("Statistics Path: {:#?}", dir_path);
                 throw!(fs::create_dir_all(&dir_path).map_err(DatabaseError::IO));
@@ -146,6 +144,15 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze {
                 yield Ok(Tuple::new(None, values));
             },
         )
+    }
+}
+
+impl Analyze {
+    pub fn build_statistics_meta_path(table_name: &TableName) -> PathBuf {
+        dirs::home_dir()
+            .expect("Your system does not have a Config directory!")
+            .join(DEFAULT_STATISTICS_META_PATH)
+            .join(table_name.as_str())
     }
 }
 
