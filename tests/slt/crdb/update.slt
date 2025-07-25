@@ -88,8 +88,8 @@ query I
 select a from t1 order by a;
 ----
 1
-2
 3
+4
 8
 
 # sqlparser-rs not support

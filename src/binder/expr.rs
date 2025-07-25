@@ -7,7 +7,7 @@ use sqlparser::ast::{
     BinaryOperator, CharLengthUnits, DataType, Expr, Function, FunctionArg, FunctionArgExpr, Ident,
     Query, UnaryOperator, Value,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::slice;
 use std::sync::Arc;
 
@@ -293,6 +293,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             self.args,
             Some(self),
         );
+
         let mut sub_query = binder.bind_query(subquery)?;
         let sub_query_schema = sub_query.output_schema();
 
@@ -368,7 +369,8 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             try_default!(&full_name.0, full_name.1);
         }
         if let Some(table) = full_name.0.or(bind_table_name) {
-            let source = self.context.bind_source(&table)?;
+            let source = self.context.bind_source::<A>(self.parent, &table)?;
+
             let schema_buf = self.table_schema_buf.entry(Arc::new(table)).or_default();
 
             Ok(ScalarExpression::ColumnRef(

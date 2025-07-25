@@ -189,6 +189,11 @@ impl<S: Storage> State<S> {
     pub(crate) fn default_optimizer(source_plan: LogicalPlan) -> HepOptimizer {
         HepOptimizer::new(source_plan)
             .batch(
+                "Correlated Subquery".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![NormalizationRuleImpl::CorrelateSubquery],
+            )
+            .batch(
                 "Column Pruning".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::ColumnPruning],

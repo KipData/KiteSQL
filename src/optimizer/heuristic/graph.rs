@@ -79,7 +79,7 @@ impl HepGraph {
         source_id: HepNodeId,
         children_option: Option<HepNodeId>,
         new_node: Operator,
-    ) {
+    ) -> HepNodeId {
         let new_index = self.graph.add_node(new_node);
         let mut order = self.graph.edges(source_id).count();
 
@@ -95,6 +95,7 @@ impl HepGraph {
 
         self.graph.add_edge(source_id, new_index, order);
         self.version += 1;
+        new_index
     }
 
     pub fn replace_node(&mut self, source_id: HepNodeId, new_node: Operator) {

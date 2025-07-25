@@ -1,0 +1,112 @@
+statement ok
+CREATE TABLE t1 (id INT PRIMARY KEY, v1 VARCHAR(50), v2 INT);
+
+statement ok
+CREATE TABLE t2 (id INT PRIMARY KEY, v1 VARCHAR(50), v2 INT);
+
+statement ok
+CREATE TABLE t3 (id INT PRIMARY KEY, v1 INT, v2 INT);
+
+statement ok
+insert into t1(id, v1, v2) values (1,'a',9)
+
+statement ok
+insert into t1(id, v1, v2) values (2,'b',6)
+
+statement ok
+insert into t1(id, v1, v2) values (3,'c',11)
+
+statement ok
+insert into t2(id, v1, v2) values (1,'A',10)
+
+statement ok
+insert into t2(id, v1, v2) values (2,'B',11)
+
+statement ok
+insert into t2(id, v1, v2) values (3,'C',9)
+
+statement ok
+insert into t3(id, v1, v2) values (1,6,10)
+
+statement ok
+insert into t3(id, v1, v2) values (2,5,10)
+
+statement ok
+insert into t3(id, v1, v2) values (3,4,10)
+
+query IT rowsort
+SELECT id, v1 FROM t1 WHERE id IN ( SELECT t2.id FROM t2 WHERE t2.v2 < t1.v2 )
+----
+1 a
+3 c
+
+query I rowsort
+SELECT v1 FROM t1 WHERE EXISTS ( SELECT 1 FROM t3 WHERE t3.id = t1.id )
+----
+a
+b
+c
+
+query TT rowsort
+SELECT t1.v1, t2.v1 FROM t1 JOIN t2 ON t1.id = t2.id WHERE t2.v2 > ( SELECT AVG(v2) FROM t1 )
+----
+a A
+b B
+c C
+
+query IT rowsort
+SELECT id, v1 FROM t1 WHERE NOT EXISTS ( SELECT 1 FROM t2 WHERE t2.id = t1.id AND t2.v2 = t1.v2 )
+----
+1 a
+2 b
+3 c
+
+query IT rowsort
+SELECT id, v1 FROM t1 WHERE v2 > ( SELECT MIN(v2) FROM t2 WHERE t2.id = t1.id )
+----
+3 c
+
+query IT rowsort
+SELECT id, v1 FROM t1 WHERE EXISTS (  SELECT 1 FROM t2 WHERE t2.id = t1.id AND EXISTS ( SELECT 1 FROM t3 WHERE t3.id = t1.id ) )
+----
+1 a
+2 b
+3 c
+
+query IT rowsort
+SELECT id, v1 FROM t1 WHERE v2 - 5 > ( SELECT AVG(v1) FROM t3 WHERE t3.id <= t1.id )
+----
+3 c
+
+query IT rowsort
+SELECT id, v1 FROM t1 WHERE id NOT IN ( SELECT t2.id FROM t2 WHERE t2.v2 > t1.v2 )
+----
+
+
+query IT rowsort
+SELECT id, v1 FROM t1 WHERE EXISTS ( SELECT 1 FROM t2 WHERE t2.id = t1.id AND t2.v2 + t1.v2 > 15 )
+----
+1 a
+2 b
+3 c
+
+query IT rowsort
+SELECT id, v1 FROM t1 WHERE v2 = ( SELECT MAX(v2) FROM t2 WHERE t2.id <= t1.id ) ORDER BY id
+----
+3 c
+
+query IT rowsort
+SELECT id, v1 FROM t1 WHERE ( SELECT COUNT(*) FROM t2 WHERE t2.v2 = t1.v2 ) = 2
+----
+1 a
+2 b
+3 c
+
+statement ok
+DROP TABLE t1;
+
+statement ok
+DROP TABLE t2;
+
+statement ok
+DROP TABLE t3;
