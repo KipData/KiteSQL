@@ -343,31 +343,29 @@ impl ScalarExpression {
     }
 
     pub fn referenced_columns(&self, only_column_ref: bool) -> Vec<ColumnRef> {
-        struct ColumnCollector {
-            columns: Vec<ColumnRef>,
-            only_column_ref: bool,
-        }
-
-        impl<'a> Visitor<'a> for ColumnCollector {
-            fn visit(&mut self, expr: &ScalarExpression) -> Result<(), DatabaseError> {
-                if !self.only_column_ref {
-                    self.columns.push(expr.output_column());
-                }
-                walk_expr(self, expr)
-            }
+        struct ColumnRefCollector(Vec<ColumnRef>);
+        impl<'a> Visitor<'a> for ColumnRefCollector {
             fn visit_column_ref(&mut self, col: &ColumnRef) -> Result<(), DatabaseError> {
-                if self.only_column_ref {
-                    self.columns.push(col.clone());
-                }
+                self.0.push(col.clone());
                 Ok(())
             }
         }
-        let mut collector = ColumnCollector {
-            columns: Vec::new(),
-            only_column_ref,
-        };
-        collector.visit(self).unwrap();
-        collector.columns
+        struct OutputColumnCollector(Vec<ColumnRef>);
+        impl<'a> Visitor<'a> for OutputColumnCollector {
+            fn visit(&mut self, expr: &ScalarExpression) -> Result<(), DatabaseError> {
+                self.0.push(expr.output_column());
+                walk_expr(self, expr)
+            }
+        }
+        if only_column_ref {
+            let mut collector = ColumnRefCollector(Vec::new());
+            collector.visit(self).unwrap();
+            collector.0
+        } else {
+            let mut collector = OutputColumnCollector(Vec::new());
+            collector.visit(self).unwrap();
+            collector.0
+        }
     }
 
     pub fn has_table_ref_column(&self) -> bool {
