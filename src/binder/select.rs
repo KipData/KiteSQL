@@ -943,8 +943,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     ) else {
                         return Err(DatabaseError::InvalidColumn("not found column".to_string()));
                     };
-                    self.context
-                        .add_using(join_type, left_column, right_column);
+                    self.context.add_using(join_type, left_column, right_column);
                     on_keys.push((
                         ScalarExpression::ColumnRef(left_column.clone()),
                         ScalarExpression::ColumnRef(right_column.clone()),
