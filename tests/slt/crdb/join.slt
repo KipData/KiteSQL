@@ -20,9 +20,8 @@ SELECT * FROM onecolumn AS a(aid, x) CROSS JOIN onecolumn AS b(bid, y) order by 
 1 null 1 null
 1 null 2 42
 
-# FIXME
-# statement error 1065
-# SELECT x FROM onecolumn AS a, onecolumn AS b;
+statement error
+SELECT x FROM onecolumn AS a, onecolumn AS b;
 
 query II
 SELECT * FROM onecolumn AS a(aid, x) JOIN onecolumn AS b(bid, y) ON a.x = b.y order by a.x desc
@@ -56,9 +55,8 @@ SELECT * FROM onecolumn AS a LEFT OUTER JOIN onecolumn AS b USING(x) ORDER BY x
 0 44 0
 1 null null
 
-# FIXME
-# statement error 1065
-# SELECT * FROM onecolumn AS a, onecolumn AS b ORDER BY x
+statement error
+SELECT * FROM onecolumn AS a, onecolumn AS b ORDER BY x
 
 query I
 SELECT * FROM onecolumn AS a NATURAL LEFT OUTER JOIN onecolumn AS b order by a.x
@@ -77,17 +75,16 @@ null null 1 null
 query I
 SELECT * FROM onecolumn AS a RIGHT OUTER JOIN onecolumn AS b USING(x) ORDER BY x
 ----
-2 42 2
-0 44 0
-null null 1
+2 2 42
+0 0 44
+null 1 null
 
-# FIXME: The fields output by Using are determined by JoinType. At this time, because it is a Right Outer Join, the first row of results should be (1 null).
 query I
 SELECT * FROM onecolumn AS a NATURAL RIGHT OUTER JOIN onecolumn AS b order by x
 ----
 2 42
 0 44
-null null
+1 null
 
 statement ok
 drop table if exists onecolumn_w
@@ -167,6 +164,7 @@ null 16
 null 42
 null 43
 
+# Tips: This case will make x take the value of both sides
 # query
 # SELECT * FROM onecolumn AS a FULL OUTER JOIN othercolumn AS b USING(x) ORDER BY x
 
@@ -176,7 +174,7 @@ null 43
 # query
 # SELECT * FROM onecolumn AS a NATURAL FULL OUTER JOIN othercolumn AS b ORDER BY x
 
-# TODO
+# TODO: Join Values
 # query
 # SELECT * FROM (SELECT x FROM onecolumn ORDER BY x DESC) NATURAL JOIN (VALUES (42)) AS v(x) LIMIT 1
 
@@ -186,23 +184,29 @@ drop table if exists empty
 statement ok
 CREATE TABLE empty (e_id INT PRIMARY KEY, x INT)
 
-statement ok
+query II
 SELECT * FROM onecolumn AS a(aid, x) CROSS JOIN empty AS b(bid, y)
+----
 
-statement ok
+query II
 SELECT * FROM empty AS a CROSS JOIN onecolumn AS b
+----
 
-statement ok
+query II
 SELECT * FROM onecolumn AS a(aid, x) JOIN empty AS b(bid, y) ON a.x = b.y
+----
 
-statement ok
+query II
 SELECT * FROM onecolumn AS a JOIN empty AS b USING(x)
+----
 
-statement ok
+query II
 SELECT * FROM empty AS a(aid, x) JOIN onecolumn AS b(bid, y) ON a.x = b.y
+----
 
-statement ok
+query II
 SELECT * FROM empty AS a JOIN onecolumn AS b USING(x)
+----
 
 query IT
 SELECT * FROM onecolumn AS a(aid, x) LEFT OUTER JOIN empty AS b(bid, y) ON a.x = b.y ORDER BY a.x
@@ -211,25 +215,28 @@ null null 2 42
 null null 0 44
 null null 1 null
 
-# FIXME: The fields output by Using are determined by JoinType.
-# query I
-# SELECT * FROM onecolumn AS a LEFT OUTER JOIN empty AS b USING(x) ORDER BY x
-# ----
-# null null 2
-# null 42 0
-# null 44 1
+query I rowsort
+SELECT * FROM onecolumn AS a LEFT OUTER JOIN empty AS b USING(x) ORDER BY x
+----
+null 0 44
+null 1 null
+null 2 42
 
-statement ok
+query I
 SELECT * FROM empty AS a(aid, x) LEFT OUTER JOIN onecolumn AS b(bid, y) ON a.x = b.y
+----
 
-statement ok
+query I
 SELECT * FROM empty AS a LEFT OUTER JOIN onecolumn AS b USING(x)
+----
 
-statement ok
+query I
 SELECT * FROM onecolumn AS a(aid, x) RIGHT OUTER JOIN empty AS b(bid, y) ON a.x = b.y
+----
 
-statement ok
+query I
 SELECT * FROM onecolumn AS a RIGHT OUTER JOIN empty AS b USING(x)
+----
 
 query II
 SELECT * FROM empty AS a(aid, x) FULL OUTER JOIN onecolumn AS b(bid, y) ON a.x = b.y ORDER BY b.y
@@ -241,15 +248,19 @@ null null 1 null
 statement ok
 SELECT * FROM empty AS a FULL OUTER JOIN onecolumn AS b USING(x) ORDER BY x
 
-query II
+query IIII
 SELECT * FROM onecolumn AS a(aid, x) FULL OUTER JOIN empty AS b(bid, y) ON a.x = b.y ORDER BY a.x
 ----
 null null 2 42
 null null 0 44
 null null 1 null
 
-# query
-# SELECT * FROM onecolumn AS a FULL OUTER JOIN empty AS b USING(x) ORDER BY x
+query III rowsort
+SELECT * FROM onecolumn AS a FULL OUTER JOIN empty AS b USING(x) ORDER BY x
+----
+null 0 44
+null 1 null
+null 2 42
 
 query II
 SELECT * FROM empty AS a(aid, x) FULL OUTER JOIN onecolumn AS b(bid, y) ON a.x = b.y ORDER BY b.y
@@ -408,13 +419,13 @@ SELECT * FROM onecolumn JOIN (SELECT x + 2 AS x FROM onecolumn) USING(x)
 ----
 0 44
 
-# TODO
+# TODO NestedJoin
 # query IIIII
 # SELECT * FROM (twocolumn AS a JOIN twocolumn AS b USING(x) JOIN twocolumn AS c USING(x)) ORDER BY x LIMIT 1
 # ----
 # 42 53 53 53
 
-# TODO
+# TODO NestedJoin
 # query IIIIII
 # SELECT a.x AS s, b.x, c.x, a.y, b.y, c.y FROM (twocolumn AS a JOIN twocolumn AS b USING(x) JOIN twocolumn AS c USING(x)) ORDER BY s
 # ----
@@ -422,11 +433,11 @@ SELECT * FROM onecolumn JOIN (SELECT x + 2 AS x FROM onecolumn) USING(x)
 # 44 44 44 51 51 51
 # 45 45 45 45 45 45
 
-# TODO
+# TODO NestedJoin
 # statement error 1065
 # SELECT * FROM (onecolumn AS a JOIN onecolumn AS b USING(y))
 
-# TODO
+# TODO NestedJoin
 # query I
 # SELECT * FROM (onecolumn AS a JOIN onecolumn AS b USING(x, x))
 # ----
@@ -439,31 +450,31 @@ drop table if exists othertype
 statement ok
 CREATE TABLE othertype (ot_id int primary key, x VARCHAR)
 
-# TODO
+# TODO NestedJoin
 # statement error 1065
 # SELECT * FROM (onecolumn JOIN onecolumn USING(x))
 
-# TODO
+# TODO NestedJoin
 # statement error 1065
 # SELECT * FROM (onecolumn JOIN twocolumn USING(x) JOIN onecolumn USING(x))
 
-# TODO
+# TODO NestedJoin
 # query II
 # SELECT * FROM (SELECT * FROM onecolumn), (SELECT * FROM onecolumn)
 
-# TODO
+# TODO NestedJoin
 # query I
 # SELECT x FROM (onecolumn JOIN othercolumn USING (x)) JOIN (onecolumn AS a JOIN othercolumn AS b USING(x)) USING(x)
 
-# TODO
+# TODO NestedJoin
 # statement error 1065
 # SELECT x FROM (SELECT * FROM onecolumn), (SELECT * FROM onecolumn)
 
-# TODO
+# TODO NestedJoin
 # statement error 1065
 # SELECT * FROM (onecolumn AS a JOIN onecolumn AS b ON x > 32)
 
-# TODO
+# TODO NestedJoin
 # statement error 1065
 # SELECT * FROM (onecolumn AS a JOIN onecolumn AS b ON a.y > y)
 
@@ -687,7 +698,6 @@ D D null
 a a null
 c c null
 
-# FIXME: The fields output by Using are determined by JoinType.
 query TTT
 SELECT s, str1.s, str2.s FROM str1 RIGHT OUTER JOIN str2 USING(s) order by str2.s
 ----
@@ -757,16 +767,14 @@ SELECT * FROM xyu LEFT OUTER JOIN xyv USING(x, y) WHERE x > 2 order by xyu.uid
 3 3 2 32 null null
 4 4 4 44 null null
 
-# FIXME: The fields output by Using are determined by JoinType.
+# TODO: x > 2 means x on both sides
 # query IIII
 # SELECT * FROM xyu RIGHT OUTER JOIN xyv USING(x, y) WHERE x > 2 order by y
 # ----
-# 31 3 1 31
-# NULL 3 3 33
-# NULL 5 5 55
+# 2 31 7 3 1 31
 
-# statement error 1065
-# SELECT * FROM xyu FULL OUTER JOIN xyv USING(x, y) WHERE x > 2
+statement error
+SELECT * FROM xyu FULL OUTER JOIN xyv USING(x, y) WHERE x > 2
 
 query IIIIII
 SELECT * FROM xyu INNER JOIN xyv ON xyu.x = xyv.x AND xyu.y = xyv.y WHERE xyu.x = 1 AND xyu.y < 10
@@ -803,7 +811,7 @@ SELECT * FROM (SELECT * FROM xyu ORDER BY x, y) AS xyu LEFT OUTER JOIN (SELECT *
 32 3 3 2 null null
 44 4 4 4 null null
 
-# FIXME: The fields output by Using are determined by JoinType.
+# TODO: x > 2 means x on both sides
 # query IIII
 # SELECT * FROM (SELECT * FROM xyu ORDER BY x, y) AS xyu RIGHT OUTER JOIN (SELECT * FROM xyv ORDER BY x, y) AS xyv USING(x, y) WHERE x > 2 order by v
 # ----
@@ -811,6 +819,7 @@ SELECT * FROM (SELECT * FROM xyu ORDER BY x, y) AS xyu LEFT OUTER JOIN (SELECT *
 # NULL 3 3 33
 # NULL 5 5 55
 
+# TODO: x > 2 means x on both sides
 # query
 # SELECT * FROM (SELECT * FROM xyu ORDER BY x, y) AS xyu FULL OUTER JOIN (SELECT * FROM xyv ORDER BY x, y) AS xyv USING(x, y) WHERE x > 2
 
@@ -863,9 +872,9 @@ SELECT * FROM l LEFT OUTER JOIN r USING(a) WHERE a = 2
 query III
 SELECT * FROM l RIGHT OUTER JOIN r USING(a) WHERE a = 3
 ----
-3 1 1
+1 3 1
 
-# FIXME: The fields output by Using are determined by JoinType.
+# TODO: a= 4 means x on both sides
 # query III
 # SELECT * FROM l RIGHT OUTER JOIN r USING(a) WHERE a = 4
 # ----

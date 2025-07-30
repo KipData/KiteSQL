@@ -16,6 +16,13 @@ pub enum JoinType {
     Full,
     Cross,
 }
+
+impl JoinType {
+    pub fn is_right(&self) -> bool {
+        matches!(self, JoinType::RightOuter)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ReferenceSerialization)]
 pub enum JoinCondition {
     On {

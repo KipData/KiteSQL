@@ -24,30 +24,36 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         let view_name = Arc::new(lower_case_name(name)?);
         let mut plan = self.bind_query(query)?;
 
-        if !columns.is_empty() {
-            let mapping_schema = plan.output_schema();
-            let exprs = columns
-                .iter()
-                .enumerate()
-                .map(|(i, ident)| {
-                    let mapping_column = &mapping_schema[i];
-                    let mut column = ColumnCatalog::new(
-                        lower_ident(ident),
-                        mapping_column.nullable(),
-                        mapping_column.desc().clone(),
-                    );
-                    column.set_ref_table(view_name.clone(), Ulid::new(), true);
+        let mapping_schema = plan.output_schema();
 
-                    ScalarExpression::Alias {
-                        expr: Box::new(ScalarExpression::ColumnRef(mapping_column.clone())),
-                        alias: AliasType::Expr(Box::new(ScalarExpression::ColumnRef(
-                            ColumnRef::from(column),
-                        ))),
-                    }
-                })
-                .collect_vec();
-            plan = self.bind_project(plan, exprs)?;
+        let exprs = if columns.is_empty() {
+            Box::new(
+                mapping_schema
+                    .iter()
+                    .map(|column| column.name().to_string()),
+            ) as Box<dyn Iterator<Item = String>>
+        } else {
+            Box::new(columns.iter().map(lower_ident)) as Box<dyn Iterator<Item = String>>
         }
+        .enumerate()
+        .map(|(i, column_name)| {
+            let mapping_column = &mapping_schema[i];
+            let mut column = ColumnCatalog::new(
+                column_name,
+                mapping_column.nullable(),
+                mapping_column.desc().clone(),
+            );
+            column.set_ref_table(view_name.clone(), Ulid::new(), true);
+
+            ScalarExpression::Alias {
+                expr: Box::new(ScalarExpression::ColumnRef(mapping_column.clone())),
+                alias: AliasType::Expr(Box::new(ScalarExpression::ColumnRef(ColumnRef::from(
+                    column,
+                )))),
+            }
+        })
+        .collect_vec();
+        plan = self.bind_project(plan, exprs)?;
 
         Ok(LogicalPlan::new(
             Operator::CreateView(CreateViewOperator {

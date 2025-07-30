@@ -112,7 +112,7 @@ pub struct BinderContext<'a, T: Transaction> {
     group_by_exprs: Vec<ScalarExpression>,
     pub(crate) agg_calls: Vec<ScalarExpression>,
     // join
-    using: HashSet<String>,
+    using: HashSet<ColumnRef>,
 
     bind_step: QueryBindStep,
     sub_queries: HashMap<QueryBindStep, Vec<SubQueryType>>,
@@ -295,8 +295,17 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
         }
     }
 
-    pub fn add_using(&mut self, name: String) {
-        self.using.insert(name);
+    pub fn add_using(
+        &mut self,
+        join_type: JoinType,
+        left_expr: &ColumnRef,
+        right_expr: &ColumnRef,
+    ) {
+        self.using.insert(if join_type.is_right() {
+            left_expr.clone()
+        } else {
+            right_expr.clone()
+        });
     }
 
     pub fn add_alias(

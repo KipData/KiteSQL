@@ -36,7 +36,6 @@ use crate::types::tuple::{Schema, SchemaRef};
 use crate::types::value::Utf8Type;
 use crate::types::{ColumnId, LogicalType};
 use itertools::Itertools;
-use sqlparser::ast::CharLengthUnits::Characters;
 use sqlparser::ast::{
     CharLengthUnits, Distinct, Expr, Ident, Join, JoinConstraint, JoinOperator, Offset,
     OrderByExpr, Query, Select, SelectInto, SelectItem, SetExpr, SetOperator, SetQuantifier,
@@ -189,14 +188,14 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             }
         }
 
-        if left_cast.len() > 0 {
+        if !left_cast.is_empty() {
             left_plan = LogicalPlan::new(
                 Operator::Project(ProjectOperator { exprs: left_cast }),
                 Childrens::Only(left_plan),
             );
         }
 
-        if right_cast.len() > 0 {
+        if !right_cast.is_empty() {
             right_plan = LogicalPlan::new(
                 Operator::Project(ProjectOperator { exprs: right_cast }),
                 Childrens::Only(right_plan),
@@ -393,7 +392,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     unreachable!()
                 }
             }
-            _ => unimplemented!(),
+            table => return Err(DatabaseError::UnsupportedStmt(format!("{:#?}", table))),
         };
 
         Ok(plan)
@@ -517,8 +516,6 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         }
                         continue;
                     }
-                    let mut join_used = HashSet::with_capacity(self.context.using.len());
-
                     for (table_name, alias, _) in self.context.bind_table.keys() {
                         let schema_buf =
                             self.table_schema_buf.entry(table_name.clone()).or_default();
@@ -527,7 +524,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                             schema_buf,
                             &mut select_items,
                             alias.as_ref().unwrap_or(table_name).clone(),
-                            Some(&mut join_used),
+                            false,
                         )?;
                     }
                 }
@@ -540,7 +537,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         schema_buf,
                         &mut select_items,
                         table_name,
-                        None,
+                        true,
                     )?;
                 }
             };
@@ -555,58 +552,48 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         schema_buf: &mut Option<SchemaOutput>,
         exprs: &mut Vec<ScalarExpression>,
         table_name: TableName,
-        mut join_used: Option<&mut HashSet<String>>,
+        is_qualified_wildcard: bool,
     ) -> Result<(), DatabaseError> {
-        let mut is_bound_alias = false;
-
-        let fn_used =
-            |column_name: &str, context: &BinderContext<T>, join_used: Option<&HashSet<_>>| {
-                context.using.contains(column_name)
-                    && matches!(join_used.map(|used| used.contains(column_name)), Some(true))
-            };
-        for (_, alias_expr) in context.expr_aliases.iter().filter(|(_, expr)| {
-            if let ScalarExpression::ColumnRef(col) = expr.unpack_alias_ref() {
-                let column_name = col.name();
-
-                if Some(&table_name) == col.table_name()
-                    && !fn_used(column_name, context, join_used.as_deref())
-                {
-                    if let Some(used) = join_used.as_mut() {
-                        used.insert(column_name.to_string());
-                    }
-                    return true;
-                }
+        let fn_not_on_using = |column: &ColumnRef| {
+            if context.using.is_empty() {
+                return Some(&table_name) == column.table_name();
             }
-            false
-        }) {
-            is_bound_alias = true;
-            exprs.push(alias_expr.clone());
-        }
-        if is_bound_alias {
+            is_qualified_wildcard
+                || Some(&table_name) == column.table_name() && !context.using.contains(column)
+        };
+
+        let bound_alias = context
+            .expr_aliases
+            .iter()
+            .filter(|(_, expr)| {
+                if let ScalarExpression::ColumnRef(col) = expr.unpack_alias_ref() {
+                    if fn_not_on_using(col) {
+                        exprs.push(ScalarExpression::clone(expr));
+                        return true;
+                    }
+                }
+                false
+            })
+            .count()
+            > 0;
+
+        if bound_alias {
             return Ok(());
         }
-
         let mut source = None;
 
         source = context.table(table_name.clone())?.map(Source::Table);
         if source.is_none() {
-            source = context.view(table_name)?.map(Source::View);
+            source = context.view(table_name.clone())?.map(Source::View);
         }
         for column in source
             .ok_or(DatabaseError::SourceNotFound)?
             .columns(schema_buf)
         {
-            let column_name = column.name();
-
-            if fn_used(column_name, context, join_used.as_deref()) {
+            if !fn_not_on_using(column) {
                 continue;
             }
-            let expr = ScalarExpression::ColumnRef(column.clone());
-
-            if let Some(used) = join_used.as_mut() {
-                used.insert(column_name.to_string());
-            }
-            exprs.push(expr);
+            exprs.push(ScalarExpression::ColumnRef(column.clone()));
         }
         Ok(())
     }
@@ -654,9 +641,12 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         self.extend(binder.context);
 
         let on = match joint_condition {
-            Some(constraint) => {
-                self.bind_join_constraint(left.output_schema(), right.output_schema(), constraint)?
-            }
+            Some(constraint) => self.bind_join_constraint(
+                join_type,
+                left.output_schema(),
+                right.output_schema(),
+                constraint,
+            )?,
             None => JoinCondition::None,
         };
 
@@ -902,6 +892,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
     fn bind_join_constraint<'c>(
         &mut self,
+        join_type: JoinType,
         left_schema: &'c SchemaRef,
         right_schema: &'c SchemaRef,
         constraint: &JoinConstraint,
@@ -938,24 +929,26 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 })
             }
             JoinConstraint::Using(idents) => {
+                fn find_column<'a>(schema: &'a Schema, name: &'a str) -> Option<&'a ColumnRef> {
+                    schema.iter().find(|column| column.name() == name)
+                }
+
                 let mut on_keys: Vec<(ScalarExpression, ScalarExpression)> = Vec::new();
-                let fn_column = |schema: &Schema, name: &str| {
-                    schema
-                        .iter()
-                        .find(|column| column.name() == name)
-                        .map(|column| ScalarExpression::ColumnRef(column.clone()))
-                };
+
                 for ident in idents {
                     let name = lower_ident(ident);
-                    if let (Some(left_column), Some(right_column)) = (
-                        fn_column(left_schema, &name),
-                        fn_column(right_schema, &name),
-                    ) {
-                        on_keys.push((left_column, right_column));
-                    } else {
-                        return Err(DatabaseError::InvalidColumn("not found column".to_string()))?;
-                    }
-                    self.context.add_using(name);
+                    let (Some(left_column), Some(right_column)) = (
+                        find_column(left_schema, &name),
+                        find_column(right_schema, &name),
+                    ) else {
+                        return Err(DatabaseError::InvalidColumn("not found column".to_string()));
+                    };
+                    self.context
+                        .add_using(join_type, left_column, right_column);
+                    on_keys.push((
+                        ScalarExpression::ColumnRef(left_column.clone()),
+                        ScalarExpression::ColumnRef(right_column.clone()),
+                    ));
                 }
                 Ok(JoinCondition::On {
                     on: on_keys,
@@ -970,15 +963,15 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 let mut on_keys: Vec<(ScalarExpression, ScalarExpression)> = Vec::new();
 
                 for name in fn_names(left_schema).intersection(&fn_names(right_schema)) {
-                    self.context.add_using(name.to_string());
                     if let (Some(left_column), Some(right_column)) = (
                         left_schema.iter().find(|column| column.name() == *name),
                         right_schema.iter().find(|column| column.name() == *name),
                     ) {
-                        on_keys.push((
-                            ScalarExpression::ColumnRef(left_column.clone()),
-                            ScalarExpression::ColumnRef(right_column.clone()),
-                        ));
+                        let left_expr = ScalarExpression::ColumnRef(left_column.clone());
+                        let right_expr = ScalarExpression::ColumnRef(right_column.clone());
+
+                        self.context.add_using(join_type, left_column, right_column);
+                        on_keys.push((left_expr, right_expr));
                     }
                 }
                 Ok(JoinCondition::On {
