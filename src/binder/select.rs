@@ -1,7 +1,3 @@
-use std::borrow::Borrow;
-use std::collections::HashSet;
-use std::sync::Arc;
-
 use crate::{
     expression::ScalarExpression,
     planner::{
@@ -13,15 +9,21 @@ use crate::{
     },
     types::value::DataValue,
 };
+use std::borrow::Borrow;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use super::{
     lower_case_name, lower_ident, Binder, BinderContext, QueryBindStep, Source, SubQueryType,
 };
 
-use crate::catalog::{ColumnCatalog, ColumnRef, ColumnSummary, TableName};
+use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, ColumnSummary, TableName};
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::joins_nullable;
 use crate::expression::agg::AggKind;
+use crate::expression::simplify::ConstantCalculator;
+use crate::expression::visitor_mut::VisitorMut;
+use crate::expression::ScalarExpression::Constant;
 use crate::expression::{AliasType, BinaryOperator};
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::operator::except::ExceptOperator;
@@ -59,6 +61,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 left,
                 right,
             } => self.bind_set_operation(op, set_quantifier, left, right),
+            SetExpr::Values(values) => self.bind_temp_values(&values.rows),
             expr => {
                 return Err(DatabaseError::UnsupportedStmt(format!(
                     "query body: {:?}",
@@ -154,6 +157,63 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         }
 
         Ok(plan)
+    }
+
+    fn bind_temp_values(
+        &mut self,
+        expr_rows: &Vec<Vec<Expr>>,
+    ) -> Result<LogicalPlan, DatabaseError> {
+        let values_len = expr_rows[0].len();
+
+        let mut inferred_types: Vec<Option<LogicalType>> = vec![None; values_len];
+        let mut rows = Vec::with_capacity(expr_rows.len());
+
+        for expr_row in expr_rows.iter() {
+            if expr_row.len() != values_len {
+                return Err(DatabaseError::ValuesLenMismatch(expr_row.len(), values_len));
+            }
+
+            let mut row = Vec::with_capacity(values_len);
+
+            for (col_index, expr) in expr_row.iter().enumerate() {
+                let mut expression = self.bind_expr(expr)?;
+                ConstantCalculator.visit(&mut expression)?;
+
+                if let Constant(value) = expression {
+                    let value_type = value.logical_type();
+
+                    inferred_types[col_index] = match &inferred_types[col_index] {
+                        Some(existing) => {
+                            Some(LogicalType::max_logical_type(existing, &value_type)?)
+                        }
+                        None => Some(value_type),
+                    };
+
+                    row.push(value);
+                } else {
+                    return Err(DatabaseError::ColumnsEmpty);
+                }
+            }
+
+            rows.push(row);
+        }
+
+        let column_refs: Vec<ColumnRef> = inferred_types
+            .into_iter()
+            .enumerate()
+            .map(|(col_index, typ)| {
+                let typ = typ.ok_or(DatabaseError::InvalidType)?;
+                let mut column_ref = ColumnCatalog::new(
+                    col_index.to_string(),
+                    false,
+                    ColumnDesc::new(typ, None, false, None)?,
+                );
+                column_ref.set_ref_table(self.context.temp_table(), ColumnId::default(), true);
+                Ok(ColumnRef(Arc::new(column_ref)))
+            })
+            .collect::<Result<_, DatabaseError>>()?;
+
+        Ok(self.bind_values(rows, Arc::new(column_refs)))
     }
 
     fn bind_set_cast(
@@ -357,8 +417,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     }
                     let table_alias = Arc::new(name.value.to_lowercase());
 
-                    plan =
-                        self.bind_alias(plan, alias_column, table_alias, tables.pop().unwrap())?;
+                    plan = self.bind_alias(plan, alias_column, table_alias, tables.pop())?;
                 }
                 plan
             }
@@ -380,7 +439,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                             plan,
                             alias_column,
                             table_alias.clone().unwrap(),
-                            table_name.clone(),
+                            Some(table_name.clone()),
                         )?;
                     }
 
@@ -403,7 +462,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         mut plan: LogicalPlan,
         alias_column: &[Ident],
         table_alias: TableName,
-        table_name: TableName,
+        table_name: Option<TableName>,
     ) -> Result<LogicalPlan, DatabaseError> {
         let input_schema = plan.output_schema();
         if !alias_column.is_empty() && alias_column.len() != input_schema.len() {
@@ -446,7 +505,9 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             );
             alias_exprs.push(alias_column_expr);
         }
-        self.context.add_table_alias(table_alias, table_name);
+        if let Some(table_name) = table_name {
+            self.context.add_table_alias(table_alias, table_name);
+        }
         self.bind_project(plan, alias_exprs)
     }
 
@@ -476,7 +537,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         };
 
         if let Some(idents) = alias_idents {
-            plan = self.bind_alias(plan, idents, table_alias.unwrap(), table_name.clone())?;
+            plan = self.bind_alias(plan, idents, table_alias.unwrap(), Some(table_name.clone()))?;
         }
         Ok(plan)
     }

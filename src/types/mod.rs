@@ -407,8 +407,9 @@ impl TryFrom<sqlparser::ast::DataType> for LogicalType {
             sqlparser::ast::DataType::String | sqlparser::ast::DataType::Text => {
                 Ok(LogicalType::Varchar(None, CharLengthUnits::Characters))
             }
-            sqlparser::ast::DataType::Float(_) => Ok(LogicalType::Float),
-            sqlparser::ast::DataType::Real => Ok(LogicalType::Float),
+            sqlparser::ast::DataType::Float(_) | sqlparser::ast::DataType::Real => {
+                Ok(LogicalType::Float)
+            }
             sqlparser::ast::DataType::Double | sqlparser::ast::DataType::DoublePrecision => {
                 Ok(LogicalType::Double)
             }
@@ -438,7 +439,7 @@ impl TryFrom<sqlparser::ast::DataType> for LogicalType {
                     Some(0..5) | None => (),
                     _ => {
                         return Err(DatabaseError::UnsupportedStmt(
-                            "time's precision must less than 5".to_string(),
+                            "time's precision must be less than 5".to_string(),
                         ))
                     }
                 }
@@ -455,7 +456,7 @@ impl TryFrom<sqlparser::ast::DataType> for LogicalType {
                     Some(3 | 6 | 9) | None => (),
                     _ => {
                         return Err(DatabaseError::UnsupportedStmt(
-                            "timestamp's precision must 3,6,9".to_string(),
+                            "timestamp's precision must be 3,6,9".to_string(),
                         ))
                     }
                 }
@@ -464,15 +465,15 @@ impl TryFrom<sqlparser::ast::DataType> for LogicalType {
                 }
                 Ok(LogicalType::TimeStamp(precision, zone))
             }
-            sqlparser::ast::DataType::Decimal(info) | sqlparser::ast::DataType::Dec(info) => {
-                match info {
-                    ExactNumberInfo::None => Ok(Self::Decimal(None, None)),
-                    ExactNumberInfo::Precision(p) => Ok(Self::Decimal(Some(p as u8), None)),
-                    ExactNumberInfo::PrecisionAndScale(p, s) => {
-                        Ok(Self::Decimal(Some(p as u8), Some(s as u8)))
-                    }
+            sqlparser::ast::DataType::Decimal(info)
+            | sqlparser::ast::DataType::Dec(info)
+            | sqlparser::ast::DataType::Numeric(info) => match info {
+                ExactNumberInfo::None => Ok(Self::Decimal(None, None)),
+                ExactNumberInfo::Precision(p) => Ok(Self::Decimal(Some(p as u8), None)),
+                ExactNumberInfo::PrecisionAndScale(p, s) => {
+                    Ok(Self::Decimal(Some(p as u8), Some(s as u8)))
                 }
-            }
+            },
             other => Err(DatabaseError::UnsupportedStmt(format!(
                 "unsupported data type: {other}"
             ))),

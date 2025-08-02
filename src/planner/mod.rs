@@ -115,6 +115,8 @@ impl LogicalPlan {
         fn collect_table(plan: &LogicalPlan, results: &mut Vec<TableName>) {
             if let Operator::TableScan(op) = &plan.operator {
                 results.push(op.table_name.clone());
+            } else if let Operator::Values(op) = &plan.operator {
+                results.push(op.schema_ref[0].table_name().unwrap().clone());
             }
             for child in plan.childrens.iter() {
                 collect_table(child, results);

@@ -40,8 +40,12 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             let mut plan = TableScanOperator::build(table_name.clone(), table, true);
 
             if let Some(alias_idents) = alias_idents {
-                plan =
-                    self.bind_alias(plan, alias_idents, table_alias.unwrap(), table_name.clone())?;
+                plan = self.bind_alias(
+                    plan,
+                    alias_idents,
+                    table_alias.unwrap(),
+                    Some(table_name.clone()),
+                )?;
             }
 
             if let Some(predicate) = selection {
