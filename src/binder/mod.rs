@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::catalog::view::View;
-use crate::catalog::{ColumnRef, TableCatalog, TableName};
+use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog, TableName};
 use crate::db::{ScalaFunctions, TableFunctions};
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
@@ -276,12 +276,18 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
         Ok(source)
     }
 
-    pub fn bind_source<'b: 'a>(&self, table_name: &str) -> Result<&Source, DatabaseError> {
+    pub fn bind_source<'b: 'a, A: AsRef<[(&'static str, DataValue)]>>(
+        &self,
+        parent: Option<&'a Binder<'a, 'b, T, A>>,
+        table_name: &str,
+    ) -> Result<&'b Source, DatabaseError> {
         if let Some(source) = self.bind_table.iter().find(|((t, alias, _), _)| {
             t.as_str() == table_name
                 || matches!(alias.as_ref().map(|a| a.as_str() == table_name), Some(true))
         }) {
             Ok(source.1)
+        } else if let Some(binder) = parent {
+            binder.context.bind_source(binder.parent, table_name)
         } else {
             Err(DatabaseError::InvalidTable(table_name.into()))
         }

@@ -10,6 +10,7 @@ use crate::optimizer::rule::normalization::combine_operators::{
 use crate::optimizer::rule::normalization::compilation_in_advance::{
     EvaluatorBind, ExpressionRemapper,
 };
+use crate::optimizer::rule::normalization::correlated_subquery::CorrelatedSubquery;
 use crate::optimizer::rule::normalization::pushdown_limit::{
     LimitProjectTranspose, PushLimitIntoScan, PushLimitThroughJoin,
 };
@@ -21,6 +22,7 @@ use crate::optimizer::rule::normalization::simplification::SimplifyFilter;
 mod column_pruning;
 mod combine_operators;
 mod compilation_in_advance;
+mod correlated_subquery;
 mod pushdown_limit;
 mod pushdown_predicates;
 mod simplification;
@@ -32,6 +34,7 @@ pub enum NormalizationRuleImpl {
     CollapseProject,
     CollapseGroupByAgg,
     CombineFilter,
+    CorrelateSubquery,
     // PushDown limit
     LimitProjectTranspose,
     PushLimitThroughJoin,
@@ -55,6 +58,7 @@ impl MatchPattern for NormalizationRuleImpl {
             NormalizationRuleImpl::CollapseProject => CollapseProject.pattern(),
             NormalizationRuleImpl::CollapseGroupByAgg => CollapseGroupByAgg.pattern(),
             NormalizationRuleImpl::CombineFilter => CombineFilter.pattern(),
+            NormalizationRuleImpl::CorrelateSubquery => CorrelatedSubquery.pattern(),
             NormalizationRuleImpl::LimitProjectTranspose => LimitProjectTranspose.pattern(),
             NormalizationRuleImpl::PushLimitThroughJoin => PushLimitThroughJoin.pattern(),
             NormalizationRuleImpl::PushLimitIntoTableScan => PushLimitIntoScan.pattern(),
@@ -75,6 +79,7 @@ impl NormalizationRule for NormalizationRuleImpl {
             NormalizationRuleImpl::CollapseProject => CollapseProject.apply(node_id, graph),
             NormalizationRuleImpl::CollapseGroupByAgg => CollapseGroupByAgg.apply(node_id, graph),
             NormalizationRuleImpl::CombineFilter => CombineFilter.apply(node_id, graph),
+            NormalizationRuleImpl::CorrelateSubquery => CorrelatedSubquery.apply(node_id, graph),
             NormalizationRuleImpl::LimitProjectTranspose => {
                 LimitProjectTranspose.apply(node_id, graph)
             }
