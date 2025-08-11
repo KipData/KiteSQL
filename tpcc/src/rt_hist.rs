@@ -45,6 +45,21 @@ impl RtHist {
         self.cur_hist[transaction][i] += 1;
     }
 
+    // Merge local histogram into this histogram
+    pub fn merge(&mut self, other: &RtHist) {
+        for transaction in 0..5 {
+            // Merge current histograms
+            for i in 0..(MAX_REC * REC_PER_SEC) {
+                self.cur_hist[transaction][i] += other.cur_hist[transaction][i];
+            }
+
+            // Update max response time
+            if other.cur_max_rt[transaction] > self.cur_max_rt[transaction] {
+                self.cur_max_rt[transaction] = other.cur_max_rt[transaction];
+            }
+        }
+    }
+
     // Checkpoint and add to the total histogram
     pub fn hist_ckp(&mut self, transaction: usize) -> f64 {
         let mut total = 0;
