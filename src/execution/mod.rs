@@ -1,7 +1,7 @@
 pub(crate) mod ddl;
 pub(crate) mod dml;
 pub(crate) mod dql;
-pub(crate) mod marco;
+pub(crate) mod execute_macro;
 
 use self::ddl::add_column::AddColumn;
 use self::dql::join::nested_loop_join::NestedLoopJoin;

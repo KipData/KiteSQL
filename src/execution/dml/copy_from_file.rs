@@ -5,8 +5,9 @@ use crate::execution::{Executor, WriteExecutor};
 use crate::planner::operator::copy_from_file::CopyFromFileOperator;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::throw;
-use crate::types::tuple::{types, Tuple};
+use crate::types::tuple::Tuple;
 use crate::types::tuple_builder::TupleBuilder;
+use itertools::Itertools;
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::mpsc;
@@ -33,7 +34,12 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CopyFromFile {
         Box::new(
             #[coroutine]
             move || {
-                let types = types(&self.op.schema_ref);
+                let serializers = self
+                    .op
+                    .schema_ref
+                    .iter()
+                    .map(|column| column.datatype().serializable())
+                    .collect_vec();
                 let (tx, rx) = mpsc::channel();
                 let (tx1, rx1) = mpsc::channel();
                 // # Cancellation
@@ -50,7 +56,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CopyFromFile {
                     throw!(unsafe { &mut (*transaction) }.append_tuple(
                         table.name(),
                         chunk,
-                        &types,
+                        &serializers,
                         false
                     ));
                     size += 1;

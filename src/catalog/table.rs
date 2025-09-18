@@ -89,12 +89,6 @@ impl TableCatalog {
         &self.primary_key_indices
     }
 
-    pub(crate) fn types(&self) -> Vec<LogicalType> {
-        self.columns()
-            .map(|column| column.datatype().clone())
-            .collect_vec()
-    }
-
     /// Add a column to the table catalog.
     pub(crate) fn add_column(
         &mut self,

@@ -99,7 +99,10 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert {
                         index_metas.push((index_meta, exprs));
                     }
 
-                    let types = table_catalog.types();
+                    let serializers = table_catalog
+                        .columns()
+                        .map(|column| column.datatype().serializable())
+                        .collect_vec();
                     let pk_indices = table_catalog.primary_keys_indices();
                     let mut coroutine = build_read(input, cache, transaction);
 
@@ -147,7 +150,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert {
                         throw!(unsafe { &mut (*transaction) }.append_tuple(
                             &table_name,
                             tuple,
-                            &types,
+                            &serializers,
                             is_overwrite
                         ));
                         inserted_count += 1;

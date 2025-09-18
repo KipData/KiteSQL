@@ -50,7 +50,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for IndexScan {
                     columns,
                     self.index_by,
                     self.ranges,
-                    with_pk,
+                    with_pk
                 ));
 
                 while let Some(tuple) = throw!(iter.next_tuple()) {

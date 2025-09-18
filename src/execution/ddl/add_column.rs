@@ -9,6 +9,7 @@ use crate::types::value::DataValue;
 use crate::{
     planner::operator::alter_table::add_column::AddColumnOperator, storage::Transaction, throw,
 };
+use itertools::Itertools;
 use std::ops::Coroutine;
 use std::ops::CoroutineState;
 use std::pin::Pin;
@@ -69,9 +70,14 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for AddColumn {
                 }
                 drop(coroutine);
 
+                let serializers = types.iter().map(|ty| ty.serializable()).collect_vec();
                 for tuple in tuples {
-                    throw!(unsafe { &mut (*transaction) }
-                        .append_tuple(table_name, tuple, &types, true));
+                    throw!(unsafe { &mut (*transaction) }.append_tuple(
+                        table_name,
+                        tuple,
+                        &serializers,
+                        true
+                    ));
                 }
                 let col_id = throw!(unsafe { &mut (*transaction) }.add_column(
                     cache.0,
