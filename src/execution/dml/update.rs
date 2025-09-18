@@ -8,10 +8,10 @@ use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::throw;
 use crate::types::index::Index;
-use crate::types::tuple::types;
 use crate::types::tuple::Tuple;
 use crate::types::tuple_builder::TupleBuilder;
 use crate::types::value::DataValue;
+use itertools::Itertools;
 use std::collections::HashMap;
 use std::ops::Coroutine;
 use std::ops::CoroutineState;
@@ -62,7 +62,10 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Update {
                 }
 
                 let input_schema = input.output_schema().clone();
-                let types = types(&input_schema);
+                let serializers = input_schema
+                    .iter()
+                    .map(|column| column.datatype().serializable())
+                    .collect_vec();
                 let mut updated_count = 0;
 
                 if let Some(table_catalog) =
@@ -133,7 +136,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Update {
                         throw!(unsafe { &mut (*transaction) }.append_tuple(
                             &table_name,
                             tuple,
-                            &types,
+                            &serializers,
                             is_overwrite
                         ));
                         updated_count += 1;

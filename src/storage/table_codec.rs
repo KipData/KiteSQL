@@ -4,7 +4,8 @@ use crate::errors::DatabaseError;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use crate::storage::{TableCache, Transaction};
 use crate::types::index::{Index, IndexId, IndexMeta, IndexType};
-use crate::types::tuple::{Schema, Tuple, TupleId};
+use crate::types::serialize::TupleValueSerializableImpl;
+use crate::types::tuple::{Tuple, TupleId};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use bumpalo::Bump;
@@ -258,7 +259,7 @@ impl TableCodec {
         &self,
         table_name: &str,
         tuple: &mut Tuple,
-        types: &[LogicalType],
+        types: &[TupleValueSerializableImpl],
     ) -> Result<(BumpBytes, BumpBytes), DatabaseError> {
         let tuple_id = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
         let key = self.encode_tuple_key(table_name, tuple_id)?;
@@ -283,14 +284,13 @@ impl TableCodec {
 
     #[inline]
     pub fn decode_tuple(
-        table_types: &[LogicalType],
-        pk_indices: &[usize],
-        projections: &[usize],
-        schema: &Schema,
+        deserializers: &[TupleValueSerializableImpl],
+        pk_indices: Option<&[usize]>,
         bytes: &[u8],
-        with_pk: bool,
+        values_len: usize,
+        total_len: usize,
     ) -> Result<Tuple, DatabaseError> {
-        Tuple::deserialize_from(table_types, pk_indices, projections, schema, bytes, with_pk)
+        Tuple::deserialize_from(deserializers, pk_indices, bytes, values_len, total_len)
     }
 
     pub fn encode_index_meta_key(
@@ -584,21 +584,19 @@ mod tests {
         let (_, bytes) = table_codec.encode_tuple(
             &table_catalog.name,
             &mut tuple,
-            &[LogicalType::Integer, LogicalType::Decimal(None, None)],
+            &[
+                LogicalType::Integer.serializable(),
+                LogicalType::Decimal(None, None).serializable(),
+            ],
         )?;
-        let schema = table_catalog.schema_ref();
-        let pk_indices = table_catalog.primary_keys_indices();
+        let deserializers = table_catalog
+            .columns()
+            .map(|column| column.datatype().serializable())
+            .collect_vec();
 
         tuple.pk = None;
         assert_eq!(
-            TableCodec::decode_tuple(
-                &table_catalog.types(),
-                pk_indices,
-                &[0, 1],
-                schema,
-                &bytes,
-                false
-            )?,
+            TableCodec::decode_tuple(&deserializers, None, &bytes, deserializers.len(), 2,)?,
             tuple
         );
 

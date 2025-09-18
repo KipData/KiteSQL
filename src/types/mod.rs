@@ -1,5 +1,6 @@
 pub mod evaluator;
 pub mod index;
+pub mod serialize;
 pub mod tuple;
 pub mod tuple_builder;
 pub mod value;

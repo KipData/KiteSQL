@@ -286,7 +286,10 @@ mod test {
                 Some(DataValue::Int32(1)),
                 vec![DataValue::Int32(1), DataValue::Boolean(true)],
             ),
-            &[LogicalType::Integer, LogicalType::Boolean],
+            &[
+                LogicalType::Integer.serializable(),
+                LogicalType::Boolean.serializable(),
+            ],
             false,
         )?;
         transaction.append_tuple(
@@ -295,7 +298,10 @@ mod test {
                 Some(DataValue::Int32(2)),
                 vec![DataValue::Int32(2), DataValue::Boolean(true)],
             ),
-            &[LogicalType::Integer, LogicalType::Boolean],
+            &[
+                LogicalType::Integer.serializable(),
+                LogicalType::Boolean.serializable(),
+            ],
             false,
         )?;
 
@@ -344,13 +350,17 @@ mod test {
             DataValue::Int32(3),
             DataValue::Int32(4),
         ];
+        let deserializers = table
+            .columns()
+            .map(|column| column.datatype().serializable())
+            .collect_vec();
+        let values_len = deserializers.len();
         let mut iter = IndexIter {
             offset: 0,
             limit: None,
-            remap_pk_indices: vec![0],
+            remap_pk_indices: Some(vec![0]),
             params: IndexImplParams {
-                tuple_schema_ref: table.schema_ref().clone(),
-                projections: vec![0],
+                deserializers,
                 index_meta: Arc::new(IndexMeta {
                     id: 0,
                     column_ids: vec![*a_column_id],
@@ -361,9 +371,9 @@ mod test {
                     ty: IndexType::PrimaryKey { is_multiple: false },
                 }),
                 table_name: &table.name,
-                table_types: table.types(),
-                with_pk: true,
                 tx: &transaction,
+                values_len,
+                total_len: 1,
             },
             ranges: vec![
                 Range::Eq(DataValue::Int32(0)),
@@ -395,7 +405,7 @@ mod test {
             .run("create table t1 (a int primary key, b int unique)")?
             .done()?;
         kite_sql
-            .run("insert into t1 (a, b) values (0, 0), (1, 1), (2, 2)")?
+            .run("insert into t1 (a, b) values (0, 0), (1, 1), (2, 2), (3, 4)")?
             .done()?;
         let transaction = kite_sql.storage.transaction().unwrap();
 
@@ -403,25 +413,51 @@ mod test {
             .table(kite_sql.state.table_cache(), Arc::new("t1".to_string()))?
             .unwrap()
             .clone();
-        let columns = table.columns().cloned().enumerate().collect();
-        let mut iter = transaction
-            .read_by_index(
-                kite_sql.state.table_cache(),
-                Arc::new("t1".to_string()),
-                (Some(0), Some(1)),
-                columns,
-                table.indexes[0].clone(),
-                vec![Range::Scope {
-                    min: Bound::Excluded(DataValue::Int32(0)),
-                    max: Bound::Unbounded,
-                }],
-                true,
-            )
-            .unwrap();
+        {
+            let mut iter = transaction
+                .read_by_index(
+                    kite_sql.state.table_cache(),
+                    Arc::new("t1".to_string()),
+                    (Some(0), Some(1)),
+                    table.columns().cloned().enumerate().collect(),
+                    table.indexes[0].clone(),
+                    vec![Range::Scope {
+                        min: Bound::Excluded(DataValue::Int32(0)),
+                        max: Bound::Unbounded,
+                    }],
+                    true,
+                )
+                .unwrap();
 
-        while let Some(tuple) = iter.next_tuple()? {
-            assert_eq!(tuple.pk, Some(DataValue::Int32(1)));
-            assert_eq!(tuple.values, vec![DataValue::Int32(1), DataValue::Int32(1)])
+            while let Some(tuple) = iter.next_tuple()? {
+                assert_eq!(tuple.pk, Some(DataValue::Int32(1)));
+                assert_eq!(tuple.values, vec![DataValue::Int32(1), DataValue::Int32(1)])
+            }
+        }
+        // projection
+        {
+            let mut columns: BTreeMap<_, _> = table.columns().cloned().enumerate().collect();
+            let _ = columns.pop_last();
+
+            let mut iter = transaction
+                .read_by_index(
+                    kite_sql.state.table_cache(),
+                    Arc::new("t1".to_string()),
+                    (Some(0), Some(1)),
+                    columns,
+                    table.indexes[0].clone(),
+                    vec![Range::Scope {
+                        min: Bound::Excluded(DataValue::Int32(3)),
+                        max: Bound::Unbounded,
+                    }],
+                    true,
+                )
+                .unwrap();
+
+            while let Some(tuple) = iter.next_tuple()? {
+                assert_eq!(tuple.pk, Some(DataValue::Int32(3)));
+                assert_eq!(tuple.values, vec![DataValue::Int32(3)])
+            }
         }
 
         Ok(())

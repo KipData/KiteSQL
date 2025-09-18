@@ -2,8 +2,8 @@ use crate::catalog::ColumnRef;
 use crate::db::ResultIter;
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::BumpBytes;
+use crate::types::serialize::{TupleValueSerializable, TupleValueSerializableImpl};
 use crate::types::value::DataValue;
-use crate::types::LogicalType;
 use bumpalo::Bump;
 use comfy_table::{Cell, Table};
 use itertools::Itertools;
@@ -15,13 +15,6 @@ const BITS_MAX_INDEX: usize = 8;
 pub type TupleId = DataValue;
 pub type Schema = Vec<ColumnRef>;
 pub type SchemaRef = Arc<Schema>;
-
-pub fn types(schema: &Schema) -> Vec<LogicalType> {
-    schema
-        .iter()
-        .map(|column| column.datatype().clone())
-        .collect_vec()
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Tuple {
@@ -36,47 +29,31 @@ impl Tuple {
 
     #[inline]
     pub fn deserialize_from(
-        table_types: &[LogicalType],
-        pk_indices: &[usize],
-        projections: &[usize],
-        schema: &Schema,
+        deserializers: &[TupleValueSerializableImpl],
+        pk_indices: Option<&[usize]>,
         bytes: &[u8],
-        with_pk: bool,
+        values_len: usize,
+        total_len: usize,
     ) -> Result<Self, DatabaseError> {
-        debug_assert!(!schema.is_empty());
-        debug_assert!(projections.is_sorted());
-        debug_assert_eq!(projections.len(), schema.len());
-
-        fn is_none(bits: u8, i: usize) -> bool {
+        fn is_null(bits: u8, i: usize) -> bool {
             bits & (1 << (7 - i)) > 0
         }
 
-        let types_len = table_types.len();
-        let bits_len = (types_len + BITS_MAX_INDEX) / BITS_MAX_INDEX;
-        let mut values = vec![DataValue::Null; projections.len()];
+        let bits_len = (total_len + BITS_MAX_INDEX) / BITS_MAX_INDEX;
+        let mut values = Vec::with_capacity(values_len);
 
-        let mut projection_i = 0;
         let mut cursor = Cursor::new(&bytes[bits_len..]);
 
-        for (i, logic_type) in table_types.iter().enumerate() {
-            if projections.len() <= projection_i {
-                break;
-            }
-            debug_assert!(projection_i < types_len);
-            if is_none(bytes[i / BITS_MAX_INDEX], i % BITS_MAX_INDEX) {
-                projection_i += 1;
+        for (i, deserializer) in deserializers.iter().enumerate() {
+            if is_null(bytes[i / BITS_MAX_INDEX], i % BITS_MAX_INDEX) {
+                values.push(DataValue::Null);
                 continue;
             }
-            if let Some(value) =
-                DataValue::from_raw(&mut cursor, logic_type, projections[projection_i] == i)?
-            {
-                values[projection_i] = value;
-                projection_i += 1;
-            }
+            deserializer.filling_value(&mut cursor, &mut values)?;
         }
 
         Ok(Tuple {
-            pk: with_pk.then(|| Tuple::primary_projection(pk_indices, &values)),
+            pk: pk_indices.map(|pk_indices| Tuple::primary_projection(pk_indices, &values)),
             values,
         })
     }
@@ -85,10 +62,10 @@ impl Tuple {
     /// Tips: all len is u32
     pub fn serialize_to<'a>(
         &self,
-        types: &[LogicalType],
+        serializers: &[TupleValueSerializableImpl],
         arena: &'a Bump,
     ) -> Result<BumpBytes<'a>, DatabaseError> {
-        debug_assert_eq!(self.values.len(), types.len());
+        debug_assert_eq!(self.values.len(), serializers.len());
 
         fn flip_bit(bits: u8, i: usize) -> u8 {
             bits | (1 << (7 - i))
@@ -99,15 +76,15 @@ impl Tuple {
         let mut bytes = BumpBytes::new_in(arena);
         bytes.resize(bits_len, 0u8);
         let null_bytes: *mut BumpBytes = &mut bytes;
-        let mut value_bytes = &mut bytes;
 
-        for (i, value) in self.values.iter().enumerate() {
+        debug_assert_eq!(self.values.len(), serializers.len());
+        for (i, (value, serializer)) in self.values.iter().zip(serializers.iter()).enumerate() {
             if value.is_null() {
                 let null_bytes = unsafe { &mut *null_bytes };
                 null_bytes[i / BITS_MAX_INDEX] =
                     flip_bit(null_bytes[i / BITS_MAX_INDEX], i % BITS_MAX_INDEX);
             } else {
-                value.to_raw(&mut value_bytes)?;
+                serializer.to_raw(value, &mut bytes)?;
             }
         }
         Ok(bytes)
@@ -333,20 +310,19 @@ mod tests {
                 ],
             ),
         ];
-        let types = columns
+        let serializers = columns
             .iter()
-            .map(|column| column.datatype().clone())
+            .map(|column| column.datatype().serializable())
             .collect_vec();
         let columns = Arc::new(columns);
         let arena = Bump::new();
         {
             let tuple_0 = Tuple::deserialize_from(
-                &types,
-                &Arc::new(vec![0]),
-                &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
-                &columns,
-                &tuples[0].serialize_to(&types, &arena).unwrap(),
-                true,
+                &serializers,
+                Some(vec![0]).as_deref(),
+                &tuples[0].serialize_to(&serializers, &arena).unwrap(),
+                serializers.len(),
+                columns.len(),
             )
             .unwrap();
 
@@ -354,16 +330,85 @@ mod tests {
         }
         {
             let tuple_1 = Tuple::deserialize_from(
-                &types,
-                &Arc::new(vec![0]),
-                &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
-                &columns,
-                &tuples[1].serialize_to(&types, &arena).unwrap(),
-                true,
+                &serializers,
+                Some(vec![0]).as_deref(),
+                &tuples[1].serialize_to(&serializers, &arena).unwrap(),
+                serializers.len(),
+                columns.len(),
             )
             .unwrap();
 
             assert_eq!(tuples[1], tuple_1);
+        }
+        // projection
+        {
+            let projection_serializers = vec![
+                columns[0].datatype().serializable(),
+                columns[1].datatype().skip_serializable(),
+                columns[2].datatype().skip_serializable(),
+                columns[3].datatype().serializable(),
+            ];
+            let tuple_2 = Tuple::deserialize_from(
+                &projection_serializers,
+                Some(vec![0]).as_deref(),
+                &tuples[0].serialize_to(&serializers, &arena).unwrap(),
+                2,
+                columns.len(),
+            )
+            .unwrap();
+
+            assert_eq!(
+                tuple_2,
+                Tuple {
+                    pk: Some(DataValue::Int32(0)),
+                    values: vec![DataValue::Int32(0), DataValue::Int16(1)],
+                }
+            );
+        }
+        // multiple pk
+        {
+            let multiple_pk_serializers = columns
+                .iter()
+                .take(5)
+                .map(|column| column.datatype().serializable())
+                .collect_vec();
+
+            let tuple_3 = Tuple::deserialize_from(
+                &multiple_pk_serializers,
+                Some(vec![4, 2]).as_deref(),
+                &tuples[0].serialize_to(&serializers, &arena).unwrap(),
+                serializers.len(),
+                columns.len(),
+            )
+            .unwrap();
+
+            assert_eq!(
+                tuple_3,
+                Tuple {
+                    pk: Some(DataValue::Tuple(
+                        vec![
+                            DataValue::UInt16(1),
+                            DataValue::Utf8 {
+                                value: "LOL".to_string(),
+                                ty: Utf8Type::Variable(Some(2)),
+                                unit: CharLengthUnits::Octets,
+                            },
+                        ],
+                        false
+                    )),
+                    values: vec![
+                        DataValue::Int32(0),
+                        DataValue::UInt32(1),
+                        DataValue::Utf8 {
+                            value: "LOL".to_string(),
+                            ty: Utf8Type::Variable(Some(2)),
+                            unit: CharLengthUnits::Characters,
+                        },
+                        DataValue::Int16(1),
+                        DataValue::UInt16(1),
+                    ],
+                }
+            );
         }
     }
 }

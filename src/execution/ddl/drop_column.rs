@@ -6,6 +6,7 @@ use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::throw;
 use crate::types::tuple::Tuple;
 use crate::types::tuple_builder::TupleBuilder;
+use itertools::Itertools;
 use std::ops::Coroutine;
 use std::ops::CoroutineState;
 use std::pin::Pin;
@@ -66,11 +67,12 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropColumn {
                         tuples.push(tuple);
                     }
                     drop(coroutine);
+                    let serializers = types.iter().map(|ty| ty.serializable()).collect_vec();
                     for tuple in tuples {
                         throw!(unsafe { &mut (*transaction) }.append_tuple(
                             &table_name,
                             tuple,
-                            &types,
+                            &serializers,
                             true
                         ));
                     }

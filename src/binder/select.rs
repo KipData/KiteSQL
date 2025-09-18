@@ -159,10 +159,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         Ok(plan)
     }
 
-    fn bind_temp_values(
-        &mut self,
-        expr_rows: &Vec<Vec<Expr>>,
-    ) -> Result<LogicalPlan, DatabaseError> {
+    fn bind_temp_values(&mut self, expr_rows: &[Vec<Expr>]) -> Result<LogicalPlan, DatabaseError> {
         let values_len = expr_rows[0].len();
 
         let mut inferred_types: Vec<Option<LogicalType>> = vec![None; values_len];
