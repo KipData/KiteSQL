@@ -43,7 +43,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         for expr in exprs {
             // TODO: Expression Index
             match self.bind_expr(&expr.expr)? {
-                ScalarExpression::ColumnRef(column) => columns.push(column),
+                ScalarExpression::ColumnRef { column, .. } => columns.push(column),
                 expr => {
                     return Err(DatabaseError::UnsupportedStmt(format!(
                         "'CREATE INDEX' by {}",

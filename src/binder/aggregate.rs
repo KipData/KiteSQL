@@ -155,7 +155,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 }
             }
             ScalarExpression::Constant(_) | ScalarExpression::ColumnRef { .. } => (),
-            ScalarExpression::Reference { .. } | ScalarExpression::Empty => unreachable!(),
+            ScalarExpression::Empty => unreachable!(),
             ScalarExpression::Tuple(args)
             | ScalarExpression::ScalaFunction(ScalarFunction { args, .. })
             | ScalarExpression::Coalesce { exprs: args, .. } => {
@@ -390,7 +390,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 Ok(())
             }
             ScalarExpression::Constant(_) => Ok(()),
-            ScalarExpression::Reference { .. } | ScalarExpression::Empty => unreachable!(),
+            ScalarExpression::Empty => unreachable!(),
             ScalarExpression::Tuple(args)
             | ScalarExpression::ScalaFunction(ScalarFunction { args, .. })
             | ScalarExpression::Coalesce { exprs: args, .. } => {

@@ -6,7 +6,6 @@ use crate::types::evaluator::EvaluatorFactory;
 use crate::types::tuple::Tuple;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::LogicalType;
-use itertools::Itertools;
 use regex::Regex;
 use sqlparser::ast::{CharLengthUnits, TrimWhereField};
 use std::cmp;
@@ -33,38 +32,29 @@ impl ScalarExpression {
 
         match self {
             ScalarExpression::Constant(val) => Ok(val.clone()),
-            ScalarExpression::ColumnRef(col) => {
-                let Some((tuple, schema)) = tuple else {
+            ScalarExpression::ColumnRef { position, .. } => {
+                let Some((tuple, _)) = tuple else {
                     return Ok(DataValue::Null);
                 };
-                let value = schema
-                    .iter()
-                    .find_position(|tul_col| tul_col.summary() == col.summary())
-                    .map(|(i, _)| tuple.values[i].clone())
-                    .unwrap_or(DataValue::Null);
+                let position = position
+                    .ok_or_else(|| DatabaseError::UnbindExpressionPosition(self.clone()))?;
 
-                Ok(value)
+                Ok(tuple.values[position].clone())
             }
             ScalarExpression::Alias { expr, alias } => {
                 let Some((tuple, schema)) = tuple else {
                     return Ok(DataValue::Null);
                 };
-                if let Some(value) = schema
-                    .iter()
-                    .find_position(|tul_col| match alias {
-                        AliasType::Name(alias) => {
-                            tul_col.table_name().is_none() && tul_col.name() == alias
+                if let AliasType::Expr(inner_expr) = alias {
+                    match inner_expr.eval(Some((tuple, schema))) {
+                        Err(DatabaseError::UnbindExpressionPosition(_)) => {
+                            expr.eval(Some((tuple, schema)))
                         }
-                        AliasType::Expr(alias_expr) => {
-                            alias_expr.output_column().summary() == tul_col.summary()
-                        }
-                    })
-                    .map(|(i, _)| tuple.values[i].clone())
-                {
-                    return Ok(value.clone());
+                        res => res,
+                    }
+                } else {
+                    expr.eval(Some((tuple, schema)))
                 }
-
-                expr.eval(Some((tuple, schema)))
             }
             ScalarExpression::TypeCast { expr, ty, .. } => Ok(expr.eval(tuple)?.cast(ty)?),
             ScalarExpression::Binary {
@@ -248,12 +238,6 @@ impl ScalarExpression {
                 } else {
                     Ok(DataValue::Null)
                 }
-            }
-            ScalarExpression::Reference { pos, .. } => {
-                let Some((tuple, _)) = tuple else {
-                    return Ok(DataValue::Null);
-                };
-                Ok(tuple.values.get(*pos).cloned().unwrap_or(DataValue::Null))
             }
             ScalarExpression::Tuple(exprs) => {
                 let mut values = Vec::with_capacity(exprs.len());

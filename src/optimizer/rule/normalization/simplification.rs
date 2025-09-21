@@ -296,7 +296,7 @@ mod test {
                         op: UnaryOperator::Minus,
                         expr: Box::new(ScalarExpression::Binary {
                             op: BinaryOperator::Plus,
-                            left_expr: Box::new(ScalarExpression::ColumnRef(ColumnRef::from(
+                            left_expr: Box::new(ScalarExpression::column_expr(ColumnRef::from(
                                 c1_col
                             ))),
                             right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(1))),
@@ -306,7 +306,7 @@ mod test {
                         evaluator: None,
                         ty: LogicalType::Integer,
                     }),
-                    right_expr: Box::new(ScalarExpression::ColumnRef(ColumnRef::from(c2_col))),
+                    right_expr: Box::new(ScalarExpression::column_expr(ColumnRef::from(c2_col))),
                     evaluator: None,
                     ty: LogicalType::Boolean,
                 }

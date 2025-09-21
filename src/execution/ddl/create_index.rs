@@ -1,7 +1,7 @@
 use crate::execution::dql::projection::Projection;
 use crate::execution::DatabaseError;
 use crate::execution::{build_read, Executor, WriteExecutor};
-use crate::expression::ScalarExpression;
+use crate::expression::{BindPosition, ScalarExpression};
 use crate::planner::operator::create_index::CreateIndexOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
@@ -11,6 +11,7 @@ use crate::types::tuple::Tuple;
 use crate::types::tuple_builder::TupleBuilder;
 use crate::types::value::DataValue;
 use crate::types::ColumnId;
+use std::borrow::Cow;
 use std::ops::Coroutine;
 use std::ops::CoroutineState;
 use std::pin::Pin;
@@ -43,15 +44,21 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateIndex {
                     ty,
                 } = self.op;
 
-                let (column_ids, column_exprs): (Vec<ColumnId>, Vec<ScalarExpression>) = columns
-                    .into_iter()
-                    .filter_map(|column| {
-                        column
-                            .id()
-                            .map(|id| (id, ScalarExpression::ColumnRef(column)))
-                    })
-                    .unzip();
+                let (column_ids, mut column_exprs): (Vec<ColumnId>, Vec<ScalarExpression>) =
+                    columns
+                        .into_iter()
+                        .filter_map(|column| {
+                            column
+                                .id()
+                                .map(|id| (id, ScalarExpression::column_expr(column)))
+                        })
+                        .unzip();
                 let schema = self.input.output_schema().clone();
+                throw!(BindPosition::bind_exprs(
+                    column_exprs.iter_mut(),
+                    || schema.iter().map(Cow::Borrowed),
+                    |a, b| a == b
+                ));
                 let index_id = match unsafe { &mut (*transaction) }.add_index_meta(
                     cache.0,
                     &table_name,

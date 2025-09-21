@@ -8,7 +8,7 @@ use crate::optimizer::rule::normalization::combine_operators::{
     CollapseGroupByAgg, CollapseProject, CombineFilter,
 };
 use crate::optimizer::rule::normalization::compilation_in_advance::{
-    EvaluatorBind, ExpressionRemapper,
+    BindExpressionPosition, EvaluatorBind,
 };
 
 use crate::optimizer::rule::normalization::pushdown_limit::{
@@ -46,7 +46,7 @@ pub enum NormalizationRuleImpl {
     SimplifyFilter,
     ConstantCalculation,
     // CompilationInAdvance
-    ExpressionRemapper,
+    BindExpressionPosition,
     EvaluatorBind,
     TopK,
 }
@@ -65,7 +65,7 @@ impl MatchPattern for NormalizationRuleImpl {
             NormalizationRuleImpl::PushPredicateIntoScan => PushPredicateIntoScan.pattern(),
             NormalizationRuleImpl::SimplifyFilter => SimplifyFilter.pattern(),
             NormalizationRuleImpl::ConstantCalculation => ConstantCalculation.pattern(),
-            NormalizationRuleImpl::ExpressionRemapper => ExpressionRemapper.pattern(),
+            NormalizationRuleImpl::BindExpressionPosition => BindExpressionPosition.pattern(),
             NormalizationRuleImpl::EvaluatorBind => EvaluatorBind.pattern(),
             NormalizationRuleImpl::TopK => TopK.pattern(),
         }
@@ -96,7 +96,9 @@ impl NormalizationRule for NormalizationRuleImpl {
                 PushPredicateIntoScan.apply(node_id, graph)
             }
             NormalizationRuleImpl::ConstantCalculation => ConstantCalculation.apply(node_id, graph),
-            NormalizationRuleImpl::ExpressionRemapper => ExpressionRemapper.apply(node_id, graph),
+            NormalizationRuleImpl::BindExpressionPosition => {
+                BindExpressionPosition.apply(node_id, graph)
+            }
             NormalizationRuleImpl::EvaluatorBind => EvaluatorBind.apply(node_id, graph),
             NormalizationRuleImpl::TopK => TopK.apply(node_id, graph),
         }

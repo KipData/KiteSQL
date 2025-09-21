@@ -113,11 +113,14 @@ mod test {
     use crate::execution::{try_collect, ReadExecutor};
     use crate::expression::agg::AggKind;
     use crate::expression::ScalarExpression;
+    use crate::optimizer::heuristic::batch::HepBatchStrategy;
+    use crate::optimizer::heuristic::optimizer::HepOptimizer;
+    use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::aggregate::AggregateOperator;
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
     use crate::planner::{Childrens, LogicalPlan};
-    use crate::storage::rocksdb::RocksStorage;
+    use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
     use crate::storage::Storage;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -143,17 +146,6 @@ mod test {
             ColumnRef::from(ColumnCatalog::new("c2".to_string(), true, desc.clone())),
             ColumnRef::from(ColumnCatalog::new("c3".to_string(), true, desc.clone())),
         ]);
-
-        let operator = AggregateOperator {
-            groupby_exprs: vec![ScalarExpression::ColumnRef(t1_schema[0].clone())],
-            agg_calls: vec![ScalarExpression::AggCall {
-                distinct: false,
-                kind: AggKind::Sum,
-                args: vec![ScalarExpression::ColumnRef(t1_schema[1].clone())],
-                ty: LogicalType::Integer,
-            }],
-            is_distinct: false,
-        };
 
         let input = LogicalPlan {
             operator: Operator::Values(ValuesOperator {
@@ -185,9 +177,37 @@ mod test {
             physical_option: None,
             _output_schema_ref: None,
         };
+        let plan = LogicalPlan::new(
+            Operator::Aggregate(AggregateOperator {
+                groupby_exprs: vec![ScalarExpression::column_expr(t1_schema[0].clone())],
+                agg_calls: vec![ScalarExpression::AggCall {
+                    distinct: false,
+                    kind: AggKind::Sum,
+                    args: vec![ScalarExpression::column_expr(t1_schema[1].clone())],
+                    ty: LogicalType::Integer,
+                }],
+                is_distinct: false,
+            }),
+            Childrens::Only(input),
+        );
 
+        let plan = HepOptimizer::new(plan)
+            .batch(
+                "Expression Remapper".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![
+                    NormalizationRuleImpl::BindExpressionPosition,
+                    // TIPS: This rule is necessary
+                    NormalizationRuleImpl::EvaluatorBind,
+                ],
+            )
+            .find_best::<RocksTransaction>(None)?;
+
+        let Operator::Aggregate(op) = plan.operator else {
+            unreachable!()
+        };
         let tuples = try_collect(
-            HashAggExecutor::from((operator, input))
+            HashAggExecutor::from((op, plan.childrens.pop_only()))
                 .execute((&table_cache, &view_cache, &meta_cache), &mut transaction),
         )?;
 

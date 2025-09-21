@@ -2,7 +2,7 @@ use crate::catalog::{ColumnRef, TableName};
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
 use crate::execution::{build_read, Executor, WriteExecutor};
-use crate::expression::ScalarExpression;
+use crate::expression::{BindPosition, ScalarExpression};
 use crate::planner::operator::update::UpdateOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
@@ -12,6 +12,7 @@ use crate::types::tuple::Tuple;
 use crate::types::tuple_builder::TupleBuilder;
 use crate::types::value::DataValue;
 use itertools::Itertools;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Coroutine;
 use std::ops::CoroutineState;
@@ -74,7 +75,12 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Update {
                 {
                     let mut index_metas = Vec::new();
                     for index_meta in table_catalog.indexes() {
-                        let exprs = throw!(index_meta.column_exprs(&table_catalog));
+                        let mut exprs = throw!(index_meta.column_exprs(&table_catalog));
+                        throw!(BindPosition::bind_exprs(
+                            exprs.iter_mut(),
+                            || input_schema.iter().map(Cow::Borrowed),
+                            |a, b| a == b
+                        ));
                         index_metas.push((index_meta, exprs));
                     }
 

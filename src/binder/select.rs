@@ -23,7 +23,6 @@ use crate::execution::dql::join::joins_nullable;
 use crate::expression::agg::AggKind;
 use crate::expression::simplify::ConstantCalculator;
 use crate::expression::visitor_mut::VisitorMut;
-use crate::expression::ScalarExpression::Constant;
 use crate::expression::{AliasType, BinaryOperator};
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::operator::except::ExceptOperator;
@@ -103,7 +102,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             }
             plan
         };
-        let mut select_list = self.normalize_select_item(&select.projection, &plan)?;
+        let mut select_list = self.normalize_select_item(&select.projection, &mut plan)?;
 
         if let Some(predicate) = &select.selection {
             plan = self.bind_where(plan, predicate)?;
@@ -159,6 +158,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         Ok(plan)
     }
 
+    /// FIXME: temp values need to register BindContext.bind_table
     fn bind_temp_values(&mut self, expr_rows: &[Vec<Expr>]) -> Result<LogicalPlan, DatabaseError> {
         let values_len = expr_rows[0].len();
 
@@ -176,7 +176,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 let mut expression = self.bind_expr(expr)?;
                 ConstantCalculator.visit(&mut expression)?;
 
-                if let Constant(value) = expression {
+                if let ScalarExpression::Constant(value) = expression {
                     let value_type = value.logical_type();
 
                     inferred_types[col_index] = match &inferred_types[col_index] {
@@ -230,19 +230,19 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 LogicalType::max_logical_type(left_schema.datatype(), right_schema.datatype())?;
             if &cast_type != left_schema.datatype() {
                 left_cast.push(ScalarExpression::TypeCast {
-                    expr: Box::new(ScalarExpression::ColumnRef(left_schema.clone())),
+                    expr: Box::new(ScalarExpression::column_expr(left_schema.clone())),
                     ty: cast_type.clone(),
                 });
             } else {
-                left_cast.push(ScalarExpression::ColumnRef(left_schema.clone()));
+                left_cast.push(ScalarExpression::column_expr(left_schema.clone()));
             }
             if &cast_type != right_schema.datatype() {
                 right_cast.push(ScalarExpression::TypeCast {
-                    expr: Box::new(ScalarExpression::ColumnRef(right_schema.clone())),
+                    expr: Box::new(ScalarExpression::column_expr(right_schema.clone())),
                     ty: cast_type.clone(),
                 });
             } else {
-                right_cast.push(ScalarExpression::ColumnRef(right_schema.clone()));
+                right_cast.push(ScalarExpression::column_expr(right_schema.clone()));
             }
         }
 
@@ -312,7 +312,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     let distinct_exprs = left_schema
                         .iter()
                         .cloned()
-                        .map(ScalarExpression::ColumnRef)
+                        .map(ScalarExpression::column_expr)
                         .collect_vec();
 
                     let union_op = Operator::Union(UnionOperator {
@@ -344,7 +344,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     let distinct_exprs = left_schema
                         .iter()
                         .cloned()
-                        .map(ScalarExpression::ColumnRef)
+                        .map(ScalarExpression::column_expr)
                         .collect_vec();
 
                     let except_op = Operator::Except(ExceptOperator {
@@ -492,8 +492,8 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             );
 
             let alias_column_expr = ScalarExpression::Alias {
-                expr: Box::new(ScalarExpression::ColumnRef(column)),
-                alias: AliasType::Expr(Box::new(ScalarExpression::ColumnRef(ColumnRef::from(
+                expr: Box::new(ScalarExpression::column_expr(column)),
+                alias: AliasType::Expr(Box::new(ScalarExpression::column_expr(ColumnRef::from(
                     alias_column,
                 )))),
             };
@@ -548,7 +548,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
     fn normalize_select_item(
         &mut self,
         items: &[SelectItem],
-        plan: &LogicalPlan,
+        plan: &mut LogicalPlan,
     ) -> Result<Vec<ScalarExpression>, DatabaseError> {
         let mut select_items = vec![];
 
@@ -624,8 +624,8 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             .expr_aliases
             .iter()
             .filter(|(_, expr)| {
-                if let ScalarExpression::ColumnRef(col) = expr.unpack_alias_ref() {
-                    if fn_not_on_using(col) {
+                if let ScalarExpression::ColumnRef { column, .. } = expr.unpack_alias_ref() {
+                    if fn_not_on_using(column) {
                         exprs.push(ScalarExpression::clone(expr));
                         return true;
                     }
@@ -651,7 +651,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             if !fn_not_on_using(column) {
                 continue;
             }
-            exprs.push(ScalarExpression::ColumnRef(column.clone()));
+            exprs.push(ScalarExpression::column_expr(column.clone()));
         }
         Ok(())
     }
@@ -751,7 +751,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                                 } else {
                                     BinaryOperator::Eq
                                 },
-                                left_expr: Box::new(ScalarExpression::ColumnRef(
+                                left_expr: Box::new(ScalarExpression::column_expr(
                                     agg.output_schema()[0].clone(),
                                 )),
                                 right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(
@@ -928,7 +928,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         }
 
         for column in select_items {
-            if let ScalarExpression::ColumnRef(col) = column {
+            if let ScalarExpression::ColumnRef { column, .. } = column {
                 let _ = table_force_nullable
                     .iter()
                     .find(|(table_name, source, _)| {
@@ -937,11 +937,11 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                             .entry((*table_name).clone())
                             .or_default();
 
-                        source.column(col.name(), schema_buf).is_some()
+                        source.column(column.name(), schema_buf).is_some()
                     })
                     .map(|(_, _, nullable)| {
-                        if let Some(new_column) = col.nullable_for_join(*nullable) {
-                            *col = new_column;
+                        if let Some(new_column) = column.nullable_for_join(*nullable) {
+                            *column = new_column;
                         }
                     });
             }
@@ -1003,8 +1003,8 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     };
                     self.context.add_using(join_type, left_column, right_column);
                     on_keys.push((
-                        ScalarExpression::ColumnRef(left_column.clone()),
-                        ScalarExpression::ColumnRef(right_column.clone()),
+                        ScalarExpression::column_expr(left_column.clone()),
+                        ScalarExpression::column_expr(right_column.clone()),
                     ));
                 }
                 Ok(JoinCondition::On {
@@ -1024,8 +1024,8 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         left_schema.iter().find(|column| column.name() == *name),
                         right_schema.iter().find(|column| column.name() == *name),
                     ) {
-                        let left_expr = ScalarExpression::ColumnRef(left_column.clone());
-                        let right_expr = ScalarExpression::ColumnRef(right_column.clone());
+                        let left_expr = ScalarExpression::column_expr(left_column.clone());
+                        let right_expr = ScalarExpression::column_expr(right_column.clone());
 
                         self.context.add_using(join_type, left_column, right_column);
                         on_keys.push((left_expr, right_expr));
@@ -1077,7 +1077,10 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     BinaryOperator::Eq => {
                         match (left_expr.unpack_alias_ref(), right_expr.unpack_alias_ref()) {
                             // example: foo = bar
-                            (ScalarExpression::ColumnRef(l), ScalarExpression::ColumnRef(r)) => {
+                            (
+                                ScalarExpression::ColumnRef { column: l, .. },
+                                ScalarExpression::ColumnRef { column: r, .. },
+                            ) => {
                                 // reorder left and right joins keys to pattern: (left, right)
                                 if fn_contains(left_schema, l.summary())
                                     && fn_contains(right_schema, r.summary())
@@ -1099,8 +1102,8 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                                     });
                                 }
                             }
-                            (ScalarExpression::ColumnRef(column), _)
-                            | (_, ScalarExpression::ColumnRef(column)) => {
+                            (ScalarExpression::ColumnRef { column, .. }, _)
+                            | (_, ScalarExpression::ColumnRef { column, .. }) => {
                                 if fn_or_contains(left_schema, right_schema, column.summary()) {
                                     accum_filter.push(ScalarExpression::Binary {
                                         left_expr,
