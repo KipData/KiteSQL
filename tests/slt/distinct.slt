@@ -11,12 +11,9 @@ SELECT DISTINCT x FROM test;
 2
 3
 
-query II
+#ORDER BY references `id` which is not in the SELECT DISTINCT list, invalid in standard SQL.
+statement error
 SELECT DISTINCT x FROM test ORDER BY x, id;
-----
-1
-2
-3
 
 query I
 SELECT DISTINCT sum(x) FROM test ORDER BY sum(x);

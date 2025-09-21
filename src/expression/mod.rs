@@ -1,5 +1,5 @@
 use self::agg::AggKind;
-use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
+use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, ColumnSummary};
 use crate::errors::DatabaseError;
 use crate::expression::function::scala::ScalarFunction;
 use crate::expression::function::table::TableFunction;
@@ -14,8 +14,10 @@ use sqlparser::ast::TrimWhereField;
 use sqlparser::ast::{
     BinaryOperator as SqlBinaryOperator, CharLengthUnits, UnaryOperator as SqlUnaryOperator,
 };
+use std::borrow::Cow;
 use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
+use std::slice::IterMut;
 use std::{fmt, mem};
 
 pub mod agg;
@@ -39,7 +41,10 @@ pub enum AliasType {
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub enum ScalarExpression {
     Constant(DataValue),
-    ColumnRef(ColumnRef),
+    ColumnRef {
+        column: ColumnRef,
+        position: Option<usize>,
+    },
     Alias {
         expr: Box<ScalarExpression>,
         alias: AliasType,
@@ -98,10 +103,6 @@ pub enum ScalarExpression {
     },
     // Temporary expression used for expression substitution
     Empty,
-    Reference {
-        expr: Box<ScalarExpression>,
-        pos: usize,
-    },
     Tuple(Vec<ScalarExpression>),
     ScalaFunction(ScalarFunction),
     TableFunction(TableFunction),
@@ -134,37 +135,75 @@ pub enum ScalarExpression {
 }
 
 #[derive(Clone)]
-pub struct TryReference<'a> {
-    output_exprs: &'a [ScalarExpression],
+pub struct BindPosition<
+    T: Clone,
+    F: Clone + Fn() -> T,
+    E: Fn(&ColumnSummary, &ColumnSummary) -> bool,
+> {
+    fn_output_columns: F,
+    fn_eq: E,
 }
 
-impl<'a> VisitorMut<'a> for TryReference<'a> {
+impl<
+        'a,
+        'b,
+        T: Iterator<Item = Cow<'b, ColumnRef>> + Clone,
+        F: Clone + Fn() -> T,
+        E: Clone + Fn(&ColumnSummary, &ColumnSummary) -> bool,
+    > VisitorMut<'a> for BindPosition<T, F, E>
+{
     fn visit(&mut self, expr: &'a mut ScalarExpression) -> Result<(), DatabaseError> {
-        let mut clone_expr = mem::replace(expr, ScalarExpression::Empty);
-        walk_mut_expr(&mut self.clone(), &mut clone_expr)?;
+        walk_mut_expr(&mut self.clone(), expr)?;
 
-        let fn_output_column = |expr: &ScalarExpression| expr.output_column();
-        let self_column = fn_output_column(&clone_expr);
+        let column = expr.output_column();
 
-        *expr = if let Some((pos, _)) = self
-            .output_exprs
-            .iter()
-            .find_position(|expr| self_column.summary() == fn_output_column(expr).summary())
+        if let Some((pos, _)) = (self.fn_output_columns)()
+            .find_position(|c| (self.fn_eq)(c.summary(), column.summary()))
         {
-            ScalarExpression::Reference {
-                expr: Box::new(clone_expr),
-                pos,
-            }
-        } else {
-            clone_expr
-        };
+            *expr = ScalarExpression::ColumnRef {
+                column,
+                position: Some(pos),
+            };
+        }
+        Ok(())
+    }
+
+    fn visit_alias(
+        &mut self,
+        expr: &'a mut ScalarExpression,
+        ty: &'a mut AliasType,
+    ) -> Result<(), DatabaseError> {
+        if let AliasType::Expr(inner_expr) = ty {
+            self.visit(inner_expr)?;
+        }
+        self.visit(expr)?;
         Ok(())
     }
 }
 
-impl<'a> TryReference<'a> {
-    pub fn new(output_exprs: &'a [ScalarExpression]) -> TryReference<'a> {
-        TryReference { output_exprs }
+impl<'b, T, F, E> BindPosition<T, F, E>
+where
+    T: Iterator<Item = Cow<'b, ColumnRef>> + Clone,
+    F: Clone + Fn() -> T,
+    E: Clone + Fn(&ColumnSummary, &ColumnSummary) -> bool,
+{
+    pub fn new(output_columns: F, fn_eq: E) -> BindPosition<T, F, E> {
+        BindPosition {
+            fn_output_columns: output_columns,
+            fn_eq,
+        }
+    }
+
+    pub fn bind_exprs(
+        exprs: IterMut<ScalarExpression>,
+        fn_schema: F,
+        fn_eq: E,
+    ) -> Result<(), DatabaseError> {
+        let mut bind_schema_position = BindPosition::new(fn_schema, fn_eq);
+        for expr in exprs {
+            bind_schema_position.visit(expr)?;
+        }
+        Ok(())
     }
 }
 
@@ -258,6 +297,13 @@ impl Visitor<'_> for HasCountStar {
 }
 
 impl ScalarExpression {
+    pub fn column_expr(column: ColumnRef) -> ScalarExpression {
+        ScalarExpression::ColumnRef {
+            column,
+            position: None,
+        }
+    }
+
     pub fn unpack_alias(self) -> ScalarExpression {
         if let ScalarExpression::Alias {
             alias: AliasType::Expr(expr),
@@ -289,7 +335,7 @@ impl ScalarExpression {
     pub fn return_type(&self) -> LogicalType {
         match self {
             ScalarExpression::Constant(v) => v.logical_type(),
-            ScalarExpression::ColumnRef(col) => col.datatype().clone(),
+            ScalarExpression::ColumnRef { column, .. } => column.datatype().clone(),
             ScalarExpression::Binary {
                 ty: return_type, ..
             }
@@ -327,9 +373,7 @@ impl ScalarExpression {
             ScalarExpression::Trim { .. } => {
                 LogicalType::Varchar(None, CharLengthUnits::Characters)
             }
-            ScalarExpression::Alias { expr, .. } | ScalarExpression::Reference { expr, .. } => {
-                expr.return_type()
-            }
+            ScalarExpression::Alias { expr, .. } => expr.return_type(),
             ScalarExpression::Empty | ScalarExpression::TableFunction(_) => unreachable!(),
             ScalarExpression::Tuple(exprs) => {
                 let types = exprs.iter().map(|expr| expr.return_type()).collect_vec();
@@ -418,7 +462,7 @@ impl ScalarExpression {
     pub fn output_name(&self) -> String {
         match self {
             ScalarExpression::Constant(value) => format!("{}", value),
-            ScalarExpression::ColumnRef(col) => col.full_name(),
+            ScalarExpression::ColumnRef { column, .. } => column.full_name(),
             ScalarExpression::Alias { alias, expr } => match alias {
                 AliasType::Name(alias) => alias.to_string(),
                 AliasType::Expr(alias_expr) => {
@@ -541,7 +585,6 @@ impl ScalarExpression {
                 };
                 format!("trim({} {})", trim_where_str, expr.output_name())
             }
-            ScalarExpression::Reference { expr, .. } => expr.output_name(),
             ScalarExpression::Empty => unreachable!(),
             ScalarExpression::Tuple(args) => {
                 let args_str = args.iter().map(|expr| expr.output_name()).join(", ");
@@ -609,12 +652,11 @@ impl ScalarExpression {
 
     pub fn output_column(&self) -> ColumnRef {
         match self {
-            ScalarExpression::ColumnRef(col) => col.clone(),
+            ScalarExpression::ColumnRef { column, .. } => column.clone(),
             ScalarExpression::Alias {
                 alias: AliasType::Expr(expr),
                 ..
-            }
-            | ScalarExpression::Reference { expr, .. } => expr.output_column(),
+            } => expr.output_column(),
             _ => ColumnRef::from(ColumnCatalog::new(
                 self.output_name(),
                 true,
@@ -833,7 +875,7 @@ mod test {
         )?;
         fn_assert(
             &mut cursor,
-            ScalarExpression::ColumnRef(ColumnRef::from(ColumnCatalog::direct_new(
+            ScalarExpression::column_expr(ColumnRef::from(ColumnCatalog::direct_new(
                 ColumnSummary {
                     name: "c3".to_string(),
                     relation: ColumnRelation::Table {
@@ -851,7 +893,7 @@ mod test {
         )?;
         fn_assert(
             &mut cursor,
-            ScalarExpression::ColumnRef(ColumnRef::from(ColumnCatalog::direct_new(
+            ScalarExpression::column_expr(ColumnRef::from(ColumnCatalog::direct_new(
                 ColumnSummary {
                     name: "c4".to_string(),
                     relation: ColumnRelation::None,

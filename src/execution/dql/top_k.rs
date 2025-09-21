@@ -175,9 +175,13 @@ mod test {
     fn test_top_k_sort() -> Result<(), DatabaseError> {
         let fn_sort_fields = |asc: bool, nulls_first: bool| {
             vec![SortField {
-                expr: ScalarExpression::Reference {
-                    expr: Box::new(ScalarExpression::Empty),
-                    pos: 0,
+                expr: ScalarExpression::ColumnRef {
+                    column: ColumnRef(Arc::new(ColumnCatalog::new(
+                        String::new(),
+                        false,
+                        ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
+                    ))),
+                    position: Some(0),
                 },
                 asc,
                 nulls_first,
@@ -358,27 +362,37 @@ mod test {
 
     #[test]
     fn test_top_k_sort_mix_values() -> Result<(), DatabaseError> {
-        let fn_sort_fields =
-            |asc_1: bool, nulls_first_1: bool, asc_2: bool, nulls_first_2: bool| {
-                vec![
-                    SortField {
-                        expr: ScalarExpression::Reference {
-                            expr: Box::new(ScalarExpression::Empty),
-                            pos: 0,
-                        },
-                        asc: asc_1,
-                        nulls_first: nulls_first_1,
+        let fn_sort_fields = |asc_1: bool,
+                              nulls_first_1: bool,
+                              asc_2: bool,
+                              nulls_first_2: bool| {
+            vec![
+                SortField {
+                    expr: ScalarExpression::ColumnRef {
+                        column: ColumnRef(Arc::new(ColumnCatalog::new(
+                            String::new(),
+                            false,
+                            ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
+                        ))),
+                        position: Some(0),
                     },
-                    SortField {
-                        expr: ScalarExpression::Reference {
-                            expr: Box::new(ScalarExpression::Empty),
-                            pos: 1,
-                        },
-                        asc: asc_2,
-                        nulls_first: nulls_first_2,
+                    asc: asc_1,
+                    nulls_first: nulls_first_1,
+                },
+                SortField {
+                    expr: ScalarExpression::ColumnRef {
+                        column: ColumnRef(Arc::new(ColumnCatalog::new(
+                            String::new(),
+                            false,
+                            ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
+                        ))),
+                        position: Some(1),
                     },
-                ]
-            };
+                    asc: asc_2,
+                    nulls_first: nulls_first_2,
+                },
+            ]
+        };
         let schema = Arc::new(vec![
             ColumnRef::from(ColumnCatalog::new(
                 "c1".to_string(),

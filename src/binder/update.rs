@@ -41,7 +41,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         slice::from_ref(ident),
                         Some(table_name.to_string()),
                     )? {
-                        ScalarExpression::ColumnRef(column) => {
+                        ScalarExpression::ColumnRef { column, .. } => {
                             let mut expr = if matches!(expression, ScalarExpression::Empty) {
                                 let default_value = column
                                     .default_value()?

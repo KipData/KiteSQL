@@ -2,6 +2,7 @@ use crate::catalog::{ColumnCatalog, TableName};
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
 use crate::execution::{build_read, Executor, WriteExecutor};
+use crate::expression::BindPosition;
 use crate::planner::operator::insert::InsertOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
@@ -12,6 +13,7 @@ use crate::types::tuple_builder::TupleBuilder;
 use crate::types::value::DataValue;
 use crate::types::ColumnId;
 use itertools::Itertools;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Coroutine;
 use std::ops::CoroutineState;
@@ -95,7 +97,16 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert {
                 {
                     let mut index_metas = Vec::new();
                     for index_meta in table_catalog.indexes() {
-                        let exprs = throw!(index_meta.column_exprs(&table_catalog));
+                        let mut exprs = throw!(index_meta.column_exprs(&table_catalog));
+                        throw!(BindPosition::bind_exprs(
+                            exprs.iter_mut(),
+                            || schema.iter().map(Cow::Borrowed),
+                            |a, b| if self.is_mapping_by_name {
+                                a.name == b.name
+                            } else {
+                                a == b
+                            }
+                        ));
                         index_metas.push((index_meta, exprs));
                     }
 

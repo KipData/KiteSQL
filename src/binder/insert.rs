@@ -51,7 +51,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                     slice::from_ref(ident),
                     Some(table_name.to_string()),
                 )? {
-                    ScalarExpression::ColumnRef(catalog) => columns.push(catalog),
+                    ScalarExpression::ColumnRef { column, .. } => columns.push(column),
                     _ => return Err(DatabaseError::UnsupportedStmt(ident.to_string())),
                 }
             }

@@ -2,17 +2,19 @@ use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
 use crate::execution::{build_read, Executor, WriteExecutor};
+use crate::expression::{BindPosition, ScalarExpression};
 use crate::optimizer::core::histogram::HistogramBuilder;
 use crate::optimizer::core::statistics_meta::StatisticsMeta;
 use crate::planner::operator::analyze::AnalyzeOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::throw;
-use crate::types::index::IndexMetaRef;
+use crate::types::index::{IndexId, IndexMetaRef};
 use crate::types::tuple::Tuple;
 use crate::types::value::{DataValue, Utf8Type};
 use itertools::Itertools;
 use sqlparser::ast::CharLengthUnits;
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fmt::Formatter;
@@ -75,11 +77,12 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze {
                 .ok_or(DatabaseError::TableNotFound));
 
                 for index in table.indexes() {
-                    builders.push((
-                        index.id,
-                        throw!(index.column_exprs(&table)),
-                        HistogramBuilder::new(index, None),
-                    ));
+                    builders.push(State {
+                        is_bound_position: false,
+                        index_id: index.id,
+                        exprs: throw!(index.column_exprs(&table)),
+                        builder: HistogramBuilder::new(index, None),
+                    });
                 }
 
                 let mut coroutine = build_read(input, cache, transaction);
@@ -87,7 +90,21 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze {
                 while let CoroutineState::Yielded(tuple) = Pin::new(&mut coroutine).resume(()) {
                     let tuple = throw!(tuple);
 
-                    for (_, exprs, builder) in builders.iter_mut() {
+                    for State {
+                        is_bound_position,
+                        exprs,
+                        builder,
+                        ..
+                    } in builders.iter_mut()
+                    {
+                        if !*is_bound_position {
+                            throw!(BindPosition::bind_exprs(
+                                exprs.iter_mut(),
+                                || schema.iter().map(Cow::Borrowed),
+                                |a, b| a == b
+                            ));
+                            *is_bound_position = true;
+                        }
                         let values = throw!(Projection::projection(&tuple, exprs, &schema));
 
                         if values.len() == 1 {
@@ -106,7 +123,10 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze {
 
                 let mut active_index_paths = HashSet::new();
 
-                for (index_id, _, builder) in builders {
+                for State {
+                    index_id, builder, ..
+                } in builders
+                {
                     let index_file = OsStr::new(&index_id.to_string()).to_os_string();
                     let path = dir_path.join(&index_file);
                     let temp_path = path.with_extension("tmp");
@@ -145,6 +165,13 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze {
             },
         )
     }
+}
+
+struct State {
+    is_bound_position: bool,
+    index_id: IndexId,
+    exprs: Vec<ScalarExpression>,
+    builder: HistogramBuilder,
 }
 
 impl Analyze {

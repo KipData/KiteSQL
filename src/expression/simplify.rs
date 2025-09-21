@@ -133,7 +133,7 @@ impl VisitorMut<'_> for Simplify {
                     match (left_expr.unpack_col(false), right_expr.unpack_col(false)) {
                         (Some(col), None) => {
                             self.replaces.push(Replace::Binary(ReplaceBinary {
-                                column_expr: ScalarExpression::ColumnRef(col),
+                                column_expr: ScalarExpression::column_expr(col),
                                 val_expr: mem::replace(right_expr, ScalarExpression::Empty),
                                 op: *op,
                                 ty: ty.clone(),
@@ -142,7 +142,7 @@ impl VisitorMut<'_> for Simplify {
                         }
                         (None, Some(col)) => {
                             self.replaces.push(Replace::Binary(ReplaceBinary {
-                                column_expr: ScalarExpression::ColumnRef(col),
+                                column_expr: ScalarExpression::column_expr(col),
                                 val_expr: mem::replace(left_expr, ScalarExpression::Empty),
                                 op: *op,
                                 ty: ty.clone(),
@@ -157,7 +157,7 @@ impl VisitorMut<'_> for Simplify {
                             match (left_expr.unpack_col(true), right_expr.unpack_col(true)) {
                                 (Some(col), None) => {
                                     self.replaces.push(Replace::Binary(ReplaceBinary {
-                                        column_expr: ScalarExpression::ColumnRef(col),
+                                        column_expr: ScalarExpression::column_expr(col),
                                         val_expr: mem::replace(right_expr, ScalarExpression::Empty),
                                         op: *op,
                                         ty: ty.clone(),
@@ -166,7 +166,7 @@ impl VisitorMut<'_> for Simplify {
                                 }
                                 (None, Some(col)) => {
                                     self.replaces.push(Replace::Binary(ReplaceBinary {
-                                        column_expr: ScalarExpression::ColumnRef(col),
+                                        column_expr: ScalarExpression::column_expr(col),
                                         val_expr: mem::replace(left_expr, ScalarExpression::Empty),
                                         op: *op,
                                         ty: ty.clone(),
@@ -483,7 +483,7 @@ impl ScalarExpression {
 
     pub(crate) fn unpack_col(&self, is_deep: bool) -> Option<ColumnRef> {
         match self {
-            ScalarExpression::ColumnRef(col) => Some(col.clone()),
+            ScalarExpression::ColumnRef { column, .. } => Some(column.clone()),
             ScalarExpression::Alias { expr, .. } => expr.unpack_col(is_deep),
             ScalarExpression::Unary { expr, .. } => expr.unpack_col(is_deep),
             ScalarExpression::Binary {

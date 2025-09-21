@@ -259,7 +259,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
 
         let alias_expr = ScalarExpression::Alias {
             expr: Box::new(expr),
-            alias: AliasType::Expr(Box::new(ScalarExpression::ColumnRef(ColumnRef::from(
+            alias: AliasType::Expr(Box::new(ScalarExpression::column_expr(ColumnRef::from(
                 alias_column,
             )))),
         };
@@ -311,13 +311,13 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
 
             let columns = sub_query_schema
                 .iter()
-                .map(|column| ScalarExpression::ColumnRef(column.clone()))
+                .map(|column| ScalarExpression::column_expr(column.clone()))
                 .collect::<Vec<_>>();
             ScalarExpression::Tuple(columns)
         } else {
             fn_check(1)?;
 
-            ScalarExpression::ColumnRef(sub_query_schema[0].clone())
+            ScalarExpression::column_expr(sub_query_schema[0].clone())
         };
         Ok((sub_query, expr))
     }
@@ -371,7 +371,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             let source = self.context.bind_source(&table)?;
             let schema_buf = self.table_schema_buf.entry(Arc::new(table)).or_default();
 
-            Ok(ScalarExpression::ColumnRef(
+            Ok(ScalarExpression::column_expr(
                 source
                     .column(&full_name.1, schema_buf)
                     .ok_or_else(|| DatabaseError::ColumnNotFound(full_name.1.to_string()))?,
@@ -403,7 +403,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                                 table_schema_buf.entry(table_name.clone()).or_default();
                             source.column(&full_name.1, schema_buf)
                         } {
-                            *got_column = Some(ScalarExpression::ColumnRef(column));
+                            *got_column = Some(ScalarExpression::column_expr(column));
                         }
                     }
                 };

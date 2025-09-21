@@ -236,7 +236,7 @@ impl<S: Storage> State<S> {
                 "Expression Remapper".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![
-                    NormalizationRuleImpl::ExpressionRemapper,
+                    NormalizationRuleImpl::BindExpressionPosition,
                     // TIPS: This rule is necessary
                     NormalizationRuleImpl::EvaluatorBind,
                 ],

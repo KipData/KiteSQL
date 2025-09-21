@@ -6,7 +6,7 @@ use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
 use crate::execution::{build_read, Executor, ReadExecutor};
-use crate::expression::ScalarExpression;
+use crate::expression::{BindPosition, ScalarExpression};
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
@@ -15,6 +15,7 @@ use crate::types::tuple::{Schema, SchemaRef, Tuple};
 use crate::types::value::{DataValue, NULL_VALUE};
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
+use std::borrow::Cow;
 use std::ops::Coroutine;
 use std::ops::CoroutineState;
 use std::pin::Pin;
@@ -140,9 +141,20 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
                     right_input,
                     output_schema_ref,
                     filter,
-                    eq_cond,
+                    mut eq_cond,
                     ..
                 } = self;
+
+                throw!(BindPosition::bind_exprs(
+                    eq_cond.on_left_keys.iter_mut(),
+                    || eq_cond.left_schema.iter().map(Cow::Borrowed),
+                    |a, b| a == b
+                ));
+                throw!(BindPosition::bind_exprs(
+                    eq_cond.on_right_keys.iter_mut(),
+                    || eq_cond.right_schema.iter().map(Cow::Borrowed),
+                    |a, b| a == b
+                ));
 
                 let right_schema_len = eq_cond.right_schema.len();
                 let mut left_coroutine = build_read(left_input, cache, transaction);
@@ -395,10 +407,13 @@ mod test {
     use crate::execution::dql::test::build_integers;
     use crate::execution::{try_collect, ReadExecutor};
     use crate::expression::ScalarExpression;
+    use crate::optimizer::heuristic::batch::HepBatchStrategy;
+    use crate::optimizer::heuristic::optimizer::HepOptimizer;
+    use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
     use crate::planner::Childrens;
-    use crate::storage::rocksdb::RocksStorage;
+    use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
     use crate::storage::Storage;
     use crate::types::evaluator::int32::Int32GtBinaryEvaluator;
     use crate::types::evaluator::BinaryEvaluatorBox;
@@ -434,8 +449,8 @@ mod test {
 
         let on_keys = if eq {
             vec![(
-                ScalarExpression::ColumnRef(t1_columns[1].clone()),
-                ScalarExpression::ColumnRef(t2_columns[1].clone()),
+                ScalarExpression::column_expr(t1_columns[1].clone()),
+                ScalarExpression::column_expr(t2_columns[1].clone()),
             )]
         } else {
             vec![]
@@ -505,10 +520,10 @@ mod test {
 
         let filter = ScalarExpression::Binary {
             op: crate::expression::BinaryOperator::Gt,
-            left_expr: Box::new(ScalarExpression::ColumnRef(ColumnRef::from(
+            left_expr: Box::new(ScalarExpression::column_expr(ColumnRef::from(
                 ColumnCatalog::new("c1".to_owned(), true, desc.clone()),
             ))),
-            right_expr: Box::new(ScalarExpression::ColumnRef(ColumnRef::from(
+            right_expr: Box::new(ScalarExpression::column_expr(ColumnRef::from(
                 ColumnCatalog::new("c4".to_owned(), true, desc.clone()),
             ))),
             evaluator: Some(BinaryEvaluatorBox(Arc::new(Int32GtBinaryEvaluator))),
@@ -548,13 +563,31 @@ mod test {
         let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
         let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
         let (keys, left, right, filter) = build_join_values(true);
-        let op = JoinOperator {
-            on: JoinCondition::On {
-                on: keys,
-                filter: Some(filter),
-            },
-            join_type: JoinType::Inner,
+        let plan = LogicalPlan::new(
+            Operator::Join(JoinOperator {
+                on: JoinCondition::On {
+                    on: keys,
+                    filter: Some(filter),
+                },
+                join_type: JoinType::Inner,
+            }),
+            Childrens::Twins { left, right },
+        );
+        let plan = HepOptimizer::new(plan)
+            .batch(
+                "Expression Remapper".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![
+                    NormalizationRuleImpl::BindExpressionPosition,
+                    // TIPS: This rule is necessary
+                    NormalizationRuleImpl::EvaluatorBind,
+                ],
+            )
+            .find_best::<RocksTransaction>(None)?;
+        let Operator::Join(op) = plan.operator else {
+            unreachable!()
         };
+        let (left, right) = plan.childrens.pop_twins();
         let executor = NestedLoopJoin::from((op, left, right))
             .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
         let tuples = try_collect(executor)?;
@@ -577,13 +610,31 @@ mod test {
         let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
         let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
         let (keys, left, right, filter) = build_join_values(true);
-        let op = JoinOperator {
-            on: JoinCondition::On {
-                on: keys,
-                filter: Some(filter),
-            },
-            join_type: JoinType::LeftOuter,
+        let plan = LogicalPlan::new(
+            Operator::Join(JoinOperator {
+                on: JoinCondition::On {
+                    on: keys,
+                    filter: Some(filter),
+                },
+                join_type: JoinType::LeftOuter,
+            }),
+            Childrens::Twins { left, right },
+        );
+        let plan = HepOptimizer::new(plan)
+            .batch(
+                "Expression Remapper".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![
+                    NormalizationRuleImpl::BindExpressionPosition,
+                    // TIPS: This rule is necessary
+                    NormalizationRuleImpl::EvaluatorBind,
+                ],
+            )
+            .find_best::<RocksTransaction>(None)?;
+        let Operator::Join(op) = plan.operator else {
+            unreachable!()
         };
+        let (left, right) = plan.childrens.pop_twins();
         let executor = NestedLoopJoin::from((op, left, right))
             .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
         let tuples = try_collect(executor)?;
@@ -618,13 +669,31 @@ mod test {
         let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
         let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
         let (keys, left, right, filter) = build_join_values(true);
-        let op = JoinOperator {
-            on: JoinCondition::On {
-                on: keys,
-                filter: Some(filter),
-            },
-            join_type: JoinType::Cross,
+        let plan = LogicalPlan::new(
+            Operator::Join(JoinOperator {
+                on: JoinCondition::On {
+                    on: keys,
+                    filter: Some(filter),
+                },
+                join_type: JoinType::Cross,
+            }),
+            Childrens::Twins { left, right },
+        );
+        let plan = HepOptimizer::new(plan)
+            .batch(
+                "Expression Remapper".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![
+                    NormalizationRuleImpl::BindExpressionPosition,
+                    // TIPS: This rule is necessary
+                    NormalizationRuleImpl::EvaluatorBind,
+                ],
+            )
+            .find_best::<RocksTransaction>(None)?;
+        let Operator::Join(op) = plan.operator else {
+            unreachable!()
         };
+        let (left, right) = plan.childrens.pop_twins();
         let executor = NestedLoopJoin::from((op, left, right))
             .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
         let tuples = try_collect(executor)?;
@@ -648,13 +717,31 @@ mod test {
         let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
         let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
         let (keys, left, right, _) = build_join_values(true);
-        let op = JoinOperator {
-            on: JoinCondition::On {
-                on: keys,
-                filter: None,
-            },
-            join_type: JoinType::Cross,
+        let plan = LogicalPlan::new(
+            Operator::Join(JoinOperator {
+                on: JoinCondition::On {
+                    on: keys,
+                    filter: None,
+                },
+                join_type: JoinType::Cross,
+            }),
+            Childrens::Twins { left, right },
+        );
+        let plan = HepOptimizer::new(plan)
+            .batch(
+                "Expression Remapper".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![
+                    NormalizationRuleImpl::BindExpressionPosition,
+                    // TIPS: This rule is necessary
+                    NormalizationRuleImpl::EvaluatorBind,
+                ],
+            )
+            .find_best::<RocksTransaction>(None)?;
+        let Operator::Join(op) = plan.operator else {
+            unreachable!()
         };
+        let (left, right) = plan.childrens.pop_twins();
         let executor = NestedLoopJoin::from((op, left, right))
             .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
         let tuples = try_collect(executor)?;
@@ -681,13 +768,31 @@ mod test {
         let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
         let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
         let (keys, left, right, _) = build_join_values(false);
-        let op = JoinOperator {
-            on: JoinCondition::On {
-                on: keys,
-                filter: None,
-            },
-            join_type: JoinType::Cross,
+        let plan = LogicalPlan::new(
+            Operator::Join(JoinOperator {
+                on: JoinCondition::On {
+                    on: keys,
+                    filter: None,
+                },
+                join_type: JoinType::Cross,
+            }),
+            Childrens::Twins { left, right },
+        );
+        let plan = HepOptimizer::new(plan)
+            .batch(
+                "Expression Remapper".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![
+                    NormalizationRuleImpl::BindExpressionPosition,
+                    // TIPS: This rule is necessary
+                    NormalizationRuleImpl::EvaluatorBind,
+                ],
+            )
+            .find_best::<RocksTransaction>(None)?;
+        let Operator::Join(op) = plan.operator else {
+            unreachable!()
         };
+        let (left, right) = plan.childrens.pop_twins();
         let executor = NestedLoopJoin::from((op, left, right))
             .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
         let tuples = try_collect(executor)?;
@@ -706,13 +811,31 @@ mod test {
         let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
         let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
         let (keys, left, right, filter) = build_join_values(true);
-        let op = JoinOperator {
-            on: JoinCondition::On {
-                on: keys,
-                filter: Some(filter),
-            },
-            join_type: JoinType::LeftSemi,
+        let plan = LogicalPlan::new(
+            Operator::Join(JoinOperator {
+                on: JoinCondition::On {
+                    on: keys,
+                    filter: Some(filter),
+                },
+                join_type: JoinType::LeftSemi,
+            }),
+            Childrens::Twins { left, right },
+        );
+        let plan = HepOptimizer::new(plan)
+            .batch(
+                "Expression Remapper".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![
+                    NormalizationRuleImpl::BindExpressionPosition,
+                    // TIPS: This rule is necessary
+                    NormalizationRuleImpl::EvaluatorBind,
+                ],
+            )
+            .find_best::<RocksTransaction>(None)?;
+        let Operator::Join(op) = plan.operator else {
+            unreachable!()
         };
+        let (left, right) = plan.childrens.pop_twins();
         let executor = NestedLoopJoin::from((op, left, right))
             .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
         let tuples = try_collect(executor)?;
@@ -734,13 +857,31 @@ mod test {
         let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
         let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
         let (keys, left, right, filter) = build_join_values(true);
-        let op = JoinOperator {
-            on: JoinCondition::On {
-                on: keys,
-                filter: Some(filter),
-            },
-            join_type: JoinType::LeftAnti,
+        let plan = LogicalPlan::new(
+            Operator::Join(JoinOperator {
+                on: JoinCondition::On {
+                    on: keys,
+                    filter: Some(filter),
+                },
+                join_type: JoinType::LeftAnti,
+            }),
+            Childrens::Twins { left, right },
+        );
+        let plan = HepOptimizer::new(plan)
+            .batch(
+                "Expression Remapper".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![
+                    NormalizationRuleImpl::BindExpressionPosition,
+                    // TIPS: This rule is necessary
+                    NormalizationRuleImpl::EvaluatorBind,
+                ],
+            )
+            .find_best::<RocksTransaction>(None)?;
+        let Operator::Join(op) = plan.operator else {
+            unreachable!()
         };
+        let (left, right) = plan.childrens.pop_twins();
         let executor = NestedLoopJoin::from((op, left, right))
             .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
         let tuples = try_collect(executor)?;
@@ -764,13 +905,31 @@ mod test {
         let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
         let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
         let (keys, left, right, filter) = build_join_values(true);
-        let op = JoinOperator {
-            on: JoinCondition::On {
-                on: keys,
-                filter: Some(filter),
-            },
-            join_type: JoinType::RightOuter,
+        let plan = LogicalPlan::new(
+            Operator::Join(JoinOperator {
+                on: JoinCondition::On {
+                    on: keys,
+                    filter: Some(filter),
+                },
+                join_type: JoinType::RightOuter,
+            }),
+            Childrens::Twins { left, right },
+        );
+        let plan = HepOptimizer::new(plan)
+            .batch(
+                "Expression Remapper".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![
+                    NormalizationRuleImpl::BindExpressionPosition,
+                    // TIPS: This rule is necessary
+                    NormalizationRuleImpl::EvaluatorBind,
+                ],
+            )
+            .find_best::<RocksTransaction>(None)?;
+        let Operator::Join(op) = plan.operator else {
+            unreachable!()
         };
+        let (left, right) = plan.childrens.pop_twins();
         let executor = NestedLoopJoin::from((op, left, right))
             .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
         let tuples = try_collect(executor)?;
@@ -799,13 +958,31 @@ mod test {
         let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
         let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
         let (keys, left, right, filter) = build_join_values(true);
-        let op = JoinOperator {
-            on: JoinCondition::On {
-                on: keys,
-                filter: Some(filter),
-            },
-            join_type: JoinType::Full,
+        let plan = LogicalPlan::new(
+            Operator::Join(JoinOperator {
+                on: JoinCondition::On {
+                    on: keys,
+                    filter: Some(filter),
+                },
+                join_type: JoinType::Full,
+            }),
+            Childrens::Twins { left, right },
+        );
+        let plan = HepOptimizer::new(plan)
+            .batch(
+                "Expression Remapper".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![
+                    NormalizationRuleImpl::BindExpressionPosition,
+                    // TIPS: This rule is necessary
+                    NormalizationRuleImpl::EvaluatorBind,
+                ],
+            )
+            .find_best::<RocksTransaction>(None)?;
+        let Operator::Join(op) = plan.operator else {
+            unreachable!()
         };
+        let (left, right) = plan.childrens.pop_twins();
         let executor = NestedLoopJoin::from((op, left, right))
             .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
         let tuples = try_collect(executor)?;
