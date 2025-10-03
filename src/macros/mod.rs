@@ -93,7 +93,7 @@ macro_rules! scala_function {
         #[typetag::serde]
         impl ::kite_sql::expression::function::scala::ScalarFunctionImpl for $struct_name {
             #[allow(unused_variables, clippy::redundant_closure_call)]
-            fn eval(&self, args: &[::kite_sql::expression::ScalarExpression], tuple: Option<(&::kite_sql::types::tuple::Tuple, &[::kite_sql::catalog::column::ColumnRef])>) -> Result<::kite_sql::types::value::DataValue, ::kite_sql::errors::DatabaseError> {
+            fn eval(&self, args: &[::kite_sql::expression::ScalarExpression], tuple: Option<(&[::kite_sql::types::value::DataValue], &[::kite_sql::catalog::column::ColumnRef])>) -> Result<::kite_sql::types::value::DataValue, ::kite_sql::errors::DatabaseError> {
                 let mut _index = 0;
 
                 $closure($({
@@ -184,7 +184,7 @@ macro_rules! table_function {
                 let mut _index = 0;
 
                 $closure($({
-                    let mut value = args[_index].eval(None)?;
+                    let mut value = args[_index].eval::<&::kite_sql::types::tuple::Tuple>(None)?;
                     _index += 1;
 
                     if value.logical_type() != $arg_ty {

@@ -1,26 +1,38 @@
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
+use crate::execution::dql::join::hash::full_join::FullJoinState;
+use crate::execution::dql::join::hash::inner_join::InnerJoinState;
+use crate::execution::dql::join::hash::left_anti_join::LeftAntiJoinState;
+use crate::execution::dql::join::hash::left_join::LeftJoinState;
+use crate::execution::dql::join::hash::left_semi_join::LeftSemiJoinState;
+use crate::execution::dql::join::hash::right_join::RightJoinState;
+use crate::execution::dql::join::hash::{
+    FilterArgs, JoinProbeState, JoinProbeStateImpl, ProbeArgs,
+};
 use crate::execution::dql::join::joins_nullable;
+use crate::execution::dql::sort::BumpVec;
 use crate::execution::{build_read, Executor, ReadExecutor};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::throw;
-use crate::types::tuple::{Schema, Tuple};
-use crate::types::value::{DataValue, NULL_VALUE};
+use crate::types::tuple::Tuple;
+use crate::types::value::DataValue;
 use ahash::{HashMap, HashMapExt};
+use bumpalo::Bump;
 use fixedbitset::FixedBitSet;
-use itertools::Itertools;
 use std::ops::Coroutine;
 use std::ops::CoroutineState;
 use std::pin::Pin;
+use std::sync::Arc;
 
 pub struct HashJoin {
     on: JoinCondition,
     ty: JoinType,
     left_input: LogicalPlan,
     right_input: LogicalPlan,
+    bump: Bump,
 }
 
 impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for HashJoin {
@@ -36,6 +48,7 @@ impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for HashJoin {
             ty: join_type,
             left_input,
             right_input,
+            bump: Default::default(),
         }
     }
 }
@@ -45,51 +58,25 @@ impl HashJoin {
         on_keys: &[ScalarExpression],
         tuple: &Tuple,
         schema: &[ColumnRef],
-    ) -> Result<Vec<DataValue>, DatabaseError> {
-        let mut values = Vec::with_capacity(on_keys.len());
-
+        build_buf: &mut BumpVec<DataValue>,
+    ) -> Result<(), DatabaseError> {
+        build_buf.clear();
         for expr in on_keys {
-            values.push(expr.eval(Some((tuple, schema)))?);
+            build_buf.push(expr.eval(Some((tuple, schema)))?);
         }
-        Ok(values)
-    }
-
-    pub(crate) fn filter(
-        mut tuple: Tuple,
-        schema: &Schema,
-        filter: &Option<ScalarExpression>,
-        join_ty: &JoinType,
-        left_schema_len: usize,
-    ) -> Result<Option<Tuple>, DatabaseError> {
-        if let (Some(expr), false) = (filter, matches!(join_ty, JoinType::Full | JoinType::Cross)) {
-            match &expr.eval(Some((&tuple, schema)))? {
-                DataValue::Boolean(false) | DataValue::Null => {
-                    let full_schema_len = schema.len();
-
-                    match join_ty {
-                        JoinType::LeftOuter => {
-                            for i in left_schema_len..full_schema_len {
-                                tuple.values[i] = NULL_VALUE.clone();
-                            }
-                        }
-                        JoinType::RightOuter => {
-                            for i in 0..left_schema_len {
-                                tuple.values[i] = NULL_VALUE.clone();
-                            }
-                        }
-                        _ => return Ok(None),
-                    }
-                }
-                DataValue::Boolean(true) => (),
-                _ => return Err(DatabaseError::InvalidType),
-            }
-        }
-
-        Ok(Some(tuple))
+        Ok(())
     }
 }
 
+#[derive(Default, Debug)]
+pub(crate) struct BuildState {
+    pub(crate) tuples: Vec<(usize, Tuple)>,
+    pub(crate) is_used: bool,
+    pub(crate) has_filted: bool,
+}
+
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
+    #[allow(clippy::mutable_key_type)]
     fn execute(
         self,
         cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
@@ -103,6 +90,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
                     ty,
                     mut left_input,
                     mut right_input,
+                    mut bump,
                 } = self;
 
                 if ty == JoinType::Cross {
@@ -131,6 +119,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
                         }
                     }
                 };
+
                 let (left_force_nullable, right_force_nullable) = joins_nullable(&ty);
 
                 let mut full_schema_ref = Vec::clone(left_input.output_schema());
@@ -142,31 +131,52 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
                     &mut full_schema_ref[left_schema_len..],
                     right_force_nullable,
                 );
+                let right_schema_len = full_schema_ref.len() - left_schema_len;
+                let full_schema_ref = Arc::new(full_schema_ref);
 
                 // build phase:
                 // 1.construct hashtable, one hash key may contains multiple rows indices.
                 // 2.merged all left tuples.
                 let mut coroutine = build_read(left_input, cache, transaction);
                 let mut build_map = HashMap::new();
-                let build_map_ptr: *mut HashMap<Vec<DataValue>, (Vec<Tuple>, bool, bool)> =
-                    &mut build_map;
+                let bump_ptr: *mut Bump = &mut bump;
+                let build_map_ptr: *mut HashMap<BumpVec<DataValue>, BuildState> = &mut build_map;
 
+                let mut buf_row =
+                    BumpVec::with_capacity_in(on_left_keys.len(), unsafe { &mut (*bump_ptr) });
+
+                let mut build_count = 0;
                 while let CoroutineState::Yielded(tuple) = Pin::new(&mut coroutine).resume(()) {
                     let tuple: Tuple = throw!(tuple);
-                    let values = throw!(Self::eval_keys(
+                    throw!(Self::eval_keys(
                         &on_left_keys,
                         &tuple,
-                        &full_schema_ref[0..left_schema_len]
+                        &full_schema_ref[0..left_schema_len],
+                        &mut buf_row,
                     ));
 
-                    unsafe {
-                        (*build_map_ptr)
-                            .entry(values)
-                            .or_insert_with(|| (Vec::new(), false, false))
-                            .0
-                            .push(tuple);
+                    let build_map_ref = unsafe { &mut (*build_map_ptr) };
+                    match build_map_ref.get_mut(&buf_row) {
+                        None => {
+                            build_map_ref.insert(
+                                buf_row.clone(),
+                                BuildState {
+                                    tuples: vec![(build_count, tuple)],
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        Some(BuildState { tuples, .. }) => tuples.push((build_count, tuple)),
                     }
+                    build_count += 1;
                 }
+                let mut join_impl =
+                    Self::create_join_impl(self.ty, left_schema_len, right_schema_len, build_count);
+                let mut filter_arg = filter.map(|expr| FilterArgs {
+                    full_schema: full_schema_ref.clone(),
+                    filter_expr: expr,
+                });
+                let filter_arg_ptr: *mut Option<FilterArgs> = &mut filter_arg;
 
                 // probe phase
                 let mut coroutine = build_read(right_input, cache, transaction);
@@ -174,128 +184,68 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
                 while let CoroutineState::Yielded(tuple) = Pin::new(&mut coroutine).resume(()) {
                     let tuple: Tuple = throw!(tuple);
 
-                    let right_cols_len = tuple.values.len();
-                    let values = throw!(Self::eval_keys(
+                    throw!(Self::eval_keys(
                         &on_right_keys,
                         &tuple,
-                        &full_schema_ref[left_schema_len..]
+                        &full_schema_ref[left_schema_len..],
+                        &mut buf_row
                     ));
-                    let has_null = values.iter().any(|value| value.is_null());
-                    let build_value = unsafe { (*build_map_ptr).get_mut(&values) };
-                    drop(values);
+                    let build_value = unsafe { (*build_map_ptr).get_mut(&buf_row) };
 
-                    if let (false, Some((tuples, is_used, is_filtered))) = (has_null, build_value) {
-                        let mut bits_option = None;
-                        *is_used = true;
-
-                        match ty {
-                            JoinType::LeftSemi => {
-                                if *is_filtered {
-                                    continue;
-                                } else {
-                                    bits_option = Some(FixedBitSet::with_capacity(tuples.len()));
-                                }
-                            }
-                            JoinType::LeftAnti => continue,
-                            _ => (),
-                        }
-                        for (i, Tuple { values, pk }) in tuples.iter().enumerate() {
-                            let full_values = values
-                                .iter()
-                                .chain(tuple.values.iter())
-                                .cloned()
-                                .collect_vec();
-                            let tuple = Tuple::new(pk.clone(), full_values);
-                            if let Some(tuple) = throw!(Self::filter(
-                                tuple,
-                                &full_schema_ref,
-                                &filter,
-                                &ty,
-                                left_schema_len
-                            )) {
-                                if let Some(bits) = bits_option.as_mut() {
-                                    bits.insert(i);
-                                } else {
-                                    yield Ok(tuple);
-                                }
-                            }
-                        }
-                        if let Some(bits) = bits_option {
-                            let mut cnt = 0;
-                            tuples.retain(|_| {
-                                let res = bits.contains(cnt);
-                                cnt += 1;
-                                res
-                            });
-                            *is_filtered = true
-                        }
-                    } else if matches!(ty, JoinType::RightOuter | JoinType::Full) {
-                        let empty_len = full_schema_ref.len() - right_cols_len;
-                        let values = (0..empty_len)
-                            .map(|_| NULL_VALUE.clone())
-                            .chain(tuple.values)
-                            .collect_vec();
-                        let tuple = Tuple::new(tuple.pk, values);
-                        if let Some(tuple) = throw!(Self::filter(
-                            tuple,
-                            &full_schema_ref,
-                            &filter,
-                            &ty,
-                            left_schema_len
-                        )) {
-                            yield Ok(tuple);
-                        }
+                    let probe_args = ProbeArgs {
+                        is_keys_has_null: buf_row.iter().any(|value| value.is_null()),
+                        probe_tuple: tuple,
+                        build_state: build_value,
+                    };
+                    let mut executor =
+                        join_impl.probe(probe_args, unsafe { &mut (*filter_arg_ptr) }.as_ref());
+                    while let CoroutineState::Yielded(tuple) = Pin::new(&mut executor).resume(()) {
+                        yield tuple;
                     }
                 }
-
-                // left drop
-                match ty {
-                    JoinType::LeftOuter | JoinType::Full => {
-                        for (_, (left_tuples, is_used, _)) in build_map {
-                            if is_used {
-                                continue;
-                            }
-                            for mut tuple in left_tuples {
-                                while tuple.values.len() != full_schema_ref.len() {
-                                    tuple.values.push(NULL_VALUE.clone());
-                                }
-                                yield Ok(tuple);
-                            }
-                        }
+                let executor =
+                    join_impl.left_drop(build_map, unsafe { &mut (*filter_arg_ptr) }.as_ref());
+                if let Some(mut executor) = executor {
+                    while let CoroutineState::Yielded(tuple) = Pin::new(&mut executor).resume(()) {
+                        yield tuple;
                     }
-                    JoinType::LeftSemi | JoinType::LeftAnti => {
-                        let is_left_semi = matches!(ty, JoinType::LeftSemi);
-
-                        for (_, (left_tuples, mut is_used, is_filtered)) in build_map {
-                            if is_left_semi {
-                                is_used = !is_used;
-                            }
-                            if is_used {
-                                continue;
-                            }
-                            if is_filtered {
-                                for tuple in left_tuples {
-                                    yield Ok(tuple);
-                                }
-                                continue;
-                            }
-                            for tuple in left_tuples {
-                                if let Some(tuple) = throw!(Self::filter(
-                                    tuple,
-                                    &full_schema_ref,
-                                    &filter,
-                                    &ty,
-                                    left_schema_len
-                                )) {
-                                    yield Ok(tuple);
-                                }
-                            }
-                        }
-                    }
-                    _ => (),
                 }
             },
         )
+    }
+}
+
+impl HashJoin {
+    fn create_join_impl(
+        ty: JoinType,
+        left_schema_len: usize,
+        right_schema_len: usize,
+        build_count: usize,
+    ) -> JoinProbeStateImpl {
+        match ty {
+            JoinType::Inner => JoinProbeStateImpl::Inner(InnerJoinState),
+            JoinType::LeftOuter => JoinProbeStateImpl::Left(LeftJoinState {
+                left_schema_len,
+                right_schema_len,
+                bits: FixedBitSet::with_capacity(build_count),
+            }),
+            JoinType::LeftSemi => JoinProbeStateImpl::LeftSemi(LeftSemiJoinState {
+                bits: FixedBitSet::with_capacity(build_count),
+            }),
+            JoinType::LeftAnti => JoinProbeStateImpl::LeftAnti(LeftAntiJoinState {
+                right_schema_len,
+                inner: LeftSemiJoinState {
+                    bits: FixedBitSet::with_capacity(build_count),
+                },
+            }),
+            JoinType::RightOuter => JoinProbeStateImpl::Right(RightJoinState { left_schema_len }),
+            JoinType::Full => JoinProbeStateImpl::Full(FullJoinState {
+                left_schema_len,
+                right_schema_len,
+                bits: FixedBitSet::with_capacity(build_count),
+            }),
+            JoinType::Cross => unreachable!(),
+        }
     }
 }
 

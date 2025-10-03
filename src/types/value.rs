@@ -16,8 +16,6 @@ use std::str::FromStr;
 use std::sync::LazyLock;
 use std::{cmp, fmt, mem};
 
-pub static NULL_VALUE: LazyLock<DataValue> = LazyLock::new(|| DataValue::Null);
-
 static UNIX_DATETIME: LazyLock<NaiveDateTime> =
     LazyLock::new(|| DateTime::from_timestamp(0, 0).unwrap().naive_utc());
 

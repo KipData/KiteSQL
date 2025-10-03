@@ -1,7 +1,7 @@
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::{BinaryOperator, ScalarExpression};
-use crate::types::value::{DataValue, NULL_VALUE};
+use crate::types::value::DataValue;
 use crate::types::ColumnId;
 use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
@@ -223,7 +223,7 @@ impl<'a> RangeDetacher<'a> {
                                 // Range::NotEq(NULL_VALUE.clone())
                                 Ok(None)
                             } else {
-                                Ok(Some(Range::Eq(NULL_VALUE.clone())))
+                                Ok(Some(Range::Eq(DataValue::Null)))
                             };
                         }
                     }
