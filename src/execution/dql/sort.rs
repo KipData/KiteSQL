@@ -334,7 +334,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Sort {
 mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
     use crate::errors::DatabaseError;
-    use crate::execution::dql::sort::{radix_sort, BumpVec, NullableVec, SortBy};
+    use crate::execution::dql::sort::{radix_sort, NullableVec, SortBy};
     use crate::expression::ScalarExpression;
     use crate::planner::operator::sort::SortField;
     use crate::types::tuple::Tuple;

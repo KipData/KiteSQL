@@ -61,7 +61,7 @@ impl HistogramBuilder {
             .capacity
             .map(|capacity| {
                 (
-                    NullableVec::<(usize, DataValue)>::fill_capacity(capacity, &self.arena),
+                    NullableVec::<(usize, DataValue)>::with_capacity(capacity, &self.arena),
                     BumpVec::<(usize, BumpBytes<'static>)>::with_capacity_in(capacity, &self.arena),
                 )
             })
