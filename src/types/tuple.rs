@@ -22,6 +22,12 @@ pub struct Tuple {
     pub values: Vec<DataValue>,
 }
 
+impl<'a> From<&'a Tuple> for &'a [DataValue] {
+    fn from(val: &'a Tuple) -> Self {
+        val.values.as_slice()
+    }
+}
+
 impl Tuple {
     pub fn new(pk: Option<TupleId>, values: Vec<DataValue>) -> Self {
         Tuple { pk, values }

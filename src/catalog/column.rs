@@ -1,6 +1,7 @@
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
+use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use crate::types::{ColumnId, LogicalType};
 use kite_sql_serde_macros::ReferenceSerialization;
@@ -169,7 +170,7 @@ impl ColumnCatalog {
         self.desc
             .default
             .as_ref()
-            .map(|expr| expr.eval(None))
+            .map(|expr| expr.eval::<&Tuple>(None))
             .transpose()
     }
 

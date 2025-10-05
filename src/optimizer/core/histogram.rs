@@ -22,7 +22,7 @@ pub struct HistogramBuilder {
 
     null_count: usize,
     values: Option<NullableVec<'static, (usize, DataValue)>>,
-    sort_keys: Option<BumpVec<'static, (usize, BumpBytes<'static>)>>,
+    sort_keys: Option<NullableVec<'static, (usize, BumpBytes<'static>)>>,
 
     value_index: usize,
 }
@@ -101,7 +101,7 @@ impl HistogramBuilder {
             self.sort_keys
                 .as_mut()
                 .unwrap()
-                .push((self.value_index, unsafe { mem::transmute::<_, _>(bytes) }))
+                .put((self.value_index, unsafe { mem::transmute::<_, _>(bytes) }))
         }
 
         self.value_index += 1;
@@ -129,21 +129,21 @@ impl HistogramBuilder {
             ..
         } = self;
         let mut values = values.unwrap();
-        let sort_keys = sort_keys.unwrap();
+        let mut sort_keys = sort_keys.unwrap();
         let mut buckets = Vec::with_capacity(number_of_buckets);
         let bucket_len = if values_len % number_of_buckets == 0 {
             values_len / number_of_buckets
         } else {
             (values_len + number_of_buckets) / number_of_buckets
         };
-        let sorted_indices = radix_sort(sort_keys, &arena);
+        radix_sort(&mut sort_keys, &arena);
 
         for i in 0..number_of_buckets {
             let mut bucket = Bucket::empty();
             let j = (i + 1) * bucket_len;
 
             bucket.upper = values
-                .get(sorted_indices[cmp::min(j, values_len) - 1])
+                .get(sort_keys.get(cmp::min(j, values_len) - 1).0)
                 .1
                 .clone();
             buckets.push(bucket);
@@ -152,7 +152,7 @@ impl HistogramBuilder {
         let mut number_of_distinct_value = 0;
         let mut last_value: Option<DataValue> = None;
 
-        for (i, index) in sorted_indices.into_iter().enumerate() {
+        for (i, (index, _)) in sort_keys.into_iter().enumerate() {
             let (ordinal, value) = values.take(index);
             sketch.increment(&value);
 

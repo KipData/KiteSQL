@@ -12,7 +12,7 @@ use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::throw;
 use crate::types::tuple::{Schema, SchemaRef, Tuple};
-use crate::types::value::{DataValue, NULL_VALUE};
+use crate::types::value::DataValue;
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
 use std::borrow::Cow;
@@ -253,7 +253,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
                             if !has_matched =>
                         {
                             let right_tuple =
-                                Tuple::new(None, vec![NULL_VALUE.clone(); right_schema_len]);
+                                Tuple::new(None, vec![DataValue::Null; right_schema_len]);
                             if matches!(ty, JoinType::RightOuter) {
                                 Self::emit_tuple(&right_tuple, &left_tuple, ty, false)
                             } else {
@@ -279,7 +279,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
                     {
                         if !bitmap.as_ref().unwrap().contains(idx) {
                             let mut right_tuple: Tuple = throw!(right_tuple);
-                            let mut values = vec![NULL_VALUE.clone(); right_schema_len];
+                            let mut values = vec![DataValue::Null; right_schema_len];
                             values.append(&mut right_tuple.values);
 
                             yield Ok(Tuple::new(right_tuple.pk, values))
@@ -318,11 +318,11 @@ impl NestedLoopJoin {
                 values
                     .iter_mut()
                     .skip(left_len)
-                    .for_each(|v| *v = NULL_VALUE.clone());
+                    .for_each(|v| *v = DataValue::Null);
             }
             JoinType::RightOuter if !is_matched => {
                 (0..left_len).for_each(|i| {
-                    values[i] = NULL_VALUE.clone();
+                    values[i] = DataValue::Null;
                 });
             }
             JoinType::LeftSemi => values.truncate(left_len),

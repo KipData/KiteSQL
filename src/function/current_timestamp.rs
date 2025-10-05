@@ -4,7 +4,6 @@ use crate::expression::function::scala::FuncMonotonicity;
 use crate::expression::function::scala::ScalarFunctionImpl;
 use crate::expression::function::FunctionSummary;
 use crate::expression::ScalarExpression;
-use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use chrono::Utc;
@@ -37,7 +36,7 @@ impl ScalarFunctionImpl for CurrentTimeStamp {
     fn eval(
         &self,
         _: &[ScalarExpression],
-        _: Option<(&Tuple, &[ColumnRef])>,
+        _: Option<(&[DataValue], &[ColumnRef])>,
     ) -> Result<DataValue, DatabaseError> {
         Ok(DataValue::Time64(Utc::now().timestamp(), 0, false))
     }

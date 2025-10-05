@@ -1,5 +1,6 @@
 use crate::planner::operator::join::JoinType;
 
+mod hash;
 pub(crate) mod hash_join;
 pub(crate) mod nested_loop_join;
 

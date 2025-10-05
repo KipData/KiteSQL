@@ -8,14 +8,15 @@ use crate::throw;
 use crate::types::tuple::{Schema, Tuple};
 use bumpalo::Bump;
 use std::cmp::Ordering;
+use std::mem::MaybeUninit;
 use std::ops::Coroutine;
 use std::ops::CoroutineState;
 use std::pin::Pin;
 
 pub(crate) type BumpVec<'bump, T> = bumpalo::collections::Vec<'bump, T>;
 
-#[derive(Clone)]
-pub(crate) struct NullableVec<'a, T>(pub(crate) BumpVec<'a, Option<T>>);
+#[derive(Debug)]
+pub(crate) struct NullableVec<'a, T>(pub(crate) BumpVec<'a, MaybeUninit<T>>);
 
 impl<'a, T> NullableVec<'a, T> {
     #[inline]
@@ -29,57 +30,80 @@ impl<'a, T> NullableVec<'a, T> {
     }
 
     #[inline]
+    pub(crate) fn fill_capacity(capacity: usize, arena: &'a Bump) -> NullableVec<'a, T> {
+        let mut data = BumpVec::with_capacity_in(capacity, arena);
+        for _ in 0..capacity {
+            data.push(MaybeUninit::uninit());
+        }
+        NullableVec(data)
+    }
+
+    #[inline]
     pub(crate) fn put(&mut self, item: T) {
-        self.0.push(Some(item));
+        self.0.push(MaybeUninit::new(item));
+    }
+
+    #[inline]
+    pub(crate) fn set(&mut self, pos: usize, item: T) {
+        self.0[pos] = MaybeUninit::new(item);
     }
 
     #[inline]
     pub(crate) fn take(&mut self, offset: usize) -> T {
-        self.0[offset].take().unwrap()
+        unsafe { self.0[offset].assume_init_read() }
     }
 
     #[inline]
     pub(crate) fn get(&self, offset: usize) -> &T {
-        self.0[offset].as_ref().unwrap()
+        unsafe { self.0[offset].assume_init_ref() }
     }
 
     #[inline]
     pub(crate) fn len(&self) -> usize {
         self.0.len()
     }
-}
 
-pub struct RemappingIterator<'a> {
-    pos: usize,
-    tuples: NullableVec<'a, (usize, Tuple)>,
-    indices: BumpVec<'a, usize>,
-}
+    #[inline]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 
-impl RemappingIterator<'_> {
-    pub fn new<'a>(
-        pos: usize,
-        tuples: NullableVec<'a, (usize, Tuple)>,
-        indices: BumpVec<'a, usize>,
-    ) -> RemappingIterator<'a> {
-        RemappingIterator {
-            pos,
-            tuples,
-            indices,
-        }
+    #[inline]
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &T> {
+        self.0.iter().map(|item| unsafe { item.assume_init_ref() })
+    }
+
+    #[inline]
+    pub(crate) fn take_iter(&mut self) -> impl Iterator<Item = T> + '_ {
+        self.0
+            .iter_mut()
+            .map(|item| unsafe { item.assume_init_read() })
+    }
+
+    #[inline]
+    pub(crate) fn into_iter(self) -> impl Iterator<Item = T> + 'a {
+        self.0
+            .into_iter()
+            .map(|item| unsafe { item.assume_init_read() })
     }
 }
 
-impl Iterator for RemappingIterator<'_> {
+pub struct RemappingIterator<'a, T> {
+    tuples: NullableVec<'a, (usize, Tuple)>,
+    indices: T,
+}
+
+impl<T: Iterator<Item = usize>> RemappingIterator<'_, T> {
+    pub fn new(tuples: NullableVec<(usize, Tuple)>, indices: T) -> RemappingIterator<T> {
+        RemappingIterator { tuples, indices }
+    }
+}
+
+impl<T: Iterator<Item = usize>> Iterator for RemappingIterator<'_, T> {
     type Item = Tuple;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.pos > self.indices.len() - 1 {
-            return None;
-        }
-        let (_, tuple) = self.tuples.take(self.indices[self.pos]);
-        self.pos += 1;
-
-        Some(tuple)
+        self.indices.next().map(|pos| self.tuples.take(pos).1)
     }
 }
 
@@ -87,33 +111,50 @@ const BUCKET_SIZE: usize = u8::MAX as usize + 1;
 
 // LSD Radix Sort
 pub(crate) fn radix_sort<'a, T, A: AsRef<[u8]>>(
-    mut tuples: BumpVec<'a, (T, A)>,
+    tuples: &mut NullableVec<'a, (T, A)>,
     arena: &'a Bump,
-) -> BumpVec<'a, T> {
-    if let Some(max_len) = tuples.iter().map(|(_, bytes)| bytes.as_ref().len()).max() {
-        // init buckets
-        let mut temp_buckets = BumpVec::with_capacity_in(BUCKET_SIZE, arena);
-        for _ in 0..BUCKET_SIZE {
-            temp_buckets.push(BumpVec::new_in(arena));
+) {
+    if tuples.is_empty() {
+        return;
+    }
+    let max_len = tuples
+        .iter()
+        .map(|(_, bytes)| bytes.as_ref().len())
+        .max()
+        .unwrap();
+
+    let mut buf = NullableVec::fill_capacity(tuples.len(), arena);
+
+    let mut count = [0usize; BUCKET_SIZE];
+    let mut pos = [0usize; BUCKET_SIZE];
+
+    for i in (0..max_len).rev() {
+        count.fill(0);
+
+        for (_, value) in tuples.iter() {
+            let bytes = value.as_ref();
+            let idx = if bytes.len() > i { bytes[i] } else { 0 };
+            count[idx as usize] += 1;
         }
 
-        for i in (0..max_len).rev() {
-            for (t, value) in tuples.drain(..) {
-                let bytes = value.as_ref();
-                let index = if bytes.len() > i { bytes[i] } else { 0 };
-
-                temp_buckets[index as usize].push((t, value));
-            }
-            for bucket in temp_buckets.iter_mut() {
-                tuples.append(bucket);
+        {
+            let mut sum = 0;
+            for j in 0..BUCKET_SIZE {
+                let c = count[j];
+                pos[j] = sum;
+                sum += c;
             }
         }
+
+        for (t, value) in tuples.take_iter() {
+            let bytes = value.as_ref();
+            let idx = if bytes.len() > i { bytes[i] } else { 0 };
+            let p = pos[idx as usize];
+            buf.set(p, (t, value));
+            pos[idx as usize] += 1;
+        }
+        std::mem::swap(tuples, &mut buf);
     }
-    let mut result = BumpVec::with_capacity_in(tuples.len(), arena);
-    for (item, _) in tuples {
-        result.push(item);
-    }
-    result
 }
 
 pub enum SortBy {
@@ -131,11 +172,9 @@ impl SortBy {
     ) -> Result<Box<dyn Iterator<Item = Tuple> + 'a>, DatabaseError> {
         match self {
             SortBy::Radix => {
-                let mut sort_keys = BumpVec::with_capacity_in(tuples.len(), arena);
+                let mut sort_keys = NullableVec::with_capacity(tuples.len(), arena);
 
-                for (i, tuple) in tuples.0.iter().enumerate() {
-                    debug_assert!(tuple.is_some());
-
+                for (i, (_, tuple)) in tuples.iter().enumerate() {
                     let mut full_key = BumpVec::new_in(arena);
 
                     for SortField {
@@ -145,7 +184,6 @@ impl SortBy {
                     } in sort_fields
                     {
                         let mut key = BumpBytes::new_in(arena);
-                        let tuple = tuple.as_ref().map(|(_, tuple)| tuple).unwrap();
 
                         expr.eval(Some((tuple, schema)))?
                             .memcomparable_encode(&mut key)?;
@@ -157,11 +195,14 @@ impl SortBy {
                         key.push(if *nulls_first { u8::MIN } else { u8::MAX });
                         full_key.extend(key);
                     }
-                    sort_keys.push((i, full_key))
+                    sort_keys.put((i, full_key))
                 }
-                let indices = radix_sort(sort_keys, arena);
+                radix_sort(&mut sort_keys, arena);
 
-                Ok(Box::new(RemappingIterator::new(0, tuples, indices)))
+                Ok(Box::new(RemappingIterator::new(
+                    tuples,
+                    sort_keys.into_iter().map(|(i, _)| i),
+                )))
             }
             SortBy::Fast => {
                 let fn_nulls_first = |nulls_first: bool| {
@@ -176,20 +217,14 @@ impl SortBy {
                 let mut eval_values = vec![Vec::with_capacity(sort_fields.len()); tuples.len()];
 
                 for (x, SortField { expr, .. }) in sort_fields.iter().enumerate() {
-                    for tuple in tuples.0.iter() {
-                        debug_assert!(tuple.is_some());
-
-                        let (_, tuple) = tuple.as_ref().unwrap();
+                    for (_, tuple) in tuples.iter() {
                         eval_values[x].push(expr.eval(Some((tuple, schema)))?);
                     }
                 }
 
                 tuples.0.sort_by(|tuple_1, tuple_2| {
-                    debug_assert!(tuple_1.is_some());
-                    debug_assert!(tuple_2.is_some());
-
-                    let (i_1, _) = tuple_1.as_ref().unwrap();
-                    let (i_2, _) = tuple_2.as_ref().unwrap();
+                    let (i_1, _) = unsafe { tuple_1.assume_init_ref() };
+                    let (i_2, _) = unsafe { tuple_2.assume_init_ref() };
                     let mut ordering = Ordering::Equal;
 
                     for (
@@ -223,12 +258,7 @@ impl SortBy {
                 });
                 drop(eval_values);
 
-                Ok(Box::new(
-                    tuples
-                        .0
-                        .into_iter()
-                        .map(|tuple| tuple.map(|(_, tuple)| tuple).unwrap()),
-                ))
+                Ok(Box::new(tuples.into_iter().map(|(_, tuple)| tuple)))
             }
         }
     }
@@ -304,7 +334,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Sort {
 mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
     use crate::errors::DatabaseError;
-    use crate::execution::dql::sort::{radix_sort, BumpVec, NullableVec, SortBy};
+    use crate::execution::dql::sort::{radix_sort, NullableVec, SortBy};
     use crate::expression::ScalarExpression;
     use crate::planner::operator::sort::SortField;
     use crate::types::tuple::Tuple;
@@ -317,15 +347,20 @@ mod test {
     fn test_radix_sort() {
         let arena = Bump::new();
         {
-            let mut indices = BumpVec::new_in(&arena);
-            indices.push((0, "abc".as_bytes().to_vec()));
-            indices.push((1, "abz".as_bytes().to_vec()));
-            indices.push((2, "abe".as_bytes().to_vec()));
-            indices.push((3, "abcd".as_bytes().to_vec()));
+            let mut indices = NullableVec::with_capacity(4, &arena);
+            indices.put((0usize, "abc".as_bytes().to_vec()));
+            indices.put((1, "abz".as_bytes().to_vec()));
+            indices.put((2, "abe".as_bytes().to_vec()));
+            indices.put((3, "abcd".as_bytes().to_vec()));
 
-            let indices = radix_sort(indices, &arena);
-            assert_eq!(indices.as_slice(), &[0, 3, 2, 1]);
-            drop(indices)
+            radix_sort(&mut indices, &arena);
+
+            let mut iter = indices.iter();
+
+            assert_eq!(Some(&(0, "abc".as_bytes().to_vec())), iter.next());
+            assert_eq!(Some(&(3, "abcd".as_bytes().to_vec())), iter.next());
+            assert_eq!(Some(&(2, "abe".as_bytes().to_vec())), iter.next());
+            assert_eq!(Some(&(1, "abz".as_bytes().to_vec())), iter.next());
         }
     }
 
@@ -352,11 +387,13 @@ mod test {
         ))]);
 
         let arena = Bump::new();
-        let mut inner = BumpVec::new_in(&arena);
-        inner.push(Some((0_usize, Tuple::new(None, vec![DataValue::Null]))));
-        inner.push(Some((1_usize, Tuple::new(None, vec![DataValue::Int32(0)]))));
-        inner.push(Some((2_usize, Tuple::new(None, vec![DataValue::Int32(1)]))));
-        let tuples = NullableVec(inner);
+        let fn_tuples = || {
+            let mut vec = NullableVec::new(&arena);
+            vec.put((0_usize, Tuple::new(None, vec![DataValue::Null])));
+            vec.put((1_usize, Tuple::new(None, vec![DataValue::Int32(0)])));
+            vec.put((2_usize, Tuple::new(None, vec![DataValue::Int32(1)])));
+            vec
+        };
 
         let fn_asc_and_nulls_last_eq = |mut iter: Box<dyn Iterator<Item = Tuple>>| {
             if let Some(tuple) = iter.next() {
@@ -432,25 +469,25 @@ mod test {
             &arena,
             &schema,
             &fn_sort_fields(true, true),
-            tuples.clone(),
+            fn_tuples(),
         )?);
         fn_asc_and_nulls_last_eq(SortBy::Radix.sorted_tuples(
             &arena,
             &schema,
             &fn_sort_fields(true, false),
-            tuples.clone(),
+            fn_tuples(),
         )?);
         fn_desc_and_nulls_first_eq(SortBy::Radix.sorted_tuples(
             &arena,
             &schema,
             &fn_sort_fields(false, true),
-            tuples.clone(),
+            fn_tuples(),
         )?);
         fn_desc_and_nulls_last_eq(SortBy::Radix.sorted_tuples(
             &arena,
             &schema,
             &fn_sort_fields(false, false),
-            tuples.clone(),
+            fn_tuples(),
         )?);
 
         // FastSort
@@ -458,25 +495,25 @@ mod test {
             &arena,
             &schema,
             &fn_sort_fields(true, true),
-            tuples.clone(),
+            fn_tuples(),
         )?);
         fn_asc_and_nulls_last_eq(SortBy::Fast.sorted_tuples(
             &arena,
             &schema,
             &fn_sort_fields(true, false),
-            tuples.clone(),
+            fn_tuples(),
         )?);
         fn_desc_and_nulls_first_eq(SortBy::Fast.sorted_tuples(
             &arena,
             &schema,
             &fn_sort_fields(false, true),
-            tuples.clone(),
+            fn_tuples(),
         )?);
         fn_desc_and_nulls_last_eq(SortBy::Fast.sorted_tuples(
             &arena,
             &schema,
             &&fn_sort_fields(false, false),
-            tuples.clone(),
+            fn_tuples(),
         )?);
 
         Ok(())
@@ -528,32 +565,35 @@ mod test {
             )),
         ]);
         let arena = Bump::new();
-        let mut inner = BumpVec::new_in(&arena);
-        inner.push(Some((
-            0_usize,
-            Tuple::new(None, vec![DataValue::Null, DataValue::Null]),
-        )));
-        inner.push(Some((
-            1_usize,
-            Tuple::new(None, vec![DataValue::Int32(0), DataValue::Null]),
-        )));
-        inner.push(Some((
-            2_usize,
-            Tuple::new(None, vec![DataValue::Int32(1), DataValue::Null]),
-        )));
-        inner.push(Some((
-            3_usize,
-            Tuple::new(None, vec![DataValue::Null, DataValue::Int32(0)]),
-        )));
-        inner.push(Some((
-            4_usize,
-            Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)]),
-        )));
-        inner.push(Some((
-            5_usize,
-            Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(0)]),
-        )));
-        let tuples = NullableVec(inner);
+
+        let fn_tuples = || {
+            let mut vec = NullableVec::new(&arena);
+            vec.put((
+                0_usize,
+                Tuple::new(None, vec![DataValue::Null, DataValue::Null]),
+            ));
+            vec.put((
+                1_usize,
+                Tuple::new(None, vec![DataValue::Int32(0), DataValue::Null]),
+            ));
+            vec.put((
+                2_usize,
+                Tuple::new(None, vec![DataValue::Int32(1), DataValue::Null]),
+            ));
+            vec.put((
+                3_usize,
+                Tuple::new(None, vec![DataValue::Null, DataValue::Int32(0)]),
+            ));
+            vec.put((
+                4_usize,
+                Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)]),
+            ));
+            vec.put((
+                5_usize,
+                Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(0)]),
+            ));
+            vec
+        };
         let fn_asc_1_and_nulls_first_1_and_asc_2_and_nulls_first_2_eq =
             |mut iter: Box<dyn Iterator<Item = Tuple>>| {
                 if let Some(tuple) = iter.next() {
@@ -692,25 +732,25 @@ mod test {
             &arena,
             &schema,
             &fn_sort_fields(true, true, true, true),
-            tuples.clone(),
+            fn_tuples(),
         )?);
         fn_asc_1_and_nulls_last_1_and_asc_2_and_nulls_first_2_eq(SortBy::Radix.sorted_tuples(
             &arena,
             &schema,
             &fn_sort_fields(true, false, true, true),
-            tuples.clone(),
+            fn_tuples(),
         )?);
         fn_desc_1_and_nulls_first_1_and_asc_2_and_nulls_first_2_eq(SortBy::Radix.sorted_tuples(
             &arena,
             &schema,
             &fn_sort_fields(false, true, true, true),
-            tuples.clone(),
+            fn_tuples(),
         )?);
         fn_desc_1_and_nulls_last_1_and_asc_2_and_nulls_first_2_eq(SortBy::Radix.sorted_tuples(
             &arena,
             &schema,
             &fn_sort_fields(false, false, true, true),
-            tuples.clone(),
+            fn_tuples(),
         )?);
 
         // FastSort
@@ -718,25 +758,25 @@ mod test {
             &arena,
             &schema,
             &fn_sort_fields(true, true, true, true),
-            tuples.clone(),
+            fn_tuples(),
         )?);
         fn_asc_1_and_nulls_last_1_and_asc_2_and_nulls_first_2_eq(SortBy::Fast.sorted_tuples(
             &arena,
             &schema,
             &fn_sort_fields(true, false, true, true),
-            tuples.clone(),
+            fn_tuples(),
         )?);
         fn_desc_1_and_nulls_first_1_and_asc_2_and_nulls_first_2_eq(SortBy::Fast.sorted_tuples(
             &arena,
             &schema,
             &fn_sort_fields(false, true, true, true),
-            tuples.clone(),
+            fn_tuples(),
         )?);
         fn_desc_1_and_nulls_last_1_and_asc_2_and_nulls_first_2_eq(SortBy::Fast.sorted_tuples(
             &arena,
             &schema,
             &fn_sort_fields(false, false, true, true),
-            tuples.clone(),
+            fn_tuples(),
         )?);
 
         Ok(())

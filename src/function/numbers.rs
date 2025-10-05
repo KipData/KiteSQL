@@ -52,7 +52,7 @@ impl TableFunctionImpl for Numbers {
         &self,
         args: &[ScalarExpression],
     ) -> Result<Box<dyn Iterator<Item = Result<Tuple, DatabaseError>>>, DatabaseError> {
-        let mut value = args[0].eval(None)?;
+        let mut value = args[0].eval::<&Tuple>(None)?;
 
         if value.logical_type() != LogicalType::Integer {
             value = value.cast(&LogicalType::Integer)?;

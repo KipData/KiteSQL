@@ -2,7 +2,6 @@ use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::function::FunctionSummary;
 use crate::expression::ScalarExpression;
-use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use kite_sql_serde_macros::ReferenceSerialization;
@@ -54,7 +53,7 @@ pub trait ScalarFunctionImpl: Debug + Send + Sync {
     fn eval(
         &self,
         args: &[ScalarExpression],
-        tuple: Option<(&Tuple, &[ColumnRef])>,
+        tuple: Option<(&[DataValue], &[ColumnRef])>,
     ) -> Result<DataValue, DatabaseError>;
 
     // TODO: Exploiting monotonicity when optimizing `ScalarFunctionImpl::monotonicity()`
