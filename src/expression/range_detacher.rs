@@ -762,25 +762,25 @@ impl fmt::Display for Range {
             Range::Scope { min, max } => {
                 match min {
                     Bound::Unbounded => write!(f, "(-inf")?,
-                    Bound::Included(value) => write!(f, "[{}", value)?,
-                    Bound::Excluded(value) => write!(f, "({}", value)?,
+                    Bound::Included(value) => write!(f, "[{value}")?,
+                    Bound::Excluded(value) => write!(f, "({value}")?,
                 }
 
                 write!(f, ", ")?;
 
                 match max {
                     Bound::Unbounded => write!(f, "+inf)")?,
-                    Bound::Included(value) => write!(f, "{}]", value)?,
-                    Bound::Excluded(value) => write!(f, "{})", value)?,
+                    Bound::Included(value) => write!(f, "{value}]")?,
+                    Bound::Excluded(value) => write!(f, "{value})")?,
                 }
 
                 Ok(())
             }
-            Range::Eq(value) => write!(f, "{}", value),
+            Range::Eq(value) => write!(f, "{value}"),
             Range::Dummy => write!(f, "Dummy"),
             Range::SortedRanges(ranges) => {
-                let ranges_str = ranges.iter().map(|range| format!("{}", range)).join(", ");
-                write!(f, "{}", ranges_str)
+                let ranges_str = ranges.iter().map(|range| format!("{range}")).join(", ");
+                write!(f, "{ranges_str}")
             }
         }
     }

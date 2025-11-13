@@ -1,6 +1,6 @@
 use crate::execution::dql::projection::Projection;
 use crate::execution::DatabaseError;
-use crate::execution::{build_read, Executor, WriteExecutor};
+use crate::execution::{build_read, spawn_executor, Executor, WriteExecutor};
 use crate::expression::{BindPosition, ScalarExpression};
 use crate::planner::operator::create_index::CreateIndexOperator;
 use crate::planner::LogicalPlan;
@@ -12,9 +12,6 @@ use crate::types::tuple_builder::TupleBuilder;
 use crate::types::value::DataValue;
 use crate::types::ColumnId;
 use std::borrow::Cow;
-use std::ops::Coroutine;
-use std::ops::CoroutineState;
-use std::pin::Pin;
 
 pub struct CreateIndex {
     op: CreateIndexOperator,
@@ -33,75 +30,73 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateIndex {
         cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
         transaction: *mut T,
     ) -> Executor<'a> {
-        Box::new(
-            #[coroutine]
-            move || {
-                let CreateIndexOperator {
-                    table_name,
-                    index_name,
-                    columns,
-                    if_not_exists,
-                    ty,
-                } = self.op;
+        spawn_executor(move |co| async move {
+            let CreateIndexOperator {
+                table_name,
+                index_name,
+                columns,
+                if_not_exists,
+                ty,
+            } = self.op;
 
-                let (column_ids, mut column_exprs): (Vec<ColumnId>, Vec<ScalarExpression>) =
-                    columns
-                        .into_iter()
-                        .filter_map(|column| {
-                            column
-                                .id()
-                                .map(|id| (id, ScalarExpression::column_expr(column)))
-                        })
-                        .unzip();
-                let schema = self.input.output_schema().clone();
-                throw!(BindPosition::bind_exprs(
+            let (column_ids, mut column_exprs): (Vec<ColumnId>, Vec<ScalarExpression>) = columns
+                .into_iter()
+                .filter_map(|column| {
+                    column
+                        .id()
+                        .map(|id| (id, ScalarExpression::column_expr(column)))
+                })
+                .unzip();
+            let schema = self.input.output_schema().clone();
+            throw!(
+                co,
+                BindPosition::bind_exprs(
                     column_exprs.iter_mut(),
                     || schema.iter().map(Cow::Borrowed),
                     |a, b| a == b
-                ));
-                let index_id = match unsafe { &mut (*transaction) }.add_index_meta(
-                    cache.0,
-                    &table_name,
-                    index_name,
-                    column_ids,
-                    ty,
-                ) {
-                    Ok(index_id) => index_id,
-                    Err(DatabaseError::DuplicateIndex(index_name)) => {
-                        if if_not_exists {
-                            return;
-                        } else {
-                            throw!(Err(DatabaseError::DuplicateIndex(index_name)))
-                        }
-                    }
-                    err => throw!(err),
-                };
-                let mut coroutine = build_read(self.input, cache, transaction);
-
-                while let CoroutineState::Yielded(tuple) = Pin::new(&mut coroutine).resume(()) {
-                    let tuple: Tuple = throw!(tuple);
-
-                    let Some(value) = DataValue::values_to_tuple(throw!(Projection::projection(
-                        &tuple,
-                        &column_exprs,
-                        &schema
-                    ))) else {
-                        continue;
-                    };
-                    let tuple_id = if let Some(tuple_id) = tuple.pk.as_ref() {
-                        tuple_id
+                )
+            );
+            let index_id = match unsafe { &mut (*transaction) }.add_index_meta(
+                cache.0,
+                &table_name,
+                index_name,
+                column_ids,
+                ty,
+            ) {
+                Ok(index_id) => index_id,
+                Err(DatabaseError::DuplicateIndex(index_name)) => {
+                    if if_not_exists {
+                        return;
                     } else {
-                        continue;
-                    };
-                    let index = Index::new(index_id, &value, ty);
-                    throw!(unsafe { &mut (*transaction) }.add_index(
-                        table_name.as_str(),
-                        index,
-                        tuple_id
-                    ));
+                        throw!(co, Err(DatabaseError::DuplicateIndex(index_name)))
+                    }
                 }
-                yield Ok(TupleBuilder::build_result("1".to_string()));
-            },
-        )
+                err => throw!(co, err),
+            };
+            let mut coroutine = build_read(self.input, cache, transaction);
+
+            for tuple in coroutine.by_ref() {
+                let tuple: Tuple = throw!(co, tuple);
+
+                let Some(value) = DataValue::values_to_tuple(throw!(
+                    co,
+                    Projection::projection(&tuple, &column_exprs, &schema)
+                )) else {
+                    continue;
+                };
+                let tuple_id = if let Some(tuple_id) = tuple.pk.as_ref() {
+                    tuple_id
+                } else {
+                    continue;
+                };
+                let index = Index::new(index_id, &value, ty);
+                throw!(
+                    co,
+                    unsafe { &mut (*transaction) }.add_index(table_name.as_str(), index, tuple_id)
+                );
+            }
+            co.yield_(Ok(TupleBuilder::build_result("1".to_string())))
+                .await;
+        })
     }
 }

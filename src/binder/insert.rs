@@ -105,7 +105,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 is_overwrite,
                 is_mapping_by_name,
             }),
-            Childrens::Only(values_plan),
+            Childrens::Only(Box::new(values_plan)),
         ))
     }
 

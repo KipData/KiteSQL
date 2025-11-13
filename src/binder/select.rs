@@ -63,8 +63,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             SetExpr::Values(values) => self.bind_temp_values(&values.rows),
             expr => {
                 return Err(DatabaseError::UnsupportedStmt(format!(
-                    "query body: {:?}",
-                    expr
+                    "query body: {expr:?}"
                 )))
             }
         }?;
@@ -151,7 +150,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     is_overwrite: false,
                     is_mapping_by_name: true,
                 }),
-                Childrens::Only(plan),
+                Childrens::Only(Box::new(plan)),
             )
         }
 
@@ -249,14 +248,14 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         if !left_cast.is_empty() {
             left_plan = LogicalPlan::new(
                 Operator::Project(ProjectOperator { exprs: left_cast }),
-                Childrens::Only(left_plan),
+                Childrens::Only(Box::new(left_plan)),
             );
         }
 
         if !right_cast.is_empty() {
             right_plan = LogicalPlan::new(
                 Operator::Project(ProjectOperator { exprs: right_cast }),
-                Childrens::Only(right_plan),
+                Childrens::Only(Box::new(right_plan)),
             );
         }
 
@@ -324,8 +323,8 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         LogicalPlan::new(
                             union_op,
                             Childrens::Twins {
-                                left: left_plan,
-                                right: right_plan,
+                                left: Box::new(left_plan),
+                                right: Box::new(right_plan),
                             },
                         ),
                         distinct_exprs,
@@ -356,8 +355,8 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         LogicalPlan::new(
                             except_op,
                             Childrens::Twins {
-                                left: left_plan,
-                                right: right_plan,
+                                left: Box::new(left_plan),
+                                right: Box::new(right_plan),
                             },
                         ),
                         distinct_exprs,
@@ -365,8 +364,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 }
             }
             set_operator => Err(DatabaseError::UnsupportedStmt(format!(
-                "set operator: {:?}",
-                set_operator
+                "set operator: {set_operator:?}"
             ))),
         }
     }
@@ -450,7 +448,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     unreachable!()
                 }
             }
-            table => return Err(DatabaseError::UnsupportedStmt(format!("{:#?}", table))),
+            table => return Err(DatabaseError::UnsupportedStmt(format!("{table:#?}"))),
         };
 
         Ok(plan)
@@ -768,7 +766,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         };
                         let plan = LogicalPlan::new(
                             Operator::Project(projection),
-                            Childrens::Only(filter),
+                            Childrens::Only(Box::new(filter)),
                         );
                         children = LJoinOperator::build(
                             children,
@@ -842,7 +840,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
         Ok(LogicalPlan::new(
             Operator::Project(ProjectOperator { exprs: select_list }),
-            Childrens::Only(children),
+            Childrens::Only(Box::new(children)),
         ))
     }
 
@@ -854,7 +852,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 sort_fields,
                 limit: None,
             }),
-            Childrens::Only(children),
+            Childrens::Only(Box::new(children)),
         )
     }
 

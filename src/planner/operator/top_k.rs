@@ -26,7 +26,7 @@ impl TopKOperator {
                 limit,
                 offset,
             }),
-            Childrens::Only(children),
+            Childrens::Only(Box::new(children)),
         )
     }
 }
@@ -36,15 +36,15 @@ impl fmt::Display for TopKOperator {
         write!(f, "Top {}, ", self.limit)?;
 
         if let Some(offset) = self.offset {
-            write!(f, "Offset {}, ", offset)?;
+            write!(f, "Offset {offset}, ")?;
         }
 
         let sort_fields = self
             .sort_fields
             .iter()
-            .map(|sort_field| format!("{}", sort_field))
+            .map(|sort_field| format!("{sort_field}"))
             .join(", ");
-        write!(f, "Sort By {}", sort_fields)?;
+        write!(f, "Sort By {sort_fields}")?;
 
         Ok(())
     }

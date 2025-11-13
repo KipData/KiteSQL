@@ -1,5 +1,5 @@
 use crate::execution::dql::aggregate::create_accumulators;
-use crate::execution::{build_read, Executor, ReadExecutor};
+use crate::execution::{build_read, spawn_executor, Executor, ReadExecutor};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::LogicalPlan;
@@ -8,10 +8,6 @@ use crate::throw;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use itertools::Itertools;
-use std::ops::Coroutine;
-use std::ops::CoroutineState;
-use std::pin::Pin;
-
 pub struct SimpleAggExecutor {
     agg_calls: Vec<ScalarExpression>,
     input: LogicalPlan,
@@ -31,23 +27,23 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SimpleAggExecutor {
         cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
         transaction: *mut T,
     ) -> Executor<'a> {
-        Box::new(
-            #[coroutine]
-            move || {
-                let SimpleAggExecutor {
-                    agg_calls,
-                    mut input,
-                } = self;
+        spawn_executor(move |co| async move {
+            let SimpleAggExecutor {
+                agg_calls,
+                mut input,
+            } = self;
 
-                let mut accs = throw!(create_accumulators(&agg_calls));
-                let schema = input.output_schema().clone();
+            let mut accs = throw!(co, create_accumulators(&agg_calls));
+            let schema = input.output_schema().clone();
 
-                let mut coroutine = build_read(input, cache, transaction);
+            let mut executor = build_read(input, cache, transaction);
 
-                while let CoroutineState::Yielded(tuple) = Pin::new(&mut coroutine).resume(()) {
-                    let tuple = throw!(tuple);
+            for tuple in executor.by_ref() {
+                let tuple = throw!(co, tuple);
 
-                    let values: Vec<DataValue> = throw!(agg_calls
+                let values: Vec<DataValue> = throw!(
+                    co,
+                    agg_calls
                         .iter()
                         .map(|expr| match expr {
                             ScalarExpression::AggCall { args, .. } => {
@@ -55,17 +51,17 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SimpleAggExecutor {
                             }
                             _ => unreachable!(),
                         })
-                        .try_collect());
+                        .try_collect()
+                );
 
-                    for (acc, value) in accs.iter_mut().zip_eq(values.iter()) {
-                        throw!(acc.update_value(value));
-                    }
+                for (acc, value) in accs.iter_mut().zip_eq(values.iter()) {
+                    throw!(co, acc.update_value(value));
                 }
-                let values: Vec<DataValue> =
-                    throw!(accs.into_iter().map(|acc| acc.evaluate()).try_collect());
+            }
+            let values: Vec<DataValue> =
+                throw!(co, accs.into_iter().map(|acc| acc.evaluate()).try_collect());
 
-                yield Ok(Tuple::new(None, values));
-            },
-        )
+            co.yield_(Ok(Tuple::new(None, values))).await;
+        })
     }
 }

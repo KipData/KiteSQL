@@ -80,10 +80,10 @@ impl fmt::Display for TableScanOperator {
             self.table_name, projection_columns
         )?;
         if let Some(limit) = limit {
-            write!(f, ", Limit: {}", limit)?;
+            write!(f, ", Limit: {limit}")?;
         }
         if let Some(offset) = offset {
-            write!(f, ", Offset: {}", offset)?;
+            write!(f, ", Offset: {offset}")?;
         }
 
         Ok(())

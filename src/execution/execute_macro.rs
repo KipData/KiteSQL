@@ -1,10 +1,10 @@
 #[macro_export]
 macro_rules! throw {
-    ($code:expr) => {
+    ($co:expr, $code:expr) => {
         match $code {
             Ok(item) => item,
             Err(err) => {
-                yield Err(err);
+                $co.yield_(Err(err)).await;
                 return;
             }
         }

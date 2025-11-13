@@ -33,12 +33,12 @@ impl fmt::Display for SortOperator {
         let sort_fields = self
             .sort_fields
             .iter()
-            .map(|sort_field| format!("{}", sort_field))
+            .map(|sort_field| format!("{sort_field}"))
             .join(", ");
-        write!(f, "Sort By {}", sort_fields)?;
+        write!(f, "Sort By {sort_fields}")?;
 
         if let Some(limit) = self.limit {
-            write!(f, ", Limit {}", limit)?;
+            write!(f, ", Limit {limit}")?;
         }
 
         Ok(())

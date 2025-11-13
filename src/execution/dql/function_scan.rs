@@ -1,4 +1,4 @@
-use crate::execution::{Executor, ReadExecutor};
+use crate::execution::{spawn_executor, Executor, ReadExecutor};
 use crate::expression::function::table::TableFunction;
 use crate::planner::operator::function_scan::FunctionScanOperator;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
@@ -22,14 +22,11 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for FunctionScan {
         _: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
         _: *mut T,
     ) -> Executor<'a> {
-        Box::new(
-            #[coroutine]
-            move || {
-                let TableFunction { args, inner } = self.table_function;
-                for tuple in throw!(inner.eval(&args)) {
-                    yield tuple;
-                }
-            },
-        )
+        spawn_executor(move |co| async move {
+            let TableFunction { args, inner } = self.table_function;
+            for tuple in throw!(co, inner.eval(&args)) {
+                co.yield_(tuple).await;
+            }
+        })
     }
 }

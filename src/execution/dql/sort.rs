@@ -1,5 +1,5 @@
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, Executor, ReadExecutor};
+use crate::execution::{build_read, spawn_executor, Executor, ReadExecutor};
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::LogicalPlan;
 use crate::storage::table_codec::BumpBytes;
@@ -9,9 +9,6 @@ use crate::types::tuple::{Schema, Tuple};
 use bumpalo::Bump;
 use std::cmp::Ordering;
 use std::mem::MaybeUninit;
-use std::ops::Coroutine;
-use std::ops::CoroutineState;
-use std::pin::Pin;
 
 pub(crate) type BumpVec<'bump, T> = bumpalo::collections::Vec<'bump, T>;
 
@@ -288,45 +285,41 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Sort {
         cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
         transaction: *mut T,
     ) -> Executor<'a> {
-        Box::new(
-            #[coroutine]
-            move || {
-                let Sort {
-                    arena,
-                    sort_fields,
-                    limit,
-                    mut input,
-                } = self;
+        spawn_executor(move |co| async move {
+            let Sort {
+                arena,
+                sort_fields,
+                limit,
+                mut input,
+            } = self;
 
-                let arena: *const Bump = &arena;
-                let schema = input.output_schema().clone();
-                let mut tuples = NullableVec::new(unsafe { &*arena });
-                let mut offset = 0;
+            let arena: *const Bump = &arena;
+            let schema = input.output_schema().clone();
+            let mut tuples = NullableVec::new(unsafe { &*arena });
 
-                let mut coroutine = build_read(input, cache, transaction);
+            let mut coroutine = build_read(input, cache, transaction);
 
-                while let CoroutineState::Yielded(tuple) = Pin::new(&mut coroutine).resume(()) {
-                    tuples.put((offset, throw!(tuple)));
-                    offset += 1;
+            for (offset, tuple) in coroutine.by_ref().enumerate() {
+                tuples.put((offset, throw!(co, tuple)));
+            }
+
+            let sort_by = if tuples.len() > 256 {
+                SortBy::Radix
+            } else {
+                SortBy::Fast
+            };
+            let mut limit = limit.unwrap_or(tuples.len());
+
+            for tuple in throw!(
+                co,
+                sort_by.sorted_tuples(unsafe { &*arena }, &schema, &sort_fields, tuples)
+            ) {
+                if limit != 0 {
+                    co.yield_(Ok(tuple)).await;
+                    limit -= 1;
                 }
-
-                let sort_by = if tuples.len() > 256 {
-                    SortBy::Radix
-                } else {
-                    SortBy::Fast
-                };
-                let mut limit = limit.unwrap_or(tuples.len());
-
-                for tuple in
-                    throw!(sort_by.sorted_tuples(unsafe { &*arena }, &schema, &sort_fields, tuples))
-                {
-                    if limit != 0 {
-                        yield Ok(tuple);
-                        limit -= 1;
-                    }
-                }
-            },
-        )
+            }
+        })
     }
 }
 

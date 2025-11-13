@@ -52,7 +52,7 @@ impl NormalizationRule for LimitProjectTranspose {
 
 /// Add extra limits below JOIN:
 /// 1. For LEFT OUTER and RIGHT OUTER JOIN, we push limits to the left and right sides,
-///     respectively.
+///    respectively.
 ///
 /// TODO: 2. For INNER and CROSS JOIN, we push limits to both the left and right sides
 /// TODO: if join condition is empty.

@@ -362,7 +362,7 @@ impl TupleValueSerializable for CharSerializable {
         match unit {
             CharLengthUnits::Characters => {
                 let chars_len = *len as usize;
-                let v = format!("{:len$}", value, len = chars_len);
+                let v = format!("{value:chars_len$}");
                 let bytes = v.as_bytes();
 
                 writer.write_u32::<LittleEndian>(bytes.len() as u32)?;

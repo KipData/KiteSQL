@@ -32,13 +32,13 @@ impl HepGraph {
             match *childrens {
                 Childrens::None => (),
                 Childrens::Only(child) => {
-                    let child_index = graph_filling(graph, child);
+                    let child_index = graph_filling(graph, *child);
                     let _ = graph.add_edge(index, child_index, 0);
                 }
                 Childrens::Twins { left, right } => {
-                    let child_index = graph_filling(graph, left);
+                    let child_index = graph_filling(graph, *left);
                     let _ = graph.add_edge(index, child_index, 0);
-                    let child_index = graph_filling(graph, right);
+                    let child_index = graph_filling(graph, *right);
                     let _ = graph.add_edge(index, child_index, 1);
                 }
             }
@@ -200,10 +200,10 @@ impl HepGraph {
 
         let childrens = match (child_0, child_1) {
             (Some(child_0), Some(child_1)) => Childrens::Twins {
-                left: child_0,
-                right: child_1,
+                left: Box::new(child_0),
+                right: Box::new(child_1),
             },
-            (Some(child), None) | (None, Some(child)) => Childrens::Only(child),
+            (Some(child), None) | (None, Some(child)) => Childrens::Only(Box::new(child)),
             (None, None) => Childrens::None,
         };
 

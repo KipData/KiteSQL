@@ -25,7 +25,7 @@ impl AggregateOperator {
                 agg_calls,
                 is_distinct,
             }),
-            Childrens::Only(children),
+            Childrens::Only(Box::new(children)),
         )
     }
 }
@@ -35,17 +35,17 @@ impl fmt::Display for AggregateOperator {
         let calls = self
             .agg_calls
             .iter()
-            .map(|call| format!("{}", call))
+            .map(|call| format!("{call}"))
             .join(", ");
-        write!(f, "Aggregate [{}]", calls)?;
+        write!(f, "Aggregate [{calls}]")?;
 
         if !self.groupby_exprs.is_empty() {
             let groupbys = self
                 .groupby_exprs
                 .iter()
-                .map(|groupby| format!("{}", groupby))
+                .map(|groupby| format!("{groupby}"))
                 .join(", ");
-            write!(f, " -> Group By [{}]", groupbys)?;
+            write!(f, " -> Group By [{groupbys}]")?;
         }
 
         Ok(())

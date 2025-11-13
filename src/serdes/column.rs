@@ -55,8 +55,7 @@ impl ReferenceSerialization for ColumnRef {
             let column = table
                 .get_column_by_id(column_id)
                 .ok_or(DatabaseError::InvalidColumn(format!(
-                    "column id: {} not found",
-                    column_id
+                    "column id: {column_id} not found"
                 )))?;
             Ok(nullable_for_join
                 .and_then(|nullable| column.nullable_for_join(nullable))

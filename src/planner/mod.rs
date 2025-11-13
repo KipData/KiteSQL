@@ -20,10 +20,10 @@ pub(crate) enum SchemaOutput {
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub enum Childrens {
     None,
-    Only(LogicalPlan),
+    Only(Box<LogicalPlan>),
     Twins {
-        left: LogicalPlan,
-        right: LogicalPlan,
+        left: Box<LogicalPlan>,
+        right: Box<LogicalPlan>,
     },
 }
 
@@ -37,7 +37,7 @@ impl Childrens {
 
     pub fn pop_only(self) -> LogicalPlan {
         match self {
-            Childrens::Only(plan) => plan,
+            Childrens::Only(plan) => *plan,
             _ => {
                 unreachable!()
             }
@@ -46,7 +46,7 @@ impl Childrens {
 
     pub fn pop_twins(self) -> (LogicalPlan, LogicalPlan) {
         match self {
-            Childrens::Twins { left, right } => (left, right),
+            Childrens::Twins { left, right } => (*left, *right),
             _ => unreachable!(),
         }
     }
@@ -67,12 +67,12 @@ impl<'a> Iterator for ChildrensIter<'a> {
                     return None;
                 }
                 self.pos += 1;
-                Some(plan)
+                Some(plan.as_ref())
             }
             Childrens::Twins { left, right } => {
                 let option = match self.pos {
-                    0 => Some(left),
-                    1 => Some(right),
+                    0 => Some(left.as_ref()),
+                    1 => Some(right.as_ref()),
                     _ => None,
                 };
                 self.pos += 1;
@@ -258,7 +258,7 @@ impl LogicalPlan {
         let mut result = format!("{:indent$}{}", "", self.operator, indent = indentation);
 
         if let Some(physical_option) = &self.physical_option {
-            result.push_str(&format!(" [{}]", physical_option));
+            result.push_str(&format!(" [{physical_option}]"));
         }
 
         for child in self.childrens.iter() {

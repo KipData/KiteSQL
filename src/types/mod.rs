@@ -497,16 +497,16 @@ impl std::fmt::Display for LogicalType {
             LogicalType::UBigint => write!(f, "UBigint")?,
             LogicalType::Float => write!(f, "Float")?,
             LogicalType::Double => write!(f, "Double")?,
-            LogicalType::Char(len, units) => write!(f, "Char({}, {})", len, units)?,
-            LogicalType::Varchar(len, units) => write!(f, "Varchar({:?}, {})", len, units)?,
+            LogicalType::Char(len, units) => write!(f, "Char({len}, {units})")?,
+            LogicalType::Varchar(len, units) => write!(f, "Varchar({len:?}, {units})")?,
             LogicalType::Date => write!(f, "Date")?,
             LogicalType::DateTime => write!(f, "DateTime")?,
             LogicalType::TimeStamp(precision, zone) => {
-                write!(f, "TimeStamp({:?}, {:?})", precision, zone)?
+                write!(f, "TimeStamp({precision:?}, {zone:?})")?
             }
-            LogicalType::Time(precision) => write!(f, "Time({:?})", precision)?,
+            LogicalType::Time(precision) => write!(f, "Time({precision:?})")?,
             LogicalType::Decimal(precision, scale) => {
-                write!(f, "Decimal({:?}, {:?})", precision, scale)?
+                write!(f, "Decimal({precision:?}, {scale:?})")?
             }
             LogicalType::Tuple(types) => {
                 write!(f, "(")?;
@@ -516,7 +516,7 @@ impl std::fmt::Display for LogicalType {
                         write!(f, ", ")?;
                     }
                     first = false;
-                    write!(f, "{}", ty)?;
+                    write!(f, "{ty}")?;
                 }
                 write!(f, ")")?
             }

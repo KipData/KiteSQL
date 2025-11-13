@@ -46,8 +46,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 ScalarExpression::ColumnRef { column, .. } => columns.push(column),
                 expr => {
                     return Err(DatabaseError::UnsupportedStmt(format!(
-                        "'CREATE INDEX' by {}",
-                        expr
+                        "'CREATE INDEX' by {expr}"
                     )))
                 }
             }
@@ -61,7 +60,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 if_not_exists,
                 ty,
             }),
-            Childrens::Only(plan),
+            Childrens::Only(Box::new(plan)),
         ))
     }
 }

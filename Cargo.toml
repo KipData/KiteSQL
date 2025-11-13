@@ -2,7 +2,7 @@
 
 [package]
 name          = "kite_sql"
-version       = "0.1.2"
+version       = "0.1.3"
 edition       = "2021"
 authors       = ["Kould <kould2333@gmail.com>", "Xwg <loloxwg@gmail.com>"]
 description   = "SQL as a Function for Rust"
@@ -60,6 +60,8 @@ sqlparser             = { version = "0.34", features = ["serde"] }
 thiserror             = { version = "1" }
 typetag               = { version = "0.2" }
 ulid                  = { version = "1", features = ["serde"] }
+genawaiter            = { version = "0.99" }
+rand                  = { version = "0.8" }
 
 # Feature: net
 async-trait           = { version = "0.1", optional = true }

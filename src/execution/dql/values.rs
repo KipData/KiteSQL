@@ -1,4 +1,4 @@
-use crate::execution::{Executor, ReadExecutor};
+use crate::execution::{spawn_executor, Executor, ReadExecutor};
 use crate::planner::operator::values::ValuesOperator;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::throw;
@@ -22,23 +22,20 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Values {
         _: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
         _: *mut T,
     ) -> Executor<'a> {
-        Box::new(
-            #[coroutine]
-            move || {
-                let ValuesOperator { rows, schema_ref } = self.op;
+        spawn_executor(move |co| async move {
+            let ValuesOperator { rows, schema_ref } = self.op;
 
-                for mut values in rows {
-                    for (i, value) in values.iter_mut().enumerate() {
-                        let ty = schema_ref[i].datatype().clone();
+            for mut values in rows {
+                for (i, value) in values.iter_mut().enumerate() {
+                    let ty = schema_ref[i].datatype().clone();
 
-                        if value.logical_type() != ty {
-                            *value = throw!(mem::replace(value, DataValue::Null).cast(&ty));
-                        }
+                    if value.logical_type() != ty {
+                        *value = throw!(co, mem::replace(value, DataValue::Null).cast(&ty));
                     }
-
-                    yield Ok(Tuple::new(None, values));
                 }
-            },
-        )
+
+                co.yield_(Ok(Tuple::new(None, values))).await;
+            }
+        })
     }
 }

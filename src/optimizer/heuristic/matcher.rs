@@ -94,23 +94,23 @@ mod tests {
         let all_dummy_plan = LogicalPlan {
             operator: Operator::Dummy,
             childrens: Box::new(Childrens::Twins {
-                left: LogicalPlan {
+                left: Box::new(LogicalPlan {
                     operator: Operator::Dummy,
-                    childrens: Box::new(Childrens::Only(LogicalPlan {
+                    childrens: Box::new(Childrens::Only(Box::new(LogicalPlan {
                         operator: Operator::Dummy,
                         childrens: Box::new(Childrens::None),
                         physical_option: None,
                         _output_schema_ref: None,
-                    })),
+                    }))),
                     physical_option: None,
                     _output_schema_ref: None,
-                },
-                right: LogicalPlan {
+                }),
+                right: Box::new(LogicalPlan {
                     operator: Operator::Dummy,
                     childrens: Box::new(Childrens::None),
                     physical_option: None,
                     _output_schema_ref: None,
-                },
+                }),
             }),
             physical_option: None,
             _output_schema_ref: None,

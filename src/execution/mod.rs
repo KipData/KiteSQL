@@ -45,10 +45,18 @@ use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::types::index::IndexInfo;
 use crate::types::tuple::Tuple;
-use std::ops::Coroutine;
+use genawaiter::sync::{Co, Gen};
+use std::future::Future;
 
-pub type Executor<'a> =
-    Box<dyn Coroutine<Yield = Result<Tuple, DatabaseError>, Return = ()> + 'a + Unpin>;
+pub type Executor<'a> = Box<dyn Iterator<Item = Result<Tuple, DatabaseError>> + 'a>;
+
+pub(crate) fn spawn_executor<'a, F, Fut>(producer: F) -> Executor<'a>
+where
+    F: FnOnce(Co<Result<Tuple, DatabaseError>>) -> Fut + 'a,
+    Fut: Future<Output = ()> + 'a,
+{
+    Box::new(Gen::new(producer).into_iter().fuse())
+}
 
 pub trait ReadExecutor<'a, T: Transaction + 'a> {
     fn execute(
@@ -235,13 +243,6 @@ pub fn build_write<'a, T: Transaction + 'a>(
 }
 
 #[cfg(test)]
-pub fn try_collect(mut executor: Executor) -> Result<Vec<Tuple>, DatabaseError> {
-    let mut output = Vec::new();
-
-    while let std::ops::CoroutineState::Yielded(tuple) =
-        std::pin::Pin::new(&mut executor).resume(())
-    {
-        output.push(tuple?);
-    }
-    Ok(output)
+pub fn try_collect(executor: Executor) -> Result<Vec<Tuple>, DatabaseError> {
+    executor.collect()
 }

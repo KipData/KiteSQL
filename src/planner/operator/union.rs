@@ -26,8 +26,8 @@ impl UnionOperator {
                 _right_schema_ref: right_schema_ref,
             }),
             Childrens::Twins {
-                left: left_plan,
-                right: right_plan,
+                left: Box::new(left_plan),
+                right: Box::new(right_plan),
             },
         )
     }
@@ -41,7 +41,7 @@ impl fmt::Display for UnionOperator {
             .map(|column| column.name().to_string())
             .join(", ");
 
-        write!(f, "Union: [{}]", schema)?;
+        write!(f, "Union: [{schema}]")?;
 
         Ok(())
     }

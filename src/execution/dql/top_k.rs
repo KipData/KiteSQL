@@ -1,6 +1,6 @@
 use crate::errors::DatabaseError;
 use crate::execution::dql::sort::BumpVec;
-use crate::execution::{build_read, Executor, ReadExecutor};
+use crate::execution::{build_read, spawn_executor, Executor, ReadExecutor};
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::top_k::TopKOperator;
 use crate::planner::LogicalPlan;
@@ -11,9 +11,6 @@ use crate::types::tuple::{Schema, Tuple};
 use bumpalo::Bump;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
-use std::ops::Coroutine;
-use std::ops::CoroutineState;
-use std::pin::Pin;
 
 #[derive(Eq, PartialEq, Debug)]
 struct CmpItem<'a> {
@@ -114,46 +111,46 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for TopK {
         cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
         transaction: *mut T,
     ) -> Executor<'a> {
-        Box::new(
-            #[coroutine]
-            move || {
-                let TopK {
-                    arena,
-                    sort_fields,
-                    limit,
-                    offset,
-                    mut input,
-                } = self;
+        spawn_executor(move |co| async move {
+            let TopK {
+                arena,
+                sort_fields,
+                limit,
+                offset,
+                mut input,
+            } = self;
 
-                let arena: *const Bump = &arena;
+            let arena: *const Bump = &arena;
 
-                let schema = input.output_schema().clone();
-                let keep_count = offset.unwrap_or(0) + limit;
-                let mut set = BTreeSet::new();
-                let mut coroutine = build_read(input, cache, transaction);
+            let schema = input.output_schema().clone();
+            let keep_count = offset.unwrap_or(0) + limit;
+            let mut set = BTreeSet::new();
+            let coroutine = build_read(input, cache, transaction);
 
-                while let CoroutineState::Yielded(tuple) = Pin::new(&mut coroutine).resume(()) {
-                    throw!(top_sort(
+            for tuple in coroutine {
+                throw!(
+                    co,
+                    top_sort(
                         unsafe { &*arena },
                         &schema,
                         &sort_fields,
                         &mut set,
-                        throw!(tuple),
+                        throw!(co, tuple),
                         keep_count,
-                    ));
-                }
+                    )
+                );
+            }
 
-                let mut i: usize = 0;
+            let mut i: usize = 0;
 
-                while let Some(item) = set.pop_first() {
-                    i += 1;
-                    if i - 1 < offset.unwrap_or(0) {
-                        continue;
-                    }
-                    yield Ok(item.tuple);
+            while let Some(item) = set.pop_first() {
+                i += 1;
+                if i - 1 < offset.unwrap_or(0) {
+                    continue;
                 }
-            },
-        )
+                co.yield_(Ok(item.tuple)).await;
+            }
+        })
     }
 }
 

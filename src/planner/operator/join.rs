@@ -49,7 +49,10 @@ impl JoinOperator {
     ) -> LogicalPlan {
         LogicalPlan::new(
             Operator::Join(JoinOperator { on, join_type }),
-            Childrens::Twins { left, right },
+            Childrens::Twins {
+                left: Box::new(left),
+                right: Box::new(right),
+            },
         )
     }
 }
@@ -85,13 +88,13 @@ impl fmt::Display for JoinCondition {
                 if !on.is_empty() {
                     let on = on
                         .iter()
-                        .map(|(v1, v2)| format!("{} = {}", v1, v2))
+                        .map(|(v1, v2)| format!("{v1} = {v2}"))
                         .join(" AND ");
 
-                    write!(f, " On {}", on)?;
+                    write!(f, " On {on}")?;
                 }
                 if let Some(filter) = filter {
-                    write!(f, " Where {}", filter)?;
+                    write!(f, " Where {filter}")?;
                 }
             }
             JoinCondition::None => {

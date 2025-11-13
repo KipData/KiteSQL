@@ -3,12 +3,12 @@ use crate::expression::range_detacher::Range;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use crate::storage::{TableCache, Transaction};
 use crate::types::value::DataValue;
+use rand::random;
 use siphasher::sip::SipHasher13;
 use std::borrow::Borrow;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::marker::PhantomData;
-use std::random::random;
 use std::{cmp, mem};
 
 pub(crate) type FastHasher = SipHasher13;

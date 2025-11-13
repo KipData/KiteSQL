@@ -454,7 +454,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             | BinaryOperator::Or
             | BinaryOperator::Xor => LogicalType::Boolean,
             BinaryOperator::StringConcat => LogicalType::Varchar(None, CharLengthUnits::Characters),
-            op => return Err(DatabaseError::UnsupportedStmt(format!("{}", op))),
+            op => return Err(DatabaseError::UnsupportedStmt(format!("{op}"))),
         };
 
         Ok(ScalarExpression::Binary {
@@ -504,8 +504,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 FunctionArgExpr::Wildcard => args.push(Self::wildcard_expr()),
                 expr => {
                     return Err(DatabaseError::UnsupportedStmt(format!(
-                        "function arg: {:#?}",
-                        expr
+                        "function arg: {expr:#?}"
                     )))
                 }
             }

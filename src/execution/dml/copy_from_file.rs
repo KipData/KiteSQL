@@ -1,7 +1,7 @@
 use crate::binder::copy::FileFormat;
 use crate::catalog::PrimaryKeyIndices;
 use crate::errors::DatabaseError;
-use crate::execution::{Executor, WriteExecutor};
+use crate::execution::{spawn_executor, Executor, WriteExecutor};
 use crate::planner::operator::copy_from_file::CopyFromFileOperator;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::throw;
@@ -31,45 +31,46 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CopyFromFile {
         (table_cache, _, _): (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
         transaction: *mut T,
     ) -> Executor<'a> {
-        Box::new(
-            #[coroutine]
-            move || {
-                let serializers = self
-                    .op
-                    .schema_ref
-                    .iter()
-                    .map(|column| column.datatype().serializable())
-                    .collect_vec();
-                let (tx, rx) = mpsc::channel();
-                let (tx1, rx1) = mpsc::channel();
-                // # Cancellation
-                // When this stream is dropped, the `rx` is dropped, the spawned task will fail to send to
-                // `tx`, then the task will finish.
-                let table = throw!(throw!(
+        spawn_executor(move |co| async move {
+            let serializers = self
+                .op
+                .schema_ref
+                .iter()
+                .map(|column| column.datatype().serializable())
+                .collect_vec();
+            let (tx, rx) = mpsc::channel();
+            let (tx1, rx1) = mpsc::channel();
+            let table = throw!(
+                co,
+                throw!(
+                    co,
                     unsafe { &mut (*transaction) }.table(table_cache, self.op.table.clone())
                 )
-                .ok_or(DatabaseError::TableNotFound));
-                let primary_keys_indices = table.primary_keys_indices().clone();
-                let handle = thread::spawn(|| self.read_file_blocking(tx, primary_keys_indices));
-                let mut size = 0_usize;
-                while let Ok(chunk) = rx.recv() {
-                    throw!(unsafe { &mut (*transaction) }.append_tuple(
+                .ok_or(DatabaseError::TableNotFound)
+            );
+            let primary_keys_indices = table.primary_keys_indices().clone();
+            let handle = thread::spawn(|| self.read_file_blocking(tx, primary_keys_indices));
+            let mut size = 0_usize;
+            while let Ok(chunk) = rx.recv() {
+                throw!(
+                    co,
+                    unsafe { &mut (*transaction) }.append_tuple(
                         table.name(),
                         chunk,
                         &serializers,
                         false
-                    ));
-                    size += 1;
-                }
-                throw!(handle.join().unwrap());
+                    )
+                );
+                size += 1;
+            }
+            throw!(co, handle.join().unwrap());
 
-                let handle = thread::spawn(move || return_result(size, tx1));
-                while let Ok(chunk) = rx1.recv() {
-                    yield Ok(chunk);
-                }
-                throw!(handle.join().unwrap())
-            },
-        )
+            let handle = thread::spawn(move || return_result(size, tx1));
+            while let Ok(chunk) = rx1.recv() {
+                co.yield_(Ok(chunk)).await;
+            }
+            throw!(co, handle.join().unwrap())
+        })
     }
 }
 
@@ -137,8 +138,6 @@ mod tests {
     use crate::types::LogicalType;
     use sqlparser::ast::CharLengthUnits;
     use std::io::Write;
-    use std::ops::{Coroutine, CoroutineState};
-    use std::pin::Pin;
     use std::sync::Arc;
     use tempfile::TempDir;
     use ulid::Ulid;
@@ -222,7 +221,7 @@ mod tests {
         let storage = db.storage;
         let mut transaction = storage.transaction()?;
 
-        let mut coroutine = executor.execute_mut(
+        let mut executor_iter = executor.execute_mut(
             (
                 db.state.table_cache(),
                 db.state.view_cache(),
@@ -230,11 +229,10 @@ mod tests {
             ),
             &mut transaction,
         );
-        let tuple = match Pin::new(&mut coroutine).resume(()) {
-            CoroutineState::Yielded(tuple) => tuple,
-            CoroutineState::Complete(()) => unreachable!(),
-        }
-        .unwrap();
+        let tuple = executor_iter
+            .next()
+            .expect("executor should yield once")
+            .unwrap();
         assert_eq!(tuple, TupleBuilder::build_result(2.to_string()));
 
         Ok(())

@@ -90,8 +90,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                     CopyTarget::File { filename } => filename.into(),
                     t => {
                         return Err(DatabaseError::UnsupportedStmt(format!(
-                            "copy target: {:?}",
-                            t
+                            "copy target: {t:?}"
                         )))
                     }
                 },
@@ -105,7 +104,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         target: ext_source,
                         schema_ref,
                     }),
-                    Childrens::Only(TableScanOperator::build(table_name, table, false)),
+                    Childrens::Only(Box::new(TableScanOperator::build(table_name, table, false))),
                 ))
             } else {
                 // COPY <dest_table> FROM <source_file>
@@ -140,7 +139,7 @@ impl FileFormat {
                 CopyOption::Header(b) => header = *b,
                 CopyOption::Quote(c) => quote = *c,
                 CopyOption::Escape(c) => escape = Some(*c),
-                o => panic!("unsupported copy option: {:?}", o),
+                o => panic!("unsupported copy option: {o:?}"),
             }
         }
         FileFormat::Csv {

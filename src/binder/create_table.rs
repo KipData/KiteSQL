@@ -76,8 +76,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 }
                 constraint => {
                     return Err(DatabaseError::UnsupportedStmt(format!(
-                        "`CreateTable` does not currently support this constraint: {:?}",
-                        constraint
+                        "`CreateTable` does not currently support this constraint: {constraint:?}"
                     )))?
                 }
             }
@@ -145,8 +144,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 }
                 option => {
                     return Err(DatabaseError::UnsupportedStmt(format!(
-                        "`Column` does not currently support this option: {:?}",
-                        option
+                        "`Column` does not currently support this option: {option:?}"
                     )))
                 }
             }
