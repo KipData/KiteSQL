@@ -1,4 +1,4 @@
-use crate::execution::{Executor, ReadExecutor};
+use crate::execution::{spawn_executor, Executor, ReadExecutor};
 use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::types::tuple::Tuple;
@@ -21,17 +21,14 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Explain {
         _: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
         _: *mut T,
     ) -> Executor<'a> {
-        Box::new(
-            #[coroutine]
-            move || {
-                let values = vec![DataValue::Utf8 {
-                    value: self.plan.explain(0),
-                    ty: Utf8Type::Variable(None),
-                    unit: CharLengthUnits::Characters,
-                }];
+        spawn_executor(move |co| async move {
+            let values = vec![DataValue::Utf8 {
+                value: self.plan.explain(0),
+                ty: Utf8Type::Variable(None),
+                unit: CharLengthUnits::Characters,
+            }];
 
-                yield Ok(Tuple::new(None, values));
-            },
-        )
+            co.yield_(Ok(Tuple::new(None, values))).await;
+        })
     }
 }

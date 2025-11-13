@@ -92,7 +92,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 
                 let field_name = field_opts
                     .ident
-                    .unwrap_or_else(|| Ident::new(&format!("field_{}", i), Span::call_site()));
+                    .unwrap_or_else(|| Ident::new(&format!("field_{i}"), Span::call_site()));
                 let ty = process_type(&field_opts.ty);
 
                 encode_fields.push(quote! {
@@ -155,7 +155,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 
                     let field_name = field_opts
                         .ident
-                        .unwrap_or_else(|| Ident::new(&format!("field_{}", i), Span::call_site()));
+                        .unwrap_or_else(|| Ident::new(&format!("field_{i}"), Span::call_site()));
                     let ty = process_type(&field_opts.ty);
 
                     encode_fields.push(quote! {

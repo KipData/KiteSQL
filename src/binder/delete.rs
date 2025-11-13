@@ -53,7 +53,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                     table_name,
                     primary_keys,
                 }),
-                Childrens::Only(plan),
+                Childrens::Only(Box::new(plan)),
             ))
         } else {
             unreachable!("only table")

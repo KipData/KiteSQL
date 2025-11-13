@@ -44,7 +44,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         if_not_exists: *if_not_exists,
                         column,
                     }),
-                    Childrens::Only(plan),
+                    Childrens::Only(Box::new(plan)),
                 )
             }
             AlterTableOperation::DropColumn {
@@ -61,13 +61,12 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         if_exists: *if_exists,
                         column_name,
                     }),
-                    Childrens::Only(plan),
+                    Childrens::Only(Box::new(plan)),
                 )
             }
             op => {
                 return Err(DatabaseError::UnsupportedStmt(format!(
-                    "AlertOperation: {:?}",
-                    op
+                    "AlertOperation: {op:?}"
                 )))
             }
         };

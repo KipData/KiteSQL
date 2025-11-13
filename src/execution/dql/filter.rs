@@ -1,13 +1,9 @@
-use crate::execution::{build_read, Executor, ReadExecutor};
+use crate::execution::{build_read, spawn_executor, Executor, ReadExecutor};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::filter::FilterOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::throw;
-use std::ops::Coroutine;
-use std::ops::CoroutineState;
-use std::pin::Pin;
-
 pub struct Filter {
     predicate: ScalarExpression,
     input: LogicalPlan,
@@ -25,26 +21,26 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Filter {
         cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
         transaction: *mut T,
     ) -> Executor<'a> {
-        Box::new(
-            #[coroutine]
-            move || {
-                let Filter {
-                    predicate,
-                    mut input,
-                } = self;
+        spawn_executor(move |co| async move {
+            let Filter {
+                predicate,
+                mut input,
+            } = self;
 
-                let schema = input.output_schema().clone();
+            let schema = input.output_schema().clone();
 
-                let mut coroutine = build_read(input, cache, transaction);
+            let executor = build_read(input, cache, transaction);
 
-                while let CoroutineState::Yielded(tuple) = Pin::new(&mut coroutine).resume(()) {
-                    let tuple = throw!(tuple);
+            for tuple in executor {
+                let tuple = throw!(co, tuple);
 
-                    if throw!(throw!(predicate.eval(Some((&tuple, &schema)))).is_true()) {
-                        yield Ok(tuple);
-                    }
+                if throw!(
+                    co,
+                    throw!(co, predicate.eval(Some((&tuple, &schema)))).is_true()
+                ) {
+                    co.yield_(Ok(tuple)).await;
                 }
-            },
-        )
+            }
+        })
     }
 }

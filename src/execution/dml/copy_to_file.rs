@@ -1,14 +1,11 @@
 use crate::binder::copy::FileFormat;
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, Executor, ReadExecutor};
+use crate::execution::{build_read, spawn_executor, Executor, ReadExecutor};
 use crate::planner::operator::copy_to_file::CopyToFileOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::throw;
 use crate::types::tuple_builder::TupleBuilder;
-use std::ops::Coroutine;
-use std::ops::CoroutineState;
-use std::pin::Pin;
 
 pub struct CopyToFile {
     op: CopyToFileOperator,
@@ -27,18 +24,19 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for CopyToFile {
         cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
         transaction: *mut T,
     ) -> Executor<'a> {
-        Box::new(
-            #[coroutine]
-            move || {
-                let mut writer = throw!(self.create_writer());
-                let CopyToFile { input, .. } = self;
+        spawn_executor(move |co| async move {
+            let this = self;
+            let mut writer = throw!(co, this.create_writer());
+            let CopyToFile { input, op } = this;
 
-                let mut coroutine = build_read(input, cache, transaction);
+            let coroutine = build_read(input, cache, transaction);
 
-                while let CoroutineState::Yielded(tuple) = Pin::new(&mut coroutine).resume(()) {
-                    let tuple = throw!(tuple);
+            for tuple in coroutine {
+                let tuple = throw!(co, tuple);
 
-                    throw!(writer
+                throw!(
+                    co,
+                    writer
                         .write_record(
                             tuple
                                 .values
@@ -46,14 +44,15 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for CopyToFile {
                                 .map(|v| v.to_string())
                                 .collect::<Vec<_>>()
                         )
-                        .map_err(DatabaseError::from));
-                }
+                        .map_err(DatabaseError::from)
+                );
+            }
 
-                throw!(writer.flush().map_err(DatabaseError::from));
+            throw!(co, writer.flush().map_err(DatabaseError::from));
 
-                yield Ok(TupleBuilder::build_result(format!("{}", self.op)));
-            },
-        )
+            co.yield_(Ok(TupleBuilder::build_result(format!("{op}"))))
+                .await;
+        })
     }
 }
 
@@ -97,8 +96,6 @@ mod tests {
     use crate::storage::Storage;
     use crate::types::LogicalType;
     use sqlparser::ast::CharLengthUnits;
-    use std::ops::{Coroutine, CoroutineState};
-    use std::pin::Pin;
     use std::sync::Arc;
     use tempfile::TempDir;
     use ulid::Ulid;
@@ -186,7 +183,7 @@ mod tests {
             op: op.clone(),
             input: TableScanOperator::build(Arc::new("t1".to_string()), table, true),
         };
-        let mut coroutine = executor.execute(
+        let mut executor = executor.execute(
             (
                 db.state.table_cache(),
                 db.state.view_cache(),
@@ -195,10 +192,7 @@ mod tests {
             &mut transaction,
         );
 
-        let tuple = match Pin::new(&mut coroutine).resume(()) {
-            CoroutineState::Yielded(tuple) => tuple,
-            CoroutineState::Complete(()) => unreachable!(),
-        }?;
+        let tuple = executor.next().expect("executor should yield once")?;
 
         let mut rdr = csv::Reader::from_path(file_path)?;
         let headers = rdr.headers()?.clone();

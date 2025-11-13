@@ -85,15 +85,7 @@
 //!     Ok(())
 //! }
 //! ```
-#![feature(error_generic_member_access)]
 #![allow(unused_doc_comments)]
-#![feature(result_flattening)]
-#![feature(coroutines)]
-#![feature(coroutine_trait)]
-#![feature(iterator_try_collect)]
-#![feature(slice_pattern)]
-#![feature(stmt_expr_attributes)]
-#![feature(random)]
 extern crate core;
 
 pub mod binder;

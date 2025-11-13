@@ -11,9 +11,9 @@ pub struct ProjectOperator {
 
 impl fmt::Display for ProjectOperator {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let exprs = self.exprs.iter().map(|expr| format!("{}", expr)).join(", ");
+        let exprs = self.exprs.iter().map(|expr| format!("{expr}")).join(", ");
 
-        write!(f, "Projection [{}]", exprs)?;
+        write!(f, "Projection [{exprs}]")?;
 
         Ok(())
     }

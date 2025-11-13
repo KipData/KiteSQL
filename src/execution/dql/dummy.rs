@@ -1,4 +1,4 @@
-use crate::execution::{Executor, ReadExecutor};
+use crate::execution::{spawn_executor, Executor, ReadExecutor};
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::types::tuple::Tuple;
 
@@ -10,11 +10,8 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Dummy {
         _: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
         _: *mut T,
     ) -> Executor<'a> {
-        Box::new(
-            #[coroutine]
-            move || {
-                yield Ok(Tuple::new(None, Vec::new()));
-            },
-        )
+        spawn_executor(move |co| async move {
+            co.yield_(Ok(Tuple::new(None, Vec::new()))).await;
+        })
     }
 }

@@ -461,7 +461,7 @@ impl ScalarExpression {
 
     pub fn output_name(&self) -> String {
         match self {
-            ScalarExpression::Constant(value) => format!("{}", value),
+            ScalarExpression::Constant(value) => format!("{value}"),
             ScalarExpression::ColumnRef { column, .. } => column.full_name(),
             ScalarExpression::Alias { alias, expr } => match alias {
                 AliasType::Name(alias) => alias.to_string(),
@@ -572,14 +572,14 @@ impl ScalarExpression {
                         .unwrap_or(" ".to_string())
                 };
                 let trim_where_str = match trim_where {
-                    Some(TrimWhereField::Both) => format!("both '{}' from", trim_what_str),
-                    Some(TrimWhereField::Leading) => format!("leading '{}' from", trim_what_str),
-                    Some(TrimWhereField::Trailing) => format!("trailing '{}' from", trim_what_str),
+                    Some(TrimWhereField::Both) => format!("both '{trim_what_str}' from"),
+                    Some(TrimWhereField::Leading) => format!("leading '{trim_what_str}' from"),
+                    Some(TrimWhereField::Trailing) => format!("trailing '{trim_what_str}' from"),
                     None => {
                         if trim_what_str.is_empty() {
                             String::new()
                         } else {
-                            format!("'{}' from", trim_what_str)
+                            format!("'{trim_what_str}' from")
                         }
                     }
                 };
@@ -588,7 +588,7 @@ impl ScalarExpression {
             ScalarExpression::Empty => unreachable!(),
             ScalarExpression::Tuple(args) => {
                 let args_str = args.iter().map(|expr| expr.output_name()).join(", ");
-                format!("({})", args_str)
+                format!("({args_str})")
             }
             ScalarExpression::ScalaFunction(ScalarFunction { args, inner }) => {
                 let args_str = args.iter().map(|expr| expr.output_name()).join(", ");
@@ -604,25 +604,25 @@ impl ScalarExpression {
                 right_expr,
                 ..
             } => {
-                format!("if {} ({}, {})", condition, left_expr, right_expr)
+                format!("if {condition} ({left_expr}, {right_expr})")
             }
             ScalarExpression::IfNull {
                 left_expr,
                 right_expr,
                 ..
             } => {
-                format!("ifnull({}, {})", left_expr, right_expr)
+                format!("ifnull({left_expr}, {right_expr})")
             }
             ScalarExpression::NullIf {
                 left_expr,
                 right_expr,
                 ..
             } => {
-                format!("ifnull({}, {})", left_expr, right_expr)
+                format!("ifnull({left_expr}, {right_expr})")
             }
             ScalarExpression::Coalesce { exprs, .. } => {
                 let exprs_str = exprs.iter().map(|expr| expr.output_name()).join(", ");
-                format!("coalesce({})", exprs_str)
+                format!("coalesce({exprs_str})")
             }
             ScalarExpression::CaseWhen {
                 operand_expr,
@@ -637,7 +637,7 @@ impl ScalarExpression {
                 };
                 let expr_pairs_str = expr_pairs
                     .iter()
-                    .map(|(when_expr, then_expr)| format!("when {} then {}", when_expr, then_expr))
+                    .map(|(when_expr, then_expr)| format!("when {when_expr} then {then_expr}"))
                     .join(" ");
 
                 format!(
@@ -682,7 +682,7 @@ impl TryFrom<SqlUnaryOperator> for UnaryOperator {
             SqlUnaryOperator::Plus => Ok(UnaryOperator::Plus),
             SqlUnaryOperator::Minus => Ok(UnaryOperator::Minus),
             SqlUnaryOperator::Not => Ok(UnaryOperator::Not),
-            op => Err(DatabaseError::UnsupportedStmt(format!("{}", op))),
+            op => Err(DatabaseError::UnsupportedStmt(format!("{op}"))),
         }
     }
 }
@@ -721,7 +721,7 @@ impl fmt::Display for BinaryOperator {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         let like_op = |f: &mut Formatter, escape_char: &Option<char>| {
             if let Some(escape_char) = escape_char {
-                write!(f, "(escape: {})", escape_char)?;
+                write!(f, "(escape: {escape_char})")?;
             }
             Ok(())
         };
@@ -784,7 +784,7 @@ impl TryFrom<SqlBinaryOperator> for BinaryOperator {
             SqlBinaryOperator::NotEq => Ok(BinaryOperator::NotEq),
             SqlBinaryOperator::And => Ok(BinaryOperator::And),
             SqlBinaryOperator::Or => Ok(BinaryOperator::Or),
-            op => Err(DatabaseError::UnsupportedStmt(format!("{}", op))),
+            op => Err(DatabaseError::UnsupportedStmt(format!("{op}"))),
         }
     }
 }

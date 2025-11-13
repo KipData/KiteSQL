@@ -487,8 +487,7 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
                 right,
             } => self.bind_set_operation(op, set_quantifier, left, right),
             expr => Err(DatabaseError::UnsupportedStmt(format!(
-                "set expression: {:?}",
-                expr
+                "set expression: {expr:?}"
             ))),
         }
     }

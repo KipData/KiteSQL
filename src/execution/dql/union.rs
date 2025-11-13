@@ -1,10 +1,6 @@
-use crate::execution::{build_read, Executor, ReadExecutor};
+use crate::execution::{build_read, spawn_executor, Executor, ReadExecutor};
 use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use std::ops::Coroutine;
-use std::ops::CoroutineState;
-use std::pin::Pin;
-
 pub struct Union {
     left_input: LogicalPlan,
     right_input: LogicalPlan,
@@ -25,24 +21,21 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Union {
         cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
         transaction: *mut T,
     ) -> Executor<'a> {
-        Box::new(
-            #[coroutine]
-            move || {
-                let Union {
-                    left_input,
-                    right_input,
-                } = self;
-                let mut coroutine = build_read(left_input, cache, transaction);
+        spawn_executor(move |co| async move {
+            let Union {
+                left_input,
+                right_input,
+            } = self;
+            let mut left = build_read(left_input, cache, transaction);
 
-                while let CoroutineState::Yielded(tuple) = Pin::new(&mut coroutine).resume(()) {
-                    yield tuple;
-                }
-                let mut coroutine = build_read(right_input, cache, transaction);
+            for tuple in left.by_ref() {
+                co.yield_(tuple).await;
+            }
+            let right = build_read(right_input, cache, transaction);
 
-                while let CoroutineState::Yielded(tuple) = Pin::new(&mut coroutine).resume(()) {
-                    yield tuple;
-                }
-            },
-        )
+            for tuple in right {
+                co.yield_(tuple).await;
+            }
+        })
     }
 }

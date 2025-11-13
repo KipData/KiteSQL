@@ -21,7 +21,7 @@ impl FilterOperator {
                 is_optimized: false,
                 having,
             }),
-            Childrens::Only(children),
+            Childrens::Only(Box::new(children)),
         )
     }
 }

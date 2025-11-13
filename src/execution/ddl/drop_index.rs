@@ -1,4 +1,4 @@
-use crate::execution::{Executor, WriteExecutor};
+use crate::execution::{spawn_executor, Executor, WriteExecutor};
 use crate::planner::operator::drop_index::DropIndexOperator;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::throw;
@@ -20,24 +20,25 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropIndex {
         (table_cache, _, _): (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
         transaction: *mut T,
     ) -> Executor<'a> {
-        Box::new(
-            #[coroutine]
-            move || {
-                let DropIndexOperator {
-                    table_name,
-                    index_name,
-                    if_exists,
-                } = self.op;
+        spawn_executor(move |co| async move {
+            let DropIndexOperator {
+                table_name,
+                index_name,
+                if_exists,
+            } = self.op;
 
-                throw!(unsafe { &mut (*transaction) }.drop_index(
+            throw!(
+                co,
+                unsafe { &mut (*transaction) }.drop_index(
                     table_cache,
                     table_name,
                     &index_name,
                     if_exists
-                ));
+                )
+            );
 
-                yield Ok(TupleBuilder::build_result(index_name.to_string()));
-            },
-        )
+            co.yield_(Ok(TupleBuilder::build_result(index_name.to_string())))
+                .await;
+        })
     }
 }

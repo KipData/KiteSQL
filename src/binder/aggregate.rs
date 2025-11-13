@@ -83,8 +83,8 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
 
                 return_orderby.push(SortField::new(
                     expr,
-                    asc.map_or(true, |asc| asc),
-                    nulls_first.map_or(false, |first| first),
+                    asc.is_none_or(|asc| asc),
+                    nulls_first.is_some_and(|first| first),
                 ));
             }
             Some(return_orderby)
@@ -251,8 +251,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
 
             if !group_raw_exprs.iter().contains(&expr) {
                 return Err(DatabaseError::AggMiss(format!(
-                    "`{}` must appear in the GROUP BY clause or be used in an aggregate function",
-                    expr
+                    "`{expr}` must appear in the GROUP BY clause or be used in an aggregate function"
                 )));
             }
         }
@@ -306,12 +305,9 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                     return Ok(());
                 }
 
-                Err(DatabaseError::AggMiss(
-                    format!(
-                        "expression '{}' must appear in the GROUP BY clause or be used in an aggregate function",
-                        expr
-                    )
-                ))
+                Err(DatabaseError::AggMiss(format!(
+                    "expression '{expr}' must appear in the GROUP BY clause or be used in an aggregate function"
+                )))
             }
             ScalarExpression::ColumnRef { .. } | ScalarExpression::Alias { .. } => {
                 if self.context.group_by_exprs.contains(expr) {
@@ -321,12 +317,9 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                     return self.validate_having_orderby(expr.unpack_alias_ref());
                 }
 
-                Err(DatabaseError::AggMiss(
-                    format!(
-                        "expression '{}' must appear in the GROUP BY clause or be used in an aggregate function",
-                        expr
-                    )
-                ))
+                Err(DatabaseError::AggMiss(format!(
+                    "expression '{expr}' must appear in the GROUP BY clause or be used in an aggregate function"
+                )))
             }
 
             ScalarExpression::TypeCast { expr, .. } => self.validate_having_orderby(expr),

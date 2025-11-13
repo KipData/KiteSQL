@@ -1,6 +1,6 @@
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::{create_accumulators, Accumulator};
-use crate::execution::{build_read, Executor, ReadExecutor};
+use crate::execution::{build_read, spawn_executor, Executor, ReadExecutor};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::LogicalPlan;
@@ -11,8 +11,6 @@ use crate::types::value::DataValue;
 use ahash::{HashMap, HashMapExt};
 use itertools::Itertools;
 use std::collections::hash_map::Entry;
-use std::ops::{Coroutine, CoroutineState};
-use std::pin::Pin;
 
 pub struct HashAggExecutor {
     agg_calls: Vec<ScalarExpression>,
@@ -45,62 +43,67 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashAggExecutor {
         cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
         transaction: *mut T,
     ) -> Executor<'a> {
-        Box::new(
-            #[coroutine]
-            move || {
-                let HashAggExecutor {
-                    agg_calls,
-                    groupby_exprs,
-                    mut input,
-                } = self;
+        spawn_executor(move |co| async move {
+            let HashAggExecutor {
+                agg_calls,
+                groupby_exprs,
+                mut input,
+            } = self;
 
-                let schema_ref = input.output_schema().clone();
-                let mut group_hash_accs: HashMap<Vec<DataValue>, Vec<Box<dyn Accumulator>>> =
-                    HashMap::new();
+            let schema_ref = input.output_schema().clone();
+            let mut group_hash_accs: HashMap<Vec<DataValue>, Vec<Box<dyn Accumulator>>> =
+                HashMap::new();
 
-                let mut coroutine = build_read(input, cache, transaction);
+            let mut executor = build_read(input, cache, transaction);
 
-                while let CoroutineState::Yielded(result) = Pin::new(&mut coroutine).resume(()) {
-                    let tuple = throw!(result);
-                    let mut values = Vec::with_capacity(agg_calls.len());
+            for result in executor.by_ref() {
+                let tuple = throw!(co, result);
+                let mut values = Vec::with_capacity(agg_calls.len());
 
-                    for expr in agg_calls.iter() {
-                        if let ScalarExpression::AggCall { args, .. } = expr {
-                            if args.len() > 1 {
-                                throw!(Err(DatabaseError::UnsupportedStmt("currently aggregate functions only support a single Column as a parameter".to_string())))
-                            }
-                            values.push(throw!(args[0].eval(Some((&tuple, &schema_ref)))));
-                        } else {
-                            unreachable!()
+                for expr in agg_calls.iter() {
+                    if let ScalarExpression::AggCall { args, .. } = expr {
+                        if args.len() > 1 {
+                            throw!(co, Err(DatabaseError::UnsupportedStmt(
+                                "currently aggregate functions only support a single Column as a parameter"
+                                    .to_string()
+                            )))
                         }
+                        values.push(throw!(co, args[0].eval(Some((&tuple, &schema_ref)))));
+                    } else {
+                        unreachable!()
                     }
-                    let group_keys: Vec<DataValue> = throw!(groupby_exprs
+                }
+                let group_keys: Vec<DataValue> = throw!(
+                    co,
+                    groupby_exprs
                         .iter()
                         .map(|expr| expr.eval(Some((&tuple, &schema_ref))))
-                        .try_collect());
+                        .try_collect()
+                );
 
-                    let entry = match group_hash_accs.entry(group_keys) {
-                        Entry::Occupied(entry) => entry.into_mut(),
-                        Entry::Vacant(entry) => {
-                            entry.insert(throw!(create_accumulators(&agg_calls)))
-                        }
-                    };
-                    for (acc, value) in entry.iter_mut().zip_eq(values.iter()) {
-                        throw!(acc.update_value(value));
+                let entry = match group_hash_accs.entry(group_keys) {
+                    Entry::Occupied(entry) => entry.into_mut(),
+                    Entry::Vacant(entry) => {
+                        entry.insert(throw!(co, create_accumulators(&agg_calls)))
                     }
+                };
+                for (acc, value) in entry.iter_mut().zip_eq(values.iter()) {
+                    throw!(co, acc.update_value(value));
                 }
+            }
 
-                for (group_keys, accs) in group_hash_accs {
-                    // Tips: Accumulator First
-                    let values: Vec<DataValue> = throw!(accs
-                        .iter()
+            for (group_keys, accs) in group_hash_accs {
+                // Tips: Accumulator First
+                let values: Vec<DataValue> = throw!(
+                    co,
+                    accs.iter()
                         .map(|acc| acc.evaluate())
                         .chain(group_keys.into_iter().map(Ok))
-                        .try_collect());
-                    yield Ok(Tuple::new(None, values));
-                }
-            },
-        )
+                        .try_collect()
+                );
+                co.yield_(Ok(Tuple::new(None, values))).await;
+            }
+        })
     }
 }
 
@@ -188,7 +191,7 @@ mod test {
                 }],
                 is_distinct: false,
             }),
-            Childrens::Only(input),
+            Childrens::Only(Box::new(input)),
         );
 
         let plan = HepOptimizer::new(plan)

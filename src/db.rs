@@ -28,9 +28,7 @@ use parking_lot::{RawRwLock, RwLock};
 use std::hash::RandomState;
 use std::marker::PhantomData;
 use std::mem;
-use std::ops::{Coroutine, CoroutineState};
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
@@ -440,16 +438,11 @@ impl<S: Storage> DBTransaction<'_, S> {
 pub struct TransactionIter<'a> {
     executor: Executor<'a>,
     schema: SchemaRef,
-    is_over: bool,
 }
 
 impl<'a> TransactionIter<'a> {
     fn new(schema: SchemaRef, executor: Executor<'a>) -> Self {
-        Self {
-            executor,
-            schema,
-            is_over: false,
-        }
+        Self { executor, schema }
     }
 }
 
@@ -457,15 +450,7 @@ impl Iterator for TransactionIter<'_> {
     type Item = Result<Tuple, DatabaseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.is_over {
-            return None;
-        }
-        if let CoroutineState::Yielded(tuple) = Pin::new(&mut self.executor).resume(()) {
-            Some(tuple)
-        } else {
-            self.is_over = true;
-            None
-        }
+        self.executor.next()
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::execution::{Executor, WriteExecutor};
+use crate::execution::{spawn_executor, Executor, WriteExecutor};
 use crate::planner::operator::create_view::CreateViewOperator;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::throw;
@@ -20,16 +20,16 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateView {
         (_, view_cache, _): (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
         transaction: *mut T,
     ) -> Executor<'a> {
-        Box::new(
-            #[coroutine]
-            move || {
-                let CreateViewOperator { view, or_replace } = self.op;
+        spawn_executor(move |co| async move {
+            let CreateViewOperator { view, or_replace } = self.op;
 
-                let result_tuple = TupleBuilder::build_result(format!("{}", view.name));
-                throw!(unsafe { &mut (*transaction) }.create_view(view_cache, view, or_replace));
+            let result_tuple = TupleBuilder::build_result(format!("{}", view.name));
+            throw!(
+                co,
+                unsafe { &mut (*transaction) }.create_view(view_cache, view, or_replace)
+            );
 
-                yield Ok(result_tuple);
-            },
-        )
+            co.yield_(Ok(result_tuple)).await;
+        })
     }
 }

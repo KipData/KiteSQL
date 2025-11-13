@@ -1,7 +1,7 @@
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
-use crate::execution::{build_read, Executor, WriteExecutor};
+use crate::execution::{build_read, spawn_executor, Executor, WriteExecutor};
 use crate::expression::{BindPosition, ScalarExpression};
 use crate::optimizer::core::histogram::HistogramBuilder;
 use crate::optimizer::core::statistics_meta::StatisticsMeta;
@@ -19,10 +19,7 @@ use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fmt::Formatter;
 use std::fs::DirEntry;
-use std::ops::Coroutine;
-use std::ops::CoroutineState;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::{fmt, fs};
 
@@ -59,111 +56,119 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze {
         cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
         transaction: *mut T,
     ) -> Executor<'a> {
-        Box::new(
-            #[coroutine]
-            move || {
-                let Analyze {
-                    table_name,
-                    mut input,
-                    index_metas,
-                } = self;
+        spawn_executor(move |co| async move {
+            let Analyze {
+                table_name,
+                mut input,
+                index_metas,
+            } = self;
 
-                let schema = input.output_schema().clone();
-                let mut builders = Vec::with_capacity(index_metas.len());
-                let table = throw!(throw!(
+            let schema = input.output_schema().clone();
+            let mut builders = Vec::with_capacity(index_metas.len());
+            let table = throw!(
+                co,
+                throw!(
+                    co,
                     unsafe { &mut (*transaction) }.table(cache.0, table_name.clone())
                 )
                 .cloned()
-                .ok_or(DatabaseError::TableNotFound));
+                .ok_or(DatabaseError::TableNotFound)
+            );
 
-                for index in table.indexes() {
-                    builders.push(State {
-                        is_bound_position: false,
-                        index_id: index.id,
-                        exprs: throw!(index.column_exprs(&table)),
-                        builder: HistogramBuilder::new(index, None),
-                    });
-                }
+            for index in table.indexes() {
+                builders.push(State {
+                    is_bound_position: false,
+                    index_id: index.id,
+                    exprs: throw!(co, index.column_exprs(&table)),
+                    builder: HistogramBuilder::new(index, None),
+                });
+            }
 
-                let mut coroutine = build_read(input, cache, transaction);
+            let mut coroutine = build_read(input, cache, transaction);
 
-                while let CoroutineState::Yielded(tuple) = Pin::new(&mut coroutine).resume(()) {
-                    let tuple = throw!(tuple);
+            for tuple in coroutine.by_ref() {
+                let tuple = throw!(co, tuple);
 
-                    for State {
-                        is_bound_position,
-                        exprs,
-                        builder,
-                        ..
-                    } in builders.iter_mut()
-                    {
-                        if !*is_bound_position {
-                            throw!(BindPosition::bind_exprs(
+                for State {
+                    is_bound_position,
+                    exprs,
+                    builder,
+                    ..
+                } in builders.iter_mut()
+                {
+                    if !*is_bound_position {
+                        throw!(
+                            co,
+                            BindPosition::bind_exprs(
                                 exprs.iter_mut(),
                                 || schema.iter().map(Cow::Borrowed),
                                 |a, b| a == b
-                            ));
-                            *is_bound_position = true;
-                        }
-                        let values = throw!(Projection::projection(&tuple, exprs, &schema));
+                            )
+                        );
+                        *is_bound_position = true;
+                    }
+                    let values = throw!(co, Projection::projection(&tuple, exprs, &schema));
 
-                        if values.len() == 1 {
-                            throw!(builder.append(&values[0]));
-                        } else {
-                            throw!(builder.append(&Arc::new(DataValue::Tuple(values, false))));
-                        }
+                    if values.len() == 1 {
+                        throw!(co, builder.append(&values[0]));
+                    } else {
+                        throw!(
+                            co,
+                            builder.append(&Arc::new(DataValue::Tuple(values, false)))
+                        );
                     }
                 }
-                drop(coroutine);
-                let mut values = Vec::with_capacity(builders.len());
-                let dir_path = Self::build_statistics_meta_path(&table_name);
-                // For DEBUG
-                // println!("Statistics Path: {:#?}", dir_path);
-                throw!(fs::create_dir_all(&dir_path).map_err(DatabaseError::IO));
+            }
+            drop(coroutine);
+            let mut values = Vec::with_capacity(builders.len());
+            let dir_path = Self::build_statistics_meta_path(&table_name);
+            throw!(co, fs::create_dir_all(&dir_path).map_err(DatabaseError::IO));
 
-                let mut active_index_paths = HashSet::new();
+            let mut active_index_paths = HashSet::new();
 
-                for State {
-                    index_id, builder, ..
-                } in builders
-                {
-                    let index_file = OsStr::new(&index_id.to_string()).to_os_string();
-                    let path = dir_path.join(&index_file);
-                    let temp_path = path.with_extension("tmp");
-                    let path_str: String = path.to_string_lossy().into();
+            for State {
+                index_id, builder, ..
+            } in builders
+            {
+                let index_file = OsStr::new(&index_id.to_string()).to_os_string();
+                let path = dir_path.join(&index_file);
+                let temp_path = path.with_extension("tmp");
+                let path_str: String = path.to_string_lossy().into();
 
-                    let (histogram, sketch) = throw!(builder.build(DEFAULT_NUM_OF_BUCKETS));
-                    let meta = StatisticsMeta::new(histogram, sketch);
+                let (histogram, sketch) = throw!(co, builder.build(DEFAULT_NUM_OF_BUCKETS));
+                let meta = StatisticsMeta::new(histogram, sketch);
 
-                    throw!(meta.to_file(&temp_path));
-                    values.push(DataValue::Utf8 {
-                        value: path_str.clone(),
-                        ty: Utf8Type::Variable(None),
-                        unit: CharLengthUnits::Characters,
-                    });
-                    throw!(unsafe { &mut (*transaction) }.save_table_meta(
+                throw!(co, meta.to_file(&temp_path));
+                values.push(DataValue::Utf8 {
+                    value: path_str.clone(),
+                    ty: Utf8Type::Variable(None),
+                    unit: CharLengthUnits::Characters,
+                });
+                throw!(
+                    co,
+                    unsafe { &mut (*transaction) }.save_table_meta(
                         cache.2,
                         &table_name,
                         path_str,
                         meta
-                    ));
-                    throw!(fs::rename(&temp_path, &path).map_err(DatabaseError::IO));
+                    )
+                );
+                throw!(co, fs::rename(&temp_path, &path).map_err(DatabaseError::IO));
 
-                    active_index_paths.insert(index_file);
+                active_index_paths.insert(index_file);
+            }
+
+            // clean expired index
+            for entry in throw!(co, fs::read_dir(dir_path).map_err(DatabaseError::IO)) {
+                let entry: DirEntry = throw!(co, entry.map_err(DatabaseError::IO));
+
+                if !active_index_paths.remove(&entry.file_name()) {
+                    throw!(co, fs::remove_file(entry.path()).map_err(DatabaseError::IO));
                 }
+            }
 
-                // clean expired index
-                for entry in throw!(fs::read_dir(dir_path).map_err(DatabaseError::IO)) {
-                    let entry: DirEntry = throw!(entry.map_err(DatabaseError::IO));
-
-                    if !active_index_paths.remove(&entry.file_name()) {
-                        throw!(fs::remove_file(entry.path()).map_err(DatabaseError::IO));
-                    }
-                }
-
-                yield Ok(Tuple::new(None, values));
-            },
-        )
+            co.yield_(Ok(Tuple::new(None, values))).await;
+        })
     }
 }
 

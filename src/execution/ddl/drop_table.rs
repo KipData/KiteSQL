@@ -1,4 +1,4 @@
-use crate::execution::{Executor, WriteExecutor};
+use crate::execution::{spawn_executor, Executor, WriteExecutor};
 use crate::planner::operator::drop_table::DropTableOperator;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::throw;
@@ -20,22 +20,23 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropTable {
         (table_cache, _, _): (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
         transaction: *mut T,
     ) -> Executor<'a> {
-        Box::new(
-            #[coroutine]
-            move || {
-                let DropTableOperator {
-                    table_name,
-                    if_exists,
-                } = self.op;
+        spawn_executor(move |co| async move {
+            let DropTableOperator {
+                table_name,
+                if_exists,
+            } = self.op;
 
-                throw!(unsafe { &mut (*transaction) }.drop_table(
+            throw!(
+                co,
+                unsafe { &mut (*transaction) }.drop_table(
                     table_cache,
                     table_name.clone(),
                     if_exists
-                ));
+                )
+            );
 
-                yield Ok(TupleBuilder::build_result(format!("{}", table_name)));
-            },
-        )
+            co.yield_(Ok(TupleBuilder::build_result(format!("{table_name}"))))
+                .await;
+        })
     }
 }

@@ -357,7 +357,7 @@ impl DataValue {
     pub(crate) fn check_string_len(string: &str, len: usize, unit: CharLengthUnits) -> bool {
         match unit {
             CharLengthUnits::Characters => string.chars().count() > len,
-            CharLengthUnits::Octets => string.as_bytes().len() > len,
+            CharLengthUnits::Octets => string.len() > len,
         }
     }
 
@@ -450,19 +450,19 @@ impl DataValue {
     }
 
     fn format_date(value: i32) -> Option<String> {
-        Self::date_format(value).map(|fmt| format!("{}", fmt))
+        Self::date_format(value).map(|fmt| format!("{fmt}"))
     }
 
     fn format_datetime(value: i64) -> Option<String> {
-        Self::date_time_format(value).map(|fmt| format!("{}", fmt))
+        Self::date_time_format(value).map(|fmt| format!("{fmt}"))
     }
 
     fn format_time(value: u32, precision: u64) -> Option<String> {
-        Self::time_format(value, precision).map(|fmt| format!("{}", fmt))
+        Self::time_format(value, precision).map(|fmt| format!("{fmt}"))
     }
 
     fn format_timestamp(value: i64, precision: u64) -> Option<String> {
-        Self::time_stamp_format(value, precision, false).map(|fmt| format!("{}", fmt))
+        Self::time_stamp_format(value, precision, false).map(|fmt| format!("{fmt}"))
     }
 
     #[inline]
@@ -1841,7 +1841,7 @@ impl TryFrom<&sqlparser::ast::Value> for DataValue {
             | sqlparser::ast::Value::DoubleQuotedString(s) => s.clone().into(),
             sqlparser::ast::Value::Boolean(b) => (*b).into(),
             sqlparser::ast::Value::Null => Self::Null,
-            v => return Err(DatabaseError::UnsupportedStmt(format!("{:?}", v))),
+            v => return Err(DatabaseError::UnsupportedStmt(format!("{v:?}"))),
         })
     }
 }
@@ -1862,18 +1862,18 @@ macro_rules! format_float_option {
 impl fmt::Display for DataValue {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
-            DataValue::Boolean(e) => write!(f, "{}", e)?,
+            DataValue::Boolean(e) => write!(f, "{e}")?,
             DataValue::Float32(e) => format_float_option!(f, e)?,
             DataValue::Float64(e) => format_float_option!(f, e)?,
-            DataValue::Int8(e) => write!(f, "{}", e)?,
-            DataValue::Int16(e) => write!(f, "{}", e)?,
-            DataValue::Int32(e) => write!(f, "{}", e)?,
-            DataValue::Int64(e) => write!(f, "{}", e)?,
-            DataValue::UInt8(e) => write!(f, "{}", e)?,
-            DataValue::UInt16(e) => write!(f, "{}", e)?,
-            DataValue::UInt32(e) => write!(f, "{}", e)?,
-            DataValue::UInt64(e) => write!(f, "{}", e)?,
-            DataValue::Utf8 { value: e, .. } => write!(f, "{}", e)?,
+            DataValue::Int8(e) => write!(f, "{e}")?,
+            DataValue::Int16(e) => write!(f, "{e}")?,
+            DataValue::Int32(e) => write!(f, "{e}")?,
+            DataValue::Int64(e) => write!(f, "{e}")?,
+            DataValue::UInt8(e) => write!(f, "{e}")?,
+            DataValue::UInt16(e) => write!(f, "{e}")?,
+            DataValue::UInt32(e) => write!(f, "{e}")?,
+            DataValue::UInt64(e) => write!(f, "{e}")?,
+            DataValue::Utf8 { value: e, .. } => write!(f, "{e}")?,
             DataValue::Null => write!(f, "null")?,
             DataValue::Date32(e) => write!(f, "{}", DataValue::date_format(*e).unwrap())?,
             DataValue::Date64(e) => write!(f, "{}", DataValue::date_time_format(*e).unwrap())?,
@@ -1906,26 +1906,26 @@ impl fmt::Display for DataValue {
 impl fmt::Debug for DataValue {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
-            DataValue::Boolean(_) => write!(f, "Boolean({})", self),
-            DataValue::Float32(_) => write!(f, "Float32({})", self),
-            DataValue::Float64(_) => write!(f, "Float64({})", self),
-            DataValue::Int8(_) => write!(f, "Int8({})", self),
-            DataValue::Int16(_) => write!(f, "Int16({})", self),
-            DataValue::Int32(_) => write!(f, "Int32({})", self),
-            DataValue::Int64(_) => write!(f, "Int64({})", self),
-            DataValue::UInt8(_) => write!(f, "UInt8({})", self),
-            DataValue::UInt16(_) => write!(f, "UInt16({})", self),
-            DataValue::UInt32(_) => write!(f, "UInt32({})", self),
-            DataValue::UInt64(_) => write!(f, "UInt64({})", self),
-            DataValue::Utf8 { .. } => write!(f, "Utf8(\"{}\")", self),
+            DataValue::Boolean(_) => write!(f, "Boolean({self})"),
+            DataValue::Float32(_) => write!(f, "Float32({self})"),
+            DataValue::Float64(_) => write!(f, "Float64({self})"),
+            DataValue::Int8(_) => write!(f, "Int8({self})"),
+            DataValue::Int16(_) => write!(f, "Int16({self})"),
+            DataValue::Int32(_) => write!(f, "Int32({self})"),
+            DataValue::Int64(_) => write!(f, "Int64({self})"),
+            DataValue::UInt8(_) => write!(f, "UInt8({self})"),
+            DataValue::UInt16(_) => write!(f, "UInt16({self})"),
+            DataValue::UInt32(_) => write!(f, "UInt32({self})"),
+            DataValue::UInt64(_) => write!(f, "UInt64({self})"),
+            DataValue::Utf8 { .. } => write!(f, "Utf8(\"{self}\")"),
             DataValue::Null => write!(f, "null"),
-            DataValue::Date32(_) => write!(f, "Date32({})", self),
-            DataValue::Date64(_) => write!(f, "Date64({})", self),
-            DataValue::Time32(..) => write!(f, "Time32({})", self),
-            DataValue::Time64(..) => write!(f, "Time64({})", self),
-            DataValue::Decimal(_) => write!(f, "Decimal({})", self),
+            DataValue::Date32(_) => write!(f, "Date32({self})"),
+            DataValue::Date64(_) => write!(f, "Date64({self})"),
+            DataValue::Time32(..) => write!(f, "Time32({self})"),
+            DataValue::Time64(..) => write!(f, "Time64({self})"),
+            DataValue::Decimal(_) => write!(f, "Decimal({self})"),
             DataValue::Tuple(..) => {
-                write!(f, "Tuple({}", self)?;
+                write!(f, "Tuple({self}")?;
                 if matches!(self, DataValue::Tuple(_, true)) {
                     write!(f, " [is upper]")?;
                 }

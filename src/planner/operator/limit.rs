@@ -18,7 +18,7 @@ impl LimitOperator {
     ) -> LogicalPlan {
         LogicalPlan::new(
             Operator::Limit(LimitOperator { offset, limit }),
-            Childrens::Only(children),
+            Childrens::Only(Box::new(children)),
         )
     }
 }
@@ -26,13 +26,13 @@ impl LimitOperator {
 impl fmt::Display for LimitOperator {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         if let Some(limit) = self.limit {
-            write!(f, "Limit {}", limit)?;
+            write!(f, "Limit {limit}")?;
         }
         if self.limit.is_some() && self.offset.is_some() {
             write!(f, ", ")?;
         }
         if let Some(offset) = self.offset {
-            write!(f, "Offset {}", offset)?;
+            write!(f, "Offset {offset}")?;
         }
 
         Ok(())

@@ -32,7 +32,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 table_name,
                 index_metas,
             }),
-            Childrens::Only(scan_op),
+            Childrens::Only(Box::new(scan_op)),
         ))
     }
 }

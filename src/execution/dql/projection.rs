@@ -1,6 +1,6 @@
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, Executor, ReadExecutor};
+use crate::execution::{build_read, spawn_executor, Executor, ReadExecutor};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::project::ProjectOperator;
 use crate::planner::LogicalPlan;
@@ -8,10 +8,6 @@ use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::throw;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
-use std::ops::Coroutine;
-use std::ops::CoroutineState;
-use std::pin::Pin;
-
 pub struct Projection {
     exprs: Vec<ScalarExpression>,
     input: LogicalPlan,
@@ -29,20 +25,17 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Projection {
         cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
         transaction: *mut T,
     ) -> Executor<'a> {
-        Box::new(
-            #[coroutine]
-            move || {
-                let Projection { exprs, mut input } = self;
-                let schema = input.output_schema().clone();
-                let mut coroutine = build_read(input, cache, transaction);
+        spawn_executor(move |co| async move {
+            let Projection { exprs, mut input } = self;
+            let schema = input.output_schema().clone();
+            let executor = build_read(input, cache, transaction);
 
-                while let CoroutineState::Yielded(tuple) = Pin::new(&mut coroutine).resume(()) {
-                    let tuple = throw!(tuple);
-                    let values = throw!(Self::projection(&tuple, &exprs, &schema));
-                    yield Ok(Tuple::new(tuple.pk, values));
-                }
-            },
-        )
+            for tuple in executor {
+                let tuple = throw!(co, tuple);
+                let values = throw!(co, Self::projection(&tuple, &exprs, &schema));
+                co.yield_(Ok(Tuple::new(tuple.pk, values))).await;
+            }
+        })
     }
 }
 

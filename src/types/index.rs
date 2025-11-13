@@ -74,7 +74,7 @@ impl fmt::Display for IndexInfo {
         write!(f, " => ")?;
 
         if let Some(range) = &self.range {
-            write!(f, "{}", range)?;
+            write!(f, "{range}")?;
         } else {
             write!(f, "EMPTY")?;
         }
