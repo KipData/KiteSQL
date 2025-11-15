@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_analyze(&mut self, name: &ObjectName) -> Result<LogicalPlan, DatabaseError> {
-        let table_name = Arc::new(lower_case_name(name)?);
+        let table_name: Arc<str> = lower_case_name(name)?.into();
 
         let table = self
             .context

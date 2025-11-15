@@ -178,7 +178,7 @@ impl HepGraph {
     }
 
     /// Use bfs to traverse the graph and return node ids
-    pub fn nodes_iter(&self, start_option: Option<HepNodeId>) -> HepGraphIter {
+    pub fn nodes_iter(&self, start_option: Option<HepNodeId>) -> HepGraphIter<'_> {
         let inner = Bfs::new(&self.graph, start_option.unwrap_or(self.root_index));
         HepGraphIter {
             inner,

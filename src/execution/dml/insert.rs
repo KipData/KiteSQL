@@ -50,7 +50,7 @@ enum MappingKey<'a> {
 }
 
 impl ColumnCatalog {
-    fn key(&self, is_mapping_by_name: bool) -> MappingKey {
+    fn key(&self, is_mapping_by_name: bool) -> MappingKey<'_> {
         if is_mapping_by_name {
             MappingKey::Name(self.name())
         } else {

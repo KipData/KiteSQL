@@ -19,7 +19,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         name: &ObjectName,
         operation: &AlterTableOperation,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name: Arc<String> = Arc::new(lower_case_name(name)?);
+        let table_name: Arc<str> = lower_case_name(name)?.into();
         let table = self
             .context
             .table(table_name.clone())?

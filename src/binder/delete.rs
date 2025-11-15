@@ -17,12 +17,12 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         selection: &Option<Expr>,
     ) -> Result<LogicalPlan, DatabaseError> {
         if let TableFactor::Table { name, alias, .. } = &from.relation {
-            let table_name = Arc::new(lower_case_name(name)?);
+            let table_name: Arc<str> = lower_case_name(name)?.into();
             let mut table_alias = None;
             let mut alias_idents = None;
 
             if let Some(TableAlias { name, columns }) = alias {
-                table_alias = Some(Arc::new(name.value.to_lowercase()));
+                table_alias = Some(name.value.to_lowercase().into());
                 alias_idents = Some(columns);
             }
             let Source::Table(table) = self

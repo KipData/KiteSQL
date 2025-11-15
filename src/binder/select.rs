@@ -146,7 +146,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         if let Some(SelectInto { name, .. }) = &select.into {
             plan = LogicalPlan::new(
                 Operator::Insert(InsertOperator {
-                    table_name: Arc::new(lower_case_name(name)?),
+                    table_name: lower_case_name(name)?.into(),
                     is_overwrite: false,
                     is_mapping_by_name: true,
                 }),
@@ -411,7 +411,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                             "Implement virtual tables for multiple table aliases".to_string(),
                         ));
                     }
-                    let table_alias = Arc::new(name.value.to_lowercase());
+                    let table_alias: Arc<str> = name.value.to_lowercase().into();
                     let table = tables.pop().unwrap_or_else(|| self.context.temp_table());
 
                     plan = self.bind_alias(plan, alias_column, table_alias, table)?;
@@ -421,7 +421,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             TableFactor::TableFunction { expr, alias } => {
                 if let ScalarExpression::TableFunction(function) = self.bind_expr(expr)? {
                     let mut table_alias = None;
-                    let table_name = Arc::new(function.summary().name.clone());
+                    let table_name: TableName = function.summary().name.clone();
                     let table = function.table();
                     let mut plan = FunctionScanOperator::build(function);
 
@@ -430,7 +430,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         columns: alias_column,
                     }) = alias
                     {
-                        table_alias = Some(Arc::new(name.value.to_lowercase()));
+                        table_alias = Some(name.value.to_lowercase().into());
 
                         plan = self.bind_alias(
                             plan,
@@ -512,12 +512,12 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         table: &str,
         alias: Option<&TableAlias>,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name = Arc::new(table.to_string());
-        let mut table_alias = None;
+        let table_name = table.into();
+        let mut table_alias: Option<TableName> = None;
         let mut alias_idents = None;
 
         if let Some(TableAlias { name, columns }) = alias {
-            table_alias = Some(Arc::new(name.value.to_lowercase()));
+            table_alias = Some(name.value.to_lowercase().into());
             alias_idents = Some(columns);
         }
 
@@ -585,7 +585,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     }
                 }
                 SelectItem::QualifiedWildcard(table_name, _) => {
-                    let table_name = Arc::new(lower_case_name(table_name)?);
+                    let table_name: Arc<str> = lower_case_name(table_name)?.into();
                     let schema_buf = self.table_schema_buf.entry(table_name.clone()).or_default();
 
                     Self::bind_table_column_refs(

@@ -24,6 +24,7 @@ mod slev;
 mod utils;
 
 pub(crate) const ALLOW_MULTI_WAREHOUSE_TX: bool = true;
+pub(crate) const CHECK_POINT_COUNT: usize = 1000;
 pub(crate) const RT_LIMITS: [Duration; 5] = [
     Duration::from_millis(500),
     Duration::from_millis(500),
@@ -193,10 +194,10 @@ fn main() -> Result<(), TpccError> {
         if !is_succeed {
             return Err(TpccError::MaxRetry);
         }
-        if round_count != 0 && round_count % 100 == 0 {
+        if round_count != 0 && round_count % CHECK_POINT_COUNT == 0 {
             println!(
                 "[TPCC CheckPoint {} on round {round_count}][{}]: 90th Percentile RT: {:.3}",
-                round_count / 100,
+                round_count / CHECK_POINT_COUNT,
                 tpcc_test.name(),
                 rt_hist.hist_ckp(i)
             );

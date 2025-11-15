@@ -23,7 +23,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         constraints: &[TableConstraint],
         if_not_exists: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name = Arc::new(lower_case_name(name)?);
+        let table_name: Arc<str> = lower_case_name(name)?.into();
 
         if !is_valid_identifier(&table_name) {
             return Err(DatabaseError::InvalidTable(
@@ -196,7 +196,7 @@ mod tests {
 
         match plan1.operator {
             Operator::CreateTable(op) => {
-                assert_eq!(op.table_name, Arc::new("t1".to_string()));
+                assert_eq!(op.table_name.as_ref(), "t1");
                 assert_eq!(op.columns[0].name(), "id");
                 assert_eq!(op.columns[0].nullable(), false);
                 assert_eq!(

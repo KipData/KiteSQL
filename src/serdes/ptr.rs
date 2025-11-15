@@ -25,7 +25,10 @@ macro_rules! implement_ptr_serialization {
                 reader: &mut R,
                 drive: Option<(&T, &TableCache)>,
                 reference_tables: &ReferenceTables,
-            ) -> Result<Self, DatabaseError> {
+            ) -> Result<Self, DatabaseError>
+            where
+                Self: Sized,
+            {
                 Ok($struct_name::from(V::decode(
                     reader,
                     drive,

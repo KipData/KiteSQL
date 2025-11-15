@@ -131,7 +131,7 @@ impl HistogramBuilder {
         let mut values = values.unwrap();
         let mut sort_keys = sort_keys.unwrap();
         let mut buckets = Vec::with_capacity(number_of_buckets);
-        let bucket_len = if values_len % number_of_buckets == 0 {
+        let bucket_len = if values_len.is_multiple_of(number_of_buckets) {
             values_len / number_of_buckets
         } else {
             (values_len + number_of_buckets) / number_of_buckets
@@ -518,14 +518,13 @@ mod tests {
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::ops::Bound;
-    use std::sync::Arc;
     use ulid::Ulid;
 
     fn index_meta() -> IndexMeta {
         IndexMeta {
             id: 0,
             column_ids: vec![Ulid::new()],
-            table_name: Arc::new("t1".to_string()),
+            table_name: "t1".to_string().into(),
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,
             name: "pk_c1".to_string(),

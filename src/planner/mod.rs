@@ -28,7 +28,7 @@ pub enum Childrens {
 }
 
 impl Childrens {
-    pub fn iter(&self) -> ChildrensIter {
+    pub fn iter(&self) -> ChildrensIter<'_> {
         ChildrensIter {
             inner: self,
             pos: 0,

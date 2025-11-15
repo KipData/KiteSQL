@@ -19,11 +19,11 @@ pub(crate) struct Lower {
 impl Lower {
     #[allow(unused_mut)]
     pub(crate) fn new() -> Arc<Self> {
-        let function_name = "lower".to_lowercase();
+        let function_name = "lower".to_string();
         let arg_types = vec![LogicalType::Varchar(None, CharLengthUnits::Characters)];
         Arc::new(Self {
             summary: FunctionSummary {
-                name: function_name,
+                name: function_name.into(),
                 arg_types,
             },
         })

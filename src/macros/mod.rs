@@ -83,7 +83,7 @@ macro_rules! scala_function {
 
                 Arc::new(Self {
                     summary: ::kite_sql::expression::function::FunctionSummary {
-                        name: function_name,
+                        name: function_name.into(),
                         arg_types
                     }
                 })
@@ -150,7 +150,7 @@ macro_rules! table_function {
             $({
                 columns.push(::kite_sql::catalog::column::ColumnCatalog::new(stringify!($output_name).to_lowercase(), true, ::kite_sql::catalog::column::ColumnDesc::new($output_ty, None, false, None).unwrap()));
             })*
-            ::kite_sql::catalog::table::TableCatalog::new(Arc::new(stringify!($function_name).to_lowercase()), columns).unwrap()
+            ::kite_sql::catalog::table::TableCatalog::new(stringify!($function_name).to_lowercase().into(), columns).unwrap()
         });
 
         #[derive(Debug, ::serde::Serialize, ::serde::Deserialize)]
@@ -170,7 +170,7 @@ macro_rules! table_function {
 
                 Arc::new(Self {
                     summary: ::kite_sql::expression::function::FunctionSummary {
-                        name: function_name,
+                        name: function_name.into(),
                         arg_types
                     }
                 })

@@ -218,7 +218,7 @@ impl<'a> RangeDetacher<'a> {
             ScalarExpression::IsNull { expr, negated, .. } => match expr.as_ref() {
                 ScalarExpression::ColumnRef { column, .. } => {
                     if let (Some(col_id), Some(col_table)) = (column.id(), column.table_name()) {
-                        if &col_id == self.column_id && col_table.as_str() == self.table_name {
+                        if &col_id == self.column_id && col_table.as_ref() == self.table_name {
                             return if *negated {
                                 // Range::NotEq(NULL_VALUE.clone())
                                 Ok(None)
@@ -669,7 +669,7 @@ impl<'a> RangeDetacher<'a> {
 
     fn _is_belong(table_name: &str, col: &ColumnRef) -> bool {
         matches!(
-            col.table_name().map(|name| table_name == name.as_str()),
+            col.table_name().map(|name| table_name == name.as_ref()),
             Some(true)
         )
     }

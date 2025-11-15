@@ -123,7 +123,7 @@ mod tests {
         let transaction = database.storage.transaction()?;
         let c1_column_id = {
             transaction
-                .table(database.state.table_cache(), Arc::new("t1".to_string()))?
+                .table(database.state.table_cache(), "t1".to_string().into())?
                 .unwrap()
                 .get_column_id_by_name("c1")
                 .unwrap()
@@ -199,7 +199,7 @@ mod tests {
                 meta: Arc::new(IndexMeta {
                     id: 0,
                     column_ids: vec![*c1_column_id],
-                    table_name: Arc::new("t1".to_string()),
+                    table_name: "t1".to_string().into(),
                     pk_ty: LogicalType::Integer,
                     value_ty: LogicalType::Integer,
                     name: "pk_index".to_string(),

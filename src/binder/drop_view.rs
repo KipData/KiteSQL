@@ -6,7 +6,6 @@ use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
 use sqlparser::ast::ObjectName;
-use std::sync::Arc;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_drop_view(
@@ -14,7 +13,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         name: &ObjectName,
         if_exists: &bool,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let view_name = Arc::new(lower_case_name(name)?);
+        let view_name = lower_case_name(name)?.into();
 
         Ok(LogicalPlan::new(
             Operator::DropView(DropViewOperator {

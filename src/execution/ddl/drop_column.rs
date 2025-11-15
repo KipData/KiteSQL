@@ -89,9 +89,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropColumn {
 
                 co.yield_(Ok(TupleBuilder::build_result("1".to_string())))
                     .await;
-            } else if if_exists {
-                return;
-            } else {
+            } else if !if_exists {
                 co.yield_(Err(DatabaseError::ColumnNotFound(column_name)))
                     .await;
             }

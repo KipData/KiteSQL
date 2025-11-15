@@ -9,7 +9,6 @@ use sqlparser::ast::{
 };
 use std::collections::HashMap;
 use std::slice;
-use std::sync::Arc;
 
 use super::{lower_ident, Binder, BinderContext, QueryBindStep, SubQueryType};
 use crate::expression::function::scala::{ArcScalarFunctionImpl, ScalarFunction};
@@ -369,7 +368,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         }
         if let Some(table) = full_name.0.or(bind_table_name) {
             let source = self.context.bind_source(&table)?;
-            let schema_buf = self.table_schema_buf.entry(Arc::new(table)).or_default();
+            let schema_buf = self.table_schema_buf.entry(table.into()).or_default();
 
             Ok(ScalarExpression::column_expr(
                 source
@@ -649,7 +648,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         }
         let arg_types = args.iter().map(ScalarExpression::return_type).collect_vec();
         let summary = FunctionSummary {
-            name: function_name,
+            name: function_name.into(),
             arg_types,
         };
         if let Some(function) = self.context.scala_functions.get(&summary) {
@@ -665,7 +664,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             }));
         }
 
-        Err(DatabaseError::FunctionNotFound(summary.name))
+        Err(DatabaseError::FunctionNotFound(summary.name.to_string()))
     }
 
     fn return_type(

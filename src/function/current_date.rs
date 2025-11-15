@@ -19,11 +19,11 @@ pub(crate) struct CurrentDate {
 impl CurrentDate {
     #[allow(unused_mut)]
     pub(crate) fn new() -> Arc<Self> {
-        let function_name = "current_date".to_lowercase();
+        let function_name = "current_date".to_string();
 
         Arc::new(Self {
             summary: FunctionSummary {
-                name: function_name,
+                name: function_name.into(),
                 arg_types: Vec::new(),
             },
         })

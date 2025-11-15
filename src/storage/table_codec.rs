@@ -94,7 +94,7 @@ impl TableCodec {
     /// Tips:
     /// 1. Root & View & Hash full key = key_prefix
     /// 2. hash table name makes it 4 as a fixed length, and [prefix_extractor](https://github.com/facebook/rocksdb/wiki/Prefix-Seek#defining-a-prefix) can be enabled in rocksdb
-    fn key_prefix(&self, ty: CodecType, name: &str) -> BumpBytes {
+    fn key_prefix(&self, ty: CodecType, name: &str) -> BumpBytes<'_> {
         let mut table_bytes = BumpBytes::new_in(&self.arena);
         table_bytes.extend_from_slice(Self::hash_bytes(name).as_slice());
 
@@ -147,7 +147,7 @@ impl TableCodec {
         table_bytes
     }
 
-    pub fn tuple_bound(&self, table_name: &str) -> (BumpBytes, BumpBytes) {
+    pub fn tuple_bound(&self, table_name: &str) -> (BumpBytes<'_>, BumpBytes<'_>) {
         let op = |bound_id| {
             let mut key_prefix = self.key_prefix(CodecType::Tuple, table_name);
 
@@ -158,7 +158,7 @@ impl TableCodec {
         (op(BOUND_MIN_TAG), op(BOUND_MAX_TAG))
     }
 
-    pub fn index_meta_bound(&self, table_name: &str) -> (BumpBytes, BumpBytes) {
+    pub fn index_meta_bound(&self, table_name: &str) -> (BumpBytes<'_>, BumpBytes<'_>) {
         let op = |bound_id| {
             let mut key_prefix = self.key_prefix(CodecType::IndexMeta, table_name);
 
@@ -173,7 +173,7 @@ impl TableCodec {
         &self,
         table_name: &str,
         index_id: IndexId,
-    ) -> Result<(BumpBytes, BumpBytes), DatabaseError> {
+    ) -> Result<(BumpBytes<'_>, BumpBytes<'_>), DatabaseError> {
         let op = |bound_id| -> Result<BumpBytes, DatabaseError> {
             let mut key_prefix = self.key_prefix(CodecType::Index, table_name);
 
@@ -186,7 +186,7 @@ impl TableCodec {
         Ok((op(BOUND_MIN_TAG)?, op(BOUND_MAX_TAG)?))
     }
 
-    pub fn all_index_bound(&self, table_name: &str) -> (BumpBytes, BumpBytes) {
+    pub fn all_index_bound(&self, table_name: &str) -> (BumpBytes<'_>, BumpBytes<'_>) {
         let op = |bound_id| {
             let mut key_prefix = self.key_prefix(CodecType::Index, table_name);
 
@@ -197,7 +197,7 @@ impl TableCodec {
         (op(BOUND_MIN_TAG), op(BOUND_MAX_TAG))
     }
 
-    pub fn root_table_bound(&self) -> (BumpBytes, BumpBytes) {
+    pub fn root_table_bound(&self) -> (BumpBytes<'_>, BumpBytes<'_>) {
         let op = |bound_id| {
             let mut key_prefix = BumpBytes::new_in(&self.arena);
 
@@ -209,7 +209,7 @@ impl TableCodec {
         (op(BOUND_MIN_TAG), op(BOUND_MAX_TAG))
     }
 
-    pub fn table_bound(&self, table_name: &str) -> (BumpBytes, BumpBytes) {
+    pub fn table_bound(&self, table_name: &str) -> (BumpBytes<'_>, BumpBytes<'_>) {
         let mut column_prefix = self.key_prefix(CodecType::Column, table_name);
         column_prefix.push(BOUND_MIN_TAG);
 
@@ -219,7 +219,7 @@ impl TableCodec {
         (column_prefix, index_prefix)
     }
 
-    pub fn columns_bound(&self, table_name: &str) -> (BumpBytes, BumpBytes) {
+    pub fn columns_bound(&self, table_name: &str) -> (BumpBytes<'_>, BumpBytes<'_>) {
         let op = |bound_id| {
             let mut key_prefix = self.key_prefix(CodecType::Column, table_name);
 
@@ -230,7 +230,7 @@ impl TableCodec {
         (op(BOUND_MIN_TAG), op(BOUND_MAX_TAG))
     }
 
-    pub fn statistics_bound(&self, table_name: &str) -> (BumpBytes, BumpBytes) {
+    pub fn statistics_bound(&self, table_name: &str) -> (BumpBytes<'_>, BumpBytes<'_>) {
         let op = |bound_id| {
             let mut key_prefix = self.key_prefix(CodecType::Statistics, table_name);
 
@@ -241,7 +241,7 @@ impl TableCodec {
         (op(BOUND_MIN_TAG), op(BOUND_MAX_TAG))
     }
 
-    pub fn view_bound(&self) -> (BumpBytes, BumpBytes) {
+    pub fn view_bound(&self) -> (BumpBytes<'_>, BumpBytes<'_>) {
         let op = |bound_id| {
             let mut key_prefix = BumpBytes::new_in(&self.arena);
 
@@ -260,7 +260,7 @@ impl TableCodec {
         table_name: &str,
         tuple: &mut Tuple,
         types: &[TupleValueSerializableImpl],
-    ) -> Result<(BumpBytes, BumpBytes), DatabaseError> {
+    ) -> Result<(BumpBytes<'_>, BumpBytes<'_>), DatabaseError> {
         let tuple_id = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
         let key = self.encode_tuple_key(table_name, tuple_id)?;
 
@@ -271,7 +271,7 @@ impl TableCodec {
         &self,
         table_name: &str,
         tuple_id: &TupleId,
-    ) -> Result<BumpBytes, DatabaseError> {
+    ) -> Result<BumpBytes<'_>, DatabaseError> {
         Self::check_primary_key(tuple_id, 0)?;
 
         let mut key_prefix = self.key_prefix(CodecType::Tuple, table_name);
@@ -297,7 +297,7 @@ impl TableCodec {
         &self,
         table_name: &str,
         index_id: IndexId,
-    ) -> Result<BumpBytes, DatabaseError> {
+    ) -> Result<BumpBytes<'_>, DatabaseError> {
         let mut key_prefix = self.key_prefix(CodecType::IndexMeta, table_name);
 
         key_prefix.write_all(&[BOUND_MIN_TAG])?;
@@ -311,7 +311,7 @@ impl TableCodec {
         &self,
         table_name: &str,
         index_meta: &IndexMeta,
-    ) -> Result<(BumpBytes, BumpBytes), DatabaseError> {
+    ) -> Result<(BumpBytes<'_>, BumpBytes<'_>), DatabaseError> {
         let key_bytes = self.encode_index_meta_key(table_name, index_meta.id)?;
 
         let mut value_bytes = BumpBytes::new_in(&self.arena);
@@ -339,7 +339,7 @@ impl TableCodec {
         name: &str,
         index: &Index,
         tuple_id: &TupleId,
-    ) -> Result<(BumpBytes, BumpBytes), DatabaseError> {
+    ) -> Result<(BumpBytes<'_>, BumpBytes<'_>), DatabaseError> {
         let key = self.encode_index_key(name, index, Some(tuple_id))?;
         let mut bytes = BumpBytes::new_in(&self.arena);
 
@@ -353,7 +353,7 @@ impl TableCodec {
         name: &str,
         index: &Index,
         is_upper: bool,
-    ) -> Result<BumpBytes, DatabaseError> {
+    ) -> Result<BumpBytes<'_>, DatabaseError> {
         let mut key_prefix = self.key_prefix(CodecType::Index, name);
         key_prefix.push(BOUND_MIN_TAG);
         key_prefix.extend_from_slice(&index.id.to_le_bytes());
@@ -372,7 +372,7 @@ impl TableCodec {
         name: &str,
         index: &Index,
         tuple_id: Option<&TupleId>,
-    ) -> Result<BumpBytes, DatabaseError> {
+    ) -> Result<BumpBytes<'_>, DatabaseError> {
         let mut key_prefix = self.encode_index_bound_key(name, index, false)?;
 
         if let Some(tuple_id) = tuple_id {
@@ -395,7 +395,7 @@ impl TableCodec {
         &self,
         col: &ColumnRef,
         reference_tables: &mut ReferenceTables,
-    ) -> Result<(BumpBytes, BumpBytes), DatabaseError> {
+    ) -> Result<(BumpBytes<'_>, BumpBytes<'_>), DatabaseError> {
         if let ColumnRelation::Table {
             column_id,
             table_name,
@@ -433,7 +433,7 @@ impl TableCodec {
         table_name: &str,
         index_id: IndexId,
         path: String,
-    ) -> (BumpBytes, BumpBytes) {
+    ) -> (BumpBytes<'_>, BumpBytes<'_>) {
         let key = self.encode_statistics_path_key(table_name, index_id);
 
         let mut value = BumpBytes::new_in(&self.arena);
@@ -442,7 +442,7 @@ impl TableCodec {
         (key, value)
     }
 
-    pub fn encode_statistics_path_key(&self, table_name: &str, index_id: IndexId) -> BumpBytes {
+    pub fn encode_statistics_path_key(&self, table_name: &str, index_id: IndexId) -> BumpBytes<'_> {
         let mut key_prefix = self.key_prefix(CodecType::Statistics, table_name);
 
         key_prefix.push(BOUND_MIN_TAG);
@@ -456,7 +456,10 @@ impl TableCodec {
 
     /// Key: View{BOUND_MIN_TAG}{ViewName}
     /// Value: View
-    pub fn encode_view(&self, view: &View) -> Result<(BumpBytes, BumpBytes), DatabaseError> {
+    pub fn encode_view(
+        &self,
+        view: &View,
+    ) -> Result<(BumpBytes<'_>, BumpBytes<'_>), DatabaseError> {
         let key = self.encode_view_key(&view.name);
 
         let mut reference_tables = ReferenceTables::new();
@@ -474,7 +477,7 @@ impl TableCodec {
         Ok((key, bytes))
     }
 
-    pub fn encode_view_key(&self, view_name: &str) -> BumpBytes {
+    pub fn encode_view_key(&self, view_name: &str) -> BumpBytes<'_> {
         self.key_prefix(CodecType::View, view_name)
     }
 
@@ -500,7 +503,7 @@ impl TableCodec {
     pub fn encode_root_table(
         &self,
         meta: &TableMeta,
-    ) -> Result<(BumpBytes, BumpBytes), DatabaseError> {
+    ) -> Result<(BumpBytes<'_>, BumpBytes<'_>), DatabaseError> {
         let key = self.encode_root_table_key(&meta.table_name);
 
         let mut meta_bytes = BumpBytes::new_in(&self.arena);
@@ -508,7 +511,7 @@ impl TableCodec {
         Ok((key, meta_bytes))
     }
 
-    pub fn encode_root_table_key(&self, table_name: &str) -> BumpBytes {
+    pub fn encode_root_table_key(&self, table_name: &str) -> BumpBytes<'_> {
         self.key_prefix(CodecType::Root, table_name)
     }
 
@@ -518,11 +521,11 @@ impl TableCodec {
         TableMeta::decode::<T, _>(&mut bytes, None, &EMPTY_REFERENCE_TABLES)
     }
 
-    pub fn encode_table_hash_key(&self, table_name: &str) -> BumpBytes {
+    pub fn encode_table_hash_key(&self, table_name: &str) -> BumpBytes<'_> {
         self.key_prefix(CodecType::Hash, table_name)
     }
 
-    pub fn encode_table_hash(&self, table_name: &str) -> (BumpBytes, BumpBytes) {
+    pub fn encode_table_hash(&self, table_name: &str) -> (BumpBytes<'_>, BumpBytes<'_>) {
         (
             self.key_prefix(CodecType::Hash, table_name),
             BumpBytes::new_in(&self.arena),
@@ -567,7 +570,7 @@ mod tests {
                 ColumnDesc::new(LogicalType::Decimal(None, None), None, false, None).unwrap(),
             ),
         ];
-        TableCatalog::new(Arc::new("t1".to_string()), columns).unwrap()
+        TableCatalog::new("t1".to_string().into(), columns).unwrap()
     }
 
     #[test]
@@ -617,7 +620,7 @@ mod tests {
 
         let table_meta = TableCodec::decode_root_table::<RocksTransaction>(&bytes).unwrap();
 
-        assert_eq!(table_meta.table_name.as_str(), table_catalog.name.as_str());
+        assert_eq!(table_meta.table_name.as_ref(), table_catalog.name.as_ref());
     }
 
     #[test]
@@ -640,7 +643,7 @@ mod tests {
         let index_meta = IndexMeta {
             id: 0,
             column_ids: vec![Ulid::new()],
-            table_name: Arc::new("T1".to_string()),
+            table_name: "t1".to_string().into(),
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,
             name: "index_1".to_string(),
@@ -681,7 +684,7 @@ mod tests {
         );
         col.summary_mut().relation = ColumnRelation::Table {
             column_id: Ulid::new(),
-            table_name: Arc::new("t1".to_string()),
+            table_name: "t1".to_string().into(),
             is_temp: false,
         };
         let col = ColumnRef::from(col);
@@ -716,7 +719,7 @@ mod tests {
                 .plan("select * from t1 where c1 in (select c1 from t1 where c1 > 1)")?;
             println!("{:#?}", plan);
             let view = View {
-                name: Arc::new("view_subquery".to_string()),
+                name: "view_subquery".to_string().into(),
                 plan: Box::new(plan),
             };
             let (_, bytes) = table_codec.encode_view(&view)?;
@@ -732,7 +735,7 @@ mod tests {
             println!("==== No Join");
             let plan = table_state.plan("select * from t1 where c1 > 1")?;
             let view = View {
-                name: Arc::new("view_filter".to_string()),
+                name: "view_filter".to_string().into(),
                 plan: Box::new(plan),
             };
             let (_, bytes) = table_codec.encode_view(&view)?;
@@ -748,7 +751,7 @@ mod tests {
             println!("==== Join");
             let plan = table_state.plan("select * from t1 left join t2 on c1 = c3")?;
             let view = View {
-                name: Arc::new("view_join".to_string()),
+                name: "view_join".to_string().into(),
                 plan: Box::new(plan),
             };
             let (_, bytes) = table_codec.encode_view(&view)?;
@@ -778,7 +781,7 @@ mod tests {
 
             col.summary_mut().relation = ColumnRelation::Table {
                 column_id: Ulid::from(col_id as u128),
-                table_name: Arc::new(table_name.to_string()),
+                table_name: table_name.to_string().into(),
                 is_temp: false,
             };
 
@@ -800,7 +803,7 @@ mod tests {
         set.insert(op(0, "T2"));
         set.insert(op(0, "T2"));
 
-        let (min, max) = table_codec.columns_bound(&Arc::new("T1".to_string()));
+        let (min, max) = table_codec.columns_bound("T1");
 
         let vec = set
             .range::<BumpBytes, (Bound<&BumpBytes>, Bound<&BumpBytes>)>((
@@ -826,7 +829,7 @@ mod tests {
             let index_meta = IndexMeta {
                 id: index_id as u32,
                 column_ids: vec![],
-                table_name: Arc::new(table_name.to_string()),
+                table_name: table_name.to_string().into(),
                 pk_ty: LogicalType::Integer,
                 value_ty: LogicalType::Integer,
                 name: format!("{}_index", index_id),
@@ -834,7 +837,7 @@ mod tests {
             };
 
             let (key, _) = table_codec
-                .encode_index_meta(&table_name.to_string(), &index_meta)
+                .encode_index_meta(table_name, &index_meta)
                 .unwrap();
             key
         };
@@ -878,9 +881,9 @@ mod tests {
             false,
             ColumnDesc::new(LogicalType::Boolean, None, false, None).unwrap(),
         );
-        let table_catalog = TableCatalog::new(Arc::new("T0".to_string()), vec![column]).unwrap();
+        let table_catalog = TableCatalog::new("T0".to_string().into(), vec![column]).unwrap();
 
-        let op = |value: DataValue, index_id: usize, table_name: &String| {
+        let op = |value: DataValue, index_id: usize, table_name: &str| {
             let value = Arc::new(value);
             let index = Index::new(
                 index_id as u32,

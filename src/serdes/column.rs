@@ -141,7 +141,9 @@ impl ReferenceSerialization for ColumnRelation {
 
 #[cfg(test)]
 pub(crate) mod test {
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation, ColumnSummary};
+    use crate::catalog::{
+        ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation, ColumnSummary, TableName,
+    };
     use crate::db::test::build_table;
     use crate::errors::DatabaseError;
     use crate::expression::ScalarExpression;
@@ -166,14 +168,14 @@ pub(crate) mod test {
         let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
         let meta_cache = StatisticsMetaCache::new(4, 1, RandomState::new())?;
 
-        let table_name = Arc::new("t1".to_string());
+        let table_name: TableName = "t1".to_string().into();
         build_table(&table_cache, &mut transaction)?;
 
         let mut cursor = Cursor::new(Vec::new());
         let mut reference_tables = ReferenceTables::new();
         let c3_column_id = {
             let table = transaction
-                .table(&table_cache, Arc::new("t1".to_string()))?
+                .table(&table_cache, "t1".to_string().into())?
                 .unwrap();
             *table.get_column_id_by_name("c3").unwrap()
         };
@@ -254,7 +256,7 @@ pub(crate) mod test {
             name: "c1".to_string(),
             relation: ColumnRelation::Table {
                 column_id: Ulid::new(),
-                table_name: Arc::new("t1".to_string()),
+                table_name: "t1".to_string().into(),
                 is_temp: false,
             },
         };
@@ -290,7 +292,7 @@ pub(crate) mod test {
         cursor.seek(SeekFrom::Start(0))?;
         let table_relation = ColumnRelation::Table {
             column_id: Ulid::new(),
-            table_name: Arc::new("t1".to_string()),
+            table_name: "t1".to_string().into(),
             is_temp: false,
         };
         table_relation.encode(&mut cursor, false, &mut reference_tables)?;

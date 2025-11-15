@@ -25,7 +25,6 @@ use crate::errors::DatabaseError;
 use crate::storage::{TableCache, Transaction};
 use std::io;
 use std::io::{Read, Write};
-use std::sync::Arc;
 
 #[macro_export]
 macro_rules! implement_serialization_by_bincode {
@@ -53,7 +52,7 @@ macro_rules! implement_serialization_by_bincode {
     };
 }
 
-pub trait ReferenceSerialization: Sized {
+pub trait ReferenceSerialization {
     fn encode<W: Write>(
         &self,
         writer: &mut W,
@@ -65,7 +64,9 @@ pub trait ReferenceSerialization: Sized {
         reader: &mut R,
         drive: Option<(&T, &TableCache)>,
         reference_tables: &ReferenceTables,
-    ) -> Result<Self, DatabaseError>;
+    ) -> Result<Self, DatabaseError>
+    where
+        Self: Sized;
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -122,7 +123,7 @@ impl ReferenceTables {
             let len = u32::from_le_bytes(bytes) as usize;
             let mut bytes = vec![0u8; len];
             reader.read_exact(&mut bytes)?;
-            tables.push(Arc::new(String::from_utf8(bytes).unwrap()));
+            tables.push(String::from_utf8(bytes).unwrap().into());
         }
 
         Ok(ReferenceTables { tables })
@@ -134,12 +135,11 @@ mod tests {
     use crate::serdes::ReferenceTables;
     use std::io;
     use std::io::{Seek, SeekFrom};
-    use std::sync::Arc;
 
     #[test]
     fn test_to_raw() -> io::Result<()> {
         let reference_tables = ReferenceTables {
-            tables: vec![Arc::new("t1".to_string()), Arc::new("t2".to_string())],
+            tables: vec!["t1".to_string().into(), "t2".to_string().into()],
         };
 
         let mut cursor = io::Cursor::new(Vec::new());

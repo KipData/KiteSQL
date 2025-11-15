@@ -130,7 +130,6 @@ mod test {
     use crate::types::value::DataValue;
     use crate::types::{ColumnId, LogicalType};
     use std::collections::Bound;
-    use std::sync::Arc;
 
     #[test]
     fn test_constant_calculation_omitted() -> Result<(), DatabaseError> {
@@ -265,7 +264,7 @@ mod test {
                     name: "c1".to_string(),
                     relation: ColumnRelation::Table {
                         column_id: *table_state.column_id_by_name("c1"),
-                        table_name: Arc::new("t1".to_string()),
+                        table_name: "t1".to_string().into(),
                         is_temp: false,
                     },
                 },
@@ -278,7 +277,7 @@ mod test {
                     name: "c2".to_string(),
                     relation: ColumnRelation::Table {
                         column_id: *table_state.column_id_by_name("c2"),
-                        table_name: Arc::new("t1".to_string()),
+                        table_name: "t1".to_string().into(),
                         is_temp: false,
                     },
                 },
