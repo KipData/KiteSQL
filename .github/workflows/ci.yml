@@ -18,7 +18,7 @@ jobs:
       - name: Install latest nightly
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: nightly-2024-10-10
+          toolchain: stable
           override: true
           components: rustfmt, clippy
 
@@ -54,7 +54,7 @@ jobs:
       - name: Install latest nightly
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: nightly-2024-10-10
+          toolchain: stable
           override: true
           components: rustfmt, clippy
 
@@ -75,7 +75,7 @@ jobs:
       - name: Install latest nightly
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: nightly-2024-10-10
+          toolchain: stable
           override: true
           components: rustfmt, clippy
 
