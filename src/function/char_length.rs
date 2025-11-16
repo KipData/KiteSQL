@@ -21,7 +21,7 @@ impl CharLength {
         let arg_types = vec![LogicalType::Varchar(None, CharLengthUnits::Characters)];
         Arc::new(Self {
             summary: FunctionSummary {
-                name: function_name,
+                name: function_name.into(),
                 arg_types,
             },
         })

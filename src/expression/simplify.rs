@@ -416,7 +416,7 @@ impl Simplify {
 
     fn _is_belong(table_name: &str, col: &ColumnRef) -> bool {
         matches!(
-            col.table_name().map(|name| table_name == name.as_str()),
+            col.table_name().map(|name| table_name == name.as_ref()),
             Some(true)
         )
     }

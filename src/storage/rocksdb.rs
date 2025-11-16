@@ -223,7 +223,7 @@ fn next(
 
 #[cfg(test)]
 mod test {
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
+    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
     use crate::db::{DataBaseBuilder, ResultIter};
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
@@ -268,12 +268,12 @@ mod test {
             .collect_vec();
         let _ = transaction.create_table(
             &table_cache,
-            Arc::new("test".to_string()),
+            "test".to_string().into(),
             source_columns,
             false,
         )?;
 
-        let table_catalog = transaction.table(&table_cache, Arc::new("test".to_string()))?;
+        let table_catalog = transaction.table(&table_cache, "test".to_string().into())?;
         assert!(table_catalog.is_some());
         assert!(table_catalog
             .unwrap()
@@ -310,7 +310,7 @@ mod test {
 
         let mut iter = transaction.read(
             &table_cache,
-            Arc::new("test".to_string()),
+            "test".to_string().into(),
             (Some(1), Some(1)),
             read_columns,
             true,
@@ -338,7 +338,7 @@ mod test {
             .done()?;
         let transaction = kite_sql.storage.transaction()?;
 
-        let table_name = Arc::new("t1".to_string());
+        let table_name: TableName = "t1".to_string().into();
         let table = transaction
             .table(kite_sql.state.table_cache(), table_name.clone())?
             .unwrap()
@@ -410,14 +410,14 @@ mod test {
         let transaction = kite_sql.storage.transaction().unwrap();
 
         let table = transaction
-            .table(kite_sql.state.table_cache(), Arc::new("t1".to_string()))?
+            .table(kite_sql.state.table_cache(), "t1".to_string().into())?
             .unwrap()
             .clone();
         {
             let mut iter = transaction
                 .read_by_index(
                     kite_sql.state.table_cache(),
-                    Arc::new("t1".to_string()),
+                    "t1".to_string().into(),
                     (Some(0), Some(1)),
                     table.columns().cloned().enumerate().collect(),
                     table.indexes[0].clone(),
@@ -442,7 +442,7 @@ mod test {
             let mut iter = transaction
                 .read_by_index(
                     kite_sql.state.table_cache(),
-                    Arc::new("t1".to_string()),
+                    "t1".to_string().into(),
                     (Some(0), Some(1)),
                     columns,
                     table.indexes[0].clone(),

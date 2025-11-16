@@ -184,7 +184,7 @@ impl Analyze {
         dirs::home_dir()
             .expect("Your system does not have a Config directory!")
             .join(DEFAULT_STATISTICS_META_PATH)
-            .join(table_name.as_str())
+            .join(table_name.as_ref())
     }
 }
 

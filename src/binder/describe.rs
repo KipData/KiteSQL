@@ -13,7 +13,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         &mut self,
         name: &ObjectName,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name = Arc::new(lower_case_name(name)?);
+        let table_name: Arc<str> = lower_case_name(name)?.into();
 
         Ok(LogicalPlan::new(
             Operator::Describe(DescribeOperator { table_name }),

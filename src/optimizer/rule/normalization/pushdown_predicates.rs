@@ -225,7 +225,7 @@ impl NormalizationRule for PushPredicateIntoScan {
                             IndexType::PrimaryKey { is_multiple: false }
                             | IndexType::Unique
                             | IndexType::Normal => {
-                                RangeDetacher::new(meta.table_name.as_str(), &meta.column_ids[0])
+                                RangeDetacher::new(meta.table_name.as_ref(), &meta.column_ids[0])
                                     .detach(&op.predicate)?
                             }
                             IndexType::PrimaryKey { is_multiple: true } | IndexType::Composite => {
@@ -252,7 +252,7 @@ impl PushPredicateIntoScan {
 
         for column_id in meta.column_ids.iter() {
             if let Some(range) =
-                RangeDetacher::new(meta.table_name.as_str(), column_id).detach(&op.predicate)?
+                RangeDetacher::new(meta.table_name.as_ref(), column_id).detach(&op.predicate)?
             {
                 apply_column_count += 1;
 

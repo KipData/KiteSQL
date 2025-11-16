@@ -16,9 +16,9 @@ use std::sync::LazyLock;
 
 static NUMBERS: LazyLock<TableCatalog> = LazyLock::new(|| {
     TableCatalog::new(
-        Arc::new("numbers".to_lowercase()),
+        "numbers".to_string().into(),
         vec![ColumnCatalog::new(
-            "number".to_lowercase(),
+            "number".to_string(),
             true,
             ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
         )],
@@ -34,11 +34,11 @@ pub(crate) struct Numbers {
 impl Numbers {
     #[allow(unused_mut)]
     pub(crate) fn new() -> Arc<Self> {
-        let function_name = "numbers".to_lowercase();
+        let function_name = "numbers".to_string();
 
         Arc::new(Self {
             summary: FunctionSummary {
-                name: function_name,
+                name: function_name.into(),
                 arg_types: vec![LogicalType::Integer],
             },
         })

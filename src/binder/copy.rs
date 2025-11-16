@@ -81,7 +81,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 return Err(DatabaseError::UnsupportedStmt("'COPY SOURCE'".to_string()));
             }
         };
-        let table_name = Arc::new(lower_case_name(&table_name)?);
+        let table_name: Arc<str> = lower_case_name(&table_name)?.into();
 
         if let Some(table) = self.context.table(table_name.clone())? {
             let schema_ref = table.schema_ref().clone();

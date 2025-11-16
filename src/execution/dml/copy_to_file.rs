@@ -108,7 +108,7 @@ mod tests {
                     name: "a".to_string(),
                     relation: ColumnRelation::Table {
                         column_id: Ulid::new(),
-                        table_name: Arc::new("t1".to_string()),
+                        table_name: "t1".to_string().into(),
                         is_temp: false,
                     },
                 },
@@ -121,7 +121,7 @@ mod tests {
                     name: "b".to_string(),
                     relation: ColumnRelation::Table {
                         column_id: Ulid::new(),
-                        table_name: Arc::new("t1".to_string()),
+                        table_name: "t1".to_string().into(),
                         is_temp: false,
                     },
                 },
@@ -134,7 +134,7 @@ mod tests {
                     name: "c".to_string(),
                     relation: ColumnRelation::Table {
                         column_id: Ulid::new(),
-                        table_name: Arc::new("t1".to_string()),
+                        table_name: "t1".to_string().into(),
                         is_temp: false,
                     },
                 },
@@ -176,12 +176,12 @@ mod tests {
         let storage = db.storage;
         let mut transaction = storage.transaction()?;
         let table = transaction
-            .table(&db.state.table_cache(), Arc::new("t1".to_string()))?
+            .table(&db.state.table_cache(), "t1".to_string().into())?
             .unwrap();
 
         let executor = CopyToFile {
             op: op.clone(),
-            input: TableScanOperator::build(Arc::new("t1".to_string()), table, true),
+            input: TableScanOperator::build("t1".to_string().into(), table, true),
         };
         let mut executor = executor.execute(
             (

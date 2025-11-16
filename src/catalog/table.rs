@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::{slice, vec};
 use ulid::Generator;
 
-pub type TableName = Arc<String>;
+pub type TableName = Arc<str>;
 pub type PrimaryKeyIndices = Arc<Vec<usize>>;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -293,18 +293,14 @@ mod tests {
             ColumnDesc::new(LogicalType::Boolean, None, false, None).unwrap(),
         );
         let col_catalogs = vec![col0, col1];
-        let table_catalog = TableCatalog::new(Arc::new("test".to_string()), col_catalogs).unwrap();
+        let table_catalog = TableCatalog::new("test".to_string().into(), col_catalogs).unwrap();
 
-        assert_eq!(table_catalog.contains_column(&"a".to_string()), true);
-        assert_eq!(table_catalog.contains_column(&"b".to_string()), true);
-        assert_eq!(table_catalog.contains_column(&"c".to_string()), false);
+        assert_eq!(table_catalog.contains_column("a"), true);
+        assert_eq!(table_catalog.contains_column("b"), true);
+        assert_eq!(table_catalog.contains_column("c"), false);
 
-        let col_a_id = table_catalog
-            .get_column_id_by_name(&"a".to_string())
-            .unwrap();
-        let col_b_id = table_catalog
-            .get_column_id_by_name(&"b".to_string())
-            .unwrap();
+        let col_a_id = table_catalog.get_column_id_by_name("a").unwrap();
+        let col_b_id = table_catalog.get_column_id_by_name("b").unwrap();
         assert!(col_a_id < col_b_id);
 
         let column_catalog = table_catalog.get_column_by_id(&col_a_id).unwrap();

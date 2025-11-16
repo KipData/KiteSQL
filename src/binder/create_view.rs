@@ -21,7 +21,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         columns: &[Ident],
         query: &Query,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let view_name = Arc::new(lower_case_name(name)?);
+        let view_name: Arc<str> = lower_case_name(name)?.into();
         let mut plan = self.bind_query(query)?;
 
         let mapping_schema = plan.output_schema();

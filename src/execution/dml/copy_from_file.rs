@@ -155,7 +155,7 @@ mod tests {
                     name: "a".to_string(),
                     relation: ColumnRelation::Table {
                         column_id: Ulid::new(),
-                        table_name: Arc::new("t1".to_string()),
+                        table_name: "t1".to_string().into(),
                         is_temp: false,
                     },
                 },
@@ -168,7 +168,7 @@ mod tests {
                     name: "b".to_string(),
                     relation: ColumnRelation::Table {
                         column_id: Ulid::new(),
-                        table_name: Arc::new("t1".to_string()),
+                        table_name: "t1".to_string().into(),
                         is_temp: false,
                     },
                 },
@@ -181,7 +181,7 @@ mod tests {
                     name: "c".to_string(),
                     relation: ColumnRelation::Table {
                         column_id: Ulid::new(),
-                        table_name: Arc::new("t1".to_string()),
+                        table_name: "t1".to_string().into(),
                         is_temp: false,
                     },
                 },
@@ -197,7 +197,7 @@ mod tests {
         ];
 
         let op = CopyFromFileOperator {
-            table: Arc::new("test_copy".to_string()),
+            table: "test_copy".to_string().into(),
             source: ExtSource {
                 path: file.path().into(),
                 format: FileFormat::Csv {

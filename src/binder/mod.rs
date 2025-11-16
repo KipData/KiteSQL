@@ -193,10 +193,11 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
     }
 
     pub fn temp_table(&mut self) -> TableName {
-        Arc::new(format!(
+        format!(
             "_temp_table_{}_",
             self.temp_table_id.fetch_add(1, Ordering::SeqCst)
-        ))
+        )
+        .into()
     }
 
     pub fn step(&mut self, bind_step: QueryBindStep) {
@@ -247,7 +248,7 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
         alias: Option<&TableName>,
         join_type: Option<JoinType>,
         only_table: bool,
-    ) -> Result<Option<Source>, DatabaseError> {
+    ) -> Result<Option<Source<'_>>, DatabaseError> {
         let mut source = None;
 
         source = if let Some(real_name) = self.table_aliases.get(table_name.as_ref()) {
@@ -276,10 +277,10 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
         Ok(source)
     }
 
-    pub fn bind_source<'b: 'a>(&self, table_name: &str) -> Result<&Source, DatabaseError> {
+    pub fn bind_source<'b: 'a>(&self, table_name: &str) -> Result<&Source<'_>, DatabaseError> {
         if let Some(source) = self.bind_table.iter().find(|((t, alias, _), _)| {
-            t.as_str() == table_name
-                || matches!(alias.as_ref().map(|a| a.as_str() == table_name), Some(true))
+            t.as_ref() == table_name
+                || matches!(alias.as_ref().map(|a| a.as_ref() == table_name), Some(true))
         }) {
             Ok(source.1)
         } else {
@@ -582,7 +583,7 @@ pub mod test {
         let table = {
             let transaction = storage.transaction()?;
             transaction
-                .table(&table_cache, Arc::new("t1".to_string()))?
+                .table(&table_cache, "t1".to_string().into())?
                 .unwrap()
                 .clone()
         };
@@ -604,7 +605,7 @@ pub mod test {
 
         let _ = transaction.create_table(
             table_cache,
-            Arc::new("t1".to_string()),
+            "t1".to_string().into(),
             vec![
                 ColumnCatalog::new(
                     "c1".to_string(),
@@ -622,7 +623,7 @@ pub mod test {
 
         let _ = transaction.create_table(
             table_cache,
-            Arc::new("t2".to_string()),
+            "t2".to_string().into(),
             vec![
                 ColumnCatalog::new(
                     "c3".to_string(),

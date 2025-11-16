@@ -759,7 +759,7 @@ impl DataValue {
 
         let mut byte_array = Vec::with_capacity(16);
         // Remove trailing zero.
-        while mantissa % 10 == 0 && mantissa != 0 {
+        while mantissa.is_multiple_of(10) && mantissa != 0 {
             mantissa /= 10;
             digit_num -= 1;
         }

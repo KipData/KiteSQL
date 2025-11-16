@@ -115,7 +115,7 @@ impl<K: Hash + Eq + PartialEq, V, S: BuildHasher> SharedLruCache<K, V, S> {
     #[inline]
     pub fn new(cap: usize, shared_size: usize, hasher: S) -> Result<Self, DatabaseError> {
         let mut shared_vec = Vec::with_capacity(shared_size);
-        if cap % shared_size != 0 {
+        if !cap.is_multiple_of(shared_size) {
             return Err(DatabaseError::SharedNotAlign);
         }
         let shared_cap = cap / shared_size;
@@ -353,7 +353,7 @@ impl<K: Hash + Eq + PartialEq, V> LruCache<K, V> {
 
     #[allow(dead_code)]
     #[inline]
-    pub fn iter(&self) -> LruCacheIter<K, V> {
+    pub fn iter(&self) -> LruCacheIter<'_, K, V> {
         LruCacheIter {
             inner: self.inner.iter(),
         }

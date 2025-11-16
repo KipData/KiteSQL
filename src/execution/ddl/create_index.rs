@@ -92,7 +92,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateIndex {
                 let index = Index::new(index_id, &value, ty);
                 throw!(
                     co,
-                    unsafe { &mut (*transaction) }.add_index(table_name.as_str(), index, tuple_id)
+                    unsafe { &mut (*transaction) }.add_index(table_name.as_ref(), index, tuple_id)
                 );
             }
             co.yield_(Ok(TupleBuilder::build_result("1".to_string())))

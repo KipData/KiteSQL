@@ -25,7 +25,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
     ) -> Result<LogicalPlan, DatabaseError> {
         // FIXME: Make it better to detect the current BindStep
         self.context.allow_default = true;
-        let table_name = Arc::new(lower_case_name(name)?);
+        let table_name: Arc<str> = lower_case_name(name)?.into();
 
         let source = self
             .context

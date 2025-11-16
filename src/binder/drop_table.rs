@@ -14,7 +14,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         name: &ObjectName,
         if_exists: &bool,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name = Arc::new(lower_case_name(name)?);
+        let table_name: Arc<str> = lower_case_name(name)?.into();
 
         Ok(LogicalPlan::new(
             Operator::DropTable(DropTableOperator {

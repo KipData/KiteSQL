@@ -34,7 +34,7 @@ impl<'a, T: Transaction> StatisticMetaLoader<'a, T> {
         if let Some(statistics_meta) = option {
             return Ok(Some(statistics_meta));
         }
-        if let Some(path) = self.tx.table_meta_path(table_name.as_str(), index_id)? {
+        if let Some(path) = self.tx.table_meta_path(table_name.as_ref(), index_id)? {
             Ok(Some(self.cache.get_or_insert(key, |_| {
                 StatisticsMeta::from_file::<T>(path)
             })?))
@@ -121,7 +121,7 @@ mod tests {
         let index = IndexMeta {
             id: 0,
             column_ids: vec![Ulid::new()],
-            table_name: Arc::new("t1".to_string()),
+            table_name: "t1".to_string().into(),
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,
             name: "pk_c1".to_string(),

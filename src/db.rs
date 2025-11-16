@@ -324,7 +324,7 @@ impl<S: Storage> Database<S> {
         &self,
         statement: &Statement,
         params: A,
-    ) -> Result<DatabaseIter<S>, DatabaseError> {
+    ) -> Result<DatabaseIter<'_, S>, DatabaseError> {
         let _guard = if matches!(command_type(statement)?, CommandType::DDL) {
             MetaDataLock::Write(self.mdl.write_arc())
         } else {
@@ -338,7 +338,7 @@ impl<S: Storage> Database<S> {
         Ok(DatabaseIter { transaction, inner })
     }
 
-    pub fn new_transaction(&self) -> Result<DBTransaction<S>, DatabaseError> {
+    pub fn new_transaction(&self) -> Result<DBTransaction<'_, S>, DatabaseError> {
         let guard = self.mdl.read_arc();
         let transaction = self.storage.transaction()?;
         let state = self.state.clone();
@@ -418,7 +418,7 @@ impl<S: Storage> DBTransaction<'_, S> {
         &mut self,
         statement: &Statement,
         params: A,
-    ) -> Result<TransactionIter, DatabaseError> {
+    ) -> Result<TransactionIter<'_>, DatabaseError> {
         if matches!(command_type(statement)?, CommandType::DDL) {
             return Err(DatabaseError::UnsupportedStmt(
                 "`DDL` is not allowed to execute within a transaction".to_string(),
@@ -500,8 +500,7 @@ pub(crate) mod test {
                 ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
             ),
         ];
-        let _ =
-            transaction.create_table(table_cache, Arc::new("t1".to_string()), columns, false)?;
+        let _ = transaction.create_table(table_cache, "t1".to_string().into(), columns, false)?;
 
         Ok(())
     }
@@ -563,7 +562,7 @@ pub(crate) mod test {
             ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
         );
         let number_column_id = iter.schema()[0].id().unwrap();
-        column.set_ref_table(Arc::new("a".to_string()), number_column_id, false);
+        column.set_ref_table("a".to_string().into(), number_column_id, false);
 
         assert_eq!(iter.schema(), &Arc::new(vec![ColumnRef::from(column)]));
         assert_eq!(

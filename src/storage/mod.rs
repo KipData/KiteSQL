@@ -100,7 +100,7 @@ pub trait Transaction: Sized {
         let table = self
             .table(table_cache, table_name.clone())?
             .ok_or(DatabaseError::TableNotFound)?;
-        let table_name = table.name.as_str();
+        let table_name = table.name.as_ref();
         let offset = offset_option.unwrap_or(0);
 
         if columns.is_empty() || with_pk {
@@ -428,7 +428,7 @@ pub trait Transaction: Sized {
             }
         }
 
-        self.remove(&unsafe { &*self.table_codec() }.encode_view_key(view_name.as_str()))?;
+        self.remove(&unsafe { &*self.table_codec() }.encode_view_key(view_name.as_ref()))?;
         view_cache.remove(&view_name);
 
         Ok(())
@@ -460,15 +460,15 @@ pub trait Transaction: Sized {
 
         let index_id = index_meta.id;
         let index_meta_key =
-            unsafe { &*self.table_codec() }.encode_index_meta_key(table_name.as_str(), index_id)?;
+            unsafe { &*self.table_codec() }.encode_index_meta_key(table_name.as_ref(), index_id)?;
         self.remove(&index_meta_key)?;
 
         let (index_min, index_max) =
-            unsafe { &*self.table_codec() }.index_bound(table_name.as_str(), index_id)?;
+            unsafe { &*self.table_codec() }.index_bound(table_name.as_ref(), index_id)?;
         self._drop_data(index_min, index_max)?;
 
         let statistics_min_key = unsafe { &*self.table_codec() }
-            .encode_statistics_path_key(table_name.as_str(), index_id);
+            .encode_statistics_path_key(table_name.as_ref(), index_id);
         self.remove(&statistics_min_key)?;
 
         table_cache.remove(&table_name);
@@ -491,17 +491,17 @@ pub trait Transaction: Sized {
             }
         }
         self.drop_name_hash(&table_name)?;
-        self.drop_data(table_name.as_str())?;
+        self.drop_data(table_name.as_ref())?;
 
         let (column_min, column_max) =
-            unsafe { &*self.table_codec() }.columns_bound(table_name.as_str());
+            unsafe { &*self.table_codec() }.columns_bound(table_name.as_ref());
         self._drop_data(column_min, column_max)?;
 
         let (index_meta_min, index_meta_max) =
-            unsafe { &*self.table_codec() }.index_meta_bound(table_name.as_str());
+            unsafe { &*self.table_codec() }.index_meta_bound(table_name.as_ref());
         self._drop_data(index_meta_min, index_meta_max)?;
 
-        self.remove(&unsafe { &*self.table_codec() }.encode_root_table_key(table_name.as_str()))?;
+        self.remove(&unsafe { &*self.table_codec() }.encode_root_table_key(table_name.as_ref()))?;
         table_cache.remove(&table_name);
 
         let _ = fs::remove_dir(Analyze::build_statistics_meta_path(&table_name));
@@ -599,7 +599,7 @@ pub trait Transaction: Sized {
         meta_cache.put((table_name.clone(), index_id), statistics_meta);
 
         let (key, value) = unsafe { &*self.table_codec() }.encode_statistics_path(
-            table_name.as_str(),
+            table_name.as_ref(),
             index_id,
             path,
         );
@@ -1273,7 +1273,9 @@ pub trait Iter {
 mod test {
     use crate::binder::test::build_t1_table;
     use crate::catalog::view::View;
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation, ColumnSummary};
+    use crate::catalog::{
+        ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation, ColumnSummary, TableName,
+    };
     use crate::db::test::build_table;
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
@@ -1363,22 +1365,19 @@ mod test {
                          table_cache: &TableCache|
          -> Result<(), DatabaseError> {
             let table = transaction
-                .table(&table_cache, Arc::new("t1".to_string()))?
+                .table(&table_cache, "t1".to_string().into())?
                 .unwrap();
             let c1_column_id = *table.get_column_id_by_name("c1").unwrap();
             let c2_column_id = *table.get_column_id_by_name("c2").unwrap();
             let c3_column_id = *table.get_column_id_by_name("c3").unwrap();
 
-            assert_eq!(table.name.as_str(), "t1");
+            assert_eq!(table.name.as_ref(), "t1");
             assert_eq!(table.indexes.len(), 1);
 
             let primary_key_index_meta = &table.indexes[0];
             assert_eq!(primary_key_index_meta.id, 0);
             assert_eq!(primary_key_index_meta.column_ids, vec![c1_column_id]);
-            assert_eq!(
-                primary_key_index_meta.table_name,
-                Arc::new("t1".to_string())
-            );
+            assert_eq!(primary_key_index_meta.table_name, "t1".to_string().into());
             assert_eq!(primary_key_index_meta.pk_ty, LogicalType::Integer);
             assert_eq!(primary_key_index_meta.name, "pk_index".to_string());
             assert_eq!(
@@ -1395,7 +1394,7 @@ mod test {
                     name: "c1".to_string(),
                     relation: ColumnRelation::Table {
                         column_id: c1_column_id,
-                        table_name: Arc::new("t1".to_string()),
+                        table_name: "t1".to_string().into(),
                         is_temp: false,
                     },
                 }
@@ -1413,7 +1412,7 @@ mod test {
                     name: "c2".to_string(),
                     relation: ColumnRelation::Table {
                         column_id: c2_column_id,
-                        table_name: Arc::new("t1".to_string()),
+                        table_name: "t1".to_string().into(),
                         is_temp: false,
                     },
                 }
@@ -1431,7 +1430,7 @@ mod test {
                     name: "c3".to_string(),
                     relation: ColumnRelation::Table {
                         column_id: c3_column_id,
-                        table_name: Arc::new("t1".to_string()),
+                        table_name: "t1".to_string().into(),
                         is_temp: false,
                     },
                 }
@@ -1478,7 +1477,7 @@ mod test {
         {
             let mut tuple_iter = transaction.read(
                 &table_cache,
-                Arc::new("t1".to_string()),
+                "t1".to_string().into(),
                 (None, None),
                 full_columns(),
                 true,
@@ -1504,7 +1503,7 @@ mod test {
         {
             let mut tuple_iter = transaction.read(
                 &table_cache,
-                Arc::new("t1".to_string()),
+                "t1".to_string().into(),
                 (None, None),
                 full_columns(),
                 true,
@@ -1537,7 +1536,7 @@ mod test {
         build_table(&table_cache, &mut transaction)?;
         let (c2_column_id, c3_column_id) = {
             let t1_table = transaction
-                .table(&table_cache, Arc::new("t1".to_string()))?
+                .table(&table_cache, "t1".to_string().into())?
                 .unwrap();
 
             (
@@ -1548,14 +1547,14 @@ mod test {
 
         let _ = transaction.add_index_meta(
             &table_cache,
-            &Arc::new("t1".to_string()),
+            &"t1".to_string().into(),
             "i1".to_string(),
             vec![c3_column_id],
             IndexType::Normal,
         )?;
         let _ = transaction.add_index_meta(
             &table_cache,
-            &Arc::new("t1".to_string()),
+            &"t1".to_string().into(),
             "i2".to_string(),
             vec![c3_column_id, c2_column_id],
             IndexType::Composite,
@@ -1565,13 +1564,13 @@ mod test {
                          table_cache: &TableCache|
          -> Result<(), DatabaseError> {
             let table = transaction
-                .table(&table_cache, Arc::new("t1".to_string()))?
+                .table(&table_cache, "t1".to_string().into())?
                 .unwrap();
 
             let i1_meta = table.indexes[1].clone();
             assert_eq!(i1_meta.id, 1);
             assert_eq!(i1_meta.column_ids, vec![c3_column_id]);
-            assert_eq!(i1_meta.table_name, Arc::new("t1".to_string()));
+            assert_eq!(i1_meta.table_name, "t1".to_string().into());
             assert_eq!(i1_meta.pk_ty, LogicalType::Integer);
             assert_eq!(i1_meta.name, "i1".to_string());
             assert_eq!(i1_meta.ty, IndexType::Normal);
@@ -1579,7 +1578,7 @@ mod test {
             let i2_meta = table.indexes[2].clone();
             assert_eq!(i2_meta.id, 2);
             assert_eq!(i2_meta.column_ids, vec![c3_column_id, c2_column_id]);
-            assert_eq!(i2_meta.table_name, Arc::new("t1".to_string()));
+            assert_eq!(i2_meta.table_name, "t1".to_string().into());
             assert_eq!(i2_meta.pk_ty, LogicalType::Integer);
             assert_eq!(i2_meta.name, "i2".to_string());
             assert_eq!(i2_meta.ty, IndexType::Composite);
@@ -1603,19 +1602,19 @@ mod test {
             dbg!(value);
             assert!(iter.try_next()?.is_none());
         }
-        match transaction.drop_index(&table_cache, Arc::new("t1".to_string()), "pk_index", false) {
+        match transaction.drop_index(&table_cache, "t1".to_string().into(), "pk_index", false) {
             Err(DatabaseError::InvalidIndex) => (),
             _ => unreachable!(),
         }
-        transaction.drop_index(&table_cache, Arc::new("t1".to_string()), "i1", false)?;
+        transaction.drop_index(&table_cache, "t1".to_string().into(), "i1", false)?;
         {
             let table = transaction
-                .table(&table_cache, Arc::new("t1".to_string()))?
+                .table(&table_cache, "t1".to_string().into())?
                 .unwrap();
             let i2_meta = table.indexes[1].clone();
             assert_eq!(i2_meta.id, 2);
             assert_eq!(i2_meta.column_ids, vec![c3_column_id, c2_column_id]);
-            assert_eq!(i2_meta.table_name, Arc::new("t1".to_string()));
+            assert_eq!(i2_meta.table_name, "t1".to_string().into());
             assert_eq!(i2_meta.pk_ty, LogicalType::Integer);
             assert_eq!(i2_meta.name, "i2".to_string());
             assert_eq!(i2_meta.ty, IndexType::Composite);
@@ -1642,13 +1641,13 @@ mod test {
         ) -> Result<IndexIter<'a, RocksTransaction<'a>>, DatabaseError> {
             transaction.read_by_index(
                 &table_cache,
-                Arc::new("t1".to_string()),
+                "t1".to_string().into(),
                 (None, None),
                 full_columns(),
                 Arc::new(IndexMeta {
                     id: 1,
                     column_ids: vec![index_column_id],
-                    table_name: Arc::new("t1".to_string()),
+                    table_name: "t1".to_string().into(),
                     pk_ty: LogicalType::Integer,
                     value_ty: LogicalType::Integer,
                     name: "i1".to_string(),
@@ -1670,13 +1669,13 @@ mod test {
 
         build_table(&table_cache, &mut transaction)?;
         let t1_table = transaction
-            .table(&table_cache, Arc::new("t1".to_string()))?
+            .table(&table_cache, "t1".to_string().into())?
             .unwrap();
         let c3_column_id = *t1_table.get_column_id_by_name("c3").unwrap();
 
         let _ = transaction.add_index_meta(
             &table_cache,
-            &Arc::new("t1".to_string()),
+            &"t1".to_string().into(),
             "i1".to_string(),
             vec![c3_column_id],
             IndexType::Normal,
@@ -1758,7 +1757,7 @@ mod test {
         let meta_cache = StatisticsMetaCache::new(4, 1, RandomState::new())?;
 
         build_table(&table_cache, &mut transaction)?;
-        let table_name = Arc::new("t1".to_string());
+        let table_name: TableName = "t1".to_string().into();
 
         let new_column = ColumnCatalog::new(
             "c4".to_string(),
@@ -1813,7 +1812,7 @@ mod test {
     fn test_view_create_drop() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
 
-        let view_name = Arc::new("v1".to_string());
+        let view_name: TableName = "v1".to_string().into();
         let view = View {
             name: view_name.clone(),
             plan: Box::new(

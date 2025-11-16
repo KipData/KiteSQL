@@ -20,7 +20,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         // FIXME: Make it better to detect the current BindStep
         self.context.allow_default = true;
         if let TableFactor::Table { name, .. } = &to.relation {
-            let table_name = Arc::new(lower_case_name(name)?);
+            let table_name: Arc<str> = lower_case_name(name)?.into();
             self.with_pk(table_name.clone());
 
             let mut plan = self.bind_table_ref(to)?;

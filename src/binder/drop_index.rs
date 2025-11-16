@@ -6,7 +6,6 @@ use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
 use sqlparser::ast::ObjectName;
-use std::sync::Arc;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_drop_index(
@@ -20,7 +19,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             .ok_or(DatabaseError::InvalidTable(name.to_string()))?;
         let index_name = name.0.get(1).ok_or(DatabaseError::InvalidIndex)?;
 
-        let table_name = Arc::new(lower_ident(table_name));
+        let table_name = lower_ident(table_name).into();
         let index_name = lower_ident(index_name);
 
         Ok(LogicalPlan::new(

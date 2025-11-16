@@ -846,7 +846,7 @@ mod test {
         let mut reference_tables = ReferenceTables::new();
         let c3_column_id = {
             let table = transaction
-                .table(&table_cache, Arc::new("t1".to_string()))?
+                .table(&table_cache, "t1".to_string().into())?
                 .unwrap();
             *table.get_column_id_by_name("c3").unwrap()
         };
@@ -880,7 +880,7 @@ mod test {
                     name: "c3".to_string(),
                     relation: ColumnRelation::Table {
                         column_id: c3_column_id,
-                        table_name: Arc::new("t1".to_string()),
+                        table_name: "t1".to_string().into(),
                         is_temp: false,
                     },
                 },

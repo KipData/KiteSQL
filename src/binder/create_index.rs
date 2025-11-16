@@ -20,7 +20,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         if_not_exists: bool,
         is_unique: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name = Arc::new(lower_case_name(table_name)?);
+        let table_name: Arc<str> = lower_case_name(table_name)?.into();
         let index_name = lower_case_name(name)?;
         let ty = if is_unique {
             IndexType::Unique

@@ -115,7 +115,7 @@ mod test {
         assert_eq!(
             function.summary,
             FunctionSummary {
-                name: "sum".to_string(),
+                name: "sum".to_string().into(),
                 arg_types: vec![LogicalType::Integer, LogicalType::Integer],
             }
         );
@@ -133,7 +133,7 @@ mod test {
         assert_eq!(
             function.summary,
             FunctionSummary {
-                name: "test_numbers".to_string(),
+                name: "test_numbers".to_string().into(),
                 arg_types: vec![LogicalType::Integer],
             }
         );
@@ -148,7 +148,7 @@ mod test {
         assert!(numbers.next().is_none());
 
         let function_schema = function.output_schema();
-        let table_name = Arc::new("test_numbers".to_string());
+        let table_name: Arc<str> = "test_numbers".to_string().into();
         let mut c1 = ColumnCatalog::new(
             "c1".to_string(),
             true,
