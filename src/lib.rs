@@ -99,6 +99,7 @@ mod function;
 pub mod macros;
 mod optimizer;
 pub mod parser;
+pub mod paths;
 pub mod planner;
 pub mod serdes;
 pub mod storage;

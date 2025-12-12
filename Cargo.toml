@@ -42,7 +42,6 @@ byteorder             = { version = "1" }
 chrono                = { version = "0.4" }
 comfy-table           = { version = "7" }
 csv                   = { version = "1" }
-dirs                  = { version = "5" }
 fixedbitset           = { version = "0.4" }
 itertools             = { version = "0.12" }
 ordered-float         = { version = "4", features = ["serde"] }
@@ -82,6 +81,17 @@ sqlite                = { version = "0.34" }
 
 [target.'cfg(unix)'.dev-dependencies]
 pprof = { version = "0.13", features = ["flamegraph", "criterion"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dirs = { version = "5" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { version = "0.2" }
+web-sys      = { version = "0.3", features = ["Storage", "Window"] }
+base64       = { version = "0.21" }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
 
 [workspace]
 members = [

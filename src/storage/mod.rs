@@ -4,9 +4,10 @@ pub(crate) mod table_codec;
 use crate::catalog::view::View;
 use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog, TableMeta, TableName};
 use crate::errors::DatabaseError;
-use crate::execution::dml::analyze::Analyze;
 use crate::expression::range_detacher::Range;
 use crate::optimizer::core::statistics_meta::{StatisticMetaLoader, StatisticsMeta};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::paths::require_statistics_base_dir;
 use crate::serdes::ReferenceTables;
 use crate::storage::table_codec::{BumpBytes, Bytes, TableCodec};
 use crate::types::index::{Index, IndexId, IndexMetaRef, IndexType};
@@ -504,7 +505,11 @@ pub trait Transaction: Sized {
         self.remove(&unsafe { &*self.table_codec() }.encode_root_table_key(table_name.as_ref()))?;
         table_cache.remove(&table_name);
 
-        let _ = fs::remove_dir(Analyze::build_statistics_meta_path(&table_name));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let path = require_statistics_base_dir().join(table_name.as_ref());
+            let _ = fs::remove_dir(path);
+        }
 
         Ok(())
     }
