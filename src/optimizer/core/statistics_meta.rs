@@ -150,7 +150,7 @@ impl StatisticsMeta {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::errors::DatabaseError;
     use crate::optimizer::core::histogram::HistogramBuilder;

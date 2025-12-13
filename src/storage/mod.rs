@@ -1,4 +1,3 @@
-#[cfg(target_arch = "wasm32")]
 pub mod memory;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod rocksdb;

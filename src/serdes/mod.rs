@@ -130,7 +130,7 @@ impl ReferenceTables {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::serdes::ReferenceTables;
     use std::io;

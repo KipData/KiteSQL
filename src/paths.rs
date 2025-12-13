@@ -86,8 +86,6 @@ mod wasm_tests {
     use std::path::PathBuf;
     use wasm_bindgen_test::*;
 
-    wasm_bindgen_test_configure!(run_in_browser);
-
     fn clear_prefix(prefix: &str) {
         let keys = wasm_storage_keys_with_prefix(prefix).expect("list keys");
 

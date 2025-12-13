@@ -789,7 +789,7 @@ impl TryFrom<SqlBinaryOperator> for BinaryOperator {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation, ColumnSummary};
     use crate::db::test::build_table;

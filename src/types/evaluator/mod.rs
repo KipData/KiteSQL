@@ -449,7 +449,7 @@ macro_rules! numeric_binary_evaluator_definition {
     };
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use crate::errors::DatabaseError;
     use crate::expression::BinaryOperator;

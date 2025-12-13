@@ -90,14 +90,78 @@ jobs:
         with:
           command: run
           args: --bin sqllogictest-test --manifest-path ./tests/sqllogictest/Cargo.toml
-#  codecov:
-#    name: Upload coverage reports to Codecov
-#    runs-on: ubuntu-latest
-#    steps:
-#      - name: Upload coverage reports to Codecov
-#        uses: codecov/codecov-action@v3
-#        with:
-#          files: ./lcov.info
-#          flags: rust
-#        env:
-#          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+  # 4
+  wasm-tests:
+    name: Wasm cargo tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Install stable with wasm target
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: wasm32-unknown-unknown
+          override: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: latest
+
+      - name: Run wasm-bindgen tests (wasm32 target)
+        run: wasm-pack test --node -- --package kite_sql --lib
+  # 5
+  wasm-examples:
+    name: Wasm examples (nodejs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Install stable with wasm target
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: wasm32-unknown-unknown
+          override: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: latest
+
+      - name: Build wasm package
+        run: wasm-pack build --release --target nodejs
+
+      - name: Run wasm example scripts
+        run: |
+          node examples/wasm_hello_world.test.mjs
+          node examples/wasm_index_usage.test.mjs
+  # 6
+  native-examples:
+    name: Native examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Install stable toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Run hello_world example
+        run: cargo run --example hello_world
+
+      - name: Run transaction example
+        run: cargo run --example transaction

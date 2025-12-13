@@ -242,7 +242,7 @@ pub fn build_write<'a, T: Transaction + 'a>(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub fn try_collect(executor: Executor) -> Result<Vec<Tuple>, DatabaseError> {
     executor.collect()
 }

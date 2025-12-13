@@ -3,7 +3,7 @@ use crate::types::value::DataValue;
 
 implement_serialization_by_bincode!(DataValue);
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod test {
     use crate::errors::DatabaseError;
     use crate::serdes::{ReferenceSerialization, ReferenceTables};

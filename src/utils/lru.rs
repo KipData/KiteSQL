@@ -387,7 +387,7 @@ impl<K, V> Drop for LruCache<K, V> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::utils::lru::{LruCache, SharedLruCache};
     use std::collections::hash_map::RandomState;

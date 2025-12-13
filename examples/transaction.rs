@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 use kite_sql::db::{DataBaseBuilder, ResultIter};
 use kite_sql::errors::DatabaseError;
 

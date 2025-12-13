@@ -199,7 +199,7 @@ impl NormalizationRule for ColumnPruning {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::binder::test::build_t1_table;
     use crate::errors::DatabaseError;

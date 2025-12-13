@@ -198,7 +198,7 @@ impl<K> ReferenceSerialization for CountMinSketch<K> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::expression::range_detacher::Range;
     use crate::optimizer::core::cm_sketch::CountMinSketch;

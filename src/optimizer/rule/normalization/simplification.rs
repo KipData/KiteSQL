@@ -114,7 +114,7 @@ impl NormalizationRule for SimplifyFilter {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use crate::binder::test::build_t1_table;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation, ColumnSummary};

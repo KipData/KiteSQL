@@ -221,7 +221,7 @@ fn next(
     Ok(Some((Vec::from(key), Vec::from(value))))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
     use crate::db::{DataBaseBuilder, ResultIter};

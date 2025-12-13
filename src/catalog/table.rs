@@ -49,7 +49,7 @@ impl TableCatalog {
         self.columns.get(id).map(|i| &self.schema_ref[*i])
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn get_column_id_by_name(&self, name: &str) -> Option<&ColumnId> {
         self.column_idxs.get(name).map(|(id, _)| id)
     }
@@ -270,7 +270,7 @@ impl TableMeta {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::catalog::ColumnDesc;

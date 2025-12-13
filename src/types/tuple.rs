@@ -134,7 +134,7 @@ pub fn create_table<I: ResultIter>(iter: I) -> Result<Table, DatabaseError> {
     Ok(table)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
     use crate::types::tuple::Tuple;
