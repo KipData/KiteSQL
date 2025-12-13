@@ -1,3 +1,6 @@
+#[cfg(target_arch = "wasm32")]
+pub mod memory;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod rocksdb;
 pub(crate) mod table_codec;
 
@@ -18,11 +21,13 @@ use crate::types::{ColumnId, LogicalType};
 use crate::utils::lru::SharedLruCache;
 use itertools::Itertools;
 use std::collections::{BTreeMap, Bound};
+#[cfg(not(target_arch = "wasm32"))]
+use std::fs;
 use std::io::Cursor;
+use std::mem;
 use std::ops::SubAssign;
 use std::sync::Arc;
 use std::vec::IntoIter;
-use std::{fs, mem};
 use ulid::Generator;
 
 pub(crate) type StatisticsMetaCache = SharedLruCache<(TableName, IndexId), StatisticsMeta>;
@@ -1274,7 +1279,7 @@ pub trait Iter {
     fn next_tuple(&mut self) -> Result<Option<Tuple>, DatabaseError>;
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use crate::binder::test::build_t1_table;
     use crate::catalog::view::View;

@@ -26,65 +26,44 @@ pub fn require_statistics_base_dir() -> PathBuf {
 #[cfg(target_arch = "wasm32")]
 mod wasm_storage {
     use crate::errors::DatabaseError;
-    use std::io;
-    use wasm_bindgen::JsValue;
+    use once_cell::sync::Lazy;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
 
-    pub fn local_storage() -> Result<web_sys::Storage, DatabaseError> {
-        web_sys::window()
-            .and_then(|window| window.local_storage().ok().flatten())
-            .ok_or_else(|| {
-                DatabaseError::IO(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "localStorage is not available",
-                ))
-            })
-    }
+    static MEMORY_STORE: Lazy<Mutex<HashMap<String, String>>> =
+        Lazy::new(|| Mutex::new(HashMap::new()));
 
     pub fn storage_keys_with_prefix(prefix: &str) -> Result<Vec<String>, DatabaseError> {
-        let storage = local_storage()?;
-        let len = storage.length().map_err(js_err_to_io)?;
-        let mut keys = Vec::new();
-
-        for i in 0..len {
-            if let Some(key) = storage.key(i).map_err(js_err_to_io)? {
-                if key.starts_with(prefix) {
-                    keys.push(key);
-                }
-            }
-        }
-
-        Ok(keys)
+        let store = MEMORY_STORE.lock().unwrap();
+        Ok(store
+            .keys()
+            .filter(|k| k.starts_with(prefix))
+            .cloned()
+            .collect())
     }
 
     pub fn remove_storage_key(key: &str) -> Result<(), DatabaseError> {
-        let storage = local_storage()?;
-        storage.remove_item(key).map_err(js_err_to_io)?;
+        MEMORY_STORE.lock().unwrap().remove(key);
         Ok(())
     }
 
     pub fn set_storage_item(key: &str, value: &str) -> Result<(), DatabaseError> {
-        let storage = local_storage()?;
-        storage.set_item(key, value).map_err(js_err_to_io)?;
+        MEMORY_STORE
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), value.to_string());
         Ok(())
     }
 
     pub fn get_storage_item(key: &str) -> Result<Option<String>, DatabaseError> {
-        let storage = local_storage()?;
-        storage.get_item(key).map_err(js_err_to_io)
-    }
-
-    fn js_err_to_io(err: JsValue) -> DatabaseError {
-        DatabaseError::IO(io::Error::new(
-            io::ErrorKind::Other,
-            err.as_string().unwrap_or_else(|| format!("{err:?}")),
-        ))
+        Ok(MEMORY_STORE.lock().unwrap().get(key).cloned())
     }
 }
 
 #[cfg(target_arch = "wasm32")]
 pub use wasm_storage::{
-    get_storage_item as wasm_get_storage_item, local_storage as wasm_local_storage,
-    remove_storage_key as wasm_remove_storage_key, set_storage_item as wasm_set_storage_item,
+    get_storage_item as wasm_get_storage_item, remove_storage_key as wasm_remove_storage_key,
+    set_storage_item as wasm_set_storage_item,
     storage_keys_with_prefix as wasm_storage_keys_with_prefix,
 };
 

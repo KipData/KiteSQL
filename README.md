@@ -34,8 +34,23 @@
 - All metadata and actual data in KV Storage, and there is no state component (e.g. system table) in the middle
 - Supports extending storage for customized workloads
 - Supports most of the SQL 2016 syntax
+- Ships a WebAssembly build for JavaScript runtimes
 
 #### 👉[check more](docs/features.md)
+
+## WebAssembly
+- Build: `wasm-pack build --release --target nodejs` (outputs to `./pkg`; use `--target web` or `--target bundler` for browser/bundler setups).
+- Usage:
+```js
+import { WasmDatabase } from "./pkg/kite_sql.js";
+
+const db = new WasmDatabase();
+await db.execute("create table demo(id int primary key, v int)");
+await db.execute("insert into demo values (1, 2), (2, 4)");
+const rows = db.run("select * from demo").rows();
+console.log(rows.map((r) => r.values.map((v) => v.Int32 ?? v)));
+```
+- In Node.js, provide a small `localStorage` shim if you enable statistics-related features (see `examples/wasm_index_usage.test.mjs`).
 
 ## Examples
 

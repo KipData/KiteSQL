@@ -3,7 +3,6 @@ use crate::expression::range_detacher::Range;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use crate::storage::{TableCache, Transaction};
 use crate::types::value::DataValue;
-use rand::random;
 use siphasher::sip::SipHasher13;
 use std::borrow::Borrow;
 use std::hash::{Hash, Hasher};
@@ -138,7 +137,7 @@ impl<K: Hash> CountMinSketch<K> {
     }
 
     fn sip_new() -> FastHasher {
-        FastHasher::new_with_keys(random(), random())
+        FastHasher::new_with_keys(0, 1)
     }
 
     fn offset<Q: ?Sized + Hash>(&self, hashes: &mut [u64; 2], key: &Q, k_i: usize) -> usize
