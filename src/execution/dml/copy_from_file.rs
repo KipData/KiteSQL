@@ -127,7 +127,7 @@ fn return_result(size: usize, tx: Sender<Tuple>) -> Result<(), DatabaseError> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::binder::copy::ExtSource;

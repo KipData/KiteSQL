@@ -524,7 +524,7 @@ pub(crate) fn is_valid_identifier(s: &str) -> bool {
         && !s.chars().all(|c| c == '_')
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub mod test {
     use crate::binder::{is_valid_identifier, Binder, BinderContext};
     use crate::catalog::{ColumnCatalog, ColumnDesc, TableCatalog};

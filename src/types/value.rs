@@ -1935,7 +1935,7 @@ impl fmt::Debug for DataValue {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use crate::errors::DatabaseError;
     use crate::storage::table_codec::BumpBytes;

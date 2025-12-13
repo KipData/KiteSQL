@@ -1,12 +1,15 @@
+pub mod memory;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod rocksdb;
 pub(crate) mod table_codec;
 
 use crate::catalog::view::View;
 use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog, TableMeta, TableName};
 use crate::errors::DatabaseError;
-use crate::execution::dml::analyze::Analyze;
 use crate::expression::range_detacher::Range;
 use crate::optimizer::core::statistics_meta::{StatisticMetaLoader, StatisticsMeta};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::paths::require_statistics_base_dir;
 use crate::serdes::ReferenceTables;
 use crate::storage::table_codec::{BumpBytes, Bytes, TableCodec};
 use crate::types::index::{Index, IndexId, IndexMetaRef, IndexType};
@@ -17,11 +20,13 @@ use crate::types::{ColumnId, LogicalType};
 use crate::utils::lru::SharedLruCache;
 use itertools::Itertools;
 use std::collections::{BTreeMap, Bound};
+#[cfg(not(target_arch = "wasm32"))]
+use std::fs;
 use std::io::Cursor;
+use std::mem;
 use std::ops::SubAssign;
 use std::sync::Arc;
 use std::vec::IntoIter;
-use std::{fs, mem};
 use ulid::Generator;
 
 pub(crate) type StatisticsMetaCache = SharedLruCache<(TableName, IndexId), StatisticsMeta>;
@@ -504,7 +509,11 @@ pub trait Transaction: Sized {
         self.remove(&unsafe { &*self.table_codec() }.encode_root_table_key(table_name.as_ref()))?;
         table_cache.remove(&table_name);
 
-        let _ = fs::remove_dir(Analyze::build_statistics_meta_path(&table_name));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let path = require_statistics_base_dir().join(table_name.as_ref());
+            let _ = fs::remove_dir(path);
+        }
 
         Ok(())
     }
@@ -1269,7 +1278,7 @@ pub trait Iter {
     fn next_tuple(&mut self) -> Result<Option<Tuple>, DatabaseError>;
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use crate::binder::test::build_t1_table;
     use crate::catalog::view::View;

@@ -7,9 +7,15 @@ use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use crate::storage::{StatisticsMetaCache, Transaction};
 use crate::types::index::IndexId;
 use crate::types::value::DataValue;
+#[cfg(target_arch = "wasm32")]
+use base64::{engine::general_purpose, Engine as _};
 use kite_sql_serde_macros::ReferenceSerialization;
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs::OpenOptions;
-use std::io::Write;
+#[cfg(target_arch = "wasm32")]
+use std::io;
+use std::io::{Cursor, Read, Write};
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::slice;
 
@@ -35,9 +41,16 @@ impl<'a, T: Transaction> StatisticMetaLoader<'a, T> {
             return Ok(Some(statistics_meta));
         }
         if let Some(path) = self.tx.table_meta_path(table_name.as_ref(), index_id)? {
-            Ok(Some(self.cache.get_or_insert(key, |_| {
-                StatisticsMeta::from_file::<T>(path)
-            })?))
+            #[cfg(target_arch = "wasm32")]
+            let statistics_meta = self
+                .cache
+                .get_or_insert(key, |_| StatisticsMeta::from_storage_string::<T>(&path))?;
+            #[cfg(not(target_arch = "wasm32"))]
+            let statistics_meta = self
+                .cache
+                .get_or_insert(key, |_| StatisticsMeta::from_file::<T>(path))?;
+
+            Ok(Some(statistics_meta))
         } else {
             Ok(None)
         }
@@ -78,6 +91,26 @@ impl StatisticsMeta {
         Ok(count)
     }
 
+    fn encode_into_writer(&self, writer: &mut impl Write) -> Result<(), DatabaseError> {
+        self.encode(writer, true, &mut ReferenceTables::new())
+    }
+
+    fn decode_from_reader<T: Transaction>(reader: &mut impl Read) -> Result<Self, DatabaseError> {
+        Self::decode::<T, _>(reader, None, &ReferenceTables::new())
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, DatabaseError> {
+        let mut bytes = Vec::new();
+        self.encode_into_writer(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    pub fn from_bytes<T: Transaction>(bytes: &[u8]) -> Result<Self, DatabaseError> {
+        let mut cursor = Cursor::new(bytes);
+        Self::decode_from_reader::<T>(&mut cursor)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn to_file(&self, path: impl AsRef<Path>) -> Result<(), DatabaseError> {
         let mut file = OpenOptions::new()
             .create(true)
@@ -85,12 +118,13 @@ impl StatisticsMeta {
             .read(true)
             .truncate(false)
             .open(path)?;
-        self.encode(&mut file, true, &mut ReferenceTables::new())?;
+        self.encode_into_writer(&mut file)?;
         file.flush()?;
 
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn from_file<T: Transaction>(path: impl AsRef<Path>) -> Result<Self, DatabaseError> {
         let mut file = OpenOptions::new()
             .create(true)
@@ -98,11 +132,25 @@ impl StatisticsMeta {
             .read(true)
             .truncate(false)
             .open(path)?;
-        Self::decode::<T, _>(&mut file, None, &ReferenceTables::new())
+        Self::decode_from_reader::<T>(&mut file)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn to_storage_string(&self) -> Result<String, DatabaseError> {
+        Ok(general_purpose::STANDARD.encode(self.to_bytes()?))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn from_storage_string<T: Transaction>(value: &str) -> Result<Self, DatabaseError> {
+        let bytes = general_purpose::STANDARD
+            .decode(value)
+            .map_err(|err| DatabaseError::IO(io::Error::new(io::ErrorKind::InvalidData, err)))?;
+
+        Self::from_bytes::<T>(&bytes)
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::errors::DatabaseError;
     use crate::optimizer::core::histogram::HistogramBuilder;

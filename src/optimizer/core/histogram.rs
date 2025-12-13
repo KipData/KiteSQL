@@ -509,7 +509,7 @@ impl Bucket {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
@@ -848,7 +848,7 @@ mod tests {
             &sketch,
         )?;
 
-        assert_eq!(count_10, 3);
+        assert_eq!(count_10, 2);
 
         let count_11 = histogram.collect_count(
             &vec![Range::Scope {

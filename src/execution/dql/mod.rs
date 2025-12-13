@@ -17,7 +17,7 @@ pub(crate) mod top_k;
 pub(crate) mod union;
 pub(crate) mod values;
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod test {
     use crate::types::value::DataValue;
     use itertools::Itertools;

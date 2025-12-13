@@ -5,6 +5,9 @@ use crate::execution::{build_read, spawn_executor, Executor, WriteExecutor};
 use crate::expression::{BindPosition, ScalarExpression};
 use crate::optimizer::core::histogram::HistogramBuilder;
 use crate::optimizer::core::statistics_meta::StatisticsMeta;
+use crate::paths::require_statistics_base_dir;
+#[cfg(target_arch = "wasm32")]
+use crate::paths::{wasm_remove_storage_key, wasm_set_storage_item, wasm_storage_keys_with_prefix};
 use crate::planner::operator::analyze::AnalyzeOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
@@ -16,15 +19,16 @@ use itertools::Itertools;
 use sqlparser::ast::CharLengthUnits;
 use std::borrow::Cow;
 use std::collections::HashSet;
+#[cfg(not(target_arch = "wasm32"))]
 use std::ffi::OsStr;
-use std::fmt::Formatter;
-use std::fs::DirEntry;
+use std::fmt::{self, Formatter};
+#[cfg(not(target_arch = "wasm32"))]
+use std::fs::{self, DirEntry};
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::{fmt, fs};
 
 const DEFAULT_NUM_OF_BUCKETS: usize = 100;
-const DEFAULT_STATISTICS_META_PATH: &str = "kite_sql_statistics_metas";
 
 pub struct Analyze {
     table_name: TableName,
@@ -120,52 +124,17 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze {
                 }
             }
             drop(coroutine);
-            let mut values = Vec::with_capacity(builders.len());
-            let dir_path = Self::build_statistics_meta_path(&table_name);
-            throw!(co, fs::create_dir_all(&dir_path).map_err(DatabaseError::IO));
+            #[cfg(target_arch = "wasm32")]
+            let values = throw!(
+                co,
+                Self::persist_statistics_meta_wasm(&table_name, builders, cache.2, transaction)
+            );
 
-            let mut active_index_paths = HashSet::new();
-
-            for State {
-                index_id, builder, ..
-            } in builders
-            {
-                let index_file = OsStr::new(&index_id.to_string()).to_os_string();
-                let path = dir_path.join(&index_file);
-                let temp_path = path.with_extension("tmp");
-                let path_str: String = path.to_string_lossy().into();
-
-                let (histogram, sketch) = throw!(co, builder.build(DEFAULT_NUM_OF_BUCKETS));
-                let meta = StatisticsMeta::new(histogram, sketch);
-
-                throw!(co, meta.to_file(&temp_path));
-                values.push(DataValue::Utf8 {
-                    value: path_str.clone(),
-                    ty: Utf8Type::Variable(None),
-                    unit: CharLengthUnits::Characters,
-                });
-                throw!(
-                    co,
-                    unsafe { &mut (*transaction) }.save_table_meta(
-                        cache.2,
-                        &table_name,
-                        path_str,
-                        meta
-                    )
-                );
-                throw!(co, fs::rename(&temp_path, &path).map_err(DatabaseError::IO));
-
-                active_index_paths.insert(index_file);
-            }
-
-            // clean expired index
-            for entry in throw!(co, fs::read_dir(dir_path).map_err(DatabaseError::IO)) {
-                let entry: DirEntry = throw!(co, entry.map_err(DatabaseError::IO));
-
-                if !active_index_paths.remove(&entry.file_name()) {
-                    throw!(co, fs::remove_file(entry.path()).map_err(DatabaseError::IO));
-                }
-            }
+            #[cfg(not(target_arch = "wasm32"))]
+            let values = throw!(
+                co,
+                Self::persist_statistics_meta_native(&table_name, builders, cache.2, transaction)
+            );
 
             co.yield_(Ok(Tuple::new(None, values))).await;
         })
@@ -180,11 +149,107 @@ struct State {
 }
 
 impl Analyze {
-    pub fn build_statistics_meta_path(table_name: &TableName) -> PathBuf {
-        dirs::home_dir()
-            .expect("Your system does not have a Config directory!")
-            .join(DEFAULT_STATISTICS_META_PATH)
+    #[cfg(not(target_arch = "wasm32"))]
+    fn persist_statistics_meta_native<T: Transaction>(
+        table_name: &TableName,
+        builders: Vec<State>,
+        cache: &StatisticsMetaCache,
+        transaction: *mut T,
+    ) -> Result<Vec<DataValue>, DatabaseError> {
+        let dir_path = Self::build_statistics_meta_path(table_name)?;
+        fs::create_dir_all(&dir_path).map_err(DatabaseError::IO)?;
+
+        let mut values = Vec::with_capacity(builders.len());
+        let mut active_index_paths = HashSet::new();
+
+        for State {
+            index_id, builder, ..
+        } in builders
+        {
+            let index_file = OsStr::new(&index_id.to_string()).to_os_string();
+            let path = dir_path.join(&index_file);
+            let temp_path = path.with_extension("tmp");
+            let path_str: String = path.to_string_lossy().into();
+
+            let (histogram, sketch) = builder.build(DEFAULT_NUM_OF_BUCKETS)?;
+            let meta = StatisticsMeta::new(histogram, sketch);
+
+            meta.to_file(&temp_path)?;
+            values.push(DataValue::Utf8 {
+                value: path_str.clone(),
+                ty: Utf8Type::Variable(None),
+                unit: CharLengthUnits::Characters,
+            });
+            unsafe { &mut (*transaction) }.save_table_meta(cache, table_name, path_str, meta)?;
+            fs::rename(&temp_path, &path).map_err(DatabaseError::IO)?;
+
+            active_index_paths.insert(index_file);
+        }
+
+        // clean expired index
+        for entry in fs::read_dir(dir_path).map_err(DatabaseError::IO)? {
+            let entry: DirEntry = entry.map_err(DatabaseError::IO)?;
+
+            if !active_index_paths.remove(&entry.file_name()) {
+                fs::remove_file(entry.path()).map_err(DatabaseError::IO)?;
+            }
+        }
+
+        Ok(values)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn persist_statistics_meta_wasm<T: Transaction>(
+        table_name: &TableName,
+        builders: Vec<State>,
+        cache: &StatisticsMetaCache,
+        transaction: *mut T,
+    ) -> Result<Vec<DataValue>, DatabaseError> {
+        let prefix = Self::build_statistics_meta_prefix(table_name)?;
+        let mut values = Vec::with_capacity(builders.len());
+        let mut active_keys = HashSet::new();
+
+        for State {
+            index_id, builder, ..
+        } in builders
+        {
+            let key = format!("{prefix}/{index_id}");
+            let (histogram, sketch) = builder.build(DEFAULT_NUM_OF_BUCKETS)?;
+            let meta = StatisticsMeta::new(histogram, sketch);
+            let encoded = meta.to_storage_string()?;
+
+            wasm_set_storage_item(&key, &encoded)?;
+            values.push(DataValue::Utf8 {
+                value: key.clone(),
+                ty: Utf8Type::Variable(None),
+                unit: CharLengthUnits::Characters,
+            });
+            unsafe { &mut (*transaction) }.save_table_meta(cache, table_name, key.clone(), meta)?;
+            active_keys.insert(key);
+        }
+
+        let keys = wasm_storage_keys_with_prefix(&(prefix.clone() + "/"))?;
+
+        for key in keys {
+            if !active_keys.contains(&key) {
+                wasm_remove_storage_key(&key)?;
+            }
+        }
+
+        Ok(values)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn build_statistics_meta_path(table_name: &TableName) -> Result<PathBuf, DatabaseError> {
+        Ok(require_statistics_base_dir().join(table_name.as_ref()))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn build_statistics_meta_prefix(table_name: &TableName) -> Result<String, DatabaseError> {
+        Ok(require_statistics_base_dir()
             .join(table_name.as_ref())
+            .to_string_lossy()
+            .into_owned())
     }
 }
 
@@ -198,12 +263,13 @@ impl fmt::Display for AnalyzeOperator {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use crate::db::{DataBaseBuilder, ResultIter};
     use crate::errors::DatabaseError;
-    use crate::execution::dml::analyze::{DEFAULT_NUM_OF_BUCKETS, DEFAULT_STATISTICS_META_PATH};
+    use crate::execution::dml::analyze::DEFAULT_NUM_OF_BUCKETS;
     use crate::optimizer::core::statistics_meta::StatisticsMeta;
+    use crate::paths::require_statistics_base_dir;
     use crate::storage::rocksdb::RocksTransaction;
     use std::ffi::OsStr;
     use std::fs;
@@ -219,6 +285,7 @@ mod test {
 
     fn test_statistics_meta() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let base_dir = require_statistics_base_dir();
         let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
 
         kite_sql
@@ -234,10 +301,7 @@ mod test {
         }
         kite_sql.run("analyze table t1")?.done()?;
 
-        let dir_path = dirs::home_dir()
-            .expect("Your system does not have a Config directory!")
-            .join(DEFAULT_STATISTICS_META_PATH)
-            .join("t1");
+        let dir_path = base_dir.join("t1");
 
         let mut paths = Vec::new();
 
@@ -266,6 +330,7 @@ mod test {
 
     fn test_clean_expired_index() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let base_dir = require_statistics_base_dir();
         let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
 
         kite_sql
@@ -281,10 +346,7 @@ mod test {
         }
         kite_sql.run("analyze table t1")?.done()?;
 
-        let dir_path = dirs::home_dir()
-            .expect("Your system does not have a Config directory!")
-            .join(DEFAULT_STATISTICS_META_PATH)
-            .join("t1");
+        let dir_path = base_dir.join("t1");
 
         let mut file_names = Vec::new();
 

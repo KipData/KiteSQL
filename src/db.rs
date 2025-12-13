@@ -17,6 +17,8 @@ use crate::optimizer::rule::implementation::ImplementationRuleImpl;
 use crate::optimizer::rule::normalization::NormalizationRuleImpl;
 use crate::parser::parse_sql;
 use crate::planner::LogicalPlan;
+use crate::storage::memory::MemoryStorage;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::storage::rocksdb::{OptimisticRocksStorage, RocksStorage};
 use crate::storage::{StatisticsMetaCache, Storage, TableCache, Transaction, ViewCache};
 use crate::types::tuple::{SchemaRef, Tuple};
@@ -44,6 +46,7 @@ pub(crate) enum MetaDataLock {
 }
 
 pub struct DataBaseBuilder {
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     path: PathBuf,
     scala_functions: ScalaFunctions,
     table_functions: TableFunctions,
@@ -82,12 +85,31 @@ impl DataBaseBuilder {
         self
     }
 
+    pub fn build_with_storage<T: Storage>(self, storage: T) -> Result<Database<T>, DatabaseError> {
+        Self::_build::<T>(storage, self.scala_functions, self.table_functions)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn build(self) -> Result<Database<MemoryStorage>, DatabaseError> {
+        let storage = MemoryStorage::new();
+
+        Self::_build::<MemoryStorage>(storage, self.scala_functions, self.table_functions)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn build(self) -> Result<Database<RocksStorage>, DatabaseError> {
         let storage = RocksStorage::new(self.path)?;
 
         Self::_build::<RocksStorage>(storage, self.scala_functions, self.table_functions)
     }
 
+    pub fn build_in_memory(self) -> Result<Database<MemoryStorage>, DatabaseError> {
+        let storage = MemoryStorage::new();
+
+        Self::_build::<MemoryStorage>(storage, self.scala_functions, self.table_functions)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn build_optimistic(self) -> Result<Database<OptimisticRocksStorage>, DatabaseError> {
         let storage = OptimisticRocksStorage::new(self.path)?;
 
@@ -467,7 +489,7 @@ impl ResultIter for TransactionIter<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
     use crate::db::{DataBaseBuilder, DatabaseError, ResultIter};

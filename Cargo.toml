@@ -21,6 +21,7 @@ required-features = ["net"]
 
 [lib]
 doctest = false
+crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["macros"]
@@ -40,9 +41,8 @@ bincode               = { version = "1" }
 bumpalo               = { version = "3", features = ["allocator-api2", "collections", "std"] }
 byteorder             = { version = "1" }
 chrono                = { version = "0.4" }
-comfy-table           = { version = "7" }
+comfy-table           = { version = "7", default-features = false }
 csv                   = { version = "1" }
-dirs                  = { version = "5" }
 fixedbitset           = { version = "0.4" }
 itertools             = { version = "0.12" }
 ordered-float         = { version = "4", features = ["serde"] }
@@ -51,7 +51,6 @@ parking_lot           = { version = "0.12", features = ["arc_lock"] }
 petgraph              = { version = "0.6" }
 recursive             = { version = "0.1" }
 regex                 = { version = "1" }
-rocksdb               = { version = "0.23" }
 rust_decimal          = { version = "1" }
 serde                 = { version = "1", features = ["derive", "rc"] }
 kite_sql_serde_macros = { version = "0.1.0", path = "kite_sql_serde_macros" }
@@ -61,7 +60,6 @@ thiserror             = { version = "1" }
 typetag               = { version = "0.2" }
 ulid                  = { version = "1", features = ["serde"] }
 genawaiter            = { version = "0.99" }
-rand                  = { version = "0.8" }
 
 # Feature: net
 async-trait           = { version = "0.1", optional = true }
@@ -73,15 +71,35 @@ pgwire                = { version = "0.28.0", optional = true }
 tokio                 = { version = "1.36", features = ["full"], optional = true }
 
 
-[dev-dependencies]
+[target.'cfg(unix)'.dev-dependencies]
+pprof = { version = "0.13", features = ["flamegraph", "criterion"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion             = { version = "0.5", features = ["html_reports"] }
 indicatif             = { version = "0.17" }
 tempfile              = { version = "3.10" }
 # Benchmark
 sqlite                = { version = "0.34" }
 
-[target.'cfg(unix)'.dev-dependencies]
-pprof = { version = "0.13", features = ["flamegraph", "criterion"] }
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dirs = { version = "5" }
+rocksdb = { version = "0.23" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen        = { version = "0.2.106" }
+web-sys             = { version = "0.3.83", features = [
+    "Storage",
+    "Window",
+] }
+base64              = { version = "0.21" }
+getrandom           = { version = "0.2", features = ["js"] }
+getrandom_03        = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+js-sys              = { version = "0.3.83" }
+serde-wasm-bindgen  = { version = "0.6.5" }
+once_cell           = { version = "1" }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3.56"
 
 [workspace]
 members = [
@@ -92,3 +110,6 @@ members = [
 
 [profile.release]
 lto = true
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

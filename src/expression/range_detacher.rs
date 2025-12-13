@@ -786,7 +786,7 @@ impl fmt::Display for Range {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use crate::binder::test::build_t1_table;
     use crate::errors::DatabaseError;

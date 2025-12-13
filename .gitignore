@@ -16,8 +16,7 @@ target/
 /.obsidian
 .DS_Store
 
-/hello_world
-/transaction
+/example_data
 
 kitesql_data
 kitesql_bench
