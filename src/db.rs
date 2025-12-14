@@ -103,7 +103,6 @@ impl DataBaseBuilder {
         Self::_build::<RocksStorage>(storage, self.scala_functions, self.table_functions)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn build_in_memory(self) -> Result<Database<MemoryStorage>, DatabaseError> {
         let storage = MemoryStorage::new();
 

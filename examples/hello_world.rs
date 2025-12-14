@@ -28,7 +28,7 @@ implement_from_tuple!(
 
 #[cfg(feature = "macros")]
 fn main() -> Result<(), DatabaseError> {
-    let database = DataBaseBuilder::path("./hello_world").build()?;
+    let database = DataBaseBuilder::path("./example_data/hello_world").build()?;
 
     // 1) Create table and insert multiple rows with mixed types.
     database

@@ -1,7 +1,6 @@
 // Verify index usage in wasm build: create table, build indexes, analyze, and query with filters.
 import assert from "node:assert/strict";
 import { createRequire } from "module";
-import fs from "node:fs";
 
 // Minimal localStorage polyfill for wasm code paths (statistics persistence).
 class LocalStorage {
@@ -36,22 +35,18 @@ global.window = windowShim;
 const require = createRequire(import.meta.url);
 const { WasmDatabase } = require("../pkg/kite_sql.js");
 
-// Load the shared test dataset for richer coverage.
-function loadTestData() {
-  const csvPath = new URL("../tests/data/row_20000.csv", import.meta.url);
-  return fs.readFileSync(csvPath, "utf8").trim();
-}
-
 async function main() {
   const db = new WasmDatabase();
 
   await db.execute("drop table if exists t1");
   await db.execute("create table t1(id int primary key, c1 int, c2 int)");
 
-  // Insert data in bulk
-  const data = loadTestData();
-  for (const line of data.split("\n")) {
-    const [id, c1, c2] = line.split("|").map((v) => parseInt(v, 10));
+  // Insert data in bulk (20k rows) without reading from disk.
+  // Each row matches the old CSV pattern: id = i*3, c1 = i*3+1, c2 = i*3+2.
+  for (let i = 0; i < 20_000; i += 1) {
+    const id = i * 3;
+    const c1 = id + 1;
+    const c2 = id + 2;
     await db.execute(`insert into t1 values(${id}, ${c1}, ${c2})`);
   }
 
