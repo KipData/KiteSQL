@@ -13,6 +13,13 @@ struct WasmRow {
     values: Vec<DataValue>,
 }
 
+#[derive(Serialize)]
+struct WasmSchemaColumn {
+    name: String,
+    datatype: String,
+    nullable: bool,
+}
+
 fn to_js_err(err: impl ToString) -> JsValue {
     js_sys::Error::new(&err.to_string()).into()
 }
@@ -87,6 +94,26 @@ impl WasmResultIter {
             Some(Err(err)) => Err(to_js_err(err.to_string())),
             None => Ok(JsValue::undefined()),
         }
+    }
+
+    /// Returns the output schema as an array of `{ name, datatype, nullable }`.
+    #[wasm_bindgen(js_name = schema)]
+    pub fn schema(&self) -> Result<JsValue, JsValue> {
+        let iter = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| to_js_err("iterator already consumed"))?;
+        let columns: Vec<WasmSchemaColumn> = iter
+            .schema()
+            .iter()
+            .map(|col| WasmSchemaColumn {
+                name: col.name().to_string(),
+                datatype: col.datatype().to_string(),
+                nullable: col.nullable(),
+            })
+            .collect();
+        serde_wasm_bindgen::to_value(&columns)
+            .map_err(|e| to_js_err(format!("serialize schema: {e}")))
     }
 
     /// Collect all remaining rows into an array and finish the iterator.
