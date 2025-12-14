@@ -72,10 +72,9 @@ let mut iter = kite_sql.run("select * from t1")?;
 let column_names: Vec<_> = iter.schema().iter().map(|c| c.name()).collect();
 println!("columns: {column_names:?}");
 
-for tuple in &mut iter {
+for tuple in iter {
     println!("{:?}", tuple?);
 }
-iter.done()?;
 ```
 
 👉**more examples**
