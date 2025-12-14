@@ -55,6 +55,8 @@ console.log(rows.map((r) => r.values.map((v) => v.Int32 ?? v)));
 ## Examples
 
 ```rust
+use kite_sql::db::{DataBaseBuilder, ResultIter};
+
 let kite_sql = DataBaseBuilder::path("./data").build()?;
 
 kite_sql
@@ -64,7 +66,13 @@ kite_sql
     .run("insert into t1 values(0, 0), (1, 1)")?
     .done()?;
 
-for tuple in kite_sql.run("select * from t1")? {
+let mut iter = kite_sql.run("select * from t1")?;
+
+// Query schema is available on every result iterator.
+let column_names: Vec<_> = iter.schema().iter().map(|c| c.name()).collect();
+println!("columns: {column_names:?}");
+
+for tuple in iter {
     println!("{:?}", tuple?);
 }
 ```

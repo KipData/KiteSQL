@@ -12,7 +12,16 @@ async function main() {
   await db.execute("create table my_struct (c1 int primary key, c2 int)");
   await db.execute("insert into my_struct values(0, 0), (1, 1)");
 
-  const rows = db.run("select * from my_struct").rows();
+  const iter = db.run("select * from my_struct");
+  const schema = iter.schema();
+  assert.deepEqual(
+    schema.map(({ name, datatype, nullable }) => ({ name, datatype, nullable })),
+    [
+      { name: "c1", datatype: "Integer", nullable: false },
+      { name: "c2", datatype: "Integer", nullable: true },
+    ],
+  );
+  const rows = iter.rows();
   assert.equal(rows.length, 2, "should return two rows");
 
   const [first, second] = rows;
