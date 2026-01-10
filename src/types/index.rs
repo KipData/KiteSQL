@@ -82,6 +82,9 @@ impl fmt::Display for IndexInfo {
         } else {
             write!(f, "EMPTY")?;
         }
+        if self.covered_deserializers.is_some() {
+            write!(f, " Covered")?;
+        }
 
         Ok(())
     }

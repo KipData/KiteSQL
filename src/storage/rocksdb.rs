@@ -464,4 +464,63 @@ mod test {
 
         Ok(())
     }
+
+    #[test]
+    fn test_read_by_index_cover() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        kite_sql
+            .run("create table t1 (a int primary key, b int unique)")?
+            .done()?;
+        kite_sql
+            .run("insert into t1 (a, b) values (0, 0), (1, 1), (2, 2), (3, 4)")?
+            .done()?;
+
+        let mut transaction = kite_sql.storage.transaction().unwrap();
+        let table = transaction
+            .table(kite_sql.state.table_cache(), "t1".to_string().into())?
+            .unwrap()
+            .clone();
+        let unique_index = table
+            .indexes
+            .iter()
+            .find(|index| matches!(index.ty, IndexType::Unique))
+            .unwrap()
+            .clone();
+        let (b_pos, b_column) = table
+            .columns()
+            .cloned()
+            .enumerate()
+            .find(|(_, column)| column.name() == "b")
+            .unwrap();
+        let mut columns = BTreeMap::new();
+        columns.insert(b_pos, b_column.clone());
+        let covered_deserializers = vec![b_column.datatype().serializable()];
+
+        let target_pk = DataValue::Int32(3);
+        let covered_value = DataValue::Int32(4);
+        transaction.remove_tuple("t1", &target_pk)?;
+
+        let mut iter = transaction.read_by_index(
+            kite_sql.state.table_cache(),
+            "t1".to_string().into(),
+            (Some(0), Some(1)),
+            columns,
+            unique_index,
+            vec![Range::Eq(covered_value.clone())],
+            false,
+            Some(covered_deserializers),
+        )?;
+
+        let mut tuples = Vec::new();
+        while let Some(tuple) = iter.next_tuple()? {
+            tuples.push(tuple);
+        }
+
+        assert_eq!(tuples.len(), 1);
+        assert_eq!(tuples[0].pk, Some(target_pk));
+        assert_eq!(tuples[0].values, vec![covered_value]);
+
+        Ok(())
+    }
 }

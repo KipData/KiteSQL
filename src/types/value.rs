@@ -588,25 +588,33 @@ impl DataValue {
     // FIXME
     fn encode_string(b: &mut BumpBytes, data: &[u8]) {
         let d_len = data.len();
-        let realloc_size = (d_len / ENCODE_GROUP_SIZE + 1) * (ENCODE_GROUP_SIZE + 1);
-        Self::realloc_bytes(b, realloc_size);
+        let needed_groups = d_len / ENCODE_GROUP_SIZE + 1;
+        Self::realloc_bytes(b, needed_groups * (ENCODE_GROUP_SIZE + 1));
 
         let mut idx = 0;
-        while idx < d_len {
-            let remain = d_len - idx;
-            let pad_count: usize;
+
+        loop {
+            let remain = d_len.saturating_sub(idx);
 
             if remain >= ENCODE_GROUP_SIZE {
                 b.extend_from_slice(&data[idx..idx + ENCODE_GROUP_SIZE]);
-                pad_count = 0;
-            } else {
-                pad_count = ENCODE_GROUP_SIZE - remain;
+                b.push(ENCODE_MARKER);
+                idx += ENCODE_GROUP_SIZE;
+                continue;
+            }
+
+            let pad_count = ENCODE_GROUP_SIZE - remain;
+
+            if remain > 0 {
                 b.extend_from_slice(&data[idx..]);
-                b.extend_from_slice(&vec![0; pad_count]);
+            }
+
+            for _ in 0..pad_count {
+                b.push(0);
             }
 
             b.push(ENCODE_MARKER - pad_count as u8);
-            idx += ENCODE_GROUP_SIZE;
+            break;
         }
     }
 
@@ -624,7 +632,12 @@ impl DataValue {
 
             let pad_count = (ENCODE_MARKER - marker) as usize;
 
-            debug_assert!(pad_count <= ENCODE_GROUP_SIZE);
+            if pad_count > ENCODE_GROUP_SIZE {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "memcomparable string marker out of range",
+                ));
+            }
 
             let data_len = ENCODE_GROUP_SIZE - pad_count;
             result.extend_from_slice(&group[..data_len]);
@@ -639,11 +652,8 @@ impl DataValue {
 
     #[inline]
     fn realloc_bytes(b: &mut BumpBytes, size: usize) {
-        let len = b.len();
-
-        if size > len {
-            b.reserve(size - len);
-            b.resize(size, 0);
+        if size > 0 {
+            b.reserve(size);
         }
     }
 
