@@ -19,7 +19,7 @@ test-wasm:
 
 ## Run the sqllogictest harness against the configured .slt suite.
 test-slt:
-	$(CARGO) run -p sqllogictest-test -- --path $(SQLLOGIC_PATH)
+	$(CARGO) run -p sqllogictest-test -- --path "$(SQLLOGIC_PATH)"
 
 ## Convenience target to run every suite in sequence.
 test-all: test test-wasm test-slt

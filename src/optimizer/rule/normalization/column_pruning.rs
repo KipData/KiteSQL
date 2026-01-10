@@ -19,11 +19,10 @@ use crate::expression::visitor::Visitor;
 use crate::expression::{HasCountStar, ScalarExpression};
 use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
 use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
-use crate::optimizer::heuristic::graph::{HepGraph, HepNodeId};
 use crate::planner::operator::Operator;
+use crate::planner::{Childrens, LogicalPlan};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::LogicalType;
-use itertools::Itertools;
 use sqlparser::ast::CharLengthUnits;
 use std::collections::HashSet;
 use std::sync::LazyLock;
@@ -61,15 +60,19 @@ impl ColumnPruning {
     fn _apply(
         column_references: HashSet<&ColumnSummary>,
         all_referenced: bool,
-        node_id: HepNodeId,
-        graph: &mut HepGraph,
-    ) -> Result<(), DatabaseError> {
-        let operator = graph.operator_mut(node_id);
+        plan: &mut LogicalPlan,
+    ) -> Result<bool, DatabaseError> {
+        let mut changed = false;
+        let operator = &mut plan.operator;
 
         match operator {
             Operator::Aggregate(op) => {
                 if !all_referenced {
+                    let before = op.agg_calls.len();
                     Self::clear_exprs(&column_references, &mut op.agg_calls);
+                    if op.agg_calls.len() != before {
+                        changed = true;
+                    }
 
                     if op.agg_calls.is_empty() && op.groupby_exprs.is_empty() {
                         let value = DataValue::Utf8 {
@@ -84,7 +87,8 @@ impl ColumnPruning {
                             kind: AggKind::Count,
                             args: vec![ScalarExpression::Constant(value)],
                             ty: LogicalType::Integer,
-                        })
+                        });
+                        changed = true;
                     }
                 }
                 let is_distinct = op.is_distinct;
@@ -97,7 +101,7 @@ impl ColumnPruning {
                     }
                 }
 
-                Self::recollect_apply(new_column_references, false, node_id, graph)?;
+                changed |= Self::recollect_apply(new_column_references, false, plan)?;
             }
             Operator::Project(op) => {
                 let mut has_count_star = HasCountStar::default();
@@ -106,18 +110,26 @@ impl ColumnPruning {
                 }
                 if !has_count_star.value {
                     if !all_referenced {
+                        let before = op.exprs.len();
                         Self::clear_exprs(&column_references, &mut op.exprs);
+                        if op.exprs.len() != before {
+                            changed = true;
+                        }
                     }
                     let referenced_columns = operator.referenced_columns(false);
                     let new_column_references = trans_references!(&referenced_columns);
 
-                    Self::recollect_apply(new_column_references, false, node_id, graph)?;
+                    changed |= Self::recollect_apply(new_column_references, false, plan)?;
                 }
             }
             Operator::TableScan(op) => {
                 if !all_referenced {
+                    let before = op.columns.len();
                     op.columns
                         .retain(|_, column| column_references.contains(column.summary()));
+                    if op.columns.len() != before {
+                        changed = true;
+                    }
                 }
             }
             Operator::Sort(_)
@@ -128,25 +140,17 @@ impl ColumnPruning {
             | Operator::Except(_)
             | Operator::TopK(_) => {
                 let temp_columns = operator.referenced_columns(false);
-                // why?
+                // this is magic!!! do not delete!!!
                 let mut column_references = column_references;
                 for column in temp_columns.iter() {
                     column_references.insert(column.summary());
                 }
-                for child_id in graph.children_at(node_id).collect_vec() {
-                    let copy_references = column_references.clone();
-
-                    Self::_apply(copy_references, all_referenced, child_id, graph)?;
-                }
+                changed |= Self::recollect_apply(column_references.clone(), all_referenced, plan)?;
             }
             // Last Operator
             Operator::Dummy | Operator::Values(_) | Operator::FunctionScan(_) => (),
             Operator::Explain => {
-                if let Some(child_id) = graph.eldest_child_at(node_id) {
-                    Self::_apply(column_references, true, child_id, graph)?;
-                } else {
-                    unreachable!()
-                }
+                changed |= Self::recollect_apply(column_references, true, plan)?;
             }
             // DDL Based on Other Plan
             Operator::Insert(_)
@@ -156,11 +160,7 @@ impl ColumnPruning {
                 let referenced_columns = operator.referenced_columns(false);
                 let new_column_references = trans_references!(&referenced_columns);
 
-                if let Some(child_id) = graph.eldest_child_at(node_id) {
-                    Self::recollect_apply(new_column_references, true, child_id, graph)?;
-                } else {
-                    unreachable!();
-                }
+                changed |= Self::recollect_apply(new_column_references, true, plan)?;
             }
             // DDL Single Plan
             Operator::CreateTable(_)
@@ -179,21 +179,35 @@ impl ColumnPruning {
             | Operator::Describe(_) => (),
         }
 
-        Ok(())
+        Ok(changed)
     }
 
     fn recollect_apply(
         referenced_columns: HashSet<&ColumnSummary>,
         all_referenced: bool,
-        node_id: HepNodeId,
-        graph: &mut HepGraph,
-    ) -> Result<(), DatabaseError> {
-        for child_id in graph.children_at(node_id).collect_vec() {
-            let copy_references: HashSet<&ColumnSummary> = referenced_columns.clone();
+        plan: &mut LogicalPlan,
+    ) -> Result<bool, DatabaseError> {
+        Self::for_each_child(plan, |child| {
+            Self::_apply(referenced_columns.clone(), all_referenced, child)
+        })
+    }
 
-            Self::_apply(copy_references, all_referenced, child_id, graph)?;
+    fn for_each_child(
+        plan: &mut LogicalPlan,
+        mut f: impl FnMut(&mut LogicalPlan) -> Result<bool, DatabaseError>,
+    ) -> Result<bool, DatabaseError> {
+        let mut changed = false;
+        match plan.childrens.as_mut() {
+            Childrens::Only(child) => {
+                changed |= f(child.as_mut())?;
+            }
+            Childrens::Twins { left, right } => {
+                changed |= f(left.as_mut())?;
+                changed |= f(right.as_mut())?;
+            }
+            Childrens::None => (),
         }
-        Ok(())
+        Ok(changed)
     }
 }
 
@@ -204,12 +218,8 @@ impl MatchPattern for ColumnPruning {
 }
 
 impl NormalizationRule for ColumnPruning {
-    fn apply(&self, node_id: HepNodeId, graph: &mut HepGraph) -> Result<(), DatabaseError> {
-        Self::_apply(HashSet::new(), true, node_id, graph)?;
-        // mark changed to skip this rule batch
-        graph.version += 1;
-
-        Ok(())
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+        Self::_apply(HashSet::new(), true, plan)
     }
 }
 

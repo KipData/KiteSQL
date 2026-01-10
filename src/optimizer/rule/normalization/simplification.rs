@@ -17,10 +17,9 @@ use crate::expression::simplify::{ConstantCalculator, Simplify};
 use crate::expression::visitor_mut::VisitorMut;
 use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
 use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
-use crate::optimizer::heuristic::graph::{HepGraph, HepNodeId};
 use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::Operator;
-use itertools::Itertools;
+use crate::planner::{Childrens, LogicalPlan};
 use std::sync::LazyLock;
 
 static CONSTANT_CALCULATION_RULE: LazyLock<Pattern> = LazyLock::new(|| Pattern {
@@ -40,8 +39,8 @@ static SIMPLIFY_FILTER_RULE: LazyLock<Pattern> = LazyLock::new(|| Pattern {
 pub struct ConstantCalculation;
 
 impl ConstantCalculation {
-    fn _apply(node_id: HepNodeId, graph: &mut HepGraph) -> Result<(), DatabaseError> {
-        let operator = graph.operator_mut(node_id);
+    fn _apply(plan: &mut LogicalPlan) -> Result<(), DatabaseError> {
+        let operator = &mut plan.operator;
 
         match operator {
             Operator::Aggregate(op) => {
@@ -75,8 +74,13 @@ impl ConstantCalculation {
             }
             _ => (),
         }
-        for child_id in graph.children_at(node_id).collect_vec() {
-            Self::_apply(child_id, graph)?;
+        match plan.childrens.as_mut() {
+            Childrens::Only(child) => Self::_apply(child.as_mut())?,
+            Childrens::Twins { left, right } => {
+                Self::_apply(left.as_mut())?;
+                Self::_apply(right.as_mut())?;
+            }
+            Childrens::None => (),
         }
 
         Ok(())
@@ -90,12 +94,9 @@ impl MatchPattern for ConstantCalculation {
 }
 
 impl NormalizationRule for ConstantCalculation {
-    fn apply(&self, node_id: HepNodeId, graph: &mut HepGraph) -> Result<(), DatabaseError> {
-        Self::_apply(node_id, graph)?;
-        // mark changed to skip this rule batch
-        graph.version += 1;
-
-        Ok(())
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+        Self::_apply(plan)?;
+        Ok(true)
     }
 }
 
@@ -109,22 +110,18 @@ impl MatchPattern for SimplifyFilter {
 }
 
 impl NormalizationRule for SimplifyFilter {
-    fn apply(&self, node_id: HepNodeId, graph: &mut HepGraph) -> Result<(), DatabaseError> {
-        let mut is_optimized = false;
-        if let Operator::Filter(filter_op) = graph.operator_mut(node_id) {
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+        if let Operator::Filter(filter_op) = &mut plan.operator {
             if filter_op.is_optimized {
-                return Ok(());
+                return Ok(false);
             }
             ConstantCalculator.visit(&mut filter_op.predicate)?;
             Simplify::default().visit(&mut filter_op.predicate)?;
             filter_op.is_optimized = true;
-            is_optimized = true;
-        }
-        if is_optimized {
-            graph.version += 1;
+            return Ok(true);
         }
 
-        Ok(())
+        Ok(false)
     }
 }
 

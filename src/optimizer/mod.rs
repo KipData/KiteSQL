@@ -16,4 +16,5 @@
 /// such as (/core) are referenced from sqlrs
 pub mod core;
 pub mod heuristic;
+pub mod plan_utils;
 pub mod rule;

@@ -383,6 +383,7 @@ mod test {
 
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
+    use crate::db::{DataBaseBuilder, ResultIter};
     use crate::execution::dql::test::build_integers;
     use crate::execution::{try_collect, ReadExecutor};
     use crate::expression::ScalarExpression;
@@ -403,6 +404,18 @@ mod test {
     use std::hash::RandomState;
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    fn tuple_to_strings(tuple: &Tuple) -> Vec<Option<String>> {
+        tuple
+            .values
+            .iter()
+            .map(|value| match value {
+                DataValue::Null => None,
+                DataValue::Utf8 { value, .. } => Some(value.clone()),
+                other => Some(other.to_string()),
+            })
+            .collect()
+    }
 
     fn build_join_values(
         eq: bool,
@@ -1016,6 +1029,54 @@ mod test {
         expected_set.insert(tuple);
 
         valid_result(&mut expected_set, &tuples);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_right_join_using_preserves_right_side_values() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let db = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+
+        let setup_sql = [
+            "DROP TABLE IF EXISTS str1",
+            "DROP TABLE IF EXISTS str2",
+            "CREATE TABLE str1 (aid INT PRIMARY KEY, a INT, s VARCHAR)",
+            "CREATE TABLE str2 (bid INT PRIMARY KEY, a INT, s VARCHAR)",
+            "INSERT INTO str1 VALUES (0, 1, 'a'), (1, 2, 'A'), (2, 3, 'c'), (3, 4, 'D')",
+            "INSERT INTO str2 VALUES (0, 1, 'A'), (1, 2, 'B'), (2, 3, 'C'), (3, 4, 'E')",
+        ];
+
+        for sql in setup_sql {
+            db.run(sql)?.done()?;
+        }
+
+        let mut iter = db.run(
+            "SELECT s, str1.s, str2.s \
+             FROM str1 RIGHT OUTER JOIN str2 USING(s) \
+             ORDER BY str2.s",
+        )?;
+        let mut actual = Vec::new();
+
+        while let Some(row) = iter.next() {
+            let tuple = row?;
+            actual.push(tuple_to_strings(&tuple));
+        }
+        iter.done()?;
+
+        assert_eq!(
+            actual,
+            vec![
+                vec![
+                    Some("A".to_string()),
+                    Some("A".to_string()),
+                    Some("A".to_string())
+                ],
+                vec![None, None, Some("B".to_string())],
+                vec![None, None, Some("C".to_string())],
+                vec![None, None, Some("E".to_string())],
+            ]
+        );
 
         Ok(())
     }

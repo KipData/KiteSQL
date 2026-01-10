@@ -125,6 +125,22 @@ impl LogicalPlan {
         }
     }
 
+    pub(crate) fn reset_output_schema_cache(&mut self) {
+        self._output_schema_ref = None;
+    }
+
+    pub(crate) fn reset_output_schema_cache_recursive(&mut self) {
+        self.reset_output_schema_cache();
+        match self.childrens.as_mut() {
+            Childrens::Only(child) => child.reset_output_schema_cache_recursive(),
+            Childrens::Twins { left, right } => {
+                left.reset_output_schema_cache_recursive();
+                right.reset_output_schema_cache_recursive();
+            }
+            Childrens::None => (),
+        }
+    }
+
     pub fn referenced_table(&self) -> Vec<TableName> {
         fn collect_table(plan: &LogicalPlan, results: &mut Vec<TableName>) {
             if let Operator::TableScan(op) = &plan.operator {

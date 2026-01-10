@@ -19,10 +19,13 @@ use crate::expression::{BinaryOperator, ScalarExpression};
 use crate::optimizer::core::pattern::Pattern;
 use crate::optimizer::core::pattern::PatternChildrenPredicate;
 use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
-use crate::optimizer::heuristic::graph::{HepGraph, HepNodeId};
+use crate::optimizer::plan_utils::{
+    left_child, only_child_mut, replace_with_only_child, right_child, wrap_child_with,
+};
 use crate::planner::operator::filter::FilterOperator;
 use crate::planner::operator::join::JoinType;
 use crate::planner::operator::Operator;
+use crate::planner::LogicalPlan;
 use crate::types::index::{IndexInfo, IndexMetaRef, IndexType};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
@@ -115,105 +118,111 @@ impl MatchPattern for PushPredicateThroughJoin {
 }
 
 impl NormalizationRule for PushPredicateThroughJoin {
-    // TODO: pushdown_predicates need to consider output columns
-    fn apply(&self, node_id: HepNodeId, graph: &mut HepGraph) -> Result<(), DatabaseError> {
-        let child_id = match graph.eldest_child_at(node_id) {
-            Some(child_id) => child_id,
-            None => return Ok(()),
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+        let filter_op = match &plan.operator {
+            Operator::Filter(op) => op.clone(),
+            _ => return Ok(false),
         };
-        if let Operator::Join(child_op) = graph.operator(child_id) {
+
+        let mut applied = false;
+
+        let parent_replacement = {
+            let join_plan = match only_child_mut(plan) {
+                Some(child) => child,
+                None => return Ok(false),
+            };
+
+            let join_op = match &join_plan.operator {
+                Operator::Join(op) => op,
+                _ => return Ok(false),
+            };
+
             if !matches!(
-                child_op.join_type,
+                join_op.join_type,
                 JoinType::Inner
                     | JoinType::LeftOuter
                     | JoinType::LeftSemi
                     | JoinType::LeftAnti
                     | JoinType::RightOuter
             ) {
-                return Ok(());
+                return Ok(false);
             }
 
-            let join_childs = graph.children_at(child_id).collect_vec();
-            let left_columns = graph.operator(join_childs[0]).referenced_columns(true);
-            let right_columns = graph.operator(join_childs[1]).referenced_columns(true);
+            let left_columns = left_child(join_plan)
+                .map(|child| child.operator.referenced_columns(true))
+                .unwrap_or_default();
+            let right_columns = right_child(join_plan)
+                .map(|child| child.operator.referenced_columns(true))
+                .unwrap_or_default();
+
+            let filter_exprs = split_conjunctive_predicates(&filter_op.predicate);
+            let (left_filters, rest): (Vec<_>, Vec<_>) = filter_exprs
+                .into_iter()
+                .partition(|f| is_subset_cols(&f.referenced_columns(true), &left_columns));
+            let (right_filters, common_filters): (Vec<_>, Vec<_>) = rest
+                .into_iter()
+                .partition(|f| is_subset_cols(&f.referenced_columns(true), &right_columns));
 
             let mut new_ops = (None, None, None);
-
-            if let Operator::Filter(op) = graph.operator(node_id) {
-                let filter_exprs = split_conjunctive_predicates(&op.predicate);
-
-                let (left_filters, rest): (Vec<_>, Vec<_>) = filter_exprs
-                    .into_iter()
-                    .partition(|f| is_subset_cols(&f.referenced_columns(true), &left_columns));
-                let (right_filters, common_filters): (Vec<_>, Vec<_>) = rest
-                    .into_iter()
-                    .partition(|f| is_subset_cols(&f.referenced_columns(true), &right_columns));
-
-                let replace_filters = match child_op.join_type {
-                    JoinType::Inner => {
-                        if !left_filters.is_empty() {
-                            if let Some(left_filter_op) = reduce_filters(left_filters, op.having) {
-                                new_ops.0 = Some(Operator::Filter(left_filter_op));
-                            }
-                        }
-
-                        if !right_filters.is_empty() {
-                            if let Some(right_filter_op) = reduce_filters(right_filters, op.having)
-                            {
-                                new_ops.1 = Some(Operator::Filter(right_filter_op));
-                            }
-                        }
-
-                        common_filters
+            let replace_filters = match join_op.join_type {
+                JoinType::Inner => {
+                    if let Some(left_filter_op) = reduce_filters(left_filters, filter_op.having) {
+                        new_ops.0 = Some(Operator::Filter(left_filter_op));
                     }
-                    JoinType::LeftOuter | JoinType::LeftSemi | JoinType::LeftAnti => {
-                        if !left_filters.is_empty() {
-                            if let Some(left_filter_op) = reduce_filters(left_filters, op.having) {
-                                new_ops.0 = Some(Operator::Filter(left_filter_op));
-                            }
-                        }
 
-                        common_filters
-                            .into_iter()
-                            .chain(right_filters)
-                            .collect_vec()
+                    if let Some(right_filter_op) = reduce_filters(right_filters, filter_op.having) {
+                        new_ops.1 = Some(Operator::Filter(right_filter_op));
                     }
-                    JoinType::RightOuter => {
-                        if !right_filters.is_empty() {
-                            if let Some(right_filter_op) = reduce_filters(right_filters, op.having)
-                            {
-                                new_ops.1 = Some(Operator::Filter(right_filter_op));
-                            }
-                        }
 
-                        common_filters.into_iter().chain(left_filters).collect_vec()
-                    }
-                    _ => vec![],
-                };
-
-                if !replace_filters.is_empty() {
-                    if let Some(replace_filter_op) = reduce_filters(replace_filters, op.having) {
-                        new_ops.2 = Some(Operator::Filter(replace_filter_op));
-                    }
+                    common_filters
                 }
+                JoinType::LeftOuter | JoinType::LeftSemi | JoinType::LeftAnti => {
+                    if let Some(left_filter_op) = reduce_filters(left_filters, filter_op.having) {
+                        new_ops.0 = Some(Operator::Filter(left_filter_op));
+                    }
+
+                    common_filters
+                        .into_iter()
+                        .chain(right_filters)
+                        .collect_vec()
+                }
+                JoinType::RightOuter => {
+                    if let Some(right_filter_op) = reduce_filters(right_filters, filter_op.having) {
+                        new_ops.1 = Some(Operator::Filter(right_filter_op));
+                    }
+
+                    common_filters.into_iter().chain(left_filters).collect_vec()
+                }
+                _ => vec![],
+            };
+
+            if let Some(replace_filter_op) = reduce_filters(replace_filters, filter_op.having) {
+                new_ops.2 = Some(Operator::Filter(replace_filter_op));
             }
 
             if let Some(left_op) = new_ops.0 {
-                graph.add_node(child_id, Some(join_childs[0]), left_op);
+                applied |= wrap_child_with(join_plan, 0, left_op);
             }
 
             if let Some(right_op) = new_ops.1 {
-                graph.add_node(child_id, Some(join_childs[1]), right_op);
+                applied |= wrap_child_with(join_plan, 1, right_op);
             }
 
-            if let Some(common_op) = new_ops.2 {
-                graph.replace_node(node_id, common_op);
-            } else {
-                graph.remove_node(node_id, false);
+            new_ops.2
+        };
+
+        match parent_replacement {
+            Some(common_op) => {
+                plan.operator = common_op;
+                applied = true;
             }
+            None if applied => {
+                applied |= replace_with_only_child(plan);
+            }
+            _ => {}
         }
 
-        Ok(())
+        Ok(applied)
     }
 }
 
@@ -226,10 +235,11 @@ impl MatchPattern for PushPredicateIntoScan {
 }
 
 impl NormalizationRule for PushPredicateIntoScan {
-    fn apply(&self, node_id: HepNodeId, graph: &mut HepGraph) -> Result<(), DatabaseError> {
-        if let Operator::Filter(op) = graph.operator(node_id).clone() {
-            if let Some(child_id) = graph.eldest_child_at(node_id) {
-                if let Operator::TableScan(scan_op) = graph.operator_mut(child_id) {
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+        if let Operator::Filter(op) = plan.operator.clone() {
+            if let Some(child) = only_child_mut(plan) {
+                if let Operator::TableScan(scan_op) = &mut child.operator {
+                    let mut changed = false;
                     for IndexInfo {
                         meta,
                         range,
@@ -239,7 +249,6 @@ impl NormalizationRule for PushPredicateIntoScan {
                         if range.is_some() {
                             continue;
                         }
-                        // range detach
                         *range = match meta.ty {
                             IndexType::PrimaryKey { is_multiple: false }
                             | IndexType::Unique
@@ -251,7 +260,11 @@ impl NormalizationRule for PushPredicateIntoScan {
                                 Self::composite_range(&op, meta)?
                             }
                         };
-                        // try index covered
+                        if range.is_none() {
+                            continue;
+                        }
+                        changed = true;
+
                         let mut deserializers = Vec::with_capacity(meta.column_ids.len());
                         let mut cover_count = 0;
                         let index_column_types = match &meta.value_ty {
@@ -261,7 +274,7 @@ impl NormalizationRule for PushPredicateIntoScan {
                         for (i, column_id) in meta.column_ids.iter().enumerate() {
                             for column in scan_op.columns.values() {
                                 deserializers.push(
-                                    if column.id().map(|id| &id == column_id).unwrap_or(false) {
+                                    if column.id().map(|id| id == *column_id).unwrap_or(false) {
                                         cover_count += 1;
                                         column.datatype().serializable()
                                     } else {
@@ -271,14 +284,15 @@ impl NormalizationRule for PushPredicateIntoScan {
                             }
                         }
                         if cover_count == scan_op.columns.len() {
-                            *covered_deserializers = Some(deserializers)
+                            *covered_deserializers = Some(deserializers);
                         }
                     }
+                    return Ok(changed);
                 }
             }
         }
 
-        Ok(())
+        Ok(false)
     }
 }
 

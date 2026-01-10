@@ -18,17 +18,16 @@ use crate::optimizer::core::pattern::PatternMatcher;
 use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::heuristic::batch::{HepBatch, HepBatchStrategy};
-use crate::optimizer::heuristic::graph::{HepGraph, HepNodeId};
-use crate::optimizer::heuristic::matcher::HepMatcher;
+use crate::optimizer::heuristic::matcher::PlanMatcher;
 use crate::optimizer::rule::implementation::ImplementationRuleImpl;
 use crate::optimizer::rule::normalization::NormalizationRuleImpl;
-use crate::planner::LogicalPlan;
+use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use std::ops::Not;
 
 pub struct HepOptimizer {
     batches: Vec<HepBatch>,
-    pub graph: HepGraph,
+    plan: LogicalPlan,
     implementations: Vec<ImplementationRuleImpl>,
 }
 
@@ -36,7 +35,7 @@ impl HepOptimizer {
     pub fn new(root: LogicalPlan) -> Self {
         Self {
             batches: vec![],
-            graph: HepGraph::new(root),
+            plan: root,
             implementations: vec![],
         }
     }
@@ -60,63 +59,70 @@ impl HepOptimizer {
         mut self,
         loader: Option<&StatisticMetaLoader<'_, T>>,
     ) -> Result<LogicalPlan, DatabaseError> {
-        for ref batch in self.batches {
+        for batch in &self.batches {
             match batch.strategy {
                 HepBatchStrategy::MaxTimes(max_iteration) => {
                     for _ in 0..max_iteration {
-                        if !Self::apply_batch(&mut self.graph, batch)? {
+                        if !Self::apply_batch(&mut self.plan, batch)? {
                             break;
                         }
                     }
                 }
                 HepBatchStrategy::LoopIfApplied => {
-                    while Self::apply_batch(&mut self.graph, batch)? {}
+                    while Self::apply_batch(&mut self.plan, batch)? {}
                 }
             }
         }
-        let memo = loader
-            .and_then(|loader| {
-                self.implementations
-                    .is_empty()
-                    .not()
-                    .then(|| Memo::new(&self.graph, loader, &self.implementations))
-            })
-            .transpose()?;
 
-        self.graph
-            .into_plan(memo.as_ref())
-            .ok_or(DatabaseError::EmptyPlan)
+        if let Some(loader) = loader {
+            if self.implementations.is_empty().not() {
+                let memo = Memo::new(&self.plan, loader, &self.implementations)?;
+                Memo::annotate_plan(&memo, &mut self.plan);
+            }
+        }
+
+        Ok(self.plan)
     }
 
-    fn apply_batch(
-        graph: *mut HepGraph,
-        HepBatch { rules, .. }: &HepBatch,
-    ) -> Result<bool, DatabaseError> {
-        let before_version = unsafe { &*graph }.version;
-
-        for rule in rules {
-            // SAFETY: after successfully modifying the graph, the iterator is no longer used.
-            for node_id in unsafe { &*graph }.nodes_iter(None) {
-                if Self::apply_rule(unsafe { &mut *graph }, rule, node_id)? {
-                    break;
-                }
+    fn apply_batch(plan: &mut LogicalPlan, batch: &HepBatch) -> Result<bool, DatabaseError> {
+        let mut applied = false;
+        for rule in &batch.rules {
+            if Self::apply_rule(plan, rule)? {
+                applied = true;
             }
         }
-
-        Ok(before_version != unsafe { &*graph }.version)
+        Ok(applied)
     }
 
     fn apply_rule(
-        graph: &mut HepGraph,
+        plan: &mut LogicalPlan,
         rule: &NormalizationRuleImpl,
-        node_id: HepNodeId,
     ) -> Result<bool, DatabaseError> {
-        let before_version = graph.version;
-
-        if HepMatcher::new(rule.pattern(), node_id, graph).match_opt_expr() {
-            rule.apply(node_id, graph)?;
+        if PlanMatcher::new(rule.pattern(), plan).match_opt_expr() && rule.apply(plan)? {
+            plan.reset_output_schema_cache_recursive();
+            return Ok(true);
         }
 
-        Ok(before_version != graph.version)
+        match plan.childrens.as_mut() {
+            Childrens::Only(child) => {
+                if Self::apply_rule(child, rule)? {
+                    plan.reset_output_schema_cache();
+                    return Ok(true);
+                }
+                Ok(false)
+            }
+            Childrens::Twins { left, right } => {
+                if Self::apply_rule(left, rule)? {
+                    plan.reset_output_schema_cache();
+                    return Ok(true);
+                }
+                if Self::apply_rule(right, rule)? {
+                    plan.reset_output_schema_cache();
+                    return Ok(true);
+                }
+                Ok(false)
+            }
+            Childrens::None => Ok(false),
+        }
     }
 }

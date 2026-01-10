@@ -16,10 +16,10 @@ use crate::errors::DatabaseError;
 use crate::optimizer::core::pattern::Pattern;
 use crate::optimizer::core::pattern::PatternChildrenPredicate;
 use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
-use crate::optimizer::heuristic::graph::{HepGraph, HepNodeId};
+use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child, wrap_child_with};
 use crate::planner::operator::join::JoinType;
 use crate::planner::operator::Operator;
-use itertools::Itertools;
+use crate::planner::LogicalPlan;
 use std::sync::LazyLock;
 
 static LIMIT_PROJECT_TRANSPOSE_RULE: LazyLock<Pattern> = LazyLock::new(|| Pattern {
@@ -55,12 +55,35 @@ impl MatchPattern for LimitProjectTranspose {
 }
 
 impl NormalizationRule for LimitProjectTranspose {
-    fn apply(&self, node_id: HepNodeId, graph: &mut HepGraph) -> Result<(), DatabaseError> {
-        if let Some(child_id) = graph.eldest_child_at(node_id) {
-            graph.swap_node(node_id, child_id);
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+        let operator = std::mem::replace(&mut plan.operator, Operator::Dummy);
+
+        let limit_op = match operator {
+            Operator::Limit(op) => op,
+            other => {
+                plan.operator = other;
+                return Ok(false);
+            }
+        };
+
+        let mut project_op = None;
+
+        if let Some(child) = only_child_mut(plan) {
+            if matches!(child.operator, Operator::Project(_)) {
+                project_op = Some(std::mem::replace(
+                    &mut child.operator,
+                    Operator::Limit(limit_op.clone()),
+                ));
+            }
         }
 
-        Ok(())
+        if let Some(project_op) = project_op {
+            plan.operator = project_op;
+            return Ok(true);
+        }
+
+        plan.operator = Operator::Limit(limit_op);
+        Ok(false)
     }
 }
 
@@ -79,32 +102,29 @@ impl MatchPattern for PushLimitThroughJoin {
 }
 
 impl NormalizationRule for PushLimitThroughJoin {
-    fn apply(&self, node_id: HepNodeId, graph: &mut HepGraph) -> Result<(), DatabaseError> {
-        if let Operator::Limit(op) = graph.operator(node_id) {
-            if let Some(child_id) = graph.eldest_child_at(node_id) {
-                let join_type = if let Operator::Join(op) = graph.operator(child_id) {
-                    Some(op.join_type)
-                } else {
-                    None
-                };
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+        let limit_op = match &plan.operator {
+            Operator::Limit(op) => op.clone(),
+            _ => return Ok(false),
+        };
 
-                if let Some(ty) = join_type {
-                    let children = graph.children_at(child_id).collect_vec();
-
-                    if let Some(grandson_id) = match ty {
-                        JoinType::LeftOuter | JoinType::LeftSemi | JoinType::LeftAnti => {
-                            children.first()
-                        }
-                        JoinType::RightOuter => children.last(),
-                        _ => None,
-                    } {
-                        graph.add_node(child_id, Some(*grandson_id), Operator::Limit(op.clone()));
+        if let Some(child) = only_child_mut(plan) {
+            if let Operator::Join(join_op) = &child.operator {
+                let mut applied = false;
+                match join_op.join_type {
+                    JoinType::LeftOuter | JoinType::LeftSemi | JoinType::LeftAnti => {
+                        applied |= wrap_child_with(child, 0, Operator::Limit(limit_op.clone()));
                     }
+                    JoinType::RightOuter => {
+                        applied |= wrap_child_with(child, 1, Operator::Limit(limit_op));
+                    }
+                    _ => {}
                 }
+                return Ok(applied);
             }
         }
 
-        Ok(())
+        Ok(false)
     }
 }
 
@@ -118,23 +138,21 @@ impl MatchPattern for PushLimitIntoScan {
 }
 
 impl NormalizationRule for PushLimitIntoScan {
-    fn apply(&self, node_id: HepNodeId, graph: &mut HepGraph) -> Result<(), DatabaseError> {
-        if let Operator::Limit(limit_op) = graph.operator(node_id) {
-            if let Some(child_index) = graph.eldest_child_at(node_id) {
-                let mut is_apply = false;
-                let limit = (limit_op.offset, limit_op.limit);
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+        let (offset, limit) = match &plan.operator {
+            Operator::Limit(limit_op) => (limit_op.offset, limit_op.limit),
+            _ => return Ok(false),
+        };
 
-                if let Operator::TableScan(scan_op) = graph.operator_mut(child_index) {
-                    scan_op.limit = limit;
-                    is_apply = true;
-                }
-                if is_apply {
-                    graph.remove_node(node_id, false);
-                }
+        if let Some(child) = only_child_mut(plan) {
+            if let Operator::TableScan(scan_op) = &mut child.operator {
+                scan_op.limit = (offset, limit);
+                let removed = replace_with_only_child(plan);
+                return Ok(removed);
             }
         }
 
-        Ok(())
+        Ok(false)
     }
 }
 
