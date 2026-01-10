@@ -244,6 +244,7 @@ impl NormalizationRule for PushPredicateIntoScan {
                         meta,
                         range,
                         covered_deserializers,
+                        cover_mapping,
                     } in &mut scan_op.index_infos
                     {
                         if range.is_some() {
@@ -265,26 +266,37 @@ impl NormalizationRule for PushPredicateIntoScan {
                         }
                         changed = true;
 
-                        let mut deserializers = Vec::with_capacity(meta.column_ids.len());
-                        let mut cover_count = 0;
+                        *covered_deserializers = None;
+                        *cover_mapping = None;
+
+                        // try index covered
+                        let mut mapping_slots = vec![usize::MAX; scan_op.columns.len()];
+                        let mut needs_mapping = false;
                         let index_column_types = match &meta.value_ty {
                             LogicalType::Tuple(tys) => tys,
                             ty => slice::from_ref(ty),
                         };
-                        for (i, column_id) in meta.column_ids.iter().enumerate() {
-                            for column in scan_op.columns.values() {
-                                deserializers.push(
-                                    if column.id().map(|id| id == *column_id).unwrap_or(false) {
-                                        cover_count += 1;
-                                        column.datatype().serializable()
-                                    } else {
-                                        index_column_types[i].skip_serializable()
-                                    },
-                                );
+                        let mut deserializers = Vec::with_capacity(meta.column_ids.len());
+
+                        for (idx, column_id) in meta.column_ids.iter().enumerate() {
+                            if let Some((scan_idx, column)) =
+                                scan_op.columns.values().enumerate().find(|(_, column)| {
+                                    column.id().map(|id| id == *column_id).unwrap_or(false)
+                                })
+                            {
+                                mapping_slots[scan_idx] = idx;
+                                needs_mapping |= scan_idx != idx;
+                                deserializers.push(column.datatype().serializable());
+                            } else {
+                                deserializers.push(index_column_types[idx].skip_serializable());
                             }
                         }
-                        if cover_count == scan_op.columns.len() {
+
+                        if mapping_slots.iter().all(|slot| *slot != usize::MAX) {
                             *covered_deserializers = Some(deserializers);
+                            if needs_mapping {
+                                *cover_mapping = Some(mapping_slots);
+                            }
                         }
                     }
                     return Ok(changed);
@@ -354,17 +366,24 @@ impl PushPredicateIntoScan {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::binder::test::build_t1_table;
+    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
     use crate::expression::{BinaryOperator, ScalarExpression};
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
     use crate::optimizer::heuristic::optimizer::HepOptimizer;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
+    use crate::planner::operator::filter::FilterOperator;
+    use crate::planner::operator::table_scan::TableScanOperator;
     use crate::planner::operator::Operator;
+    use crate::planner::{Childrens, LogicalPlan};
     use crate::storage::rocksdb::RocksTransaction;
+    use crate::types::index::{IndexInfo, IndexMeta, IndexType};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
-    use std::collections::Bound;
+    use std::collections::{BTreeMap, Bound};
+    use std::sync::Arc;
+    use ulid::Ulid;
 
     #[test]
     fn test_push_predicate_into_scan() -> Result<(), DatabaseError> {
@@ -395,6 +414,171 @@ mod tests {
             assert_eq!(op.index_infos[0].range, Some(mock_range));
         } else {
             unreachable!("Should be a filter operator")
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cover_mapping_matches_scan_order() -> Result<(), DatabaseError> {
+        let table_name: TableName = Arc::from("mock_table");
+        let c1_id = Ulid::new();
+        let c2_id = Ulid::new();
+        let c3_id = Ulid::new();
+
+        let mut c1 = ColumnCatalog::new(
+            "c1".to_string(),
+            false,
+            ColumnDesc::new(LogicalType::Integer, Some(0), false, None)?,
+        );
+        c1.set_ref_table(table_name.clone(), c1_id, false);
+        let c1_ref = ColumnRef::from(c1.clone());
+
+        let mut c2 = ColumnCatalog::new(
+            "c2".to_string(),
+            false,
+            ColumnDesc::new(LogicalType::Integer, None, false, None)?,
+        );
+        c2.set_ref_table(table_name.clone(), c2_id, false);
+        let c2_ref = ColumnRef::from(c2.clone());
+
+        let mut c3 = ColumnCatalog::new(
+            "c3".to_string(),
+            false,
+            ColumnDesc::new(LogicalType::Integer, None, false, None)?,
+        );
+        c3.set_ref_table(table_name.clone(), c3_id, false);
+
+        let mut columns = BTreeMap::new();
+        columns.insert(0, c1_ref.clone());
+        columns.insert(1, c2_ref.clone());
+
+        let index_meta_reordered = Arc::new(IndexMeta {
+            id: 0,
+            column_ids: vec![c2_id, c3_id, c1_id],
+            table_name: table_name.clone(),
+            pk_ty: LogicalType::Integer,
+            value_ty: LogicalType::Tuple(vec![
+                LogicalType::Integer,
+                LogicalType::Integer,
+                LogicalType::Integer,
+            ]),
+            name: "idx_c2_c3_c1".to_string(),
+            ty: IndexType::Composite,
+        });
+        let index_meta_aligned = Arc::new(IndexMeta {
+            id: 1,
+            column_ids: vec![c1_id, c2_id],
+            table_name: table_name.clone(),
+            pk_ty: LogicalType::Integer,
+            value_ty: LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Integer]),
+            name: "idx_c1_c2".to_string(),
+            ty: IndexType::Composite,
+        });
+
+        let scan_plan = LogicalPlan::new(
+            Operator::TableScan(TableScanOperator {
+                table_name: table_name.clone(),
+                primary_keys: vec![c1_id],
+                columns,
+                limit: (None, None),
+                index_infos: vec![
+                    IndexInfo {
+                        meta: index_meta_reordered,
+                        range: None,
+                        covered_deserializers: None,
+                        cover_mapping: None,
+                    },
+                    IndexInfo {
+                        meta: index_meta_aligned,
+                        range: None,
+                        covered_deserializers: None,
+                        cover_mapping: None,
+                    },
+                ],
+                with_pk: false,
+            }),
+            Childrens::None,
+        );
+
+        let c1_gt = ScalarExpression::Binary {
+            op: BinaryOperator::Gt,
+            left_expr: Box::new(ScalarExpression::column_expr(c1_ref.clone())),
+            right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(0))),
+            evaluator: None,
+            ty: LogicalType::Boolean,
+        };
+        let c2_gt = ScalarExpression::Binary {
+            op: BinaryOperator::Gt,
+            left_expr: Box::new(ScalarExpression::column_expr(c2_ref.clone())),
+            right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(0))),
+            evaluator: None,
+            ty: LogicalType::Boolean,
+        };
+        let predicate = ScalarExpression::Binary {
+            op: BinaryOperator::And,
+            left_expr: Box::new(c1_gt),
+            right_expr: Box::new(c2_gt),
+            evaluator: None,
+            ty: LogicalType::Boolean,
+        };
+
+        let filter_plan = LogicalPlan::new(
+            Operator::Filter(FilterOperator {
+                predicate,
+                is_optimized: false,
+                having: false,
+            }),
+            Childrens::Only(Box::new(scan_plan)),
+        );
+
+        let best_plan = HepOptimizer::new(filter_plan)
+            .batch(
+                "push_cover_mapping".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![NormalizationRuleImpl::PushPredicateIntoScan],
+            )
+            .find_best::<RocksTransaction>(None)?;
+
+        let table_scan = best_plan.childrens.pop_only();
+        if let Operator::TableScan(op) = &table_scan.operator {
+            let index_infos = &op.index_infos;
+            assert_eq!(index_infos.len(), 2);
+
+            // verify the first index (reordered scan columns) still uses mapping
+            let reordered_index = &index_infos[0];
+            let deserializers = reordered_index
+                .covered_deserializers
+                .as_ref()
+                .expect("expected covering deserializers");
+            assert_eq!(deserializers.len(), 3);
+            assert_eq!(
+                deserializers[0],
+                c2_ref.datatype().serializable(),
+                "first serializer should align with c2"
+            );
+            assert_eq!(
+                deserializers[1],
+                c3.datatype().skip_serializable(),
+                "non-projected index column should be skipped"
+            );
+            assert_eq!(
+                deserializers[2],
+                c1_ref.datatype().serializable(),
+                "last serializer should align with c1"
+            );
+            let mapping = reordered_index.cover_mapping.as_ref().map(|m| m.as_slice());
+            assert_eq!(mapping, Some(&[2, 0][..]));
+
+            // verify the second index matches scan order exactly so mapping is omitted
+            let ordered_index = &index_infos[1];
+            assert!(ordered_index.covered_deserializers.is_some());
+            assert!(
+                ordered_index.cover_mapping.is_none(),
+                "mapping should be None when index/scan order already match"
+            );
+        } else {
+            unreachable!("expected table scan");
         }
 
         Ok(())

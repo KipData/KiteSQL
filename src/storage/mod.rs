@@ -29,7 +29,7 @@ use crate::storage::table_codec::{BumpBytes, Bytes, TableCodec};
 use crate::types::index::{Index, IndexId, IndexMetaRef, IndexType};
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::{Tuple, TupleId};
-use crate::types::value::DataValue;
+use crate::types::value::{DataValue, TupleMappingRef};
 use crate::types::{ColumnId, LogicalType};
 use crate::utils::lru::SharedLruCache;
 use itertools::Itertools;
@@ -114,6 +114,7 @@ pub trait Transaction: Sized {
         ranges: Vec<Range>,
         with_pk: bool,
         covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
+        cover_mapping_indices: Option<Vec<usize>>,
     ) -> Result<IndexIter<'a, Self>, DatabaseError> {
         debug_assert!(columns.keys().all_unique());
         let values_len = columns.len();
@@ -129,21 +130,32 @@ pub trait Transaction: Sized {
                 columns.insert(*i, column.clone());
             }
         }
-        let (inner, deserializers, remap_pk_indices) =
-            if let Some(deserializers) = covered_deserializers {
-                (
-                    IndexImplEnum::Covered(CoveredIndexImpl),
-                    deserializers,
-                    PrimaryKeyRemap::Covered,
-                )
-            } else {
-                let (deserializers, remap_pk_indices) =
-                    Self::create_deserializers(&columns, table, with_pk);
-                (
-                    IndexImplEnum::instance(index_meta.ty),
-                    deserializers,
-                    remap_pk_indices,
-                )
+        let (inner, deserializers, remap_pk_indices, cover_mapping) =
+            match (covered_deserializers, cover_mapping_indices) {
+                (Some(deserializers), mapping) => {
+                    let tuple_len = match &index_meta.value_ty {
+                        LogicalType::Tuple(tys) => tys.len(),
+                        _ => 1,
+                    };
+                    let cover_mapping = mapping.map(|slots| TupleMapping::new(slots, tuple_len));
+
+                    (
+                        IndexImplEnum::Covered(CoveredIndexImpl),
+                        deserializers,
+                        PrimaryKeyRemap::Covered,
+                        cover_mapping,
+                    )
+                }
+                (None, _) => {
+                    let (deserializers, remap_pk_indices) =
+                        Self::create_deserializers(&columns, table, with_pk);
+                    (
+                        IndexImplEnum::instance(index_meta.ty),
+                        deserializers,
+                        remap_pk_indices,
+                        None,
+                    )
+                }
             };
 
         Ok(IndexIter {
@@ -157,6 +169,7 @@ pub trait Transaction: Sized {
                 values_len,
                 total_len: table.columns_len(),
                 tx: self,
+                cover_mapping,
             },
             inner,
             ranges: ranges.into_iter(),
@@ -835,6 +848,29 @@ struct NormalIndexImpl;
 struct CompositeIndexImpl;
 struct CoveredIndexImpl;
 
+struct TupleMapping {
+    index_to_scan: Vec<usize>,
+    target_len: usize,
+}
+
+impl TupleMapping {
+    fn new(scan_to_index: Vec<usize>, tuple_len: usize) -> Self {
+        let mut index_to_scan = vec![usize::MAX; tuple_len];
+
+        for (scan_idx, index_idx) in scan_to_index.iter().enumerate() {
+            index_to_scan[*index_idx] = scan_idx;
+        }
+        TupleMapping {
+            index_to_scan,
+            target_len: scan_to_index.len(),
+        }
+    }
+
+    fn as_ref(&self) -> TupleMappingRef<'_> {
+        TupleMappingRef::new(&self.index_to_scan, self.target_len)
+    }
+}
+
 struct IndexImplParams<'a, T: Transaction> {
     index_meta: IndexMetaRef,
     table_name: &'a str,
@@ -842,6 +878,7 @@ struct IndexImplParams<'a, T: Transaction> {
     values_len: usize,
     total_len: usize,
     tx: &'a T,
+    cover_mapping: Option<TupleMapping>,
 }
 
 impl<T: Transaction> IndexImplParams<'_, T> {
@@ -1119,7 +1156,11 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for CoveredIndexImpl 
         pk_indices: &PrimaryKeyRemap,
         params: &IndexImplParams<T>,
     ) -> Result<Tuple, DatabaseError> {
-        let key = TableCodec::decode_index_key(key, params.value_ty())?;
+        let mapping = params
+            .cover_mapping
+            .as_ref()
+            .map(|mapping| mapping.as_ref());
+        let key = TableCodec::decode_index_key(key, params.value_ty(), mapping)?;
 
         let mut tuple_id = None;
         if matches!(pk_indices, PrimaryKeyRemap::Covered) {
@@ -1768,6 +1809,7 @@ mod test {
                     max: Bound::Unbounded,
                 }],
                 true,
+                None,
                 None,
             )
         }

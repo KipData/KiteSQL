@@ -274,6 +274,7 @@ mod tests {
                     }
                 ])),
                 covered_deserializers: None,
+                cover_mapping: None,
             }))
         );
 
