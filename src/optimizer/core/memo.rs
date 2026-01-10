@@ -212,6 +212,7 @@ mod tests {
                         max: Bound::Unbounded,
                     }
                 ])),
+                covered_deserializers: None,
             }))
         );
 

@@ -48,6 +48,7 @@ impl TableScanOperator {
             .map(|meta| IndexInfo {
                 meta: meta.clone(),
                 range: None,
+                covered_deserializers: None,
             })
             .collect_vec();
 

@@ -3,6 +3,7 @@ use crate::types::value::{DataValue, Utf8Type};
 use crate::types::LogicalType;
 use bumpalo::collections::Vec;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use kite_sql_serde_macros::ReferenceSerialization;
 use ordered_float::OrderedFloat;
 use rust_decimal::Decimal;
 use sqlparser::ast::CharLengthUnits;
@@ -41,7 +42,7 @@ pub trait TupleValueSerializable: Debug {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]
 pub enum TupleValueSerializableImpl {
     Boolean,
     Int8,

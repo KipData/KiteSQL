@@ -2,6 +2,7 @@ use crate::catalog::{TableCatalog, TableName};
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::Range;
 use crate::expression::ScalarExpression;
+use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::value::DataValue;
 use crate::types::{ColumnId, LogicalType};
 use kite_sql_serde_macros::ReferenceSerialization;
@@ -11,6 +12,8 @@ use std::sync::Arc;
 
 pub type IndexId = u32;
 pub type IndexMetaRef = Arc<IndexMeta>;
+
+pub const INDEX_ID_LEN: usize = 4;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, ReferenceSerialization)]
 pub enum IndexType {
@@ -24,6 +27,7 @@ pub enum IndexType {
 pub struct IndexInfo {
     pub(crate) meta: IndexMetaRef,
     pub(crate) range: Option<Range>,
+    pub(crate) covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]
@@ -77,6 +81,9 @@ impl fmt::Display for IndexInfo {
             write!(f, "{range}")?;
         } else {
             write!(f, "EMPTY")?;
+        }
+        if self.covered_deserializers.is_some() {
+            write!(f, " Covered")?;
         }
 
         Ok(())

@@ -13,9 +13,9 @@ use crate::types::index::{IndexInfo, IndexMetaRef, IndexType};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use itertools::Itertools;
-use std::mem;
 use std::ops::Bound;
 use std::sync::LazyLock;
+use std::{mem, slice};
 
 static PUSH_PREDICATE_THROUGH_JOIN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
     predicate: |op| matches!(op, Operator::Filter(_)),
@@ -215,12 +215,17 @@ impl NormalizationRule for PushPredicateIntoScan {
     fn apply(&self, node_id: HepNodeId, graph: &mut HepGraph) -> Result<(), DatabaseError> {
         if let Operator::Filter(op) = graph.operator(node_id).clone() {
             if let Some(child_id) = graph.eldest_child_at(node_id) {
-                if let Operator::TableScan(child_op) = graph.operator_mut(child_id) {
-                    //FIXME: now only support `unique` and `primary key`
-                    for IndexInfo { meta, range } in &mut child_op.index_infos {
+                if let Operator::TableScan(scan_op) = graph.operator_mut(child_id) {
+                    for IndexInfo {
+                        meta,
+                        range,
+                        covered_deserializers,
+                    } in &mut scan_op.index_infos
+                    {
                         if range.is_some() {
                             continue;
                         }
+                        // range detach
                         *range = match meta.ty {
                             IndexType::PrimaryKey { is_multiple: false }
                             | IndexType::Unique
@@ -232,6 +237,28 @@ impl NormalizationRule for PushPredicateIntoScan {
                                 Self::composite_range(&op, meta)?
                             }
                         };
+                        // try index covered
+                        let mut deserializers = Vec::with_capacity(meta.column_ids.len());
+                        let mut cover_count = 0;
+                        let index_column_types = match &meta.value_ty {
+                            LogicalType::Tuple(tys) => tys,
+                            ty => slice::from_ref(ty),
+                        };
+                        for (i, column_id) in meta.column_ids.iter().enumerate() {
+                            for column in scan_op.columns.values() {
+                                deserializers.push(
+                                    if column.id().map(|id| &id == column_id).unwrap_or(false) {
+                                        cover_count += 1;
+                                        column.datatype().serializable()
+                                    } else {
+                                        index_column_types[i].skip_serializable()
+                                    },
+                                );
+                            }
+                        }
+                        if cover_count == scan_op.columns.len() {
+                            *covered_deserializers = Some(deserializers)
+                        }
                     }
                 }
             }

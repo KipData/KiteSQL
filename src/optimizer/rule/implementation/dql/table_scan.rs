@@ -79,7 +79,9 @@ impl<T: Transaction> ImplementationRule<T> for IndexScanImplementation {
                     {
                         let mut row_count = statistics_meta.collect_count(range)?;
 
-                        if !matches!(index_info.meta.ty, IndexType::PrimaryKey { .. }) {
+                        if index_info.covered_deserializers.is_none()
+                            && !matches!(index_info.meta.ty, IndexType::PrimaryKey { .. })
+                        {
                             // need to return table query(non-covering index)
                             row_count *= 2;
                         }

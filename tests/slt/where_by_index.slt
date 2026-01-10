@@ -198,5 +198,70 @@ select * from t1 where c2 > 0 and c2 < 10;
 0 1 9
 6 7 8
 
+# unique covered
+query I rowsort
+select c1 from t1 where c1 < 10;
+----
+1
+7
+
+# unique covered with primary key projection
+query II rowsort
+select c1, id from t1 where c1 < 10;
+----
+1 0
+7 6
+
+statement ok
+drop index t1.u_c1_index;
+
+# normal covered
+query II rowsort
+select c2 from t1 where c2 < 10 and c2 > 0;
+----
+8
+9
+
+statement ok
+drop index t1.c2_index;
+
+# composite covered
+query II rowsort
+select c1, c2 from t1 where c1 < 10 and c1 > 0 and c2 >0 and c2 < 10;
+----
+1 9
+7 8
+
+# composite covered projection reorder
+query II rowsort
+select c2, c1 from t1 where c1 < 10 and c1 > 0 and c2 > 0 and c2 < 10;
+----
+8 7
+9 1
+
+
 statement ok
 drop table t1;
+
+statement ok
+create table t_cover(id int primary key, c1 int, c2 int, c3 int);
+
+statement ok
+insert into t_cover values
+    (1, 1, 10, 11),
+    (2, 2, 20, 21),
+    (3, 2, 22, 23),
+    (4, 3, 30, 31);
+
+statement ok
+create index idx_cover on t_cover (c1, c2, c3);
+
+# composite index trailing columns cover (index columns > output columns)
+query II rowsort
+select c2, c3 from t_cover where c1 = 2;
+----
+20 21
+22 23
+
+statement ok
+drop table t_cover;
