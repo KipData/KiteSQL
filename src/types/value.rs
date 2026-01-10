@@ -824,9 +824,11 @@ impl DataValue {
         Self::memcomparable_decode_mapping(reader, ty, None)
     }
 
+    #[inline]
     pub fn memcomparable_decode_mapping<R: Read>(
         reader: &mut R,
         ty: &LogicalType,
+        // for index cover mapping reduce one layer of conversion
         tuple_mapping: Option<TupleMappingRef<'_>>,
     ) -> Result<DataValue, DatabaseError> {
         if reader.read_u8()? == 0u8 {
