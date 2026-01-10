@@ -349,6 +349,7 @@ mod native_tests {
                 max: Bound::Included(DataValue::Int32(2)),
             }],
             true,
+            None,
         )?;
 
         let mut result = Vec::new();

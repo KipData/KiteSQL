@@ -2,8 +2,8 @@ use crate::catalog::view::View;
 use crate::catalog::{ColumnRef, ColumnRelation, TableMeta};
 use crate::errors::DatabaseError;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
-use crate::storage::{TableCache, Transaction};
-use crate::types::index::{Index, IndexId, IndexMeta, IndexType};
+use crate::storage::{PrimaryKeyRemap, TableCache, Transaction};
+use crate::types::index::{Index, IndexId, IndexMeta, IndexType, INDEX_ID_LEN};
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::{Tuple, TupleId};
 use crate::types::value::DataValue;
@@ -16,10 +16,12 @@ use std::sync::LazyLock;
 
 pub(crate) const BOUND_MIN_TAG: u8 = u8::MIN;
 pub(crate) const BOUND_MAX_TAG: u8 = u8::MAX;
+pub(crate) const NULL_TAG: u8 = 0u8;
+pub(crate) const NOTNULL_TAG: u8 = 1u8;
 
-static ROOT_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"Root".to_vec());
-static VIEW_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"View".to_vec());
-static HASH_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"Hash".to_vec());
+static ROOT_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"R".to_vec());
+static VIEW_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"V".to_vec());
+static HASH_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"H".to_vec());
 static EMPTY_REFERENCE_TABLES: LazyLock<ReferenceTables> = LazyLock::new(ReferenceTables::new);
 
 pub type Bytes = Vec<u8>;
@@ -285,7 +287,7 @@ impl TableCodec {
     #[inline]
     pub fn decode_tuple(
         deserializers: &[TupleValueSerializableImpl],
-        pk_indices: Option<&[usize]>,
+        pk_indices: &PrimaryKeyRemap,
         bytes: &[u8],
         values_len: usize,
         total_len: usize,
@@ -381,6 +383,12 @@ impl TableCodec {
             }
         }
         Ok(key_prefix)
+    }
+
+    pub fn decode_index_key(bytes: &[u8], ty: &LogicalType) -> Result<DataValue, DatabaseError> {
+        // Hash + TypeTag + Bound Min + Index Id Len + Bound Min
+        let start = 8 + 1 + 1 + 1 + INDEX_ID_LEN;
+        DataValue::memcomparable_decode(&mut Cursor::new(&bytes[start..]), ty)
     }
 
     pub fn decode_index(bytes: &[u8]) -> Result<TupleId, DatabaseError> {
@@ -544,7 +552,7 @@ mod tests {
     use crate::serdes::ReferenceTables;
     use crate::storage::rocksdb::RocksTransaction;
     use crate::storage::table_codec::{BumpBytes, TableCodec};
-    use crate::storage::Storage;
+    use crate::storage::{PrimaryKeyRemap, Storage};
     use crate::types::index::{Index, IndexMeta, IndexType};
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
@@ -599,7 +607,13 @@ mod tests {
 
         tuple.pk = None;
         assert_eq!(
-            TableCodec::decode_tuple(&deserializers, None, &bytes, deserializers.len(), 2,)?,
+            TableCodec::decode_tuple(
+                &deserializers,
+                &PrimaryKeyRemap::None,
+                &bytes,
+                deserializers.len(),
+                2,
+            )?,
             tuple
         );
 

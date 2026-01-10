@@ -124,9 +124,11 @@ pub fn build_read<'a, T: Transaction + 'a>(
             if let Some(PhysicalOption::IndexScan(IndexInfo {
                 meta,
                 range: Some(range),
+                covered_deserializers,
             })) = plan.physical_option
             {
-                IndexScan::from((op, meta, range)).execute(cache, transaction)
+                IndexScan::from((op, meta, range, covered_deserializers))
+                    .execute(cache, transaction)
             } else {
                 SeqScan::from(op).execute(cache, transaction)
             }

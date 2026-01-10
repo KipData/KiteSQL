@@ -230,7 +230,7 @@ mod test {
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::{
         IndexImplEnum, IndexImplParams, IndexIter, IndexIterState, Iter, PrimaryKeyIndexImpl,
-        Storage, Transaction,
+        PrimaryKeyRemap, Storage, Transaction,
     };
     use crate::types::index::{IndexMeta, IndexType};
     use crate::types::tuple::Tuple;
@@ -358,7 +358,7 @@ mod test {
         let mut iter = IndexIter {
             offset: 0,
             limit: None,
-            remap_pk_indices: Some(vec![0]),
+            remap_pk_indices: PrimaryKeyRemap::Indices(vec![0]),
             params: IndexImplParams {
                 deserializers,
                 index_meta: Arc::new(IndexMeta {
@@ -426,6 +426,7 @@ mod test {
                         max: Bound::Unbounded,
                     }],
                     true,
+                    None,
                 )
                 .unwrap();
 
@@ -451,6 +452,7 @@ mod test {
                         max: Bound::Unbounded,
                     }],
                     true,
+                    None,
                 )
                 .unwrap();
 

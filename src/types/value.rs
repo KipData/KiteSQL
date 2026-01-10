@@ -1,6 +1,7 @@
 use super::LogicalType;
 use crate::errors::DatabaseError;
-use crate::storage::table_codec::{BumpBytes, BOUND_MAX_TAG, BOUND_MIN_TAG};
+use crate::storage::table_codec::{BumpBytes, BOUND_MAX_TAG, NOTNULL_TAG, NULL_TAG};
+use byteorder::ReadBytesExt;
 use chrono::format::{DelayedFormat, StrftimeItems};
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use itertools::Itertools;
@@ -11,7 +12,7 @@ use sqlparser::ast::CharLengthUnits;
 use std::cmp::Ordering;
 use std::fmt::Formatter;
 use std::hash::Hash;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::str::FromStr;
 use std::sync::LazyLock;
 use std::{cmp, fmt, mem};
@@ -204,6 +205,14 @@ macro_rules! encode_u {
     ($writer:ident, $u:expr) => {
         $writer.write_all(&$u.to_be_bytes())?
     };
+}
+
+macro_rules! decode_u {
+    ($reader:ident, $ty:ty) => {{
+        let mut buf = [0u8; std::mem::size_of::<$ty>()];
+        $reader.read_exact(&mut buf)?;
+        <$ty>::from_be_bytes(buf)
+    }};
 }
 
 impl Eq for DataValue {}
@@ -576,13 +585,14 @@ impl DataValue {
     //
     // Refer: https://github.com/facebook/mysql-5.6/wiki/MyRocks-record-format#memcomparable-format
     #[inline]
-    fn encode_bytes(b: &mut BumpBytes, data: &[u8]) {
+    // FIXME
+    fn encode_string(b: &mut BumpBytes, data: &[u8]) {
         let d_len = data.len();
         let realloc_size = (d_len / ENCODE_GROUP_SIZE + 1) * (ENCODE_GROUP_SIZE + 1);
         Self::realloc_bytes(b, realloc_size);
 
         let mut idx = 0;
-        while idx <= d_len {
+        while idx < d_len {
             let remain = d_len - idx;
             let pad_count: usize;
 
@@ -601,6 +611,33 @@ impl DataValue {
     }
 
     #[inline]
+    fn decode_string<R: Read>(reader: &mut R) -> std::io::Result<Vec<u8>> {
+        let mut result = Vec::new();
+
+        loop {
+            let mut group = [0u8; ENCODE_GROUP_SIZE];
+            reader.read_exact(&mut group)?;
+
+            let mut marker = [0u8; 1];
+            reader.read_exact(&mut marker)?;
+            let marker = marker[0];
+
+            let pad_count = (ENCODE_MARKER - marker) as usize;
+
+            debug_assert!(pad_count <= ENCODE_GROUP_SIZE);
+
+            let data_len = ENCODE_GROUP_SIZE - pad_count;
+            result.extend_from_slice(&group[..data_len]);
+
+            if pad_count != 0 {
+                break;
+            }
+        }
+
+        Ok(result)
+    }
+
+    #[inline]
     fn realloc_bytes(b: &mut BumpBytes, size: usize) {
         let len = b.len();
 
@@ -612,7 +649,14 @@ impl DataValue {
 
     #[inline]
     pub fn memcomparable_encode(&self, b: &mut BumpBytes) -> Result<(), DatabaseError> {
+        if let DataValue::Null = self {
+            b.push(NULL_TAG);
+            return Ok(());
+        }
+        b.push(NOTNULL_TAG);
+
         match self {
+            DataValue::Null => (),
             DataValue::Int8(v) => encode_u!(b, *v as u8 ^ 0x80_u8),
             DataValue::Int16(v) => encode_u!(b, *v as u16 ^ 0x8000_u16),
             DataValue::Int32(v) | DataValue::Date32(v) => {
@@ -625,7 +669,7 @@ impl DataValue {
             DataValue::UInt16(v) => encode_u!(b, v),
             DataValue::UInt32(v) | DataValue::Time32(v, ..) => encode_u!(b, v),
             DataValue::UInt64(v) => encode_u!(b, v),
-            DataValue::Utf8 { value: v, .. } => Self::encode_bytes(b, v.as_bytes()),
+            DataValue::Utf8 { value: v, .. } => Self::encode_string(b, v.as_bytes()),
             DataValue::Boolean(v) => b.push(if *v { b'1' } else { b'0' }),
             DataValue::Float32(f) => {
                 let mut u = f.to_bits();
@@ -649,23 +693,99 @@ impl DataValue {
 
                 encode_u!(b, u);
             }
-            DataValue::Null => (),
             DataValue::Decimal(v) => Self::serialize_decimal(*v, b)?,
             DataValue::Tuple(values, is_upper) => {
                 let last = values.len() - 1;
 
                 for (i, v) in values.iter().enumerate() {
                     v.memcomparable_encode(b)?;
-                    if (v.is_null() || i == last) && *is_upper {
+                    if i == last && *is_upper {
                         b.push(BOUND_MAX_TAG);
-                    } else {
-                        b.push(BOUND_MIN_TAG);
                     }
                 }
             }
         }
 
         Ok(())
+    }
+
+    pub fn memcomparable_decode<R: Read>(
+        reader: &mut R,
+        ty: &LogicalType,
+    ) -> Result<DataValue, DatabaseError> {
+        if reader.read_u8()? == 0u8 {
+            return Ok(DataValue::Null);
+        }
+        match ty {
+            LogicalType::SqlNull => Ok(DataValue::Null),
+            LogicalType::Tinyint => {
+                let u = decode_u!(reader, u8);
+                Ok(DataValue::Int8((u ^ 0x80) as i8))
+            }
+            LogicalType::Smallint => {
+                let u = decode_u!(reader, u16);
+                Ok(DataValue::Int16((u ^ 0x8000) as i16))
+            }
+            LogicalType::Integer | LogicalType::Date | LogicalType::Time(_) => {
+                let u = decode_u!(reader, u32);
+                Ok(DataValue::Int32((u ^ 0x8000_0000) as i32))
+            }
+            LogicalType::Bigint | LogicalType::DateTime | LogicalType::TimeStamp(..) => {
+                let u = decode_u!(reader, u64);
+                Ok(DataValue::Int64((u ^ 0x8000_0000_0000_0000) as i64))
+            }
+            LogicalType::UTinyint => Ok(DataValue::UInt8(decode_u!(reader, u8))),
+            LogicalType::USmallint => Ok(DataValue::UInt16(decode_u!(reader, u16))),
+            LogicalType::UInteger => Ok(DataValue::UInt32(decode_u!(reader, u32))),
+            LogicalType::UBigint => Ok(DataValue::UInt64(decode_u!(reader, u64))),
+            LogicalType::Float => {
+                let mut u = decode_u!(reader, u32);
+
+                // 反向还原
+                if (u & 0x8000_0000) != 0 {
+                    u &= !0x8000_0000;
+                } else {
+                    u = !u;
+                }
+
+                Ok(DataValue::Float32(f32::from_bits(u).into()))
+            }
+            LogicalType::Double => {
+                let mut u = decode_u!(reader, u64);
+
+                if (u & 0x8000_0000_0000_0000) != 0 {
+                    u &= !0x8000_0000_0000_0000;
+                } else {
+                    u = !u;
+                }
+
+                Ok(DataValue::Float64(f64::from_bits(u).into()))
+            }
+            LogicalType::Boolean => {
+                let mut b = [0u8; 1];
+                reader.read_exact(&mut b)?;
+                Ok(DataValue::Boolean(b[0] == b'1'))
+            }
+            LogicalType::Varchar(len, unit) => Ok(DataValue::Utf8 {
+                value: String::from_utf8(Self::decode_string(reader)?)?,
+                ty: Utf8Type::Variable(*len),
+                unit: *unit,
+            }),
+            LogicalType::Char(len, unit) => Ok(DataValue::Utf8 {
+                value: String::from_utf8(Self::decode_string(reader)?)?,
+                ty: Utf8Type::Fixed(*len),
+                unit: *unit,
+            }),
+            LogicalType::Decimal(..) => Ok(DataValue::Decimal(Self::deserialize_decimal(reader)?)),
+            LogicalType::Tuple(tys) => {
+                let mut values = Vec::with_capacity(tys.len());
+
+                for ty in tys {
+                    values.push(Self::memcomparable_decode(reader, ty)?);
+                }
+                Ok(DataValue::Tuple(values, false))
+            }
+        }
     }
 
     // https://github.com/risingwavelabs/memcomparable/blob/main/src/ser.rs#L468
@@ -785,6 +905,64 @@ impl DataValue {
         byte_array.reverse();
 
         (e100 as i8, byte_array)
+    }
+
+    pub fn deserialize_decimal<R: Read>(mut reader: R) -> Result<Decimal, DatabaseError> {
+        // decode exponent
+        let flag = reader.read_u8()?;
+        let exponent = match flag {
+            0x08 => !reader.read_u8()? as i8,
+            0x09..=0x13 => (0x13 - flag) as i8,
+            0x14 => -(reader.read_u8()? as i8),
+            0x15 => return Ok(Decimal::ZERO),
+            0x16 => -!(reader.read_u8()? as i8),
+            0x17..=0x21 => (flag - 0x17) as i8,
+            0x22 => reader.read_u8()? as i8,
+            b => {
+                return Err(DatabaseError::InvalidValue(format!(
+                    "invalid decimal exponent: {b}"
+                )))
+            }
+        };
+        // decode mantissa
+        let neg = (0x07..0x15).contains(&flag);
+        let mut mantissa: i128 = 0;
+        let mut mlen = 0i8;
+        loop {
+            let mut b = reader.read_u8()?;
+            if neg {
+                b = !b;
+            }
+            let x = b / 2;
+            mantissa = mantissa * 100 + x as i128;
+            mlen += 1;
+            if b & 1 == 0 {
+                break;
+            }
+        }
+
+        // get scale
+        let mut scale = (mlen - exponent) * 2;
+        if scale <= 0 {
+            // e.g. 1(mantissa) + 2(exponent) (which is 100).
+            for _i in 0..-scale {
+                mantissa *= 10;
+            }
+            scale = 0;
+        } else if mantissa % 10 == 0 {
+            // Remove unnecessary zeros.
+            // e.g. 0.01_11_10 should be 0.01_11_1
+            mantissa /= 10;
+            scale -= 1;
+        }
+
+        if neg {
+            mantissa = -mantissa;
+        }
+        Ok(rust_decimal::Decimal::from_i128_with_scale(
+            mantissa,
+            scale as u32,
+        ))
     }
 
     #[inline]
@@ -1939,10 +2117,13 @@ impl fmt::Debug for DataValue {
 mod test {
     use crate::errors::DatabaseError;
     use crate::storage::table_codec::BumpBytes;
-    use crate::types::value::DataValue;
+    use crate::types::value::{DataValue, Utf8Type};
+    use crate::types::LogicalType;
     use bumpalo::Bump;
     use ordered_float::OrderedFloat;
     use rust_decimal::Decimal;
+    use sqlparser::ast::CharLengthUnits;
+    use std::io::Cursor;
 
     #[test]
     fn test_mem_comparable_null() -> Result<(), DatabaseError> {
@@ -1952,10 +2133,15 @@ mod test {
         let mut key_i8_2 = BumpBytes::new_in(&arena);
         let mut key_i8_3 = BumpBytes::new_in(&arena);
 
-        DataValue::Null.memcomparable_encode(&mut key_i8_0)?;
-        DataValue::Int8(i8::MIN).memcomparable_encode(&mut key_i8_1)?;
-        DataValue::Int8(-1_i8).memcomparable_encode(&mut key_i8_2)?;
-        DataValue::Int8(i8::MAX).memcomparable_encode(&mut key_i8_3)?;
+        let value_0 = DataValue::Null;
+        let value_1 = DataValue::Int8(i8::MIN);
+        let value_2 = DataValue::Int8(-1_i8);
+        let value_3 = DataValue::Int8(i8::MAX);
+
+        value_0.memcomparable_encode(&mut key_i8_0)?;
+        value_1.memcomparable_encode(&mut key_i8_1)?;
+        value_2.memcomparable_encode(&mut key_i8_2)?;
+        value_3.memcomparable_encode(&mut key_i8_3)?;
 
         println!("{:?} < {:?}", key_i8_0, key_i8_1);
         println!("{:?} < {:?}", key_i8_1, key_i8_2);
@@ -1964,63 +2150,237 @@ mod test {
         assert!(key_i8_1 < key_i8_2);
         assert!(key_i8_2 < key_i8_3);
 
+        assert_eq!(
+            value_0,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(key_i8_0.as_slice()),
+                &LogicalType::Tinyint
+            )?
+        );
+        assert_eq!(
+            value_1,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(key_i8_1.as_slice()),
+                &LogicalType::Tinyint
+            )?
+        );
+        assert_eq!(
+            value_2,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(key_i8_2.as_slice()),
+                &LogicalType::Tinyint
+            )?
+        );
+        assert_eq!(
+            value_3,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(key_i8_3.as_slice()),
+                &LogicalType::Tinyint
+            )?
+        );
+
         Ok(())
     }
 
     #[test]
     fn test_mem_comparable_int() -> Result<(), DatabaseError> {
         let arena = Bump::new();
+
+        // ---------- Int8 ----------
+        let mut key_i8_0 = BumpBytes::new_in(&arena);
         let mut key_i8_1 = BumpBytes::new_in(&arena);
         let mut key_i8_2 = BumpBytes::new_in(&arena);
         let mut key_i8_3 = BumpBytes::new_in(&arena);
 
-        DataValue::Int8(i8::MIN).memcomparable_encode(&mut key_i8_1)?;
-        DataValue::Int8(-1_i8).memcomparable_encode(&mut key_i8_2)?;
-        DataValue::Int8(i8::MAX).memcomparable_encode(&mut key_i8_3)?;
+        let v_i8_0 = DataValue::Null;
+        let v_i8_1 = DataValue::Int8(i8::MIN);
+        let v_i8_2 = DataValue::Int8(-1);
+        let v_i8_3 = DataValue::Int8(i8::MAX);
 
-        println!("{:?} < {:?}", key_i8_1, key_i8_2);
-        println!("{:?} < {:?}", key_i8_2, key_i8_3);
+        v_i8_0.memcomparable_encode(&mut key_i8_0)?;
+        v_i8_1.memcomparable_encode(&mut key_i8_1)?;
+        v_i8_2.memcomparable_encode(&mut key_i8_2)?;
+        v_i8_3.memcomparable_encode(&mut key_i8_3)?;
+
+        assert!(key_i8_0 < key_i8_1);
         assert!(key_i8_1 < key_i8_2);
         assert!(key_i8_2 < key_i8_3);
 
+        assert_eq!(
+            v_i8_0,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(key_i8_0.as_slice()),
+                &LogicalType::Tinyint
+            )?
+        );
+        assert_eq!(
+            v_i8_1,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(key_i8_1.as_slice()),
+                &LogicalType::Tinyint
+            )?
+        );
+        assert_eq!(
+            v_i8_2,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(key_i8_2.as_slice()),
+                &LogicalType::Tinyint
+            )?
+        );
+        assert_eq!(
+            v_i8_3,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(key_i8_3.as_slice()),
+                &LogicalType::Tinyint
+            )?
+        );
+
+        // ---------- Int16 ----------
+        let mut key_i16_0 = BumpBytes::new_in(&arena);
         let mut key_i16_1 = BumpBytes::new_in(&arena);
         let mut key_i16_2 = BumpBytes::new_in(&arena);
         let mut key_i16_3 = BumpBytes::new_in(&arena);
 
-        DataValue::Int16(i16::MIN).memcomparable_encode(&mut key_i16_1)?;
-        DataValue::Int16(-1_i16).memcomparable_encode(&mut key_i16_2)?;
-        DataValue::Int16(i16::MAX).memcomparable_encode(&mut key_i16_3)?;
+        let v_i16_0 = DataValue::Null;
+        let v_i16_1 = DataValue::Int16(i16::MIN);
+        let v_i16_2 = DataValue::Int16(-1);
+        let v_i16_3 = DataValue::Int16(i16::MAX);
 
-        println!("{:?} < {:?}", key_i16_1, key_i16_2);
-        println!("{:?} < {:?}", key_i16_2, key_i16_3);
+        v_i16_0.memcomparable_encode(&mut key_i16_0)?;
+        v_i16_1.memcomparable_encode(&mut key_i16_1)?;
+        v_i16_2.memcomparable_encode(&mut key_i16_2)?;
+        v_i16_3.memcomparable_encode(&mut key_i16_3)?;
+
+        assert!(key_i16_0 < key_i16_1);
         assert!(key_i16_1 < key_i16_2);
         assert!(key_i16_2 < key_i16_3);
 
+        assert_eq!(
+            v_i16_0,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(key_i16_0.as_slice()),
+                &LogicalType::Smallint
+            )?
+        );
+        assert_eq!(
+            v_i16_1,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(key_i16_1.as_slice()),
+                &LogicalType::Smallint
+            )?
+        );
+        assert_eq!(
+            v_i16_2,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(key_i16_2.as_slice()),
+                &LogicalType::Smallint
+            )?
+        );
+        assert_eq!(
+            v_i16_3,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(key_i16_3.as_slice()),
+                &LogicalType::Smallint
+            )?
+        );
+
+        // ---------- Int32 ----------
+        let mut key_i32_0 = BumpBytes::new_in(&arena);
         let mut key_i32_1 = BumpBytes::new_in(&arena);
         let mut key_i32_2 = BumpBytes::new_in(&arena);
         let mut key_i32_3 = BumpBytes::new_in(&arena);
 
-        DataValue::Int32(i32::MIN).memcomparable_encode(&mut key_i32_1)?;
-        DataValue::Int32(-1_i32).memcomparable_encode(&mut key_i32_2)?;
-        DataValue::Int32(i32::MAX).memcomparable_encode(&mut key_i32_3)?;
+        let v_i32_0 = DataValue::Null;
+        let v_i32_1 = DataValue::Int32(i32::MIN);
+        let v_i32_2 = DataValue::Int32(-1);
+        let v_i32_3 = DataValue::Int32(i32::MAX);
 
-        println!("{:?} < {:?}", key_i32_1, key_i32_2);
-        println!("{:?} < {:?}", key_i32_2, key_i32_3);
+        v_i32_0.memcomparable_encode(&mut key_i32_0)?;
+        v_i32_1.memcomparable_encode(&mut key_i32_1)?;
+        v_i32_2.memcomparable_encode(&mut key_i32_2)?;
+        v_i32_3.memcomparable_encode(&mut key_i32_3)?;
+
+        assert!(key_i32_0 < key_i32_1);
         assert!(key_i32_1 < key_i32_2);
         assert!(key_i32_2 < key_i32_3);
 
+        assert_eq!(
+            v_i32_0,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(key_i32_0.as_slice()),
+                &LogicalType::Integer
+            )?
+        );
+        assert_eq!(
+            v_i32_1,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(key_i32_1.as_slice()),
+                &LogicalType::Integer
+            )?
+        );
+        assert_eq!(
+            v_i32_2,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(key_i32_2.as_slice()),
+                &LogicalType::Integer
+            )?
+        );
+        assert_eq!(
+            v_i32_3,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(key_i32_3.as_slice()),
+                &LogicalType::Integer
+            )?
+        );
+
+        // ---------- Int64 ----------
+        let mut key_i64_0 = BumpBytes::new_in(&arena);
         let mut key_i64_1 = BumpBytes::new_in(&arena);
         let mut key_i64_2 = BumpBytes::new_in(&arena);
         let mut key_i64_3 = BumpBytes::new_in(&arena);
 
-        DataValue::Int64(i64::MIN).memcomparable_encode(&mut key_i64_1)?;
-        DataValue::Int64(-1_i64).memcomparable_encode(&mut key_i64_2)?;
-        DataValue::Int64(i64::MAX).memcomparable_encode(&mut key_i64_3)?;
+        let v_i64_0 = DataValue::Null;
+        let v_i64_1 = DataValue::Int64(i64::MIN);
+        let v_i64_2 = DataValue::Int64(-1);
+        let v_i64_3 = DataValue::Int64(i64::MAX);
 
-        println!("{:?} < {:?}", key_i64_1, key_i64_2);
-        println!("{:?} < {:?}", key_i64_2, key_i64_3);
+        v_i64_0.memcomparable_encode(&mut key_i64_0)?;
+        v_i64_1.memcomparable_encode(&mut key_i64_1)?;
+        v_i64_2.memcomparable_encode(&mut key_i64_2)?;
+        v_i64_3.memcomparable_encode(&mut key_i64_3)?;
+
+        assert!(key_i64_0 < key_i64_1);
         assert!(key_i64_1 < key_i64_2);
         assert!(key_i64_2 < key_i64_3);
+
+        assert_eq!(
+            v_i64_0,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(key_i64_0.as_slice()),
+                &LogicalType::Bigint
+            )?
+        );
+        assert_eq!(
+            v_i64_1,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(key_i64_1.as_slice()),
+                &LogicalType::Bigint
+            )?
+        );
+        assert_eq!(
+            v_i64_2,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(key_i64_2.as_slice()),
+                &LogicalType::Bigint
+            )?
+        );
+        assert_eq!(
+            v_i64_3,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(key_i64_3.as_slice()),
+                &LogicalType::Bigint
+            )?
+        );
 
         Ok(())
     }
@@ -2028,31 +2388,92 @@ mod test {
     #[test]
     fn test_mem_comparable_float() -> Result<(), DatabaseError> {
         let arena = Bump::new();
+
+        // ---------- Float32 ----------
+        let mut key_f32_0 = BumpBytes::new_in(&arena);
         let mut key_f32_1 = BumpBytes::new_in(&arena);
         let mut key_f32_2 = BumpBytes::new_in(&arena);
         let mut key_f32_3 = BumpBytes::new_in(&arena);
 
-        DataValue::Float32(OrderedFloat(f32::MIN)).memcomparable_encode(&mut key_f32_1)?;
-        DataValue::Float32(OrderedFloat(-1_f32)).memcomparable_encode(&mut key_f32_2)?;
-        DataValue::Float32(OrderedFloat(f32::MAX)).memcomparable_encode(&mut key_f32_3)?;
+        let v_f32_0 = DataValue::Null;
+        let v_f32_1 = DataValue::Float32(OrderedFloat(f32::MIN));
+        let v_f32_2 = DataValue::Float32(OrderedFloat(-1.0));
+        let v_f32_3 = DataValue::Float32(OrderedFloat(f32::MAX));
 
-        println!("{:?} < {:?}", key_f32_1, key_f32_2);
-        println!("{:?} < {:?}", key_f32_2, key_f32_3);
+        v_f32_0.memcomparable_encode(&mut key_f32_0)?;
+        v_f32_1.memcomparable_encode(&mut key_f32_1)?;
+        v_f32_2.memcomparable_encode(&mut key_f32_2)?;
+        v_f32_3.memcomparable_encode(&mut key_f32_3)?;
+
+        assert!(key_f32_0 < key_f32_1);
         assert!(key_f32_1 < key_f32_2);
         assert!(key_f32_2 < key_f32_3);
 
+        assert_eq!(
+            v_f32_0,
+            DataValue::memcomparable_decode(&mut Cursor::new(&key_f32_0[..]), &LogicalType::Float)?
+        );
+        assert_eq!(
+            v_f32_1,
+            DataValue::memcomparable_decode(&mut Cursor::new(&key_f32_1[..]), &LogicalType::Float)?
+        );
+        assert_eq!(
+            v_f32_2,
+            DataValue::memcomparable_decode(&mut Cursor::new(&key_f32_2[..]), &LogicalType::Float)?
+        );
+        assert_eq!(
+            v_f32_3,
+            DataValue::memcomparable_decode(&mut Cursor::new(&key_f32_3[..]), &LogicalType::Float)?
+        );
+
+        // ---------- Float64 ----------
+        let mut key_f64_0 = BumpBytes::new_in(&arena);
         let mut key_f64_1 = BumpBytes::new_in(&arena);
         let mut key_f64_2 = BumpBytes::new_in(&arena);
         let mut key_f64_3 = BumpBytes::new_in(&arena);
 
-        DataValue::Float64(OrderedFloat(f64::MIN)).memcomparable_encode(&mut key_f64_1)?;
-        DataValue::Float64(OrderedFloat(-1_f64)).memcomparable_encode(&mut key_f64_2)?;
-        DataValue::Float64(OrderedFloat(f64::MAX)).memcomparable_encode(&mut key_f64_3)?;
+        let v_f64_0 = DataValue::Null;
+        let v_f64_1 = DataValue::Float64(OrderedFloat(f64::MIN));
+        let v_f64_2 = DataValue::Float64(OrderedFloat(-1.0));
+        let v_f64_3 = DataValue::Float64(OrderedFloat(f64::MAX));
 
-        println!("{:?} < {:?}", key_f64_1, key_f64_2);
-        println!("{:?} < {:?}", key_f64_2, key_f64_3);
+        v_f64_0.memcomparable_encode(&mut key_f64_0)?;
+        v_f64_1.memcomparable_encode(&mut key_f64_1)?;
+        v_f64_2.memcomparable_encode(&mut key_f64_2)?;
+        v_f64_3.memcomparable_encode(&mut key_f64_3)?;
+
+        assert!(key_f64_0 < key_f64_1);
         assert!(key_f64_1 < key_f64_2);
         assert!(key_f64_2 < key_f64_3);
+
+        assert_eq!(
+            v_f64_0,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(&key_f64_0[..]),
+                &LogicalType::Double
+            )?
+        );
+        assert_eq!(
+            v_f64_1,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(&key_f64_1[..]),
+                &LogicalType::Double
+            )?
+        );
+        assert_eq!(
+            v_f64_2,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(&key_f64_2[..]),
+                &LogicalType::Double
+            )?
+        );
+        assert_eq!(
+            v_f64_3,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(&key_f64_3[..]),
+                &LogicalType::Double
+            )?
+        );
 
         Ok(())
     }
@@ -2060,18 +2481,58 @@ mod test {
     #[test]
     fn test_mem_comparable_decimal() -> Result<(), DatabaseError> {
         let arena = Bump::new();
-        let mut key_deciaml_1 = BumpBytes::new_in(&arena);
-        let mut key_deciaml_2 = BumpBytes::new_in(&arena);
-        let mut key_deciaml_3 = BumpBytes::new_in(&arena);
 
-        DataValue::Decimal(Decimal::MIN).memcomparable_encode(&mut key_deciaml_1)?;
-        DataValue::Decimal(Decimal::new(-1, 0)).memcomparable_encode(&mut key_deciaml_2)?;
-        DataValue::Decimal(Decimal::MAX).memcomparable_encode(&mut key_deciaml_3)?;
+        let mut key_decimal_0 = BumpBytes::new_in(&arena);
+        let mut key_decimal_1 = BumpBytes::new_in(&arena);
+        let mut key_decimal_2 = BumpBytes::new_in(&arena);
+        let mut key_decimal_3 = BumpBytes::new_in(&arena);
 
-        println!("{:?} < {:?}", key_deciaml_1, key_deciaml_2);
-        println!("{:?} < {:?}", key_deciaml_2, key_deciaml_3);
-        assert!(key_deciaml_1 < key_deciaml_2);
-        assert!(key_deciaml_2 < key_deciaml_3);
+        let v_decimal_0 = DataValue::Null;
+        let v_decimal_1 = DataValue::Decimal(Decimal::MIN);
+        let v_decimal_2 = DataValue::Decimal(Decimal::new(-1, 0));
+        let v_decimal_3 = DataValue::Decimal(Decimal::MAX);
+
+        v_decimal_0.memcomparable_encode(&mut key_decimal_0)?;
+        v_decimal_1.memcomparable_encode(&mut key_decimal_1)?;
+        v_decimal_2.memcomparable_encode(&mut key_decimal_2)?;
+        v_decimal_3.memcomparable_encode(&mut key_decimal_3)?;
+
+        println!("{:?} < {:?}", key_decimal_0, key_decimal_1);
+        println!("{:?} < {:?}", key_decimal_1, key_decimal_2);
+        println!("{:?} < {:?}", key_decimal_2, key_decimal_3);
+
+        assert!(key_decimal_0 < key_decimal_1);
+        assert!(key_decimal_1 < key_decimal_2);
+        assert!(key_decimal_2 < key_decimal_3);
+
+        assert_eq!(
+            v_decimal_0,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(&key_decimal_0[..]),
+                &LogicalType::Decimal(None, None)
+            )?
+        );
+        assert_eq!(
+            v_decimal_1,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(&key_decimal_1[..]),
+                &LogicalType::Decimal(None, None)
+            )?
+        );
+        assert_eq!(
+            v_decimal_2,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(&key_decimal_2[..]),
+                &LogicalType::Decimal(None, None)
+            )?
+        );
+        assert_eq!(
+            v_decimal_3,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(&key_decimal_3[..]),
+                &LogicalType::Decimal(None, None)
+            )?
+        );
 
         Ok(())
     }
@@ -2079,61 +2540,205 @@ mod test {
     #[test]
     fn test_mem_comparable_tuple_lower() -> Result<(), DatabaseError> {
         let arena = Bump::new();
+
         let mut key_tuple_1 = BumpBytes::new_in(&arena);
         let mut key_tuple_2 = BumpBytes::new_in(&arena);
         let mut key_tuple_3 = BumpBytes::new_in(&arena);
 
-        DataValue::Tuple(
+        let v_tuple_1 = DataValue::Tuple(
             vec![DataValue::Null, DataValue::Int8(0), DataValue::Int8(1)],
             false,
-        )
-        .memcomparable_encode(&mut key_tuple_1)?;
-        DataValue::Tuple(
+        );
+
+        let v_tuple_2 = DataValue::Tuple(
             vec![DataValue::Int8(0), DataValue::Int8(0), DataValue::Int8(1)],
             false,
-        )
-        .memcomparable_encode(&mut key_tuple_2)?;
-        DataValue::Tuple(
+        );
+
+        let v_tuple_3 = DataValue::Tuple(
             vec![DataValue::Int8(0), DataValue::Int8(0), DataValue::Int8(2)],
             false,
-        )
-        .memcomparable_encode(&mut key_tuple_3)?;
+        );
+
+        v_tuple_1.memcomparable_encode(&mut key_tuple_1)?;
+        v_tuple_2.memcomparable_encode(&mut key_tuple_2)?;
+        v_tuple_3.memcomparable_encode(&mut key_tuple_3)?;
 
         println!("{:?} < {:?}", key_tuple_1, key_tuple_2);
         println!("{:?} < {:?}", key_tuple_2, key_tuple_3);
+
         assert!(key_tuple_1 < key_tuple_2);
         assert!(key_tuple_2 < key_tuple_3);
+
+        assert_eq!(
+            v_tuple_1,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(&key_tuple_1[..]),
+                &LogicalType::Tuple(vec![
+                    LogicalType::Tinyint,
+                    LogicalType::Tinyint,
+                    LogicalType::Tinyint,
+                ])
+            )?
+        );
+        assert_eq!(
+            v_tuple_2,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(&key_tuple_2[..]),
+                &LogicalType::Tuple(vec![
+                    LogicalType::Tinyint,
+                    LogicalType::Tinyint,
+                    LogicalType::Tinyint,
+                ])
+            )?
+        );
+        assert_eq!(
+            v_tuple_3,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(&key_tuple_3[..]),
+                &LogicalType::Tuple(vec![
+                    LogicalType::Tinyint,
+                    LogicalType::Tinyint,
+                    LogicalType::Tinyint,
+                ])
+            )?
+        );
 
         Ok(())
     }
 
     #[test]
     fn test_mem_comparable_tuple_upper() -> Result<(), DatabaseError> {
+        use DataValue::*;
+
+        fn logical_eq(lhs: &DataValue, rhs: &DataValue) -> bool {
+            match (lhs, rhs) {
+                (Tuple(lv, _), Tuple(rv, _)) => {
+                    lv.len() == rv.len() && lv.iter().zip(rv.iter()).all(|(l, r)| logical_eq(l, r))
+                }
+                _ => lhs == rhs,
+            }
+        }
+
         let arena = Bump::new();
+
         let mut key_tuple_1 = BumpBytes::new_in(&arena);
         let mut key_tuple_2 = BumpBytes::new_in(&arena);
         let mut key_tuple_3 = BumpBytes::new_in(&arena);
 
-        DataValue::Tuple(
-            vec![DataValue::Null, DataValue::Int8(0), DataValue::Int8(1)],
-            true,
-        )
-        .memcomparable_encode(&mut key_tuple_1)?;
-        DataValue::Tuple(
-            vec![DataValue::Int8(0), DataValue::Int8(0), DataValue::Int8(1)],
-            true,
-        )
-        .memcomparable_encode(&mut key_tuple_2)?;
-        DataValue::Tuple(
-            vec![DataValue::Int8(0), DataValue::Int8(0), DataValue::Int8(2)],
-            true,
-        )
-        .memcomparable_encode(&mut key_tuple_3)?;
+        let v_tuple_1 = Tuple(
+            vec![Null, Int8(0), Int8(1)],
+            true, // upper bound
+        );
 
-        println!("{:?} < {:?}", key_tuple_2, key_tuple_3);
-        println!("{:?} < {:?}", key_tuple_3, key_tuple_1);
+        let v_tuple_2 = Tuple(vec![Int8(0), Int8(0), Int8(1)], true);
+
+        let v_tuple_3 = Tuple(vec![Int8(0), Int8(0), Int8(2)], true);
+
+        v_tuple_1.memcomparable_encode(&mut key_tuple_1)?;
+        v_tuple_2.memcomparable_encode(&mut key_tuple_2)?;
+        v_tuple_3.memcomparable_encode(&mut key_tuple_3)?;
+
+        assert!(key_tuple_1 < key_tuple_2);
         assert!(key_tuple_2 < key_tuple_3);
-        assert!(key_tuple_3 < key_tuple_1);
+
+        let ty = LogicalType::Tuple(vec![
+            LogicalType::Tinyint,
+            LogicalType::Tinyint,
+            LogicalType::Tinyint,
+        ]);
+
+        let d1 = DataValue::memcomparable_decode(&mut Cursor::new(&key_tuple_1[..]), &ty)?;
+        let d2 = DataValue::memcomparable_decode(&mut Cursor::new(&key_tuple_2[..]), &ty)?;
+        let d3 = DataValue::memcomparable_decode(&mut Cursor::new(&key_tuple_3[..]), &ty)?;
+
+        assert!(logical_eq(&v_tuple_1, &d1));
+        assert!(logical_eq(&v_tuple_2, &d2));
+        assert!(logical_eq(&v_tuple_3, &d3));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_mem_comparable_utf8() -> Result<(), DatabaseError> {
+        let arena = Bump::new();
+
+        let mut key_null = BumpBytes::new_in(&arena);
+        let mut key_a = BumpBytes::new_in(&arena);
+        let mut key_ab = BumpBytes::new_in(&arena);
+        let mut key_b = BumpBytes::new_in(&arena);
+        let mut key_zh = BumpBytes::new_in(&arena);
+
+        let v_null = DataValue::Null;
+
+        let v_a = DataValue::Utf8 {
+            value: "a".to_string(),
+            ty: Utf8Type::Variable(None),
+            unit: CharLengthUnits::Characters,
+        };
+
+        let v_ab = DataValue::Utf8 {
+            value: "ab".to_string(),
+            ty: Utf8Type::Variable(None),
+            unit: CharLengthUnits::Characters,
+        };
+
+        let v_b = DataValue::Utf8 {
+            value: "b".to_string(),
+            ty: Utf8Type::Variable(None),
+            unit: CharLengthUnits::Characters,
+        };
+
+        let v_zh = DataValue::Utf8 {
+            value: "中".to_string(),
+            ty: Utf8Type::Variable(None),
+            unit: CharLengthUnits::Characters,
+        };
+
+        v_null.memcomparable_encode(&mut key_null)?;
+        v_a.memcomparable_encode(&mut key_a)?;
+        v_ab.memcomparable_encode(&mut key_ab)?;
+        v_b.memcomparable_encode(&mut key_b)?;
+        v_zh.memcomparable_encode(&mut key_zh)?;
+
+        // ordering
+        assert!(key_null < key_a);
+        assert!(key_a < key_ab);
+        assert!(key_ab < key_b);
+        assert!(key_b < key_zh);
+
+        // decode check
+        assert_eq!(
+            v_a,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(&key_a[..]),
+                &LogicalType::Varchar(None, CharLengthUnits::Characters)
+            )?
+        );
+
+        assert_eq!(
+            v_ab,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(&key_ab[..]),
+                &LogicalType::Varchar(None, CharLengthUnits::Characters)
+            )?
+        );
+
+        assert_eq!(
+            v_b,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(&key_b[..]),
+                &LogicalType::Varchar(None, CharLengthUnits::Characters)
+            )?
+        );
+
+        assert_eq!(
+            v_zh,
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(&key_zh[..]),
+                &LogicalType::Varchar(None, CharLengthUnits::Characters)
+            )?
+        );
 
         Ok(())
     }

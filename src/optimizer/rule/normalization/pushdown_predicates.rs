@@ -215,12 +215,17 @@ impl NormalizationRule for PushPredicateIntoScan {
     fn apply(&self, node_id: HepNodeId, graph: &mut HepGraph) -> Result<(), DatabaseError> {
         if let Operator::Filter(op) = graph.operator(node_id).clone() {
             if let Some(child_id) = graph.eldest_child_at(node_id) {
-                if let Operator::TableScan(child_op) = graph.operator_mut(child_id) {
-                    //FIXME: now only support `unique` and `primary key`
-                    for IndexInfo { meta, range } in &mut child_op.index_infos {
+                if let Operator::TableScan(scan_op) = graph.operator_mut(child_id) {
+                    for IndexInfo {
+                        meta,
+                        range,
+                        covered_deserializers,
+                    } in &mut scan_op.index_infos
+                    {
                         if range.is_some() {
                             continue;
                         }
+                        // range detach
                         *range = match meta.ty {
                             IndexType::PrimaryKey { is_multiple: false }
                             | IndexType::Unique
@@ -232,6 +237,17 @@ impl NormalizationRule for PushPredicateIntoScan {
                                 Self::composite_range(&op, meta)?
                             }
                         };
+                        // try index covered
+                        let mut deserializers = Vec::with_capacity(scan_op.columns.len());
+                        for column_id in &meta.column_ids {
+                            for column in scan_op.columns.values() {
+                                if column.id().map(|id| &id == column_id).unwrap_or(false) {
+                                    deserializers.push(column.datatype().serializable());
+                                }
+                            }
+                        }
+                        *covered_deserializers =
+                            (!deserializers.is_empty()).then_some(deserializers);
                     }
                 }
             }

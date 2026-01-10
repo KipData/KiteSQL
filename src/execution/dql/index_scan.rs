@@ -4,15 +4,31 @@ use crate::planner::operator::table_scan::TableScanOperator;
 use crate::storage::{Iter, StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::throw;
 use crate::types::index::IndexMetaRef;
+use crate::types::serialize::TupleValueSerializableImpl;
 
 pub(crate) struct IndexScan {
     op: TableScanOperator,
     index_by: IndexMetaRef,
     ranges: Vec<Range>,
+    covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
 }
 
-impl From<(TableScanOperator, IndexMetaRef, Range)> for IndexScan {
-    fn from((op, index_by, range): (TableScanOperator, IndexMetaRef, Range)) -> Self {
+impl
+    From<(
+        TableScanOperator,
+        IndexMetaRef,
+        Range,
+        Option<Vec<TupleValueSerializableImpl>>,
+    )> for IndexScan
+{
+    fn from(
+        (op, index_by, range, covered_deserializers): (
+            TableScanOperator,
+            IndexMetaRef,
+            Range,
+            Option<Vec<TupleValueSerializableImpl>>,
+        ),
+    ) -> Self {
         let ranges = match range {
             Range::SortedRanges(ranges) => ranges,
             range => vec![range],
@@ -22,6 +38,7 @@ impl From<(TableScanOperator, IndexMetaRef, Range)> for IndexScan {
             op,
             index_by,
             ranges,
+            covered_deserializers,
         }
     }
 }
@@ -51,6 +68,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for IndexScan {
                     self.index_by,
                     self.ranges,
                     with_pk,
+                    self.covered_deserializers,
                 )
             );
 
