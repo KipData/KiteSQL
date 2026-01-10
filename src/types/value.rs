@@ -657,13 +657,22 @@ impl DataValue {
         }
     }
 
-    #[inline]
-    pub fn memcomparable_encode(&self, b: &mut BumpBytes) -> Result<(), DatabaseError> {
+    #[inline(always)]
+    pub fn memcomparable_encode_with_null_order(
+        &self,
+        b: &mut BumpBytes,
+        nulls_first: bool,
+    ) -> Result<(), DatabaseError> {
+        let (null_tag, not_null_tag) = if nulls_first {
+            (NULL_TAG, NOTNULL_TAG)
+        } else {
+            (NOTNULL_TAG, NULL_TAG)
+        };
         if let DataValue::Null = self {
-            b.push(NULL_TAG);
+            b.push(null_tag);
             return Ok(());
         }
-        b.push(NOTNULL_TAG);
+        b.push(not_null_tag);
 
         match self {
             DataValue::Null => (),
@@ -717,6 +726,11 @@ impl DataValue {
         }
 
         Ok(())
+    }
+
+    #[inline]
+    pub fn memcomparable_encode(&self, b: &mut BumpBytes) -> Result<(), DatabaseError> {
+        self.memcomparable_encode_with_null_order(b, true)
     }
 
     pub fn memcomparable_decode<R: Read>(

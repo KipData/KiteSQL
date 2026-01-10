@@ -48,13 +48,12 @@ fn top_sort<'a>(
     {
         let mut key = BumpBytes::new_in(arena);
         expr.eval(Some((&tuple, &**schema)))?
-            .memcomparable_encode(&mut key)?;
-        if !asc {
-            for byte in key.iter_mut() {
+            .memcomparable_encode_with_null_order(&mut key, *nulls_first)?;
+        if !asc && key.len() > 1 {
+            for byte in key.iter_mut().skip(1) {
                 *byte ^= 0xFF;
             }
         }
-        key.push(if *nulls_first { u8::MIN } else { u8::MAX });
         full_key.extend(key);
     }
 
