@@ -13,9 +13,9 @@ use crate::types::index::{IndexInfo, IndexMetaRef, IndexType};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use itertools::Itertools;
-use std::mem;
 use std::ops::Bound;
 use std::sync::LazyLock;
+use std::{mem, slice};
 
 static PUSH_PREDICATE_THROUGH_JOIN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
     predicate: |op| matches!(op, Operator::Filter(_)),
@@ -238,16 +238,27 @@ impl NormalizationRule for PushPredicateIntoScan {
                             }
                         };
                         // try index covered
-                        let mut deserializers = Vec::with_capacity(scan_op.columns.len());
-                        for column_id in &meta.column_ids {
+                        let mut deserializers = Vec::with_capacity(meta.column_ids.len());
+                        let mut cover_count = 0;
+                        let index_column_types = match &meta.value_ty {
+                            LogicalType::Tuple(tys) => tys,
+                            ty => slice::from_ref(ty),
+                        };
+                        for (i, column_id) in meta.column_ids.iter().enumerate() {
                             for column in scan_op.columns.values() {
-                                if column.id().map(|id| &id == column_id).unwrap_or(false) {
-                                    deserializers.push(column.datatype().serializable());
-                                }
+                                deserializers.push(
+                                    if column.id().map(|id| &id == column_id).unwrap_or(false) {
+                                        cover_count += 1;
+                                        column.datatype().serializable()
+                                    } else {
+                                        index_column_types[i].skip_serializable()
+                                    },
+                                );
                             }
                         }
-                        *covered_deserializers =
-                            (!deserializers.is_empty()).then_some(deserializers);
+                        if cover_count == scan_op.columns.len() {
+                            *covered_deserializers = Some(deserializers)
+                        }
                     }
                 }
             }

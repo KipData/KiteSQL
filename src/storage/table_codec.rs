@@ -19,9 +19,9 @@ pub(crate) const BOUND_MAX_TAG: u8 = u8::MAX;
 pub(crate) const NULL_TAG: u8 = 0u8;
 pub(crate) const NOTNULL_TAG: u8 = 1u8;
 
-static ROOT_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"R".to_vec());
-static VIEW_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"V".to_vec());
-static HASH_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"H".to_vec());
+static ROOT_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"Root".to_vec());
+static VIEW_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"View".to_vec());
+static HASH_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"Hash".to_vec());
 static EMPTY_REFERENCE_TABLES: LazyLock<ReferenceTables> = LazyLock::new(ReferenceTables::new);
 
 pub type Bytes = Vec<u8>;
