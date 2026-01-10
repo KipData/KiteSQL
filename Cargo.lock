@@ -1320,7 +1320,7 @@ dependencies = [
 
 [[package]]
 name = "kite_sql"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ahash 0.8.12",
  "async-trait",
@@ -1349,7 +1349,6 @@ dependencies = [
  "ordered-float",
  "parking_lot",
  "paste",
- "petgraph",
  "pgwire",
  "pprof",
  "recursive",
@@ -1764,16 +1763,6 @@ name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
-
-[[package]]
-name = "petgraph"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4c5cc86750666a3ed20bdaf5ca2a0344f9c67674cae0515bec2da16fbaa47db"
-dependencies = [
- "fixedbitset",
- "indexmap",
-]
 
 [[package]]
 name = "pgwire"

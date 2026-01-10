@@ -211,11 +211,8 @@ impl<S: Storage> State<S> {
         ///     Limit(1)
         ///       Project(a,b)
         let source_plan = binder.bind(stmt)?;
-        // println!("source_plan plan: {:#?}", source_plan);
-
         let best_plan = Self::default_optimizer(source_plan)
             .find_best(Some(&transaction.meta_loader(meta_cache)))?;
-        // println!("best_plan plan: {:#?}", best_plan);
 
         Ok(best_plan)
     }
@@ -356,7 +353,7 @@ impl<S: Storage> Database<S> {
         self.state.prepare(sql)
     }
 
-    fn execute<A: AsRef<[(&'static str, DataValue)]>>(
+    pub fn execute<A: AsRef<[(&'static str, DataValue)]>>(
         &self,
         statement: &Statement,
         params: A,

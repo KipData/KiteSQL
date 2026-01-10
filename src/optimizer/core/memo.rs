@@ -16,10 +16,10 @@ use crate::errors::DatabaseError;
 use crate::optimizer::core::pattern::PatternMatcher;
 use crate::optimizer::core::rule::{ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::optimizer::heuristic::graph::{HepGraph, HepNodeId};
-use crate::optimizer::heuristic::matcher::HepMatcher;
+use crate::optimizer::heuristic::matcher::PlanMatcher;
 use crate::optimizer::rule::implementation::ImplementationRuleImpl;
 use crate::planner::operator::PhysicalOption;
+use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -42,42 +42,88 @@ impl GroupExpression {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct NodePath(Vec<usize>);
+
+impl NodePath {
+    fn root() -> Self {
+        Self(Vec::new())
+    }
+
+    fn child(&self, idx: usize) -> Self {
+        let mut path = self.0.clone();
+        path.push(idx);
+        Self(path)
+    }
+}
+
 #[derive(Debug)]
 pub struct Memo {
-    groups: HashMap<HepNodeId, GroupExpression>,
+    groups: HashMap<NodePath, GroupExpression>,
 }
 
 impl Memo {
     pub(crate) fn new<T: Transaction>(
-        graph: &HepGraph,
+        plan: &LogicalPlan,
         loader: &StatisticMetaLoader<'_, T>,
         implementations: &[ImplementationRuleImpl],
     ) -> Result<Self, DatabaseError> {
-        let node_count = graph.node_count();
         let mut groups = HashMap::new();
-
-        if node_count == 0 {
-            return Err(DatabaseError::EmptyPlan);
-        }
-
-        for node_id in graph.nodes_iter(None) {
-            for rule in implementations {
-                if HepMatcher::new(rule.pattern(), node_id, graph).match_opt_expr() {
-                    let op = graph.operator(node_id);
-                    let group_expr = groups
-                        .entry(node_id)
-                        .or_insert_with(|| GroupExpression { exprs: vec![] });
-
-                    rule.to_expression(op, loader, group_expr)?;
-                }
-            }
-        }
-
+        Self::collect(plan, NodePath::root(), loader, implementations, &mut groups)?;
         Ok(Memo { groups })
     }
 
-    pub(crate) fn cheapest_physical_option(&self, node_id: &HepNodeId) -> Option<PhysicalOption> {
-        self.groups.get(node_id).and_then(|exprs| {
+    fn collect<T: Transaction>(
+        plan: &LogicalPlan,
+        path: NodePath,
+        loader: &StatisticMetaLoader<'_, T>,
+        implementations: &[ImplementationRuleImpl],
+        groups: &mut HashMap<NodePath, GroupExpression>,
+    ) -> Result<(), DatabaseError> {
+        for rule in implementations {
+            if PlanMatcher::new(rule.pattern(), plan).match_opt_expr() {
+                let group_expr = groups
+                    .entry(path.clone())
+                    .or_insert_with(|| GroupExpression { exprs: vec![] });
+                rule.to_expression(&plan.operator, loader, group_expr)?;
+            }
+        }
+
+        match plan.childrens.as_ref() {
+            Childrens::Only(child) => {
+                Self::collect(child, path.child(0), loader, implementations, groups)?;
+            }
+            Childrens::Twins { left, right } => {
+                Self::collect(left, path.child(0), loader, implementations, groups)?;
+                Self::collect(right, path.child(1), loader, implementations, groups)?;
+            }
+            Childrens::None => {}
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn annotate_plan(&self, plan: &mut LogicalPlan) {
+        Self::annotate(plan, &NodePath::root(), self);
+    }
+
+    fn annotate(plan: &mut LogicalPlan, path: &NodePath, memo: &Memo) {
+        if let Some(option) = memo.cheapest_physical_option(path) {
+            plan.physical_option = Some(option);
+        }
+
+        match plan.childrens.as_mut() {
+            Childrens::Only(child) => Self::annotate(child, &path.child(0), memo),
+            Childrens::Twins { left, right } => {
+                Self::annotate(left, &path.child(0), memo);
+                Self::annotate(right, &path.child(1), memo);
+            }
+            Childrens::None => {}
+        }
+    }
+
+    pub(crate) fn cheapest_physical_option(&self, path: &NodePath) -> Option<PhysicalOption> {
+        self.groups.get(path).and_then(|exprs| {
             exprs
                 .exprs
                 .iter()
@@ -94,13 +140,13 @@ impl Memo {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    use super::NodePath;
     use crate::binder::{Binder, BinderContext};
     use crate::db::{DataBaseBuilder, ResultIter};
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
     use crate::optimizer::core::memo::Memo;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
-    use crate::optimizer::heuristic::graph::HepGraph;
     use crate::optimizer::heuristic::optimizer::HepOptimizer;
     use crate::optimizer::rule::implementation::ImplementationRuleImpl;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
@@ -110,12 +156,12 @@ mod tests {
     use crate::types::index::{IndexInfo, IndexMeta, IndexType};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
-    use petgraph::stable_graph::NodeIndex;
     use std::ops::Bound;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
     use tempfile::TempDir;
 
+    // Tips: This test may occasionally encounter errors; you can repeat the test multiple times.
     #[test]
     fn test_build_memo() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
@@ -161,7 +207,7 @@ mod tests {
             "select c1, c3 from t1 inner join t2 on c1 = c3 where (c1 > 40 or c1 = 2) and c3 > 22",
         )?;
         let plan = binder.bind(&stmt[0])?;
-        let best_plan = HepOptimizer::new(plan)
+        let mut best_plan = HepOptimizer::new(plan)
             .batch(
                 "Simplify Filter".to_string(),
                 HepBatchStrategy::once_topdown(),
@@ -176,7 +222,6 @@ mod tests {
                 ],
             )
             .find_best::<RocksTransaction>(None)?;
-        let graph = HepGraph::new(best_plan);
         let rules = vec![
             ImplementationRuleImpl::Projection,
             ImplementationRuleImpl::Filter,
@@ -186,12 +231,15 @@ mod tests {
         ];
 
         let memo = Memo::new(
-            &graph,
+            &best_plan,
             &transaction.meta_loader(database.state.meta_cache()),
             &rules,
         )?;
-        let best_plan = graph.into_plan(Some(&memo));
-        let exprs = &memo.groups.get(&NodeIndex::new(3)).unwrap();
+        Memo::annotate_plan(&memo, &mut best_plan);
+        let exprs = memo
+            .groups
+            .get(&NodePath(vec![0, 0, 0]))
+            .expect("missing group");
 
         assert_eq!(exprs.exprs.len(), 2);
         assert_eq!(exprs.exprs[0].cost, Some(1000));
@@ -200,7 +248,6 @@ mod tests {
         assert!(matches!(exprs.exprs[1].op, PhysicalOption::IndexScan(_)));
         assert_eq!(
             best_plan
-                .unwrap()
                 .childrens
                 .pop_only()
                 .childrens

@@ -13,52 +13,47 @@
 // limitations under the License.
 
 use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate, PatternMatcher};
-use crate::optimizer::heuristic::graph::{HepGraph, HepNodeId};
+use crate::planner::LogicalPlan;
 
-/// Use pattern to determines which rule can be applied
-pub struct HepMatcher<'a, 'b> {
+/// Use pattern to determine which rule can be applied on a [`LogicalPlan`] subtree.
+pub struct PlanMatcher<'a> {
     pattern: &'a Pattern,
-    start_id: HepNodeId,
-    graph: &'b HepGraph,
+    plan: &'a LogicalPlan,
 }
 
-impl<'a, 'b> HepMatcher<'a, 'b> {
-    pub(crate) fn new(pattern: &'a Pattern, start_id: HepNodeId, graph: &'b HepGraph) -> Self {
-        Self {
-            pattern,
-            start_id,
-            graph,
-        }
+impl<'a> PlanMatcher<'a> {
+    pub(crate) fn new(pattern: &'a Pattern, plan: &'a LogicalPlan) -> Self {
+        Self { pattern, plan }
     }
 }
 
-impl PatternMatcher for HepMatcher<'_, '_> {
+impl PatternMatcher for PlanMatcher<'_> {
     fn match_opt_expr(&self) -> bool {
-        let op = self.graph.operator(self.start_id);
-        // check the root node predicate
-        if !(self.pattern.predicate)(op) {
+        if !(self.pattern.predicate)(&self.plan.operator) {
             return false;
         }
 
         match &self.pattern.children {
             PatternChildrenPredicate::Recursive => {
-                // check
-                for node_id in self.graph.nodes_iter(Some(self.start_id)) {
-                    if !(self.pattern.predicate)(self.graph.operator(node_id)) {
+                for child in self.plan.childrens.iter() {
+                    if !(self.pattern.predicate)(&child.operator) {
+                        return false;
+                    }
+                    if !PlanMatcher::new(self.pattern, child).match_opt_expr() {
                         return false;
                     }
                 }
             }
             PatternChildrenPredicate::Predicate(patterns) => {
-                for node_id in self.graph.children_at(self.start_id) {
+                for child in self.plan.childrens.iter() {
                     for pattern in patterns {
-                        if !HepMatcher::new(pattern, node_id, self.graph).match_opt_expr() {
+                        if !PlanMatcher::new(pattern, child).match_opt_expr() {
                             return false;
                         }
                     }
                 }
             }
-            PatternChildrenPredicate::None => (),
+            PatternChildrenPredicate::None => {}
         }
 
         true
@@ -67,11 +62,10 @@ impl PatternMatcher for HepMatcher<'_, '_> {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    use super::*;
     use crate::binder::test::build_t1_table;
     use crate::errors::DatabaseError;
     use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate, PatternMatcher};
-    use crate::optimizer::heuristic::graph::{HepGraph, HepNodeId};
-    use crate::optimizer::heuristic::matcher::HepMatcher;
     use crate::planner::operator::Operator;
     use crate::planner::{Childrens, LogicalPlan};
 
@@ -79,26 +73,16 @@ mod tests {
     fn test_predicate() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
         let plan = table_state.plan("select * from t1")?;
-        let graph = HepGraph::new(plan.clone());
 
         let project_into_table_scan_pattern = Pattern {
-            predicate: |p| match p {
-                Operator::Project(_) => true,
-                _ => false,
-            },
+            predicate: |p| matches!(p, Operator::Project(_)),
             children: PatternChildrenPredicate::Predicate(vec![Pattern {
-                predicate: |p| match p {
-                    Operator::TableScan(_) => true,
-                    _ => false,
-                },
+                predicate: |p| matches!(p, Operator::TableScan(_)),
                 children: PatternChildrenPredicate::None,
             }]),
         };
 
-        assert!(
-            HepMatcher::new(&project_into_table_scan_pattern, HepNodeId::new(0), &graph)
-                .match_opt_expr()
-        );
+        assert!(PlanMatcher::new(&project_into_table_scan_pattern, &plan).match_opt_expr());
 
         Ok(())
     }
@@ -129,16 +113,12 @@ mod tests {
             physical_option: None,
             _output_schema_ref: None,
         };
-        let graph = HepGraph::new(all_dummy_plan.clone());
 
         let only_dummy_pattern = Pattern {
-            predicate: |p| match p {
-                Operator::Dummy => true,
-                _ => false,
-            },
+            predicate: |p| matches!(p, Operator::Dummy),
             children: PatternChildrenPredicate::Recursive,
         };
 
-        assert!(HepMatcher::new(&only_dummy_pattern, HepNodeId::new(0), &graph).match_opt_expr());
+        assert!(PlanMatcher::new(&only_dummy_pattern, &all_dummy_plan).match_opt_expr());
     }
 }

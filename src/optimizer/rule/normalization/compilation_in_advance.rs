@@ -17,9 +17,9 @@ use crate::expression::visitor_mut::VisitorMut;
 use crate::expression::{BindEvaluator, BindPosition, ScalarExpression};
 use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
 use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
-use crate::optimizer::heuristic::graph::{HepGraph, HepNodeId};
 use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::Operator;
+use crate::planner::{Childrens, LogicalPlan};
 use std::borrow::Cow;
 use std::sync::LazyLock;
 
@@ -39,23 +39,26 @@ pub struct BindExpressionPosition;
 impl BindExpressionPosition {
     fn _apply(
         output_exprs: &mut Vec<ScalarExpression>,
-        node_id: HepNodeId,
-        graph: &mut HepGraph,
+        plan: &mut LogicalPlan,
     ) -> Result<(), DatabaseError> {
-        if let Some(child_id) = graph.eldest_child_at(node_id) {
-            Self::_apply(output_exprs, child_id, graph)?;
-        }
-        // for join
         let mut left_len = 0;
-        if let Operator::Join(_) | Operator::Union(_) | Operator::Except(_) =
-            graph.operator(node_id)
-        {
-            let mut second_output_exprs = Vec::new();
-            if let Some(child_id) = graph.youngest_child_at(node_id) {
-                Self::_apply(&mut second_output_exprs, child_id, graph)?;
+        match plan.childrens.as_mut() {
+            Childrens::Only(child) => {
+                Self::_apply(output_exprs, child)?;
             }
-            left_len = output_exprs.len();
-            output_exprs.append(&mut second_output_exprs);
+            Childrens::Twins { left, right } => {
+                Self::_apply(output_exprs, left)?;
+                if matches!(
+                    plan.operator,
+                    Operator::Join(_) | Operator::Union(_) | Operator::Except(_)
+                ) {
+                    let mut second_output_exprs = Vec::new();
+                    Self::_apply(&mut second_output_exprs, right)?;
+                    left_len = output_exprs.len();
+                    output_exprs.append(&mut second_output_exprs);
+                }
+            }
+            Childrens::None => {}
         }
         let mut bind_position = BindPosition::new(
             || {
@@ -65,7 +68,7 @@ impl BindExpressionPosition {
             },
             |a, b| a == b,
         );
-        let operator = graph.operator_mut(node_id);
+        let operator = &mut plan.operator;
         match operator {
             Operator::Join(op) => {
                 match &mut op.on {
@@ -172,12 +175,9 @@ impl MatchPattern for BindExpressionPosition {
 }
 
 impl NormalizationRule for BindExpressionPosition {
-    fn apply(&self, node_id: HepNodeId, graph: &mut HepGraph) -> Result<(), DatabaseError> {
-        Self::_apply(&mut Vec::new(), node_id, graph)?;
-        // mark changed to skip this rule batch
-        graph.version += 1;
-
-        Ok(())
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+        Self::_apply(&mut Vec::new(), plan)?;
+        Ok(true)
     }
 }
 
@@ -185,17 +185,19 @@ impl NormalizationRule for BindExpressionPosition {
 pub struct EvaluatorBind;
 
 impl EvaluatorBind {
-    fn _apply(node_id: HepNodeId, graph: &mut HepGraph) -> Result<(), DatabaseError> {
-        if let Some(child_id) = graph.eldest_child_at(node_id) {
-            Self::_apply(child_id, graph)?;
-        }
-        // for join
-        if let Operator::Join(_) = graph.operator(node_id) {
-            if let Some(child_id) = graph.youngest_child_at(node_id) {
-                Self::_apply(child_id, graph)?;
+    fn _apply(plan: &mut LogicalPlan) -> Result<(), DatabaseError> {
+        match plan.childrens.as_mut() {
+            Childrens::Only(child) => Self::_apply(child)?,
+            Childrens::Twins { left, right } => {
+                Self::_apply(left)?;
+                if matches!(plan.operator, Operator::Join(_)) {
+                    Self::_apply(right)?;
+                }
             }
+            Childrens::None => {}
         }
-        let operator = graph.operator_mut(node_id);
+
+        let operator = &mut plan.operator;
 
         match operator {
             Operator::Join(op) => {
@@ -284,11 +286,8 @@ impl MatchPattern for EvaluatorBind {
 }
 
 impl NormalizationRule for EvaluatorBind {
-    fn apply(&self, node_id: HepNodeId, graph: &mut HepGraph) -> Result<(), DatabaseError> {
-        Self::_apply(node_id, graph)?;
-        // mark changed to skip this rule batch
-        graph.version += 1;
-
-        Ok(())
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+        Self::_apply(plan)?;
+        Ok(true)
     }
 }
