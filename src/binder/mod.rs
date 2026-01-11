@@ -581,7 +581,7 @@ pub mod test {
             );
             let stmt = crate::parser::parse_sql(sql)?;
 
-            Ok(binder.bind(&stmt[0])?)
+            binder.bind(&stmt[0])
         }
 
         pub(crate) fn column_id_by_name(&self, name: &str) -> &ColumnId {

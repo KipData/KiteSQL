@@ -212,13 +212,13 @@ mod tests {
             Operator::CreateTable(op) => {
                 assert_eq!(op.table_name.as_ref(), "t1");
                 assert_eq!(op.columns[0].name(), "id");
-                assert_eq!(op.columns[0].nullable(), false);
+                assert!(!op.columns[0].nullable());
                 assert_eq!(
                     op.columns[0].desc(),
                     &ColumnDesc::new(LogicalType::Integer, Some(0), false, None)?
                 );
                 assert_eq!(op.columns[1].name(), "name");
-                assert_eq!(op.columns[1].nullable(), true);
+                assert!(op.columns[1].nullable());
                 assert_eq!(
                     op.columns[1].desc(),
                     &ColumnDesc::new(

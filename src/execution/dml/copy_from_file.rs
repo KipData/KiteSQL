@@ -161,7 +161,7 @@ mod tests {
         let csv = "1,1.5,one\n2,2.5,two\n";
 
         let mut file = tempfile::NamedTempFile::new().expect("failed to create temp file");
-        write!(file, "{}", csv).expect("failed to write file");
+        write!(file, "{csv}").expect("failed to write file");
 
         let columns = vec![
             ColumnRef::from(ColumnCatalog::direct_new(

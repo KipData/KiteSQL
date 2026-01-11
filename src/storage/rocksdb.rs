@@ -278,7 +278,7 @@ mod test {
 
         let source_columns = columns
             .iter()
-            .map(|col_ref| ColumnCatalog::clone(&col_ref))
+            .map(|col_ref| ColumnCatalog::clone(col_ref))
             .collect_vec();
         let _ = transaction.create_table(
             &table_cache,
@@ -289,13 +289,10 @@ mod test {
 
         let table_catalog = transaction.table(&table_cache, "test".to_string().into())?;
         assert!(table_catalog.is_some());
-        assert!(table_catalog
-            .unwrap()
-            .get_column_id_by_name(&"c1".to_string())
-            .is_some());
+        assert!(table_catalog.unwrap().get_column_id_by_name("c1").is_some());
 
         transaction.append_tuple(
-            &"test".to_string(),
+            "test",
             Tuple::new(
                 Some(DataValue::Int32(1)),
                 vec![DataValue::Int32(1), DataValue::Boolean(true)],
@@ -307,7 +304,7 @@ mod test {
             false,
         )?;
         transaction.append_tuple(
-            &"test".to_string(),
+            "test",
             Tuple::new(
                 Some(DataValue::Int32(2)),
                 vec![DataValue::Int32(2), DataValue::Boolean(true)],

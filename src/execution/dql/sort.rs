@@ -519,7 +519,7 @@ mod test {
         fn_desc_and_nulls_last_eq(SortBy::Fast.sorted_tuples(
             &arena,
             &schema,
-            &&fn_sort_fields(false, false),
+            &fn_sort_fields(false, false),
             fn_tuples(),
         )?);
 

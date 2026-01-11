@@ -681,7 +681,7 @@ mod tests {
             name: "index_1".to_string(),
             ty: IndexType::PrimaryKey { is_multiple: false },
         };
-        let (_, bytes) = table_codec.encode_index_meta(&"T1".to_string(), &index_meta)?;
+        let (_, bytes) = table_codec.encode_index_meta("T1", &index_meta)?;
 
         assert_eq!(
             TableCodec::decode_index_meta::<RocksTransaction>(&bytes)?,
@@ -749,7 +749,7 @@ mod tests {
             println!("==== Subquery");
             let plan = table_state
                 .plan("select * from t1 where c1 in (select c1 from t1 where c1 > 1)")?;
-            println!("{:#?}", plan);
+            println!("{plan:#?}");
             let view = View {
                 name: "view_subquery".to_string().into(),
                 plan: Box::new(plan),
@@ -799,6 +799,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::mutable_key_type)]
     fn test_table_codec_column_bound() {
         let table_codec = TableCodec {
             arena: Default::default(),
@@ -852,6 +853,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::mutable_key_type)]
     fn test_table_codec_index_meta_bound() {
         let table_codec = TableCodec {
             arena: Default::default(),
@@ -864,7 +866,7 @@ mod tests {
                 table_name: table_name.to_string().into(),
                 pk_ty: LogicalType::Integer,
                 value_ty: LogicalType::Integer,
-                name: format!("{}_index", index_id),
+                name: format!("{index_id}_index"),
                 ty: IndexType::PrimaryKey { is_multiple: false },
             };
 
@@ -886,7 +888,7 @@ mod tests {
         set.insert(op(1, "T2"));
         set.insert(op(2, "T2"));
 
-        let (min, max) = table_codec.index_meta_bound(&"T1".to_string());
+        let (min, max) = table_codec.index_meta_bound("T1");
 
         let vec = set
             .range::<BumpBytes, (Bound<&BumpBytes>, Bound<&BumpBytes>)>((
@@ -903,6 +905,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::mutable_key_type)]
     fn test_table_codec_index_bound() {
         let table_codec = TableCodec {
             arena: Default::default(),
@@ -940,12 +943,7 @@ mod tests {
         set.insert(op(DataValue::Int32(1), 2, &table_catalog.name));
         set.insert(op(DataValue::Int32(2), 2, &table_catalog.name));
 
-        println!("{:#?}", set);
-
         let (min, max) = table_codec.index_bound(&table_catalog.name, 1).unwrap();
-
-        println!("{:?}", min);
-        println!("{:?}", max);
 
         let vec = set
             .range::<BumpBytes, (Bound<&BumpBytes>, Bound<&BumpBytes>)>((
@@ -962,6 +960,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::mutable_key_type)]
     fn test_table_codec_index_all_bound() {
         let table_codec = TableCodec {
             arena: Default::default(),
@@ -976,7 +975,7 @@ mod tests {
             );
 
             table_codec
-                .encode_index_key(&table_name.to_string(), &index, None)
+                .encode_index_key(table_name, &index, None)
                 .unwrap()
         };
 
@@ -992,7 +991,7 @@ mod tests {
         set.insert(op(DataValue::Int32(1), 0, "T2"));
         set.insert(op(DataValue::Int32(2), 0, "T2"));
 
-        let (min, max) = table_codec.all_index_bound(&"T1".to_string());
+        let (min, max) = table_codec.all_index_bound("T1");
 
         let vec = set
             .range::<BumpBytes, (Bound<&BumpBytes>, Bound<&BumpBytes>)>((
@@ -1009,6 +1008,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::mutable_key_type)]
     fn test_table_codec_tuple_bound() {
         let table_codec = TableCodec {
             arena: Default::default(),
@@ -1016,7 +1016,7 @@ mod tests {
         let mut set = BTreeSet::new();
         let op = |tuple_id: DataValue, table_name: &str| {
             table_codec
-                .encode_tuple_key(&table_name.to_string(), &Arc::new(tuple_id))
+                .encode_tuple_key(table_name, &Arc::new(tuple_id))
                 .unwrap()
         };
 
@@ -1032,7 +1032,7 @@ mod tests {
         set.insert(op(DataValue::Int32(1), "T2"));
         set.insert(op(DataValue::Int32(2), "T2"));
 
-        let (min, max) = table_codec.tuple_bound(&"T1".to_string());
+        let (min, max) = table_codec.tuple_bound("T1");
 
         let vec = set
             .range::<BumpBytes, (Bound<&BumpBytes>, Bound<&BumpBytes>)>((
@@ -1049,6 +1049,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::mutable_key_type)]
     fn test_root_codec_name_bound() {
         let table_codec = TableCodec {
             arena: Default::default(),
@@ -1082,6 +1083,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::mutable_key_type)]
     fn test_view_codec_name_bound() {
         let table_codec = TableCodec {
             arena: Default::default(),

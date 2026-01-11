@@ -309,19 +309,19 @@ mod tests {
         let col_catalogs = vec![col0, col1];
         let table_catalog = TableCatalog::new("test".to_string().into(), col_catalogs).unwrap();
 
-        assert_eq!(table_catalog.contains_column("a"), true);
-        assert_eq!(table_catalog.contains_column("b"), true);
-        assert_eq!(table_catalog.contains_column("c"), false);
+        assert!(table_catalog.contains_column("a"));
+        assert!(table_catalog.contains_column("b"));
+        assert!(!table_catalog.contains_column("c"));
 
         let col_a_id = table_catalog.get_column_id_by_name("a").unwrap();
         let col_b_id = table_catalog.get_column_id_by_name("b").unwrap();
         assert!(col_a_id < col_b_id);
 
-        let column_catalog = table_catalog.get_column_by_id(&col_a_id).unwrap();
+        let column_catalog = table_catalog.get_column_by_id(col_a_id).unwrap();
         assert_eq!(column_catalog.name(), "a");
         assert_eq!(*column_catalog.datatype(), LogicalType::Integer,);
 
-        let column_catalog = table_catalog.get_column_by_id(&col_b_id).unwrap();
+        let column_catalog = table_catalog.get_column_by_id(col_b_id).unwrap();
         assert_eq!(column_catalog.name(), "b");
         assert_eq!(*column_catalog.datatype(), LogicalType::Boolean,);
     }

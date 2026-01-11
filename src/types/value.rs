@@ -2262,9 +2262,9 @@ mod test {
         value_2.memcomparable_encode(&mut key_i8_2)?;
         value_3.memcomparable_encode(&mut key_i8_3)?;
 
-        println!("{:?} < {:?}", key_i8_0, key_i8_1);
-        println!("{:?} < {:?}", key_i8_1, key_i8_2);
-        println!("{:?} < {:?}", key_i8_2, key_i8_3);
+        println!("{key_i8_0:?} < {key_i8_1:?}");
+        println!("{key_i8_1:?} < {key_i8_2:?}");
+        println!("{key_i8_2:?} < {key_i8_3:?}");
         assert!(key_i8_0 < key_i8_1);
         assert!(key_i8_1 < key_i8_2);
         assert!(key_i8_2 < key_i8_3);
@@ -2616,9 +2616,9 @@ mod test {
         v_decimal_2.memcomparable_encode(&mut key_decimal_2)?;
         v_decimal_3.memcomparable_encode(&mut key_decimal_3)?;
 
-        println!("{:?} < {:?}", key_decimal_0, key_decimal_1);
-        println!("{:?} < {:?}", key_decimal_1, key_decimal_2);
-        println!("{:?} < {:?}", key_decimal_2, key_decimal_3);
+        println!("{key_decimal_0:?} < {key_decimal_1:?}");
+        println!("{key_decimal_1:?} < {key_decimal_2:?}");
+        println!("{key_decimal_2:?} < {key_decimal_3:?}");
 
         assert!(key_decimal_0 < key_decimal_1);
         assert!(key_decimal_1 < key_decimal_2);
@@ -2683,8 +2683,8 @@ mod test {
         v_tuple_2.memcomparable_encode(&mut key_tuple_2)?;
         v_tuple_3.memcomparable_encode(&mut key_tuple_3)?;
 
-        println!("{:?} < {:?}", key_tuple_1, key_tuple_2);
-        println!("{:?} < {:?}", key_tuple_2, key_tuple_3);
+        println!("{key_tuple_1:?} < {key_tuple_2:?}");
+        println!("{key_tuple_2:?} < {key_tuple_3:?}");
 
         assert!(key_tuple_1 < key_tuple_2);
         assert!(key_tuple_2 < key_tuple_3);

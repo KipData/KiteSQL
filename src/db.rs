@@ -544,7 +544,7 @@ pub(crate) mod test {
         let database = DataBaseBuilder::path(temp_dir.path()).build()?;
         let mut transaction = database.storage.transaction()?;
 
-        build_table(&database.state.table_cache(), &mut transaction)?;
+        build_table(database.state.table_cache(), &mut transaction)?;
         transaction.commit()?;
 
         for result in database.run("select * from t1")? {

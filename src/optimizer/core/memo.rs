@@ -174,7 +174,7 @@ mod tests {
             .done()?;
 
         for i in 0..1000 {
-            let _ = database
+            database
                 .run(format!("insert into t1 values({}, {})", i, i + 1).as_str())?
                 .done()?;
         }

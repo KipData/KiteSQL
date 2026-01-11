@@ -1213,27 +1213,27 @@ mod tests {
         let table_states = build_t1_table()?;
 
         let plan_1 = table_states.plan("select * from t1")?;
-        println!("just_col:\n {:#?}", plan_1);
+        println!("just_col:\n {plan_1:#?}");
         let plan_2 = table_states.plan("select t1.c1, t1.c2 from t1")?;
-        println!("table_with_col:\n {:#?}", plan_2);
+        println!("table_with_col:\n {plan_2:#?}");
         let plan_3 = table_states.plan("select t1.c1, t1.c2 from t1 where c1 > 2")?;
-        println!("table_with_col_and_c1_compare_constant:\n {:#?}", plan_3);
+        println!("table_with_col_and_c1_compare_constant:\n {plan_3:#?}");
         let plan_4 = table_states.plan("select t1.c1, t1.c2 from t1 where c1 > c2")?;
-        println!("table_with_col_and_c1_compare_c2:\n {:#?}", plan_4);
+        println!("table_with_col_and_c1_compare_c2:\n {plan_4:#?}");
         let plan_5 = table_states.plan("select avg(t1.c1) from t1")?;
-        println!("table_with_col_and_c1_avg:\n {:#?}", plan_5);
+        println!("table_with_col_and_c1_avg:\n {plan_5:#?}");
         let plan_6 = table_states.plan("select t1.c1, t1.c2 from t1 where (t1.c1 - t1.c2) > 1")?;
-        println!("table_with_col_nested:\n {:#?}", plan_6);
+        println!("table_with_col_nested:\n {plan_6:#?}");
 
         let plan_7 = table_states.plan("select * from t1 limit 1")?;
-        println!("limit:\n {:#?}", plan_7);
+        println!("limit:\n {plan_7:#?}");
 
         let plan_8 = table_states.plan("select * from t1 offset 2")?;
-        println!("offset:\n {:#?}", plan_8);
+        println!("offset:\n {plan_8:#?}");
 
         let plan_9 =
             table_states.plan("select c1, c3 from t1 inner join t2 on c1 = c3 and c1 > 1")?;
-        println!("join:\n {:#?}", plan_9);
+        println!("join:\n {plan_9:#?}");
 
         Ok(())
     }

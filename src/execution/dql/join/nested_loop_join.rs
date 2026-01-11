@@ -1058,7 +1058,7 @@ mod test {
         )?;
         let mut actual = Vec::new();
 
-        while let Some(row) = iter.next() {
+        for row in iter.by_ref() {
             let tuple = row?;
             actual.push(tuple_to_strings(&tuple));
         }
