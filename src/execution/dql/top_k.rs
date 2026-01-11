@@ -168,6 +168,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for TopK {
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[allow(clippy::mutable_key_type)]
 mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
     use crate::errors::DatabaseError;
@@ -259,7 +260,7 @@ mod test {
         top_sort(
             &arena,
             &schema,
-            &*fn_sort_fields(true, true),
+            &fn_sort_fields(true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Null]),
             2,
@@ -267,7 +268,7 @@ mod test {
         top_sort(
             &arena,
             &schema,
-            &*fn_sort_fields(true, true),
+            &fn_sort_fields(true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0)]),
             2,
@@ -275,12 +276,11 @@ mod test {
         top_sort(
             &arena,
             &schema,
-            &*fn_sort_fields(true, true),
+            &fn_sort_fields(true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1)]),
             2,
         )?;
-        println!("{:#?}", indices);
         fn_asc_and_nulls_first_eq(indices);
 
         let mut indices = BTreeSet::new();
@@ -288,7 +288,7 @@ mod test {
         top_sort(
             &arena,
             &schema,
-            &*fn_sort_fields(true, false),
+            &fn_sort_fields(true, false),
             &mut indices,
             Tuple::new(None, vec![DataValue::Null]),
             2,
@@ -296,7 +296,7 @@ mod test {
         top_sort(
             &arena,
             &schema,
-            &*fn_sort_fields(true, false),
+            &fn_sort_fields(true, false),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0)]),
             2,
@@ -304,7 +304,7 @@ mod test {
         top_sort(
             &arena,
             &schema,
-            &*fn_sort_fields(true, false),
+            &fn_sort_fields(true, false),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1)]),
             2,
@@ -316,7 +316,7 @@ mod test {
         top_sort(
             &arena,
             &schema,
-            &*fn_sort_fields(false, true),
+            &fn_sort_fields(false, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Null]),
             2,
@@ -324,7 +324,7 @@ mod test {
         top_sort(
             &arena,
             &schema,
-            &*fn_sort_fields(false, true),
+            &fn_sort_fields(false, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0)]),
             2,
@@ -332,7 +332,7 @@ mod test {
         top_sort(
             &arena,
             &schema,
-            &*fn_sort_fields(false, true),
+            &fn_sort_fields(false, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1)]),
             2,
@@ -344,7 +344,7 @@ mod test {
         top_sort(
             &arena,
             &schema,
-            &*fn_sort_fields(false, false),
+            &fn_sort_fields(false, false),
             &mut indices,
             Tuple::new(None, vec![DataValue::Null]),
             2,
@@ -352,7 +352,7 @@ mod test {
         top_sort(
             &arena,
             &schema,
-            &*fn_sort_fields(false, false),
+            &fn_sort_fields(false, false),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0)]),
             2,
@@ -360,7 +360,7 @@ mod test {
         top_sort(
             &arena,
             &schema,
-            &*fn_sort_fields(false, false),
+            &fn_sort_fields(false, false),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1)]),
             2,

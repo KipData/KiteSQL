@@ -762,7 +762,7 @@ mod tests {
         let (histogram, sketch) = builder.build(4)?;
 
         let count_1 = histogram.collect_count(
-            &vec![
+            &[
                 Range::Eq(DataValue::Int32(2)),
                 Range::Scope {
                     min: Bound::Included(DataValue::Int32(4)),
@@ -775,7 +775,7 @@ mod tests {
         assert_eq!(count_1, 9);
 
         let count_2 = histogram.collect_count(
-            &vec![Range::Scope {
+            &[Range::Scope {
                 min: Bound::Included(DataValue::Int32(4)),
                 max: Bound::Unbounded,
             }],
@@ -785,7 +785,7 @@ mod tests {
         assert_eq!(count_2, 11);
 
         let count_3 = histogram.collect_count(
-            &vec![Range::Scope {
+            &[Range::Scope {
                 min: Bound::Excluded(DataValue::Int32(7)),
                 max: Bound::Unbounded,
             }],
@@ -795,7 +795,7 @@ mod tests {
         assert_eq!(count_3, 7);
 
         let count_4 = histogram.collect_count(
-            &vec![Range::Scope {
+            &[Range::Scope {
                 min: Bound::Unbounded,
                 max: Bound::Included(DataValue::Int32(11)),
             }],
@@ -805,7 +805,7 @@ mod tests {
         assert_eq!(count_4, 12);
 
         let count_5 = histogram.collect_count(
-            &vec![Range::Scope {
+            &[Range::Scope {
                 min: Bound::Unbounded,
                 max: Bound::Excluded(DataValue::Int32(8)),
             }],
@@ -815,7 +815,7 @@ mod tests {
         assert_eq!(count_5, 8);
 
         let count_6 = histogram.collect_count(
-            &vec![Range::Scope {
+            &[Range::Scope {
                 min: Bound::Included(DataValue::Int32(2)),
                 max: Bound::Unbounded,
             }],
@@ -825,7 +825,7 @@ mod tests {
         assert_eq!(count_6, 13);
 
         let count_7 = histogram.collect_count(
-            &vec![Range::Scope {
+            &[Range::Scope {
                 min: Bound::Excluded(DataValue::Int32(1)),
                 max: Bound::Unbounded,
             }],
@@ -835,7 +835,7 @@ mod tests {
         assert_eq!(count_7, 13);
 
         let count_8 = histogram.collect_count(
-            &vec![Range::Scope {
+            &[Range::Scope {
                 min: Bound::Unbounded,
                 max: Bound::Included(DataValue::Int32(12)),
             }],
@@ -845,7 +845,7 @@ mod tests {
         assert_eq!(count_8, 13);
 
         let count_9 = histogram.collect_count(
-            &vec![Range::Scope {
+            &[Range::Scope {
                 min: Bound::Unbounded,
                 max: Bound::Excluded(DataValue::Int32(13)),
             }],
@@ -855,7 +855,7 @@ mod tests {
         assert_eq!(count_9, 13);
 
         let count_10 = histogram.collect_count(
-            &vec![Range::Scope {
+            &[Range::Scope {
                 min: Bound::Excluded(DataValue::Int32(0)),
                 max: Bound::Excluded(DataValue::Int32(3)),
             }],
@@ -865,7 +865,7 @@ mod tests {
         assert_eq!(count_10, 2);
 
         let count_11 = histogram.collect_count(
-            &vec![Range::Scope {
+            &[Range::Scope {
                 min: Bound::Included(DataValue::Int32(1)),
                 max: Bound::Included(DataValue::Int32(2)),
             }],

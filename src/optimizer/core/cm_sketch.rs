@@ -246,7 +246,7 @@ mod tests {
             cms.increment(&DataValue::Int32(300));
         }
         assert_eq!(
-            cms.collect_count(&vec![
+            cms.collect_count(&[
                 Range::Eq(DataValue::Int32(300)),
                 Range::Scope {
                     min: Bound::Unbounded,

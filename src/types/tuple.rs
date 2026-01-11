@@ -274,7 +274,7 @@ mod tests {
             )),
         ]);
 
-        let tuples = vec![
+        let tuples = [
             Tuple::new(
                 Some(DataValue::Int32(0)),
                 vec![

@@ -567,7 +567,7 @@ mod tests {
                 c1_ref.datatype().serializable(),
                 "last serializer should align with c1"
             );
-            let mapping = reordered_index.cover_mapping.as_ref().map(|m| m.as_slice());
+            let mapping = reordered_index.cover_mapping.as_deref();
             assert_eq!(mapping, Some(&[2, 0][..]));
 
             // verify the second index matches scan order exactly so mapping is omitted

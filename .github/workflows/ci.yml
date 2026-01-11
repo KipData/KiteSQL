@@ -29,22 +29,15 @@ jobs:
       # as it is set as an "override" for current directory
 
       - name: Run cargo check
-        uses: actions-rs/cargo@v1
-        with:
-          command: check
+        run: make cargo-check
 
 
       - name: Run cargo build
-        uses: actions-rs/cargo@v1
-        with:
-          command: build
+        run: make build
 
 
       - name: Run cargo test
-        uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --all
+        run: make test
   # 2
   fmt:
     name: Rust fmt
@@ -62,10 +55,7 @@ jobs:
       # as it is set as an "override" for current directory
 
       - name: Run cargo fmt
-        uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: -- --check
+        run: make fmt
   # 3
   e2e:
     name: Rust e2e sqllogictest
@@ -85,11 +75,8 @@ jobs:
       # `cargo check` command here will use installed `nightly`
       # as it is set as an "override" for current directory
 
-      - name: Run cargo run sqllogictest-test
-        uses: actions-rs/cargo@v1
-        with:
-          command: run
-          args: --bin sqllogictest-test --manifest-path ./tests/sqllogictest/Cargo.toml
+      - name: Run sqllogictest suite
+        run: make test-slt
   # 4
   wasm-tests:
     name: Wasm cargo tests
@@ -115,7 +102,7 @@ jobs:
           version: latest
 
       - name: Run wasm-bindgen tests (wasm32 target)
-        run: wasm-pack test --node -- --package kite_sql --lib
+        run: make test-wasm
   # 5
   wasm-examples:
     name: Wasm examples (nodejs)
@@ -141,12 +128,10 @@ jobs:
           version: latest
 
       - name: Build wasm package
-        run: wasm-pack build --release --target nodejs
+        run: make wasm-build
 
       - name: Run wasm example scripts
-        run: |
-          node examples/wasm_hello_world.test.mjs
-          node examples/wasm_index_usage.test.mjs
+        run: make wasm-examples
   # 6
   native-examples:
     name: Native examples
@@ -160,8 +145,5 @@ jobs:
           toolchain: stable
           override: true
 
-      - name: Run hello_world example
-        run: cargo run --example hello_world
-
-      - name: Run transaction example
-        run: cargo run --example transaction
+      - name: Run native examples
+        run: make native-examples

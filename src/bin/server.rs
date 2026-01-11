@@ -18,7 +18,7 @@ use futures::stream;
 use kite_sql::db::{DBTransaction, DataBaseBuilder, Database, ResultIter};
 use kite_sql::errors::DatabaseError;
 use kite_sql::storage::rocksdb::RocksStorage;
-use kite_sql::types::tuple::{Schema, SchemaRef, Tuple};
+use kite_sql::types::tuple::{SchemaRef, Tuple};
 use kite_sql::types::LogicalType;
 use log::{error, info, LevelFilter};
 use parking_lot::Mutex;
@@ -172,7 +172,10 @@ impl SimpleQueryHandler for SessionBackend {
                     .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
                 guard.replace(TransactionPtr(
                     Box::leak(Box::<DBTransaction<'static, RocksStorage>>::new(unsafe {
-                        transmute(transaction)
+                        transmute::<
+                            DBTransaction<'_, RocksStorage>,
+                            DBTransaction<'static, RocksStorage>,
+                        >(transaction)
                     }))
                     .into(),
                 ));
@@ -371,7 +374,7 @@ async fn main() {
     tokio::select! {
         res = server_run(listener,factory) => {
             if let Err(err) = res {
-                error!("[Listener][Failed To Accept]: {}", err);
+                error!("[Listener][Failed To Accept]: {err}");
             }
         }
         _ = quit() => info!("Bye!")
@@ -388,7 +391,7 @@ async fn server_run(
 
         tokio::spawn(async move {
             if let Err(err) = process_socket(incoming_socket.0, None, factory_ref).await {
-                error!("Failed To Process: {}", err);
+                error!("Failed To Process: {err}");
             }
         });
     }

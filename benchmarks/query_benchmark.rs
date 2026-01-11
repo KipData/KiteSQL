@@ -22,8 +22,8 @@ use sqlite::Error;
 use std::fs;
 use std::path::Path;
 
-const QUERY_BENCH_KITE_SQL_PATH: &'static str = "./kitesql_bench";
-const QUERY_BENCH_SQLITE_PATH: &'static str = "./sqlite_bench";
+const QUERY_BENCH_KITE_SQL_PATH: &str = "./kitesql_bench";
+const QUERY_BENCH_SQLITE_PATH: &str = "./sqlite_bench";
 const TABLE_ROW_NUM: u64 = 200_000;
 
 fn query_cases() -> Vec<(&'static str, &'static str)> {
@@ -62,9 +62,9 @@ fn init_kitesql_query_bench() -> Result<(), DatabaseError> {
 }
 
 fn init_sqlite_query_bench() -> Result<(), Error> {
-    let connection = sqlite::open(QUERY_BENCH_SQLITE_PATH.to_owned())?;
+    let connection = sqlite::open(QUERY_BENCH_SQLITE_PATH)?;
 
-    let _ = connection.execute("create table t1 (c1 int primary key, c2 int)")?;
+    connection.execute("create table t1 (c1 int primary key, c2 int)")?;
 
     let pb = ProgressBar::new(TABLE_ROW_NUM);
     pb.set_style(
@@ -73,7 +73,7 @@ fn init_sqlite_query_bench() -> Result<(), Error> {
             .unwrap(),
     );
     for i in 0..TABLE_ROW_NUM {
-        let _ = connection.execute(format!("insert into t1 values({}, {})", i, i + 1))?;
+        connection.execute(format!("insert into t1 values({i}, {})", i + 1).as_str())?;
         pb.set_position(i + 1);
     }
     pb.finish_with_message("Insert completed!");
@@ -91,16 +91,14 @@ fn path_exists_and_is_directory(path: &str) -> bool {
 fn query_on_execute(c: &mut Criterion) {
     if !Path::new(QUERY_BENCH_SQLITE_PATH).exists() {
         println!(
-            "SQLITE: The table is not initialized and data insertion is started. => {}",
-            TABLE_ROW_NUM
+            "SQLITE: The table is not initialized and data insertion is started. => {TABLE_ROW_NUM}"
         );
 
         init_sqlite_query_bench().unwrap();
     }
     if !path_exists_and_is_directory(QUERY_BENCH_KITE_SQL_PATH) {
         println!(
-            "KiteSQL: The table is not initialized and data insertion is started. => {}",
-            TABLE_ROW_NUM
+            "KiteSQL: The table is not initialized and data insertion is started. => {TABLE_ROW_NUM}"
         );
 
         init_kitesql_query_bench().unwrap();
@@ -111,7 +109,8 @@ fn query_on_execute(c: &mut Criterion) {
     println!("Table initialization completed");
 
     for (name, case) in query_cases() {
-        c.bench_function(format!("KiteSQL: {} by '{}'", name, case).as_str(), |b| {
+        let kite_label = format!("KiteSQL: {name} by '{case}'");
+        c.bench_function(&kite_label, |b| {
             b.iter(|| {
                 for tuple in database.run(case).unwrap() {
                     let _ = tuple.unwrap();
@@ -119,8 +118,9 @@ fn query_on_execute(c: &mut Criterion) {
             })
         });
 
-        let connection = sqlite::open(QUERY_BENCH_SQLITE_PATH.to_owned()).unwrap();
-        c.bench_function(format!("SQLite: {} by '{}'", name, case).as_str(), |b| {
+        let connection = sqlite::open(QUERY_BENCH_SQLITE_PATH).unwrap();
+        let sqlite_label = format!("SQLite: {name} by '{case}'");
+        c.bench_function(&sqlite_label, |b| {
             b.iter(|| {
                 for row in connection.prepare(case).unwrap() {
                     let _ = row.unwrap();

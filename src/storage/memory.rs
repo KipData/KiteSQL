@@ -160,7 +160,7 @@ mod wasm_tests {
         )?;
 
         transaction.append_tuple(
-            &"test".to_string(),
+            "test",
             Tuple::new(
                 Some(DataValue::Int32(1)),
                 vec![DataValue::Int32(1), DataValue::Boolean(true)],
@@ -172,7 +172,7 @@ mod wasm_tests {
             false,
         )?;
         transaction.append_tuple(
-            &"test".to_string(),
+            "test",
             Tuple::new(
                 Some(DataValue::Int32(2)),
                 vec![DataValue::Int32(2), DataValue::Boolean(true)],
@@ -293,7 +293,7 @@ mod native_tests {
         )?;
 
         transaction.append_tuple(
-            &"test".to_string(),
+            "test",
             Tuple::new(
                 Some(DataValue::Int32(1)),
                 vec![DataValue::Int32(1), DataValue::Boolean(true)],
@@ -305,7 +305,7 @@ mod native_tests {
             false,
         )?;
         transaction.append_tuple(
-            &"test".to_string(),
+            "test",
             Tuple::new(
                 Some(DataValue::Int32(2)),
                 vec![DataValue::Int32(2), DataValue::Boolean(true)],

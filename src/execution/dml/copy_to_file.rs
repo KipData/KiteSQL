@@ -190,7 +190,7 @@ mod tests {
         let storage = db.storage;
         let mut transaction = storage.transaction()?;
         let table = transaction
-            .table(&db.state.table_cache(), "t1".to_string().into())?
+            .table(db.state.table_cache(), "t1".to_string().into())?
             .unwrap();
 
         let executor = CopyToFile {
@@ -224,7 +224,7 @@ mod tests {
 
         assert!(records.next().is_none());
 
-        assert_eq!(tuple, TupleBuilder::build_result(format!("{}", op)));
+        assert_eq!(tuple, TupleBuilder::build_result(format!("{op}")));
 
         Ok(())
     }

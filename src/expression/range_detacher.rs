@@ -801,6 +801,7 @@ impl fmt::Display for Range {
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[allow(clippy::uninlined_format_args)]
 mod test {
     use crate::binder::test::build_t1_table;
     use crate::errors::DatabaseError;

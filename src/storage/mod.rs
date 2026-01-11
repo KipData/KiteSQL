@@ -1516,7 +1516,7 @@ mod test {
                          table_cache: &TableCache|
          -> Result<(), DatabaseError> {
             let table = transaction
-                .table(&table_cache, "t1".to_string().into())?
+                .table(table_cache, "t1".to_string().into())?
                 .unwrap();
             let c1_column_id = *table.get_column_id_by_name("c1").unwrap();
             let c2_column_id = *table.get_column_id_by_name("c2").unwrap();
@@ -1538,7 +1538,7 @@ mod test {
 
             let mut column_iter = table.columns();
             let c1_column = column_iter.next().unwrap();
-            assert_eq!(c1_column.nullable(), false);
+            assert!(!c1_column.nullable());
             assert_eq!(
                 c1_column.summary(),
                 &ColumnSummary {
@@ -1556,7 +1556,7 @@ mod test {
             );
 
             let c2_column = column_iter.next().unwrap();
-            assert_eq!(c2_column.nullable(), false);
+            assert!(!c2_column.nullable());
             assert_eq!(
                 c2_column.summary(),
                 &ColumnSummary {
@@ -1574,7 +1574,7 @@ mod test {
             );
 
             let c3_column = column_iter.next().unwrap();
-            assert_eq!(c3_column.nullable(), false);
+            assert!(!c3_column.nullable());
             assert_eq!(
                 c3_column.summary(),
                 &ColumnSummary {
@@ -1715,7 +1715,7 @@ mod test {
                          table_cache: &TableCache|
          -> Result<(), DatabaseError> {
             let table = transaction
-                .table(&table_cache, "t1".to_string().into())?
+                .table(table_cache, "t1".to_string().into())?
                 .unwrap();
 
             let i1_meta = table.indexes[1].clone();
@@ -1791,7 +1791,7 @@ mod test {
             index_column_id: ColumnId,
         ) -> Result<IndexIter<'a, RocksTransaction<'a>>, DatabaseError> {
             transaction.read_by_index(
-                &table_cache,
+                table_cache,
                 "t1".to_string().into(),
                 (None, None),
                 full_columns(),
@@ -1835,7 +1835,7 @@ mod test {
         )?;
 
         let tuples = build_tuples();
-        let indexes = vec![
+        let indexes = [
             (
                 Arc::new(DataValue::Int32(0)),
                 Index::new(1, &tuples[0].values[2], IndexType::Normal),
