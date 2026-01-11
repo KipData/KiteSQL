@@ -25,6 +25,7 @@ pub(crate) struct IndexScan {
     index_by: IndexMetaRef,
     ranges: Vec<Range>,
     covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
+    cover_mapping: Option<Vec<usize>>,
 }
 
 impl
@@ -33,14 +34,16 @@ impl
         IndexMetaRef,
         Range,
         Option<Vec<TupleValueSerializableImpl>>,
+        Option<Vec<usize>>,
     )> for IndexScan
 {
     fn from(
-        (op, index_by, range, covered_deserializers): (
+        (op, index_by, range, covered_deserializers, cover_mapping): (
             TableScanOperator,
             IndexMetaRef,
             Range,
             Option<Vec<TupleValueSerializableImpl>>,
+            Option<Vec<usize>>,
         ),
     ) -> Self {
         let ranges = match range {
@@ -53,6 +56,7 @@ impl
             index_by,
             ranges,
             covered_deserializers,
+            cover_mapping,
         }
     }
 }
@@ -83,6 +87,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for IndexScan {
                     self.ranges,
                     with_pk,
                     self.covered_deserializers,
+                    self.cover_mapping,
                 )
             );
 

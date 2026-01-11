@@ -42,6 +42,7 @@ pub struct IndexInfo {
     pub(crate) meta: IndexMetaRef,
     pub(crate) range: Option<Range>,
     pub(crate) covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
+    pub(crate) cover_mapping: Option<Vec<usize>>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]

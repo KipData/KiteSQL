@@ -63,6 +63,7 @@ impl TableScanOperator {
                 meta: meta.clone(),
                 range: None,
                 covered_deserializers: None,
+                cover_mapping: None,
             })
             .collect_vec();
 

@@ -139,9 +139,10 @@ pub fn build_read<'a, T: Transaction + 'a>(
                 meta,
                 range: Some(range),
                 covered_deserializers,
+                cover_mapping,
             })) = plan.physical_option
             {
-                IndexScan::from((op, meta, range, covered_deserializers))
+                IndexScan::from((op, meta, range, covered_deserializers, cover_mapping))
                     .execute(cache, transaction)
             } else {
                 SeqScan::from(op).execute(cache, transaction)

@@ -388,6 +388,7 @@ mod test {
                 tx: &transaction,
                 values_len,
                 total_len: 1,
+                cover_mapping: None,
             },
             ranges: vec![
                 Range::Eq(DataValue::Int32(0)),
@@ -441,6 +442,7 @@ mod test {
                     }],
                     true,
                     None,
+                    None,
                 )
                 .unwrap();
 
@@ -467,6 +469,7 @@ mod test {
                     }],
                     true,
                     None,
+                    None,
                 )
                 .unwrap();
 
@@ -489,10 +492,22 @@ mod test {
         kite_sql
             .run("insert into t1 (a, b) values (0, 0), (1, 1), (2, 2), (3, 4)")?
             .done()?;
+        kite_sql.run("create index idx_b_a on t1(b, a)")?.done()?;
 
         let mut transaction = kite_sql.storage.transaction().unwrap();
         let table = transaction
             .table(kite_sql.state.table_cache(), "t1".to_string().into())?
+            .unwrap()
+            .clone();
+        let columns_vec: Vec<_> = table.columns().cloned().collect();
+        let a_cover_column = columns_vec
+            .iter()
+            .find(|column| column.name() == "a")
+            .unwrap()
+            .clone();
+        let b_cover_column = columns_vec
+            .iter()
+            .find(|column| column.name() == "b")
             .unwrap()
             .clone();
         let unique_index = table
@@ -511,6 +526,56 @@ mod test {
         columns.insert(b_pos, b_column.clone());
         let covered_deserializers = vec![b_column.datatype().serializable()];
 
+        // ensure cover mapping can reorder index values to match scan order
+        let composite_index = table
+            .indexes
+            .iter()
+            .find(|index| index.name == "idx_b_a")
+            .unwrap()
+            .clone();
+        let mut reordered_columns = BTreeMap::new();
+        reordered_columns.insert(0, a_cover_column.clone());
+        reordered_columns.insert(1, b_cover_column.clone());
+        let reordered_deserializers = vec![
+            a_cover_column.datatype().serializable(),
+            b_cover_column.datatype().serializable(),
+        ];
+        let a_id = a_cover_column.id().unwrap();
+        let b_id = b_cover_column.id().unwrap();
+        let cover_mapping = vec![
+            composite_index
+                .column_ids
+                .iter()
+                .position(|id| id == &a_id)
+                .unwrap(),
+            composite_index
+                .column_ids
+                .iter()
+                .position(|id| id == &b_id)
+                .unwrap(),
+        ];
+
+        let mut iter = transaction.read_by_index(
+            kite_sql.state.table_cache(),
+            "t1".to_string().into(),
+            (None, None),
+            reordered_columns,
+            composite_index,
+            vec![Range::Scope {
+                min: Bound::Unbounded,
+                max: Bound::Unbounded,
+            }],
+            false,
+            Some(reordered_deserializers),
+            Some(cover_mapping),
+        )?;
+        let first_tuple = iter.next_tuple()?.unwrap();
+        assert_eq!(
+            first_tuple.values,
+            vec![DataValue::Int32(0), DataValue::Int32(0)]
+        );
+        drop(iter);
+
         let target_pk = DataValue::Int32(3);
         let covered_value = DataValue::Int32(4);
         transaction.remove_tuple("t1", &target_pk)?;
@@ -524,6 +589,7 @@ mod test {
             vec![Range::Eq(covered_value.clone())],
             false,
             Some(covered_deserializers),
+            None,
         )?;
 
         let mut tuples = Vec::new();

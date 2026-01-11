@@ -88,6 +88,76 @@ pub enum DataValue {
     Tuple(Vec<DataValue>, bool),
 }
 
+#[derive(Clone, Copy)]
+pub struct TupleMappingRef<'a> {
+    index_to_scan: &'a [usize],
+    target_len: usize,
+}
+
+impl<'a> TupleMappingRef<'a> {
+    pub fn new(index_to_scan: &'a [usize], target_len: usize) -> Self {
+        TupleMappingRef {
+            index_to_scan,
+            target_len,
+        }
+    }
+
+    #[inline]
+    pub fn target_len(&self) -> usize {
+        self.target_len
+    }
+
+    #[inline]
+    pub fn scan_index(&self, index_pos: usize) -> Option<usize> {
+        self.index_to_scan.get(index_pos).copied().and_then(|slot| {
+            if slot == usize::MAX {
+                None
+            } else {
+                Some(slot)
+            }
+        })
+    }
+}
+
+enum TupleCollector<'a> {
+    Mapped {
+        mapping: TupleMappingRef<'a>,
+        values: Vec<DataValue>,
+    },
+    Ordered(Vec<DataValue>),
+}
+
+impl<'a> TupleCollector<'a> {
+    fn new(mapping: Option<TupleMappingRef<'a>>, tuple_len: usize) -> Self {
+        if let Some(mapping) = mapping {
+            TupleCollector::Mapped {
+                values: vec![DataValue::Null; mapping.target_len()],
+                mapping,
+            }
+        } else {
+            TupleCollector::Ordered(Vec::with_capacity(tuple_len))
+        }
+    }
+
+    fn push(&mut self, index_pos: usize, value: DataValue) {
+        match self {
+            TupleCollector::Mapped { mapping, values } => {
+                if let Some(target_pos) = mapping.scan_index(index_pos) {
+                    values[target_pos] = value;
+                }
+            }
+            TupleCollector::Ordered(values) => values.push(value),
+        }
+    }
+
+    fn finish(self) -> Vec<DataValue> {
+        match self {
+            TupleCollector::Mapped { values, .. } => values,
+            TupleCollector::Ordered(values) => values,
+        }
+    }
+}
+
 macro_rules! generate_get_option {
     ($data_value:ident, $($prefix:ident : $variant:ident($field:ty)),*) => {
         impl $data_value {
@@ -751,6 +821,16 @@ impl DataValue {
         reader: &mut R,
         ty: &LogicalType,
     ) -> Result<DataValue, DatabaseError> {
+        Self::memcomparable_decode_mapping(reader, ty, None)
+    }
+
+    #[inline]
+    pub fn memcomparable_decode_mapping<R: Read>(
+        reader: &mut R,
+        ty: &LogicalType,
+        // for index cover mapping reduce one layer of conversion
+        tuple_mapping: Option<TupleMappingRef<'_>>,
+    ) -> Result<DataValue, DatabaseError> {
         if reader.read_u8()? == 0u8 {
             return Ok(DataValue::Null);
         }
@@ -816,12 +896,13 @@ impl DataValue {
             }),
             LogicalType::Decimal(..) => Ok(DataValue::Decimal(Self::deserialize_decimal(reader)?)),
             LogicalType::Tuple(tys) => {
-                let mut values = Vec::with_capacity(tys.len());
+                let mut collector = TupleCollector::new(tuple_mapping, tys.len());
 
-                for ty in tys {
-                    values.push(Self::memcomparable_decode(reader, ty)?);
+                for (index_pos, ty) in tys.iter().enumerate() {
+                    let value = Self::memcomparable_decode_mapping(reader, ty, None)?;
+                    collector.push(index_pos, value);
                 }
-                Ok(DataValue::Tuple(values, false))
+                Ok(DataValue::Tuple(collector.finish(), false))
             }
         }
     }
@@ -2155,7 +2236,7 @@ impl fmt::Debug for DataValue {
 mod test {
     use crate::errors::DatabaseError;
     use crate::storage::table_codec::BumpBytes;
-    use crate::types::value::{DataValue, Utf8Type};
+    use crate::types::value::{DataValue, TupleMappingRef, Utf8Type};
     use crate::types::LogicalType;
     use bumpalo::Bump;
     use ordered_float::OrderedFloat;
@@ -2693,6 +2774,42 @@ mod test {
         assert!(logical_eq(&v_tuple_1, &d1));
         assert!(logical_eq(&v_tuple_2, &d2));
         assert!(logical_eq(&v_tuple_3, &d3));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_memcomparable_decode_mapping_orders_values() -> Result<(), DatabaseError> {
+        let arena = Bump::new();
+        let mut key_tuple = BumpBytes::new_in(&arena);
+
+        let value = DataValue::Tuple(
+            vec![
+                DataValue::Int32(1),
+                DataValue::Int32(2),
+                DataValue::Int32(3),
+            ],
+            false,
+        );
+        value.memcomparable_encode(&mut key_tuple)?;
+
+        let ty = LogicalType::Tuple(vec![
+            LogicalType::Integer,
+            LogicalType::Integer,
+            LogicalType::Integer,
+        ]);
+        let index_to_scan = vec![1, usize::MAX, 0];
+        let mapping = TupleMappingRef::new(&index_to_scan, 2);
+        let decoded = DataValue::memcomparable_decode_mapping(
+            &mut Cursor::new(&key_tuple[..]),
+            &ty,
+            Some(mapping),
+        )?;
+
+        assert_eq!(
+            decoded,
+            DataValue::Tuple(vec![DataValue::Int32(3), DataValue::Int32(1)], false)
+        );
 
         Ok(())
     }

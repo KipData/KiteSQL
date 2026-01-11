@@ -20,7 +20,7 @@ use crate::storage::{PrimaryKeyRemap, TableCache, Transaction};
 use crate::types::index::{Index, IndexId, IndexMeta, IndexType, INDEX_ID_LEN};
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::{Tuple, TupleId};
-use crate::types::value::DataValue;
+use crate::types::value::{DataValue, TupleMappingRef};
 use crate::types::LogicalType;
 use bumpalo::Bump;
 use siphasher::sip::SipHasher;
@@ -399,10 +399,14 @@ impl TableCodec {
         Ok(key_prefix)
     }
 
-    pub fn decode_index_key(bytes: &[u8], ty: &LogicalType) -> Result<DataValue, DatabaseError> {
+    pub fn decode_index_key(
+        bytes: &[u8],
+        ty: &LogicalType,
+        mapping: Option<TupleMappingRef<'_>>,
+    ) -> Result<DataValue, DatabaseError> {
         // Hash + TypeTag + Bound Min + Index Id Len + Bound Min
         let start = 8 + 1 + 1 + 1 + INDEX_ID_LEN;
-        DataValue::memcomparable_decode(&mut Cursor::new(&bytes[start..]), ty)
+        DataValue::memcomparable_decode_mapping(&mut Cursor::new(&bytes[start..]), ty, mapping)
     }
 
     pub fn decode_index(bytes: &[u8]) -> Result<TupleId, DatabaseError> {

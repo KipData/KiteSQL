@@ -26,6 +26,8 @@ use kite_sql::errors::DatabaseError;
 use kite_sql::storage::Storage;
 use rand::prelude::ThreadRng;
 use rand::Rng;
+use std::fs;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 mod delivery;
@@ -92,6 +94,10 @@ struct Args {
 // TODO: Support multi-threaded TPCC
 fn main() -> Result<(), TpccError> {
     let args = Args::parse();
+    let db_path = Path::new(&args.path);
+    if db_path.exists() {
+        fs::remove_dir_all(db_path)?;
+    }
 
     let mut rng = rand::thread_rng();
     let database = DataBaseBuilder::path(&args.path).build()?;
@@ -326,6 +332,12 @@ pub enum TpccError {
         #[source]
         #[from]
         DatabaseError,
+    ),
+    #[error("io error: {0}")]
+    Io(
+        #[source]
+        #[from]
+        std::io::Error,
     ),
     #[error("tuples is empty")]
     EmptyTuples,
