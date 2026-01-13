@@ -241,7 +241,7 @@ mod tests {
         let plan = table_state.plan("select c1, c3 from t1 left join t2 on c1 = c3")?;
 
         let best_plan = HepOptimizer::new(plan.clone())
-            .batch(
+            .before_batch(
                 "test_column_pruning".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::ColumnPruning],

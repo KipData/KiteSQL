@@ -20,13 +20,15 @@ use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::heuristic::batch::{HepBatch, HepBatchStrategy};
 use crate::optimizer::heuristic::matcher::PlanMatcher;
 use crate::optimizer::rule::implementation::ImplementationRuleImpl;
+use crate::optimizer::rule::normalization::annotate_sort_preserving_indexes;
 use crate::optimizer::rule::normalization::NormalizationRuleImpl;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use std::ops::Not;
 
 pub struct HepOptimizer {
-    batches: Vec<HepBatch>,
+    before_batches: Vec<HepBatch>,
+    after_batches: Vec<HepBatch>,
     plan: LogicalPlan,
     implementations: Vec<ImplementationRuleImpl>,
 }
@@ -34,19 +36,32 @@ pub struct HepOptimizer {
 impl HepOptimizer {
     pub fn new(root: LogicalPlan) -> Self {
         Self {
-            batches: vec![],
+            before_batches: vec![],
+            after_batches: vec![],
             plan: root,
             implementations: vec![],
         }
     }
 
-    pub fn batch(
+    pub fn before_batch(
         mut self,
         name: String,
         strategy: HepBatchStrategy,
         rules: Vec<NormalizationRuleImpl>,
     ) -> Self {
-        self.batches.push(HepBatch::new(name, strategy, rules));
+        self.before_batches
+            .push(HepBatch::new(name, strategy, rules));
+        self
+    }
+
+    pub fn after_batch(
+        mut self,
+        name: String,
+        strategy: HepBatchStrategy,
+        rules: Vec<NormalizationRuleImpl>,
+    ) -> Self {
+        self.after_batches
+            .push(HepBatch::new(name, strategy, rules));
         self
     }
 
@@ -59,20 +74,8 @@ impl HepOptimizer {
         mut self,
         loader: Option<&StatisticMetaLoader<'_, T>>,
     ) -> Result<LogicalPlan, DatabaseError> {
-        for batch in &self.batches {
-            match batch.strategy {
-                HepBatchStrategy::MaxTimes(max_iteration) => {
-                    for _ in 0..max_iteration {
-                        if !Self::apply_batch(&mut self.plan, batch)? {
-                            break;
-                        }
-                    }
-                }
-                HepBatchStrategy::LoopIfApplied => {
-                    while Self::apply_batch(&mut self.plan, batch)? {}
-                }
-            }
-        }
+        Self::apply_batches(&mut self.plan, &self.before_batches)?;
+        annotate_sort_preserving_indexes(&mut self.plan);
 
         if let Some(loader) = loader {
             if self.implementations.is_empty().not() {
@@ -80,8 +83,26 @@ impl HepOptimizer {
                 Memo::annotate_plan(&memo, &mut self.plan);
             }
         }
+        Self::apply_batches(&mut self.plan, &self.after_batches)?;
 
         Ok(self.plan)
+    }
+
+    #[inline]
+    fn apply_batches(plan: &mut LogicalPlan, batches: &[HepBatch]) -> Result<(), DatabaseError> {
+        for batch in batches {
+            match batch.strategy {
+                HepBatchStrategy::MaxTimes(max_iteration) => {
+                    for _ in 0..max_iteration {
+                        if !Self::apply_batch(plan, batch)? {
+                            break;
+                        }
+                    }
+                }
+                HepBatchStrategy::LoopIfApplied => while Self::apply_batch(plan, batch)? {},
+            }
+        }
+        Ok(())
     }
 
     fn apply_batch(plan: &mut LogicalPlan, batch: &HepBatch) -> Result<bool, DatabaseError> {

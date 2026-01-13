@@ -150,7 +150,7 @@ mod test {
             table_state.plan("select c1 + (2 + 1), 2 + 1 from t1 where (2 + (-1)) < -(c1 + 1)")?;
 
         let best_plan = HepOptimizer::new(plan)
-            .batch(
+            .before_batch(
                 "test_simplification".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![
@@ -216,7 +216,7 @@ mod test {
 
         let op = |plan: LogicalPlan| -> Result<Option<Range>, DatabaseError> {
             let best_plan = HepOptimizer::new(plan.clone())
-                .batch(
+                .before_batch(
                     "test_simplify_filter".to_string(),
                     HepBatchStrategy::once_topdown(),
                     vec![NormalizationRuleImpl::SimplifyFilter],
@@ -261,7 +261,7 @@ mod test {
         let plan = table_state.plan("select * from t1 where -(c1 + 1) > c2")?;
 
         let best_plan = HepOptimizer::new(plan.clone())
-            .batch(
+            .before_batch(
                 "test_simplify_filter".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::SimplifyFilter],
@@ -333,7 +333,7 @@ mod test {
         column_id: &ColumnId,
     ) -> Result<Option<Range>, DatabaseError> {
         let best_plan = HepOptimizer::new(plan.clone())
-            .batch(
+            .before_batch(
                 "test_simplify_filter".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::SimplifyFilter],

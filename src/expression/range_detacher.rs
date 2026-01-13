@@ -820,7 +820,7 @@ mod test {
 
     fn plan_filter(plan: LogicalPlan) -> Result<Option<FilterOperator>, DatabaseError> {
         let best_plan = HepOptimizer::new(plan.clone())
-            .batch(
+            .before_batch(
                 "test_simplify_filter".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::SimplifyFilter],

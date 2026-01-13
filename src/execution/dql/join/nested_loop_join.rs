@@ -569,7 +569,7 @@ mod test {
             },
         );
         let plan = HepOptimizer::new(plan)
-            .batch(
+            .before_batch(
                 "Expression Remapper".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![
@@ -619,7 +619,7 @@ mod test {
             },
         );
         let plan = HepOptimizer::new(plan)
-            .batch(
+            .before_batch(
                 "Expression Remapper".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![
@@ -681,7 +681,7 @@ mod test {
             },
         );
         let plan = HepOptimizer::new(plan)
-            .batch(
+            .before_batch(
                 "Expression Remapper".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![
@@ -732,7 +732,7 @@ mod test {
             },
         );
         let plan = HepOptimizer::new(plan)
-            .batch(
+            .before_batch(
                 "Expression Remapper".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![
@@ -786,7 +786,7 @@ mod test {
             },
         );
         let plan = HepOptimizer::new(plan)
-            .batch(
+            .before_batch(
                 "Expression Remapper".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![
@@ -832,7 +832,7 @@ mod test {
             },
         );
         let plan = HepOptimizer::new(plan)
-            .batch(
+            .before_batch(
                 "Expression Remapper".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![
@@ -881,7 +881,7 @@ mod test {
             },
         );
         let plan = HepOptimizer::new(plan)
-            .batch(
+            .before_batch(
                 "Expression Remapper".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![
@@ -932,7 +932,7 @@ mod test {
             },
         );
         let plan = HepOptimizer::new(plan)
-            .batch(
+            .before_batch(
                 "Expression Remapper".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![
@@ -988,7 +988,7 @@ mod test {
             },
         );
         let plan = HepOptimizer::new(plan)
-            .batch(
+            .before_batch(
                 "Expression Remapper".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![

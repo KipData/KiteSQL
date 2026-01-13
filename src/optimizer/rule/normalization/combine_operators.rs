@@ -201,7 +201,7 @@ mod tests {
         let table_state = build_t1_table()?;
         let plan = table_state.plan("select c1 from (select c1, c2 from t1) t")?;
 
-        let optimizer = HepOptimizer::new(plan).batch(
+        let optimizer = HepOptimizer::new(plan).before_batch(
             "test_collapse_project".to_string(),
             HepBatchStrategy::once_topdown(),
             vec![NormalizationRuleImpl::CollapseProject],
@@ -234,7 +234,7 @@ mod tests {
         let original_grandchild = original_child.childrens.pop_only();
         assert!(matches!(original_grandchild.operator, Operator::Project(_)));
 
-        let optimizer = HepOptimizer::new(plan).batch(
+        let optimizer = HepOptimizer::new(plan).before_batch(
             "test_collapse_project_with_alias".to_string(),
             HepBatchStrategy::once_topdown(),
             vec![NormalizationRuleImpl::CollapseProject],
@@ -263,7 +263,7 @@ mod tests {
         let plan =
             table_state.plan("select * from (select * from t1 where c1 > 1) t where 1 = 1")?;
 
-        let optimizer = HepOptimizer::new(plan).batch(
+        let optimizer = HepOptimizer::new(plan).before_batch(
             "test_combine_filter".to_string(),
             HepBatchStrategy::once_topdown(),
             vec![NormalizationRuleImpl::CombineFilter],
@@ -289,7 +289,7 @@ mod tests {
         let table_state = build_t1_table()?;
         let plan = table_state.plan("select distinct c1, c2 from t1 group by c1, c2")?;
 
-        let optimizer = HepOptimizer::new(plan.clone()).batch(
+        let optimizer = HepOptimizer::new(plan.clone()).before_batch(
             "test_collapse_group_by_agg".to_string(),
             HepBatchStrategy::once_topdown(),
             vec![NormalizationRuleImpl::CollapseGroupByAgg],

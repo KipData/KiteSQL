@@ -23,9 +23,9 @@ use crate::optimizer::plan_utils::{
     left_child, only_child_mut, replace_with_only_child, right_child, wrap_child_with,
 };
 use crate::planner::operator::filter::FilterOperator;
-use crate::planner::operator::join::JoinType;
-use crate::planner::operator::Operator;
-use crate::planner::LogicalPlan;
+use crate::planner::operator::join::{JoinCondition, JoinType};
+use crate::planner::operator::{Operator, SortOption};
+use crate::planner::{LogicalPlan, SchemaOutput};
 use crate::types::index::{IndexInfo, IndexMetaRef, IndexType};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
@@ -50,7 +50,11 @@ static PUSH_PREDICATE_INTO_SCAN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
     }]),
 });
 
-// TODO: 感觉是只是处理projection中的alias反向替换为filter中表达式
+static JOIN_WITH_FILTER_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
+    predicate: |op| matches!(op, Operator::Join(_)),
+    children: PatternChildrenPredicate::None,
+});
+
 #[allow(dead_code)]
 static PUSH_PREDICATE_THROUGH_NON_JOIN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
     predicate: |op| matches!(op, Operator::Filter(_)),
@@ -101,6 +105,13 @@ pub fn is_subset_cols(left: &[ColumnRef], right: &[ColumnRef]) -> bool {
     left.iter().all(|l| right.contains(l))
 }
 
+fn plan_output_columns(plan: &LogicalPlan) -> Vec<ColumnRef> {
+    match plan.output_schema_direct() {
+        SchemaOutput::Schema(schema) => schema,
+        SchemaOutput::SchemaRef(schema_ref) => schema_ref.iter().cloned().collect(),
+    }
+}
+
 /// Comments copied from Spark Catalyst PushPredicateThroughJoin
 ///
 /// Pushes down `Filter` operators where the `condition` can be
@@ -149,10 +160,10 @@ impl NormalizationRule for PushPredicateThroughJoin {
             }
 
             let left_columns = left_child(join_plan)
-                .map(|child| child.operator.referenced_columns(true))
+                .map(plan_output_columns)
                 .unwrap_or_default();
             let right_columns = right_child(join_plan)
-                .map(|child| child.operator.referenced_columns(true))
+                .map(plan_output_columns)
                 .unwrap_or_default();
 
             let filter_exprs = split_conjunctive_predicates(&filter_op.predicate);
@@ -245,11 +256,19 @@ impl NormalizationRule for PushPredicateIntoScan {
                         range,
                         covered_deserializers,
                         cover_mapping,
+                        sort_option,
+                        sort_elimination_hint: _,
                     } in &mut scan_op.index_infos
                     {
                         if range.is_some() {
                             continue;
                         }
+                        let SortOption::OrderBy {
+                            ignore_prefix_len, ..
+                        } = sort_option
+                        else {
+                            return Err(DatabaseError::InvalidIndex);
+                        };
                         *range = match meta.ty {
                             IndexType::PrimaryKey { is_multiple: false }
                             | IndexType::Unique
@@ -258,7 +277,7 @@ impl NormalizationRule for PushPredicateIntoScan {
                                     .detach(&op.predicate)?
                             }
                             IndexType::PrimaryKey { is_multiple: true } | IndexType::Composite => {
-                                Self::composite_range(&op, meta)?
+                                Self::composite_range(&op, meta, ignore_prefix_len)?
                             }
                         };
                         if range.is_none() {
@@ -312,6 +331,7 @@ impl PushPredicateIntoScan {
     fn composite_range(
         op: &FilterOperator,
         meta: &mut IndexMetaRef,
+        ignore_prefix_len: &mut usize,
     ) -> Result<Option<Range>, DatabaseError> {
         let mut res = None;
         let mut eq_ranges = Vec::with_capacity(meta.column_ids.len());
@@ -331,6 +351,8 @@ impl PushPredicateIntoScan {
             }
             break;
         }
+        *ignore_prefix_len = eq_ranges.len();
+
         if res.is_none() {
             if let Some(range) = eq_ranges.pop() {
                 res = range.combining_eqs(&eq_ranges);
@@ -341,8 +363,8 @@ impl PushPredicateIntoScan {
                 fn eq_to_scope(range: Range) -> Range {
                     match range {
                         Range::Eq(DataValue::Tuple(values, _)) => {
-                            let min = Bound::Excluded(DataValue::Tuple(values.clone(), false));
-                            let max = Bound::Excluded(DataValue::Tuple(values, true));
+                            let min = Bound::Included(DataValue::Tuple(values.clone(), false));
+                            let max = Bound::Included(DataValue::Tuple(values, true));
 
                             Range::Scope { min, max }
                         }
@@ -363,6 +385,119 @@ impl PushPredicateIntoScan {
     }
 }
 
+pub struct PushJoinPredicateIntoScan;
+
+impl MatchPattern for PushJoinPredicateIntoScan {
+    fn pattern(&self) -> &Pattern {
+        &JOIN_WITH_FILTER_PATTERN
+    }
+}
+
+impl NormalizationRule for PushJoinPredicateIntoScan {
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+        let (join_type, filter_expr) = {
+            let Operator::Join(join_op) = &mut plan.operator else {
+                return Ok(false);
+            };
+            if !matches!(
+                join_op.join_type,
+                JoinType::Inner
+                    | JoinType::LeftOuter
+                    | JoinType::LeftSemi
+                    | JoinType::LeftAnti
+                    | JoinType::RightOuter
+            ) {
+                return Ok(false);
+            }
+            let JoinCondition::On { filter, .. } = &mut join_op.on else {
+                return Ok(false);
+            };
+            let Some(filter_expr) = filter.take() else {
+                return Ok(false);
+            };
+            (join_op.join_type, filter_expr)
+        };
+
+        let left_columns = left_child(plan)
+            .map(plan_output_columns)
+            .unwrap_or_default();
+        let right_columns = right_child(plan)
+            .map(plan_output_columns)
+            .unwrap_or_default();
+
+        let filter_exprs = split_conjunctive_predicates(&filter_expr);
+        let (left_filters, rest): (Vec<_>, Vec<_>) = filter_exprs
+            .into_iter()
+            .partition(|expr| is_subset_cols(&expr.referenced_columns(true), &left_columns));
+        let (right_filters, common_filters): (Vec<_>, Vec<_>) = rest
+            .into_iter()
+            .partition(|expr| is_subset_cols(&expr.referenced_columns(true), &right_columns));
+
+        let (push_left, push_right) = match join_type {
+            JoinType::Inner => (true, true),
+            JoinType::LeftOuter => (false, true),
+            JoinType::RightOuter => (true, false),
+            JoinType::LeftSemi => (true, false),
+            JoinType::LeftAnti => (false, false),
+            _ => (false, false),
+        };
+
+        let mut new_ops = (None, None);
+        let mut remaining_filters = common_filters;
+
+        let (left_push, left_remain) = if push_left {
+            (left_filters, Vec::new())
+        } else {
+            (Vec::new(), left_filters)
+        };
+        if let Some(filter_op) = reduce_filters(left_push, false) {
+            new_ops.0 = Some(Operator::Filter(filter_op));
+        } else {
+            remaining_filters.extend(left_remain);
+        }
+
+        let (right_push, right_remain) = if push_right {
+            (right_filters, Vec::new())
+        } else {
+            (Vec::new(), right_filters)
+        };
+        if let Some(filter_op) = reduce_filters(right_push, false) {
+            new_ops.1 = Some(Operator::Filter(filter_op));
+        } else {
+            remaining_filters.extend(right_remain);
+        }
+
+        let mut applied = false;
+        if let Some(left_op) = new_ops.0 {
+            applied |= wrap_child_with(plan, 0, left_op);
+        }
+        if let Some(right_op) = new_ops.1 {
+            applied |= wrap_child_with(plan, 1, right_op);
+        }
+
+        let mut join_filter = reduce_filters(remaining_filters, false).map(|op| op.predicate);
+        let filter_changed = match &join_filter {
+            Some(expr) => expr != &filter_expr,
+            None => true,
+        };
+
+        if !filter_changed {
+            join_filter = Some(filter_expr);
+        } else {
+            applied = true;
+        }
+
+        if let Operator::Join(join_op) = &mut plan.operator {
+            match &mut join_op.on {
+                JoinCondition::On { filter, .. } => *filter = join_filter,
+                JoinCondition::None => {}
+            }
+        }
+
+        Ok(applied)
+    }
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::binder::test::build_t1_table;
@@ -374,8 +509,9 @@ mod tests {
     use crate::optimizer::heuristic::optimizer::HepOptimizer;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::filter::FilterOperator;
+    use crate::planner::operator::join::{JoinCondition, JoinType};
     use crate::planner::operator::table_scan::TableScanOperator;
-    use crate::planner::operator::Operator;
+    use crate::planner::operator::{Operator, SortOption};
     use crate::planner::{Childrens, LogicalPlan};
     use crate::storage::rocksdb::RocksTransaction;
     use crate::types::index::{IndexInfo, IndexMeta, IndexType};
@@ -385,6 +521,27 @@ mod tests {
     use std::sync::Arc;
     use ulid::Ulid;
 
+    fn with_join_type(mut plan: LogicalPlan, join_type: JoinType) -> LogicalPlan {
+        fn visit(plan: &mut LogicalPlan, join_type: JoinType) -> bool {
+            if let Operator::Join(join_op) = &mut plan.operator {
+                join_op.join_type = join_type;
+                return true;
+            }
+            match plan.childrens.as_mut() {
+                Childrens::Only(child) => visit(child, join_type),
+                Childrens::Twins { left, right } => {
+                    visit(left, join_type) || visit(right, join_type)
+                }
+                Childrens::None => false,
+            }
+        }
+        assert!(
+            visit(&mut plan, join_type),
+            "expected plan to contain a join"
+        );
+        plan
+    }
+
     #[test]
     fn test_push_predicate_into_scan() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
@@ -392,12 +549,12 @@ mod tests {
         let plan = table_state.plan("select * from t1 where -(1 - c2) > 0")?;
 
         let best_plan = HepOptimizer::new(plan)
-            .batch(
+            .before_batch(
                 "simplify_filter".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::SimplifyFilter],
             )
-            .batch(
+            .before_batch(
                 "test_push_predicate_into_scan".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushPredicateIntoScan],
@@ -485,15 +642,25 @@ mod tests {
                 index_infos: vec![
                     IndexInfo {
                         meta: index_meta_reordered,
+                        sort_option: SortOption::OrderBy {
+                            fields: vec![],
+                            ignore_prefix_len: 0,
+                        },
                         range: None,
                         covered_deserializers: None,
                         cover_mapping: None,
+                        sort_elimination_hint: None,
                     },
                     IndexInfo {
                         meta: index_meta_aligned,
+                        sort_option: SortOption::OrderBy {
+                            fields: vec![],
+                            ignore_prefix_len: 0,
+                        },
                         range: None,
                         covered_deserializers: None,
                         cover_mapping: None,
+                        sort_elimination_hint: None,
                     },
                 ],
                 with_pk: false,
@@ -533,7 +700,7 @@ mod tests {
         );
 
         let best_plan = HepOptimizer::new(filter_plan)
-            .batch(
+            .before_batch(
                 "push_cover_mapping".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushPredicateIntoScan],
@@ -591,7 +758,7 @@ mod tests {
             table_state.plan("select * from t1 left join t2 on c1 = c3 where c1 > 1 and c3 < 2")?;
 
         let best_plan = HepOptimizer::new(plan)
-            .batch(
+            .before_batch(
                 "test_push_predicate_through_join".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushPredicateThroughJoin],
@@ -636,7 +803,7 @@ mod tests {
             .plan("select * from t1 right join t2 on c1 = c3 where c1 > 1 and c3 < 2")?;
 
         let best_plan = HepOptimizer::new(plan)
-            .batch(
+            .before_batch(
                 "test_push_predicate_through_join".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushPredicateThroughJoin],
@@ -681,7 +848,7 @@ mod tests {
             .plan("select * from t1 inner join t2 on c1 = c3 where c1 > 1 and c3 < 2")?;
 
         let best_plan = HepOptimizer::new(plan)
-            .batch(
+            .before_batch(
                 "test_push_predicate_through_join".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushPredicateThroughJoin],
@@ -720,6 +887,267 @@ mod tests {
         } else {
             unreachable!("Should be a filter operator")
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_push_join_predicate_into_scan_inner_join() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table()?;
+        let plan = table_state
+            .plan("select * from t1 inner join t2 on t1.c1 = t2.c3 and t1.c1 > 1 and t2.c3 < 2")?;
+
+        let mut best_plan = HepOptimizer::new(plan)
+            .before_batch(
+                "push_join_predicate_into_scan".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![NormalizationRuleImpl::PushJoinPredicateIntoScan],
+            )
+            .find_best::<RocksTransaction>(None)?;
+
+        if matches!(best_plan.operator, Operator::Project(_)) {
+            best_plan = best_plan.childrens.pop_only();
+        }
+
+        let join_plan = best_plan;
+        let join_op = match &join_plan.operator {
+            Operator::Join(op) => op,
+            _ => unreachable!("expected join root"),
+        };
+
+        match &join_op.on {
+            JoinCondition::On { filter, .. } => assert!(
+                filter.is_none(),
+                "join filter should be removed after pushdown"
+            ),
+            JoinCondition::None => unreachable!("expected join condition"),
+        }
+
+        let (left_child, right_child) = join_plan.childrens.pop_twins();
+
+        if let Operator::Filter(left_filter) = &left_child.operator {
+            match left_filter.predicate {
+                ScalarExpression::Binary {
+                    op: BinaryOperator::Gt,
+                    ty: LogicalType::Boolean,
+                    ..
+                } => (),
+                _ => unreachable!("left filter should be greater-than"),
+            }
+        } else {
+            unreachable!("left child should be filter");
+        }
+        match left_child.childrens.pop_only().operator {
+            Operator::TableScan(_) => (),
+            _ => unreachable!("left filter child should be table scan"),
+        }
+
+        if let Operator::Filter(right_filter) = &right_child.operator {
+            match right_filter.predicate {
+                ScalarExpression::Binary {
+                    op: BinaryOperator::Lt,
+                    ty: LogicalType::Boolean,
+                    ..
+                } => (),
+                _ => unreachable!("right filter should be less-than"),
+            }
+        } else {
+            unreachable!("right child should be filter");
+        }
+        match right_child.childrens.pop_only().operator {
+            Operator::TableScan(_) => (),
+            _ => unreachable!("right filter child should be table scan"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_push_join_predicate_left_outer_preserve_left() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table()?;
+        let plan =
+            table_state.plan("select * from t1 left join t2 on t1.c1 = t2.c3 and t1.c1 > 1")?;
+
+        let mut best_plan = HepOptimizer::new(plan)
+            .before_batch(
+                "push_join_predicate_into_scan".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![NormalizationRuleImpl::PushJoinPredicateIntoScan],
+            )
+            .find_best::<RocksTransaction>(None)?;
+
+        if matches!(best_plan.operator, Operator::Project(_)) {
+            best_plan = best_plan.childrens.pop_only();
+        }
+
+        let join_plan = best_plan;
+        let join_op = match &join_plan.operator {
+            Operator::Join(op) => op,
+            _ => unreachable!("expected join root"),
+        };
+
+        assert!(matches!(join_op.join_type, JoinType::LeftOuter));
+
+        match &join_op.on {
+            JoinCondition::On { filter, .. } => assert!(
+                filter.is_some(),
+                "left-side predicate should remain in join filter"
+            ),
+            JoinCondition::None => unreachable!("expected join condition"),
+        }
+
+        let (left_child, _right_child) = join_plan.childrens.pop_twins();
+        assert!(
+            !matches!(left_child.operator, Operator::Filter(_)),
+            "left child should not introduce new filter"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_push_join_predicate_left_outer_push_right() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table()?;
+        let plan =
+            table_state.plan("select * from t1 left join t2 on t1.c1 = t2.c3 and t2.c3 < 2")?;
+
+        let mut best_plan = HepOptimizer::new(plan)
+            .before_batch(
+                "push_join_predicate_into_scan".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![NormalizationRuleImpl::PushJoinPredicateIntoScan],
+            )
+            .find_best::<RocksTransaction>(None)?;
+
+        if matches!(best_plan.operator, Operator::Project(_)) {
+            best_plan = best_plan.childrens.pop_only();
+        }
+
+        let join_plan = best_plan;
+
+        let join_op = match &join_plan.operator {
+            Operator::Join(op) => op,
+            _ => unreachable!("expected join root"),
+        };
+
+        assert!(matches!(join_op.join_type, JoinType::LeftOuter));
+        match &join_op.on {
+            JoinCondition::On { filter, .. } => assert!(
+                filter.is_none(),
+                "right-side predicate should be pushed down"
+            ),
+            JoinCondition::None => unreachable!("expected join condition"),
+        }
+
+        let (_left_child, right_child) = join_plan.childrens.pop_twins();
+        let filter_op = match right_child.operator {
+            Operator::Filter(ref op) => op,
+            _ => unreachable!("right child should be a filter"),
+        };
+        match filter_op.predicate {
+            ScalarExpression::Binary {
+                op: BinaryOperator::Lt,
+                ty: LogicalType::Boolean,
+                ..
+            } => (),
+            _ => unreachable!("right filter should be less-than predicate"),
+        }
+        match right_child.childrens.pop_only().operator {
+            Operator::TableScan(_) => (),
+            _ => unreachable!("filter child should be a table scan"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_push_join_predicate_left_semi_keeps_right_filter() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table()?;
+        let plan =
+            table_state.plan("select * from t1 inner join t2 on t1.c1 = t2.c3 and t2.c3 < 2")?;
+        let plan = with_join_type(plan, JoinType::LeftSemi);
+
+        let mut best_plan = HepOptimizer::new(plan)
+            .before_batch(
+                "push_join_predicate_into_scan".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![NormalizationRuleImpl::PushJoinPredicateIntoScan],
+            )
+            .find_best::<RocksTransaction>(None)?;
+
+        if matches!(best_plan.operator, Operator::Project(_)) {
+            best_plan = best_plan.childrens.pop_only();
+        }
+
+        let join_plan = best_plan;
+        {
+            let join_op = match &join_plan.operator {
+                Operator::Join(op) => op,
+                _ => unreachable!("expected join root"),
+            };
+
+            assert!(matches!(join_op.join_type, JoinType::LeftSemi));
+            match &join_op.on {
+                JoinCondition::On { filter, .. } => assert!(
+                    filter.is_some(),
+                    "semi join should keep right-side predicates in the join filter"
+                ),
+                JoinCondition::None => unreachable!("expected join condition"),
+            }
+        }
+        let (_left_child, right_child) = join_plan.childrens.pop_twins();
+        assert!(
+            !matches!(right_child.operator, Operator::Filter(_)),
+            "right child should not get a pushed-down filter for semi join"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_push_join_predicate_left_anti_keeps_filters() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table()?;
+        let plan = table_state
+            .plan("select * from t1 inner join t2 on t1.c1 = t2.c3 and t1.c1 > 1 and t2.c3 < 2")?;
+        let plan = with_join_type(plan, JoinType::LeftAnti);
+
+        let mut best_plan = HepOptimizer::new(plan)
+            .before_batch(
+                "push_join_predicate_into_scan".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![NormalizationRuleImpl::PushJoinPredicateIntoScan],
+            )
+            .find_best::<RocksTransaction>(None)?;
+
+        if matches!(best_plan.operator, Operator::Project(_)) {
+            best_plan = best_plan.childrens.pop_only();
+        }
+
+        let join_plan = best_plan;
+        {
+            let join_op = match &join_plan.operator {
+                Operator::Join(op) => op,
+                _ => unreachable!("expected join root"),
+            };
+            assert!(matches!(join_op.join_type, JoinType::LeftAnti));
+
+            match &join_op.on {
+                JoinCondition::On { filter, .. } => {
+                    assert!(filter.is_some(), "left anti join should keep ON predicates")
+                }
+                JoinCondition::None => unreachable!("expected join condition"),
+            }
+        }
+
+        let (left_child, right_child) = join_plan.childrens.pop_twins();
+        assert!(
+            !matches!(left_child.operator, Operator::Filter(_)),
+            "left anti join should not push predicates to the left child"
+        );
+        assert!(
+            !matches!(right_child.operator, Operator::Filter(_)),
+            "left anti join should not push predicates to the right child"
+        );
 
         Ok(())
     }

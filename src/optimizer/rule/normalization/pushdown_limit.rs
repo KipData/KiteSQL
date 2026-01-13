@@ -172,7 +172,7 @@ mod tests {
         let plan = table_state.plan("select c1, c2 from t1 limit 1")?;
 
         let best_plan = HepOptimizer::new(plan.clone())
-            .batch(
+            .before_batch(
                 "test_limit_project_transpose".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::LimitProjectTranspose],
@@ -199,7 +199,7 @@ mod tests {
         let plan = table_state.plan("select * from t1 left join t2 on c1 = c3 limit 1")?;
 
         let best_plan = HepOptimizer::new(plan.clone())
-            .batch(
+            .before_batch(
                 "test_push_limit_through_join".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![
@@ -231,7 +231,7 @@ mod tests {
         let plan = table_state.plan("select * from t1 limit 1 offset 1")?;
 
         let best_plan = HepOptimizer::new(plan.clone())
-            .batch(
+            .before_batch(
                 "test_push_limit_into_table_scan".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![

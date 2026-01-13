@@ -30,6 +30,7 @@ CREATE TABLE tab64784(pk INTEGER primary key, col0 INTEGER, col1 FLOAT, col2 VAR
 statement ok
 INSERT INTO tab64784 VALUES(0,212,202.62,'nshdy',212,208.79,'wsxfc'),(1,213,203.64,'xwfuo',213,209.26,'lyswz'),(2,214,204.82,'jnued',216,210.48,'qczzf'),(3,215,205.40,'jtijf',217,211.96,'dpugl'),(4,216,206.3,'dpdzk',219,212.43,'xfirg'),(5,218,207.43,'qpwyw',220,213.50,'fmgky'),(6,219,208.3,'uooxb',221,215.30,'xpmdy'),(7,220,209.54,'ndtbb',225,218.8,'ivqyw'),(8,221,210.65,'zjpts',226,219.82,'sezsm'),(9,222,211.57,'slaxq',227,220.91,'bdqyb')
 
+# TODO: Order by column index
 query II
 SELECT pk, col0 FROM tab64784 WHERE (col0 IN (SELECT col3 FROM tab64784 WHERE col3 IS NULL OR (col1 < 22.54) OR col4 > 85.74) OR ((col4 IS NULL)) AND col3 < 8 OR (col4 > 82.93 AND (col0 <= 61) AND col0 > 94 AND col0 > 15)) ORDER BY 2 DESC
 ----

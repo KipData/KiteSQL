@@ -219,12 +219,12 @@ impl<S: Storage> State<S> {
 
     pub(crate) fn default_optimizer(source_plan: LogicalPlan) -> HepOptimizer {
         HepOptimizer::new(source_plan)
-            .batch(
+            .before_batch(
                 "Column Pruning".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::ColumnPruning],
             )
-            .batch(
+            .before_batch(
                 "Simplify Filter".to_string(),
                 HepBatchStrategy::fix_point_topdown(10),
                 vec![
@@ -232,15 +232,16 @@ impl<S: Storage> State<S> {
                     NormalizationRuleImpl::ConstantCalculation,
                 ],
             )
-            .batch(
+            .before_batch(
                 "Predicate Pushdown".to_string(),
                 HepBatchStrategy::fix_point_topdown(10),
                 vec![
                     NormalizationRuleImpl::PushPredicateThroughJoin,
+                    NormalizationRuleImpl::PushJoinPredicateIntoScan,
                     NormalizationRuleImpl::PushPredicateIntoScan,
                 ],
             )
-            .batch(
+            .before_batch(
                 "Limit Pushdown".to_string(),
                 HepBatchStrategy::fix_point_topdown(10),
                 vec![
@@ -249,7 +250,7 @@ impl<S: Storage> State<S> {
                     NormalizationRuleImpl::PushLimitIntoTableScan,
                 ],
             )
-            .batch(
+            .before_batch(
                 "Combine Operators".to_string(),
                 HepBatchStrategy::fix_point_topdown(10),
                 vec![
@@ -258,12 +259,17 @@ impl<S: Storage> State<S> {
                     NormalizationRuleImpl::CombineFilter,
                 ],
             )
-            .batch(
+            .before_batch(
                 "TopK".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::TopK],
             )
-            .batch(
+            .after_batch(
+                "Eliminate Redundant Sort".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![NormalizationRuleImpl::EliminateRedundantSort],
+            )
+            .after_batch(
                 "Expression Remapper".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![
@@ -629,9 +635,9 @@ pub(crate) mod test {
 
             assert_eq!(
                 iter.next().unwrap()?.values[0].utf8().unwrap(),
-                "Projection [t1.a, t1.b] [Project]
-  Filter (t1.b > 0), Is Having: false [Filter]
-    TableScan t1 -> [a, b] [SeqScan]"
+                "Projection [t1.a, t1.b] [Project => (Sort Option: Follow)]
+  Filter (t1.b > 0), Is Having: false [Filter => (Sort Option: Follow)]
+    TableScan t1 -> [a, b] [SeqScan => (Sort Option: None)]"
             )
         }
         // Aggregate
@@ -651,10 +657,10 @@ pub(crate) mod test {
             )?;
             assert_eq!(
                 iter.next().unwrap()?.values[0].utf8().unwrap(),
-                "Projection [(t1.a + 0), Max((t1.b + 0))] [Project]
-  Aggregate [Max((t1.b + 0))] -> Group By [(t1.a + 0)] [HashAggregate]
-    Filter (t1.b > 1), Is Having: false [Filter]
-      TableScan t1 -> [a, b] [SeqScan]"
+                "Projection [(t1.a + 0), Max((t1.b + 0))] [Project => (Sort Option: Follow)]
+  Aggregate [Max((t1.b + 0))] -> Group By [(t1.a + 0)] [HashAggregate => (Sort Option: None)]
+    Filter (t1.b > 1), Is Having: false [Filter => (Sort Option: Follow)]
+      TableScan t1 -> [a, b] [SeqScan => (Sort Option: None)]"
             )
         }
         {
@@ -671,14 +677,14 @@ pub(crate) mod test {
             )?;
             assert_eq!(
                 iter.next().unwrap()?.values[0].utf8().unwrap(),
-                "Projection [t1.a, t1.b, 9] [Project]
-  LeftOuter Join Where (t1.a > 0) [NestLoopJoin]
-    Projection [t1.a, t1.b] [Project]
-      Filter (t1.b > 0), Is Having: false [Filter]
-        TableScan t1 -> [a, b] [SeqScan]
-    Projection [t1.a, t1.b] [Project]
-      Filter (t1.a > 1), Is Having: false [Filter]
-        TableScan t1 -> [a, b] [SeqScan]"
+                "Projection [t1.a, t1.b, 9] [Project => (Sort Option: Follow)]
+  LeftOuter Join Where (t1.a > 0) [NestLoopJoin => (Sort Option: None)]
+    Projection [t1.a, t1.b] [Project => (Sort Option: Follow)]
+      Filter (t1.b > 0), Is Having: false [Filter => (Sort Option: Follow)]
+        TableScan t1 -> [a, b] [SeqScan => (Sort Option: None)]
+    Projection [t1.a, t1.b] [Project => (Sort Option: Follow)]
+      Filter (t1.a > 1), Is Having: false [Filter => (Sort Option: Follow)]
+        TableScan t1 -> [a, b] [SeqScan => (Sort Option: None)]"
             )
         }
 
