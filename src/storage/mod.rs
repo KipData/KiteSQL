@@ -81,13 +81,13 @@ pub trait Transaction: Sized {
         let table = self
             .table(table_cache, table_name.clone())?
             .ok_or(DatabaseError::TableNotFound)?;
-        if columns.is_empty() || with_pk {
+        if columns.is_empty() {
             for (i, column) in table.primary_keys() {
                 columns.insert(*i, column.clone());
             }
         }
-        let (deserializers, remap_pk_indices) =
-            Self::create_deserializers(&columns, table, with_pk);
+        let deserializers = Self::create_deserializers(&columns, table);
+        let pk_ty = with_pk.then(|| table.primary_keys_type().clone());
 
         let (min, max) = unsafe { &*self.table_codec() }.tuple_bound(&table_name);
         let iter = self.range(Bound::Included(min), Bound::Included(max))?;
@@ -95,7 +95,7 @@ pub trait Transaction: Sized {
         Ok(TupleIter {
             offset: bounds.0.unwrap_or(0),
             limit: bounds.1,
-            remap_pk_indices,
+            pk_ty,
             deserializers,
             values_len: columns.len(),
             total_len: table.columns_len(),
@@ -130,7 +130,7 @@ pub trait Transaction: Sized {
                 columns.insert(*i, column.clone());
             }
         }
-        let (inner, deserializers, remap_pk_indices, cover_mapping) =
+        let (inner, deserializers, cover_mapping) =
             match (covered_deserializers, cover_mapping_indices) {
                 (Some(deserializers), mapping) => {
                     let tuple_len = match &index_meta.value_ty {
@@ -142,26 +142,18 @@ pub trait Transaction: Sized {
                     (
                         IndexImplEnum::Covered(CoveredIndexImpl),
                         deserializers,
-                        PrimaryKeyRemap::Covered,
                         cover_mapping,
                     )
                 }
                 (None, _) => {
-                    let (deserializers, remap_pk_indices) =
-                        Self::create_deserializers(&columns, table, with_pk);
-                    (
-                        IndexImplEnum::instance(index_meta.ty),
-                        deserializers,
-                        remap_pk_indices,
-                        None,
-                    )
+                    let deserializers = Self::create_deserializers(&columns, table);
+                    (IndexImplEnum::instance(index_meta.ty), deserializers, None)
                 }
             };
 
         Ok(IndexIter {
             offset,
             limit: limit_option,
-            remap_pk_indices,
             params: IndexImplParams {
                 index_meta,
                 table_name,
@@ -170,6 +162,7 @@ pub trait Transaction: Sized {
                 total_len: table.columns_len(),
                 tx: self,
                 cover_mapping,
+                with_pk,
             },
             inner,
             ranges: ranges.into_iter(),
@@ -180,12 +173,8 @@ pub trait Transaction: Sized {
     fn create_deserializers(
         columns: &BTreeMap<usize, ColumnRef>,
         table: &TableCatalog,
-        with_pk: bool,
-    ) -> (Vec<TupleValueSerializableImpl>, PrimaryKeyRemap) {
-        let primary_keys_indices = table.primary_keys_indices();
-
+    ) -> Vec<TupleValueSerializableImpl> {
         let mut deserializers = Vec::with_capacity(columns.len());
-        let mut projections = Vec::with_capacity(columns.len());
         let mut last_projection = None;
         for (projection, column) in columns.iter() {
             let (start, end) = last_projection
@@ -198,23 +187,10 @@ pub trait Transaction: Sized {
             for skip_column in table.schema_ref()[start..end].iter() {
                 deserializers.push(skip_column.datatype().skip_serializable());
             }
-            if with_pk {
-                projections.push(*projection);
-            }
             deserializers.push(column.datatype().serializable());
             last_projection = Some(*projection);
         }
-        let remap_pk = if with_pk {
-            PrimaryKeyRemap::Indices(
-                primary_keys_indices
-                    .iter()
-                    .filter_map(|pk| projections.binary_search(pk).ok())
-                    .collect_vec(),
-            )
-        } else {
-            PrimaryKeyRemap::None
-        };
-        (deserializers, remap_pk)
+        deserializers
     }
 
     fn add_index_meta(
@@ -804,14 +780,12 @@ trait IndexImpl<'bytes, T: Transaction + 'bytes> {
         &self,
         key: &Bytes,
         value: &Bytes,
-        pk_indices: &PrimaryKeyRemap,
         params: &IndexImplParams<T>,
     ) -> Result<Tuple, DatabaseError>;
 
     fn eq_to_res<'a>(
         &self,
         value: &DataValue,
-        pk_indices: &PrimaryKeyRemap,
         params: &IndexImplParams<'a, T>,
     ) -> Result<IndexResult<'a, T>, DatabaseError>;
 
@@ -879,6 +853,7 @@ struct IndexImplParams<'a, T: Transaction> {
     total_len: usize,
     tx: &'a T,
     cover_mapping: Option<TupleMapping>,
+    with_pk: bool,
 }
 
 impl<T: Transaction> IndexImplParams<'_, T> {
@@ -901,11 +876,7 @@ impl<T: Transaction> IndexImplParams<'_, T> {
         Ok(val)
     }
 
-    fn get_tuple_by_id(
-        &self,
-        pk_indices: &PrimaryKeyRemap,
-        tuple_id: &TupleId,
-    ) -> Result<Option<Tuple>, DatabaseError> {
+    fn get_tuple_by_id(&self, tuple_id: &TupleId) -> Result<Option<Tuple>, DatabaseError> {
         let key = unsafe { &*self.table_codec() }.encode_tuple_key(self.table_name, tuple_id)?;
 
         self.tx
@@ -913,7 +884,7 @@ impl<T: Transaction> IndexImplParams<'_, T> {
             .map(|bytes| {
                 TableCodec::decode_tuple(
                     &self.deserializers,
-                    pk_indices,
+                    Some(tuple_id.clone()),
                     &bytes,
                     self.values_len,
                     self.total_len,
@@ -933,30 +904,28 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for IndexImplEnum {
         &self,
         key: &Bytes,
         value: &Bytes,
-        pk_indices: &PrimaryKeyRemap,
         params: &IndexImplParams<T>,
     ) -> Result<Tuple, DatabaseError> {
         match self {
-            IndexImplEnum::PrimaryKey(inner) => inner.index_lookup(key, value, pk_indices, params),
-            IndexImplEnum::Unique(inner) => inner.index_lookup(key, value, pk_indices, params),
-            IndexImplEnum::Normal(inner) => inner.index_lookup(key, value, pk_indices, params),
-            IndexImplEnum::Composite(inner) => inner.index_lookup(key, value, pk_indices, params),
-            IndexImplEnum::Covered(inner) => inner.index_lookup(key, value, pk_indices, params),
+            IndexImplEnum::PrimaryKey(inner) => inner.index_lookup(key, value, params),
+            IndexImplEnum::Unique(inner) => inner.index_lookup(key, value, params),
+            IndexImplEnum::Normal(inner) => inner.index_lookup(key, value, params),
+            IndexImplEnum::Composite(inner) => inner.index_lookup(key, value, params),
+            IndexImplEnum::Covered(inner) => inner.index_lookup(key, value, params),
         }
     }
 
     fn eq_to_res<'a>(
         &self,
         value: &DataValue,
-        pk_indices: &PrimaryKeyRemap,
         params: &IndexImplParams<'a, T>,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
         match self {
-            IndexImplEnum::PrimaryKey(inner) => inner.eq_to_res(value, pk_indices, params),
-            IndexImplEnum::Unique(inner) => inner.eq_to_res(value, pk_indices, params),
-            IndexImplEnum::Normal(inner) => inner.eq_to_res(value, pk_indices, params),
-            IndexImplEnum::Composite(inner) => inner.eq_to_res(value, pk_indices, params),
-            IndexImplEnum::Covered(inner) => inner.eq_to_res(value, pk_indices, params),
+            IndexImplEnum::PrimaryKey(inner) => inner.eq_to_res(value, params),
+            IndexImplEnum::Unique(inner) => inner.eq_to_res(value, params),
+            IndexImplEnum::Normal(inner) => inner.eq_to_res(value, params),
+            IndexImplEnum::Composite(inner) => inner.eq_to_res(value, params),
+            IndexImplEnum::Covered(inner) => inner.eq_to_res(value, params),
         }
     }
 
@@ -979,14 +948,14 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for IndexImplEnum {
 impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for PrimaryKeyIndexImpl {
     fn index_lookup(
         &self,
-        _: &Bytes,
+        key: &Bytes,
         value: &Bytes,
-        pk_indices: &PrimaryKeyRemap,
         params: &IndexImplParams<T>,
     ) -> Result<Tuple, DatabaseError> {
+        let tuple_id = TableCodec::decode_tuple_key(key, &params.index_meta.pk_ty)?;
         TableCodec::decode_tuple(
             &params.deserializers,
-            pk_indices,
+            Some(tuple_id),
             value,
             params.values_len,
             params.total_len,
@@ -996,16 +965,16 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for PrimaryKeyIndexIm
     fn eq_to_res<'a>(
         &self,
         value: &DataValue,
-        pk_indices: &PrimaryKeyRemap,
         params: &IndexImplParams<'a, T>,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
+        let tuple_id = value.clone();
         let tuple = params
             .tx
             .get(&unsafe { &*params.table_codec() }.encode_tuple_key(params.table_name, value)?)?
             .map(|bytes| {
                 TableCodec::decode_tuple(
                     &params.deserializers,
-                    pk_indices,
+                    Some(tuple_id.clone()),
                     &bytes,
                     params.values_len,
                     params.total_len,
@@ -1028,12 +997,11 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for PrimaryKeyIndexIm
 #[inline(always)]
 fn secondary_index_lookup<T: Transaction>(
     bytes: &Bytes,
-    pk_indices: &PrimaryKeyRemap,
     params: &IndexImplParams<T>,
 ) -> Result<Tuple, DatabaseError> {
     let tuple_id = TableCodec::decode_index(bytes)?;
     params
-        .get_tuple_by_id(pk_indices, &tuple_id)?
+        .get_tuple_by_id(&tuple_id)?
         .ok_or(DatabaseError::TupleIdNotFound(tuple_id))
 }
 
@@ -1042,16 +1010,14 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for UniqueIndexImpl {
         &self,
         _: &Bytes,
         value: &Bytes,
-        pk_indices: &PrimaryKeyRemap,
         params: &IndexImplParams<T>,
     ) -> Result<Tuple, DatabaseError> {
-        secondary_index_lookup(value, pk_indices, params)
+        secondary_index_lookup(value, params)
     }
 
     fn eq_to_res<'a>(
         &self,
         value: &DataValue,
-        pk_indices: &PrimaryKeyRemap,
         params: &IndexImplParams<'a, T>,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
         let Some(bytes) = params.tx.get(&self.bound_key(params, value, false)?)? else {
@@ -1059,7 +1025,7 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for UniqueIndexImpl {
         };
         let tuple_id = TableCodec::decode_index(&bytes)?;
         let tuple = params
-            .get_tuple_by_id(pk_indices, &tuple_id)?
+            .get_tuple_by_id(&tuple_id)?
             .ok_or(DatabaseError::TupleIdNotFound(tuple_id))?;
         Ok(IndexResult::Tuple(Some(tuple)))
     }
@@ -1081,16 +1047,14 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for NormalIndexImpl {
         &self,
         _: &Bytes,
         value: &Bytes,
-        pk_indices: &PrimaryKeyRemap,
         params: &IndexImplParams<T>,
     ) -> Result<Tuple, DatabaseError> {
-        secondary_index_lookup(value, pk_indices, params)
+        secondary_index_lookup(value, params)
     }
 
     fn eq_to_res<'a>(
         &self,
         value: &DataValue,
-        _: &PrimaryKeyRemap,
         params: &IndexImplParams<'a, T>,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
         eq_to_res_scope(self, value, params)
@@ -1117,16 +1081,14 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for CompositeIndexImp
         &self,
         _: &Bytes,
         value: &Bytes,
-        pk_indices: &PrimaryKeyRemap,
         params: &IndexImplParams<T>,
     ) -> Result<Tuple, DatabaseError> {
-        secondary_index_lookup(value, pk_indices, params)
+        secondary_index_lookup(value, params)
     }
 
     fn eq_to_res<'a>(
         &self,
         value: &DataValue,
-        _: &PrimaryKeyRemap,
         params: &IndexImplParams<'a, T>,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
         eq_to_res_scope(self, value, params)
@@ -1153,7 +1115,6 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for CoveredIndexImpl 
         &self,
         key: &Bytes,
         value: &Bytes,
-        pk_indices: &PrimaryKeyRemap,
         params: &IndexImplParams<T>,
     ) -> Result<Tuple, DatabaseError> {
         let mapping = params
@@ -1162,10 +1123,11 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for CoveredIndexImpl 
             .map(|mapping| mapping.as_ref());
         let key = TableCodec::decode_index_key(key, params.value_ty(), mapping)?;
 
-        let mut tuple_id = None;
-        if matches!(pk_indices, PrimaryKeyRemap::Covered) {
-            tuple_id = Some(TableCodec::decode_index(value)?);
-        }
+        let tuple_id = if params.with_pk {
+            Some(TableCodec::decode_index(value)?)
+        } else {
+            None
+        };
         let values = match key {
             DataValue::Tuple(vals, _) => vals,
             v => {
@@ -1178,7 +1140,6 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for CoveredIndexImpl 
     fn eq_to_res<'a>(
         &self,
         value: &DataValue,
-        _: &PrimaryKeyRemap,
         params: &IndexImplParams<'a, T>,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
         eq_to_res_scope(self, value, params)
@@ -1218,7 +1179,7 @@ fn eq_to_res_scope<'a, T: Transaction + 'a>(
 pub struct TupleIter<'a, T: Transaction + 'a> {
     offset: usize,
     limit: Option<usize>,
-    remap_pk_indices: PrimaryKeyRemap,
+    pk_ty: Option<LogicalType>,
     deserializers: Vec<TupleValueSerializableImpl>,
     values_len: usize,
     total_len: usize,
@@ -1235,16 +1196,21 @@ impl<'a, T: Transaction + 'a> Iter for TupleIter<'a, T> {
         }
 
         #[allow(clippy::never_loop)]
-        while let Some((_, value)) = self.iter.try_next()? {
+        while let Some((key, value)) = self.iter.try_next()? {
             if let Some(limit) = self.limit.as_mut() {
                 if *limit == 0 {
                     return Ok(None);
                 }
                 *limit -= 1;
             }
+            let tuple_id = if let Some(pk_ty) = &self.pk_ty {
+                Some(TableCodec::decode_tuple_key(&key, pk_ty)?)
+            } else {
+                None
+            };
             let tuple = TableCodec::decode_tuple(
                 &self.deserializers,
-                &self.remap_pk_indices,
+                tuple_id,
                 &value,
                 self.values_len,
                 self.total_len,
@@ -1257,17 +1223,9 @@ impl<'a, T: Transaction + 'a> Iter for TupleIter<'a, T> {
     }
 }
 
-pub enum PrimaryKeyRemap {
-    None,
-    Covered,
-    Indices(Vec<usize>),
-}
-
 pub struct IndexIter<'a, T: Transaction> {
     offset: usize,
     limit: Option<usize>,
-
-    remap_pk_indices: PrimaryKeyRemap,
     params: IndexImplParams<'a, T>,
     inner: IndexImplEnum,
     // for buffering data
@@ -1369,11 +1327,7 @@ impl<T: Transaction> Iter for IndexIter<'_, T> {
                         Range::Eq(mut val) => {
                             val = self.params.try_cast(val)?;
 
-                            match self.inner.eq_to_res(
-                                &val,
-                                &self.remap_pk_indices,
-                                &self.params,
-                            )? {
+                            match self.inner.eq_to_res(&val, &self.params)? {
                                 IndexResult::Tuple(tuple) => {
                                     if Self::offset_move(&mut self.offset) {
                                         continue;
@@ -1395,12 +1349,7 @@ impl<T: Transaction> Iter for IndexIter<'_, T> {
                             continue;
                         }
                         Self::limit_sub(&mut self.limit);
-                        let tuple = self.inner.index_lookup(
-                            &key,
-                            &value,
-                            &self.remap_pk_indices,
-                            &self.params,
-                        )?;
+                        let tuple = self.inner.index_lookup(&key, &value, &self.params)?;
 
                         return Ok(Some(tuple));
                     }

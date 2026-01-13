@@ -244,7 +244,7 @@ mod test {
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::{
         IndexImplEnum, IndexImplParams, IndexIter, IndexIterState, Iter, PrimaryKeyIndexImpl,
-        PrimaryKeyRemap, Storage, Transaction,
+        Storage, Transaction,
     };
     use crate::types::index::{IndexMeta, IndexType};
     use crate::types::tuple::Tuple;
@@ -369,9 +369,7 @@ mod test {
         let mut iter = IndexIter {
             offset: 0,
             limit: None,
-            remap_pk_indices: PrimaryKeyRemap::Indices(vec![0]),
             params: IndexImplParams {
-                deserializers,
                 index_meta: Arc::new(IndexMeta {
                     id: 0,
                     column_ids: vec![*a_column_id],
@@ -382,10 +380,12 @@ mod test {
                     ty: IndexType::PrimaryKey { is_multiple: false },
                 }),
                 table_name: &table.name,
-                tx: &transaction,
+                deserializers,
                 values_len,
-                total_len: 1,
+                total_len: table.columns_len(),
+                tx: &transaction,
                 cover_mapping: None,
+                with_pk: true,
             },
             ranges: vec![
                 Range::Eq(DataValue::Int32(0)),
@@ -595,7 +595,7 @@ mod test {
         }
 
         assert_eq!(tuples.len(), 1);
-        assert_eq!(tuples[0].pk, Some(target_pk));
+        assert_eq!(tuples[0].pk, None);
         assert_eq!(tuples[0].values, vec![covered_value]);
 
         Ok(())

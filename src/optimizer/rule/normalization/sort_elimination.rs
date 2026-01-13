@@ -279,6 +279,7 @@ mod tests {
         let c1 = make_sort_field("c1");
         let c2 = make_sort_field("c2");
         let mut plan = build_plan(vec![c2.clone()], vec![c1, c2], 1);
+        super::annotate_sort_preserving_indexes(&mut plan);
         let rule = EliminateRedundantSort;
 
         assert!(rule.apply(&mut plan)?);
@@ -335,6 +336,7 @@ mod tests {
         let c1 = make_sort_field("c1");
         let c2 = make_sort_field("c2");
         let mut plan = build_plan(vec![c2.clone()], vec![c1.clone(), c2], 0);
+        super::annotate_sort_preserving_indexes(&mut plan);
         let rule = EliminateRedundantSort;
 
         assert!(!rule.apply(&mut plan)?);
@@ -366,7 +368,13 @@ mod tests {
             }),
             Childrens::None,
         );
-        scan_plan.physical_option = Some(PhysicalOption::new(PlanImpl::SeqScan, SortOption::None));
+        if let Operator::TableScan(scan_op) = &scan_plan.operator {
+            let index_info = scan_op.index_infos[0].clone();
+            scan_plan.physical_option = Some(PhysicalOption::new(
+                PlanImpl::IndexScan(index_info.clone()),
+                index_info.sort_option.clone(),
+            ));
+        }
 
         let mut filter = LogicalPlan::new(
             Operator::Filter(FilterOperator {
@@ -386,6 +394,7 @@ mod tests {
             Childrens::Only(Box::new(filter)),
         );
 
+        super::annotate_sort_preserving_indexes(&mut plan);
         let rule = EliminateRedundantSort;
         assert!(rule.apply(&mut plan)?);
         assert!(matches!(plan.operator, Operator::Filter(_)));

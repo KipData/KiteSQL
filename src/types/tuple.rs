@@ -16,7 +16,6 @@ use crate::catalog::ColumnRef;
 use crate::db::ResultIter;
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::BumpBytes;
-use crate::storage::PrimaryKeyRemap;
 use crate::types::serialize::{TupleValueSerializable, TupleValueSerializableImpl};
 use crate::types::value::DataValue;
 use bumpalo::Bump;
@@ -51,7 +50,7 @@ impl Tuple {
     #[inline]
     pub fn deserialize_from(
         deserializers: &[TupleValueSerializableImpl],
-        pk_remap: &PrimaryKeyRemap,
+        tuple_id: Option<TupleId>,
         bytes: &[u8],
         values_len: usize,
         total_len: usize,
@@ -72,13 +71,10 @@ impl Tuple {
             }
             deserializer.filling_value(&mut cursor, &mut values)?;
         }
-        let pk = if let PrimaryKeyRemap::Indices(indices) = pk_remap {
-            Some(Tuple::primary_projection(indices, &values))
-        } else {
-            None
-        };
-
-        Ok(Tuple { pk, values })
+        Ok(Tuple {
+            pk: tuple_id,
+            values,
+        })
     }
 
     /// e.g.: bits(u8)..|data_0(len for utf8_1)|utf8_0|data_1|
@@ -154,7 +150,6 @@ pub fn create_table<I: ResultIter>(iter: I) -> Result<Table, DatabaseError> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
-    use crate::storage::PrimaryKeyRemap;
     use crate::types::tuple::Tuple;
     use crate::types::value::{DataValue, Utf8Type};
     use crate::types::LogicalType;
@@ -343,7 +338,7 @@ mod tests {
         {
             let tuple_0 = Tuple::deserialize_from(
                 &serializers,
-                &PrimaryKeyRemap::Indices(vec![0]),
+                tuples[0].pk.clone(),
                 &tuples[0].serialize_to(&serializers, &arena).unwrap(),
                 serializers.len(),
                 columns.len(),
@@ -355,7 +350,7 @@ mod tests {
         {
             let tuple_1 = Tuple::deserialize_from(
                 &serializers,
-                &PrimaryKeyRemap::Indices(vec![0]),
+                tuples[1].pk.clone(),
                 &tuples[1].serialize_to(&serializers, &arena).unwrap(),
                 serializers.len(),
                 columns.len(),
@@ -374,7 +369,7 @@ mod tests {
             ];
             let tuple_2 = Tuple::deserialize_from(
                 &projection_serializers,
-                &PrimaryKeyRemap::Indices(vec![0]),
+                tuples[0].pk.clone(),
                 &tuples[0].serialize_to(&serializers, &arena).unwrap(),
                 2,
                 columns.len(),
@@ -396,11 +391,19 @@ mod tests {
                 .take(5)
                 .map(|column| column.datatype().serializable())
                 .collect_vec();
+            let mut multi_pk_tuple = tuples[0].clone();
+            multi_pk_tuple.pk = Some(DataValue::Tuple(
+                vec![
+                    multi_pk_tuple.values[4].clone(),
+                    multi_pk_tuple.values[2].clone(),
+                ],
+                false,
+            ));
 
             let tuple_3 = Tuple::deserialize_from(
                 &multiple_pk_serializers,
-                &PrimaryKeyRemap::Indices(vec![4, 2]),
-                &tuples[0].serialize_to(&serializers, &arena).unwrap(),
+                multi_pk_tuple.pk.clone(),
+                &multi_pk_tuple.serialize_to(&serializers, &arena).unwrap(),
                 serializers.len(),
                 columns.len(),
             )
@@ -409,17 +412,7 @@ mod tests {
             assert_eq!(
                 tuple_3,
                 Tuple {
-                    pk: Some(DataValue::Tuple(
-                        vec![
-                            DataValue::UInt16(1),
-                            DataValue::Utf8 {
-                                value: "LOL".to_string(),
-                                ty: Utf8Type::Variable(Some(2)),
-                                unit: CharLengthUnits::Octets,
-                            },
-                        ],
-                        false
-                    )),
+                    pk: multi_pk_tuple.pk.clone(),
                     values: vec![
                         DataValue::Int32(0),
                         DataValue::UInt32(1),
