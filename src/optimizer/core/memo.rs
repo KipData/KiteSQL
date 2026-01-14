@@ -148,7 +148,7 @@ mod tests {
     use crate::expression::ScalarExpression;
     use crate::optimizer::core::memo::Memo;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
-    use crate::optimizer::heuristic::optimizer::HepOptimizer;
+    use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::implementation::ImplementationRuleImpl;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::sort::SortField;
@@ -212,7 +212,7 @@ mod tests {
             "select c1, c3 from t1 inner join t2 on c1 = c3 where (c1 > 40 or c1 = 2) and c3 > 22",
         )?;
         let plan = binder.bind(&stmt[0])?;
-        let mut best_plan = HepOptimizer::new(plan)
+        let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
                 "Simplify Filter".to_string(),
                 HepBatchStrategy::once_topdown(),
@@ -227,6 +227,9 @@ mod tests {
                     NormalizationRuleImpl::PushPredicateIntoScan,
                 ],
             )
+            .build();
+        let mut best_plan = pipeline
+            .instantiate(plan)
             .find_best::<RocksTransaction>(None)?;
         let rules = vec![
             ImplementationRuleImpl::Projection,

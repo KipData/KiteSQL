@@ -131,7 +131,7 @@ mod test {
     use crate::expression::agg::AggKind;
     use crate::expression::ScalarExpression;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
-    use crate::optimizer::heuristic::optimizer::HepOptimizer;
+    use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::aggregate::AggregateOperator;
     use crate::planner::operator::values::ValuesOperator;
@@ -208,7 +208,7 @@ mod test {
             Childrens::Only(Box::new(input)),
         );
 
-        let plan = HepOptimizer::new(plan)
+        let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
                 "Expression Remapper".to_string(),
                 HepBatchStrategy::once_topdown(),
@@ -218,6 +218,9 @@ mod test {
                     NormalizationRuleImpl::EvaluatorBind,
                 ],
             )
+            .build();
+        let plan = pipeline
+            .instantiate(plan)
             .find_best::<RocksTransaction>(None)?;
 
         let Operator::Aggregate(op) = plan.operator else {

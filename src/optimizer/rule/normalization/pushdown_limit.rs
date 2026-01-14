@@ -161,7 +161,7 @@ mod tests {
     use crate::binder::test::build_t1_table;
     use crate::errors::DatabaseError;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
-    use crate::optimizer::heuristic::optimizer::HepOptimizer;
+    use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::Operator;
     use crate::storage::rocksdb::RocksTransaction;
@@ -171,12 +171,15 @@ mod tests {
         let table_state = build_t1_table()?;
         let plan = table_state.plan("select c1, c2 from t1 limit 1")?;
 
-        let best_plan = HepOptimizer::new(plan.clone())
+        let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
                 "test_limit_project_transpose".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::LimitProjectTranspose],
             )
+            .build();
+        let best_plan = pipeline
+            .instantiate(plan)
             .find_best::<RocksTransaction>(None)?;
 
         if let Operator::Project(_) = &best_plan.operator {
@@ -198,7 +201,7 @@ mod tests {
         let table_state = build_t1_table()?;
         let plan = table_state.plan("select * from t1 left join t2 on c1 = c3 limit 1")?;
 
-        let best_plan = HepOptimizer::new(plan.clone())
+        let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
                 "test_push_limit_through_join".to_string(),
                 HepBatchStrategy::once_topdown(),
@@ -207,6 +210,9 @@ mod tests {
                     NormalizationRuleImpl::PushLimitThroughJoin,
                 ],
             )
+            .build();
+        let best_plan = pipeline
+            .instantiate(plan)
             .find_best::<RocksTransaction>(None)?;
 
         let join_op = best_plan.childrens.pop_only().childrens.pop_only();
@@ -230,7 +236,7 @@ mod tests {
         let table_state = build_t1_table()?;
         let plan = table_state.plan("select * from t1 limit 1 offset 1")?;
 
-        let best_plan = HepOptimizer::new(plan.clone())
+        let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
                 "test_push_limit_into_table_scan".to_string(),
                 HepBatchStrategy::once_topdown(),
@@ -239,6 +245,9 @@ mod tests {
                     NormalizationRuleImpl::PushLimitIntoTableScan,
                 ],
             )
+            .build();
+        let best_plan = pipeline
+            .instantiate(plan)
             .find_best::<RocksTransaction>(None)?;
 
         let scan_op = best_plan.childrens.pop_only();

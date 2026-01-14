@@ -133,7 +133,7 @@ mod test {
     use crate::expression::range_detacher::{Range, RangeDetacher};
     use crate::expression::{BinaryOperator, ScalarExpression, UnaryOperator};
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
-    use crate::optimizer::heuristic::optimizer::HepOptimizer;
+    use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::Operator;
     use crate::planner::LogicalPlan;
@@ -142,6 +142,19 @@ mod test {
     use crate::types::{ColumnId, LogicalType};
     use std::collections::Bound;
 
+    fn run_with_single_batch(
+        plan: LogicalPlan,
+        name: &str,
+        strategy: HepBatchStrategy,
+        rules: Vec<NormalizationRuleImpl>,
+    ) -> Result<LogicalPlan, DatabaseError> {
+        HepOptimizerPipeline::builder()
+            .before_batch(name.to_string(), strategy, rules)
+            .build()
+            .instantiate(plan)
+            .find_best::<RocksTransaction>(None)
+    }
+
     #[test]
     fn test_constant_calculation_omitted() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
@@ -149,7 +162,7 @@ mod test {
         let plan =
             table_state.plan("select c1 + (2 + 1), 2 + 1 from t1 where (2 + (-1)) < -(c1 + 1)")?;
 
-        let best_plan = HepOptimizer::new(plan)
+        let best_plan = HepOptimizerPipeline::builder()
             .before_batch(
                 "test_simplification".to_string(),
                 HepBatchStrategy::once_topdown(),
@@ -158,6 +171,8 @@ mod test {
                     NormalizationRuleImpl::ConstantCalculation,
                 ],
             )
+            .build()
+            .instantiate(plan)
             .find_best::<RocksTransaction>(None)?;
         if let Operator::Project(project_op) = best_plan.clone().operator {
             let constant_expr = ScalarExpression::Constant(DataValue::Int32(3));
@@ -215,13 +230,12 @@ mod test {
         let plan_10 = table_state.plan("select * from t1 where 24 < (-1 - c1) + 1")?;
 
         let op = |plan: LogicalPlan| -> Result<Option<Range>, DatabaseError> {
-            let best_plan = HepOptimizer::new(plan.clone())
-                .before_batch(
-                    "test_simplify_filter".to_string(),
-                    HepBatchStrategy::once_topdown(),
-                    vec![NormalizationRuleImpl::SimplifyFilter],
-                )
-                .find_best::<RocksTransaction>(None)?;
+            let best_plan = run_with_single_batch(
+                plan,
+                "test_simplify_filter",
+                HepBatchStrategy::once_topdown(),
+                vec![NormalizationRuleImpl::SimplifyFilter],
+            )?;
 
             let filter_op = best_plan.childrens.pop_only();
             if let Operator::Filter(filter_op) = filter_op.operator {
@@ -260,13 +274,12 @@ mod test {
         let table_state = build_t1_table()?;
         let plan = table_state.plan("select * from t1 where -(c1 + 1) > c2")?;
 
-        let best_plan = HepOptimizer::new(plan.clone())
-            .before_batch(
-                "test_simplify_filter".to_string(),
-                HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::SimplifyFilter],
-            )
-            .find_best::<RocksTransaction>(None)?;
+        let best_plan = run_with_single_batch(
+            plan,
+            "test_simplify_filter",
+            HepBatchStrategy::once_topdown(),
+            vec![NormalizationRuleImpl::SimplifyFilter],
+        )?;
 
         let filter_op = best_plan.childrens.pop_only();
         if let Operator::Filter(filter_op) = filter_op.operator {
@@ -332,13 +345,12 @@ mod test {
         plan: &LogicalPlan,
         column_id: &ColumnId,
     ) -> Result<Option<Range>, DatabaseError> {
-        let best_plan = HepOptimizer::new(plan.clone())
-            .before_batch(
-                "test_simplify_filter".to_string(),
-                HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::SimplifyFilter],
-            )
-            .find_best::<RocksTransaction>(None)?;
+        let best_plan = run_with_single_batch(
+            plan.clone(),
+            "test_simplify_filter",
+            HepBatchStrategy::once_topdown(),
+            vec![NormalizationRuleImpl::SimplifyFilter],
+        )?;
 
         let filter_op = best_plan.childrens.pop_only();
         if let Operator::Filter(filter_op) = filter_op.operator {

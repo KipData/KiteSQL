@@ -506,7 +506,9 @@ mod tests {
     use crate::expression::range_detacher::Range;
     use crate::expression::{BinaryOperator, ScalarExpression};
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
-    use crate::optimizer::heuristic::optimizer::HepOptimizer;
+    use crate::optimizer::heuristic::optimizer::{
+        HepOptimizerPipeline, HepOptimizerPipelineBuilder,
+    };
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::filter::FilterOperator;
     use crate::planner::operator::join::{JoinCondition, JoinType};
@@ -520,6 +522,16 @@ mod tests {
     use std::collections::{BTreeMap, Bound};
     use std::sync::Arc;
     use ulid::Ulid;
+
+    fn apply_pipeline(
+        plan: LogicalPlan,
+        builder: HepOptimizerPipelineBuilder,
+    ) -> Result<LogicalPlan, DatabaseError> {
+        builder
+            .build()
+            .instantiate(plan)
+            .find_best::<RocksTransaction>(None)
+    }
 
     fn with_join_type(mut plan: LogicalPlan, join_type: JoinType) -> LogicalPlan {
         fn visit(plan: &mut LogicalPlan, join_type: JoinType) -> bool {
@@ -548,18 +560,20 @@ mod tests {
         // 1 - c2 < 0 => c2 > 1
         let plan = table_state.plan("select * from t1 where -(1 - c2) > 0")?;
 
-        let best_plan = HepOptimizer::new(plan)
-            .before_batch(
-                "simplify_filter".to_string(),
-                HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::SimplifyFilter],
-            )
-            .before_batch(
-                "test_push_predicate_into_scan".to_string(),
-                HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::PushPredicateIntoScan],
-            )
-            .find_best::<RocksTransaction>(None)?;
+        let best_plan = apply_pipeline(
+            plan,
+            HepOptimizerPipeline::builder()
+                .before_batch(
+                    "simplify_filter".to_string(),
+                    HepBatchStrategy::once_topdown(),
+                    vec![NormalizationRuleImpl::SimplifyFilter],
+                )
+                .before_batch(
+                    "test_push_predicate_into_scan".to_string(),
+                    HepBatchStrategy::once_topdown(),
+                    vec![NormalizationRuleImpl::PushPredicateIntoScan],
+                ),
+        )?;
 
         let scan_op = best_plan.childrens.pop_only().childrens.pop_only();
         if let Operator::TableScan(op) = &scan_op.operator {
@@ -699,13 +713,14 @@ mod tests {
             Childrens::Only(Box::new(scan_plan)),
         );
 
-        let best_plan = HepOptimizer::new(filter_plan)
-            .before_batch(
+        let best_plan = apply_pipeline(
+            filter_plan,
+            HepOptimizerPipeline::builder().before_batch(
                 "push_cover_mapping".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushPredicateIntoScan],
-            )
-            .find_best::<RocksTransaction>(None)?;
+            ),
+        )?;
 
         let table_scan = best_plan.childrens.pop_only();
         if let Operator::TableScan(op) = &table_scan.operator {
@@ -757,13 +772,14 @@ mod tests {
         let plan =
             table_state.plan("select * from t1 left join t2 on c1 = c3 where c1 > 1 and c3 < 2")?;
 
-        let best_plan = HepOptimizer::new(plan)
-            .before_batch(
+        let best_plan = apply_pipeline(
+            plan,
+            HepOptimizerPipeline::builder().before_batch(
                 "test_push_predicate_through_join".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushPredicateThroughJoin],
-            )
-            .find_best::<RocksTransaction>(None)?;
+            ),
+        )?;
 
         let filter_op = best_plan.childrens.pop_only();
         if let Operator::Filter(op) = &filter_op.operator {
@@ -802,13 +818,14 @@ mod tests {
         let plan = table_state
             .plan("select * from t1 right join t2 on c1 = c3 where c1 > 1 and c3 < 2")?;
 
-        let best_plan = HepOptimizer::new(plan)
-            .before_batch(
+        let best_plan = apply_pipeline(
+            plan,
+            HepOptimizerPipeline::builder().before_batch(
                 "test_push_predicate_through_join".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushPredicateThroughJoin],
-            )
-            .find_best::<RocksTransaction>(None)?;
+            ),
+        )?;
 
         let filter_op = best_plan.childrens.pop_only();
         if let Operator::Filter(op) = &filter_op.operator {
@@ -847,13 +864,14 @@ mod tests {
         let plan = table_state
             .plan("select * from t1 inner join t2 on c1 = c3 where c1 > 1 and c3 < 2")?;
 
-        let best_plan = HepOptimizer::new(plan)
-            .before_batch(
+        let best_plan = apply_pipeline(
+            plan,
+            HepOptimizerPipeline::builder().before_batch(
                 "test_push_predicate_through_join".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushPredicateThroughJoin],
-            )
-            .find_best::<RocksTransaction>(None)?;
+            ),
+        )?;
 
         let join_op = best_plan.childrens.pop_only();
         if let Operator::Join(_) = &join_op.operator {
@@ -897,13 +915,14 @@ mod tests {
         let plan = table_state
             .plan("select * from t1 inner join t2 on t1.c1 = t2.c3 and t1.c1 > 1 and t2.c3 < 2")?;
 
-        let mut best_plan = HepOptimizer::new(plan)
-            .before_batch(
+        let mut best_plan = apply_pipeline(
+            plan,
+            HepOptimizerPipeline::builder().before_batch(
                 "push_join_predicate_into_scan".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushJoinPredicateIntoScan],
-            )
-            .find_best::<RocksTransaction>(None)?;
+            ),
+        )?;
 
         if matches!(best_plan.operator, Operator::Project(_)) {
             best_plan = best_plan.childrens.pop_only();
@@ -968,13 +987,14 @@ mod tests {
         let plan =
             table_state.plan("select * from t1 left join t2 on t1.c1 = t2.c3 and t1.c1 > 1")?;
 
-        let mut best_plan = HepOptimizer::new(plan)
-            .before_batch(
+        let mut best_plan = apply_pipeline(
+            plan,
+            HepOptimizerPipeline::builder().before_batch(
                 "push_join_predicate_into_scan".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushJoinPredicateIntoScan],
-            )
-            .find_best::<RocksTransaction>(None)?;
+            ),
+        )?;
 
         if matches!(best_plan.operator, Operator::Project(_)) {
             best_plan = best_plan.childrens.pop_only();
@@ -1011,13 +1031,14 @@ mod tests {
         let plan =
             table_state.plan("select * from t1 left join t2 on t1.c1 = t2.c3 and t2.c3 < 2")?;
 
-        let mut best_plan = HepOptimizer::new(plan)
-            .before_batch(
+        let mut best_plan = apply_pipeline(
+            plan,
+            HepOptimizerPipeline::builder().before_batch(
                 "push_join_predicate_into_scan".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushJoinPredicateIntoScan],
-            )
-            .find_best::<RocksTransaction>(None)?;
+            ),
+        )?;
 
         if matches!(best_plan.operator, Operator::Project(_)) {
             best_plan = best_plan.childrens.pop_only();
@@ -1067,13 +1088,14 @@ mod tests {
             table_state.plan("select * from t1 inner join t2 on t1.c1 = t2.c3 and t2.c3 < 2")?;
         let plan = with_join_type(plan, JoinType::LeftSemi);
 
-        let mut best_plan = HepOptimizer::new(plan)
-            .before_batch(
+        let mut best_plan = apply_pipeline(
+            plan,
+            HepOptimizerPipeline::builder().before_batch(
                 "push_join_predicate_into_scan".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushJoinPredicateIntoScan],
-            )
-            .find_best::<RocksTransaction>(None)?;
+            ),
+        )?;
 
         if matches!(best_plan.operator, Operator::Project(_)) {
             best_plan = best_plan.childrens.pop_only();
@@ -1111,13 +1133,14 @@ mod tests {
             .plan("select * from t1 inner join t2 on t1.c1 = t2.c3 and t1.c1 > 1 and t2.c3 < 2")?;
         let plan = with_join_type(plan, JoinType::LeftAnti);
 
-        let mut best_plan = HepOptimizer::new(plan)
-            .before_batch(
+        let mut best_plan = apply_pipeline(
+            plan,
+            HepOptimizerPipeline::builder().before_batch(
                 "push_join_predicate_into_scan".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushJoinPredicateIntoScan],
-            )
-            .find_best::<RocksTransaction>(None)?;
+            ),
+        )?;
 
         if matches!(best_plan.operator, Operator::Project(_)) {
             best_plan = best_plan.childrens.pop_only();

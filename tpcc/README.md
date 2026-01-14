@@ -4,13 +4,13 @@ run `cargo run -p tpcc --release` to run tpcc
 - i9-13900HX
 - 32.0 GB
 - KIOXIA-EXCERIA PLUS G3 SSD
-- Tips: TPCC currently only supports single thread
+- Tips: Pass `--threads <n>` to run multiple worker threads (default: 8)
 ```shell
-|New-Order| sc: 434819  lt: 0  fl: 4430
-|Payment| sc: 434798  lt: 0  fl: 0
-|Order-Status| sc: 43480  lt: 0  fl: 598
-|Delivery| sc: 43480  lt: 0  fl: 0
-|Stock-Level| sc: 43479  lt: 0  fl: 0
+|New-Order| sc: 445996  lt: 0  fl: 4649
+|Payment| sc: 445972  lt: 0  fl: 0
+|Order-Status| sc: 44597  lt: 0  fl: 622
+|Delivery| sc: 44597  lt: 0  fl: 0
+|Stock-Level| sc: 44597  lt: 0  fl: 0
 in 720 sec.
 <Constraint Check> (all must be [OK])
 [transaction percentage]
@@ -24,61 +24,59 @@ in 720 sec.
    Order-Status: 100.0  [OK]
    Delivery: 100.0  [OK]
    Stock-Level: 100.0  [OK]
-   New-Order Total: 434819
-   Payment Total: 434798
-   Order-Status Total: 43480
-   Delivery Total: 43480
-   Stock-Level Total: 43479
+   New-Order Total: 445996
+   Payment Total: 445972
+   Order-Status Total: 44597
+   Delivery Total: 44597
+   Stock-Level Total: 44597
 
 
 <RT Histogram>
 
 1.New-Order
 
-0.001, 259304
-0.002, 174946
-0.003,    102
-0.004,      7
-0.007,      2
+0.001, 282206
+0.002, 163359
+0.003,     95
+0.004,      6
 
 2.Payment
 
-0.001, 431876
-0.002,    285
-0.003,      2
+0.001, 444948
+0.002,    260
 
 3.Order-Status
 
-0.001,  36715
-0.002,   4995
-0.003,   1124
-0.004,    366
-0.005,    201
-0.006,     71
-0.007,      4
-0.008,      1
+0.001,  36721
+0.002,   5254
+0.003,   1110
+0.004,    396
+0.005,    189
+0.006,     62
+0.007,      6
 
 4.Delivery
 
-0.001,  42956
+0.001,  43260
 
 5.Stock-Level
 
-0.001,  23079
-0.002,  16248
-0.003,   3817
-0.004,    110
-0.005,      2
+0.001,  22651
+0.002,  18136
+0.003,   3223
+0.004,    108
+0.005,      5
+0.006,      4
 0.007,      1
 
 <90th Percentile RT (MaxRT)>
-   New-Order : 0.002  (0.013)
-     Payment : 0.001  (0.017)
-Order-Status : 0.002  (0.016)
+   New-Order : 0.002  (0.012)
+     Payment : 0.001  (0.002)
+Order-Status : 0.002  (0.019)
     Delivery : 0.001  (0.001)
- Stock-Level : 0.002  (0.022)
+ Stock-Level : 0.002  (0.018)
 <TpmC>
-36235 Tpmc
+37166 Tpmc
 ```
 
 ## Explain

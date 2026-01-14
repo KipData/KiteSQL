@@ -92,13 +92,13 @@ run `cargo run -p tpcc --release` to run tpcc
 All cases have been fully optimized.
 ```shell
 <90th Percentile RT (MaxRT)>
-   New-Order : 0.002  (0.013)
-     Payment : 0.001  (0.017)
-Order-Status : 0.002  (0.016)
+   New-Order : 0.002  (0.012)
+     Payment : 0.001  (0.002)
+Order-Status : 0.002  (0.019)
     Delivery : 0.001  (0.001)
- Stock-Level : 0.002  (0.022)
+ Stock-Level : 0.002  (0.018)
 <TpmC>
-36235 Tpmc
+37166 Tpmc
 ```
 #### 👉[check more](tpcc/README.md)
 
