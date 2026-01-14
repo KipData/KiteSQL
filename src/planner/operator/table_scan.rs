@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::Operator;
+use super::{Operator, SortOption};
 use crate::catalog::{ColumnRef, TableCatalog, TableName};
+use crate::errors::DatabaseError;
+use crate::expression::ScalarExpression;
+use crate::planner::operator::sort::SortField;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Bounds;
 use crate::types::index::IndexInfo;
@@ -44,7 +47,7 @@ impl TableScanOperator {
         table_name: TableName,
         table_catalog: &TableCatalog,
         with_pk: bool,
-    ) -> LogicalPlan {
+    ) -> Result<LogicalPlan, DatabaseError> {
         let primary_keys = table_catalog
             .primary_keys()
             .iter()
@@ -56,18 +59,35 @@ impl TableScanOperator {
             .enumerate()
             .map(|(i, column)| (i, column.clone()))
             .collect();
-        let index_infos = table_catalog
-            .indexes
-            .iter()
-            .map(|meta| IndexInfo {
-                meta: meta.clone(),
+        let mut index_infos = Vec::with_capacity(table_catalog.indexes.len());
+
+        for index_meta in table_catalog.indexes.iter() {
+            let mut sort_fields = Vec::with_capacity(index_meta.column_ids.len());
+            for col_id in &index_meta.column_ids {
+                let column = table_catalog.get_column_by_id(col_id).ok_or_else(|| {
+                    DatabaseError::ColumnNotFound(format!("index column id: {col_id} not found"))
+                })?;
+                sort_fields.push(SortField {
+                    expr: ScalarExpression::column_expr(column.clone()),
+                    asc: true,
+                    nulls_first: true,
+                })
+            }
+
+            index_infos.push(IndexInfo {
+                meta: index_meta.clone(),
+                sort_option: SortOption::OrderBy {
+                    fields: sort_fields,
+                    ignore_prefix_len: 0,
+                },
                 range: None,
                 covered_deserializers: None,
                 cover_mapping: None,
-            })
-            .collect_vec();
+                sort_elimination_hint: None,
+            });
+        }
 
-        LogicalPlan::new(
+        Ok(LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
                 index_infos,
                 table_name,
@@ -77,7 +97,7 @@ impl TableScanOperator {
                 with_pk,
             }),
             Childrens::None,
-        )
+        ))
     }
 }
 

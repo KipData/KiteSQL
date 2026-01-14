@@ -16,7 +16,7 @@ use crate::catalog::view::View;
 use crate::catalog::{ColumnRef, ColumnRelation, TableMeta};
 use crate::errors::DatabaseError;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
-use crate::storage::{PrimaryKeyRemap, TableCache, Transaction};
+use crate::storage::{TableCache, Transaction};
 use crate::types::index::{Index, IndexId, IndexMeta, IndexType, INDEX_ID_LEN};
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::{Tuple, TupleId};
@@ -32,6 +32,10 @@ pub(crate) const BOUND_MIN_TAG: u8 = u8::MIN;
 pub(crate) const BOUND_MAX_TAG: u8 = u8::MAX;
 pub(crate) const NULL_TAG: u8 = 0u8;
 pub(crate) const NOTNULL_TAG: u8 = 1u8;
+const TABLE_NAME_HASH_LEN: usize = 8;
+const KEY_TYPE_TAG_LEN: usize = 1;
+const KEY_BOUND_LEN: usize = 1;
+const TUPLE_KEY_PREFIX_LEN: usize = TABLE_NAME_HASH_LEN + KEY_TYPE_TAG_LEN + KEY_BOUND_LEN;
 
 static ROOT_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"Root".to_vec());
 static VIEW_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"View".to_vec());
@@ -298,15 +302,19 @@ impl TableCodec {
         Ok(key_prefix)
     }
 
+    pub fn decode_tuple_key(bytes: &[u8], pk_ty: &LogicalType) -> Result<TupleId, DatabaseError> {
+        DataValue::memcomparable_decode(&mut Cursor::new(&bytes[TUPLE_KEY_PREFIX_LEN..]), pk_ty)
+    }
+
     #[inline]
     pub fn decode_tuple(
         deserializers: &[TupleValueSerializableImpl],
-        pk_indices: &PrimaryKeyRemap,
+        tuple_id: Option<TupleId>,
         bytes: &[u8],
         values_len: usize,
         total_len: usize,
     ) -> Result<Tuple, DatabaseError> {
-        Tuple::deserialize_from(deserializers, pk_indices, bytes, values_len, total_len)
+        Tuple::deserialize_from(deserializers, tuple_id, bytes, values_len, total_len)
     }
 
     pub fn encode_index_meta_key(
@@ -405,7 +413,7 @@ impl TableCodec {
         mapping: Option<TupleMappingRef<'_>>,
     ) -> Result<DataValue, DatabaseError> {
         // Hash + TypeTag + Bound Min + Index Id Len + Bound Min
-        let start = 8 + 1 + 1 + 1 + INDEX_ID_LEN;
+        let start = TUPLE_KEY_PREFIX_LEN + INDEX_ID_LEN + KEY_BOUND_LEN;
         DataValue::memcomparable_decode_mapping(&mut Cursor::new(&bytes[start..]), ty, mapping)
     }
 
@@ -570,7 +578,7 @@ mod tests {
     use crate::serdes::ReferenceTables;
     use crate::storage::rocksdb::RocksTransaction;
     use crate::storage::table_codec::{BumpBytes, TableCodec};
-    use crate::storage::{PrimaryKeyRemap, Storage};
+    use crate::storage::Storage;
     use crate::types::index::{Index, IndexMeta, IndexType};
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
@@ -625,13 +633,7 @@ mod tests {
 
         tuple.pk = None;
         assert_eq!(
-            TableCodec::decode_tuple(
-                &deserializers,
-                &PrimaryKeyRemap::None,
-                &bytes,
-                deserializers.len(),
-                2,
-            )?,
+            TableCodec::decode_tuple(&deserializers, None, &bytes, deserializers.len(), 2,)?,
             tuple
         );
 

@@ -407,6 +407,17 @@ impl ScalarExpression {
                 self.0.push(col.clone());
                 Ok(())
             }
+
+            fn visit_alias(
+                &mut self,
+                expr: &ScalarExpression,
+                ty: &AliasType,
+            ) -> Result<(), DatabaseError> {
+                if let AliasType::Expr(alias_expr) = ty {
+                    self.0.push(alias_expr.output_column());
+                }
+                self.visit(expr)
+            }
         }
         struct OutputColumnCollector(Vec<ColumnRef>);
         impl Visitor<'_> for OutputColumnCollector {

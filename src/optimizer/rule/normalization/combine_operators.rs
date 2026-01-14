@@ -190,7 +190,7 @@ mod tests {
     use crate::errors::DatabaseError;
     use crate::expression::{BinaryOperator, ScalarExpression};
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
-    use crate::optimizer::heuristic::optimizer::HepOptimizer;
+    use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::Operator;
     use crate::planner::Childrens;
@@ -201,12 +201,16 @@ mod tests {
         let table_state = build_t1_table()?;
         let plan = table_state.plan("select c1 from (select c1, c2 from t1) t")?;
 
-        let optimizer = HepOptimizer::new(plan).batch(
-            "test_collapse_project".to_string(),
-            HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::CollapseProject],
-        );
-        let best_plan = optimizer.find_best::<RocksTransaction>(None)?;
+        let pipeline = HepOptimizerPipeline::builder()
+            .before_batch(
+                "test_collapse_project".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![NormalizationRuleImpl::CollapseProject],
+            )
+            .build();
+        let best_plan = pipeline
+            .instantiate(plan)
+            .find_best::<RocksTransaction>(None)?;
 
         if let Operator::Project(op) = &best_plan.operator {
             assert_eq!(op.exprs.len(), 1);
@@ -234,12 +238,16 @@ mod tests {
         let original_grandchild = original_child.childrens.pop_only();
         assert!(matches!(original_grandchild.operator, Operator::Project(_)));
 
-        let optimizer = HepOptimizer::new(plan).batch(
-            "test_collapse_project_with_alias".to_string(),
-            HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::CollapseProject],
-        );
-        let best_plan = optimizer.find_best::<RocksTransaction>(None)?;
+        let pipeline = HepOptimizerPipeline::builder()
+            .before_batch(
+                "test_collapse_project_with_alias".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![NormalizationRuleImpl::CollapseProject],
+            )
+            .build();
+        let best_plan = pipeline
+            .instantiate(plan)
+            .find_best::<RocksTransaction>(None)?;
         if let Operator::Project(op) = &best_plan.operator {
             assert_eq!(op.exprs.len(), 1);
         } else {
@@ -263,12 +271,16 @@ mod tests {
         let plan =
             table_state.plan("select * from (select * from t1 where c1 > 1) t where 1 = 1")?;
 
-        let optimizer = HepOptimizer::new(plan).batch(
-            "test_combine_filter".to_string(),
-            HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::CombineFilter],
-        );
-        let best_plan = optimizer.find_best::<RocksTransaction>(None)?;
+        let pipeline = HepOptimizerPipeline::builder()
+            .before_batch(
+                "test_combine_filter".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![NormalizationRuleImpl::CombineFilter],
+            )
+            .build();
+        let best_plan = pipeline
+            .instantiate(plan)
+            .find_best::<RocksTransaction>(None)?;
 
         let filter_op = best_plan.childrens.pop_only();
         if let Operator::Filter(op) = &filter_op.operator {
@@ -289,13 +301,17 @@ mod tests {
         let table_state = build_t1_table()?;
         let plan = table_state.plan("select distinct c1, c2 from t1 group by c1, c2")?;
 
-        let optimizer = HepOptimizer::new(plan.clone()).batch(
-            "test_collapse_group_by_agg".to_string(),
-            HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::CollapseGroupByAgg],
-        );
+        let pipeline = HepOptimizerPipeline::builder()
+            .before_batch(
+                "test_collapse_group_by_agg".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![NormalizationRuleImpl::CollapseGroupByAgg],
+            )
+            .build();
 
-        let best_plan = optimizer.find_best::<RocksTransaction>(None)?;
+        let best_plan = pipeline
+            .instantiate(plan)
+            .find_best::<RocksTransaction>(None)?;
 
         let agg_op = best_plan.childrens.pop_only();
         if let Operator::Aggregate(_) = &agg_op.operator {

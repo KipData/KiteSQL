@@ -273,9 +273,9 @@ mod test {
     use crate::execution::dql::join::hash_join::HashJoin;
     use crate::execution::dql::test::build_integers;
     use crate::execution::{try_collect, ReadExecutor};
-    use crate::expression::ScalarExpression;
+    use crate::expression::{BinaryOperator, ScalarExpression};
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
-    use crate::optimizer::heuristic::optimizer::HepOptimizer;
+    use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
     use crate::planner::operator::values::ValuesOperator;
@@ -291,6 +291,21 @@ mod test {
     use std::hash::RandomState;
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    fn optimize_exprs(plan: LogicalPlan) -> Result<LogicalPlan, DatabaseError> {
+        HepOptimizerPipeline::builder()
+            .before_batch(
+                "Expression Remapper".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![
+                    NormalizationRuleImpl::BindExpressionPosition,
+                    NormalizationRuleImpl::EvaluatorBind,
+                ],
+            )
+            .build()
+            .instantiate(plan)
+            .find_best::<RocksTransaction>(None)
+    }
 
     fn build_join_values() -> (
         Vec<(ScalarExpression, ScalarExpression)>,
@@ -399,17 +414,7 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = HepOptimizer::new(plan)
-            .batch(
-                "Expression Remapper".to_string(),
-                HepBatchStrategy::once_topdown(),
-                vec![
-                    NormalizationRuleImpl::BindExpressionPosition,
-                    // TIPS: This rule is necessary
-                    NormalizationRuleImpl::EvaluatorBind,
-                ],
-            )
-            .find_best::<RocksTransaction>(None)?;
+        let plan = optimize_exprs(plan)?;
 
         let Operator::Join(op) = plan.operator else {
             unreachable!()
@@ -460,17 +465,7 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = HepOptimizer::new(plan)
-            .batch(
-                "Expression Remapper".to_string(),
-                HepBatchStrategy::once_topdown(),
-                vec![
-                    NormalizationRuleImpl::BindExpressionPosition,
-                    // TIPS: This rule is necessary
-                    NormalizationRuleImpl::EvaluatorBind,
-                ],
-            )
-            .find_best::<RocksTransaction>(None)?;
+        let plan = optimize_exprs(plan)?;
 
         let Operator::Join(op) = plan.operator else {
             unreachable!()
@@ -568,17 +563,7 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = HepOptimizer::new(plan)
-            .batch(
-                "Expression Remapper".to_string(),
-                HepBatchStrategy::once_topdown(),
-                vec![
-                    NormalizationRuleImpl::BindExpressionPosition,
-                    // TIPS: This rule is necessary
-                    NormalizationRuleImpl::EvaluatorBind,
-                ],
-            )
-            .find_best::<RocksTransaction>(None)?;
+        let plan = optimize_exprs(plan)?;
 
         let Operator::Join(op) = plan.operator else {
             unreachable!()
@@ -611,6 +596,97 @@ mod test {
     }
 
     #[test]
+    fn test_right_join_filter_only_left_columns() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let storage = RocksStorage::new(temp_dir.path())?;
+        let mut transaction = storage.transaction()?;
+        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+
+        let desc = ColumnDesc::new(LogicalType::Integer, None, false, None)?;
+        let left_columns = vec![
+            ColumnRef::from(ColumnCatalog::new("k".to_string(), true, desc.clone())),
+            ColumnRef::from(ColumnCatalog::new("v".to_string(), true, desc.clone())),
+        ];
+        let right_columns = vec![ColumnRef::from(ColumnCatalog::new(
+            "rk".to_string(),
+            true,
+            desc.clone(),
+        ))];
+
+        let on_keys = vec![(
+            ScalarExpression::column_expr(left_columns[0].clone()),
+            ScalarExpression::column_expr(right_columns[0].clone()),
+        )];
+        let filter_expr = ScalarExpression::Binary {
+            op: BinaryOperator::Gt,
+            left_expr: Box::new(ScalarExpression::column_expr(left_columns[1].clone())),
+            right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(1))),
+            evaluator: None,
+            ty: LogicalType::Boolean,
+        };
+
+        let left = LogicalPlan {
+            operator: Operator::Values(ValuesOperator {
+                rows: vec![
+                    vec![DataValue::Int32(2), DataValue::Int32(0)],
+                    vec![DataValue::Int32(2), DataValue::Int32(5)],
+                ],
+                schema_ref: Arc::new(left_columns),
+            }),
+            childrens: Box::new(Childrens::None),
+            physical_option: None,
+            _output_schema_ref: None,
+        };
+        let right = LogicalPlan {
+            operator: Operator::Values(ValuesOperator {
+                rows: vec![vec![DataValue::Int32(2)]],
+                schema_ref: Arc::new(right_columns),
+            }),
+            childrens: Box::new(Childrens::None),
+            physical_option: None,
+            _output_schema_ref: None,
+        };
+
+        let plan = LogicalPlan::new(
+            Operator::Join(JoinOperator {
+                on: JoinCondition::On {
+                    on: on_keys,
+                    filter: Some(filter_expr),
+                },
+                join_type: JoinType::RightOuter,
+            }),
+            Childrens::Twins {
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        );
+
+        let plan = optimize_exprs(plan)?;
+
+        let Operator::Join(op) = plan.operator else {
+            unreachable!()
+        };
+        let (left, right) = plan.childrens.pop_twins();
+        let executor = HashJoin::from((op, left, right))
+            .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
+        let tuples = try_collect(executor)?;
+
+        assert_eq!(tuples.len(), 1);
+        assert_eq!(
+            tuples[0].values,
+            vec![
+                DataValue::Int32(2),
+                DataValue::Int32(5),
+                DataValue::Int32(2)
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_full_join() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
@@ -633,17 +709,7 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = HepOptimizer::new(plan)
-            .batch(
-                "Expression Remapper".to_string(),
-                HepBatchStrategy::once_topdown(),
-                vec![
-                    NormalizationRuleImpl::BindExpressionPosition,
-                    // TIPS: This rule is necessary
-                    NormalizationRuleImpl::EvaluatorBind,
-                ],
-            )
-            .find_best::<RocksTransaction>(None)?;
+        let plan = optimize_exprs(plan)?;
 
         let Operator::Join(op) = plan.operator else {
             unreachable!()

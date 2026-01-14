@@ -40,6 +40,7 @@ impl<'a> JoinProbeState<'a> for RightJoinState {
             } = probe_args
             {
                 let mut has_filtered = false;
+                let mut produced = false;
                 for (_, Tuple { values, pk }) in build_state.tuples.iter() {
                     let full_values =
                         Vec::from_iter(values.iter().chain(probe_tuple.values.iter()).cloned());
@@ -49,18 +50,21 @@ impl<'a> JoinProbeState<'a> for RightJoinState {
                         Some(filter_args) => {
                             if !throw!(co, filter(&full_values, filter_args)) {
                                 has_filtered = true;
-                                co.yield_(Ok(FullJoinState::full_right_row(
-                                    left_schema_len,
-                                    &probe_tuple,
-                                )))
-                                .await;
                                 continue;
                             }
                         }
                     }
+                    produced = true;
                     co.yield_(Ok(Tuple::new(pk.clone(), full_values))).await;
                 }
-                build_state.is_used = !has_filtered;
+                if !produced {
+                    co.yield_(Ok(FullJoinState::full_right_row(
+                        left_schema_len,
+                        &probe_tuple,
+                    )))
+                    .await;
+                }
+                build_state.is_used = produced;
                 build_state.has_filted = has_filtered;
                 return;
             }

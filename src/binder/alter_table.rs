@@ -44,7 +44,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 if_not_exists,
                 column_def,
             } => {
-                let plan = TableScanOperator::build(table_name.clone(), table, true);
+                let plan = TableScanOperator::build(table_name.clone(), table, true)?;
                 let column = self.bind_column(column_def, None)?;
 
                 if !is_valid_identifier(column.name()) {
@@ -66,7 +66,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 if_exists,
                 ..
             } => {
-                let plan = TableScanOperator::build(table_name.clone(), table, true);
+                let plan = TableScanOperator::build(table_name.clone(), table, true)?;
                 let column_name = column_name.value.clone();
 
                 LogicalPlan::new(

@@ -17,7 +17,7 @@ use crate::optimizer::core::memo::{Expression, GroupExpression};
 use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
 use crate::optimizer::core::rule::{ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::planner::operator::{Operator, PhysicalOption};
+use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
 use crate::single_mapping;
 use crate::storage::Transaction;
 use std::sync::LazyLock;
@@ -33,5 +33,5 @@ pub struct AddColumnImplementation;
 single_mapping!(
     AddColumnImplementation,
     ADD_COLUMN_PATTERN,
-    PhysicalOption::AddColumn
+    PhysicalOption::new(PlanImpl::AddColumn, SortOption::None)
 );

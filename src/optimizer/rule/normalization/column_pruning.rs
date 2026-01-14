@@ -228,7 +228,7 @@ mod tests {
     use crate::binder::test::build_t1_table;
     use crate::errors::DatabaseError;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
-    use crate::optimizer::heuristic::optimizer::HepOptimizer;
+    use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::join::JoinCondition;
     use crate::planner::operator::Operator;
@@ -240,12 +240,15 @@ mod tests {
         let table_state = build_t1_table()?;
         let plan = table_state.plan("select c1, c3 from t1 left join t2 on c1 = c3")?;
 
-        let best_plan = HepOptimizer::new(plan.clone())
-            .batch(
+        let pipeline = HepOptimizerPipeline::builder()
+            .before_batch(
                 "test_column_pruning".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::ColumnPruning],
             )
+            .build();
+        let best_plan = pipeline
+            .instantiate(plan)
             .find_best::<RocksTransaction>(None)?;
 
         assert!(matches!(best_plan.childrens.as_ref(), Childrens::Only(_)));

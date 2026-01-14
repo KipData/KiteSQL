@@ -26,7 +26,7 @@ use crate::function::numbers::Numbers;
 use crate::function::octet_length::OctetLength;
 use crate::function::upper::Upper;
 use crate::optimizer::heuristic::batch::HepBatchStrategy;
-use crate::optimizer::heuristic::optimizer::HepOptimizer;
+use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
 use crate::optimizer::rule::implementation::ImplementationRuleImpl;
 use crate::optimizer::rule::normalization::NormalizationRuleImpl;
 use crate::parser::parse_sql;
@@ -148,10 +148,103 @@ impl DataBaseBuilder {
                 meta_cache,
                 table_cache,
                 view_cache,
+                optimizer_pipeline: default_optimizer_pipeline(),
                 _p: Default::default(),
             }),
         })
     }
+}
+
+fn default_optimizer_pipeline() -> HepOptimizerPipeline {
+    HepOptimizerPipeline::builder()
+        .before_batch(
+            "Column Pruning".to_string(),
+            HepBatchStrategy::once_topdown(),
+            vec![NormalizationRuleImpl::ColumnPruning],
+        )
+        .before_batch(
+            "Simplify Filter".to_string(),
+            HepBatchStrategy::fix_point_topdown(10),
+            vec![
+                NormalizationRuleImpl::SimplifyFilter,
+                NormalizationRuleImpl::ConstantCalculation,
+            ],
+        )
+        .before_batch(
+            "Predicate Pushdown".to_string(),
+            HepBatchStrategy::fix_point_topdown(10),
+            vec![
+                NormalizationRuleImpl::PushPredicateThroughJoin,
+                NormalizationRuleImpl::PushJoinPredicateIntoScan,
+                NormalizationRuleImpl::PushPredicateIntoScan,
+            ],
+        )
+        .before_batch(
+            "Limit Pushdown".to_string(),
+            HepBatchStrategy::fix_point_topdown(10),
+            vec![
+                NormalizationRuleImpl::LimitProjectTranspose,
+                NormalizationRuleImpl::PushLimitThroughJoin,
+                NormalizationRuleImpl::PushLimitIntoTableScan,
+            ],
+        )
+        .before_batch(
+            "Combine Operators".to_string(),
+            HepBatchStrategy::fix_point_topdown(10),
+            vec![
+                NormalizationRuleImpl::CollapseProject,
+                NormalizationRuleImpl::CollapseGroupByAgg,
+                NormalizationRuleImpl::CombineFilter,
+            ],
+        )
+        .before_batch(
+            "TopK".to_string(),
+            HepBatchStrategy::once_topdown(),
+            vec![NormalizationRuleImpl::TopK],
+        )
+        .after_batch(
+            "Eliminate Redundant Sort".to_string(),
+            HepBatchStrategy::once_topdown(),
+            vec![NormalizationRuleImpl::EliminateRedundantSort],
+        )
+        .after_batch(
+            "Expression Remapper".to_string(),
+            HepBatchStrategy::once_topdown(),
+            vec![
+                NormalizationRuleImpl::BindExpressionPosition,
+                NormalizationRuleImpl::EvaluatorBind,
+            ],
+        )
+        .implementations(vec![
+            // DQL
+            ImplementationRuleImpl::SimpleAggregate,
+            ImplementationRuleImpl::GroupByAggregate,
+            ImplementationRuleImpl::Dummy,
+            ImplementationRuleImpl::Filter,
+            ImplementationRuleImpl::HashJoin,
+            ImplementationRuleImpl::Limit,
+            ImplementationRuleImpl::Projection,
+            ImplementationRuleImpl::SeqScan,
+            ImplementationRuleImpl::IndexScan,
+            ImplementationRuleImpl::FunctionScan,
+            ImplementationRuleImpl::Sort,
+            ImplementationRuleImpl::TopK,
+            ImplementationRuleImpl::Values,
+            // DML
+            ImplementationRuleImpl::Analyze,
+            ImplementationRuleImpl::CopyFromFile,
+            ImplementationRuleImpl::CopyToFile,
+            ImplementationRuleImpl::Delete,
+            ImplementationRuleImpl::Insert,
+            ImplementationRuleImpl::Update,
+            // DLL
+            ImplementationRuleImpl::AddColumn,
+            ImplementationRuleImpl::CreateTable,
+            ImplementationRuleImpl::DropColumn,
+            ImplementationRuleImpl::DropTable,
+            ImplementationRuleImpl::Truncate,
+        ])
+        .build()
 }
 
 pub(crate) struct State<S> {
@@ -160,6 +253,7 @@ pub(crate) struct State<S> {
     meta_cache: StatisticsMetaCache,
     table_cache: TableCache,
     view_cache: ViewCache,
+    optimizer_pipeline: HepOptimizerPipeline,
     _p: PhantomData<S>,
 }
 
@@ -182,6 +276,7 @@ impl<S: Storage> State<S> {
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn build_plan<A: AsRef<[(&'static str, DataValue)]>>(
+        &self,
         stmt: &Statement,
         params: A,
         table_cache: &TableCache,
@@ -211,96 +306,12 @@ impl<S: Storage> State<S> {
         ///     Limit(1)
         ///       Project(a,b)
         let source_plan = binder.bind(stmt)?;
-        let best_plan = Self::default_optimizer(source_plan)
+        let best_plan = self
+            .optimizer_pipeline
+            .instantiate(source_plan)
             .find_best(Some(&transaction.meta_loader(meta_cache)))?;
 
         Ok(best_plan)
-    }
-
-    pub(crate) fn default_optimizer(source_plan: LogicalPlan) -> HepOptimizer {
-        HepOptimizer::new(source_plan)
-            .batch(
-                "Column Pruning".to_string(),
-                HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::ColumnPruning],
-            )
-            .batch(
-                "Simplify Filter".to_string(),
-                HepBatchStrategy::fix_point_topdown(10),
-                vec![
-                    NormalizationRuleImpl::SimplifyFilter,
-                    NormalizationRuleImpl::ConstantCalculation,
-                ],
-            )
-            .batch(
-                "Predicate Pushdown".to_string(),
-                HepBatchStrategy::fix_point_topdown(10),
-                vec![
-                    NormalizationRuleImpl::PushPredicateThroughJoin,
-                    NormalizationRuleImpl::PushPredicateIntoScan,
-                ],
-            )
-            .batch(
-                "Limit Pushdown".to_string(),
-                HepBatchStrategy::fix_point_topdown(10),
-                vec![
-                    NormalizationRuleImpl::LimitProjectTranspose,
-                    NormalizationRuleImpl::PushLimitThroughJoin,
-                    NormalizationRuleImpl::PushLimitIntoTableScan,
-                ],
-            )
-            .batch(
-                "Combine Operators".to_string(),
-                HepBatchStrategy::fix_point_topdown(10),
-                vec![
-                    NormalizationRuleImpl::CollapseProject,
-                    NormalizationRuleImpl::CollapseGroupByAgg,
-                    NormalizationRuleImpl::CombineFilter,
-                ],
-            )
-            .batch(
-                "TopK".to_string(),
-                HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::TopK],
-            )
-            .batch(
-                "Expression Remapper".to_string(),
-                HepBatchStrategy::once_topdown(),
-                vec![
-                    NormalizationRuleImpl::BindExpressionPosition,
-                    // TIPS: This rule is necessary
-                    NormalizationRuleImpl::EvaluatorBind,
-                ],
-            )
-            .implementations(vec![
-                // DQL
-                ImplementationRuleImpl::SimpleAggregate,
-                ImplementationRuleImpl::GroupByAggregate,
-                ImplementationRuleImpl::Dummy,
-                ImplementationRuleImpl::Filter,
-                ImplementationRuleImpl::HashJoin,
-                ImplementationRuleImpl::Limit,
-                ImplementationRuleImpl::Projection,
-                ImplementationRuleImpl::SeqScan,
-                ImplementationRuleImpl::IndexScan,
-                ImplementationRuleImpl::FunctionScan,
-                ImplementationRuleImpl::Sort,
-                ImplementationRuleImpl::TopK,
-                ImplementationRuleImpl::Values,
-                // DML
-                ImplementationRuleImpl::Analyze,
-                ImplementationRuleImpl::CopyFromFile,
-                ImplementationRuleImpl::CopyToFile,
-                ImplementationRuleImpl::Delete,
-                ImplementationRuleImpl::Insert,
-                ImplementationRuleImpl::Update,
-                // DLL
-                ImplementationRuleImpl::AddColumn,
-                ImplementationRuleImpl::CreateTable,
-                ImplementationRuleImpl::DropColumn,
-                ImplementationRuleImpl::DropTable,
-                ImplementationRuleImpl::Truncate,
-            ])
     }
 
     fn prepare<T: AsRef<str>>(&self, sql: T) -> Result<Statement, DatabaseError> {
@@ -314,7 +325,7 @@ impl<S: Storage> State<S> {
         stmt: &Statement,
         params: A,
     ) -> Result<(SchemaRef, Executor<'a>), DatabaseError> {
-        let mut plan = Self::build_plan(
+        let mut plan = self.build_plan(
             stmt,
             params,
             self.table_cache(),
@@ -629,9 +640,9 @@ pub(crate) mod test {
 
             assert_eq!(
                 iter.next().unwrap()?.values[0].utf8().unwrap(),
-                "Projection [t1.a, t1.b] [Project]
-  Filter (t1.b > 0), Is Having: false [Filter]
-    TableScan t1 -> [a, b] [SeqScan]"
+                "Projection [t1.a, t1.b] [Project => (Sort Option: Follow)]
+  Filter (t1.b > 0), Is Having: false [Filter => (Sort Option: Follow)]
+    TableScan t1 -> [a, b] [SeqScan => (Sort Option: None)]"
             )
         }
         // Aggregate
@@ -651,10 +662,10 @@ pub(crate) mod test {
             )?;
             assert_eq!(
                 iter.next().unwrap()?.values[0].utf8().unwrap(),
-                "Projection [(t1.a + 0), Max((t1.b + 0))] [Project]
-  Aggregate [Max((t1.b + 0))] -> Group By [(t1.a + 0)] [HashAggregate]
-    Filter (t1.b > 1), Is Having: false [Filter]
-      TableScan t1 -> [a, b] [SeqScan]"
+                "Projection [(t1.a + 0), Max((t1.b + 0))] [Project => (Sort Option: Follow)]
+  Aggregate [Max((t1.b + 0))] -> Group By [(t1.a + 0)] [HashAggregate => (Sort Option: None)]
+    Filter (t1.b > 1), Is Having: false [Filter => (Sort Option: Follow)]
+      TableScan t1 -> [a, b] [SeqScan => (Sort Option: None)]"
             )
         }
         {
@@ -671,14 +682,14 @@ pub(crate) mod test {
             )?;
             assert_eq!(
                 iter.next().unwrap()?.values[0].utf8().unwrap(),
-                "Projection [t1.a, t1.b, 9] [Project]
-  LeftOuter Join Where (t1.a > 0) [NestLoopJoin]
-    Projection [t1.a, t1.b] [Project]
-      Filter (t1.b > 0), Is Having: false [Filter]
-        TableScan t1 -> [a, b] [SeqScan]
-    Projection [t1.a, t1.b] [Project]
-      Filter (t1.a > 1), Is Having: false [Filter]
-        TableScan t1 -> [a, b] [SeqScan]"
+                "Projection [t1.a, t1.b, 9] [Project => (Sort Option: Follow)]
+  LeftOuter Join Where (t1.a > 0) [NestLoopJoin => (Sort Option: None)]
+    Projection [t1.a, t1.b] [Project => (Sort Option: Follow)]
+      Filter (t1.b > 0), Is Having: false [Filter => (Sort Option: Follow)]
+        TableScan t1 -> [a, b] [SeqScan => (Sort Option: None)]
+    Projection [t1.a, t1.b] [Project => (Sort Option: Follow)]
+      Filter (t1.a > 1), Is Having: false [Filter => (Sort Option: Follow)]
+        TableScan t1 -> [a, b] [SeqScan => (Sort Option: None)]"
             )
         }
 

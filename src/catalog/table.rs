@@ -38,7 +38,7 @@ pub struct TableCatalog {
     schema_ref: SchemaRef,
     primary_keys: Vec<(usize, ColumnRef)>,
     primary_key_indices: PrimaryKeyIndices,
-    primary_key_type: Option<LogicalType>,
+    primary_key_type: LogicalType,
 }
 
 //TODO: can add some like Table description and other information as attributes
@@ -99,6 +99,10 @@ impl TableCatalog {
         &self.primary_keys
     }
 
+    pub(crate) fn primary_keys_type(&self) -> &LogicalType {
+        &self.primary_key_type
+    }
+
     pub(crate) fn primary_keys_indices(&self) -> &PrimaryKeyIndices {
         &self.primary_key_indices
     }
@@ -144,23 +148,7 @@ impl TableCatalog {
         }
 
         let index_id = self.indexes.last().map(|index| index.id + 1).unwrap_or(0);
-        let pk_ty = self
-            .primary_key_type
-            .get_or_insert_with(|| {
-                let primary_keys = &self.primary_keys;
-
-                if primary_keys.len() == 1 {
-                    primary_keys[0].1.datatype().clone()
-                } else {
-                    LogicalType::Tuple(
-                        primary_keys
-                            .iter()
-                            .map(|(_, column)| column.datatype().clone())
-                            .collect_vec(),
-                    )
-                }
-            })
-            .clone();
+        let pk_ty = self.primary_key_type.clone();
 
         let mut val_tys = Vec::with_capacity(column_ids.len());
         for column_id in column_ids.iter() {
@@ -205,7 +193,7 @@ impl TableCatalog {
             schema_ref: Arc::new(vec![]),
             primary_keys: vec![],
             primary_key_indices: Default::default(),
-            primary_key_type: None,
+            primary_key_type: LogicalType::SqlNull,
         };
         let mut generator = Generator::new();
         for col_catalog in columns.into_iter() {
@@ -216,10 +204,24 @@ impl TableCatalog {
         let (primary_keys, primary_key_indices) =
             Self::build_primary_keys(&table_catalog.schema_ref);
 
+        table_catalog.primary_key_type = Self::build_primary_key_type(&primary_keys);
         table_catalog.primary_keys = primary_keys;
         table_catalog.primary_key_indices = primary_key_indices;
 
         Ok(table_catalog)
+    }
+
+    fn build_primary_key_type(primary_keys: &[(usize, ColumnRef)]) -> LogicalType {
+        if primary_keys.len() == 1 {
+            primary_keys[0].1.datatype().clone()
+        } else {
+            LogicalType::Tuple(
+                primary_keys
+                    .iter()
+                    .map(|(_, column)| column.datatype().clone())
+                    .collect_vec(),
+            )
+        }
     }
 
     pub(crate) fn reload(
@@ -240,6 +242,7 @@ impl TableCatalog {
         }
         let schema_ref = Arc::new(column_refs.clone());
         let (primary_keys, primary_key_indices) = Self::build_primary_keys(&schema_ref);
+        let primary_key_type = Self::build_primary_key_type(&primary_keys);
 
         Ok(TableCatalog {
             name,
@@ -249,7 +252,7 @@ impl TableCatalog {
             schema_ref,
             primary_keys,
             primary_key_indices,
-            primary_key_type: None,
+            primary_key_type,
         })
     }
 
