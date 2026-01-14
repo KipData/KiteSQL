@@ -27,12 +27,10 @@ use crate::optimizer::rule::normalization::compilation_in_advance::{
 use crate::optimizer::rule::normalization::pushdown_limit::{
     LimitProjectTranspose, PushLimitIntoScan, PushLimitThroughJoin,
 };
-use crate::optimizer::rule::normalization::pushdown_predicates::{
-    PushJoinPredicateIntoScan, PushPredicateIntoScan, PushPredicateThroughJoin,
-};
+use crate::optimizer::rule::normalization::pushdown_predicates::PushPredicateIntoScan;
+use crate::optimizer::rule::normalization::pushdown_predicates::PushPredicateThroughJoin;
 use crate::optimizer::rule::normalization::simplification::ConstantCalculation;
 use crate::optimizer::rule::normalization::simplification::SimplifyFilter;
-use crate::optimizer::rule::normalization::sort_elimination::EliminateRedundantSort;
 use crate::optimizer::rule::normalization::top_k::TopK;
 use crate::planner::LogicalPlan;
 mod column_pruning;
@@ -41,9 +39,7 @@ mod compilation_in_advance;
 mod pushdown_limit;
 mod pushdown_predicates;
 mod simplification;
-mod sort_elimination;
 mod top_k;
-pub use sort_elimination::annotate_sort_preserving_indexes;
 
 #[derive(Debug, Copy, Clone)]
 pub enum NormalizationRuleImpl {
@@ -58,7 +54,6 @@ pub enum NormalizationRuleImpl {
     PushLimitIntoTableScan,
     // PushDown predicates
     PushPredicateThroughJoin,
-    PushJoinPredicateIntoScan,
     // Tips: need to be used with `SimplifyFilter`
     PushPredicateIntoScan,
     // Simplification
@@ -68,7 +63,6 @@ pub enum NormalizationRuleImpl {
     BindExpressionPosition,
     EvaluatorBind,
     TopK,
-    EliminateRedundantSort,
 }
 
 impl MatchPattern for NormalizationRuleImpl {
@@ -82,14 +76,12 @@ impl MatchPattern for NormalizationRuleImpl {
             NormalizationRuleImpl::PushLimitThroughJoin => PushLimitThroughJoin.pattern(),
             NormalizationRuleImpl::PushLimitIntoTableScan => PushLimitIntoScan.pattern(),
             NormalizationRuleImpl::PushPredicateThroughJoin => PushPredicateThroughJoin.pattern(),
-            NormalizationRuleImpl::PushJoinPredicateIntoScan => PushJoinPredicateIntoScan.pattern(),
             NormalizationRuleImpl::PushPredicateIntoScan => PushPredicateIntoScan.pattern(),
             NormalizationRuleImpl::SimplifyFilter => SimplifyFilter.pattern(),
             NormalizationRuleImpl::ConstantCalculation => ConstantCalculation.pattern(),
             NormalizationRuleImpl::BindExpressionPosition => BindExpressionPosition.pattern(),
             NormalizationRuleImpl::EvaluatorBind => EvaluatorBind.pattern(),
             NormalizationRuleImpl::TopK => TopK.pattern(),
-            NormalizationRuleImpl::EliminateRedundantSort => EliminateRedundantSort.pattern(),
         }
     }
 }
@@ -105,16 +97,12 @@ impl NormalizationRule for NormalizationRuleImpl {
             NormalizationRuleImpl::PushLimitThroughJoin => PushLimitThroughJoin.apply(plan),
             NormalizationRuleImpl::PushLimitIntoTableScan => PushLimitIntoScan.apply(plan),
             NormalizationRuleImpl::PushPredicateThroughJoin => PushPredicateThroughJoin.apply(plan),
-            NormalizationRuleImpl::PushJoinPredicateIntoScan => {
-                PushJoinPredicateIntoScan.apply(plan)
-            }
             NormalizationRuleImpl::SimplifyFilter => SimplifyFilter.apply(plan),
             NormalizationRuleImpl::PushPredicateIntoScan => PushPredicateIntoScan.apply(plan),
             NormalizationRuleImpl::ConstantCalculation => ConstantCalculation.apply(plan),
             NormalizationRuleImpl::BindExpressionPosition => BindExpressionPosition.apply(plan),
             NormalizationRuleImpl::EvaluatorBind => EvaluatorBind.apply(plan),
             NormalizationRuleImpl::TopK => TopK.apply(plan),
-            NormalizationRuleImpl::EliminateRedundantSort => EliminateRedundantSort.apply(plan),
         }
     }
 }

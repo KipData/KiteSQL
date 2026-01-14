@@ -388,7 +388,7 @@ mod test {
     use crate::execution::{try_collect, ReadExecutor};
     use crate::expression::ScalarExpression;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
-    use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
+    use crate::optimizer::heuristic::optimizer::HepOptimizer;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
@@ -404,21 +404,6 @@ mod test {
     use std::hash::RandomState;
     use std::sync::Arc;
     use tempfile::TempDir;
-
-    fn optimize_exprs(plan: LogicalPlan) -> Result<LogicalPlan, DatabaseError> {
-        HepOptimizerPipeline::builder()
-            .before_batch(
-                "Expression Remapper".to_string(),
-                HepBatchStrategy::once_topdown(),
-                vec![
-                    NormalizationRuleImpl::BindExpressionPosition,
-                    NormalizationRuleImpl::EvaluatorBind,
-                ],
-            )
-            .build()
-            .instantiate(plan)
-            .find_best::<RocksTransaction>(None)
-    }
 
     fn tuple_to_strings(tuple: &Tuple) -> Vec<Option<String>> {
         tuple
@@ -583,7 +568,17 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = optimize_exprs(plan)?;
+        let plan = HepOptimizer::new(plan)
+            .batch(
+                "Expression Remapper".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![
+                    NormalizationRuleImpl::BindExpressionPosition,
+                    // TIPS: This rule is necessary
+                    NormalizationRuleImpl::EvaluatorBind,
+                ],
+            )
+            .find_best::<RocksTransaction>(None)?;
         let Operator::Join(op) = plan.operator else {
             unreachable!()
         };
@@ -623,7 +618,17 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = optimize_exprs(plan)?;
+        let plan = HepOptimizer::new(plan)
+            .batch(
+                "Expression Remapper".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![
+                    NormalizationRuleImpl::BindExpressionPosition,
+                    // TIPS: This rule is necessary
+                    NormalizationRuleImpl::EvaluatorBind,
+                ],
+            )
+            .find_best::<RocksTransaction>(None)?;
         let Operator::Join(op) = plan.operator else {
             unreachable!()
         };
@@ -675,7 +680,17 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = optimize_exprs(plan)?;
+        let plan = HepOptimizer::new(plan)
+            .batch(
+                "Expression Remapper".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![
+                    NormalizationRuleImpl::BindExpressionPosition,
+                    // TIPS: This rule is necessary
+                    NormalizationRuleImpl::EvaluatorBind,
+                ],
+            )
+            .find_best::<RocksTransaction>(None)?;
         let Operator::Join(op) = plan.operator else {
             unreachable!()
         };
@@ -716,7 +731,17 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = optimize_exprs(plan)?;
+        let plan = HepOptimizer::new(plan)
+            .batch(
+                "Expression Remapper".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![
+                    NormalizationRuleImpl::BindExpressionPosition,
+                    // TIPS: This rule is necessary
+                    NormalizationRuleImpl::EvaluatorBind,
+                ],
+            )
+            .find_best::<RocksTransaction>(None)?;
         let Operator::Join(op) = plan.operator else {
             unreachable!()
         };
@@ -760,7 +785,17 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = optimize_exprs(plan)?;
+        let plan = HepOptimizer::new(plan)
+            .batch(
+                "Expression Remapper".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![
+                    NormalizationRuleImpl::BindExpressionPosition,
+                    // TIPS: This rule is necessary
+                    NormalizationRuleImpl::EvaluatorBind,
+                ],
+            )
+            .find_best::<RocksTransaction>(None)?;
         let Operator::Join(op) = plan.operator else {
             unreachable!()
         };
@@ -796,7 +831,17 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = optimize_exprs(plan)?;
+        let plan = HepOptimizer::new(plan)
+            .batch(
+                "Expression Remapper".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![
+                    NormalizationRuleImpl::BindExpressionPosition,
+                    // TIPS: This rule is necessary
+                    NormalizationRuleImpl::EvaluatorBind,
+                ],
+            )
+            .find_best::<RocksTransaction>(None)?;
         let Operator::Join(op) = plan.operator else {
             unreachable!()
         };
@@ -835,7 +880,17 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = optimize_exprs(plan)?;
+        let plan = HepOptimizer::new(plan)
+            .batch(
+                "Expression Remapper".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![
+                    NormalizationRuleImpl::BindExpressionPosition,
+                    // TIPS: This rule is necessary
+                    NormalizationRuleImpl::EvaluatorBind,
+                ],
+            )
+            .find_best::<RocksTransaction>(None)?;
         let Operator::Join(op) = plan.operator else {
             unreachable!()
         };
@@ -876,7 +931,17 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = optimize_exprs(plan)?;
+        let plan = HepOptimizer::new(plan)
+            .batch(
+                "Expression Remapper".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![
+                    NormalizationRuleImpl::BindExpressionPosition,
+                    // TIPS: This rule is necessary
+                    NormalizationRuleImpl::EvaluatorBind,
+                ],
+            )
+            .find_best::<RocksTransaction>(None)?;
         let Operator::Join(op) = plan.operator else {
             unreachable!()
         };
@@ -922,7 +987,17 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = optimize_exprs(plan)?;
+        let plan = HepOptimizer::new(plan)
+            .batch(
+                "Expression Remapper".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![
+                    NormalizationRuleImpl::BindExpressionPosition,
+                    // TIPS: This rule is necessary
+                    NormalizationRuleImpl::EvaluatorBind,
+                ],
+            )
+            .find_best::<RocksTransaction>(None)?;
         let Operator::Join(op) = plan.operator else {
             unreachable!()
         };

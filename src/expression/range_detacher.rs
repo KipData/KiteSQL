@@ -807,7 +807,7 @@ mod test {
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::{Range, RangeDetacher};
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
-    use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
+    use crate::optimizer::heuristic::optimizer::HepOptimizer;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::filter::FilterOperator;
     use crate::planner::operator::Operator;
@@ -819,15 +819,12 @@ mod test {
     use std::ops::Bound;
 
     fn plan_filter(plan: LogicalPlan) -> Result<Option<FilterOperator>, DatabaseError> {
-        let pipeline = HepOptimizerPipeline::builder()
-            .before_batch(
+        let best_plan = HepOptimizer::new(plan.clone())
+            .batch(
                 "test_simplify_filter".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::SimplifyFilter],
             )
-            .build();
-        let best_plan = pipeline
-            .instantiate(plan)
             .find_best::<RocksTransaction>(None)?;
         if let Operator::Filter(filter_op) = best_plan.childrens.pop_only().operator {
             Ok(Some(filter_op))

@@ -145,14 +145,12 @@ mod tests {
     use crate::db::{DataBaseBuilder, ResultIter};
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
-    use crate::expression::ScalarExpression;
     use crate::optimizer::core::memo::Memo;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
-    use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
+    use crate::optimizer::heuristic::optimizer::HepOptimizer;
     use crate::optimizer::rule::implementation::ImplementationRuleImpl;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
-    use crate::planner::operator::sort::SortField;
-    use crate::planner::operator::{PhysicalOption, PlanImpl, SortOption};
+    use crate::planner::operator::PhysicalOption;
     use crate::storage::rocksdb::RocksTransaction;
     use crate::storage::{Storage, Transaction};
     use crate::types::index::{IndexInfo, IndexMeta, IndexType};
@@ -183,16 +181,13 @@ mod tests {
         database.run("analyze table t1")?.done()?;
 
         let transaction = database.storage.transaction()?;
-        let c1_column = transaction
-            .table(database.state.table_cache(), "t1".to_string().into())?
-            .unwrap()
-            .get_column_by_name("c1")
-            .unwrap();
-        let sort_fields = vec![SortField::new(
-            ScalarExpression::column_expr(c1_column.clone()),
-            true,
-            true,
-        )];
+        let c1_column_id = {
+            transaction
+                .table(database.state.table_cache(), "t1".to_string().into())?
+                .unwrap()
+                .get_column_id_by_name("c1")
+                .unwrap()
+        };
         let scala_functions = Default::default();
         let table_functions = Default::default();
         let mut binder = Binder::new(
@@ -212,24 +207,20 @@ mod tests {
             "select c1, c3 from t1 inner join t2 on c1 = c3 where (c1 > 40 or c1 = 2) and c3 > 22",
         )?;
         let plan = binder.bind(&stmt[0])?;
-        let pipeline = HepOptimizerPipeline::builder()
-            .before_batch(
+        let mut best_plan = HepOptimizer::new(plan)
+            .batch(
                 "Simplify Filter".to_string(),
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::SimplifyFilter],
             )
-            .before_batch(
+            .batch(
                 "Predicate Pushdown".to_string(),
                 HepBatchStrategy::fix_point_topdown(10),
                 vec![
                     NormalizationRuleImpl::PushPredicateThroughJoin,
-                    NormalizationRuleImpl::PushJoinPredicateIntoScan,
                     NormalizationRuleImpl::PushPredicateIntoScan,
                 ],
             )
-            .build();
-        let mut best_plan = pipeline
-            .instantiate(plan)
             .find_best::<RocksTransaction>(None)?;
         let rules = vec![
             ImplementationRuleImpl::Projection,
@@ -252,18 +243,9 @@ mod tests {
 
         assert_eq!(exprs.exprs.len(), 2);
         assert_eq!(exprs.exprs[0].cost, Some(1000));
-        assert_eq!(
-            exprs.exprs[0].op,
-            PhysicalOption::new(PlanImpl::SeqScan, SortOption::None)
-        );
+        assert_eq!(exprs.exprs[0].op, PhysicalOption::SeqScan);
         assert!(exprs.exprs[1].cost.unwrap() >= 960);
-        assert!(matches!(
-            exprs.exprs[1].op,
-            PhysicalOption {
-                plan: PlanImpl::IndexScan(..),
-                ..
-            }
-        ));
+        assert!(matches!(exprs.exprs[1].op, PhysicalOption::IndexScan(_)));
         assert_eq!(
             best_plan
                 .childrens
@@ -274,37 +256,26 @@ mod tests {
                 .childrens
                 .pop_only()
                 .physical_option,
-            Some(PhysicalOption::new(
-                PlanImpl::IndexScan(IndexInfo {
-                    meta: Arc::new(IndexMeta {
-                        id: 0,
-                        column_ids: vec![c1_column.id().unwrap()],
-                        table_name: "t1".to_string().into(),
-                        pk_ty: LogicalType::Integer,
-                        value_ty: LogicalType::Integer,
-                        name: "pk_index".to_string(),
-                        ty: IndexType::PrimaryKey { is_multiple: false },
-                    }),
-                    sort_option: SortOption::OrderBy {
-                        fields: sort_fields.clone(),
-                        ignore_prefix_len: 0,
-                    },
-                    range: Some(Range::SortedRanges(vec![
-                        Range::Eq(DataValue::Int32(2)),
-                        Range::Scope {
-                            min: Bound::Excluded(DataValue::Int32(40)),
-                            max: Bound::Unbounded,
-                        }
-                    ])),
-                    covered_deserializers: None,
-                    cover_mapping: None,
-                    sort_elimination_hint: None,
+            Some(PhysicalOption::IndexScan(IndexInfo {
+                meta: Arc::new(IndexMeta {
+                    id: 0,
+                    column_ids: vec![*c1_column_id],
+                    table_name: "t1".to_string().into(),
+                    pk_ty: LogicalType::Integer,
+                    value_ty: LogicalType::Integer,
+                    name: "pk_index".to_string(),
+                    ty: IndexType::PrimaryKey { is_multiple: false },
                 }),
-                SortOption::OrderBy {
-                    fields: sort_fields,
-                    ignore_prefix_len: 0,
-                }
-            ))
+                range: Some(Range::SortedRanges(vec![
+                    Range::Eq(DataValue::Int32(2)),
+                    Range::Scope {
+                        min: Bound::Excluded(DataValue::Int32(40)),
+                        max: Bound::Unbounded,
+                    }
+                ])),
+                covered_deserializers: None,
+                cover_mapping: None,
+            }))
         );
 
         Ok(())

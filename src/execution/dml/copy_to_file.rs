@@ -195,7 +195,7 @@ mod tests {
 
         let executor = CopyToFile {
             op: op.clone(),
-            input: TableScanOperator::build("t1".to_string().into(), table, true)?,
+            input: TableScanOperator::build("t1".to_string().into(), table, true),
         };
         let mut executor = executor.execute(
             (

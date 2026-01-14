@@ -541,7 +541,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             .source_and_bind(table_name.clone(), table_alias.as_ref(), join_type, false)?
             .ok_or(DatabaseError::SourceNotFound)?;
         let mut plan = match source {
-            Source::Table(table) => TableScanOperator::build(table_name.clone(), table, with_pk)?,
+            Source::Table(table) => TableScanOperator::build(table_name.clone(), table, with_pk),
             Source::View(view) => LogicalPlan::clone(&view.plan),
         };
 

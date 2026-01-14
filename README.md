@@ -88,17 +88,15 @@ run `cargo run -p tpcc --release` to run tpcc
 - 32.0 GB
 - KIOXIA-EXCERIA PLUS G3 SSD
 - Tips: TPC-C currently only supports single thread
-
-All cases have been fully optimized.
 ```shell
 <90th Percentile RT (MaxRT)>
-   New-Order : 0.002  (0.012)
-     Payment : 0.001  (0.002)
-Order-Status : 0.002  (0.019)
+   New-Order : 0.002  (0.005)
+     Payment : 0.001  (0.003)
+Order-Status : 0.057  (0.088)
     Delivery : 0.001  (0.001)
- Stock-Level : 0.002  (0.018)
+ Stock-Level : 0.002  (0.006)
 <TpmC>
-37166 Tpmc
+11125 Tpmc
 ```
 #### 👉[check more](tpcc/README.md)
 

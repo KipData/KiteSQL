@@ -63,7 +63,6 @@ use crate::planner::operator::except::ExceptOperator;
 use crate::planner::operator::function_scan::FunctionScanOperator;
 use crate::planner::operator::insert::InsertOperator;
 use crate::planner::operator::join::JoinCondition;
-use crate::planner::operator::sort::SortField;
 use crate::planner::operator::top_k::TopKOperator;
 use crate::planner::operator::truncate::TruncateOperator;
 use crate::planner::operator::union::UnionOperator;
@@ -116,36 +115,7 @@ pub enum Operator {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
-pub enum SortOption {
-    OrderBy {
-        fields: Vec<SortField>,
-        // When indexing, the output columns can ignore the order of the first few columns due to equality queries in the range prefix, thus satisfying diverse sort_fields.
-        // e.g.: index (c1, c2, c3) range where c1 = 1, c2 = 2, c3 > 3,
-        // sort_fields can be c1, c2, c3, or even just c2, c3, in which case ignore_prefix_len is 2.
-        ignore_prefix_len: usize,
-    },
-    Follow,
-    None,
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
-pub struct PhysicalOption {
-    pub plan: PlanImpl,
-    sort_option: SortOption,
-}
-
-impl PhysicalOption {
-    pub fn new(plan: PlanImpl, sort_option: SortOption) -> Self {
-        Self { plan, sort_option }
-    }
-
-    pub fn sort_option(&self) -> &SortOption {
-        &self.sort_option
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
-pub enum PlanImpl {
+pub enum PhysicalOption {
     Dummy,
     SimpleAggregate,
     HashAggregate,
@@ -365,63 +335,34 @@ impl fmt::Display for Operator {
 }
 
 impl fmt::Display for PhysicalOption {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{} => (Sort Option: {})", self.plan, self.sort_option)?;
-        Ok(())
-    }
-}
-
-impl fmt::Display for SortOption {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            SortOption::OrderBy {
-                fields,
-                ignore_prefix_len,
-            } => {
-                write!(f, "OrderBy: (")?;
-                for (i, sort_field) in fields.iter().enumerate() {
-                    write!(f, "{sort_field}")?;
-                    if fields.len() - 1 != i {
-                        write!(f, ", ")?;
-                    }
-                }
-                write!(f, ") ignore_prefix_len: {ignore_prefix_len}")
-            }
-            SortOption::Follow => write!(f, "Follow"),
-            SortOption::None => write!(f, "None"),
-        }
-    }
-}
-
-impl fmt::Display for PlanImpl {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
-            PlanImpl::Dummy => write!(f, "Dummy"),
-            PlanImpl::SimpleAggregate => write!(f, "SimpleAggregate"),
-            PlanImpl::HashAggregate => write!(f, "HashAggregate"),
-            PlanImpl::Filter => write!(f, "Filter"),
-            PlanImpl::HashJoin => write!(f, "HashJoin"),
-            PlanImpl::NestLoopJoin => write!(f, "NestLoopJoin"),
-            PlanImpl::Project => write!(f, "Project"),
-            PlanImpl::SeqScan => write!(f, "SeqScan"),
-            PlanImpl::FunctionScan => write!(f, "FunctionScan"),
-            PlanImpl::IndexScan(index) => write!(f, "IndexScan By {index}"),
-            PlanImpl::Sort => write!(f, "Sort"),
-            PlanImpl::Limit => write!(f, "Limit"),
-            PlanImpl::TopK => write!(f, "TopK"),
-            PlanImpl::Values => write!(f, "Values"),
-            PlanImpl::Insert => write!(f, "Insert"),
-            PlanImpl::Update => write!(f, "Update"),
-            PlanImpl::Delete => write!(f, "Delete"),
-            PlanImpl::AddColumn => write!(f, "AddColumn"),
-            PlanImpl::DropColumn => write!(f, "DropColumn"),
-            PlanImpl::CreateTable => write!(f, "CreateTable"),
-            PlanImpl::DropTable => write!(f, "DropTable"),
-            PlanImpl::Truncate => write!(f, "Truncate"),
-            PlanImpl::Show => write!(f, "Show"),
-            PlanImpl::CopyFromFile => write!(f, "CopyFromFile"),
-            PlanImpl::CopyToFile => write!(f, "CopyToFile"),
-            PlanImpl::Analyze => write!(f, "Analyze"),
+            PhysicalOption::Dummy => write!(f, "Dummy"),
+            PhysicalOption::SimpleAggregate => write!(f, "SimpleAggregate"),
+            PhysicalOption::HashAggregate => write!(f, "HashAggregate"),
+            PhysicalOption::Filter => write!(f, "Filter"),
+            PhysicalOption::HashJoin => write!(f, "HashJoin"),
+            PhysicalOption::NestLoopJoin => write!(f, "NestLoopJoin"),
+            PhysicalOption::Project => write!(f, "Project"),
+            PhysicalOption::SeqScan => write!(f, "SeqScan"),
+            PhysicalOption::FunctionScan => write!(f, "FunctionScan"),
+            PhysicalOption::IndexScan(index) => write!(f, "IndexScan By {index}"),
+            PhysicalOption::Sort => write!(f, "Sort"),
+            PhysicalOption::Limit => write!(f, "Limit"),
+            PhysicalOption::TopK => write!(f, "TopK"),
+            PhysicalOption::Values => write!(f, "Values"),
+            PhysicalOption::Insert => write!(f, "Insert"),
+            PhysicalOption::Update => write!(f, "Update"),
+            PhysicalOption::Delete => write!(f, "Delete"),
+            PhysicalOption::AddColumn => write!(f, "AddColumn"),
+            PhysicalOption::DropColumn => write!(f, "DropColumn"),
+            PhysicalOption::CreateTable => write!(f, "CreateTable"),
+            PhysicalOption::DropTable => write!(f, "DropTable"),
+            PhysicalOption::Truncate => write!(f, "Truncate"),
+            PhysicalOption::Show => write!(f, "Show"),
+            PhysicalOption::CopyFromFile => write!(f, "CopyFromFile"),
+            PhysicalOption::CopyToFile => write!(f, "CopyToFile"),
+            PhysicalOption::Analyze => write!(f, "Analyze"),
         }
     }
 }

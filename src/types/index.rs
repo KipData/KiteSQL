@@ -16,7 +16,6 @@ use crate::catalog::{TableCatalog, TableName};
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::Range;
 use crate::expression::ScalarExpression;
-use crate::planner::operator::SortOption;
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::value::DataValue;
 use crate::types::{ColumnId, LogicalType};
@@ -41,11 +40,9 @@ pub enum IndexType {
 #[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]
 pub struct IndexInfo {
     pub(crate) meta: IndexMetaRef,
-    pub(crate) sort_option: SortOption,
     pub(crate) range: Option<Range>,
     pub(crate) covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
     pub(crate) cover_mapping: Option<Vec<usize>>,
-    pub(crate) sort_elimination_hint: Option<usize>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]

@@ -18,7 +18,7 @@ use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
 use crate::optimizer::core::rule::{ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::planner::operator::join::{JoinCondition, JoinOperator};
-use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
+use crate::planner::operator::{Operator, PhysicalOption};
 use crate::storage::Transaction;
 use std::sync::LazyLock;
 
@@ -43,7 +43,7 @@ impl<T: Transaction> ImplementationRule<T> for JoinImplementation {
         _: &StatisticMetaLoader<'_, T>,
         group_expr: &mut GroupExpression,
     ) -> Result<(), DatabaseError> {
-        let mut physical_option = PhysicalOption::new(PlanImpl::NestLoopJoin, SortOption::None);
+        let mut physical_option = PhysicalOption::NestLoopJoin;
 
         if let Operator::Join(JoinOperator {
             on: JoinCondition::On { on, .. },
@@ -51,7 +51,7 @@ impl<T: Transaction> ImplementationRule<T> for JoinImplementation {
         }) = op
         {
             if !on.is_empty() {
-                physical_option.plan = PlanImpl::HashJoin;
+                physical_option = PhysicalOption::HashJoin;
             }
         }
         group_expr.append_expr(Expression {

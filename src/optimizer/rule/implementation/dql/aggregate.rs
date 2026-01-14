@@ -17,7 +17,7 @@ use crate::optimizer::core::memo::{Expression, GroupExpression};
 use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
 use crate::optimizer::core::rule::{ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
+use crate::planner::operator::{Operator, PhysicalOption};
 use crate::single_mapping;
 use crate::storage::Transaction;
 use std::sync::LazyLock;
@@ -48,7 +48,7 @@ pub struct GroupByAggregateImplementation;
 single_mapping!(
     GroupByAggregateImplementation,
     GROUP_BY_AGGREGATE_PATTERN,
-    PhysicalOption::new(PlanImpl::HashAggregate, SortOption::None)
+    PhysicalOption::HashAggregate
 );
 
 pub struct SimpleAggregateImplementation;
@@ -56,5 +56,5 @@ pub struct SimpleAggregateImplementation;
 single_mapping!(
     SimpleAggregateImplementation,
     SIMPLE_AGGREGATE_PATTERN,
-    PhysicalOption::new(PlanImpl::SimpleAggregate, SortOption::None)
+    PhysicalOption::SimpleAggregate
 );

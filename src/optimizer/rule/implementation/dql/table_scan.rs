@@ -17,7 +17,7 @@ use crate::optimizer::core::memo::{Expression, GroupExpression};
 use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
 use crate::optimizer::core::rule::{ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
+use crate::planner::operator::{Operator, PhysicalOption};
 use crate::storage::Transaction;
 use crate::types::index::IndexType;
 use std::sync::LazyLock;
@@ -54,9 +54,10 @@ impl<T: Transaction> ImplementationRule<T> for SeqScanImplementation {
                 .map(|statistics_meta| statistics_meta.histogram().values_len());
 
             group_expr.append_expr(Expression {
-                op: PhysicalOption::new(PlanImpl::SeqScan, SortOption::None),
+                op: PhysicalOption::SeqScan,
                 cost,
             });
+
             Ok(())
         } else {
             unreachable!("invalid operator!")
@@ -91,6 +92,7 @@ impl<T: Transaction> ImplementationRule<T> for IndexScanImplementation {
                         loader.load(&scan_op.table_name, index_info.meta.id)?
                     {
                         let mut row_count = statistics_meta.collect_count(range)?;
+
                         if index_info.covered_deserializers.is_none()
                             && !matches!(index_info.meta.ty, IndexType::PrimaryKey { .. })
                         {
@@ -101,21 +103,10 @@ impl<T: Transaction> ImplementationRule<T> for IndexScanImplementation {
                     }
                 }
 
-                if let (Some(covered), Some(row_count)) = (index_info.sort_elimination_hint, cost) {
-                    let rows = row_count.max(1) as f64;
-                    let raw_bonus = rows * rows.log2();
-                    // TODO: replace this heuristic with accurate row-count driven sort cost once available.
-                    let bonus = (raw_bonus as usize) / covered.max(1);
-                    cost = Some(row_count.saturating_sub(bonus));
-                }
-
                 group_expr.append_expr(Expression {
-                    op: PhysicalOption::new(
-                        PlanImpl::IndexScan(index_info.clone()),
-                        index_info.sort_option.clone(),
-                    ),
+                    op: PhysicalOption::IndexScan(index_info.clone()),
                     cost,
-                });
+                })
             }
 
             Ok(())

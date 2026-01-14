@@ -17,7 +17,8 @@ use crate::optimizer::core::memo::{Expression, GroupExpression};
 use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
 use crate::optimizer::core::rule::{ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
+use crate::planner::operator::{Operator, PhysicalOption};
+use crate::single_mapping;
 use crate::storage::Transaction;
 use std::sync::LazyLock;
 
@@ -29,32 +30,4 @@ static SORT_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
 #[derive(Clone)]
 pub struct SortImplementation;
 
-impl MatchPattern for SortImplementation {
-    fn pattern(&self) -> &Pattern {
-        &SORT_PATTERN
-    }
-}
-
-impl<T: Transaction> ImplementationRule<T> for SortImplementation {
-    fn to_expression(
-        &self,
-        op: &Operator,
-        _: &StatisticMetaLoader<'_, T>,
-        group_expr: &mut GroupExpression,
-    ) -> Result<(), DatabaseError> {
-        if let Operator::Sort(op) = op {
-            group_expr.append_expr(Expression {
-                op: PhysicalOption::new(
-                    PlanImpl::Sort,
-                    SortOption::OrderBy {
-                        fields: op.sort_fields.clone(),
-                        ignore_prefix_len: 0,
-                    },
-                ),
-                cost: None,
-            });
-        }
-
-        Ok(())
-    }
-}
+single_mapping!(SortImplementation, SORT_PATTERN, PhysicalOption::Sort);

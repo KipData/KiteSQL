@@ -54,7 +54,7 @@ use crate::execution::dql::top_k::TopK;
 use crate::execution::dql::union::Union;
 use crate::execution::dql::values::Values;
 use crate::planner::operator::join::JoinCondition;
-use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
+use crate::planner::operator::{Operator, PhysicalOption};
 use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::types::index::IndexInfo;
@@ -120,14 +120,7 @@ pub fn build_read<'a, T: Transaction + 'a>(
 
             match &op.on {
                 JoinCondition::On { on, .. }
-                    if !on.is_empty()
-                        && matches!(
-                            plan.physical_option,
-                            Some(PhysicalOption {
-                                plan: PlanImpl::HashJoin,
-                                ..
-                            })
-                        ) =>
+                    if !on.is_empty() && plan.physical_option == Some(PhysicalOption::HashJoin) =>
                 {
                     HashJoin::from((op, left_input, right_input)).execute(cache, transaction)
                 }
@@ -142,18 +135,12 @@ pub fn build_read<'a, T: Transaction + 'a>(
             Projection::from((op, input)).execute(cache, transaction)
         }
         Operator::TableScan(op) => {
-            if let Some(PhysicalOption {
-                plan:
-                    PlanImpl::IndexScan(IndexInfo {
-                        meta,
-                        range: Some(range),
-                        covered_deserializers,
-                        cover_mapping,
-                        sort_option: _,
-                        sort_elimination_hint: _,
-                    }),
-                ..
-            }) = plan.physical_option
+            if let Some(PhysicalOption::IndexScan(IndexInfo {
+                meta,
+                range: Some(range),
+                covered_deserializers,
+                cover_mapping,
+            })) = plan.physical_option
             {
                 IndexScan::from((op, meta, range, covered_deserializers, cover_mapping))
                     .execute(cache, transaction)

@@ -118,9 +118,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         target: ext_source,
                         schema_ref,
                     }),
-                    Childrens::Only(Box::new(TableScanOperator::build(
-                        table_name, table, false,
-                    )?)),
+                    Childrens::Only(Box::new(TableScanOperator::build(table_name, table, false))),
                 ))
             } else {
                 // COPY <dest_table> FROM <source_file>
