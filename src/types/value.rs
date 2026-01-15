@@ -422,6 +422,14 @@ impl DataValue {
         }
     }
 
+    pub fn new_utf8(string: String) -> Self {
+        DataValue::Utf8 {
+            ty: Utf8Type::Fixed(string.len() as u32),
+            value: string,
+            unit: CharLengthUnits::Characters,
+        }
+    }
+
     pub fn date(&self) -> Option<NaiveDate> {
         if let DataValue::Date32(val) = self {
             NaiveDate::from_num_days_from_ce_opt(*val)

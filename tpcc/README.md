@@ -1,5 +1,7 @@
 # TPCC on KiteSQL
-run `cargo run -p tpcc --release` to run tpcc
+Run `make tpcc` (or `cargo run -p tpcc --release`) to exercise the workload on KiteSQL's native storage.
+
+Run `make tpcc-dual` (or `cargo run -p tpcc --release -- --backend dual`) to execute the workload on KiteSQL while mirroring every statement to an in-memory SQLite database; the runner asserts that both engines return identical tuples, making it ideal for correctness validation.
 
 - i9-13900HX
 - 32.0 GB
@@ -78,11 +80,6 @@ Order-Status : 0.002  (0.019)
 <TpmC>
 37166 Tpmc
 ```
-
-## Explain
-run `cargo test -p tpcc explain_tpcc -- --ignored` to explain tpcc statements
-
-Tips: after TPCC loaded tables
 
 ## Refer to
 - https://github.com/AgilData/tpcc

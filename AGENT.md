@@ -88,6 +88,9 @@ PRs that modify logic but leave obvious test gaps untouched may be rejected.
 
 If something can be written clearly using fewer concepts, do that.
 
+- Prefer incremental fixes: solve the problem at hand with the smallest reasonable change
+  before introducing new abstractions or generalizations.
+
 ---
 
 ### 3.2 Low Comments, High Signal

@@ -82,7 +82,8 @@ for tuple in iter {
 - [transaction](examples/transaction.rs)
 
 ## TPC-C
-run `cargo run -p tpcc --release` to run tpcc
+Run `make tpcc` (or `cargo run -p tpcc --release`) to execute the benchmark against the default KiteSQL storage.  
+Run `make tpcc-dual` (or `cargo run -p tpcc --release -- --backend dual`) to mirror every TPCC statement to an in-memory SQLite database alongside KiteSQL and assert the two engines return identical results.
 
 - i9-13900HX
 - 32.0 GB

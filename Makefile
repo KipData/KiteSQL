@@ -47,6 +47,10 @@ check: fmt clippy
 tpcc:
 	$(CARGO) run -p tpcc --release
 
+## Execute TPCC while mirroring every statement to an in-memory SQLite instance for validation.
+tpcc-dual:
+	$(CARGO) run -p tpcc --release -- --backend dual
+
 ## Run JavaScript-based Wasm example scripts.
 wasm-examples:
 	node examples/wasm_hello_world.test.mjs

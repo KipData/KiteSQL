@@ -130,26 +130,30 @@ pub trait Transaction: Sized {
                 columns.insert(*i, column.clone());
             }
         }
-        let (inner, deserializers, cover_mapping) =
-            match (covered_deserializers, cover_mapping_indices) {
-                (Some(deserializers), mapping) => {
-                    let tuple_len = match &index_meta.value_ty {
-                        LogicalType::Tuple(tys) => tys.len(),
-                        _ => 1,
-                    };
-                    let cover_mapping = mapping.map(|slots| TupleMapping::new(slots, tuple_len));
+        let is_primary_index = matches!(index_meta.ty, IndexType::PrimaryKey { .. });
+        let (inner, deserializers, cover_mapping) = match (
+            covered_deserializers,
+            cover_mapping_indices,
+            is_primary_index,
+        ) {
+            (Some(deserializers), mapping, false) => {
+                let tuple_len = match &index_meta.value_ty {
+                    LogicalType::Tuple(tys) => tys.len(),
+                    _ => 1,
+                };
+                let cover_mapping = mapping.map(|slots| TupleMapping::new(slots, tuple_len));
 
-                    (
-                        IndexImplEnum::Covered(CoveredIndexImpl),
-                        deserializers,
-                        cover_mapping,
-                    )
-                }
-                (None, _) => {
-                    let deserializers = Self::create_deserializers(&columns, table);
-                    (IndexImplEnum::instance(index_meta.ty), deserializers, None)
-                }
-            };
+                (
+                    IndexImplEnum::Covered(CoveredIndexImpl),
+                    deserializers,
+                    cover_mapping,
+                )
+            }
+            _ => {
+                let deserializers = Self::create_deserializers(&columns, table);
+                (IndexImplEnum::instance(index_meta.ty), deserializers, None)
+            }
+        };
 
         Ok(IndexIter {
             offset,
@@ -1320,7 +1324,6 @@ impl<T: Transaction> Iter for IndexIter<'_, T> {
 
                             let mut encode_max = bound_encode(max, true)?;
                             check_bound(&mut encode_max, bound_max);
-
                             let iter = self.params.tx.range(encode_min, encode_max)?;
                             self.state = IndexIterState::Range(iter);
                         }

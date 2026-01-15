@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::backend::dual::DualBackend;
+use crate::backend::kite::KiteBackend;
+use crate::backend::{
+    BackendControl, BackendTransaction, ColumnType, PreparedStatement, StatementSpec,
+};
 use crate::delivery::DeliveryTest;
 use crate::load::Load;
 use crate::new_ord::NewOrdTest;
@@ -20,16 +25,16 @@ use crate::payment::PaymentTest;
 use crate::rt_hist::RtHist;
 use crate::slev::SlevTest;
 use crate::utils::SeqGen;
-use clap::Parser;
-use kite_sql::db::{DBTransaction, DataBaseBuilder, Statement};
+use clap::{Parser, ValueEnum};
+use indicatif::{ProgressBar, ProgressStyle};
 use kite_sql::errors::DatabaseError;
-use kite_sql::storage::Storage;
 use rand::prelude::ThreadRng;
 use rand::Rng;
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+mod backend;
 mod delivery;
 mod load;
 mod new_ord;
@@ -48,27 +53,36 @@ pub(crate) const RT_LIMITS: [Duration; 5] = [
     Duration::from_secs(8),
     Duration::from_secs(2),
 ];
+const TX_NAMES: [&str; 5] = [
+    "New-Order",
+    "Payment",
+    "Order-Status",
+    "Delivery",
+    "Stock-Level",
+];
+pub(crate) const STOCK_LEVEL_DISTINCT_SQL: &str = "SELECT DISTINCT ol_i_id FROM order_line WHERE ol_w_id = ?1 AND ol_d_id = ?2 AND ol_o_id < ?3 AND ol_o_id >= (?4 - 20)";
+pub(crate) const STOCK_LEVEL_DISTINCT_SQLITE: &str = "SELECT DISTINCT ol_i_id FROM (SELECT ol_i_id FROM order_line WHERE ol_w_id = ?1 AND ol_d_id = ?2 AND ol_o_id < ?3 AND ol_o_id >= (?4 - 20) ORDER BY ol_o_id, ol_d_id, ol_w_id)";
 
-pub(crate) trait TpccTransaction<S: Storage> {
+pub(crate) trait TpccTransaction {
     type Args;
 
     fn run(
-        tx: &mut DBTransaction<S>,
+        tx: &mut dyn BackendTransaction,
         args: &Self::Args,
-        statements: &[Statement],
+        statements: &[PreparedStatement],
     ) -> Result<(), TpccError>;
 }
 
-pub(crate) trait TpccTest<S: Storage> {
+pub(crate) trait TpccTest {
     fn name(&self) -> &'static str;
 
     fn do_transaction(
         &self,
         rng: &mut ThreadRng,
-        tx: &mut DBTransaction<S>,
+        tx: &mut dyn BackendTransaction,
         num_ware: usize,
         args: &TpccArgs,
-        statements: &[Statement],
+        statements: &[PreparedStatement],
     ) -> Result<(), TpccError>;
 }
 
@@ -83,6 +97,8 @@ struct Args {
     joins: bool,
     #[clap(long, default_value = "kite_sql_tpcc")]
     path: String,
+    #[clap(long, value_enum, default_value = "kite")]
+    backend: BackendKind,
     #[clap(long, default_value = "5")]
     max_retry: usize,
     #[clap(long, default_value = "720")]
@@ -91,120 +107,58 @@ struct Args {
     num_ware: usize,
 }
 
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum BackendKind {
+    Kite,
+    Dual,
+}
+
 // TODO: Support multi-threaded TPCC
 fn main() -> Result<(), TpccError> {
     let args = Args::parse();
-    let db_path = Path::new(&args.path);
-    if db_path.exists() {
-        fs::remove_dir_all(db_path)?;
+    let mut rng = rand::thread_rng();
+
+    match args.backend {
+        BackendKind::Kite => {
+            let db_path = Path::new(&args.path);
+            if db_path.exists() {
+                fs::remove_dir_all(db_path)?;
+            }
+            let backend = KiteBackend::new(&args.path)?;
+            run_tpcc(&backend, &args, &mut rng)?;
+        }
+        BackendKind::Dual => {
+            let db_path = Path::new(&args.path);
+            if db_path.exists() {
+                fs::remove_dir_all(db_path)?;
+            }
+            let backend = DualBackend::new(&args.path)?;
+            run_tpcc(&backend, &args, &mut rng)?;
+        }
     }
 
-    let mut rng = rand::thread_rng();
-    let database = DataBaseBuilder::path(&args.path).build()?;
+    Ok(())
+}
 
-    Load::load_items(&mut rng, &database)?;
-    Load::load_warehouses(&mut rng, &database, args.num_ware)?;
-    Load::load_custs(&mut rng, &database, args.num_ware)?;
-    Load::load_ord(&mut rng, &database, args.num_ware)?;
+fn run_tpcc<B: BackendControl>(
+    backend: &B,
+    args: &Args,
+    rng: &mut ThreadRng,
+) -> Result<(), TpccError> {
+    Load::load_items(rng, backend)?;
+    Load::load_warehouses(rng, backend, args.num_ware)?;
+    Load::load_custs(rng, backend, args.num_ware)?;
+    Load::load_ord(rng, backend, args.num_ware)?;
 
-    let test_statements = vec![
-        // New-Order: order creation and stock reservation.
-        vec![
-            // Hot join fetching customer credit + warehouse tax.
-            database.prepare("SELECT c.c_discount, c.c_last, c.c_credit, w.w_tax FROM customer AS c JOIN warehouse AS w ON c.c_w_id = w_id AND w.w_id = ?1 AND c.c_w_id = ?2 AND c.c_d_id = ?3 AND c.c_id = ?4")?,
-            // PK lookup of customer row.
-            database.prepare("SELECT c_discount, c_last, c_credit FROM customer WHERE c_w_id = ?1 AND c_d_id = ?2 AND c_id = ?3")?,
-            // Single-row warehouse tax read.
-            database.prepare("SELECT w_tax FROM warehouse WHERE w_id = ?1")?,
-            // Next order id lookup; serialized per district.
-            database.prepare("SELECT d_next_o_id, d_tax FROM district WHERE d_id = ?1 AND d_w_id = ?2")?,
-            // Hot-row update on d_next_o_id.
-            database.prepare("UPDATE district SET d_next_o_id = ?1 + 1 WHERE d_id = ?2 AND d_w_id = ?3")?,
-            // Orders insert touches multiple indexes.
-            database.prepare("INSERT INTO orders (o_id, o_d_id, o_w_id, o_c_id, o_entry_d, o_ol_cnt, o_all_local) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)")?,
-            // Append to new_orders queue.
-            database.prepare("INSERT INTO new_orders (no_o_id, no_d_id, no_w_id) VALUES (?1,?2,?3)")?,
-            // Random item lookup by PK.
-            database.prepare("SELECT i_price, i_name, i_data FROM item WHERE i_id = ?1")?,
-            // Stock fetch per item/warehouse.
-            database.prepare("SELECT s_quantity, s_data, s_dist_01, s_dist_02, s_dist_03, s_dist_04, s_dist_05, s_dist_06, s_dist_07, s_dist_08, s_dist_09, s_dist_10 FROM stock WHERE s_i_id = ?1 AND s_w_id = ?2")?,
-            // Stock decrement; contention point.
-            database.prepare("UPDATE stock SET s_quantity = ?1 WHERE s_i_id = ?2 AND s_w_id = ?3")?,
-            // Order_line insert per item.
-            database.prepare("INSERT INTO order_line (ol_o_id, ol_d_id, ol_w_id, ol_number, ol_i_id, ol_supply_w_id, ol_quantity, ol_amount, ol_dist_info) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)")?,
-        ],
-        // Payment: apply payment and write history row.
-        vec![
-            // Warehouse w_ytd counter update.
-            database.prepare("UPDATE warehouse SET w_ytd = w_ytd + ?1 WHERE w_id = ?2")?,
-            // Warehouse address projection.
-            database.prepare("SELECT w_street_1, w_street_2, w_city, w_state, w_zip, w_name FROM warehouse WHERE w_id = ?1")?,
-            // District d_ytd counter update.
-            database.prepare("UPDATE district SET d_ytd = d_ytd + ?1 WHERE d_w_id = ?2 AND d_id = ?3")?,
-            // District address projection.
-            database.prepare("SELECT d_street_1, d_street_2, d_city, d_state, d_zip, d_name FROM district WHERE d_w_id = ?1 AND d_id = ?2")?,
-            // COUNT over customers sharing last name (line 129).
-            database.prepare("SELECT count(c_id) FROM customer WHERE c_w_id = ?1 AND c_d_id = ?2 AND c_last = ?3")?,
-            // ORDER BY c_first to pick correct customer (line 130).
-            database.prepare("SELECT c_id FROM customer WHERE c_w_id = ?1 AND c_d_id = ?2 AND c_last = ?3 ORDER BY c_first")?,
-            // Full customer row read.
-            database.prepare("SELECT c_first, c_middle, c_last, c_street_1, c_street_2, c_city, c_state, c_zip, c_phone, c_credit, c_credit_lim, c_discount, c_balance, c_since FROM customer WHERE c_w_id = ?1 AND c_d_id = ?2 AND c_id = ?3")?,
-            // Pull c_data LOB.
-            database.prepare("SELECT c_data FROM customer WHERE c_w_id = ?1 AND c_d_id = ?2 AND c_id = ?3")?,
-            // Update balance + c_data (text concat).
-            database.prepare("UPDATE customer SET c_balance = ?1, c_data = ?2 WHERE c_w_id = ?3 AND c_d_id = ?4 AND c_id = ?5")?,
-            // Balance-only update variant.
-            database.prepare("UPDATE customer SET c_balance = ?1 WHERE c_w_id = ?2 AND c_d_id = ?3 AND c_id = ?4")?,
-            // History append writes long text payload.
-            database.prepare("INSERT OVERWRITE history(h_c_d_id, h_c_w_id, h_c_id, h_d_id, h_w_id, h_date, h_amount, h_data) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)")?,
-        ],
-        // Order-Status: inspect the most recent order of a customer.
-        vec![
-            // COUNT on customers sharing last name (line 138).
-            database.prepare("SELECT count(c_id) FROM customer WHERE c_w_id = ?1 AND c_d_id = ?2 AND c_last = ?3")?,
-            // ORDER BY c_first to pick median entry (line 139).
-            database.prepare("SELECT c_balance, c_first, c_middle, c_last FROM customer WHERE c_w_id = ?1 AND c_d_id = ?2 AND c_last = ?3 ORDER BY c_first")?,
-            // Direct customer lookup by id.
-            database.prepare("SELECT c_balance, c_first, c_middle, c_last FROM customer WHERE c_w_id = ?1 AND c_d_id = ?2 AND c_id = ?3")?,
-            // Correlated MAX(o_id) to find latest order.
-            database.prepare("SELECT o_id, o_entry_d, COALESCE(o_carrier_id,0) FROM orders WHERE o_w_id = ?1 AND o_d_id = ?2 AND o_c_id = ?3 AND o_id = (SELECT MAX(o_id) FROM orders WHERE o_w_id = ?4 AND o_d_id = ?5 AND o_c_id = ?6)")?,
-            // Fetch all order_line rows for that order.
-            database.prepare("SELECT ol_i_id, ol_supply_w_id, ol_quantity, ol_amount, ol_delivery_d FROM order_line WHERE ol_w_id = ?1 AND ol_d_id = ?2 AND ol_o_id = ?3")?
-        ],
-        // Delivery: finish the oldest new order per district.
-        vec![
-            // MIN(no_o_id) over new_orders (line 145).
-            database.prepare("SELECT COALESCE(MIN(no_o_id),0) FROM new_orders WHERE no_d_id = ?1 AND no_w_id = ?2")?,
-            // Delete that new_orders entry.
-            database.prepare("DELETE FROM new_orders WHERE no_o_id = ?1 AND no_d_id = ?2 AND no_w_id = ?3")?,
-            // Lookup the customer id from orders.
-            database.prepare("SELECT o_c_id FROM orders WHERE o_id = ?1 AND o_d_id = ?2 AND o_w_id = ?3")?,
-            // Update carrier id on the order.
-            database.prepare("UPDATE orders SET o_carrier_id = ?1 WHERE o_id = ?2 AND o_d_id = ?3 AND o_w_id = ?4")?,
-            // Update delivery timestamp on order_line rows.
-            database.prepare("UPDATE order_line SET ol_delivery_d = ?1 WHERE ol_o_id = ?2 AND ol_d_id = ?3 AND ol_w_id = ?4")?,
-            // SUM(ol_amount) per order (line 150).
-            database.prepare("SELECT SUM(ol_amount) FROM order_line WHERE ol_o_id = ?1 AND ol_d_id = ?2 AND ol_w_id = ?3")?,
-            // Customer balance + delivery_cnt increment.
-            database.prepare("UPDATE customer SET c_balance = c_balance + ?1 , c_delivery_cnt = c_delivery_cnt + 1 WHERE c_id = ?2 AND c_d_id = ?3 AND c_w_id = ?4")?,
-        ],
-        // Stock-Level: detect items that are low stock for recent orders.
-        vec![
-            // District next_o_id read.
-            database.prepare("SELECT d_next_o_id FROM district WHERE d_id = ?1 AND d_w_id = ?2")?,
-            // DISTINCT item ids from last 20 orders (line 155).
-            database.prepare("SELECT DISTINCT ol_i_id FROM order_line WHERE ol_w_id = ?1 AND ol_d_id = ?2 AND ol_o_id < ?3 AND ol_o_id >= (?4 - 20)")?,
-            // COUNT stock rows where s_quantity falls below threshold (line 156).
-            database.prepare("SELECT count(*) FROM stock WHERE s_w_id = ?1 AND s_i_id = ?2 AND s_quantity < ?3")?,
-        ],
-    ];
+    let statement_specs = statement_specs();
+    let test_statements = backend.prepare_statements(&statement_specs)?;
 
     let mut rt_hist = RtHist::new();
     let mut success = [0usize; 5];
     let mut late = [0usize; 5];
     let mut failure = [0usize; 5];
-    let tests = vec![
-        Box::new(NewOrdTest) as Box<dyn TpccTest<_>>,
+    let tests: Vec<Box<dyn TpccTest>> = vec![
+        Box::new(NewOrdTest),
         Box::new(PaymentTest),
         Box::new(OrderStatTest),
         Box::new(DeliveryTest),
@@ -216,6 +170,17 @@ fn main() -> Result<(), TpccError> {
     let mut round_count = 0;
     let mut seq_gen = SeqGen::new(10, 10, 1, 1, 1);
     let tpcc_start = Instant::now();
+    let progress = ProgressBar::new_spinner();
+    progress.set_style(ProgressStyle::with_template("{spinner:.green} [TPCC] {msg}").unwrap());
+    progress.enable_steady_tick(Duration::from_millis(120));
+    update_progress_bar(
+        &progress,
+        round_count,
+        &success,
+        &late,
+        &failure,
+        tpcc_start,
+    );
 
     while tpcc_start.elapsed() < duration {
         let i = seq_gen.get();
@@ -223,19 +188,16 @@ fn main() -> Result<(), TpccError> {
         let statement = &test_statements[i];
 
         let mut is_succeed = false;
-        for j in 0..args.max_retry + 1 {
+        let mut last_error = None;
+        for _attempt in 0..=args.max_retry {
             let transaction_start = Instant::now();
-            let mut tx = database.new_transaction()?;
+            let mut tx = backend.new_transaction()?;
 
             if let Err(err) =
-                tpcc_test.do_transaction(&mut rng, &mut tx, args.num_ware, &tpcc_args, &statement)
+                tpcc_test.do_transaction(rng, &mut tx, args.num_ware, &tpcc_args, statement)
             {
                 failure[i] += 1;
-                eprintln!(
-                    "[{}] Error while doing transaction: {}",
-                    tpcc_test.name(),
-                    err
-                );
+                last_error = Some(err);
             } else {
                 let rt = transaction_start.elapsed();
                 rt_hist.hist_inc(i, rt);
@@ -249,82 +211,56 @@ fn main() -> Result<(), TpccError> {
                 tx.commit()?;
                 break;
             }
-            if j < args.max_retry {
-                println!("[{}] Retry for the {}th time", tpcc_test.name(), j + 1);
-            }
         }
         if !is_succeed {
+            if let Some(err) = last_error {
+                eprintln!(
+                    "[{}] Error after {} retries: {}",
+                    tpcc_test.name(),
+                    args.max_retry,
+                    err
+                );
+            }
             return Err(TpccError::MaxRetry);
         }
+        update_progress_bar(
+            &progress,
+            round_count,
+            &success,
+            &late,
+            &failure,
+            tpcc_start,
+        );
+
         if round_count != 0 && round_count % CHECK_POINT_COUNT == 0 {
-            println!(
-                "[TPCC CheckPoint {} on round {round_count}][{}]: 90th Percentile RT: {:.3}",
+            let p90 = rt_hist.hist_ckp(i);
+            print_checkpoint(
                 round_count / CHECK_POINT_COUNT,
+                round_count,
                 tpcc_test.name(),
-                rt_hist.hist_ckp(i)
+                p90,
+                &success,
+                &late,
+                &failure,
+                tpcc_start,
+                &progress,
             );
         }
         round_count += 1;
     }
+    progress.finish_and_clear();
     let actual_tpcc_time = tpcc_start.elapsed();
-    println!("---------------------------------------------------");
-    // Raw Results
-    print_transaction(&success, &late, &failure, |name, success, late, failure| {
-        println!("|{}| sc: {}  lt: {}  fl: {}", name, success, late, failure)
-    });
-    println!("in {} sec.", actual_tpcc_time.as_secs());
-    println!("<Constraint Check> (all must be [OK])");
-    println!("[transaction percentage]");
-
-    let mut j = 0.0;
-    for i in 0..5 {
-        j += (success[i] + late[i]) as f64;
-    }
-    // Payment
-    let f = (((success[1] + late[1]) as f64 / j) * 100.0).round();
-    print!("   Payment: {:.1}% (>=43.0%)", f);
-    if f >= 43.0 {
-        println!("  [Ok]");
-    } else {
-        println!("  [NG]");
-    }
-    // Order-Status
-    let f = (((success[2] + late[2]) as f64 / j) * 100.0).round();
-    print!("   Order-Status: {:.1}% (>=4.0%)", f);
-    if f >= 4.0 {
-        println!("  [Ok]");
-    } else {
-        println!("  [NG]");
-    }
-    // Delivery
-    let f = (((success[3] + late[3]) as f64 / j) * 100.0).round();
-    print!("   Delivery: {:.1}% (>=4.0%)", f);
-    if f >= 4.0 {
-        println!("  [Ok]");
-    } else {
-        println!("  [NG]");
-    }
-    // Stock-Level
-    let f = (((success[4] + late[4]) as f64 / j) * 100.0).round();
-    print!("   Stock-Level: {:.1}% (>=4.0%)", f);
-    if f >= 4.0 {
-        println!("  [Ok]");
-    } else {
-        println!("  [NG]");
-    }
-    println!("[response time (at least 90%% passed)]");
-    print_transaction(&success, &late, &failure, |name, success, late, _| {
-        let f = (success as f64 / (success + late) as f64) * 100.0;
-        print!("   {}: {:.1}", name, f);
-        if f >= 90.0 {
-            println!("  [OK]");
-        } else {
-            println!("  [NG]");
-        }
-    });
-    print_transaction(&success, &late, &failure, |name, success, late, _| {
-        println!("   {} Total: {}", name, success + late)
-    });
+    update_progress_bar(
+        &progress,
+        round_count,
+        &success,
+        &late,
+        &failure,
+        tpcc_start,
+    );
+    print_summary_table(&success, &late, &failure, actual_tpcc_time);
+    print_constraint_checks(&success, &late);
+    print_response_checks(&success, &late);
     println!();
     rt_hist.hist_report();
     println!("<TpmC>");
@@ -334,24 +270,365 @@ fn main() -> Result<(), TpccError> {
     Ok(())
 }
 
-fn print_transaction<F: Fn(&str, usize, usize, usize)>(
+fn statement_specs() -> Vec<Vec<StatementSpec>> {
+    vec![
+        vec![
+            stmt(
+                "SELECT c.c_discount, c.c_last, c.c_credit, w.w_tax FROM customer AS c JOIN warehouse AS w ON c.c_w_id = w_id AND w.w_id = ?1 AND c.c_w_id = ?2 AND c.c_d_id = ?3 AND c.c_id = ?4",
+                &[ColumnType::Decimal, ColumnType::Utf8, ColumnType::Utf8, ColumnType::Decimal],
+            ),
+            stmt(
+                "SELECT c_discount, c_last, c_credit FROM customer WHERE c_w_id = ?1 AND c_d_id = ?2 AND c_id = ?3",
+                &[ColumnType::Decimal, ColumnType::Utf8, ColumnType::Utf8],
+            ),
+            stmt(
+                "SELECT w_tax FROM warehouse WHERE w_id = ?1",
+                &[ColumnType::Decimal],
+            ),
+            stmt(
+                "SELECT d_next_o_id, d_tax FROM district WHERE d_id = ?1 AND d_w_id = ?2",
+                &[ColumnType::Int32, ColumnType::Decimal],
+            ),
+            stmt(
+                "UPDATE district SET d_next_o_id = ?1 + 1 WHERE d_id = ?2 AND d_w_id = ?3",
+                &[],
+            ),
+            stmt(
+                "INSERT INTO orders (o_id, o_d_id, o_w_id, o_c_id, o_entry_d, o_ol_cnt, o_all_local) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                &[],
+            ),
+            stmt(
+                "INSERT INTO new_orders (no_o_id, no_d_id, no_w_id) VALUES (?1,?2,?3)",
+                &[],
+            ),
+            stmt(
+                "SELECT i_price, i_name, i_data FROM item WHERE i_id = ?1",
+                &[ColumnType::Decimal, ColumnType::Utf8, ColumnType::Utf8],
+            ),
+            stmt(
+                "SELECT s_quantity, s_data, s_dist_01, s_dist_02, s_dist_03, s_dist_04, s_dist_05, s_dist_06, s_dist_07, s_dist_08, s_dist_09, s_dist_10 FROM stock WHERE s_i_id = ?1 AND s_w_id = ?2",
+                &[
+                    ColumnType::Int16,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                ],
+            ),
+            stmt(
+                "UPDATE stock SET s_quantity = ?1 WHERE s_i_id = ?2 AND s_w_id = ?3",
+                &[],
+            ),
+            stmt(
+                "INSERT INTO order_line (ol_o_id, ol_d_id, ol_w_id, ol_number, ol_i_id, ol_supply_w_id, ol_quantity, ol_amount, ol_dist_info) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                &[],
+            ),
+        ],
+        vec![
+            stmt(
+                "UPDATE warehouse SET w_ytd = w_ytd + ?1 WHERE w_id = ?2",
+                &[],
+            ),
+            stmt(
+                "SELECT w_street_1, w_street_2, w_city, w_state, w_zip, w_name FROM warehouse WHERE w_id = ?1",
+                &[
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                ],
+            ),
+            stmt(
+                "UPDATE district SET d_ytd = d_ytd + ?1 WHERE d_w_id = ?2 AND d_id = ?3",
+                &[],
+            ),
+            stmt(
+                "SELECT d_street_1, d_street_2, d_city, d_state, d_zip, d_name FROM district WHERE d_w_id = ?1 AND d_id = ?2",
+                &[
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                ],
+            ),
+            stmt(
+                "SELECT count(c_id) FROM customer WHERE c_w_id = ?1 AND c_d_id = ?2 AND c_last = ?3",
+                &[ColumnType::Int32],
+            ),
+            stmt(
+                "SELECT c_id FROM customer WHERE c_w_id = ?1 AND c_d_id = ?2 AND c_last = ?3 ORDER BY c_first",
+                &[ColumnType::Int32],
+            ),
+            stmt(
+                "SELECT c_first, c_middle, c_last, c_street_1, c_street_2, c_city, c_state, c_zip, c_phone, c_credit, c_credit_lim, c_discount, c_balance, c_since FROM customer WHERE c_w_id = ?1 AND c_d_id = ?2 AND c_id = ?3",
+                &[
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Int64,
+                    ColumnType::Decimal,
+                    ColumnType::Decimal,
+                    ColumnType::DateTime,
+                ],
+            ),
+            stmt(
+                "SELECT c_data FROM customer WHERE c_w_id = ?1 AND c_d_id = ?2 AND c_id = ?3",
+                &[ColumnType::Utf8],
+            ),
+            stmt(
+                "UPDATE customer SET c_balance = ?1, c_data = ?2 WHERE c_w_id = ?3 AND c_d_id = ?4 AND c_id = ?5",
+                &[],
+            ),
+            stmt(
+                "UPDATE customer SET c_balance = ?1 WHERE c_w_id = ?2 AND c_d_id = ?3 AND c_id = ?4",
+                &[],
+            ),
+            stmt(
+                "INSERT INTO history(h_c_d_id, h_c_w_id, h_c_id, h_d_id, h_w_id, h_date, h_amount, h_data) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                &[],
+            ),
+        ],
+        vec![
+            // "SELECT count(c_id) FROM customer WHERE c_w_id = ?1 AND c_d_id = ?2 AND c_last = ?3"
+            stmt(
+                "SELECT count(c_id) FROM customer WHERE c_w_id = ?1 AND c_d_id = ?2 AND c_last = ?3",
+                &[ColumnType::Int32],
+            ),
+            // "SELECT c_balance, c_first, c_middle, c_last FROM customer WHERE ... ORDER BY c_first"
+            stmt(
+                "SELECT c_balance, c_first, c_middle, c_last FROM customer WHERE c_w_id = ?1 AND c_d_id = ?2 AND c_last = ?3 ORDER BY c_first",
+                &[
+                    ColumnType::Decimal,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                ],
+            ),
+            // "SELECT c_balance, c_first, c_middle, c_last FROM customer WHERE c_w_id = ?1 AND c_d_id = ?2 AND c_id = ?3"
+            stmt(
+                "SELECT c_balance, c_first, c_middle, c_last FROM customer WHERE c_w_id = ?1 AND c_d_id = ?2 AND c_id = ?3",
+                &[
+                    ColumnType::Decimal,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                    ColumnType::Utf8,
+                ],
+            ),
+            // "SELECT o_id, o_entry_d, COALESCE(o_carrier_id,0) FROM orders ..."
+            stmt(
+                "SELECT o_id, o_entry_d, COALESCE(o_carrier_id,0) FROM orders WHERE o_w_id = ?1 AND o_d_id = ?2 AND o_c_id = ?3 AND o_id = (SELECT MAX(o_id) FROM orders WHERE o_w_id = ?4 AND o_d_id = ?5 AND o_c_id = ?6)",
+                &[ColumnType::Int32, ColumnType::DateTime, ColumnType::Int32],
+            ),
+            // "SELECT ol_i_id, ol_supply_w_id, ol_quantity, ol_amount, ol_delivery_d FROM order_line ..."
+            stmt(
+                "SELECT ol_i_id, ol_supply_w_id, ol_quantity, ol_amount, ol_delivery_d FROM order_line WHERE ol_w_id = ?1 AND ol_d_id = ?2 AND ol_o_id = ?3",
+                &[
+                    ColumnType::Int32,
+                    ColumnType::Int16,
+                    ColumnType::Int8,
+                    ColumnType::Decimal,
+                    ColumnType::NullableDateTime,
+                ],
+            ),
+        ],
+        vec![
+            // "SELECT COALESCE(MIN(no_o_id),0) FROM new_orders WHERE no_d_id = ?1 AND no_w_id = ?2"
+            stmt(
+                "SELECT COALESCE(MIN(no_o_id),0) FROM new_orders WHERE no_d_id = ?1 AND no_w_id = ?2",
+                &[ColumnType::Int32],
+            ),
+            // "DELETE FROM new_orders WHERE no_o_id = ?1 AND no_d_id = ?2 AND no_w_id = ?3"
+            stmt(
+                "DELETE FROM new_orders WHERE no_o_id = ?1 AND no_d_id = ?2 AND no_w_id = ?3",
+                &[],
+            ),
+            // "SELECT o_c_id FROM orders WHERE o_id = ?1 AND o_d_id = ?2 AND o_w_id = ?3"
+            stmt(
+                "SELECT o_c_id FROM orders WHERE o_id = ?1 AND o_d_id = ?2 AND o_w_id = ?3",
+                &[ColumnType::Int32],
+            ),
+            // "UPDATE orders SET o_carrier_id = ?1 WHERE o_id = ?2 AND o_d_id = ?3 AND o_w_id = ?4"
+            stmt(
+                "UPDATE orders SET o_carrier_id = ?1 WHERE o_id = ?2 AND o_d_id = ?3 AND o_w_id = ?4",
+                &[],
+            ),
+            // "UPDATE order_line SET ol_delivery_d = ?1 WHERE ol_o_id = ?2 AND ol_d_id = ?3 AND ol_w_id = ?4"
+            stmt(
+                "UPDATE order_line SET ol_delivery_d = ?1 WHERE ol_o_id = ?2 AND ol_d_id = ?3 AND ol_w_id = ?4",
+                &[],
+            ),
+            // "SELECT SUM(ol_amount) FROM order_line WHERE ol_o_id = ?1 AND ol_d_id = ?2 AND ol_w_id = ?3"
+            stmt(
+                "SELECT SUM(ol_amount) FROM order_line WHERE ol_o_id = ?1 AND ol_d_id = ?2 AND ol_w_id = ?3",
+                &[ColumnType::Decimal],
+            ),
+            // "UPDATE customer SET c_balance = c_balance + ?1 , c_delivery_cnt = c_delivery_cnt + 1 WHERE c_id = ?2 ..."
+            stmt(
+                "UPDATE customer SET c_balance = c_balance + ?1 , c_delivery_cnt = c_delivery_cnt + 1 WHERE c_id = ?2 AND c_d_id = ?3 AND c_w_id = ?4",
+                &[],
+            ),
+        ],
+        vec![
+            // "SELECT d_next_o_id FROM district WHERE d_id = ?1 AND d_w_id = ?2"
+            stmt(
+                "SELECT d_next_o_id FROM district WHERE d_id = ?1 AND d_w_id = ?2",
+                &[ColumnType::Int32],
+            ),
+            stmt(STOCK_LEVEL_DISTINCT_SQL, &[ColumnType::Int32]),
+            // "SELECT count(*) FROM stock WHERE s_w_id = ?1 AND s_i_id = ?2 AND s_quantity < ?3"
+            stmt(
+                "SELECT count(*) FROM stock WHERE s_w_id = ?1 AND s_i_id = ?2 AND s_quantity < ?3",
+                &[ColumnType::Int32],
+            ),
+        ],
+    ]
+}
+
+fn stmt(sql: &'static str, result_types: &'static [ColumnType]) -> StatementSpec {
+    StatementSpec { sql, result_types }
+}
+
+fn print_summary_table(success: &[usize], late: &[usize], failure: &[usize], elapsed: Duration) {
+    println!("---------------------------------------------------");
+    println!(
+        "Transaction Summary (elapsed {:.1}s)",
+        elapsed.as_secs_f32()
+    );
+    println!("+--------------+---------+------+---------+-------+");
+    println!("| Transaction  | Success | Late | Failure | Total |");
+    println!("+--------------+---------+------+---------+-------+");
+    for (idx, name) in TX_NAMES.iter().enumerate() {
+        let total = success[idx] + late[idx] + failure[idx];
+        println!(
+            "| {:<12} | {:>7} | {:>4} | {:>7} | {:>5} |",
+            name, success[idx], late[idx], failure[idx], total
+        );
+    }
+    println!("+--------------+---------+------+---------+-------+");
+}
+
+fn print_constraint_checks(success: &[usize], late: &[usize]) {
+    println!("<Constraint Check> (all must be [OK])");
+    println!("[transaction percentage]");
+    let total: f64 = success
+        .iter()
+        .zip(late.iter())
+        .map(|(s, l)| (s + l) as f64)
+        .sum();
+    let checks = [
+        (1, "Payment", 43.0),
+        (2, "Order-Status", 4.0),
+        (3, "Delivery", 4.0),
+        (4, "Stock-Level", 4.0),
+    ];
+    for (idx, name, threshold) in checks {
+        let pct = if total > 0.0 {
+            ((success[idx] + late[idx]) as f64 / total) * 100.0
+        } else {
+            0.0
+        };
+        let status = if pct >= threshold { "OK" } else { "NG" };
+        println!("   {name}: {pct:>5.1}% (>={threshold:.1}%)  [{status}]");
+    }
+}
+
+fn print_response_checks(success: &[usize], late: &[usize]) {
+    println!("[response time (at least 90% passed)]");
+    for (idx, name) in TX_NAMES.iter().enumerate() {
+        let total = success[idx] + late[idx];
+        if total == 0 {
+            println!("   {name}:  n/a  [NG]");
+            continue;
+        }
+        let pct = (success[idx] as f64 / total as f64) * 100.0;
+        let status = if pct >= 90.0 { "OK" } else { "NG" };
+        println!("   {name}: {pct:>5.1}%  [{status}]");
+    }
+}
+
+fn update_progress_bar(
+    pb: &ProgressBar,
+    round: usize,
     success: &[usize],
     late: &[usize],
     failure: &[usize],
-    fn_print: F,
+    start: Instant,
 ) {
-    for (i, name) in vec![
-        "New-Order",
-        "Payment",
-        "Order-Status",
-        "Delivery",
-        "Stock-Level",
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        fn_print(name, success[i], late[i], failure[i]);
-    }
+    let elapsed = start.elapsed();
+    let total_success: usize = success.iter().sum();
+    let total_late: usize = late.iter().sum();
+    let total_failure: usize = failure.iter().sum();
+    let total_mix: f64 = success
+        .iter()
+        .zip(late.iter())
+        .map(|(s, l)| (s + l) as f64)
+        .sum();
+    let mix_str = if total_mix > 0.0 {
+        let share = |idx: usize| ((success[idx] + late[idx]) as f64 / total_mix) * 100.0;
+        format!(
+            "mix NO {:>4.1}% P {:>4.1}% OS {:>4.1}% D {:>4.1}% SL {:>4.1}%",
+            share(0),
+            share(1),
+            share(2),
+            share(3),
+            share(4)
+        )
+    } else {
+        "mix n/a".to_string()
+    };
+    let est_tpmc = if elapsed.as_secs_f64() > 0.0 {
+        ((success[0] + late[0]) as f64) / (elapsed.as_secs_f64() / 60.0)
+    } else {
+        0.0
+    };
+    pb.set_message(format!(
+        "round {:>6} | succ {:>6} late {:>5} fail {:>5} | est TpmC {:>6.0} | {}",
+        round, total_success, total_late, total_failure, est_tpmc, mix_str
+    ));
+}
+
+fn print_checkpoint(
+    checkpoint_idx: usize,
+    round: usize,
+    test_name: &str,
+    p90: f64,
+    success: &[usize],
+    late: &[usize],
+    failure: &[usize],
+    start: Instant,
+    progress: &ProgressBar,
+) {
+    let elapsed = start.elapsed();
+    let total_failure: usize = failure.iter().sum();
+    let est_tpmc = if elapsed.as_secs_f64() > 0.0 {
+        ((success[0] + late[0]) as f64) / (elapsed.as_secs_f64() / 60.0)
+    } else {
+        0.0
+    };
+
+    progress.println(format!(
+        "[CP {checkpoint_idx:>3} | round {round:>6} | {test_name} p90={p90:.3}s | \
+est TpmC {:>6.0} | total fail {:>6}]",
+        est_tpmc, total_failure
+    ));
 }
 
 fn other_ware(rng: &mut ThreadRng, home_ware: usize, num_ware: usize) -> usize {
@@ -375,6 +652,24 @@ pub enum TpccError {
         #[from]
         DatabaseError,
     ),
+    #[error("sqlite: {0}")]
+    Sqlite(
+        #[source]
+        #[from]
+        sqlite::Error,
+    ),
+    #[error("decimal parse error: {0}")]
+    Decimal(
+        #[source]
+        #[from]
+        rust_decimal::Error,
+    ),
+    #[error("datetime parse error: {0}")]
+    Chrono(
+        #[source]
+        #[from]
+        chrono::ParseError,
+    ),
     #[error("io error: {0}")]
     Io(
         #[source]
@@ -385,264 +680,12 @@ pub enum TpccError {
     EmptyTuples,
     #[error("maximum retries reached")]
     MaxRetry,
-}
-
-#[ignore]
-#[test]
-fn explain_tpcc() -> Result<(), DatabaseError> {
-    use kite_sql::types::tuple::create_table;
-
-    let database = DataBaseBuilder::path("./kite_sql_tpcc").build()?;
-    let mut tx = database.new_transaction()?;
-
-    let customer_tuple = tx
-        .run("SELECT c_w_id, c_d_id, c_id, c_last, c_balance, c_data FROM customer limit 1")?
-        .next()
-        .unwrap()?;
-    let district_tuple = tx
-        .run("SELECT d_id, d_w_id, d_next_o_id FROM district limit 1")?
-        .next()
-        .unwrap()?;
-    let item_tuple = tx.run("SELECT i_id FROM item limit 1")?.next().unwrap()?;
-    let stock_tuple = tx
-        .run("SELECT s_i_id, s_w_id, s_quantity FROM stock limit 1")?
-        .next()
-        .unwrap()?;
-    let orders_tuple = tx
-        .run("SELECT o_w_id, o_d_id, o_c_id, o_id, o_carrier_id FROM orders limit 1")?
-        .next()
-        .unwrap()?;
-    let order_line_tuple = tx
-        .run("SELECT ol_w_id, ol_d_id, ol_o_id, ol_delivery_d FROM order_line limit 1")?
-        .next()
-        .unwrap()?;
-    let new_order_tuple = tx
-        .run("SELECT no_d_id, no_w_id, no_o_id FROM new_orders limit 1")?
-        .next()
-        .unwrap()?;
-
-    let c_w_id = customer_tuple.values[0].clone();
-    let c_d_id = customer_tuple.values[1].clone();
-    let c_id = customer_tuple.values[2].clone();
-    let c_last = customer_tuple.values[3].clone();
-    let c_balance = customer_tuple.values[4].clone();
-    let c_data = customer_tuple.values[5].clone();
-
-    let d_id = district_tuple.values[0].clone();
-    let d_w_id = district_tuple.values[1].clone();
-    let d_next_o_id = district_tuple.values[2].clone();
-
-    let i_id = item_tuple.values[0].clone();
-
-    let s_i_id = stock_tuple.values[0].clone();
-    let s_w_id = stock_tuple.values[1].clone();
-    let s_quantity = stock_tuple.values[2].clone();
-
-    let o_w_id = orders_tuple.values[0].clone();
-    let o_d_id = orders_tuple.values[1].clone();
-    let o_c_id = orders_tuple.values[2].clone();
-    let o_id = orders_tuple.values[3].clone();
-    let o_carrier_id = orders_tuple.values[4].clone();
-
-    let ol_w_id = order_line_tuple.values[0].clone();
-    let ol_d_id = order_line_tuple.values[1].clone();
-    let ol_o_id = order_line_tuple.values[2].clone();
-    let ol_delivery_d = order_line_tuple.values[3].clone();
-
-    let no_d_id = new_order_tuple.values[0].clone();
-    let no_w_id = new_order_tuple.values[1].clone();
-    let no_o_id = new_order_tuple.values[2].clone();
-    // ORDER
-    {
-        println!("========Explain on Order");
-        {
-            println!("{}", format!("explain SELECT c_discount, c_last, c_credit FROM customer WHERE c_w_id = {} AND c_d_id = {} AND c_id = {}", c_w_id, c_d_id, c_id));
-            let iter = tx.run(format!("explain SELECT c_discount, c_last, c_credit FROM customer WHERE c_w_id = {} AND c_d_id = {} AND c_id = {}", c_w_id, c_d_id, c_id))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!(
-                "explain SELECT d_next_o_id, d_tax FROM district WHERE d_id = {} AND d_w_id = {}",
-                d_id, d_w_id
-            ))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!(
-                "explain UPDATE district SET d_next_o_id = {} + 1 WHERE d_id = {} AND d_w_id = {}",
-                d_next_o_id, d_id, d_w_id
-            ))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!(
-                "explain SELECT i_price, i_name, i_data FROM item WHERE i_id = {}",
-                i_id
-            ))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!("explain SELECT s_quantity, s_data, s_dist_01, s_dist_02, s_dist_03, s_dist_04, s_dist_05, s_dist_06, s_dist_07, s_dist_08, s_dist_09, s_dist_10 FROM stock WHERE s_i_id = {} AND s_w_id = {}", s_i_id, s_w_id))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!(
-                "explain UPDATE stock SET s_quantity = {} WHERE s_i_id = {} AND s_w_id = {}",
-                s_quantity, s_i_id, s_w_id
-            ))?;
-
-            println!("{}", create_table(iter)?);
-        }
-    }
-
-    // Payment
-    {
-        println!("========Explain on Payment");
-        {
-            let iter = tx.run(format!(
-                "explain UPDATE stock SET s_quantity = {} WHERE s_i_id = {} AND s_w_id = {}",
-                s_quantity, s_i_id, s_w_id
-            ))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!("explain SELECT d_street_1, d_street_2, d_city, d_state, d_zip, d_name FROM district WHERE d_w_id = {} AND d_id = {}", d_w_id, d_id))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!("explain SELECT count(c_id) FROM customer WHERE c_w_id = {} AND c_d_id = {} AND c_last = '{}'", c_w_id, c_d_id, c_last))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!("explain SELECT c_id FROM customer WHERE c_w_id = {} AND c_d_id = {} AND c_last = '{}' ORDER BY c_first", c_w_id, c_d_id, c_last))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!("explain SELECT c_first, c_middle, c_last, c_street_1, c_street_2, c_city, c_state, c_zip, c_phone, c_credit, c_credit_lim, c_discount, c_balance, c_since FROM customer WHERE c_w_id = {} AND c_d_id = {} AND c_id = {}", c_w_id, c_d_id, c_id))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!("explain SELECT c_data FROM customer WHERE c_w_id = {} AND c_d_id = {} AND c_id = {}", c_w_id, c_d_id, c_id))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!("explain UPDATE customer SET c_balance = {}, c_data = '{}' WHERE c_w_id = {} AND c_d_id = {} AND c_id = {}", c_balance, c_data, c_w_id, c_d_id, c_id))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!("explain UPDATE customer SET c_balance = {} WHERE c_w_id = {} AND c_d_id = {} AND c_id = {}", c_balance, c_w_id, c_d_id, c_id))?;
-
-            println!("{}", create_table(iter)?);
-        }
-    }
-
-    // Order-Stat
-    {
-        println!("========Explain on Order-Stat");
-        {
-            let iter = tx.run(format!("explain SELECT count(c_id) FROM customer WHERE c_w_id = {} AND c_d_id = {} AND c_last = '{}'", c_w_id, c_d_id, c_last))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!("explain SELECT c_balance, c_first, c_middle, c_last FROM customer WHERE c_w_id = {} AND c_d_id = {} AND c_last = '{}' ORDER BY c_first", c_w_id, c_d_id, c_last))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!("explain SELECT c_balance, c_first, c_middle, c_last FROM customer WHERE c_w_id = {} AND c_d_id = {} AND c_id = {}", c_w_id, c_d_id, c_id))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!("explain SELECT o_id, o_entry_d, COALESCE(o_carrier_id,0) FROM orders WHERE o_w_id = {} AND o_d_id = {} AND o_c_id = {} AND o_id = (SELECT MAX(o_id) FROM orders WHERE o_w_id = {} AND o_d_id = {} AND o_c_id = {})", o_w_id, o_d_id, o_c_id, o_w_id, o_d_id, o_c_id))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!("explain SELECT ol_i_id, ol_supply_w_id, ol_quantity, ol_amount, ol_delivery_d FROM order_line WHERE ol_w_id = {} AND ol_d_id = {} AND ol_o_id = {}", ol_w_id, ol_d_id, ol_o_id))?;
-
-            println!("{}", create_table(iter)?);
-        }
-    }
-
-    // Deliver
-    {
-        println!("========Explain on Deliver");
-        {
-            let iter = tx.run(format!("explain SELECT COALESCE(MIN(no_o_id),0) FROM new_orders WHERE no_d_id = {} AND no_w_id = {}", no_d_id, no_w_id))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!("explain DELETE FROM new_orders WHERE no_o_id = {} AND no_d_id = {} AND no_w_id = {}", no_o_id, no_d_id, no_w_id))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!(
-                "explain SELECT o_c_id FROM orders WHERE o_id = {} AND o_d_id = {} AND o_w_id = {}",
-                o_id, o_d_id, o_w_id
-            ))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!("explain UPDATE orders SET o_carrier_id = {} WHERE o_id = {} AND o_d_id = {} AND o_w_id = {}", o_carrier_id, o_id, o_d_id, o_w_id))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!("explain UPDATE order_line SET ol_delivery_d = '{}' WHERE ol_o_id = {} AND ol_d_id = {} AND ol_w_id = {}", ol_delivery_d, ol_o_id, ol_d_id, ol_w_id))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!("explain SELECT SUM(ol_amount) FROM order_line WHERE ol_o_id = {} AND ol_d_id = {} AND ol_w_id = {}", ol_o_id, ol_d_id, ol_w_id))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!("explain UPDATE customer SET c_balance = c_balance + 1 , c_delivery_cnt = c_delivery_cnt + 1 WHERE c_id = {} AND c_d_id = {} AND c_w_id = {}", c_id, c_d_id, c_w_id))?;
-
-            println!("{}", create_table(iter)?);
-        }
-    }
-
-    // Stock-Level
-    {
-        println!("========Explain on Stock-Level");
-        {
-            let iter = tx.run(format!(
-                "explain SELECT d_next_o_id FROM district WHERE d_id = {} AND d_w_id = {}",
-                d_id, d_w_id
-            ))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!("explain SELECT DISTINCT ol_i_id FROM order_line WHERE ol_w_id = {} AND ol_d_id = {} AND ol_o_id < {} AND ol_o_id >= ({} - 20)", ol_w_id, ol_d_id, ol_o_id, ol_o_id))?;
-
-            println!("{}", create_table(iter)?);
-        }
-        {
-            let iter = tx.run(format!("explain SELECT count(*) FROM stock WHERE s_w_id = {} AND s_i_id = {} AND s_quantity < {}", s_w_id, s_i_id, s_quantity))?;
-
-            println!("{}", create_table(iter)?);
-        }
-    }
-
-    Ok(())
+    #[error("invalid backend usage")]
+    InvalidBackend,
+    #[error("invalid parameter name")]
+    InvalidParameter,
+    #[error("invalid datetime value")]
+    InvalidDateTime,
+    #[error("backend mismatch: {0}")]
+    BackendMismatch(String),
 }
