@@ -83,7 +83,7 @@ for tuple in iter {
 
 ## TPC-C
 Run `make tpcc` (or `cargo run -p tpcc --release`) to execute the benchmark against the default KiteSQL storage.  
-Run `make tpcc-dual` (or `cargo run -p tpcc --release -- --backend dual`) to mirror every TPCC statement to an in-memory SQLite database alongside KiteSQL and assert the two engines return identical results.
+Run `make tpcc-dual` to mirror every TPCC statement to an in-memory SQLite database alongside KiteSQL and assert the two engines return identical results; this target runs for 60 seconds (`--measure-time 60`). Use `cargo run -p tpcc --release -- --backend dual --measure-time <secs>` for a custom duration.
 
 - i9-13900HX
 - 32.0 GB
