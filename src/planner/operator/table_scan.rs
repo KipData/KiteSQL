@@ -84,6 +84,7 @@ impl TableScanOperator {
                 covered_deserializers: None,
                 cover_mapping: None,
                 sort_elimination_hint: None,
+                stream_distinct_hint: None,
             });
         }
 

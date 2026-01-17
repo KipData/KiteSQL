@@ -20,8 +20,10 @@ use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::heuristic::batch::{HepBatch, HepBatchStrategy};
 use crate::optimizer::heuristic::matcher::PlanMatcher;
 use crate::optimizer::rule::implementation::ImplementationRuleImpl;
-use crate::optimizer::rule::normalization::annotate_sort_preserving_indexes;
 use crate::optimizer::rule::normalization::NormalizationRuleImpl;
+use crate::optimizer::rule::normalization::{
+    annotate_sort_preserving_indexes, annotate_stream_distinct_indexes,
+};
 use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use std::ops::Not;
@@ -54,6 +56,7 @@ impl<'a> HepOptimizer<'a> {
     ) -> Result<LogicalPlan, DatabaseError> {
         Self::apply_batches(&mut self.plan, self.before_batches)?;
         annotate_sort_preserving_indexes(&mut self.plan);
+        annotate_stream_distinct_indexes(&mut self.plan);
 
         if let Some(loader) = loader {
             if self.implementations.is_empty().not() {

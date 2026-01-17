@@ -36,6 +36,7 @@ use crate::execution::dml::insert::Insert;
 use crate::execution::dml::update::Update;
 use crate::execution::dql::aggregate::hash_agg::HashAggExecutor;
 use crate::execution::dql::aggregate::simple_agg::SimpleAggExecutor;
+use crate::execution::dql::aggregate::stream_distinct::StreamDistinctExecutor;
 use crate::execution::dql::describe::Describe;
 use crate::execution::dql::dummy::Dummy;
 use crate::execution::dql::except::Except;
@@ -96,6 +97,7 @@ pub fn build_read<'a, T: Transaction + 'a>(
     let LogicalPlan {
         operator,
         childrens,
+        physical_option,
         ..
     } = plan;
 
@@ -106,6 +108,17 @@ pub fn build_read<'a, T: Transaction + 'a>(
 
             if op.groupby_exprs.is_empty() {
                 SimpleAggExecutor::from((op, input)).execute(cache, transaction)
+            } else if op.is_distinct
+                && op.agg_calls.is_empty()
+                && matches!(
+                    physical_option,
+                    Some(PhysicalOption {
+                        plan: PlanImpl::StreamDistinct,
+                        ..
+                    })
+                )
+            {
+                StreamDistinctExecutor::from((op, input)).execute(cache, transaction)
             } else {
                 HashAggExecutor::from((op, input)).execute(cache, transaction)
             }
@@ -122,7 +135,7 @@ pub fn build_read<'a, T: Transaction + 'a>(
                 JoinCondition::On { on, .. }
                     if !on.is_empty()
                         && matches!(
-                            plan.physical_option,
+                            physical_option,
                             Some(PhysicalOption {
                                 plan: PlanImpl::HashJoin,
                                 ..
@@ -143,23 +156,30 @@ pub fn build_read<'a, T: Transaction + 'a>(
         }
         Operator::TableScan(op) => {
             if let Some(PhysicalOption {
-                plan:
-                    PlanImpl::IndexScan(IndexInfo {
+                plan: PlanImpl::IndexScan(index_info),
+                ..
+            }) = physical_option
+            {
+                let IndexInfo {
+                    meta,
+                    range,
+                    covered_deserializers,
+                    cover_mapping,
+                    ..
+                } = *index_info;
+                if let Some(range) = range {
+                    return IndexScan::from((
+                        op,
                         meta,
-                        range: Some(range),
+                        range,
                         covered_deserializers,
                         cover_mapping,
-                        sort_option: _,
-                        sort_elimination_hint: _,
-                    }),
-                ..
-            }) = plan.physical_option
-            {
-                IndexScan::from((op, meta, range, covered_deserializers, cover_mapping))
-                    .execute(cache, transaction)
-            } else {
-                SeqScan::from(op).execute(cache, transaction)
+                    ))
+                    .execute(cache, transaction);
+                }
             }
+
+            SeqScan::from(op).execute(cache, transaction)
         }
         Operator::FunctionScan(op) => FunctionScan::from(op).execute(cache, transaction),
         Operator::Sort(op) => {

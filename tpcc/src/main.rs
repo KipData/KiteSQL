@@ -689,3 +689,264 @@ pub enum TpccError {
     #[error("backend mismatch: {0}")]
     BackendMismatch(String),
 }
+
+#[ignore]
+#[test]
+fn explain_tpcc() -> Result<(), DatabaseError> {
+    use kite_sql::db::DataBaseBuilder;
+    use kite_sql::types::tuple::create_table;
+
+    let database = DataBaseBuilder::path("./../kite_sql_tpcc").build()?;
+    let mut tx = database.new_transaction()?;
+
+    let customer_tuple = tx
+        .run("SELECT c_w_id, c_d_id, c_id, c_last, c_balance, c_data FROM customer limit 1")?
+        .next()
+        .unwrap()?;
+    let district_tuple = tx
+        .run("SELECT d_id, d_w_id, d_next_o_id FROM district limit 1")?
+        .next()
+        .unwrap()?;
+    let item_tuple = tx.run("SELECT i_id FROM item limit 1")?.next().unwrap()?;
+    let stock_tuple = tx
+        .run("SELECT s_i_id, s_w_id, s_quantity FROM stock limit 1")?
+        .next()
+        .unwrap()?;
+    let orders_tuple = tx
+        .run("SELECT o_w_id, o_d_id, o_c_id, o_id, o_carrier_id FROM orders limit 1")?
+        .next()
+        .unwrap()?;
+    let order_line_tuple = tx
+        .run("SELECT ol_w_id, ol_d_id, ol_o_id, ol_delivery_d FROM order_line limit 1")?
+        .next()
+        .unwrap()?;
+    let new_order_tuple = tx
+        .run("SELECT no_d_id, no_w_id, no_o_id FROM new_orders limit 1")?
+        .next()
+        .unwrap()?;
+
+    let c_w_id = customer_tuple.values[0].clone();
+    let c_d_id = customer_tuple.values[1].clone();
+    let c_id = customer_tuple.values[2].clone();
+    let c_last = customer_tuple.values[3].clone();
+    let c_balance = customer_tuple.values[4].clone();
+    let c_data = customer_tuple.values[5].clone();
+
+    let d_id = district_tuple.values[0].clone();
+    let d_w_id = district_tuple.values[1].clone();
+    let d_next_o_id = district_tuple.values[2].clone();
+
+    let i_id = item_tuple.values[0].clone();
+
+    let s_i_id = stock_tuple.values[0].clone();
+    let s_w_id = stock_tuple.values[1].clone();
+    let s_quantity = stock_tuple.values[2].clone();
+
+    let o_w_id = orders_tuple.values[0].clone();
+    let o_d_id = orders_tuple.values[1].clone();
+    let o_c_id = orders_tuple.values[2].clone();
+    let o_id = orders_tuple.values[3].clone();
+    let o_carrier_id = orders_tuple.values[4].clone();
+
+    let ol_w_id = order_line_tuple.values[0].clone();
+    let ol_d_id = order_line_tuple.values[1].clone();
+    let ol_o_id = order_line_tuple.values[2].clone();
+    let ol_delivery_d = order_line_tuple.values[3].clone();
+
+    let no_d_id = new_order_tuple.values[0].clone();
+    let no_w_id = new_order_tuple.values[1].clone();
+    let no_o_id = new_order_tuple.values[2].clone();
+    // ORDER
+    {
+        println!("========Explain on Order");
+        {
+            println!("{}", format!("explain SELECT c_discount, c_last, c_credit FROM customer WHERE c_w_id = {} AND c_d_id = {} AND c_id = {}", c_w_id, c_d_id, c_id));
+            let iter = tx.run(format!("explain SELECT c_discount, c_last, c_credit FROM customer WHERE c_w_id = {} AND c_d_id = {} AND c_id = {}", c_w_id, c_d_id, c_id))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!(
+                "explain SELECT d_next_o_id, d_tax FROM district WHERE d_id = {} AND d_w_id = {}",
+                d_id, d_w_id
+            ))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!(
+                "explain UPDATE district SET d_next_o_id = {} + 1 WHERE d_id = {} AND d_w_id = {}",
+                d_next_o_id, d_id, d_w_id
+            ))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!(
+                "explain SELECT i_price, i_name, i_data FROM item WHERE i_id = {}",
+                i_id
+            ))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!("explain SELECT s_quantity, s_data, s_dist_01, s_dist_02, s_dist_03, s_dist_04, s_dist_05, s_dist_06, s_dist_07, s_dist_08, s_dist_09, s_dist_10 FROM stock WHERE s_i_id = {} AND s_w_id = {}", s_i_id, s_w_id))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!(
+                "explain UPDATE stock SET s_quantity = {} WHERE s_i_id = {} AND s_w_id = {}",
+                s_quantity, s_i_id, s_w_id
+            ))?;
+
+            println!("{}", create_table(iter)?);
+        }
+    }
+
+    // Payment
+    {
+        println!("========Explain on Payment");
+        {
+            let iter = tx.run(format!(
+                "explain UPDATE stock SET s_quantity = {} WHERE s_i_id = {} AND s_w_id = {}",
+                s_quantity, s_i_id, s_w_id
+            ))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!("explain SELECT d_street_1, d_street_2, d_city, d_state, d_zip, d_name FROM district WHERE d_w_id = {} AND d_id = {}", d_w_id, d_id))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!("explain SELECT count(c_id) FROM customer WHERE c_w_id = {} AND c_d_id = {} AND c_last = '{}'", c_w_id, c_d_id, c_last))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!("explain SELECT c_id FROM customer WHERE c_w_id = {} AND c_d_id = {} AND c_last = '{}' ORDER BY c_first", c_w_id, c_d_id, c_last))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!("explain SELECT c_first, c_middle, c_last, c_street_1, c_street_2, c_city, c_state, c_zip, c_phone, c_credit, c_credit_lim, c_discount, c_balance, c_since FROM customer WHERE c_w_id = {} AND c_d_id = {} AND c_id = {}", c_w_id, c_d_id, c_id))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!("explain SELECT c_data FROM customer WHERE c_w_id = {} AND c_d_id = {} AND c_id = {}", c_w_id, c_d_id, c_id))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!("explain UPDATE customer SET c_balance = {}, c_data = '{}' WHERE c_w_id = {} AND c_d_id = {} AND c_id = {}", c_balance, c_data, c_w_id, c_d_id, c_id))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!("explain UPDATE customer SET c_balance = {} WHERE c_w_id = {} AND c_d_id = {} AND c_id = {}", c_balance, c_w_id, c_d_id, c_id))?;
+
+            println!("{}", create_table(iter)?);
+        }
+    }
+
+    // Order-Stat
+    {
+        println!("========Explain on Order-Stat");
+        {
+            let iter = tx.run(format!("explain SELECT count(c_id) FROM customer WHERE c_w_id = {} AND c_d_id = {} AND c_last = '{}'", c_w_id, c_d_id, c_last))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!("explain SELECT c_balance, c_first, c_middle, c_last FROM customer WHERE c_w_id = {} AND c_d_id = {} AND c_last = '{}' ORDER BY c_first", c_w_id, c_d_id, c_last))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!("explain SELECT c_balance, c_first, c_middle, c_last FROM customer WHERE c_w_id = {} AND c_d_id = {} AND c_id = {}", c_w_id, c_d_id, c_id))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!("explain SELECT o_id, o_entry_d, COALESCE(o_carrier_id,0) FROM orders WHERE o_w_id = {} AND o_d_id = {} AND o_c_id = {} AND o_id = (SELECT MAX(o_id) FROM orders WHERE o_w_id = {} AND o_d_id = {} AND o_c_id = {})", o_w_id, o_d_id, o_c_id, o_w_id, o_d_id, o_c_id))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!("explain SELECT ol_i_id, ol_supply_w_id, ol_quantity, ol_amount, ol_delivery_d FROM order_line WHERE ol_w_id = {} AND ol_d_id = {} AND ol_o_id = {}", ol_w_id, ol_d_id, ol_o_id))?;
+
+            println!("{}", create_table(iter)?);
+        }
+    }
+
+    // Deliver
+    {
+        println!("========Explain on Deliver");
+        {
+            let iter = tx.run(format!("explain SELECT COALESCE(MIN(no_o_id),0) FROM new_orders WHERE no_d_id = {} AND no_w_id = {}", no_d_id, no_w_id))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!("explain DELETE FROM new_orders WHERE no_o_id = {} AND no_d_id = {} AND no_w_id = {}", no_o_id, no_d_id, no_w_id))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!(
+                "explain SELECT o_c_id FROM orders WHERE o_id = {} AND o_d_id = {} AND o_w_id = {}",
+                o_id, o_d_id, o_w_id
+            ))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!("explain UPDATE orders SET o_carrier_id = {} WHERE o_id = {} AND o_d_id = {} AND o_w_id = {}", o_carrier_id, o_id, o_d_id, o_w_id))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!("explain UPDATE order_line SET ol_delivery_d = '{}' WHERE ol_o_id = {} AND ol_d_id = {} AND ol_w_id = {}", ol_delivery_d, ol_o_id, ol_d_id, ol_w_id))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!("explain SELECT SUM(ol_amount) FROM order_line WHERE ol_o_id = {} AND ol_d_id = {} AND ol_w_id = {}", ol_o_id, ol_d_id, ol_w_id))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!("explain UPDATE customer SET c_balance = c_balance + 1 , c_delivery_cnt = c_delivery_cnt + 1 WHERE c_id = {} AND c_d_id = {} AND c_w_id = {}", c_id, c_d_id, c_w_id))?;
+
+            println!("{}", create_table(iter)?);
+        }
+    }
+
+    // Stock-Level
+    {
+        println!("========Explain on Stock-Level");
+        {
+            let iter = tx.run(format!(
+                "explain SELECT d_next_o_id FROM district WHERE d_id = {} AND d_w_id = {}",
+                d_id, d_w_id
+            ))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!("explain SELECT DISTINCT ol_i_id FROM order_line WHERE ol_w_id = {} AND ol_d_id = {} AND ol_o_id < {} AND ol_o_id >= ({} - 20)", ol_w_id, ol_d_id, ol_o_id, ol_o_id))?;
+
+            println!("{}", create_table(iter)?);
+        }
+        {
+            let iter = tx.run(format!("explain SELECT count(*) FROM stock WHERE s_w_id = {} AND s_i_id = {} AND s_quantity < {}", s_w_id, s_i_id, s_quantity))?;
+
+            println!("{}", create_table(iter)?);
+        }
+    }
+
+    Ok(())
+}

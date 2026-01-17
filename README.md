@@ -93,13 +93,13 @@ Run `make tpcc-dual` to mirror every TPCC statement to an in-memory SQLite datab
 All cases have been fully optimized.
 ```shell
 <90th Percentile RT (MaxRT)>
-   New-Order : 0.002  (0.012)
-     Payment : 0.001  (0.002)
-Order-Status : 0.002  (0.019)
-    Delivery : 0.001  (0.001)
- Stock-Level : 0.002  (0.018)
+   New-Order : 0.002  (0.006)
+     Payment : 0.001  (0.019)
+Order-Status : 0.001  (0.003)
+    Delivery : 0.022  (0.038)
+ Stock-Level : 0.002  (0.005)
 <TpmC>
-37166 Tpmc
+18432 Tpmc
 ```
 #### 👉[check more](tpcc/README.md)
 

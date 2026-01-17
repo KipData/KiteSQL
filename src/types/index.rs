@@ -46,6 +46,7 @@ pub struct IndexInfo {
     pub(crate) covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
     pub(crate) cover_mapping: Option<Vec<usize>>,
     pub(crate) sort_elimination_hint: Option<usize>,
+    pub(crate) stream_distinct_hint: Option<usize>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]

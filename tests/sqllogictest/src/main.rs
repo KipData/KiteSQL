@@ -38,6 +38,7 @@ fn main() {
 
     println!("KiteSQL Test Start!\n");
     init_20000_row_csv().expect("failed to init csv");
+    init_distinct_rows_csv().expect("failed to init distinct csv");
     let mut file_num = 0;
     let start = Instant::now();
 
@@ -82,6 +83,25 @@ fn init_20000_row_csv() -> io::Result<()> {
                 .collect::<Vec<_>>()
                 .join("|");
             writeln!(file, "{}", row)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn init_distinct_rows_csv() -> io::Result<()> {
+    let path = "tests/data/distinct_rows.csv";
+
+    if !Path::new(path).exists() {
+        let mut file = File::create(path)?;
+        let rows = 200_000usize;
+        let distinct = 20usize;
+
+        for i in 0..rows {
+            let id = i as i32;
+            let c1 = (i % distinct) as i32;
+            let c2 = ((i * 7) % 1000) as i32;
+            writeln!(file, "{}|{}|{}", id, c1, c2)?;
         }
     }
 

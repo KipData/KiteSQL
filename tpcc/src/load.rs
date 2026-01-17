@@ -16,6 +16,7 @@ use crate::backend::SimpleExecutor;
 use crate::TpccError;
 use chrono::Utc;
 use indicatif::{ProgressBar, ProgressStyle};
+use kite_sql::errors::DatabaseError;
 use rand::rngs::ThreadRng;
 use rand::Rng;
 use rust_decimal::Decimal;
@@ -267,6 +268,12 @@ impl Load {
         finish_progress(&pb, Some("Warehouses loaded"));
         println!("[Analyze Table: stock]");
         exec.execute_batch("analyze table stock")?;
+        println!("[Analyze Table: district]");
+        match exec.execute_batch("analyze table district") {
+            Ok(_) | Err(TpccError::Database(DatabaseError::TooManyBuckets(..))) => (),
+            err => return err,
+        };
+
         Ok(())
     }
 

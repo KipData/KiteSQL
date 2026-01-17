@@ -224,6 +224,19 @@ select c2 from t1 where c2 < 10 and c2 > 0;
 9
 
 statement ok
+insert into t1 values(100000002, 100000002, 8);
+
+# stream distinct
+query I rowsort
+select distinct c2 from t1 where c2 < 10 and c2 > 0;
+----
+8
+9
+
+statement ok
+delete from t1 where id = 100000002;
+
+statement ok
 drop index t1.c2_index;
 
 # composite covered

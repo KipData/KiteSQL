@@ -360,9 +360,7 @@ mod tests {
             let mut rows = Vec::new();
             while let Some(row) = iter.next() {
                 let tuple = row?;
-                let value = tuple.values[0]
-                    .i32()
-                    .expect("expected Int32 column");
+                let value = tuple.values[0].i32().expect("expected Int32 column");
                 rows.push(value);
             }
             rows
@@ -398,8 +396,7 @@ mod tests {
     }
 
     fn parse_dt(value: &str) -> NaiveDateTime {
-        NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
-            .expect("invalid datetime literal")
+        NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").expect("invalid datetime literal")
     }
 
     #[test]
@@ -469,8 +466,7 @@ mod tests {
         ];
 
         let kite_unordered = collect_i32(&backend.kite, STOCK_LEVEL_DISTINCT_SQL, &params)?;
-        let sqlite_unordered =
-            collect_i32(&backend.sqlite, STOCK_LEVEL_DISTINCT_SQLITE, &params)?;
+        let sqlite_unordered = collect_i32(&backend.sqlite, STOCK_LEVEL_DISTINCT_SQLITE, &params)?;
         let dual_unordered = collect_i32(&backend, STOCK_LEVEL_DISTINCT_SQL, &params)?;
 
         let mut kite_sorted = kite_unordered.clone();
