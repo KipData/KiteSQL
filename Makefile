@@ -3,7 +3,7 @@ CARGO ?= cargo
 WASM_PACK ?= wasm-pack
 SQLLOGIC_PATH ?= tests/slt/**/*.slt
 
-.PHONY: test test-wasm test-slt test-all wasm-build check tpcc cargo-check build wasm-examples native-examples fmt clippy
+.PHONY: test test-wasm test-slt test-all wasm-build check tpcc tpcc-dual cargo-check build wasm-examples native-examples fmt clippy
 
 ## Run default Rust tests in the current environment (non-WASM).
 test:
@@ -46,6 +46,10 @@ check: fmt clippy
 ## Execute the TPCC workload example as a standalone command.
 tpcc:
 	$(CARGO) run -p tpcc --release
+
+## Execute TPCC while mirroring every statement to an in-memory SQLite instance for validation.
+tpcc-dual:
+	$(CARGO) run -p tpcc --release -- --backend dual --measure-time 60
 
 ## Run JavaScript-based Wasm example scripts.
 wasm-examples:

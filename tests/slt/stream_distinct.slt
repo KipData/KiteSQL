@@ -1,0 +1,45 @@
+statement ok
+create table distinct_t(id int primary key, c1 int, c2 int);
+
+statement ok
+copy distinct_t from 'tests/data/distinct_rows.csv' ( DELIMITER '|' );
+
+statement ok
+create index distinct_t_c1_index on distinct_t (c1);
+
+statement ok
+analyze table distinct_t;
+
+# stream distinct
+query I rowsort
+select distinct c1 from distinct_t where c1 < 10 and c1 > 0;
+----
+1
+2
+3
+4
+5
+6
+7
+8
+9
+
+statement ok
+drop index distinct_t.distinct_t_c1_index;
+
+# hash distinct
+query I rowsort
+select distinct c1 from distinct_t where c1 < 10 and c1 > 0;
+----
+1
+2
+3
+4
+5
+6
+7
+8
+9
+
+statement ok
+drop table distinct_t;

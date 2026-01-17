@@ -205,6 +205,45 @@ mod test {
     }
 
     #[test]
+    fn test_constant_cast_elimination() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table()?;
+        let plan = table_state
+            .plan("select cast(1 as int), cast(2 as int) + 1 from t1 where cast(3 as int) = 3")?;
+
+        let best_plan = run_with_single_batch(
+            plan,
+            "test_constant_cast_elimination",
+            HepBatchStrategy::once_topdown(),
+            vec![NormalizationRuleImpl::ConstantCalculation],
+        )?;
+
+        if let Operator::Project(project_op) = best_plan.operator {
+            assert_eq!(
+                project_op.exprs[0],
+                ScalarExpression::Constant(DataValue::Int32(1))
+            );
+            assert_eq!(
+                project_op.exprs[1],
+                ScalarExpression::Constant(DataValue::Int32(3))
+            );
+        } else {
+            unreachable!();
+        }
+
+        let filter_op = best_plan.childrens.pop_only();
+        if let Operator::Filter(filter_op) = filter_op.operator {
+            assert_eq!(
+                filter_op.predicate,
+                ScalarExpression::Constant(DataValue::Boolean(true))
+            );
+        } else {
+            unreachable!();
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn test_simplify_filter_single_column() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
         // c1 + 1 < -1 => c1 < -2

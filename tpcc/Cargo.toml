@@ -12,3 +12,5 @@ ordered-float   = { version = "4" }
 rand            = { version = "0.8" }
 rust_decimal    = { version = "1" }
 thiserror       = { version = "1" }
+sqlite          = { version = "0.34" }
+sqlparser       = { version = "0.34" }

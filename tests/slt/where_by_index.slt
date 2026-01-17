@@ -19,7 +19,7 @@ create index p_index on t1 (c1, c2);
 statement ok
 analyze table t1;
 
-query IIT
+query IIT   
 select * from t1 limit 10;
 ----
 0 1 2
@@ -198,6 +198,7 @@ select * from t1 where c2 > 0 and c2 < 10;
 0 1 9
 6 7 8
 
+
 # unique covered
 query I rowsort
 select c1 from t1 where c1 < 10;
@@ -221,6 +222,19 @@ select c2 from t1 where c2 < 10 and c2 > 0;
 ----
 8
 9
+
+statement ok
+insert into t1 values(100000002, 100000002, 8);
+
+# stream distinct
+query I rowsort
+select distinct c2 from t1 where c2 < 10 and c2 > 0;
+----
+8
+9
+
+statement ok
+delete from t1 where id = 100000002;
 
 statement ok
 drop index t1.c2_index;

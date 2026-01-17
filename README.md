@@ -82,7 +82,8 @@ for tuple in iter {
 - [transaction](examples/transaction.rs)
 
 ## TPC-C
-run `cargo run -p tpcc --release` to run tpcc
+Run `make tpcc` (or `cargo run -p tpcc --release`) to execute the benchmark against the default KiteSQL storage.  
+Run `make tpcc-dual` to mirror every TPCC statement to an in-memory SQLite database alongside KiteSQL and assert the two engines return identical results; this target runs for 60 seconds (`--measure-time 60`). Use `cargo run -p tpcc --release -- --backend dual --measure-time <secs>` for a custom duration.
 
 - i9-13900HX
 - 32.0 GB
@@ -92,13 +93,13 @@ run `cargo run -p tpcc --release` to run tpcc
 All cases have been fully optimized.
 ```shell
 <90th Percentile RT (MaxRT)>
-   New-Order : 0.002  (0.012)
-     Payment : 0.001  (0.002)
-Order-Status : 0.002  (0.019)
-    Delivery : 0.001  (0.001)
- Stock-Level : 0.002  (0.018)
+   New-Order : 0.002  (0.006)
+     Payment : 0.001  (0.019)
+Order-Status : 0.001  (0.003)
+    Delivery : 0.022  (0.038)
+ Stock-Level : 0.002  (0.005)
 <TpmC>
-37166 Tpmc
+18432 Tpmc
 ```
 #### 👉[check more](tpcc/README.md)
 

@@ -17,6 +17,7 @@ mod count;
 pub mod hash_agg;
 mod min_max;
 pub mod simple_agg;
+pub mod stream_distinct;
 mod sum;
 
 use crate::errors::DatabaseError;

@@ -101,17 +101,35 @@ impl<T: Transaction> ImplementationRule<T> for IndexScanImplementation {
                     }
                 }
 
-                if let (Some(covered), Some(row_count)) = (index_info.sort_elimination_hint, cost) {
-                    let rows = row_count.max(1) as f64;
-                    let raw_bonus = rows * rows.log2();
-                    // TODO: replace this heuristic with accurate row-count driven sort cost once available.
-                    let bonus = (raw_bonus as usize) / covered.max(1);
-                    cost = Some(row_count.saturating_sub(bonus));
+                if let Some(row_count) = cost {
+                    // bonus = 0.5 * (rows * log2(rows)) / log2(hint_sum), capped to rows/2
+                    // c = rows - bonus, min rows/2
+                    // c
+                    // rows   |\
+                    //        | \
+                    //        |  \
+                    //        |   \______
+                    // rows/2 |__________\______
+                    //        |
+                    //        |
+                    //        └────────────────────── hint_sum
+                    //         2    4    8   16   32
+                    let hint_sum = index_info.sort_elimination_hint.unwrap_or(0)
+                        + index_info.stream_distinct_hint.unwrap_or(0);
+                    if hint_sum > 0 {
+                        let rows = row_count.max(1) as f64;
+                        let raw_bonus = rows * rows.log2();
+                        let hint_weight = (hint_sum as f64).log2().max(1.0);
+                        // TODO: replace this heuristic with accurate row-count driven sort cost once available.
+                        let bonus = (raw_bonus / hint_weight * 0.5) as usize;
+                        let min_cost = row_count.div_ceil(2);
+                        cost = Some(row_count.saturating_sub(bonus).max(min_cost));
+                    }
                 }
 
                 group_expr.append_expr(Expression {
                     op: PhysicalOption::new(
-                        PlanImpl::IndexScan(index_info.clone()),
+                        PlanImpl::IndexScan(Box::new(index_info.clone())),
                         index_info.sort_option.clone(),
                     ),
                     cost,

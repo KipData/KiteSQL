@@ -275,7 +275,7 @@ mod tests {
                 .pop_only()
                 .physical_option,
             Some(PhysicalOption::new(
-                PlanImpl::IndexScan(IndexInfo {
+                PlanImpl::IndexScan(Box::new(IndexInfo {
                     meta: Arc::new(IndexMeta {
                         id: 0,
                         column_ids: vec![c1_column.id().unwrap()],
@@ -299,7 +299,8 @@ mod tests {
                     covered_deserializers: None,
                     cover_mapping: None,
                     sort_elimination_hint: None,
-                }),
+                    stream_distinct_hint: None,
+                })),
                 SortOption::OrderBy {
                     fields: sort_fields,
                     ignore_prefix_len: 0,

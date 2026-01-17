@@ -203,9 +203,12 @@ fn default_optimizer_pipeline() -> HepOptimizerPipeline {
             vec![NormalizationRuleImpl::TopK],
         )
         .after_batch(
-            "Eliminate Redundant Sort".to_string(),
+            "Eliminate Aggregate".to_string(),
             HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::EliminateRedundantSort],
+            vec![
+                NormalizationRuleImpl::EliminateRedundantSort,
+                NormalizationRuleImpl::UseStreamDistinct,
+            ],
         )
         .after_batch(
             "Expression Remapper".to_string(),

@@ -24,6 +24,9 @@ use crate::optimizer::rule::normalization::compilation_in_advance::{
     BindExpressionPosition, EvaluatorBind,
 };
 
+use crate::optimizer::rule::normalization::agg_elimination::{
+    EliminateRedundantSort, UseStreamDistinct,
+};
 use crate::optimizer::rule::normalization::pushdown_limit::{
     LimitProjectTranspose, PushLimitIntoScan, PushLimitThroughJoin,
 };
@@ -32,18 +35,17 @@ use crate::optimizer::rule::normalization::pushdown_predicates::{
 };
 use crate::optimizer::rule::normalization::simplification::ConstantCalculation;
 use crate::optimizer::rule::normalization::simplification::SimplifyFilter;
-use crate::optimizer::rule::normalization::sort_elimination::EliminateRedundantSort;
 use crate::optimizer::rule::normalization::top_k::TopK;
 use crate::planner::LogicalPlan;
+mod agg_elimination;
 mod column_pruning;
 mod combine_operators;
 mod compilation_in_advance;
 mod pushdown_limit;
 mod pushdown_predicates;
 mod simplification;
-mod sort_elimination;
 mod top_k;
-pub use sort_elimination::annotate_sort_preserving_indexes;
+pub use agg_elimination::{annotate_sort_preserving_indexes, annotate_stream_distinct_indexes};
 
 #[derive(Debug, Copy, Clone)]
 pub enum NormalizationRuleImpl {
@@ -69,6 +71,7 @@ pub enum NormalizationRuleImpl {
     EvaluatorBind,
     TopK,
     EliminateRedundantSort,
+    UseStreamDistinct,
 }
 
 impl MatchPattern for NormalizationRuleImpl {
@@ -90,6 +93,7 @@ impl MatchPattern for NormalizationRuleImpl {
             NormalizationRuleImpl::EvaluatorBind => EvaluatorBind.pattern(),
             NormalizationRuleImpl::TopK => TopK.pattern(),
             NormalizationRuleImpl::EliminateRedundantSort => EliminateRedundantSort.pattern(),
+            NormalizationRuleImpl::UseStreamDistinct => UseStreamDistinct.pattern(),
         }
     }
 }
@@ -115,6 +119,7 @@ impl NormalizationRule for NormalizationRuleImpl {
             NormalizationRuleImpl::EvaluatorBind => EvaluatorBind.apply(plan),
             NormalizationRuleImpl::TopK => TopK.apply(plan),
             NormalizationRuleImpl::EliminateRedundantSort => EliminateRedundantSort.apply(plan),
+            NormalizationRuleImpl::UseStreamDistinct => UseStreamDistinct.apply(plan),
         }
     }
 }

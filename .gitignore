@@ -25,3 +25,4 @@ kite_sql_tpcc
 copy.csv
 
 tests/data/row_20000.csv
+tests/data/distinct_rows.csv

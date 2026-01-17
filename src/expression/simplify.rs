@@ -97,6 +97,14 @@ impl VisitorMut<'_> for ConstantCalculator {
                     let _ = mem::replace(expr, ScalarExpression::Constant(value));
                 }
             }
+            ScalarExpression::TypeCast { expr: arg_expr, ty } => {
+                self.visit(arg_expr)?;
+
+                if let ScalarExpression::Constant(value) = arg_expr.as_mut() {
+                    let casted = mem::replace(value, DataValue::Null).cast(ty)?;
+                    let _ = mem::replace(expr, ScalarExpression::Constant(casted));
+                }
+            }
             _ => walk_mut_expr(self, expr)?,
         }
 

@@ -103,6 +103,10 @@ impl TableCodec {
                 | LogicalType::UBigint
                 | LogicalType::Char(..)
                 | LogicalType::Varchar(..)
+                | LogicalType::Date
+                | LogicalType::DateTime
+                | LogicalType::Time(..)
+                | LogicalType::TimeStamp(..)
         ) {
             return Err(DatabaseError::InvalidType);
         }

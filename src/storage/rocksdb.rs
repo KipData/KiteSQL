@@ -598,6 +598,37 @@ mod test {
         assert_eq!(tuples[0].pk, None);
         assert_eq!(tuples[0].values, vec![covered_value]);
 
+        // primary key index should ignore covered-deserializer hint and still return rows
+        let pk_index = table
+            .indexes
+            .iter()
+            .find(|index| index.name == "pk_index")
+            .unwrap()
+            .clone();
+        let mut pk_columns = BTreeMap::new();
+        pk_columns.insert(0, a_cover_column.clone());
+        let pk_deserializers = vec![a_cover_column.datatype().serializable()];
+        let mut iter = transaction.read_by_index(
+            kite_sql.state.table_cache(),
+            "t1".to_string().into(),
+            (None, None),
+            pk_columns,
+            pk_index,
+            vec![Range::Scope {
+                min: Bound::Unbounded,
+                max: Bound::Unbounded,
+            }],
+            false,
+            Some(pk_deserializers),
+            Some(vec![0]),
+        )?;
+        let mut row_count = 0;
+        while let Some(tuple) = iter.next_tuple()? {
+            assert_eq!(tuple.values.len(), 1);
+            row_count += 1;
+        }
+        assert_eq!(row_count, 3);
+
         Ok(())
     }
 }
