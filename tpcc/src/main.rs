@@ -696,7 +696,7 @@ fn explain_tpcc() -> Result<(), DatabaseError> {
     use kite_sql::db::DataBaseBuilder;
     use kite_sql::types::tuple::create_table;
 
-    let database = DataBaseBuilder::path("./../kite_sql_tpcc").build()?;
+    let database = DataBaseBuilder::path("./kite_sql_tpcc").build()?;
     let mut tx = database.new_transaction()?;
 
     let customer_tuple = tx

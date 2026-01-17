@@ -64,7 +64,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor {
 
                 if last_keys.as_ref() != Some(&group_keys) {
                     last_keys = Some(group_keys.clone());
-                    co.yield_(Ok(Tuple::new(None, group_keys))).await;
+                    co.yield_(Ok(Tuple::new(tuple.pk, group_keys))).await;
                 }
             }
         })
@@ -78,11 +78,14 @@ mod tests {
     use crate::execution::dql::aggregate::stream_distinct::StreamDistinctExecutor;
     use crate::execution::{try_collect, ReadExecutor};
     use crate::expression::ScalarExpression;
+    use crate::optimizer::heuristic::batch::HepBatchStrategy;
+    use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
+    use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::aggregate::AggregateOperator;
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
     use crate::planner::{Childrens, LogicalPlan};
-    use crate::storage::rocksdb::RocksStorage;
+    use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
     use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -113,6 +116,21 @@ mod tests {
         Ok((table_cache, view_cache, meta_cache, temp_dir, storage))
     }
 
+    fn optimize_exprs(plan: LogicalPlan) -> Result<LogicalPlan, DatabaseError> {
+        HepOptimizerPipeline::builder()
+            .before_batch(
+                "Expression Remapper".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![
+                    NormalizationRuleImpl::BindExpressionPosition,
+                    NormalizationRuleImpl::EvaluatorBind,
+                ],
+            )
+            .build()
+            .instantiate(plan)
+            .find_best::<RocksTransaction>(None)
+    }
+
     #[test]
     fn stream_distinct_single_column_sorted() -> Result<(), DatabaseError> {
         let desc = ColumnDesc::new(LogicalType::Integer, None, false, None)?;
@@ -140,11 +158,16 @@ mod tests {
             agg_calls: vec![],
             is_distinct: true,
         };
+        let plan = LogicalPlan::new(Operator::Aggregate(agg), Childrens::Only(Box::new(input)));
+        let plan = optimize_exprs(plan)?;
+        let Operator::Aggregate(agg) = plan.operator else {
+            unreachable!()
+        };
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let mut transaction = storage.transaction()?;
         let tuples = try_collect(
-            StreamDistinctExecutor::from((agg, input))
+            StreamDistinctExecutor::from((agg, plan.childrens.pop_only()))
                 .execute((&table_cache, &view_cache, &meta_cache), &mut transaction),
         )?;
 
@@ -187,11 +210,16 @@ mod tests {
             agg_calls: vec![],
             is_distinct: true,
         };
+        let plan = LogicalPlan::new(Operator::Aggregate(agg), Childrens::Only(Box::new(input)));
+        let plan = optimize_exprs(plan)?;
+        let Operator::Aggregate(agg) = plan.operator else {
+            unreachable!()
+        };
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let mut transaction = storage.transaction()?;
         let tuples = try_collect(
-            StreamDistinctExecutor::from((agg, input))
+            StreamDistinctExecutor::from((agg, plan.childrens.pop_only()))
                 .execute((&table_cache, &view_cache, &meta_cache), &mut transaction),
         )?;
 

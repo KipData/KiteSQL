@@ -785,9 +785,9 @@ impl Load {
 
                 let ol_dist_info = generate_string(rng, 24, 24);
                 let (ol_delivery_d, ol_amount) = if o_id > 2100 {
-                    ("null".to_string(), "0.00".to_string())
+                    ("null", "0.00".to_string())
                 } else {
-                    (date.clone(), format!("{:.2}", rng.gen_range(0.1..100.0)))
+                    (date.as_str(), format!("{:.2}", rng.gen_range(0.1..100.0)))
                 };
                 exec.execute_batch(&format!(
                     "insert into order_line values({}, {}, {}, {}, {}, {}, {}, {}, {}, '{}')",
