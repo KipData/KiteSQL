@@ -18,13 +18,14 @@ use crate::expression::ScalarExpression;
 use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
 use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
 use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child};
+use crate::planner::operator::limit::LimitOperator;
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
 use crate::planner::{Childrens, LogicalPlan};
 use std::sync::LazyLock;
 
 static REDUNDANT_SORT_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |op| matches!(op, Operator::Sort(_)),
+    predicate: |op| matches!(op, Operator::Sort(_) | Operator::TopK(_)),
     children: PatternChildrenPredicate::None,
 });
 
@@ -38,8 +39,12 @@ impl MatchPattern for EliminateRedundantSort {
 
 impl NormalizationRule for EliminateRedundantSort {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
-        let sort_fields = match &plan.operator {
-            Operator::Sort(sort_op) => sort_op.sort_fields.clone(),
+        let (sort_fields, topk_limit) = match &plan.operator {
+            Operator::Sort(sort_op) => (sort_op.sort_fields.clone(), None),
+            Operator::TopK(topk_op) => (
+                topk_op.sort_fields.clone(),
+                Some((topk_op.limit, topk_op.offset)),
+            ),
             _ => return Ok(false),
         };
 
@@ -52,6 +57,15 @@ impl NormalizationRule for EliminateRedundantSort {
 
         if !can_remove {
             return Ok(false);
+        }
+
+        if let Some((limit, offset)) = topk_limit {
+            plan.operator = Operator::Limit(LimitOperator {
+                offset,
+                limit: Some(limit),
+            });
+            plan.physical_option = Some(PhysicalOption::new(PlanImpl::Limit, SortOption::Follow));
+            return Ok(true);
         }
 
         Ok(replace_with_only_child(plan))
@@ -165,7 +179,7 @@ fn distinct_sort_fields(groupby_exprs: &[ScalarExpression]) -> Vec<SortField> {
     groupby_exprs
         .iter()
         .cloned()
-        .map(|expr| SortField::new(expr, true, true))
+        .map(|expr| SortField::new(expr, true, false))
         .collect()
 }
 
@@ -322,6 +336,7 @@ mod tests {
     use crate::planner::operator::filter::FilterOperator;
     use crate::planner::operator::sort::{SortField, SortOperator};
     use crate::planner::operator::table_scan::TableScanOperator;
+    use crate::planner::operator::top_k::TopKOperator;
     use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
     use crate::planner::{Childrens, LogicalPlan};
     use crate::types::index::{IndexInfo, IndexMeta, IndexType};
@@ -334,7 +349,7 @@ mod tests {
 
     fn make_sort_field(name: &str) -> SortField {
         let column = ColumnRef::from(ColumnCatalog::new_dummy(name.to_string()));
-        SortField::new(ScalarExpression::column_expr(column), true, true)
+        SortField::new(ScalarExpression::column_expr(column), true, false)
     }
 
     fn build_plan(
@@ -412,7 +427,7 @@ mod tests {
         let sort_fields = vec![SortField::new(
             ScalarExpression::column_expr(c1.clone()),
             true,
-            true,
+            false,
         )];
         let sort_option = SortOption::OrderBy {
             fields: sort_fields.clone(),
@@ -472,6 +487,28 @@ mod tests {
     }
 
     #[test]
+    fn remove_topk_when_index_matches_order() -> Result<(), DatabaseError> {
+        let sort_field = make_sort_field("c1");
+        let mut plan = build_plan(vec![sort_field.clone()], vec![sort_field.clone()], 0);
+        plan.operator = Operator::TopK(TopKOperator {
+            sort_fields: vec![sort_field],
+            limit: 10,
+            offset: Some(5),
+        });
+        let rule = EliminateRedundantSort;
+
+        assert!(rule.apply(&mut plan)?);
+        match plan.operator {
+            Operator::Limit(limit_op) => {
+                assert_eq!(limit_op.limit, Some(10));
+                assert_eq!(limit_op.offset, Some(5));
+            }
+            _ => unreachable!("expected limit operator after removing topk"),
+        }
+        Ok(())
+    }
+
+    #[test]
     fn remove_sort_when_prefix_can_be_ignored() -> Result<(), DatabaseError> {
         let c1 = make_sort_field("c1");
         let c2 = make_sort_field("c2");
@@ -486,7 +523,7 @@ mod tests {
     #[test]
     fn annotate_sets_sort_hint_on_table_scan() -> Result<(), DatabaseError> {
         let column = ColumnRef::from(ColumnCatalog::new_dummy("c1".to_string()));
-        let sort_field = SortField::new(ScalarExpression::column_expr(column.clone()), true, true);
+        let sort_field = SortField::new(ScalarExpression::column_expr(column.clone()), true, false);
         let (index_info, _) = build_index_info(vec![sort_field.clone()], 0);
 
         let mut columns = BTreeMap::new();
@@ -588,7 +625,7 @@ mod tests {
     #[test]
     fn promote_index_to_remove_sort() -> Result<(), DatabaseError> {
         let column = ColumnRef::from(ColumnCatalog::new_dummy("c_first".to_string()));
-        let sort_field = SortField::new(ScalarExpression::column_expr(column.clone()), true, true);
+        let sort_field = SortField::new(ScalarExpression::column_expr(column.clone()), true, false);
         let (mut index_info, _) = build_index_info(vec![sort_field.clone()], 0);
         index_info.range = Some(Range::Scope {
             min: Bound::Unbounded,

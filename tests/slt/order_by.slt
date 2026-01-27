@@ -55,20 +55,20 @@ insert into t values (0, 1, 0), (1, 2, 2), (2, null, 5), (3, 2, null), (4, null,
 query II
 select v1, v2 from t order by v1 asc, v2 asc
 ----
-null null
-null 5
 1 0
-2 null
 2 2
+2 null
+null 5
+null null
 
 query II
 select v1, v2 from t order by v1 asc nulls last, v2 asc
 ----
 1 0
-2 null
 2 2
-null null
+2 null
 null 5
+null null
 
 statement ok
 drop table t

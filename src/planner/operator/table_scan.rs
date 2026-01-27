@@ -70,7 +70,7 @@ impl TableScanOperator {
                 sort_fields.push(SortField {
                     expr: ScalarExpression::column_expr(column.clone()),
                     asc: true,
-                    nulls_first: true,
+                    nulls_first: false,
                 })
             }
 

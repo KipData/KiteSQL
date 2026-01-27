@@ -30,8 +30,9 @@ use std::sync::LazyLock;
 
 pub(crate) const BOUND_MIN_TAG: u8 = u8::MIN;
 pub(crate) const BOUND_MAX_TAG: u8 = u8::MAX;
-pub(crate) const NULL_TAG: u8 = 0u8;
-pub(crate) const NOTNULL_TAG: u8 = 1u8;
+// Nulls Last default
+pub(crate) const NULL_TAG: u8 = 1u8;
+pub(crate) const NOTNULL_TAG: u8 = 0u8;
 const TABLE_NAME_HASH_LEN: usize = 8;
 const KEY_TYPE_TAG_LEN: usize = 1;
 const KEY_BOUND_LEN: usize = 1;
