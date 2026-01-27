@@ -189,6 +189,14 @@ fn default_optimizer_pipeline() -> HepOptimizerPipeline {
             ],
         )
         .before_batch(
+            "TopK".to_string(),
+            HepBatchStrategy::once_topdown(),
+            vec![
+                NormalizationRuleImpl::MinMaxToTopK,
+                NormalizationRuleImpl::TopK,
+            ],
+        )
+        .before_batch(
             "Combine Operators".to_string(),
             HepBatchStrategy::fix_point_topdown(10),
             vec![
@@ -196,11 +204,6 @@ fn default_optimizer_pipeline() -> HepOptimizerPipeline {
                 NormalizationRuleImpl::CollapseGroupByAgg,
                 NormalizationRuleImpl::CombineFilter,
             ],
-        )
-        .before_batch(
-            "TopK".to_string(),
-            HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::TopK],
         )
         .after_batch(
             "Eliminate Aggregate".to_string(),
@@ -379,8 +382,16 @@ impl<S: Storage> Database<S> {
         };
         let transaction = Box::into_raw(Box::new(self.storage.transaction()?));
         let (schema, executor) =
-            self.state
-                .execute(unsafe { &mut (*transaction) }, statement, params)?;
+            match self
+                .state
+                .execute(unsafe { &mut (*transaction) }, statement, params)
+            {
+                Ok(result) => result,
+                Err(err) => {
+                    unsafe { drop(Box::from_raw(transaction)) };
+                    return Err(err);
+                }
+            };
         let inner = Box::into_raw(Box::new(TransactionIter::new(schema, executor)));
         Ok(DatabaseIter { transaction, inner })
     }
