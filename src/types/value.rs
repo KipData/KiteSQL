@@ -756,9 +756,9 @@ impl DataValue {
         nulls_first: bool,
     ) -> Result<(), DatabaseError> {
         let (null_tag, not_null_tag) = if nulls_first {
-            (NULL_TAG, NOTNULL_TAG)
-        } else {
             (NOTNULL_TAG, NULL_TAG)
+        } else {
+            (NULL_TAG, NOTNULL_TAG)
         };
         if let DataValue::Null = self {
             b.push(null_tag);
@@ -822,7 +822,7 @@ impl DataValue {
 
     #[inline]
     pub fn memcomparable_encode(&self, b: &mut BumpBytes) -> Result<(), DatabaseError> {
-        self.memcomparable_encode_with_null_order(b, true)
+        self.memcomparable_encode_with_null_order(b, false)
     }
 
     pub fn memcomparable_decode<R: Read>(
@@ -839,7 +839,7 @@ impl DataValue {
         // for index cover mapping reduce one layer of conversion
         tuple_mapping: Option<TupleMappingRef<'_>>,
     ) -> Result<DataValue, DatabaseError> {
-        if reader.read_u8()? == 0u8 {
+        if reader.read_u8()? == NULL_TAG {
             return Ok(DataValue::Null);
         }
         match ty {
@@ -2273,9 +2273,9 @@ mod test {
         println!("{key_i8_0:?} < {key_i8_1:?}");
         println!("{key_i8_1:?} < {key_i8_2:?}");
         println!("{key_i8_2:?} < {key_i8_3:?}");
-        assert!(key_i8_0 < key_i8_1);
         assert!(key_i8_1 < key_i8_2);
         assert!(key_i8_2 < key_i8_3);
+        assert!(key_i8_3 < key_i8_0);
 
         assert_eq!(
             value_0,
@@ -2329,9 +2329,9 @@ mod test {
         v_i8_2.memcomparable_encode(&mut key_i8_2)?;
         v_i8_3.memcomparable_encode(&mut key_i8_3)?;
 
-        assert!(key_i8_0 < key_i8_1);
         assert!(key_i8_1 < key_i8_2);
         assert!(key_i8_2 < key_i8_3);
+        assert!(key_i8_3 < key_i8_0);
 
         assert_eq!(
             v_i8_0,
@@ -2378,9 +2378,9 @@ mod test {
         v_i16_2.memcomparable_encode(&mut key_i16_2)?;
         v_i16_3.memcomparable_encode(&mut key_i16_3)?;
 
-        assert!(key_i16_0 < key_i16_1);
         assert!(key_i16_1 < key_i16_2);
         assert!(key_i16_2 < key_i16_3);
+        assert!(key_i16_3 < key_i16_0);
 
         assert_eq!(
             v_i16_0,
@@ -2427,9 +2427,9 @@ mod test {
         v_i32_2.memcomparable_encode(&mut key_i32_2)?;
         v_i32_3.memcomparable_encode(&mut key_i32_3)?;
 
-        assert!(key_i32_0 < key_i32_1);
         assert!(key_i32_1 < key_i32_2);
         assert!(key_i32_2 < key_i32_3);
+        assert!(key_i32_3 < key_i32_0);
 
         assert_eq!(
             v_i32_0,
@@ -2476,9 +2476,9 @@ mod test {
         v_i64_2.memcomparable_encode(&mut key_i64_2)?;
         v_i64_3.memcomparable_encode(&mut key_i64_3)?;
 
-        assert!(key_i64_0 < key_i64_1);
         assert!(key_i64_1 < key_i64_2);
         assert!(key_i64_2 < key_i64_3);
+        assert!(key_i64_3 < key_i64_0);
 
         assert_eq!(
             v_i64_0,
@@ -2532,9 +2532,9 @@ mod test {
         v_f32_2.memcomparable_encode(&mut key_f32_2)?;
         v_f32_3.memcomparable_encode(&mut key_f32_3)?;
 
-        assert!(key_f32_0 < key_f32_1);
         assert!(key_f32_1 < key_f32_2);
         assert!(key_f32_2 < key_f32_3);
+        assert!(key_f32_3 < key_f32_0);
 
         assert_eq!(
             v_f32_0,
@@ -2569,9 +2569,9 @@ mod test {
         v_f64_2.memcomparable_encode(&mut key_f64_2)?;
         v_f64_3.memcomparable_encode(&mut key_f64_3)?;
 
-        assert!(key_f64_0 < key_f64_1);
         assert!(key_f64_1 < key_f64_2);
         assert!(key_f64_2 < key_f64_3);
+        assert!(key_f64_3 < key_f64_0);
 
         assert_eq!(
             v_f64_0,
@@ -2628,9 +2628,9 @@ mod test {
         println!("{key_decimal_1:?} < {key_decimal_2:?}");
         println!("{key_decimal_2:?} < {key_decimal_3:?}");
 
-        assert!(key_decimal_0 < key_decimal_1);
         assert!(key_decimal_1 < key_decimal_2);
         assert!(key_decimal_2 < key_decimal_3);
+        assert!(key_decimal_3 < key_decimal_0);
 
         assert_eq!(
             v_decimal_0,
@@ -2694,8 +2694,8 @@ mod test {
         println!("{key_tuple_1:?} < {key_tuple_2:?}");
         println!("{key_tuple_2:?} < {key_tuple_3:?}");
 
-        assert!(key_tuple_1 < key_tuple_2);
         assert!(key_tuple_2 < key_tuple_3);
+        assert!(key_tuple_3 < key_tuple_1);
 
         assert_eq!(
             v_tuple_1,
@@ -2766,8 +2766,8 @@ mod test {
         v_tuple_2.memcomparable_encode(&mut key_tuple_2)?;
         v_tuple_3.memcomparable_encode(&mut key_tuple_3)?;
 
-        assert!(key_tuple_1 < key_tuple_2);
         assert!(key_tuple_2 < key_tuple_3);
+        assert!(key_tuple_3 < key_tuple_1);
 
         let ty = LogicalType::Tuple(vec![
             LogicalType::Tinyint,
@@ -2865,10 +2865,10 @@ mod test {
         v_zh.memcomparable_encode(&mut key_zh)?;
 
         // ordering
-        assert!(key_null < key_a);
         assert!(key_a < key_ab);
         assert!(key_ab < key_b);
         assert!(key_b < key_zh);
+        assert!(key_zh < key_null);
 
         // decode check
         assert_eq!(

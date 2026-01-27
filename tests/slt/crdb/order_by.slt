@@ -10,23 +10,23 @@ INSERT INTO t VALUES (1, 9, true), (2, 8, false), (3, 7, NULL)
 query I
 SELECT c FROM t ORDER BY c
 ----
-null
 false
 true
+null
 
 query I
 SELECT c FROM t ORDER BY c
 ----
-null
 false
 true
+null
 
 query I
 SELECT c FROM t ORDER BY c DESC
 ----
-null
 true
 false
+null
 
 query II
 SELECT a, b FROM t ORDER BY b
@@ -354,20 +354,20 @@ null 6
 query II
 SELECT x, y FROM xy ORDER BY x, y
 ----
-null null
-null 6
-2 null
 2 5
+2 null
 4 8
+null 6
+null null
 
 query IT
 SELECT x, y FROM xy ORDER BY x, y DESC NULLS FIRST
 ----
-null null
-null 6
 2 null
 2 5
 4 8
+null null
+null 6
 
 query IT
 SELECT x, y FROM xy ORDER BY x NULLS LAST, y DESC NULLS FIRST
@@ -390,10 +390,10 @@ null null
 query TT
 SELECT x, y FROM xy ORDER BY x NULLS FIRST, y DESC
 ----
-null null
 null 6
-2 null
+null null
 2 5
+2 null
 4 8
 
 query TI

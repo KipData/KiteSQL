@@ -98,7 +98,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 return_orderby.push(SortField::new(
                     expr,
                     asc.is_none_or(|asc| asc),
-                    nulls_first.unwrap_or(true),
+                    nulls_first.unwrap_or(false),
                 ));
             }
             Some(return_orderby)

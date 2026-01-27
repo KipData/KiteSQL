@@ -179,7 +179,7 @@ fn distinct_sort_fields(groupby_exprs: &[ScalarExpression]) -> Vec<SortField> {
     groupby_exprs
         .iter()
         .cloned()
-        .map(|expr| SortField::new(expr, true, true))
+        .map(|expr| SortField::new(expr, true, false))
         .collect()
 }
 
@@ -349,7 +349,7 @@ mod tests {
 
     fn make_sort_field(name: &str) -> SortField {
         let column = ColumnRef::from(ColumnCatalog::new_dummy(name.to_string()));
-        SortField::new(ScalarExpression::column_expr(column), true, true)
+        SortField::new(ScalarExpression::column_expr(column), true, false)
     }
 
     fn build_plan(
@@ -427,7 +427,7 @@ mod tests {
         let sort_fields = vec![SortField::new(
             ScalarExpression::column_expr(c1.clone()),
             true,
-            true,
+            false,
         )];
         let sort_option = SortOption::OrderBy {
             fields: sort_fields.clone(),
@@ -523,7 +523,7 @@ mod tests {
     #[test]
     fn annotate_sets_sort_hint_on_table_scan() -> Result<(), DatabaseError> {
         let column = ColumnRef::from(ColumnCatalog::new_dummy("c1".to_string()));
-        let sort_field = SortField::new(ScalarExpression::column_expr(column.clone()), true, true);
+        let sort_field = SortField::new(ScalarExpression::column_expr(column.clone()), true, false);
         let (index_info, _) = build_index_info(vec![sort_field.clone()], 0);
 
         let mut columns = BTreeMap::new();
@@ -625,7 +625,7 @@ mod tests {
     #[test]
     fn promote_index_to_remove_sort() -> Result<(), DatabaseError> {
         let column = ColumnRef::from(ColumnCatalog::new_dummy("c_first".to_string()));
-        let sort_field = SortField::new(ScalarExpression::column_expr(column.clone()), true, true);
+        let sort_field = SortField::new(ScalarExpression::column_expr(column.clone()), true, false);
         let (mut index_info, _) = build_index_info(vec![sort_field.clone()], 0);
         index_info.range = Some(Range::Scope {
             min: Bound::Unbounded,

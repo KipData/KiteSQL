@@ -191,7 +191,7 @@ mod tests {
         let sort_fields = vec![SortField::new(
             ScalarExpression::column_expr(c1_column.clone()),
             true,
-            true,
+            false,
         )];
         let scala_functions = Default::default();
         let table_functions = Default::default();

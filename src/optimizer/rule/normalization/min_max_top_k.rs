@@ -18,7 +18,6 @@ use crate::expression::ScalarExpression;
 use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
 use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
 use crate::optimizer::plan_utils::{only_child, wrap_child_with};
-use crate::planner::operator::filter::FilterOperator;
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::top_k::TopKOperator;
 use crate::planner::operator::Operator;
@@ -60,7 +59,7 @@ impl NormalizationRule for MinMaxToTopK {
             _ => return Ok(false),
         };
 
-        let sort_field = SortField::new(args[0].clone(), asc, true);
+        let sort_field = SortField::new(args[0].clone(), asc, false);
         let already_topk = match only_child(plan) {
             Some(child) => match &child.operator {
                 Operator::TopK(topk) => {
@@ -74,23 +73,6 @@ impl NormalizationRule for MinMaxToTopK {
         };
 
         if already_topk {
-            return Ok(false);
-        }
-
-        // IndexScan prioritizes indexed columns as null first.
-        // Therefore, to ensure Top K is eliminated when an index exists,
-        // we set it to null first and filter null rows.
-        let predicate = ScalarExpression::IsNull {
-            negated: true,
-            expr: Box::new(args[0].clone()),
-        };
-        let filter = Operator::Filter(FilterOperator {
-            predicate,
-            is_optimized: false,
-            having: false,
-        });
-
-        if !wrap_child_with(plan, 0, filter) {
             return Ok(false);
         }
 
@@ -167,27 +149,12 @@ mod tests {
         assert!(topk.offset.is_none());
         assert_eq!(topk.sort_fields.len(), 1);
         assert!(topk.sort_fields[0].asc);
-        assert!(topk.sort_fields[0].nulls_first);
+        assert!(!topk.sort_fields[0].nulls_first);
         let args = match &op.agg_calls[0] {
             crate::expression::ScalarExpression::AggCall { args, .. } => args,
             _ => unreachable!("Aggregate should use AggCall"),
         };
         assert_eq!(topk.sort_fields[0].expr, args[0]);
-
-        let filter_plan = match topk_plan.childrens.as_ref() {
-            Childrens::Only(child) => child.as_ref(),
-            _ => unreachable!("TopK should have one child"),
-        };
-        match &filter_plan.operator {
-            Operator::Filter(filter_op) => match &filter_op.predicate {
-                crate::expression::ScalarExpression::IsNull { negated, expr } => {
-                    assert!(*negated);
-                    assert_eq!(**expr, args[0]);
-                }
-                _ => unreachable!("Expected IS NOT NULL filter under TopK"),
-            },
-            _ => unreachable!("Expected Filter under TopK"),
-        }
 
         Ok(())
     }
@@ -216,21 +183,7 @@ mod tests {
         assert!(topk.offset.is_none());
         assert_eq!(topk.sort_fields.len(), 1);
         assert!(!topk.sort_fields[0].asc);
-        assert!(topk.sort_fields[0].nulls_first);
-
-        let filter_plan = match topk_plan.childrens.as_ref() {
-            Childrens::Only(child) => child.as_ref(),
-            _ => unreachable!("TopK should have one child"),
-        };
-        match &filter_plan.operator {
-            Operator::Filter(filter_op) => match &filter_op.predicate {
-                crate::expression::ScalarExpression::IsNull { negated, .. } => {
-                    assert!(*negated);
-                }
-                _ => unreachable!("Expected IS NOT NULL filter under TopK"),
-            },
-            _ => unreachable!("Expected Filter under TopK"),
-        }
+        assert!(!topk.sort_fields[0].nulls_first);
 
         Ok(())
     }
