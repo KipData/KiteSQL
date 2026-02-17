@@ -30,6 +30,7 @@ use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
 use crate::optimizer::rule::implementation::ImplementationRuleImpl;
 use crate::optimizer::rule::normalization::NormalizationRuleImpl;
 use crate::parser::parse_sql;
+use crate::planner::operator::Operator;
 use crate::planner::LogicalPlan;
 use crate::storage::memory::MemoryStorage;
 #[cfg(not(target_arch = "wasm32"))]
@@ -64,6 +65,7 @@ pub struct DataBaseBuilder {
     path: PathBuf,
     scala_functions: ScalaFunctions,
     table_functions: TableFunctions,
+    histogram_buckets: Option<usize>,
 }
 
 impl DataBaseBuilder {
@@ -72,6 +74,7 @@ impl DataBaseBuilder {
             path: path.into(),
             scala_functions: Default::default(),
             table_functions: Default::default(),
+            histogram_buckets: None,
         };
         builder = builder.register_scala_function(CharLength::new("char_length".to_lowercase()));
         builder =
@@ -83,6 +86,11 @@ impl DataBaseBuilder {
         builder = builder.register_scala_function(Upper::new());
         builder = builder.register_table_function(Numbers::new());
         builder
+    }
+
+    pub fn histogram_buckets(mut self, buckets: usize) -> Self {
+        self.histogram_buckets = Some(buckets);
+        self
     }
 
     pub fn register_scala_function(mut self, function: Arc<dyn ScalarFunctionImpl>) -> Self {
@@ -100,41 +108,72 @@ impl DataBaseBuilder {
     }
 
     pub fn build_with_storage<T: Storage>(self, storage: T) -> Result<Database<T>, DatabaseError> {
-        Self::_build::<T>(storage, self.scala_functions, self.table_functions)
+        Self::_build::<T>(
+            storage,
+            self.scala_functions,
+            self.table_functions,
+            self.histogram_buckets,
+        )
     }
 
     #[cfg(target_arch = "wasm32")]
     pub fn build(self) -> Result<Database<MemoryStorage>, DatabaseError> {
         let storage = MemoryStorage::new();
 
-        Self::_build::<MemoryStorage>(storage, self.scala_functions, self.table_functions)
+        Self::_build::<MemoryStorage>(
+            storage,
+            self.scala_functions,
+            self.table_functions,
+            self.histogram_buckets,
+        )
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn build(self) -> Result<Database<RocksStorage>, DatabaseError> {
         let storage = RocksStorage::new(self.path)?;
 
-        Self::_build::<RocksStorage>(storage, self.scala_functions, self.table_functions)
+        Self::_build::<RocksStorage>(
+            storage,
+            self.scala_functions,
+            self.table_functions,
+            self.histogram_buckets,
+        )
     }
 
     pub fn build_in_memory(self) -> Result<Database<MemoryStorage>, DatabaseError> {
         let storage = MemoryStorage::new();
 
-        Self::_build::<MemoryStorage>(storage, self.scala_functions, self.table_functions)
+        Self::_build::<MemoryStorage>(
+            storage,
+            self.scala_functions,
+            self.table_functions,
+            self.histogram_buckets,
+        )
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn build_optimistic(self) -> Result<Database<OptimisticRocksStorage>, DatabaseError> {
         let storage = OptimisticRocksStorage::new(self.path)?;
 
-        Self::_build::<OptimisticRocksStorage>(storage, self.scala_functions, self.table_functions)
+        Self::_build::<OptimisticRocksStorage>(
+            storage,
+            self.scala_functions,
+            self.table_functions,
+            self.histogram_buckets,
+        )
     }
 
     fn _build<T: Storage>(
         storage: T,
         scala_functions: ScalaFunctions,
         table_functions: TableFunctions,
+        histogram_buckets: Option<usize>,
     ) -> Result<Database<T>, DatabaseError> {
+        if matches!(histogram_buckets, Some(0)) {
+            return Err(DatabaseError::InvalidValue(
+                "histogram buckets must be >= 1".to_string(),
+            ));
+        }
         let meta_cache = SharedLruCache::new(256, 8, RandomState::new())?;
         let table_cache = SharedLruCache::new(48, 4, RandomState::new())?;
         let view_cache = SharedLruCache::new(12, 4, RandomState::new())?;
@@ -149,6 +188,7 @@ impl DataBaseBuilder {
                 table_cache,
                 view_cache,
                 optimizer_pipeline: default_optimizer_pipeline(),
+                histogram_buckets,
                 _p: Default::default(),
             }),
         })
@@ -260,6 +300,7 @@ pub(crate) struct State<S> {
     table_cache: TableCache,
     view_cache: ViewCache,
     optimizer_pipeline: HepOptimizerPipeline,
+    histogram_buckets: Option<usize>,
     _p: PhantomData<S>,
 }
 
@@ -312,10 +353,16 @@ impl<S: Storage> State<S> {
         ///     Limit(1)
         ///       Project(a,b)
         let source_plan = binder.bind(stmt)?;
-        let best_plan = self
+        let mut best_plan = self
             .optimizer_pipeline
             .instantiate(source_plan)
             .find_best(Some(&transaction.meta_loader(meta_cache)))?;
+
+        if let Operator::Analyze(op) = &mut best_plan.operator {
+            if op.histogram_buckets.is_none() {
+                op.histogram_buckets = self.histogram_buckets;
+            }
+        }
 
         Ok(best_plan)
     }
@@ -1035,5 +1082,18 @@ pub(crate) mod test {
         assert!(res.is_err());
 
         Ok(())
+    }
+
+    #[test]
+    fn test_invalid_histogram_buckets() {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let result = DataBaseBuilder::path(temp_dir.path())
+            .histogram_buckets(0)
+            .build();
+
+        assert!(matches!(
+            result,
+            Err(DatabaseError::InvalidValue(message)) if message == "histogram buckets must be >= 1"
+        ));
     }
 }

@@ -20,4 +20,5 @@ use kite_sql_serde_macros::ReferenceSerialization;
 pub struct AnalyzeOperator {
     pub table_name: TableName,
     pub index_metas: Vec<IndexMetaRef>,
+    pub histogram_buckets: Option<usize>,
 }

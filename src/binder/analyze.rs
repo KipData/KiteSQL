@@ -45,6 +45,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             Operator::Analyze(AnalyzeOperator {
                 table_name,
                 index_metas,
+                histogram_buckets: None,
             }),
             Childrens::Only(Box::new(scan_op)),
         ))

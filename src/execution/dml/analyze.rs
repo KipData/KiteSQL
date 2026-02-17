@@ -48,6 +48,7 @@ pub struct Analyze {
     table_name: TableName,
     input: LogicalPlan,
     index_metas: Vec<IndexMetaRef>,
+    histogram_buckets: Option<usize>,
 }
 
 impl From<(AnalyzeOperator, LogicalPlan)> for Analyze {
@@ -56,6 +57,7 @@ impl From<(AnalyzeOperator, LogicalPlan)> for Analyze {
             AnalyzeOperator {
                 table_name,
                 index_metas,
+                histogram_buckets,
             },
             input,
         ): (AnalyzeOperator, LogicalPlan),
@@ -64,6 +66,7 @@ impl From<(AnalyzeOperator, LogicalPlan)> for Analyze {
             table_name,
             input,
             index_metas,
+            histogram_buckets,
         }
     }
 }
@@ -79,6 +82,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze {
                 table_name,
                 mut input,
                 index_metas,
+                histogram_buckets,
             } = self;
 
             let schema = input.output_schema().clone();
@@ -99,6 +103,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze {
                     index_id: index.id,
                     exprs: throw!(co, index.column_exprs(&table)),
                     builder: HistogramBuilder::new(index, None),
+                    histogram_buckets,
                 });
             }
 
@@ -160,6 +165,7 @@ struct State {
     index_id: IndexId,
     exprs: Vec<ScalarExpression>,
     builder: HistogramBuilder,
+    histogram_buckets: Option<usize>,
 }
 
 impl Analyze {
@@ -177,7 +183,10 @@ impl Analyze {
         let mut active_index_paths = HashSet::new();
 
         for State {
-            index_id, builder, ..
+            index_id,
+            builder,
+            histogram_buckets,
+            ..
         } in builders
         {
             let index_file = OsStr::new(&index_id.to_string()).to_os_string();
@@ -185,7 +194,8 @@ impl Analyze {
             let temp_path = path.with_extension("tmp");
             let path_str: String = path.to_string_lossy().into();
 
-            let (histogram, sketch) = builder.build(DEFAULT_NUM_OF_BUCKETS)?;
+            let (histogram, sketch) =
+                builder.build(histogram_buckets.unwrap_or(DEFAULT_NUM_OF_BUCKETS))?;
             let meta = StatisticsMeta::new(histogram, sketch);
 
             meta.to_file(&temp_path)?;
@@ -224,11 +234,15 @@ impl Analyze {
         let mut active_keys = HashSet::new();
 
         for State {
-            index_id, builder, ..
+            index_id,
+            builder,
+            histogram_buckets,
+            ..
         } in builders
         {
             let key = format!("{prefix}/{index_id}");
-            let (histogram, sketch) = builder.build(DEFAULT_NUM_OF_BUCKETS)?;
+            let (histogram, sketch) =
+                builder.build(histogram_buckets.unwrap_or(DEFAULT_NUM_OF_BUCKETS))?;
             let meta = StatisticsMeta::new(histogram, sketch);
             let encoded = meta.to_storage_string()?;
 
@@ -300,7 +314,10 @@ mod test {
     fn test_statistics_meta() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let base_dir = require_statistics_base_dir();
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let buckets = 10;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path())
+            .histogram_buckets(buckets)
+            .build()?;
 
         kite_sql
             .run("create table t1 (a int primary key, b int)")?
@@ -328,16 +345,19 @@ mod test {
 
         assert_eq!(statistics_meta_pk_index.index_id(), 0);
         assert_eq!(statistics_meta_pk_index.histogram().values_len(), 101);
+        assert_eq!(statistics_meta_pk_index.histogram().buckets_len(), buckets);
 
         let statistics_meta_b_index = StatisticsMeta::from_file::<RocksTransaction>(&paths[1])?;
 
         assert_eq!(statistics_meta_b_index.index_id(), 1);
         assert_eq!(statistics_meta_b_index.histogram().values_len(), 101);
+        assert_eq!(statistics_meta_b_index.histogram().buckets_len(), buckets);
 
         let statistics_meta_p_index = StatisticsMeta::from_file::<RocksTransaction>(&paths[2])?;
 
         assert_eq!(statistics_meta_p_index.index_id(), 2);
         assert_eq!(statistics_meta_p_index.histogram().values_len(), 101);
+        assert_eq!(statistics_meta_p_index.histogram().buckets_len(), buckets);
 
         Ok(())
     }
