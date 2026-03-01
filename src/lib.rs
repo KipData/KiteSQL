@@ -115,6 +115,8 @@ mod optimizer;
 pub mod parser;
 pub mod paths;
 pub mod planner;
+#[cfg(all(not(target_arch = "wasm32"), feature = "python"))]
+pub mod python;
 pub mod serdes;
 pub mod storage;
 pub mod types;

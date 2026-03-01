@@ -147,3 +147,23 @@ jobs:
 
       - name: Run native examples
         run: make native-examples
+  # 7
+  python-tests:
+    name: Python bindings tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Install stable toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run python binding tests
+        run: make test-python
