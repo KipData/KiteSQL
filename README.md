@@ -62,8 +62,8 @@ import kite_sql
 db = kite_sql.Database.in_memory()
 db.execute("create table demo(id int primary key, v int)")
 db.execute("insert into demo values (1, 2), (2, 4)")
-rows = db.run("select * from demo").rows()
-print([row["values"] for row in rows])
+for row in db.run("select * from demo"):
+    print(row["values"])
 ```
 
 ## Examples
