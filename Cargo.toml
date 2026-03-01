@@ -28,6 +28,7 @@ default = ["macros"]
 macros  = []
 net     = ["dep:pgwire", "dep:async-trait", "dep:clap", "dep:env_logger", "dep:futures", "dep:log", "dep:tokio"]
 pprof   = ["pprof/criterion", "pprof/flamegraph"]
+python  = ["dep:pyo3"]
 
 [[bench]]
 name    = "query_bench"
@@ -48,6 +49,7 @@ itertools             = { version = "0.12" }
 ordered-float         = { version = "4", features = ["serde"] }
 paste                 = { version = "1" }
 parking_lot           = { version = "0.12", features = ["arc_lock"] }
+pyo3                  = { version = "0.23", features = ["auto-initialize"], optional = true }
 recursive             = { version = "0.1" }
 regex                 = { version = "1" }
 rust_decimal          = { version = "1" }

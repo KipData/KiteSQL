@@ -52,6 +52,20 @@ console.log(rows.map((r) => r.values.map((v) => v.Int32 ?? v)));
 ```
 - In Node.js, provide a small `localStorage` shim if you enable statistics-related features (see `examples/wasm_index_usage.test.mjs`).
 
+## Python (PyO3)
+- Enable bindings with Cargo feature `python`.
+- Constructor is explicit: `Database(path)`; in-memory usage is `Database.in_memory()`.
+- Minimal usage:
+```python
+import kite_sql
+
+db = kite_sql.Database.in_memory()
+db.execute("create table demo(id int primary key, v int)")
+db.execute("insert into demo values (1, 2), (2, 4)")
+for row in db.run("select * from demo"):
+    print(row["values"])
+```
+
 ## Examples
 
 ```rust

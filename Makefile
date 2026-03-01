@@ -3,11 +3,15 @@ CARGO ?= cargo
 WASM_PACK ?= wasm-pack
 SQLLOGIC_PATH ?= tests/slt/**/*.slt
 
-.PHONY: test test-wasm test-slt test-all wasm-build check tpcc tpcc-dual cargo-check build wasm-examples native-examples fmt clippy
+.PHONY: test test-python test-wasm test-slt test-all wasm-build check tpcc tpcc-dual cargo-check build wasm-examples native-examples fmt clippy
 
 ## Run default Rust tests in the current environment (non-WASM).
 test:
 	$(CARGO) test --all
+
+## Run Python binding API tests implemented with pyo3.
+test-python:
+	$(CARGO) test --features python test_python_
 
 ## Perform a `cargo check` across the workspace.
 cargo-check:
@@ -30,7 +34,7 @@ test-slt:
 	$(CARGO) run -p sqllogictest-test -- --path '$(SQLLOGIC_PATH)'
 
 ## Convenience target to run every suite in sequence.
-test-all: test test-wasm test-slt
+test-all: test test-wasm test-slt test-python
 
 ## Run formatting (check mode) across the workspace.
 fmt:
