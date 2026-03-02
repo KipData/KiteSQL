@@ -44,7 +44,7 @@ fn format_sql_error_loc(span: &Option<SqlErrorSpan>) -> String {
 fn format_not_null_message(column: &Option<String>, span: &Option<SqlErrorSpan>) -> String {
     match column {
         Some(column) => format!(
-            "column: {column} cannot be null{}",
+            "column: `{column}` cannot be null{}",
             format_sql_error_loc(span)
         ),
         None => format!("cannot be null{}", format_sql_error_loc(span)),
@@ -76,10 +76,10 @@ pub enum DatabaseError {
     ChannelClose,
     #[error("columns empty")]
     ColumnsEmpty,
-    #[error("column id: {0} not found")]
+    #[error("column id: `{0}` not found")]
     ColumnIdNotFound(String),
     #[error(
-        "column: {name} not found{loc}",
+        "column: `{name}` not found{loc}",
         loc = format_sql_error_loc(span)
     )]
     ColumnNotFound {
@@ -96,18 +96,18 @@ pub enum DatabaseError {
     DefaultNotColumnRef,
     #[error("default does not exist")]
     DefaultNotExist,
-    #[error("column: {0} already exists")]
+    #[error("column: `{0}` already exists")]
     DuplicateColumn(String),
-    #[error("table or view: {0} hash already exists")]
+    #[error("table or view: `{0}` hash already exists")]
     DuplicateSourceHash(String),
-    #[error("index: {0} already exists")]
+    #[error("index: `{0}` already exists")]
     DuplicateIndex(String),
     #[error("duplicate primary key")]
     DuplicatePrimaryKey,
     #[error("the column has been declared unique and the value already exists")]
     DuplicateUniqueValue,
     #[error(
-        "function: {name} not found{loc}",
+        "function: `{name}` not found{loc}",
         loc = format_sql_error_loc(span)
     )]
     FunctionNotFound {
@@ -129,7 +129,7 @@ pub enum DatabaseError {
     #[error("can not compare two types: {0} and {1}")]
     Incomparable(LogicalType, LogicalType),
     #[error(
-        "invalid column: {name}{loc}",
+        "invalid column: `{name}`{loc}",
         loc = format_sql_error_loc(span)
     )]
     InvalidColumn {
@@ -139,7 +139,7 @@ pub enum DatabaseError {
     #[error("invalid index")]
     InvalidIndex,
     #[error(
-        "invalid table: {name}{loc}",
+        "invalid table: `{name}`{loc}",
         loc = format_sql_error_loc(span)
     )]
     InvalidTable {
@@ -161,7 +161,7 @@ pub enum DatabaseError {
     #[error("add column must be nullable or specify a default value")]
     NeedNullAbleOrDefault,
     #[error(
-        "parameter: {name} not found{loc}",
+        "parameter: `{name}` not found{loc}",
         loc = format_sql_error_loc(span)
     )]
     ParametersNotFound {
