@@ -243,7 +243,7 @@ impl ColumnDesc {
         self.is_unique
     }
 
-    pub(crate) fn set_unique(&mut self, is_unique: bool) {
-        self.is_unique = is_unique
+    pub(crate) fn set_unique(&mut self) {
+        self.is_unique = true
     }
 }

@@ -35,7 +35,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             let mut table_alias = None;
             let mut alias_idents = None;
 
-            if let Some(TableAlias { name, columns }) = alias {
+            if let Some(TableAlias { name, columns, .. }) = alias {
                 table_alias = Some(name.value.to_lowercase().into());
                 alias_idents = Some(columns);
             }

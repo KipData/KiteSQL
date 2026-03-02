@@ -16,7 +16,7 @@ use sqlparser::ast::{AlterTableOperation, ObjectName};
 
 use std::sync::Arc;
 
-use super::{is_valid_identifier, Binder};
+use super::{attach_span_if_absent, is_valid_identifier, Binder};
 use crate::binder::lower_case_name;
 use crate::errors::DatabaseError;
 use crate::planner::operator::alter_table::add_column::AddColumnOperator;
@@ -43,13 +43,15 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 column_keyword: _,
                 if_not_exists,
                 column_def,
+                ..
             } => {
                 let plan = TableScanOperator::build(table_name.clone(), table, true)?;
                 let column = self.bind_column(column_def, None)?;
 
                 if !is_valid_identifier(column.name()) {
-                    return Err(DatabaseError::InvalidColumn(
-                        "illegal column naming".to_string(),
+                    return Err(attach_span_if_absent(
+                        DatabaseError::invalid_column("illegal column naming".to_string()),
+                        column_def,
                     ));
                 }
                 LogicalPlan::new(
@@ -62,12 +64,17 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 )
             }
             AlterTableOperation::DropColumn {
-                column_name,
+                column_names,
                 if_exists,
                 ..
             } => {
                 let plan = TableScanOperator::build(table_name.clone(), table, true)?;
-                let column_name = column_name.value.clone();
+                if column_names.len() != 1 {
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "only dropping a single column is supported".to_string(),
+                    ));
+                }
+                let column_name = column_names[0].value.clone();
 
                 LogicalPlan::new(
                     Operator::DropColumn(DropColumnOperator {

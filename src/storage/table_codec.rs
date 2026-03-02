@@ -451,7 +451,7 @@ impl TableCodec {
 
             Ok((key_prefix, column_bytes))
         } else {
-            Err(DatabaseError::InvalidColumn(
+            Err(DatabaseError::invalid_column(
                 "column does not belong to table".to_string(),
             ))
         }

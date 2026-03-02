@@ -21,6 +21,26 @@ use std::num::{ParseFloatError, ParseIntError, TryFromIntError};
 use std::str::{ParseBoolError, Utf8Error};
 use std::string::FromUtf8Error;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlErrorSpan {
+    pub start: usize,
+    pub end: usize,
+    pub line: usize,
+    pub near: Option<String>,
+}
+
+fn format_sql_error_loc(span: &Option<SqlErrorSpan>) -> String {
+    span.as_ref()
+        .map(|s| {
+            if let Some(near) = &s.near {
+                format!(" near '{near}' at line {}", s.line)
+            } else {
+                format!(" at line {}, range {}..{}", s.line, s.start, s.end)
+            }
+        })
+        .unwrap_or_default()
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum DatabaseError {
     #[error("agg miss: {0}")]
@@ -33,16 +53,29 @@ pub enum DatabaseError {
     ),
     #[error("cache size overflow")]
     CacheSizeOverFlow,
-    #[error("cast fail: {from} -> {to}")]
-    CastFail { from: LogicalType, to: LogicalType },
+    #[error(
+        "cast fail: {from} -> {to}{loc}",
+        loc = format_sql_error_loc(span)
+    )]
+    CastFail {
+        from: LogicalType,
+        to: LogicalType,
+        span: Option<SqlErrorSpan>,
+    },
     #[error("channel close")]
     ChannelClose,
     #[error("columns empty")]
     ColumnsEmpty,
     #[error("column id: {0} not found")]
     ColumnIdNotFound(String),
-    #[error("column: {0} not found")]
-    ColumnNotFound(String),
+    #[error(
+        "column: {name} not found{loc}",
+        loc = format_sql_error_loc(span)
+    )]
+    ColumnNotFound {
+        name: String,
+        span: Option<SqlErrorSpan>,
+    },
     #[error("csv error: {0}")]
     Csv(
         #[from]
@@ -63,8 +96,14 @@ pub enum DatabaseError {
     DuplicatePrimaryKey,
     #[error("the column has been declared unique and the value already exists")]
     DuplicateUniqueValue,
-    #[error("function: {0} not found")]
-    FunctionNotFound(String),
+    #[error(
+        "function: {name} not found{loc}",
+        loc = format_sql_error_loc(span)
+    )]
+    FunctionNotFound {
+        name: String,
+        span: Option<SqlErrorSpan>,
+    },
     #[error("empty plan")]
     EmptyPlan,
     #[error("sql statement is empty")]
@@ -79,12 +118,24 @@ pub enum DatabaseError {
     ),
     #[error("can not compare two types: {0} and {1}")]
     Incomparable(LogicalType, LogicalType),
-    #[error("invalid column: {0}")]
-    InvalidColumn(String),
+    #[error(
+        "invalid column: {name}{loc}",
+        loc = format_sql_error_loc(span)
+    )]
+    InvalidColumn {
+        name: String,
+        span: Option<SqlErrorSpan>,
+    },
     #[error("invalid index")]
     InvalidIndex,
-    #[error("invalid table: {0}")]
-    InvalidTable(String),
+    #[error(
+        "invalid table: {name}{loc}",
+        loc = format_sql_error_loc(span)
+    )]
+    InvalidTable {
+        name: String,
+        span: Option<SqlErrorSpan>,
+    },
     #[error("invalid type")]
     InvalidType,
     #[error("invalid value: {0}")]
@@ -99,8 +150,14 @@ pub enum DatabaseError {
     MisMatch(&'static str, &'static str),
     #[error("add column must be nullable or specify a default value")]
     NeedNullAbleOrDefault,
-    #[error("parameter: {0} not found")]
-    ParametersNotFound(String),
+    #[error(
+        "parameter: {name} not found{loc}",
+        loc = format_sql_error_loc(span)
+    )]
+    ParametersNotFound {
+        name: String,
+        span: Option<SqlErrorSpan>,
+    },
     #[error("no transaction begin")]
     NoTransactionBegin,
     #[error("cannot be null")]
@@ -196,4 +253,154 @@ pub enum DatabaseError {
     ViewExists,
     #[error("the view not found")]
     ViewNotFound,
+}
+
+impl DatabaseError {
+    pub fn invalid_column(name: impl Into<String>) -> Self {
+        Self::InvalidColumn {
+            name: name.into(),
+            span: None,
+        }
+    }
+
+    pub fn column_not_found(name: impl Into<String>) -> Self {
+        Self::ColumnNotFound {
+            name: name.into(),
+            span: None,
+        }
+    }
+
+    pub fn invalid_table(name: impl Into<String>) -> Self {
+        Self::InvalidTable {
+            name: name.into(),
+            span: None,
+        }
+    }
+
+    pub fn function_not_found(name: impl Into<String>) -> Self {
+        Self::FunctionNotFound {
+            name: name.into(),
+            span: None,
+        }
+    }
+
+    pub fn parameter_not_found(name: impl Into<String>) -> Self {
+        Self::ParametersNotFound {
+            name: name.into(),
+            span: None,
+        }
+    }
+
+    pub fn with_span(self, span: SqlErrorSpan) -> Self {
+        match self {
+            Self::CastFail { from, to, .. } => Self::CastFail {
+                from,
+                to,
+                span: Some(span),
+            },
+            Self::InvalidColumn { name, .. } => Self::InvalidColumn {
+                name,
+                span: Some(span),
+            },
+            Self::ColumnNotFound { name, .. } => Self::ColumnNotFound {
+                name,
+                span: Some(span),
+            },
+            Self::InvalidTable { name, .. } => Self::InvalidTable {
+                name,
+                span: Some(span),
+            },
+            Self::FunctionNotFound { name, .. } => Self::FunctionNotFound {
+                name,
+                span: Some(span),
+            },
+            Self::ParametersNotFound { name, .. } => Self::ParametersNotFound {
+                name,
+                span: Some(span),
+            },
+            other => other,
+        }
+    }
+
+    pub fn with_sql_context(self, sql: &str) -> Self {
+        let annotate = |span: Option<SqlErrorSpan>| -> Option<SqlErrorSpan> {
+            span.map(|mut span| {
+                if span.near.is_none() {
+                    span.near = extract_sql_near(sql, &span);
+                }
+                span
+            })
+        };
+
+        match self {
+            Self::CastFail { from, to, span } => Self::CastFail {
+                from,
+                to,
+                span: annotate(span),
+            },
+            Self::InvalidColumn { name, span } => Self::InvalidColumn {
+                name,
+                span: annotate(span),
+            },
+            Self::ColumnNotFound { name, span } => Self::ColumnNotFound {
+                name,
+                span: annotate(span),
+            },
+            Self::InvalidTable { name, span } => Self::InvalidTable {
+                name,
+                span: annotate(span),
+            },
+            Self::FunctionNotFound { name, span } => Self::FunctionNotFound {
+                name,
+                span: annotate(span),
+            },
+            Self::ParametersNotFound { name, span } => Self::ParametersNotFound {
+                name,
+                span: annotate(span),
+            },
+            other => other,
+        }
+    }
+
+    pub fn sql_error_span(&self) -> Option<&SqlErrorSpan> {
+        match self {
+            DatabaseError::CastFail { span, .. }
+            | DatabaseError::InvalidColumn { span, .. }
+            | DatabaseError::ColumnNotFound { span, .. }
+            | DatabaseError::InvalidTable { span, .. }
+            | DatabaseError::FunctionNotFound { span, .. }
+            | DatabaseError::ParametersNotFound { span, .. } => span.as_ref(),
+            _ => None,
+        }
+    }
+}
+
+fn extract_sql_near(sql: &str, span: &SqlErrorSpan) -> Option<String> {
+    if span.line == 0 || span.start == 0 {
+        return None;
+    }
+
+    let line = sql.lines().nth(span.line.saturating_sub(1))?;
+    let line = line.trim_end_matches('\r');
+
+    let line_char_count = line.chars().count();
+    let start_idx = span.start.saturating_sub(1).min(line_char_count);
+    let end_idx = span.end.min(line_char_count).max(start_idx + 1);
+
+    let start_byte = char_to_byte_offset(line, start_idx)?;
+    let end_byte = char_to_byte_offset(line, end_idx)?;
+    let near = line.get(start_byte..end_byte)?.trim();
+
+    if near.is_empty() {
+        None
+    } else {
+        Some(near.to_string())
+    }
+}
+
+fn char_to_byte_offset(s: &str, char_index: usize) -> Option<usize> {
+    if char_index == s.chars().count() {
+        return Some(s.len());
+    }
+    s.char_indices().nth(char_index).map(|(idx, _)| idx)
 }

@@ -361,9 +361,11 @@ pub struct Database<S: Storage> {
 impl<S: Storage> Database<S> {
     /// Run SQL queries.
     pub fn run<T: AsRef<str>>(&self, sql: T) -> Result<DatabaseIter<'_, S>, DatabaseError> {
-        let statement = self.prepare(sql)?;
+        let sql = sql.as_ref();
+        let statement = self.prepare(sql).map_err(|err| err.with_sql_context(sql))?;
 
         self.execute(&statement, &[])
+            .map_err(|err| err.with_sql_context(sql))
     }
 
     pub fn prepare<T: AsRef<str>>(&self, sql: T) -> Result<Statement, DatabaseError> {
@@ -463,9 +465,14 @@ pub struct DBTransaction<'a, S: Storage + 'a> {
 
 impl<S: Storage> DBTransaction<'_, S> {
     pub fn run<T: AsRef<str>>(&mut self, sql: T) -> Result<TransactionIter<'_>, DatabaseError> {
-        let statement = self.state.prepare(sql)?;
+        let sql = sql.as_ref();
+        let statement = self
+            .state
+            .prepare(sql)
+            .map_err(|err| err.with_sql_context(sql))?;
 
         self.execute(&statement, &[])
+            .map_err(|err| err.with_sql_context(sql))
     }
 
     pub fn prepare<T: AsRef<str>>(&self, sql: T) -> Result<Statement, DatabaseError> {
@@ -648,9 +655,9 @@ pub(crate) mod test {
 
         // Filter
         {
-            let statement = kite_sql.prepare("explain select * from t1 where b > ?1")?;
+            let statement = kite_sql.prepare("explain select * from t1 where b > $1")?;
 
-            let mut iter = kite_sql.execute(&statement, &[("?1", DataValue::Int32(0))])?;
+            let mut iter = kite_sql.execute(&statement, &[("$1", DataValue::Int32(0))])?;
 
             assert_eq!(
                 iter.next().unwrap()?.values[0].utf8().unwrap(),
@@ -662,16 +669,16 @@ pub(crate) mod test {
         // Aggregate
         {
             let statement = kite_sql.prepare(
-                "explain select a + ?1, max(b + ?2) from t1 where b > ?3 group by a + ?4",
+                "explain select a + $1, max(b + $2) from t1 where b > $3 group by a + $4",
             )?;
 
             let mut iter = kite_sql.execute(
                 &statement,
                 &[
-                    ("?1", DataValue::Int32(0)),
-                    ("?2", DataValue::Int32(0)),
-                    ("?3", DataValue::Int32(1)),
-                    ("?4", DataValue::Int32(0)),
+                    ("$1", DataValue::Int32(0)),
+                    ("$2", DataValue::Int32(0)),
+                    ("$3", DataValue::Int32(1)),
+                    ("$4", DataValue::Int32(0)),
                 ],
             )?;
             assert_eq!(
@@ -683,15 +690,15 @@ pub(crate) mod test {
             )
         }
         {
-            let statement = kite_sql.prepare("explain select *, ?1 from (select * from t1 where b > ?2) left join (select * from t1 where a > ?3) on a > ?4")?;
+            let statement = kite_sql.prepare("explain select *, $1 from (select * from t1 where b > $2) left join (select * from t1 where a > $3) on a > $4")?;
 
             let mut iter = kite_sql.execute(
                 &statement,
                 &[
-                    ("?1", DataValue::Int32(9)),
-                    ("?2", DataValue::Int32(0)),
-                    ("?3", DataValue::Int32(1)),
-                    ("?4", DataValue::Int32(0)),
+                    ("$1", DataValue::Int32(9)),
+                    ("$2", DataValue::Int32(0)),
+                    ("$3", DataValue::Int32(1)),
+                    ("$4", DataValue::Int32(0)),
                 ],
             )?;
             assert_eq!(
@@ -705,6 +712,65 @@ pub(crate) mod test {
       Filter (t1.a > 1), Is Having: false [Filter => (Sort Option: Follow)]
         TableScan t1 -> [a, b] [SeqScan => (Sort Option: None)]"
             )
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_bind_error_with_span() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+
+        kite_sql
+            .run("create table t_bind_span(id int primary key)")?
+            .done()?;
+
+        let err = match kite_sql.run("select id, missing_col from t_bind_span") {
+            Ok(_) => panic!("expected bind error"),
+            Err(err) => err,
+        };
+        println!("{}", err);
+
+        match err {
+            DatabaseError::ColumnNotFound { span, .. }
+            | DatabaseError::InvalidColumn { span, .. } => {
+                let span = span.expect("bind error should include span");
+                assert_eq!(span.line, 1);
+                assert!(span.start >= 12);
+                assert!(span.end > span.start);
+                assert_eq!(span.near.as_deref(), Some("missing_col"));
+            }
+            other => panic!("unexpected error type: {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_bind_function_error_with_span() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+
+        kite_sql
+            .run("create table t_bind_fn_span(id int primary key)")?
+            .done()?;
+
+        let err = match kite_sql.run("select missing_fn(id) from t_bind_fn_span") {
+            Ok(_) => panic!("expected function bind error"),
+            Err(err) => err,
+        };
+        println!("{}", err);
+
+        match err {
+            DatabaseError::FunctionNotFound { span, .. } => {
+                let span = span.expect("function bind error should include span");
+                assert_eq!(span.line, 1);
+                assert!(span.start >= 8);
+                assert!(span.end > span.start);
+                assert_eq!(span.near.as_deref(), Some("missing_fn(id)"));
+            }
+            other => panic!("unexpected error type: {other:?}"),
         }
 
         Ok(())

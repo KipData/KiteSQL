@@ -65,7 +65,7 @@ impl TableScanOperator {
             let mut sort_fields = Vec::with_capacity(index_meta.column_ids.len());
             for col_id in &index_meta.column_ids {
                 let column = table_catalog.get_column_by_id(col_id).ok_or_else(|| {
-                    DatabaseError::ColumnNotFound(format!("index column id: {col_id} not found"))
+                    DatabaseError::column_not_found(format!("index column id: {col_id} not found"))
                 })?;
                 sort_fields.push(SortField {
                     expr: ScalarExpression::column_expr(column.clone()),

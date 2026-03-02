@@ -354,6 +354,7 @@ macro_rules! numeric_to_boolean {
             _ => Err(DatabaseError::CastFail {
                 from: $from_ty,
                 to: LogicalType::Boolean,
+                span: None,
             }),
         }
     };
@@ -1129,6 +1130,7 @@ impl DataValue {
                 _ => Err(DatabaseError::CastFail {
                     from: self.logical_type(),
                     to: to.clone(),
+                    span: None,
                 }),
             },
             DataValue::Float32(value) => match to {
@@ -1146,6 +1148,7 @@ impl DataValue {
                         Decimal::from_f32(value.0).ok_or(DatabaseError::CastFail {
                             from: self.logical_type(),
                             to: to.clone(),
+                            span: None,
                         })?;
                     Self::decimal_round_f(option, &mut decimal);
 
@@ -1192,6 +1195,7 @@ impl DataValue {
                 _ => Err(DatabaseError::CastFail {
                     from: self.logical_type(),
                     to: to.clone(),
+                    span: None,
                 }),
             },
             DataValue::Float64(value) => match to {
@@ -1209,6 +1213,7 @@ impl DataValue {
                         Decimal::from_f64(value.0).ok_or(DatabaseError::CastFail {
                             from: self.logical_type(),
                             to: to.clone(),
+                            span: None,
                         })?;
                     Self::decimal_round_f(option, &mut decimal);
 
@@ -1255,6 +1260,7 @@ impl DataValue {
                 _ => Err(DatabaseError::CastFail {
                     from: self.logical_type(),
                     to: to.clone(),
+                    span: None,
                 }),
             },
             DataValue::Int8(value) => match to {
@@ -1285,6 +1291,7 @@ impl DataValue {
                 _ => Err(DatabaseError::CastFail {
                     from: self.logical_type(),
                     to: to.clone(),
+                    span: None,
                 }),
             },
             DataValue::Int16(value) => match to {
@@ -1315,6 +1322,7 @@ impl DataValue {
                 _ => Err(DatabaseError::CastFail {
                     from: self.logical_type(),
                     to: to.clone(),
+                    span: None,
                 }),
             },
             DataValue::Int32(value) => match to {
@@ -1345,6 +1353,7 @@ impl DataValue {
                 _ => Err(DatabaseError::CastFail {
                     from: self.logical_type(),
                     to: to.clone(),
+                    span: None,
                 }),
             },
             DataValue::Int64(value) => match to {
@@ -1375,6 +1384,7 @@ impl DataValue {
                 _ => Err(DatabaseError::CastFail {
                     from: self.logical_type(),
                     to: to.clone(),
+                    span: None,
                 }),
             },
             DataValue::UInt8(value) => match to {
@@ -1405,6 +1415,7 @@ impl DataValue {
                 _ => Err(DatabaseError::CastFail {
                     from: self.logical_type(),
                     to: to.clone(),
+                    span: None,
                 }),
             },
             DataValue::UInt16(value) => match to {
@@ -1435,6 +1446,7 @@ impl DataValue {
                 _ => Err(DatabaseError::CastFail {
                     from: self.logical_type(),
                     to: to.clone(),
+                    span: None,
                 }),
             },
             DataValue::UInt32(value) => match to {
@@ -1465,6 +1477,7 @@ impl DataValue {
                 _ => Err(DatabaseError::CastFail {
                     from: self.logical_type(),
                     to: to.clone(),
+                    span: None,
                 }),
             },
             DataValue::UInt64(value) => match to {
@@ -1495,6 +1508,7 @@ impl DataValue {
                 _ => Err(DatabaseError::CastFail {
                     from: self.logical_type(),
                     to: to.clone(),
+                    span: None,
                 }),
             },
             DataValue::Utf8 { ref value, .. } => match to {
@@ -1517,9 +1531,7 @@ impl DataValue {
                     varchar_cast!(value, len, Utf8Type::Variable(*len), *unit)
                 }
                 LogicalType::Date => {
-                    let value = NaiveDate::parse_from_str(value, DATE_FMT)
-                        .map(|date| date.num_days_from_ce())
-                        .unwrap();
+                    let value = NaiveDate::parse_from_str(value, DATE_FMT)?.num_days_from_ce();
                     Ok(DataValue::Date32(value))
                 }
                 LogicalType::DateTime => {
@@ -1596,6 +1608,7 @@ impl DataValue {
                                 return Err(DatabaseError::CastFail {
                                     from: self.logical_type(),
                                     to: to.clone(),
+                                    span: None,
                                 });
                             }
                         }
@@ -1608,6 +1621,7 @@ impl DataValue {
                 _ => Err(DatabaseError::CastFail {
                     from: self.logical_type(),
                     to: to.clone(),
+                    span: None,
                 }),
             },
             DataValue::Date32(value) => match to {
@@ -1616,7 +1630,8 @@ impl DataValue {
                     varchar_cast!(
                         Self::format_date(value).ok_or(DatabaseError::CastFail {
                             from: self.logical_type(),
-                            to: to.clone()
+                            to: to.clone(),
+                            span: None,
                         })?,
                         Some(len),
                         Utf8Type::Fixed(*len),
@@ -1627,7 +1642,8 @@ impl DataValue {
                     varchar_cast!(
                         Self::format_date(value).ok_or(DatabaseError::CastFail {
                             from: self.logical_type(),
-                            to: to.clone()
+                            to: to.clone(),
+                            span: None,
                         })?,
                         len,
                         Utf8Type::Variable(*len),
@@ -1640,11 +1656,13 @@ impl DataValue {
                         .ok_or(DatabaseError::CastFail {
                             from: self.logical_type(),
                             to: to.clone(),
+                            span: None,
                         })?
                         .and_hms_opt(0, 0, 0)
                         .ok_or(DatabaseError::CastFail {
                             from: self.logical_type(),
                             to: to.clone(),
+                            span: None,
                         })?
                         .and_utc()
                         .timestamp();
@@ -1654,6 +1672,7 @@ impl DataValue {
                 _ => Err(DatabaseError::CastFail {
                     from: self.logical_type(),
                     to: to.clone(),
+                    span: None,
                 }),
             },
             DataValue::Date64(value) => match to {
@@ -1662,7 +1681,8 @@ impl DataValue {
                     varchar_cast!(
                         Self::format_datetime(value).ok_or(DatabaseError::CastFail {
                             from: self.logical_type(),
-                            to: to.clone()
+                            to: to.clone(),
+                            span: None,
                         })?,
                         Some(len),
                         Utf8Type::Fixed(*len),
@@ -1673,7 +1693,8 @@ impl DataValue {
                     varchar_cast!(
                         Self::format_datetime(value).ok_or(DatabaseError::CastFail {
                             from: self.logical_type(),
-                            to: to.clone()
+                            to: to.clone(),
+                            span: None,
                         })?,
                         len,
                         Utf8Type::Variable(*len),
@@ -1685,6 +1706,7 @@ impl DataValue {
                         .ok_or(DatabaseError::CastFail {
                             from: self.logical_type(),
                             to: to.clone(),
+                            span: None,
                         })?
                         .naive_utc()
                         .date()
@@ -1703,6 +1725,7 @@ impl DataValue {
                         .ok_or(DatabaseError::CastFail {
                             from: self.logical_type(),
                             to: to.clone(),
+                            span: None,
                         })?;
 
                     Ok(DataValue::Time32(Self::pack(value, 0, 0), precision))
@@ -1717,6 +1740,7 @@ impl DataValue {
                 _ => Err(DatabaseError::CastFail {
                     from: self.logical_type(),
                     to: to.clone(),
+                    span: None,
                 }),
             },
             DataValue::Time32(value, precision) => match to {
@@ -1725,7 +1749,8 @@ impl DataValue {
                     varchar_cast!(
                         Self::format_time(value, precision).ok_or(DatabaseError::CastFail {
                             from: self.logical_type(),
-                            to: to.clone()
+                            to: to.clone(),
+                            span: None,
                         })?,
                         Some(len),
                         Utf8Type::Fixed(*len),
@@ -1736,7 +1761,8 @@ impl DataValue {
                     varchar_cast!(
                         Self::format_time(value, precision).ok_or(DatabaseError::CastFail {
                             from: self.logical_type(),
-                            to: to.clone()
+                            to: to.clone(),
+                            span: None,
                         })?,
                         len,
                         Utf8Type::Variable(*len),
@@ -1749,6 +1775,7 @@ impl DataValue {
                 _ => Err(DatabaseError::CastFail {
                     from: self.logical_type(),
                     to: to.clone(),
+                    span: None,
                 }),
             },
             DataValue::Time64(value, precision, _) => match to {
@@ -1758,7 +1785,8 @@ impl DataValue {
                         Self::format_timestamp(value, precision).ok_or(
                             DatabaseError::CastFail {
                                 from: self.logical_type(),
-                                to: to.clone()
+                                to: to.clone(),
+                                span: None,
                             }
                         )?,
                         Some(len),
@@ -1771,7 +1799,8 @@ impl DataValue {
                         Self::format_timestamp(value, precision).ok_or(
                             DatabaseError::CastFail {
                                 from: self.logical_type(),
-                                to: to.clone()
+                                to: to.clone(),
+                                span: None,
                             }
                         )?,
                         len,
@@ -1784,6 +1813,7 @@ impl DataValue {
                         .ok_or(DatabaseError::CastFail {
                             from: self.logical_type(),
                             to: to.clone(),
+                            span: None,
                         })?
                         .naive_utc()
                         .date()
@@ -1796,6 +1826,7 @@ impl DataValue {
                         .ok_or(DatabaseError::CastFail {
                             from: self.logical_type(),
                             to: to.clone(),
+                            span: None,
                         })?
                         .timestamp();
                     Ok(DataValue::Date64(value))
@@ -1812,6 +1843,7 @@ impl DataValue {
                         .ok_or(DatabaseError::CastFail {
                             from: self.logical_type(),
                             to: to.clone(),
+                            span: None,
                         })?;
                     Ok(DataValue::Time32(Self::pack(value, nano, p), p))
                 }
@@ -1821,6 +1853,7 @@ impl DataValue {
                 _ => Err(DatabaseError::CastFail {
                     from: self.logical_type(),
                     to: to.clone(),
+                    span: None,
                 }),
             },
             DataValue::Decimal(value) => match to {
@@ -1829,12 +1862,14 @@ impl DataValue {
                     DatabaseError::CastFail {
                         from: self.logical_type(),
                         to: to.clone(),
+                        span: None,
                     },
                 )?))),
                 LogicalType::Double => Ok(DataValue::Float64(OrderedFloat(value.to_f64().ok_or(
                     DatabaseError::CastFail {
                         from: self.logical_type(),
                         to: to.clone(),
+                        span: None,
                     },
                 )?))),
                 LogicalType::Decimal(_, _) => Ok(DataValue::Decimal(value)),
@@ -1855,6 +1890,7 @@ impl DataValue {
                 _ => Err(DatabaseError::CastFail {
                     from: self.logical_type(),
                     to: to.clone(),
+                    span: None,
                 }),
             },
             DataValue::Tuple(mut values, is_upper) => match to {
@@ -1869,6 +1905,7 @@ impl DataValue {
                 _ => Err(DatabaseError::CastFail {
                     from: LogicalType::Tuple(values.iter().map(DataValue::logical_type).collect()),
                     to: to.clone(),
+                    span: None,
                 }),
             },
         }?;

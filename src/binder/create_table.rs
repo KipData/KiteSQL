@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{is_valid_identifier, Binder};
+use super::{attach_span_if_absent, is_valid_identifier, Binder};
 use crate::binder::lower_case_name;
 use crate::catalog::{ColumnCatalog, ColumnDesc};
 use crate::errors::DatabaseError;
@@ -24,7 +24,7 @@ use crate::storage::Transaction;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use itertools::Itertools;
-use sqlparser::ast::{ColumnDef, ColumnOption, ObjectName, TableConstraint};
+use sqlparser::ast::{ColumnDef, ColumnOption, Expr, IndexColumn, ObjectName, TableConstraint};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -40,8 +40,9 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         let table_name: Arc<str> = lower_case_name(name)?.into();
 
         if !is_valid_identifier(&table_name) {
-            return Err(DatabaseError::InvalidTable(
-                "illegal table naming".to_string(),
+            return Err(attach_span_if_absent(
+                DatabaseError::invalid_table("illegal table naming".to_string()),
+                name,
             ));
         }
         {
@@ -53,8 +54,9 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                     return Err(DatabaseError::DuplicateColumn(col_name.clone()));
                 }
                 if !is_valid_identifier(col_name) {
-                    return Err(DatabaseError::InvalidColumn(
-                        "illegal column naming".to_string(),
+                    return Err(attach_span_if_absent(
+                        DatabaseError::invalid_column("illegal column naming".to_string()),
+                        col,
                     ));
                 }
             }
@@ -66,27 +68,15 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             .try_collect()?;
         for constraint in constraints {
             match constraint {
-                TableConstraint::Unique {
-                    columns: column_names,
-                    is_primary,
-                    ..
-                } => {
-                    for (i, column_name) in column_names
-                        .iter()
-                        .map(|ident| ident.value.to_lowercase())
-                        .enumerate()
-                    {
-                        if let Some(column) = columns
-                            .iter_mut()
-                            .find(|column| column.name() == column_name)
-                        {
-                            if *is_primary {
-                                column.desc_mut().set_primary(Some(i));
-                            } else {
-                                column.desc_mut().set_unique(true);
-                            }
-                        }
-                    }
+                TableConstraint::PrimaryKey(primary) => {
+                    Self::bind_constraint(&mut columns, &primary.columns, |i, desc| {
+                        desc.set_primary(Some(i))
+                    })?;
+                }
+                TableConstraint::Unique(unique) => {
+                    Self::bind_constraint(&mut columns, &unique.columns, |_, desc| {
+                        desc.set_unique()
+                    })?;
                 }
                 constraint => {
                     return Err(DatabaseError::UnsupportedStmt(format!(
@@ -97,8 +87,11 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         }
 
         if columns.iter().filter(|col| col.desc().is_primary()).count() == 0 {
-            return Err(DatabaseError::InvalidTable(
-                "the primary key field must exist and have at least one".to_string(),
+            return Err(attach_span_if_absent(
+                DatabaseError::invalid_table(
+                    "the primary key field must exist and have at least one".to_string(),
+                ),
+                name,
             ));
         }
 
@@ -110,6 +103,29 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             }),
             Childrens::None,
         ))
+    }
+
+    fn bind_constraint<F: Fn(usize, &mut ColumnDesc)>(
+        table_columns: &mut [ColumnCatalog],
+        exprs: &[IndexColumn],
+        fn_constraint: F,
+    ) -> Result<(), DatabaseError> {
+        for (i, index_column) in exprs.iter().enumerate() {
+            let Expr::Identifier(ident) = &index_column.column.expr else {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "only identifier columns are supported in `PRIMARY KEY/UNIQUE`".to_string(),
+                ));
+            };
+            let column_name = ident.value.to_lowercase();
+
+            if let Some(column) = table_columns
+                .iter_mut()
+                .find(|column| column.name() == column_name)
+            {
+                fn_constraint(i, column.desc_mut())
+            }
+        }
+        Ok(())
     }
 
     pub fn bind_column(
@@ -130,16 +146,13 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             match &option_def.option {
                 ColumnOption::Null => nullable = true,
                 ColumnOption::NotNull => nullable = false,
-                ColumnOption::Unique { is_primary, .. } => {
-                    if *is_primary {
-                        column_desc.set_primary(column_index);
-                        nullable = false;
-                        // Skip other options when using primary key
-                        break;
-                    } else {
-                        column_desc.set_unique(true);
-                    }
+                ColumnOption::PrimaryKey(_) => {
+                    column_desc.set_primary(column_index);
+                    nullable = false;
+                    // Skip other options when using primary key
+                    break;
                 }
+                ColumnOption::Unique(_) => column_desc.set_unique(),
                 ColumnOption::Default(expr) => {
                     let mut expr = self.bind_expr(expr)?;
 

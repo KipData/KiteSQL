@@ -396,9 +396,14 @@ impl TryFrom<sqlparser::ast::DataType> for LogicalType {
             | sqlparser::ast::DataType::Character(char_len) => {
                 let mut len = 1;
                 let mut char_unit = None;
-                if let Some(sqlparser::ast::CharacterLength { length, unit }) = char_len {
-                    len = cmp::max(len, length);
-                    char_unit = unit;
+                if let Some(char_len) = char_len {
+                    match char_len {
+                        sqlparser::ast::CharacterLength::IntegerLength { length, unit } => {
+                            len = cmp::max(len, length);
+                            char_unit = unit;
+                        }
+                        sqlparser::ast::CharacterLength::Max => {}
+                    }
                 }
                 Ok(LogicalType::Char(
                     len as u32,
@@ -410,35 +415,58 @@ impl TryFrom<sqlparser::ast::DataType> for LogicalType {
             | sqlparser::ast::DataType::Varchar(varchar_len) => {
                 let mut len = None;
                 let mut char_unit = None;
-                if let Some(sqlparser::ast::CharacterLength { length, unit }) = varchar_len {
-                    len = Some(length as u32);
-                    char_unit = unit;
+                if let Some(varchar_len) = varchar_len {
+                    match varchar_len {
+                        sqlparser::ast::CharacterLength::IntegerLength { length, unit } => {
+                            len = Some(length as u32);
+                            char_unit = unit;
+                        }
+                        sqlparser::ast::CharacterLength::Max => {}
+                    }
                 }
                 Ok(LogicalType::Varchar(
                     len,
                     char_unit.unwrap_or(CharLengthUnits::Characters),
                 ))
             }
-            sqlparser::ast::DataType::String | sqlparser::ast::DataType::Text => {
+            sqlparser::ast::DataType::String(_) | sqlparser::ast::DataType::Text => {
                 Ok(LogicalType::Varchar(None, CharLengthUnits::Characters))
             }
-            sqlparser::ast::DataType::Float(_) | sqlparser::ast::DataType::Real => {
-                Ok(LogicalType::Float)
-            }
-            sqlparser::ast::DataType::Double | sqlparser::ast::DataType::DoublePrecision => {
-                Ok(LogicalType::Double)
-            }
+            sqlparser::ast::DataType::Float(_)
+            | sqlparser::ast::DataType::Float4
+            | sqlparser::ast::DataType::Float32
+            | sqlparser::ast::DataType::Real => Ok(LogicalType::Float),
+            sqlparser::ast::DataType::Double(_)
+            | sqlparser::ast::DataType::DoublePrecision
+            | sqlparser::ast::DataType::Float8
+            | sqlparser::ast::DataType::Float64 => Ok(LogicalType::Double),
             sqlparser::ast::DataType::TinyInt(_) => Ok(LogicalType::Tinyint),
-            sqlparser::ast::DataType::UnsignedTinyInt(_) => Ok(LogicalType::UTinyint),
-            sqlparser::ast::DataType::SmallInt(_) => Ok(LogicalType::Smallint),
-            sqlparser::ast::DataType::UnsignedSmallInt(_) => Ok(LogicalType::USmallint),
-            sqlparser::ast::DataType::Int(_) | sqlparser::ast::DataType::Integer(_) => {
-                Ok(LogicalType::Integer)
+            sqlparser::ast::DataType::TinyIntUnsigned(_) | sqlparser::ast::DataType::UTinyInt => {
+                Ok(LogicalType::UTinyint)
             }
-            sqlparser::ast::DataType::UnsignedInt(_)
-            | sqlparser::ast::DataType::UnsignedInteger(_) => Ok(LogicalType::UInteger),
-            sqlparser::ast::DataType::BigInt(_) => Ok(LogicalType::Bigint),
-            sqlparser::ast::DataType::UnsignedBigInt(_) => Ok(LogicalType::UBigint),
+            sqlparser::ast::DataType::SmallInt(_) | sqlparser::ast::DataType::Int2(_) => {
+                Ok(LogicalType::Smallint)
+            }
+            sqlparser::ast::DataType::SmallIntUnsigned(_)
+            | sqlparser::ast::DataType::Int2Unsigned(_)
+            | sqlparser::ast::DataType::USmallInt => Ok(LogicalType::USmallint),
+            sqlparser::ast::DataType::Int(_)
+            | sqlparser::ast::DataType::Integer(_)
+            | sqlparser::ast::DataType::Int4(_)
+            | sqlparser::ast::DataType::Int32 => Ok(LogicalType::Integer),
+            sqlparser::ast::DataType::IntUnsigned(_)
+            | sqlparser::ast::DataType::IntegerUnsigned(_)
+            | sqlparser::ast::DataType::Int4Unsigned(_)
+            | sqlparser::ast::DataType::Unsigned
+            | sqlparser::ast::DataType::UnsignedInteger
+            | sqlparser::ast::DataType::UInt32 => Ok(LogicalType::UInteger),
+            sqlparser::ast::DataType::BigInt(_)
+            | sqlparser::ast::DataType::Int8(_)
+            | sqlparser::ast::DataType::Int64 => Ok(LogicalType::Bigint),
+            sqlparser::ast::DataType::BigIntUnsigned(_)
+            | sqlparser::ast::DataType::Int8Unsigned(_)
+            | sqlparser::ast::DataType::UBigInt
+            | sqlparser::ast::DataType::UInt64 => Ok(LogicalType::UBigint),
             sqlparser::ast::DataType::Boolean => Ok(LogicalType::Boolean),
             sqlparser::ast::DataType::Date => Ok(LogicalType::Date),
             sqlparser::ast::DataType::Datetime(precision) => {
@@ -481,7 +509,9 @@ impl TryFrom<sqlparser::ast::DataType> for LogicalType {
                 Ok(LogicalType::TimeStamp(precision, zone))
             }
             sqlparser::ast::DataType::Decimal(info)
+            | sqlparser::ast::DataType::DecimalUnsigned(info)
             | sqlparser::ast::DataType::Dec(info)
+            | sqlparser::ast::DataType::DecUnsigned(info)
             | sqlparser::ast::DataType::Numeric(info) => match info {
                 ExactNumberInfo::None => Ok(Self::Decimal(None, None)),
                 ExactNumberInfo::Precision(p) => Ok(Self::Decimal(Some(p as u8), None)),

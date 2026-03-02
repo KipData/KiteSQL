@@ -120,7 +120,7 @@ pub fn replace_child_with_only_child(plan: &mut LogicalPlan, child_idx: usize) -
 pub fn wrap_child_with(plan: &mut LogicalPlan, child_idx: usize, operator: Operator) -> bool {
     if let Some(slot) = child_mut(plan, child_idx) {
         let previous = mem::replace(slot, LogicalPlan::new(operator, Childrens::None));
-        slot.childrens = Box::new(Childrens::Only(Box::new(previous)));
+        *slot.childrens = Childrens::Only(Box::new(previous));
         true
     } else {
         false

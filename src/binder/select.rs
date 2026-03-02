@@ -28,7 +28,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::{
-    lower_case_name, lower_ident, Binder, BinderContext, QueryBindStep, Source, SubQueryType,
+    attach_span_if_absent, lower_case_name, lower_ident, Binder, BinderContext, QueryBindStep,
+    Source, SubQueryType,
 };
 
 use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, ColumnSummary, TableName};
@@ -52,9 +53,10 @@ use crate::types::value::Utf8Type;
 use crate::types::{ColumnId, LogicalType};
 use itertools::Itertools;
 use sqlparser::ast::{
-    CharLengthUnits, Distinct, Expr, Ident, Join, JoinConstraint, JoinOperator, Offset,
-    OrderByExpr, Query, Select, SelectInto, SelectItem, SetExpr, SetOperator, SetQuantifier,
-    TableAlias, TableFactor, TableWithJoins,
+    CharLengthUnits, Distinct, Expr, GroupByExpr, Join, JoinConstraint, JoinOperator, LimitClause,
+    Offset, OffsetRows, OrderByExpr, OrderByKind, Query, Select, SelectInto, SelectItem,
+    SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, TableAlias,
+    TableAliasColumnDef, TableFactor, TableWithJoins,
 };
 
 impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, 'b, T, A> {
@@ -65,8 +67,20 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             // TODO support with clause.
         }
 
+        let order_by_exprs = if let Some(order_by) = &query.order_by {
+            match &order_by.kind {
+                OrderByKind::Expressions(exprs) => exprs.clone(),
+                OrderByKind::All(_) => {
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "ORDER BY ALL is not supported".to_string(),
+                    ))
+                }
+            }
+        } else {
+            vec![]
+        };
         let mut plan = match query.body.borrow() {
-            SetExpr::Select(select) => self.bind_select(select, &query.order_by),
+            SetExpr::Select(select) => self.bind_select(select, &order_by_exprs),
             SetExpr::Query(query) => self.bind_query(query),
             SetExpr::SetOperation {
                 op,
@@ -82,11 +96,31 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             }
         }?;
 
-        let limit = &query.limit;
-        let offset = &query.offset;
+        let (limit, offset) = match &query.limit_clause {
+            Some(LimitClause::LimitOffset {
+                limit,
+                offset,
+                limit_by,
+            }) => {
+                if !limit_by.is_empty() {
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "LIMIT BY is not supported".to_string(),
+                    ));
+                }
+                (limit.clone(), offset.clone())
+            }
+            Some(LimitClause::OffsetCommaLimit { offset, limit }) => (
+                Some(limit.clone()),
+                Some(Offset {
+                    value: offset.clone(),
+                    rows: OffsetRows::None,
+                }),
+            ),
+            None => (None, None),
+        };
 
         if limit.is_some() || offset.is_some() {
-            plan = self.bind_limit(plan, limit, offset)?;
+            plan = self.bind_limit(plan, &limit, &offset)?;
         }
 
         self.context.step(origin_step);
@@ -123,8 +157,22 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         self.extract_select_join(&mut select_list);
         self.extract_select_aggregate(&mut select_list)?;
 
-        if !select.group_by.is_empty() {
-            self.extract_group_by_aggregate(&mut select_list, &select.group_by)?;
+        match &select.group_by {
+            GroupByExpr::Expressions(group_by_exprs, modifiers) => {
+                if !modifiers.is_empty() {
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "GROUP BY modifiers are not supported".to_string(),
+                    ));
+                }
+                if !group_by_exprs.is_empty() {
+                    self.extract_group_by_aggregate(&mut select_list, group_by_exprs)?;
+                }
+            }
+            GroupByExpr::All(_) => {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "GROUP BY ALL is not supported".to_string(),
+                ))
+            }
         }
 
         let mut having_orderby = (None, None);
@@ -286,6 +334,11 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         let is_all = match set_quantifier {
             SetQuantifier::All => true,
             SetQuantifier::Distinct | SetQuantifier::None => false,
+            SetQuantifier::ByName | SetQuantifier::AllByName | SetQuantifier::DistinctByName => {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "set quantifier BY NAME is not supported".to_string(),
+                ))
+            }
         };
         let mut left_plan = self.bind_set_expr(left)?;
         let mut right_plan = self.bind_set_expr(right)?;
@@ -418,6 +471,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 if let Some(TableAlias {
                     name,
                     columns: alias_column,
+                    ..
                 }) = alias
                 {
                     if tables.len() > 1 {
@@ -442,6 +496,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     if let Some(TableAlias {
                         name,
                         columns: alias_column,
+                        ..
                     }) = alias
                     {
                         table_alias = Some(name.value.to_lowercase().into());
@@ -471,7 +526,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
     pub(crate) fn bind_alias(
         &mut self,
         mut plan: LogicalPlan,
-        alias_column: &[Ident],
+        alias_column: &[TableAliasColumnDef],
         table_alias: TableName,
         table_name: TableName,
     ) -> Result<LogicalPlan, DatabaseError> {
@@ -488,7 +543,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         } else {
             alias_column
                 .iter()
-                .map(lower_ident)
+                .map(|column| lower_ident(&column.name))
                 .zip(input_schema.iter().cloned())
                 .collect_vec()
         };
@@ -530,7 +585,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         let mut table_alias: Option<TableName> = None;
         let mut alias_idents = None;
 
-        if let Some(TableAlias { name, columns }) = alias {
+        if let Some(TableAlias { name, columns, .. }) = alias {
             table_alias = Some(name.value.to_lowercase().into());
             alias_idents = Some(columns);
         }
@@ -599,7 +654,16 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     }
                 }
                 SelectItem::QualifiedWildcard(table_name, _) => {
-                    let table_name: Arc<str> = lower_case_name(table_name)?.into();
+                    let table_name: Arc<str> = match table_name {
+                        SelectItemQualifiedWildcardKind::ObjectName(name) => {
+                            lower_case_name(name)?.into()
+                        }
+                        SelectItemQualifiedWildcardKind::Expr(expr) => {
+                            return Err(DatabaseError::UnsupportedStmt(format!(
+                                "qualified wildcard expr: {expr}"
+                            )))
+                        }
+                    };
                     let schema_buf = self.table_schema_buf.entry(table_name.clone()).or_default();
 
                     Self::bind_table_column_refs(
@@ -676,15 +740,34 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         let Join {
             relation,
             join_operator,
+            ..
         } = join;
 
         let (join_type, joint_condition) = match join_operator {
-            JoinOperator::Inner(constraint) => (JoinType::Inner, Some(constraint)),
-            JoinOperator::LeftOuter(constraint) => (JoinType::LeftOuter, Some(constraint)),
-            JoinOperator::RightOuter(constraint) => (JoinType::RightOuter, Some(constraint)),
+            JoinOperator::Join(constraint)
+            | JoinOperator::Inner(constraint)
+            | JoinOperator::StraightJoin(constraint) => (JoinType::Inner, Some(constraint)),
+            JoinOperator::Left(constraint) | JoinOperator::LeftOuter(constraint) => {
+                (JoinType::LeftOuter, Some(constraint))
+            }
+            JoinOperator::Right(constraint) | JoinOperator::RightOuter(constraint) => {
+                (JoinType::RightOuter, Some(constraint))
+            }
             JoinOperator::FullOuter(constraint) => (JoinType::Full, Some(constraint)),
-            JoinOperator::CrossJoin => (JoinType::Cross, None),
-            _ => unimplemented!(),
+            JoinOperator::Semi(constraint) | JoinOperator::LeftSemi(constraint) => {
+                (JoinType::LeftSemi, Some(constraint))
+            }
+            JoinOperator::Anti(constraint) | JoinOperator::LeftAnti(constraint) => {
+                (JoinType::LeftAnti, Some(constraint))
+            }
+            JoinOperator::CrossJoin(constraint) => (JoinType::Cross, Some(constraint)),
+            JoinOperator::RightSemi(_)
+            | JoinOperator::RightAnti(_)
+            | JoinOperator::CrossApply
+            | JoinOperator::OuterApply
+            | JoinOperator::AsOf { .. } => {
+                return Err(DatabaseError::UnsupportedStmt(format!("{join_operator:?}")))
+            }
         };
         let BinderContext {
             table_cache,
@@ -880,33 +963,35 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
         let mut limit = None;
         let mut offset = None;
-        if let Some(expr) = limit_expr {
-            let expr = self.bind_expr(expr)?;
-            match expr {
+        if let Some(limit_ast) = limit_expr {
+            let bound_limit = self.bind_expr(limit_ast)?;
+            match bound_limit {
                 ScalarExpression::Constant(dv) => match &dv {
                     DataValue::Int32(v) if *v >= 0 => limit = Some(*v as usize),
                     DataValue::Int64(v) if *v >= 0 => limit = Some(*v as usize),
                     _ => return Err(DatabaseError::InvalidType),
                 },
                 _ => {
-                    return Err(DatabaseError::InvalidColumn(
-                        "invalid limit expression.".to_owned(),
+                    return Err(attach_span_if_absent(
+                        DatabaseError::invalid_column("invalid limit expression.".to_owned()),
+                        limit_ast,
                     ))
                 }
             }
         }
 
-        if let Some(expr) = offset_expr {
-            let expr = self.bind_expr(&expr.value)?;
-            match expr {
+        if let Some(offset_ast) = offset_expr {
+            let bound_offset = self.bind_expr(&offset_ast.value)?;
+            match bound_offset {
                 ScalarExpression::Constant(dv) => match &dv {
                     DataValue::Int32(v) if *v >= 0 => offset = Some(*v as usize),
                     DataValue::Int64(v) if *v >= 0 => offset = Some(*v as usize),
                     _ => return Err(DatabaseError::InvalidType),
                 },
                 _ => {
-                    return Err(DatabaseError::InvalidColumn(
-                        "invalid limit expression.".to_owned(),
+                    return Err(attach_span_if_absent(
+                        DatabaseError::invalid_column("invalid limit expression.".to_owned()),
+                        &offset_ast.value,
                     ))
                 }
             }
@@ -1006,12 +1091,15 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 let mut on_keys: Vec<(ScalarExpression, ScalarExpression)> = Vec::new();
 
                 for ident in idents {
-                    let name = lower_ident(ident);
+                    let name = lower_case_name(ident)?;
                     let (Some(left_column), Some(right_column)) = (
                         find_column(left_schema, &name),
                         find_column(right_schema, &name),
                     ) else {
-                        return Err(DatabaseError::InvalidColumn("not found column".to_string()));
+                        return Err(attach_span_if_absent(
+                            DatabaseError::invalid_column("not found column".to_string()),
+                            ident,
+                        ));
                     };
                     self.context.add_using(join_type, left_column, right_column);
                     on_keys.push((

@@ -23,7 +23,7 @@ use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
 use itertools::Itertools;
-use sqlparser::ast::{Ident, ObjectName, Query};
+use sqlparser::ast::{ObjectName, Query, ViewColumnDef};
 use std::sync::Arc;
 use ulid::Ulid;
 
@@ -32,41 +32,55 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         &mut self,
         or_replace: &bool,
         name: &ObjectName,
-        columns: &[Ident],
+        columns: &[ViewColumnDef],
         query: &Query,
     ) -> Result<LogicalPlan, DatabaseError> {
+        fn projection_exprs(
+            view_name: &Arc<str>,
+            mapping_schema: &[ColumnRef],
+            column_names: impl Iterator<Item = String>,
+        ) -> Vec<ScalarExpression> {
+            column_names
+                .enumerate()
+                .map(|(i, column_name)| {
+                    let mapping_column = &mapping_schema[i];
+                    let mut column = ColumnCatalog::new(
+                        column_name,
+                        mapping_column.nullable(),
+                        mapping_column.desc().clone(),
+                    );
+                    column.set_ref_table(view_name.clone(), Ulid::new(), true);
+
+                    ScalarExpression::Alias {
+                        expr: Box::new(ScalarExpression::column_expr(mapping_column.clone())),
+                        alias: AliasType::Expr(Box::new(ScalarExpression::column_expr(
+                            ColumnRef::from(column),
+                        ))),
+                    }
+                })
+                .collect_vec()
+        }
+
         let view_name: Arc<str> = lower_case_name(name)?.into();
         let mut plan = self.bind_query(query)?;
 
         let mapping_schema = plan.output_schema();
 
-        let exprs = if columns.is_empty() {
-            Box::new(
+        let exprs: Vec<ScalarExpression> = if columns.is_empty() {
+            projection_exprs(
+                &view_name,
+                mapping_schema,
                 mapping_schema
                     .iter()
                     .map(|column| column.name().to_string()),
-            ) as Box<dyn Iterator<Item = String>>
+            )
         } else {
-            Box::new(columns.iter().map(lower_ident)) as Box<dyn Iterator<Item = String>>
-        }
-        .enumerate()
-        .map(|(i, column_name)| {
-            let mapping_column = &mapping_schema[i];
-            let mut column = ColumnCatalog::new(
-                column_name,
-                mapping_column.nullable(),
-                mapping_column.desc().clone(),
-            );
-            column.set_ref_table(view_name.clone(), Ulid::new(), true);
-
-            ScalarExpression::Alias {
-                expr: Box::new(ScalarExpression::column_expr(mapping_column.clone())),
-                alias: AliasType::Expr(Box::new(ScalarExpression::column_expr(ColumnRef::from(
-                    column,
-                )))),
-            }
-        })
-        .collect_vec();
+            projection_exprs(
+                &view_name,
+                mapping_schema,
+                columns.iter().map(|column| lower_ident(&column.name)),
+            )
+        };
         plan = self.bind_project(plan, exprs)?;
 
         Ok(LogicalPlan::new(

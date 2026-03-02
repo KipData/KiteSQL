@@ -34,7 +34,11 @@ mod show_view;
 mod truncate;
 mod update;
 
-use sqlparser::ast::{Ident, ObjectName, ObjectType, SetExpr, Statement};
+use sqlparser::ast::{
+    DescribeAlias, FromTable, Ident, ObjectName, ObjectNamePart, ObjectType, SetExpr, Spanned,
+    Statement, TableObject,
+};
+use sqlparser::tokenizer::Span;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -42,7 +46,7 @@ use std::sync::Arc;
 use crate::catalog::view::View;
 use crate::catalog::{ColumnRef, TableCatalog, TableName};
 use crate::db::{ScalaFunctions, TableFunctions};
-use crate::errors::DatabaseError;
+use crate::errors::{DatabaseError, SqlErrorSpan};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::JoinType;
 use crate::planner::{LogicalPlan, SchemaOutput};
@@ -61,23 +65,67 @@ pub enum CommandType {
     DDL,
 }
 
+fn annotate_bind_error(stmt: &Statement, err: DatabaseError) -> DatabaseError {
+    attach_span_if_absent(err, stmt)
+}
+
+pub(crate) fn attach_span_from_sqlparser_span_if_absent(
+    err: DatabaseError,
+    span: Span,
+) -> DatabaseError {
+    if err.sql_error_span().is_some() {
+        return err;
+    }
+
+    match sqlparser_span_to_sql_error_span(span) {
+        Some(span) => err.with_span(span),
+        None => err,
+    }
+}
+
+pub(crate) fn attach_span_if_absent<T: Spanned + ?Sized>(
+    err: DatabaseError,
+    node: &T,
+) -> DatabaseError {
+    attach_span_from_sqlparser_span_if_absent(err, node.span())
+}
+
+pub(crate) fn sqlparser_span_to_sql_error_span(span: Span) -> Option<SqlErrorSpan> {
+    if span == Span::empty() {
+        return None;
+    }
+
+    let start = span.start.column as usize;
+    let mut end = span.end.column as usize;
+    if end <= start {
+        end = start.saturating_add(1);
+    }
+
+    Some(SqlErrorSpan {
+        start,
+        end,
+        line: span.start.line as usize,
+        near: None,
+    })
+}
+
 pub fn command_type(stmt: &Statement) -> Result<CommandType, DatabaseError> {
     match stmt {
-        Statement::CreateTable { .. }
-        | Statement::CreateIndex { .. }
-        | Statement::CreateView { .. }
-        | Statement::AlterTable { .. }
+        Statement::CreateTable(_)
+        | Statement::CreateIndex(_)
+        | Statement::CreateView(_)
+        | Statement::AlterTable(_)
         | Statement::Drop { .. } => Ok(CommandType::DDL),
         Statement::Query(_)
         | Statement::Explain { .. }
         | Statement::ExplainTable { .. }
         | Statement::ShowTables { .. }
-        | Statement::ShowVariable { .. } => Ok(CommandType::DQL),
-        Statement::Analyze { .. }
-        | Statement::Truncate { .. }
-        | Statement::Update { .. }
-        | Statement::Delete { .. }
-        | Statement::Insert { .. }
+        | Statement::ShowViews { .. } => Ok(CommandType::DQL),
+        Statement::Analyze(_)
+        | Statement::Truncate(_)
+        | Statement::Update(_)
+        | Statement::Delete(_)
+        | Statement::Insert(_)
         | Statement::Copy { .. } => Ok(CommandType::DML),
         stmt => Err(DatabaseError::UnsupportedStmt(stmt.to_string())),
     }
@@ -298,7 +346,7 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
         }) {
             Ok(source.1)
         } else {
-            Err(DatabaseError::InvalidTable(table_name.into()))
+            Err(DatabaseError::invalid_table(table_name))
         }
     }
 
@@ -375,17 +423,23 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
         false
     }
 
-    pub fn bind(&mut self, stmt: &Statement) -> Result<LogicalPlan, DatabaseError> {
+    fn bind_inner(&mut self, stmt: &Statement) -> Result<LogicalPlan, DatabaseError> {
         let plan = match stmt {
             Statement::Query(query) => self.bind_query(query)?,
-            Statement::AlterTable { name, operation } => self.bind_alter_table(name, operation)?,
-            Statement::CreateTable {
-                name,
-                columns,
-                constraints,
-                if_not_exists,
-                ..
-            } => self.bind_create_table(name, columns, constraints, *if_not_exists)?,
+            Statement::AlterTable(alter) => {
+                if alter.operations.len() != 1 {
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "only a single ALTER TABLE operation is supported".to_string(),
+                    ));
+                }
+                self.bind_alter_table(&alter.name, &alter.operations[0])?
+            }
+            Statement::CreateTable(create) => self.bind_create_table(
+                &create.name,
+                &create.columns,
+                &create.constraints,
+                create.if_not_exists,
+            )?,
             Statement::Drop {
                 object_type,
                 names,
@@ -408,16 +462,29 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
                     }
                 }
             }
-            Statement::Insert {
-                table_name,
-                columns,
-                source,
-                overwrite,
-                ..
-            } => {
+            Statement::Insert(insert) => {
+                let table_name = match &insert.table {
+                    TableObject::TableName(table_name) => table_name,
+                    TableObject::TableFunction(_) => {
+                        return Err(DatabaseError::UnsupportedStmt(
+                            "insert into table function is not supported".to_string(),
+                        ))
+                    }
+                };
+                let source = insert.source.as_ref().ok_or_else(|| {
+                    DatabaseError::UnsupportedStmt(
+                        "insert without source is not supported".to_string(),
+                    )
+                })?;
                 // TODO: support body on Insert
                 if let SetExpr::Values(values) = source.body.as_ref() {
-                    self.bind_insert(table_name, columns, &values.rows, *overwrite, false)?
+                    self.bind_insert(
+                        table_name,
+                        &insert.columns,
+                        &values.rows,
+                        insert.overwrite,
+                        false,
+                    )?
                 } else {
                     return Err(DatabaseError::UnsupportedStmt(format!(
                         "insert body: {:#?}",
@@ -425,36 +492,44 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
                     )));
                 }
             }
-            Statement::Update {
-                table,
-                selection,
-                assignments,
-                ..
-            } => {
+            Statement::Update(update) => {
+                let table = &update.table;
                 if !table.joins.is_empty() {
                     unimplemented!()
                 } else {
-                    self.bind_update(table, selection, assignments)?
+                    self.bind_update(table, &update.selection, &update.assignments)?
                 }
             }
-            Statement::Delete {
-                from, selection, ..
-            } => {
+            Statement::Delete(delete) => {
+                let from = match &delete.from {
+                    FromTable::WithFromKeyword(from) | FromTable::WithoutKeyword(from) => from,
+                };
                 let table = &from[0];
 
                 if !table.joins.is_empty() {
                     unimplemented!()
                 } else {
-                    self.bind_delete(table, selection)?
+                    self.bind_delete(table, &delete.selection)?
                 }
             }
-            Statement::Analyze { table_name, .. } => self.bind_analyze(table_name)?,
-            Statement::Truncate { table_name, .. } => self.bind_truncate(table_name)?,
+            Statement::Analyze(analyze) => {
+                let table_name = analyze.table_name.as_ref().ok_or_else(|| {
+                    DatabaseError::UnsupportedStmt(
+                        "ANALYZE without table is not supported".to_string(),
+                    )
+                })?;
+                self.bind_analyze(table_name)?
+            }
+            Statement::Truncate(truncate) => {
+                if truncate.table_names.len() != 1 {
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "only truncate a single table is supported".to_string(),
+                    ));
+                }
+                self.bind_truncate(&truncate.table_names[0].name)?
+            }
             Statement::ShowTables { .. } => self.bind_show_tables()?,
-            Statement::ShowVariable { variable } => match &variable[0].value.to_lowercase()[..] {
-                "views" => self.bind_show_views()?,
-                _ => return Err(DatabaseError::UnsupportedStmt(stmt.to_string())),
-            },
+            Statement::ShowViews { .. } => self.bind_show_views()?,
             Statement::Copy {
                 source,
                 to,
@@ -463,32 +538,36 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
                 ..
             } => self.bind_copy(source.clone(), *to, target.clone(), options)?,
             Statement::Explain { statement, .. } => {
-                let plan = self.bind(statement)?;
+                let plan = self.bind_inner(statement)?;
 
                 self.bind_explain(plan)?
             }
             Statement::ExplainTable {
-                describe_alias: true,
+                describe_alias: DescribeAlias::Describe | DescribeAlias::Desc,
                 table_name,
+                ..
             } => self.bind_describe(table_name)?,
-            Statement::CreateIndex {
-                table_name,
-                name,
-                columns,
-                if_not_exists,
-                unique,
-                ..
-            } => self.bind_create_index(table_name, name, columns, *if_not_exists, *unique)?,
-            Statement::CreateView {
-                or_replace,
-                name,
-                columns,
-                query,
-                ..
-            } => self.bind_create_view(or_replace, name, columns, query)?,
+            Statement::CreateIndex(create) => self.bind_create_index(
+                &create.table_name,
+                create.name.as_ref(),
+                &create.columns,
+                create.if_not_exists,
+                create.unique,
+            )?,
+            Statement::CreateView(create) => self.bind_create_view(
+                &create.or_replace,
+                &create.name,
+                &create.columns,
+                &create.query,
+            )?,
             _ => return Err(DatabaseError::UnsupportedStmt(stmt.to_string())),
         };
         Ok(plan)
+    }
+
+    pub fn bind(&mut self, stmt: &Statement) -> Result<LogicalPlan, DatabaseError> {
+        self.bind_inner(stmt)
+            .map_err(|err| annotate_bind_error(stmt, err))
     }
 
     pub fn bind_set_expr(&mut self, set_expr: &SetExpr) -> Result<LogicalPlan, DatabaseError> {
@@ -524,12 +603,21 @@ fn lower_ident(ident: &Ident) -> String {
     ident.value.to_lowercase()
 }
 
+fn lower_name_part(part: &ObjectNamePart) -> Result<String, DatabaseError> {
+    part.as_ident()
+        .map(lower_ident)
+        .ok_or_else(|| attach_span_if_absent(DatabaseError::invalid_table(part.to_string()), part))
+}
+
 /// Convert an object name into lower case
 fn lower_case_name(name: &ObjectName) -> Result<String, DatabaseError> {
     if name.0.len() == 1 {
-        return Ok(lower_ident(&name.0[0]));
+        return lower_name_part(&name.0[0]);
     }
-    Err(DatabaseError::InvalidTable(name.to_string()))
+    Err(attach_span_if_absent(
+        DatabaseError::invalid_table(name.to_string()),
+        name,
+    ))
 }
 
 pub(crate) fn is_valid_identifier(s: &str) -> bool {

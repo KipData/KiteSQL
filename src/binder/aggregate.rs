@@ -87,18 +87,14 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         let return_orderby = if !orderbys.is_empty() {
             let mut return_orderby = vec![];
             for orderby in orderbys {
-                let OrderByExpr {
-                    expr,
-                    asc,
-                    nulls_first,
-                } = orderby;
+                let OrderByExpr { expr, options, .. } = orderby;
                 let mut expr = self.bind_expr(expr)?;
                 self.visit_column_agg_expr(&mut expr)?;
 
                 return_orderby.push(SortField::new(
                     expr,
-                    asc.is_none_or(|asc| asc),
-                    nulls_first.unwrap_or(false),
+                    options.asc.is_none_or(|asc| asc),
+                    options.nulls_first.unwrap_or(false),
                 ));
             }
             Some(return_orderby)

@@ -71,7 +71,7 @@ impl IndexMeta {
             if let Some(column) = table.get_column_by_id(column_id) {
                 exprs.push(ScalarExpression::column_expr(column.clone()));
             } else {
-                return Err(DatabaseError::ColumnNotFound(column_id.to_string()));
+                return Err(DatabaseError::column_not_found(column_id.to_string()));
             }
         }
         Ok(exprs)
