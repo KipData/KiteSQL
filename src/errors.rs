@@ -26,19 +26,29 @@ pub struct SqlErrorSpan {
     pub start: usize,
     pub end: usize,
     pub line: usize,
-    pub near: Option<String>,
+    pub highlight: Option<String>,
 }
 
 fn format_sql_error_loc(span: &Option<SqlErrorSpan>) -> String {
     span.as_ref()
         .map(|s| {
-            if let Some(near) = &s.near {
-                format!(" near '{near}' at line {}", s.line)
+            if let Some(highlight) = &s.highlight {
+                format!("\n{highlight}")
             } else {
                 format!(" at line {}, range {}..{}", s.line, s.start, s.end)
             }
         })
         .unwrap_or_default()
+}
+
+fn format_not_null_message(column: &Option<String>, span: &Option<SqlErrorSpan>) -> String {
+    match column {
+        Some(column) => format!(
+            "column: {column} cannot be null{}",
+            format_sql_error_loc(span)
+        ),
+        None => format!("cannot be null{}", format_sql_error_loc(span)),
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -160,8 +170,11 @@ pub enum DatabaseError {
     },
     #[error("no transaction begin")]
     NoTransactionBegin,
-    #[error("cannot be null")]
-    NotNull,
+    #[error("{msg}", msg = format_not_null_message(column, span))]
+    NotNull {
+        column: Option<String>,
+        span: Option<SqlErrorSpan>,
+    },
     #[error("over flow")]
     OverFlow,
     #[error("parser bool: {0}")]
@@ -291,6 +304,20 @@ impl DatabaseError {
         }
     }
 
+    pub fn not_null() -> Self {
+        Self::NotNull {
+            column: None,
+            span: None,
+        }
+    }
+
+    pub fn not_null_column(name: impl Into<String>) -> Self {
+        Self::NotNull {
+            column: Some(name.into()),
+            span: None,
+        }
+    }
+
     pub fn with_span(self, span: SqlErrorSpan) -> Self {
         match self {
             Self::CastFail { from, to, .. } => Self::CastFail {
@@ -318,6 +345,10 @@ impl DatabaseError {
                 name,
                 span: Some(span),
             },
+            Self::NotNull { column, .. } => Self::NotNull {
+                column,
+                span: Some(span),
+            },
             other => other,
         }
     }
@@ -325,8 +356,8 @@ impl DatabaseError {
     pub fn with_sql_context(self, sql: &str) -> Self {
         let annotate = |span: Option<SqlErrorSpan>| -> Option<SqlErrorSpan> {
             span.map(|mut span| {
-                if span.near.is_none() {
-                    span.near = extract_sql_near(sql, &span);
+                if span.highlight.is_none() {
+                    span.highlight = build_sql_highlight(sql, &span);
                 }
                 span
             })
@@ -358,6 +389,10 @@ impl DatabaseError {
                 name,
                 span: annotate(span),
             },
+            Self::NotNull { column, span } => Self::NotNull {
+                column,
+                span: annotate(span),
+            },
             other => other,
         }
     }
@@ -369,38 +404,48 @@ impl DatabaseError {
             | DatabaseError::ColumnNotFound { span, .. }
             | DatabaseError::InvalidTable { span, .. }
             | DatabaseError::FunctionNotFound { span, .. }
-            | DatabaseError::ParametersNotFound { span, .. } => span.as_ref(),
+            | DatabaseError::ParametersNotFound { span, .. }
+            | DatabaseError::NotNull { span, .. } => span.as_ref(),
             _ => None,
         }
     }
 }
 
-fn extract_sql_near(sql: &str, span: &SqlErrorSpan) -> Option<String> {
+fn build_sql_highlight(sql: &str, span: &SqlErrorSpan) -> Option<String> {
     if span.line == 0 || span.start == 0 {
         return None;
     }
 
-    let line = sql.lines().nth(span.line.saturating_sub(1))?;
-    let line = line.trim_end_matches('\r');
-
-    let line_char_count = line.chars().count();
-    let start_idx = span.start.saturating_sub(1).min(line_char_count);
-    let end_idx = span.end.min(line_char_count).max(start_idx + 1);
-
-    let start_byte = char_to_byte_offset(line, start_idx)?;
-    let end_byte = char_to_byte_offset(line, end_idx)?;
-    let near = line.get(start_byte..end_byte)?.trim();
-
-    if near.is_empty() {
-        None
-    } else {
-        Some(near.to_string())
+    let lines = sql
+        .lines()
+        .map(|line| line.trim_end_matches('\r').to_string())
+        .collect::<Vec<_>>();
+    if lines.is_empty() || span.line > lines.len() {
+        return None;
     }
-}
 
-fn char_to_byte_offset(s: &str, char_index: usize) -> Option<usize> {
-    if char_index == s.chars().count() {
-        return Some(s.len());
+    let width = lines.len().to_string().len();
+    let mut out = String::new();
+    out.push_str(&format!("--> line {}\n", span.line));
+
+    for (i, line) in lines.iter().enumerate() {
+        let line_no = i + 1;
+        out.push_str(&format!("{line_no:>width$} | {line}\n", width = width));
+
+        if line_no == span.line {
+            let char_len = line.chars().count();
+            let start = span.start.saturating_sub(1).min(char_len);
+            let end = span.end.min(char_len).max(start + 1);
+            let marker_len = end.saturating_sub(start).max(1);
+            out.push_str(&format!(
+                "{:>width$} | {}{}\n",
+                "",
+                " ".repeat(start),
+                "^".repeat(marker_len),
+                width = width
+            ));
+        }
     }
-    s.char_indices().nth(char_index).map(|(idx, _)| idx)
+
+    Some(out.trim_end().to_string())
 }

@@ -739,7 +739,10 @@ pub(crate) mod test {
                 assert_eq!(span.line, 1);
                 assert!(span.start >= 12);
                 assert!(span.end > span.start);
-                assert_eq!(span.near.as_deref(), Some("missing_col"));
+                assert!(span
+                    .highlight
+                    .as_deref()
+                    .is_some_and(|h| h.contains("missing_col")));
             }
             other => panic!("unexpected error type: {other:?}"),
         }
@@ -768,7 +771,10 @@ pub(crate) mod test {
                 assert_eq!(span.line, 1);
                 assert!(span.start >= 8);
                 assert!(span.end > span.start);
-                assert_eq!(span.near.as_deref(), Some("missing_fn(id)"));
+                assert!(span
+                    .highlight
+                    .as_deref()
+                    .is_some_and(|h| h.contains("missing_fn(id)")));
             }
             other => panic!("unexpected error type: {other:?}"),
         }

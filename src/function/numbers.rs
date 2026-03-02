@@ -71,7 +71,9 @@ impl TableFunctionImpl for Numbers {
         if value.logical_type() != LogicalType::Integer {
             value = value.cast(&LogicalType::Integer)?;
         }
-        let num = value.i32().ok_or(DatabaseError::NotNull)?;
+        let num = value
+            .i32()
+            .ok_or_else(|| DatabaseError::not_null_column("numbers() arg"))?;
 
         Ok(
             Box::new((0..num).map(|i| Ok(Tuple::new(None, vec![DataValue::Int32(i)]))))

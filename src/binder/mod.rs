@@ -105,7 +105,7 @@ pub(crate) fn sqlparser_span_to_sql_error_span(span: Span) -> Option<SqlErrorSpa
         start,
         end,
         line: span.start.line as usize,
-        near: None,
+        highlight: None,
     })
 }
 

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::binder::{lower_case_name, Binder};
+use crate::binder::{attach_span_if_absent, lower_case_name, Binder};
 use crate::errors::DatabaseError;
 use crate::expression::simplify::ConstantCalculator;
 use crate::expression::visitor_mut::VisitorMut;
@@ -96,6 +96,12 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         }
                         // Check if the value length is too long
                         value.check_len(ty)?;
+                        if value.is_null() && !schema_ref[i].nullable() {
+                            return Err(attach_span_if_absent(
+                                DatabaseError::not_null_column(schema_ref[i].name().to_string()),
+                                expr,
+                            ));
+                        }
 
                         row.push(value);
                     }
@@ -103,6 +109,12 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         let default_value = schema_ref[i]
                             .default_value()?
                             .ok_or(DatabaseError::DefaultNotExist)?;
+                        if default_value.is_null() && !schema_ref[i].nullable() {
+                            return Err(attach_span_if_absent(
+                                DatabaseError::not_null_column(schema_ref[i].name().to_string()),
+                                expr,
+                            ));
+                        }
                         row.push(default_value);
                     }
                     _ => return Err(DatabaseError::UnsupportedStmt(expr.to_string())),

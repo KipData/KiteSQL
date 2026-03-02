@@ -75,7 +75,7 @@ impl TableCodec {
             return Err(DatabaseError::PrimaryKeyTooManyLayers);
         }
         if value.is_null() {
-            return Err(DatabaseError::NotNull);
+            return Err(DatabaseError::not_null_column("primary key"));
         }
 
         if let DataValue::Tuple(values, _) = &value {
