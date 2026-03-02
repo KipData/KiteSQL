@@ -374,13 +374,21 @@ impl<S: Storage> Database<S> {
             .state
             .prepare_all(sql)
             .map_err(|err| err.with_sql_context(sql))?;
-        let is_write = statements
+        let has_ddl = statements
             .iter()
-            .try_fold(false, |is_write, stmt| {
-                Ok::<_, DatabaseError>(is_write || matches!(command_type(stmt)?, CommandType::DDL))
+            .try_fold(false, |has_ddl, stmt| {
+                Ok::<_, DatabaseError>(has_ddl || matches!(command_type(stmt)?, CommandType::DDL))
             })
             .map_err(|err| err.with_sql_context(sql))?;
-        let _guard = if is_write {
+
+        if statements.len() > 1 && has_ddl {
+            return Err(DatabaseError::UnsupportedStmt(
+                "DDL is not allowed in multi-statement execution".to_string(),
+            )
+            .with_sql_context(sql));
+        }
+
+        let _guard = if has_ddl {
             MetaDataLock::Write(self.mdl.write_arc())
         } else {
             MetaDataLock::Read(self.mdl.read_arc())
@@ -798,6 +806,25 @@ pub(crate) mod test {
         );
         assert!(iter.next().is_none());
         iter.done()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_run_multi_statement_disallow_ddl() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+
+        let err = match kite_sql.run("create table t_multi_ddl (a int primary key); select 1") {
+            Ok(_) => panic!("multi-statement execution with DDL should be rejected"),
+            Err(err) => err,
+        };
+        match err {
+            DatabaseError::UnsupportedStmt(msg) => {
+                assert!(msg.contains("multi-statement execution"));
+            }
+            other => panic!("unexpected error type: {other:?}"),
+        }
 
         Ok(())
     }
