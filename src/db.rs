@@ -388,7 +388,7 @@ impl<S: Storage> Database<S> {
             .with_sql_context(sql));
         }
 
-        let _guard = if has_ddl {
+        let guard = if has_ddl {
             MetaDataLock::Write(self.mdl.write_arc())
         } else {
             MetaDataLock::Read(self.mdl.read_arc())
@@ -417,7 +417,11 @@ impl<S: Storage> Database<S> {
                 }
             } else {
                 let inner = Box::into_raw(Box::new(TransactionIter::new(schema, executor)));
-                return Ok(DatabaseIter { transaction, inner });
+                return Ok(DatabaseIter {
+                    transaction,
+                    inner,
+                    _guard: guard,
+                });
             }
         }
 
@@ -434,7 +438,7 @@ impl<S: Storage> Database<S> {
         statement: &Statement,
         params: A,
     ) -> Result<DatabaseIter<'_, S>, DatabaseError> {
-        let _guard = if matches!(command_type(statement)?, CommandType::DDL) {
+        let guard = if matches!(command_type(statement)?, CommandType::DDL) {
             MetaDataLock::Write(self.mdl.write_arc())
         } else {
             MetaDataLock::Read(self.mdl.read_arc())
@@ -452,7 +456,11 @@ impl<S: Storage> Database<S> {
                 }
             };
         let inner = Box::into_raw(Box::new(TransactionIter::new(schema, executor)));
-        Ok(DatabaseIter { transaction, inner })
+        Ok(DatabaseIter {
+            transaction,
+            inner,
+            _guard: guard,
+        })
     }
 
     pub fn new_transaction(&self) -> Result<DBTransaction<'_, S>, DatabaseError> {
@@ -477,6 +485,7 @@ pub trait ResultIter: Iterator<Item = Result<Tuple, DatabaseError>> {
 pub struct DatabaseIter<'a, S: Storage + 'a> {
     transaction: *mut S::TransactionType<'a>,
     inner: *mut TransactionIter<'a>,
+    _guard: MetaDataLock,
 }
 
 impl<S: Storage> Drop for DatabaseIter<'_, S> {
