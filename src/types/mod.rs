@@ -402,7 +402,11 @@ impl TryFrom<sqlparser::ast::DataType> for LogicalType {
                             len = cmp::max(len, length);
                             char_unit = unit;
                         }
-                        sqlparser::ast::CharacterLength::Max => {}
+                        sqlparser::ast::CharacterLength::Max => {
+                            return Err(DatabaseError::UnsupportedStmt(
+                                "CHAR(MAX) is not supported".to_string(),
+                            ));
+                        }
                     }
                 }
                 Ok(LogicalType::Char(
@@ -421,7 +425,11 @@ impl TryFrom<sqlparser::ast::DataType> for LogicalType {
                             len = Some(length as u32);
                             char_unit = unit;
                         }
-                        sqlparser::ast::CharacterLength::Max => {}
+                        sqlparser::ast::CharacterLength::Max => {
+                            return Err(DatabaseError::UnsupportedStmt(
+                                "VARCHAR(MAX) is not supported".to_string(),
+                            ));
+                        }
                     }
                 }
                 Ok(LogicalType::Varchar(

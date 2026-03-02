@@ -572,7 +572,7 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
 
     pub fn bind_set_expr(&mut self, set_expr: &SetExpr) -> Result<LogicalPlan, DatabaseError> {
         match set_expr {
-            SetExpr::Select(select) => self.bind_select(select, &[]),
+            SetExpr::Select(select) => self.bind_select(select, None),
             SetExpr::Query(query) => self.bind_query(query),
             SetExpr::SetOperation {
                 op,

@@ -54,7 +54,7 @@ use crate::types::{ColumnId, LogicalType};
 use itertools::Itertools;
 use sqlparser::ast::{
     CharLengthUnits, Distinct, Expr, GroupByExpr, Join, JoinConstraint, JoinOperator, LimitClause,
-    Offset, OffsetRows, OrderByExpr, OrderByKind, Query, Select, SelectInto, SelectItem,
+    OrderByExpr, OrderByKind, Query, Select, SelectInto, SelectItem,
     SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, TableAlias,
     TableAliasColumnDef, TableFactor, TableWithJoins,
 };
@@ -69,7 +69,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
         let order_by_exprs = if let Some(order_by) = &query.order_by {
             match &order_by.kind {
-                OrderByKind::Expressions(exprs) => exprs.clone(),
+                OrderByKind::Expressions(exprs) => Some(exprs.as_slice()),
                 OrderByKind::All(_) => {
                     return Err(DatabaseError::UnsupportedStmt(
                         "ORDER BY ALL is not supported".to_string(),
@@ -77,10 +77,10 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 }
             }
         } else {
-            vec![]
+            None
         };
         let mut plan = match query.body.borrow() {
-            SetExpr::Select(select) => self.bind_select(select, &order_by_exprs),
+            SetExpr::Select(select) => self.bind_select(select, order_by_exprs),
             SetExpr::Query(query) => self.bind_query(query),
             SetExpr::SetOperation {
                 op,
@@ -96,31 +96,8 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             }
         }?;
 
-        let (limit, offset) = match &query.limit_clause {
-            Some(LimitClause::LimitOffset {
-                limit,
-                offset,
-                limit_by,
-            }) => {
-                if !limit_by.is_empty() {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "LIMIT BY is not supported".to_string(),
-                    ));
-                }
-                (limit.clone(), offset.clone())
-            }
-            Some(LimitClause::OffsetCommaLimit { offset, limit }) => (
-                Some(limit.clone()),
-                Some(Offset {
-                    value: offset.clone(),
-                    rows: OffsetRows::None,
-                }),
-            ),
-            None => (None, None),
-        };
-
-        if limit.is_some() || offset.is_some() {
-            plan = self.bind_limit(plan, &limit, &offset)?;
+        if let Some(limit_clause) = query.limit_clause.clone() {
+            plan = self.bind_limit(plan, limit_clause)?;
         }
 
         self.context.step(origin_step);
@@ -130,7 +107,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
     pub(crate) fn bind_select(
         &mut self,
         select: &Select,
-        orderby: &[OrderByExpr],
+        orderby: Option<&[OrderByExpr]>,
     ) -> Result<LogicalPlan, DatabaseError> {
         let mut plan = if select.from.is_empty() {
             LogicalPlan::new(Operator::Dummy, Childrens::None)
@@ -177,8 +154,9 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
         let mut having_orderby = (None, None);
 
-        if select.having.is_some() || !orderby.is_empty() {
-            having_orderby = self.extract_having_orderby_aggregate(&select.having, orderby)?;
+        if select.having.is_some() || orderby.is_some() {
+            having_orderby =
+                self.extract_having_orderby_aggregate(&select.having, orderby.unwrap_or(&[]))?;
         }
 
         if !self.context.agg_calls.is_empty() || !self.context.group_by_exprs.is_empty() {
@@ -953,51 +931,60 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         )
     }
 
+    fn bind_non_negative_limit_value(&mut self, expr: &Expr) -> Result<usize, DatabaseError> {
+        let bound_expr = self.bind_expr(expr)?;
+        match bound_expr {
+            ScalarExpression::Constant(dv) => match &dv {
+                DataValue::Int32(v) if *v >= 0 => Ok(*v as usize),
+                DataValue::Int64(v) if *v >= 0 => Ok(*v as usize),
+                _ => Err(DatabaseError::InvalidType),
+            },
+            _ => Err(attach_span_if_absent(
+                DatabaseError::invalid_column("invalid limit expression.".to_owned()),
+                expr,
+            )),
+        }
+    }
+
     fn bind_limit(
         &mut self,
         children: LogicalPlan,
-        limit_expr: &Option<Expr>,
-        offset_expr: &Option<Offset>,
+        limit: LimitClause,
     ) -> Result<LogicalPlan, DatabaseError> {
         self.context.step(QueryBindStep::Limit);
 
-        let mut limit = None;
-        let mut offset = None;
-        if let Some(limit_ast) = limit_expr {
-            let bound_limit = self.bind_expr(limit_ast)?;
-            match bound_limit {
-                ScalarExpression::Constant(dv) => match &dv {
-                    DataValue::Int32(v) if *v >= 0 => limit = Some(*v as usize),
-                    DataValue::Int64(v) if *v >= 0 => limit = Some(*v as usize),
-                    _ => return Err(DatabaseError::InvalidType),
-                },
-                _ => {
-                    return Err(attach_span_if_absent(
-                        DatabaseError::invalid_column("invalid limit expression.".to_owned()),
-                        limit_ast,
-                    ))
+        let mut limit_value = None;
+        let mut offset_value = None;
+        match limit {
+            LimitClause::LimitOffset {
+                limit: limit_expr,
+                offset: offset_expr,
+                limit_by,
+            } => {
+                if !limit_by.is_empty() {
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "LIMIT BY is not supported".to_string(),
+                    ));
                 }
+
+                if let Some(limit_ast) = limit_expr.as_ref() {
+                    limit_value = Some(self.bind_non_negative_limit_value(limit_ast)?);
+                }
+
+                if let Some(offset_ast) = offset_expr.as_ref() {
+                    offset_value = Some(self.bind_non_negative_limit_value(&offset_ast.value)?);
+                }
+            }
+            LimitClause::OffsetCommaLimit {
+                offset: offset_expr,
+                limit: limit_expr,
+            } => {
+                limit_value = Some(self.bind_non_negative_limit_value(&limit_expr)?);
+                offset_value = Some(self.bind_non_negative_limit_value(&offset_expr)?);
             }
         }
 
-        if let Some(offset_ast) = offset_expr {
-            let bound_offset = self.bind_expr(&offset_ast.value)?;
-            match bound_offset {
-                ScalarExpression::Constant(dv) => match &dv {
-                    DataValue::Int32(v) if *v >= 0 => offset = Some(*v as usize),
-                    DataValue::Int64(v) if *v >= 0 => offset = Some(*v as usize),
-                    _ => return Err(DatabaseError::InvalidType),
-                },
-                _ => {
-                    return Err(attach_span_if_absent(
-                        DatabaseError::invalid_column("invalid limit expression.".to_owned()),
-                        &offset_ast.value,
-                    ))
-                }
-            }
-        }
-
-        Ok(LimitOperator::build(offset, limit, children))
+        Ok(LimitOperator::build(offset_value, limit_value, children))
     }
 
     pub fn extract_select_join(&mut self, select_items: &mut [ScalarExpression]) {
