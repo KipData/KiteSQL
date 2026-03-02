@@ -75,14 +75,14 @@ impl TpccTransaction for Payment {
         tx.execute_drain(
             &statements[0],
             &[
-                ("?1", DataValue::Decimal(args.h_amount)),
-                ("?2", DataValue::Int16(args.w_id as i16)),
+                ("$1", DataValue::Decimal(args.h_amount)),
+                ("$2", DataValue::Int16(args.w_id as i16)),
             ],
         )?;
         // "SELECT w_street_1, w_street_2, w_city, w_state, w_zip, w_name FROM warehouse WHERE w_id = ?"
         let tuple = tx.query_one(
             &statements[1],
-            &[("?1", DataValue::Int16(args.w_id as i16))],
+            &[("$1", DataValue::Int16(args.w_id as i16))],
         )?;
         let w_street_1 = tuple.values[0].utf8().unwrap();
         let w_street_2 = tuple.values[1].utf8().unwrap();
@@ -95,9 +95,9 @@ impl TpccTransaction for Payment {
         tx.execute_drain(
             &statements[2],
             &[
-                ("?1", DataValue::Decimal(args.h_amount)),
-                ("?2", DataValue::Int16(args.w_id as i16)),
-                ("?3", DataValue::Int8(args.d_id as i8)),
+                ("$1", DataValue::Decimal(args.h_amount)),
+                ("$2", DataValue::Int16(args.w_id as i16)),
+                ("$3", DataValue::Int8(args.d_id as i8)),
             ],
         )?;
 
@@ -105,8 +105,8 @@ impl TpccTransaction for Payment {
         let tuple = tx.query_one(
             &statements[3],
             &[
-                ("?1", DataValue::Int16(args.w_id as i16)),
-                ("?2", DataValue::Int8(args.d_id as i8)),
+                ("$1", DataValue::Int16(args.w_id as i16)),
+                ("$2", DataValue::Int8(args.d_id as i8)),
             ],
         )?;
         let d_street_1 = tuple.values[0].utf8().unwrap();
@@ -122,17 +122,17 @@ impl TpccTransaction for Payment {
             let tuple = tx.query_one(
                 &statements[4],
                 &[
-                    ("?1", DataValue::Int16(args.c_w_id as i16)),
-                    ("?2", DataValue::Int8(args.c_d_id as i8)),
-                    ("?3", DataValue::from(args.c_last.clone())),
+                    ("$1", DataValue::Int16(args.c_w_id as i16)),
+                    ("$2", DataValue::Int8(args.c_d_id as i8)),
+                    ("$3", DataValue::from(args.c_last.clone())),
                 ],
             )?;
             let mut name_cnt = tuple.values[0].i32().unwrap();
             // "SELECT c_id FROM customer WHERE c_w_id = ? AND c_d_id = ? AND c_last = ? ORDER BY c_first"
             let params = [
-                ("?1", DataValue::Int16(args.c_w_id as i16)),
-                ("?2", DataValue::Int8(args.c_d_id as i8)),
-                ("?3", DataValue::from(args.c_last.clone())),
+                ("$1", DataValue::Int16(args.c_w_id as i16)),
+                ("$2", DataValue::Int8(args.c_d_id as i8)),
+                ("$3", DataValue::from(args.c_last.clone())),
             ];
             let mut tuple_iter = tx.execute(&statements[5], &params)?;
             if name_cnt % 2 == 1 {
@@ -147,9 +147,9 @@ impl TpccTransaction for Payment {
         let tuple = tx.query_one(
             &statements[6],
             &[
-                ("?1", DataValue::Int16(args.c_w_id as i16)),
-                ("?2", DataValue::Int8(args.c_d_id as i8)),
-                ("?3", DataValue::Int32(c_id)),
+                ("$1", DataValue::Int16(args.c_w_id as i16)),
+                ("$2", DataValue::Int8(args.c_d_id as i8)),
+                ("$3", DataValue::Int32(c_id)),
             ],
         )?;
         let c_first = tuple.values[0].utf8().unwrap();
@@ -174,9 +174,9 @@ impl TpccTransaction for Payment {
                 let tuple = tx.query_one(
                     &statements[7],
                     &[
-                        ("?1", DataValue::Int16(args.c_w_id as i16)),
-                        ("?2", DataValue::Int8(args.c_d_id as i8)),
-                        ("?3", DataValue::Int32(c_id)),
+                        ("$1", DataValue::Int16(args.c_w_id as i16)),
+                        ("$2", DataValue::Int8(args.c_d_id as i8)),
+                        ("$3", DataValue::Int32(c_id)),
                     ],
                 )?;
                 let c_data = tuple.values[0].utf8().unwrap();
@@ -188,11 +188,11 @@ impl TpccTransaction for Payment {
                 tx.execute_drain(
                     &statements[8],
                     &[
-                        ("?1", DataValue::Decimal(c_balance)),
-                        ("?2", DataValue::from(c_data.to_string())),
-                        ("?3", DataValue::Int16(args.c_w_id as i16)),
-                        ("?4", DataValue::Int8(args.c_d_id as i8)),
-                        ("?5", DataValue::Int32(c_id)),
+                        ("$1", DataValue::Decimal(c_balance)),
+                        ("$2", DataValue::from(c_data.to_string())),
+                        ("$3", DataValue::Int16(args.c_w_id as i16)),
+                        ("$4", DataValue::Int8(args.c_d_id as i8)),
+                        ("$5", DataValue::Int32(c_id)),
                     ],
                 )?;
             } else {
@@ -200,10 +200,10 @@ impl TpccTransaction for Payment {
                 tx.execute_drain(
                     &statements[9],
                     &[
-                        ("?1", DataValue::Decimal(c_balance)),
-                        ("?2", DataValue::Int16(args.c_w_id as i16)),
-                        ("?3", DataValue::Int8(args.c_d_id as i8)),
-                        ("?4", DataValue::Int32(c_id)),
+                        ("$1", DataValue::Decimal(c_balance)),
+                        ("$2", DataValue::Int16(args.c_w_id as i16)),
+                        ("$3", DataValue::Int8(args.c_d_id as i8)),
+                        ("$4", DataValue::Int32(c_id)),
                     ],
                 )?;
             }
@@ -212,10 +212,10 @@ impl TpccTransaction for Payment {
             tx.execute_drain(
                 &statements[9],
                 &[
-                    ("?1", DataValue::Decimal(c_balance)),
-                    ("?2", DataValue::Int16(args.c_w_id as i16)),
-                    ("?3", DataValue::Int8(args.c_d_id as i8)),
-                    ("?4", DataValue::Int32(c_id)),
+                    ("$1", DataValue::Decimal(c_balance)),
+                    ("$2", DataValue::Int16(args.c_w_id as i16)),
+                    ("$3", DataValue::Int8(args.c_d_id as i8)),
+                    ("$4", DataValue::Int32(c_id)),
                 ],
             )?;
         }
@@ -224,14 +224,14 @@ impl TpccTransaction for Payment {
         tx.execute_drain(
             &statements[10],
             &[
-                ("?1", DataValue::Int8(args.c_d_id as i8)),
-                ("?2", DataValue::Int16(args.c_w_id as i16)),
-                ("?3", DataValue::Int32(c_id)),
-                ("?4", DataValue::Int8(args.d_id as i8)),
-                ("?5", DataValue::Int16(args.w_id as i16)),
-                ("?6", DataValue::from(&now.naive_utc())),
-                ("?7", DataValue::Decimal(args.h_amount)),
-                ("?8", DataValue::from(h_data)),
+                ("$1", DataValue::Int8(args.c_d_id as i8)),
+                ("$2", DataValue::Int16(args.c_w_id as i16)),
+                ("$3", DataValue::Int32(c_id)),
+                ("$4", DataValue::Int8(args.d_id as i8)),
+                ("$5", DataValue::Int16(args.w_id as i16)),
+                ("$6", DataValue::from(&now.naive_utc())),
+                ("$7", DataValue::Decimal(args.h_amount)),
+                ("$8", DataValue::from(h_data)),
             ],
         )?;
 

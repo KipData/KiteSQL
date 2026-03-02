@@ -63,17 +63,17 @@ impl TpccTransaction for OrderStat {
             let tuple = tx.query_one(
                 &statements[0],
                 &[
-                    ("?1", DataValue::Int16(args.w_id as i16)),
-                    ("?2", DataValue::Int8(args.d_id as i8)),
-                    ("?3", DataValue::from(args.c_last.clone())),
+                    ("$1", DataValue::Int16(args.w_id as i16)),
+                    ("$2", DataValue::Int8(args.d_id as i8)),
+                    ("$3", DataValue::from(args.c_last.clone())),
                 ],
             )?;
             let mut name_cnt = tuple.values[0].i32().unwrap() as usize;
             // "SELECT c_balance, c_first, c_middle, c_last FROM customer WHERE c_w_id = ? AND c_d_id = ? AND c_last = ? ORDER BY c_first"
             let params = [
-                ("?1", DataValue::Int16(args.w_id as i16)),
-                ("?2", DataValue::Int8(args.d_id as i8)),
-                ("?3", DataValue::from(args.c_last.clone())),
+                ("$1", DataValue::Int16(args.w_id as i16)),
+                ("$2", DataValue::Int8(args.d_id as i8)),
+                ("$3", DataValue::from(args.c_last.clone())),
             ];
             let mut tuple_iter = tx.execute(&statements[1], &params)?;
 
@@ -99,9 +99,9 @@ impl TpccTransaction for OrderStat {
             let tuple = tx.query_one(
                 &statements[2],
                 &[
-                    ("?1", DataValue::Int16(args.w_id as i16)),
-                    ("?2", DataValue::Int8(args.d_id as i8)),
-                    ("?3", DataValue::Int32(args.c_id as i32)),
+                    ("$1", DataValue::Int16(args.w_id as i16)),
+                    ("$2", DataValue::Int8(args.d_id as i8)),
+                    ("$3", DataValue::Int32(args.c_id as i32)),
                 ],
             )?;
             let c_balance = tuple.values[0].decimal().unwrap();
@@ -112,20 +112,20 @@ impl TpccTransaction for OrderStat {
         };
         // "SELECT o_id, o_entry_d, COALESCE(o_carrier_id,0) FROM orders WHERE o_w_id = ? AND o_d_id = ? AND o_c_id = ? AND o_id = (SELECT MAX(o_id) FROM orders WHERE o_w_id = ? AND o_d_id = ? AND o_c_id = ?)"
         let params = [
-            ("?1", DataValue::Int16(args.w_id as i16)),
-            ("?2", DataValue::Int8(args.d_id as i8)),
-            ("?3", DataValue::Int32(args.c_id as i32)),
-            ("?4", DataValue::Int16(args.w_id as i16)),
-            ("?5", DataValue::Int8(args.d_id as i8)),
-            ("?6", DataValue::Int32(args.c_id as i32)),
+            ("$1", DataValue::Int16(args.w_id as i16)),
+            ("$2", DataValue::Int8(args.d_id as i8)),
+            ("$3", DataValue::Int32(args.c_id as i32)),
+            ("$4", DataValue::Int16(args.w_id as i16)),
+            ("$5", DataValue::Int8(args.d_id as i8)),
+            ("$6", DataValue::Int32(args.c_id as i32)),
         ];
         let tuple = tx.query_one(&statements[3], &params)?;
         let o_id = tuple.values[0].i32().unwrap();
         // "SELECT ol_i_id, ol_supply_w_id, ol_quantity, ol_amount, ol_delivery_d FROM order_line WHERE ol_w_id = ? AND ol_d_id = ? AND ol_o_id = ?"
         let params = [
-            ("?1", DataValue::Int16(args.w_id as i16)),
-            ("?2", DataValue::Int8(args.d_id as i8)),
-            ("?3", DataValue::Int32(o_id)),
+            ("$1", DataValue::Int16(args.w_id as i16)),
+            ("$2", DataValue::Int8(args.d_id as i8)),
+            ("$3", DataValue::Int32(o_id)),
         ];
         let _tuple = tx.query_one(&statements[4], &params)?;
         // let ol_i_id = tuple.values[0].i32();

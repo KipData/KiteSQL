@@ -321,8 +321,16 @@ impl<S: Storage> State<S> {
     }
 
     fn prepare<T: AsRef<str>>(&self, sql: T) -> Result<Statement, DatabaseError> {
-        let mut stmts = parse_sql(sql)?;
+        let mut stmts = self.prepare_all(sql)?;
         stmts.pop().ok_or(DatabaseError::EmptyStatement)
+    }
+
+    fn prepare_all<T: AsRef<str>>(&self, sql: T) -> Result<Vec<Statement>, DatabaseError> {
+        let stmts = parse_sql(sql)?;
+        if stmts.is_empty() {
+            return Err(DatabaseError::EmptyStatement);
+        }
+        Ok(stmts)
     }
 
     fn execute<'a, A: AsRef<[(&'static str, DataValue)]>>(
@@ -361,9 +369,64 @@ pub struct Database<S: Storage> {
 impl<S: Storage> Database<S> {
     /// Run SQL queries.
     pub fn run<T: AsRef<str>>(&self, sql: T) -> Result<DatabaseIter<'_, S>, DatabaseError> {
-        let statement = self.prepare(sql)?;
+        let sql = sql.as_ref();
+        let statements = self
+            .state
+            .prepare_all(sql)
+            .map_err(|err| err.with_sql_context(sql))?;
+        let has_ddl = statements
+            .iter()
+            .try_fold(false, |has_ddl, stmt| {
+                Ok::<_, DatabaseError>(has_ddl || matches!(command_type(stmt)?, CommandType::DDL))
+            })
+            .map_err(|err| err.with_sql_context(sql))?;
 
-        self.execute(&statement, &[])
+        if statements.len() > 1 && has_ddl {
+            return Err(DatabaseError::UnsupportedStmt(
+                "DDL is not allowed in multi-statement execution".to_string(),
+            )
+            .with_sql_context(sql));
+        }
+
+        let guard = if has_ddl {
+            MetaDataLock::Write(self.mdl.write_arc())
+        } else {
+            MetaDataLock::Read(self.mdl.read_arc())
+        };
+
+        let transaction = Box::into_raw(Box::new(self.storage.transaction()?));
+        let mut statements = statements.into_iter().peekable();
+
+        while let Some(statement) = statements.next() {
+            let (schema, executor) =
+                match self
+                    .state
+                    .execute(unsafe { &mut (*transaction) }, &statement, &[])
+                {
+                    Ok(result) => result,
+                    Err(err) => {
+                        unsafe { drop(Box::from_raw(transaction)) };
+                        return Err(err.with_sql_context(sql));
+                    }
+                };
+
+            if statements.peek().is_some() {
+                if let Err(err) = TransactionIter::new(schema, executor).done() {
+                    unsafe { drop(Box::from_raw(transaction)) };
+                    return Err(err.with_sql_context(sql));
+                }
+            } else {
+                let inner = Box::into_raw(Box::new(TransactionIter::new(schema, executor)));
+                return Ok(DatabaseIter {
+                    transaction,
+                    inner,
+                    _guard: guard,
+                });
+            }
+        }
+
+        unsafe { drop(Box::from_raw(transaction)) };
+        Err(DatabaseError::EmptyStatement.with_sql_context(sql))
     }
 
     pub fn prepare<T: AsRef<str>>(&self, sql: T) -> Result<Statement, DatabaseError> {
@@ -375,7 +438,7 @@ impl<S: Storage> Database<S> {
         statement: &Statement,
         params: A,
     ) -> Result<DatabaseIter<'_, S>, DatabaseError> {
-        let _guard = if matches!(command_type(statement)?, CommandType::DDL) {
+        let guard = if matches!(command_type(statement)?, CommandType::DDL) {
             MetaDataLock::Write(self.mdl.write_arc())
         } else {
             MetaDataLock::Read(self.mdl.read_arc())
@@ -393,7 +456,11 @@ impl<S: Storage> Database<S> {
                 }
             };
         let inner = Box::into_raw(Box::new(TransactionIter::new(schema, executor)));
-        Ok(DatabaseIter { transaction, inner })
+        Ok(DatabaseIter {
+            transaction,
+            inner,
+            _guard: guard,
+        })
     }
 
     pub fn new_transaction(&self) -> Result<DBTransaction<'_, S>, DatabaseError> {
@@ -418,6 +485,7 @@ pub trait ResultIter: Iterator<Item = Result<Tuple, DatabaseError>> {
 pub struct DatabaseIter<'a, S: Storage + 'a> {
     transaction: *mut S::TransactionType<'a>,
     inner: *mut TransactionIter<'a>,
+    _guard: MetaDataLock,
 }
 
 impl<S: Storage> Drop for DatabaseIter<'_, S> {
@@ -463,9 +531,24 @@ pub struct DBTransaction<'a, S: Storage + 'a> {
 
 impl<S: Storage> DBTransaction<'_, S> {
     pub fn run<T: AsRef<str>>(&mut self, sql: T) -> Result<TransactionIter<'_>, DatabaseError> {
-        let statement = self.state.prepare(sql)?;
+        let sql = sql.as_ref();
+        let mut statements = self
+            .state
+            .prepare_all(sql)
+            .map_err(|err| err.with_sql_context(sql))?;
+        let last_statement = statements
+            .pop()
+            .ok_or_else(|| DatabaseError::EmptyStatement.with_sql_context(sql))?;
 
-        self.execute(&statement, &[])
+        for statement in statements {
+            self.execute(&statement, &[])
+                .map_err(|err| err.with_sql_context(sql))?
+                .done()
+                .map_err(|err| err.with_sql_context(sql))?;
+        }
+
+        self.execute(&last_statement, &[])
+            .map_err(|err| err.with_sql_context(sql))
     }
 
     pub fn prepare<T: AsRef<str>>(&self, sql: T) -> Result<Statement, DatabaseError> {
@@ -648,9 +731,9 @@ pub(crate) mod test {
 
         // Filter
         {
-            let statement = kite_sql.prepare("explain select * from t1 where b > ?1")?;
+            let statement = kite_sql.prepare("explain select * from t1 where b > $1")?;
 
-            let mut iter = kite_sql.execute(&statement, &[("?1", DataValue::Int32(0))])?;
+            let mut iter = kite_sql.execute(&statement, &[("$1", DataValue::Int32(0))])?;
 
             assert_eq!(
                 iter.next().unwrap()?.values[0].utf8().unwrap(),
@@ -662,16 +745,16 @@ pub(crate) mod test {
         // Aggregate
         {
             let statement = kite_sql.prepare(
-                "explain select a + ?1, max(b + ?2) from t1 where b > ?3 group by a + ?4",
+                "explain select a + $1, max(b + $2) from t1 where b > $3 group by a + $4",
             )?;
 
             let mut iter = kite_sql.execute(
                 &statement,
                 &[
-                    ("?1", DataValue::Int32(0)),
-                    ("?2", DataValue::Int32(0)),
-                    ("?3", DataValue::Int32(1)),
-                    ("?4", DataValue::Int32(0)),
+                    ("$1", DataValue::Int32(0)),
+                    ("$2", DataValue::Int32(0)),
+                    ("$3", DataValue::Int32(1)),
+                    ("$4", DataValue::Int32(0)),
                 ],
             )?;
             assert_eq!(
@@ -683,15 +766,15 @@ pub(crate) mod test {
             )
         }
         {
-            let statement = kite_sql.prepare("explain select *, ?1 from (select * from t1 where b > ?2) left join (select * from t1 where a > ?3) on a > ?4")?;
+            let statement = kite_sql.prepare("explain select *, $1 from (select * from t1 where b > $2) left join (select * from t1 where a > $3) on a > $4")?;
 
             let mut iter = kite_sql.execute(
                 &statement,
                 &[
-                    ("?1", DataValue::Int32(9)),
-                    ("?2", DataValue::Int32(0)),
-                    ("?3", DataValue::Int32(1)),
-                    ("?4", DataValue::Int32(0)),
+                    ("$1", DataValue::Int32(9)),
+                    ("$2", DataValue::Int32(0)),
+                    ("$3", DataValue::Int32(1)),
+                    ("$4", DataValue::Int32(0)),
                 ],
             )?;
             assert_eq!(
@@ -705,6 +788,116 @@ pub(crate) mod test {
       Filter (t1.a > 1), Is Having: false [Filter => (Sort Option: Follow)]
         TableScan t1 -> [a, b] [SeqScan => (Sort Option: None)]"
             )
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_run_multi_statement() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+
+        kite_sql
+            .run("create table t_multi (a int primary key, b int)")?
+            .done()?;
+
+        let mut iter = kite_sql.run(
+            "insert into t_multi values(0, 0); insert into t_multi values(1, 1); select * from t_multi order by a",
+        )?;
+        assert_eq!(
+            iter.next().unwrap()?.values,
+            vec![DataValue::Int32(0), DataValue::Int32(0)]
+        );
+        assert_eq!(
+            iter.next().unwrap()?.values,
+            vec![DataValue::Int32(1), DataValue::Int32(1)]
+        );
+        assert!(iter.next().is_none());
+        iter.done()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_run_multi_statement_disallow_ddl() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+
+        let err = match kite_sql.run("create table t_multi_ddl (a int primary key); select 1") {
+            Ok(_) => panic!("multi-statement execution with DDL should be rejected"),
+            Err(err) => err,
+        };
+        match err {
+            DatabaseError::UnsupportedStmt(msg) => {
+                assert!(msg.contains("multi-statement execution"));
+            }
+            other => panic!("unexpected error type: {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_bind_error_with_span() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+
+        kite_sql
+            .run("create table t_bind_span(id int primary key)")?
+            .done()?;
+
+        let err = match kite_sql.run("select id, missing_col from t_bind_span") {
+            Ok(_) => panic!("expected bind error"),
+            Err(err) => err,
+        };
+        println!("{}", err);
+
+        match err {
+            DatabaseError::ColumnNotFound { span, .. }
+            | DatabaseError::InvalidColumn { span, .. } => {
+                let span = span.expect("bind error should include span");
+                assert_eq!(span.line, 1);
+                assert!(span.start >= 12);
+                assert!(span.end > span.start);
+                assert!(span
+                    .highlight
+                    .as_deref()
+                    .is_some_and(|h| h.contains("missing_col")));
+            }
+            other => panic!("unexpected error type: {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_bind_function_error_with_span() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+
+        kite_sql
+            .run("create table t_bind_fn_span(id int primary key)")?
+            .done()?;
+
+        let err = match kite_sql.run("select missing_fn(id) from t_bind_fn_span") {
+            Ok(_) => panic!("expected function bind error"),
+            Err(err) => err,
+        };
+        println!("{}", err);
+
+        match err {
+            DatabaseError::FunctionNotFound { span, .. } => {
+                let span = span.expect("function bind error should include span");
+                assert_eq!(span.line, 1);
+                assert!(span.start >= 8);
+                assert!(span.end > span.start);
+                assert!(span
+                    .highlight
+                    .as_deref()
+                    .is_some_and(|h| h.contains("missing_fn(id)")));
+            }
+            other => panic!("unexpected error type: {other:?}"),
         }
 
         Ok(())
@@ -753,6 +946,41 @@ pub(crate) mod test {
         let mut tx_3 = kite_sql.new_transaction()?;
         let res = tx_3.run("create table t2 (a int primary key, b int)");
         assert!(res.is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_transaction_run_multi_statement() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+
+        kite_sql
+            .run("create table t_multi_tx (a int primary key, b int)")?
+            .done()?;
+
+        let mut tx = kite_sql.new_transaction()?;
+        let mut iter = tx.run(
+            "insert into t_multi_tx values(0, 0); insert into t_multi_tx values(1, 1); select * from t_multi_tx order by a",
+        )?;
+        assert_eq!(
+            iter.next().unwrap()?.values,
+            vec![DataValue::Int32(0), DataValue::Int32(0)]
+        );
+        assert_eq!(
+            iter.next().unwrap()?.values,
+            vec![DataValue::Int32(1), DataValue::Int32(1)]
+        );
+        assert!(iter.next().is_none());
+        iter.done()?;
+        tx.commit()?;
+
+        let mut check_iter = kite_sql.run("select count(*) from t_multi_tx")?;
+        assert_eq!(
+            check_iter.next().unwrap()?.values,
+            vec![DataValue::Int32(2)]
+        );
+        check_iter.done()?;
 
         Ok(())
     }

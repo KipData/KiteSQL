@@ -154,7 +154,7 @@ impl TableCatalog {
         for column_id in column_ids.iter() {
             let val_ty = self
                 .get_column_by_id(column_id)
-                .ok_or_else(|| DatabaseError::ColumnNotFound(column_id.to_string()))?
+                .ok_or_else(|| DatabaseError::column_not_found(column_id.to_string()))?
                 .datatype()
                 .clone();
             val_tys.push(val_ty)
@@ -233,7 +233,7 @@ impl TableCatalog {
         let mut columns = BTreeMap::new();
 
         for (i, column_ref) in column_refs.iter().enumerate() {
-            let column_id = column_ref.id().ok_or(DatabaseError::InvalidColumn(
+            let column_id = column_ref.id().ok_or(DatabaseError::invalid_column(
                 "column does not belong to table".to_string(),
             ))?;
 

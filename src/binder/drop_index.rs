@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::binder::{lower_ident, Binder};
+use crate::binder::{attach_span_if_absent, lower_name_part, Binder};
 use crate::errors::DatabaseError;
 use crate::planner::operator::drop_index::DropIndexOperator;
 use crate::planner::operator::Operator;
@@ -27,14 +27,13 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         name: &ObjectName,
         if_exists: &bool,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name = name
-            .0
-            .first()
-            .ok_or(DatabaseError::InvalidTable(name.to_string()))?;
+        let table_name = name.0.first().ok_or_else(|| {
+            attach_span_if_absent(DatabaseError::invalid_table(name.to_string()), name)
+        })?;
         let index_name = name.0.get(1).ok_or(DatabaseError::InvalidIndex)?;
 
-        let table_name = lower_ident(table_name).into();
-        let index_name = lower_ident(index_name);
+        let table_name = lower_name_part(table_name)?.into();
+        let index_name = lower_name_part(index_name)?;
 
         Ok(LogicalPlan::new(
             Operator::DropIndex(DropIndexOperator {

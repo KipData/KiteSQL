@@ -96,7 +96,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert {
                 .map(|(_, col)| col.key(is_mapping_by_name))
                 .collect_vec();
             if primary_keys.is_empty() {
-                throw!(co, Err(DatabaseError::NotNull))
+                throw!(co, Err(DatabaseError::not_null()))
             }
 
             if let Some(table_catalog) = throw!(
@@ -152,7 +152,8 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert {
                             value.unwrap_or(DataValue::Null)
                         };
                         if value.is_null() && !col.nullable() {
-                            co.yield_(Err(DatabaseError::NotNull)).await;
+                            co.yield_(Err(DatabaseError::not_null_column(col.name().to_string())))
+                                .await;
                             return;
                         }
                         values.push(value)

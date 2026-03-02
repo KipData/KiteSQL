@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::binder::{lower_case_name, Binder};
+use crate::binder::{
+    attach_span_from_sqlparser_span_if_absent, attach_span_if_absent, lower_case_name, Binder,
+};
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::update::UpdateOperator;
@@ -20,11 +22,25 @@ use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
-use sqlparser::ast::{Assignment, Expr, TableFactor, TableWithJoins};
+use sqlparser::ast::{
+    Assignment, AssignmentTarget, Expr, Ident, ObjectName, TableFactor, TableWithJoins,
+};
 use std::slice;
 use std::sync::Arc;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
+    fn single_ident_from_object_name(name: &ObjectName) -> Result<&Ident, DatabaseError> {
+        if name.0.len() != 1 {
+            return Err(attach_span_if_absent(
+                DatabaseError::invalid_column(name.to_string()),
+                name,
+            ));
+        }
+        name.0[0].as_ident().ok_or_else(|| {
+            attach_span_if_absent(DatabaseError::invalid_column(name.to_string()), name)
+        })
+    }
+
     pub(crate) fn bind_update(
         &mut self,
         to: &TableWithJoins,
@@ -47,10 +63,21 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             if assignments.is_empty() {
                 return Err(DatabaseError::ColumnsEmpty);
             }
-            for Assignment { id, value } in assignments {
+            for Assignment { target, value } in assignments {
                 let expression = self.bind_expr(value)?;
+                let mut idents = vec![];
+                match target {
+                    AssignmentTarget::ColumnName(name) => {
+                        idents.push(Self::single_ident_from_object_name(name)?);
+                    }
+                    AssignmentTarget::Tuple(_) => {
+                        return Err(DatabaseError::UnsupportedStmt(
+                            "UPDATE assignment tuple target is not supported".to_string(),
+                        ))
+                    }
+                }
 
-                for ident in id {
+                for ident in idents {
                     match self.bind_column_ref_from_identifiers(
                         slice::from_ref(ident),
                         Some(table_name.to_string()),
@@ -72,7 +99,12 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                             }
                             value_exprs.push((column, expr));
                         }
-                        _ => return Err(DatabaseError::InvalidColumn(ident.to_string())),
+                        _ => {
+                            return Err(attach_span_from_sqlparser_span_if_absent(
+                                DatabaseError::invalid_column(ident.to_string()),
+                                ident.span,
+                            ))
+                        }
                     }
                 }
             }

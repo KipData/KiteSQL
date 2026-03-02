@@ -7,5 +7,5 @@ edition = "2021"
 "kite_sql"  = { path = "../.." }
 lazy_static = { version = "1" }
 serde       = { version = "1", features = ["derive", "rc"] }
-sqlparser   = { version = "0.34", features = ["serde"] }
+sqlparser   = { version = "0.61", features = ["serde"] }
 typetag     = { version = "0.2" }

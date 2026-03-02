@@ -21,6 +21,36 @@ use std::num::{ParseFloatError, ParseIntError, TryFromIntError};
 use std::str::{ParseBoolError, Utf8Error};
 use std::string::FromUtf8Error;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlErrorSpan {
+    pub start: usize,
+    pub end: usize,
+    pub line: usize,
+    pub highlight: Option<String>,
+}
+
+fn format_sql_error_loc(span: &Option<SqlErrorSpan>) -> String {
+    span.as_ref()
+        .map(|s| {
+            if let Some(highlight) = &s.highlight {
+                format!("\n{highlight}")
+            } else {
+                format!(" at line {}, range {}..{}", s.line, s.start, s.end)
+            }
+        })
+        .unwrap_or_default()
+}
+
+fn format_not_null_message(column: &Option<String>, span: &Option<SqlErrorSpan>) -> String {
+    match column {
+        Some(column) => format!(
+            "column: `{column}` cannot be null{}",
+            format_sql_error_loc(span)
+        ),
+        None => format!("cannot be null{}", format_sql_error_loc(span)),
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum DatabaseError {
     #[error("agg miss: {0}")]
@@ -33,16 +63,29 @@ pub enum DatabaseError {
     ),
     #[error("cache size overflow")]
     CacheSizeOverFlow,
-    #[error("cast fail: {from} -> {to}")]
-    CastFail { from: LogicalType, to: LogicalType },
+    #[error(
+        "cast fail: {from} -> {to}{loc}",
+        loc = format_sql_error_loc(span)
+    )]
+    CastFail {
+        from: LogicalType,
+        to: LogicalType,
+        span: Option<SqlErrorSpan>,
+    },
     #[error("channel close")]
     ChannelClose,
     #[error("columns empty")]
     ColumnsEmpty,
-    #[error("column id: {0} not found")]
+    #[error("column id: `{0}` not found")]
     ColumnIdNotFound(String),
-    #[error("column: {0} not found")]
-    ColumnNotFound(String),
+    #[error(
+        "column: `{name}` not found{loc}",
+        loc = format_sql_error_loc(span)
+    )]
+    ColumnNotFound {
+        name: String,
+        span: Option<SqlErrorSpan>,
+    },
     #[error("csv error: {0}")]
     Csv(
         #[from]
@@ -53,18 +96,24 @@ pub enum DatabaseError {
     DefaultNotColumnRef,
     #[error("default does not exist")]
     DefaultNotExist,
-    #[error("column: {0} already exists")]
+    #[error("column: `{0}` already exists")]
     DuplicateColumn(String),
-    #[error("table or view: {0} hash already exists")]
+    #[error("table or view: `{0}` hash already exists")]
     DuplicateSourceHash(String),
-    #[error("index: {0} already exists")]
+    #[error("index: `{0}` already exists")]
     DuplicateIndex(String),
     #[error("duplicate primary key")]
     DuplicatePrimaryKey,
     #[error("the column has been declared unique and the value already exists")]
     DuplicateUniqueValue,
-    #[error("function: {0} not found")]
-    FunctionNotFound(String),
+    #[error(
+        "function: `{name}` not found{loc}",
+        loc = format_sql_error_loc(span)
+    )]
+    FunctionNotFound {
+        name: String,
+        span: Option<SqlErrorSpan>,
+    },
     #[error("empty plan")]
     EmptyPlan,
     #[error("sql statement is empty")]
@@ -79,12 +128,24 @@ pub enum DatabaseError {
     ),
     #[error("can not compare two types: {0} and {1}")]
     Incomparable(LogicalType, LogicalType),
-    #[error("invalid column: {0}")]
-    InvalidColumn(String),
+    #[error(
+        "invalid column: `{name}`{loc}",
+        loc = format_sql_error_loc(span)
+    )]
+    InvalidColumn {
+        name: String,
+        span: Option<SqlErrorSpan>,
+    },
     #[error("invalid index")]
     InvalidIndex,
-    #[error("invalid table: {0}")]
-    InvalidTable(String),
+    #[error(
+        "invalid table: `{name}`{loc}",
+        loc = format_sql_error_loc(span)
+    )]
+    InvalidTable {
+        name: String,
+        span: Option<SqlErrorSpan>,
+    },
     #[error("invalid type")]
     InvalidType,
     #[error("invalid value: {0}")]
@@ -99,12 +160,21 @@ pub enum DatabaseError {
     MisMatch(&'static str, &'static str),
     #[error("add column must be nullable or specify a default value")]
     NeedNullAbleOrDefault,
-    #[error("parameter: {0} not found")]
-    ParametersNotFound(String),
+    #[error(
+        "parameter: `{name}` not found{loc}",
+        loc = format_sql_error_loc(span)
+    )]
+    ParametersNotFound {
+        name: String,
+        span: Option<SqlErrorSpan>,
+    },
     #[error("no transaction begin")]
     NoTransactionBegin,
-    #[error("cannot be null")]
-    NotNull,
+    #[error("{msg}", msg = format_not_null_message(column, span))]
+    NotNull {
+        column: Option<String>,
+        span: Option<SqlErrorSpan>,
+    },
     #[error("over flow")]
     OverFlow,
     #[error("parser bool: {0}")]
@@ -196,4 +266,186 @@ pub enum DatabaseError {
     ViewExists,
     #[error("the view not found")]
     ViewNotFound,
+}
+
+impl DatabaseError {
+    pub fn invalid_column(name: impl Into<String>) -> Self {
+        Self::InvalidColumn {
+            name: name.into(),
+            span: None,
+        }
+    }
+
+    pub fn column_not_found(name: impl Into<String>) -> Self {
+        Self::ColumnNotFound {
+            name: name.into(),
+            span: None,
+        }
+    }
+
+    pub fn invalid_table(name: impl Into<String>) -> Self {
+        Self::InvalidTable {
+            name: name.into(),
+            span: None,
+        }
+    }
+
+    pub fn function_not_found(name: impl Into<String>) -> Self {
+        Self::FunctionNotFound {
+            name: name.into(),
+            span: None,
+        }
+    }
+
+    pub fn parameter_not_found(name: impl Into<String>) -> Self {
+        Self::ParametersNotFound {
+            name: name.into(),
+            span: None,
+        }
+    }
+
+    pub fn not_null() -> Self {
+        Self::NotNull {
+            column: None,
+            span: None,
+        }
+    }
+
+    pub fn not_null_column(name: impl Into<String>) -> Self {
+        Self::NotNull {
+            column: Some(name.into()),
+            span: None,
+        }
+    }
+
+    pub fn with_span(self, span: SqlErrorSpan) -> Self {
+        match self {
+            Self::CastFail { from, to, .. } => Self::CastFail {
+                from,
+                to,
+                span: Some(span),
+            },
+            Self::InvalidColumn { name, .. } => Self::InvalidColumn {
+                name,
+                span: Some(span),
+            },
+            Self::ColumnNotFound { name, .. } => Self::ColumnNotFound {
+                name,
+                span: Some(span),
+            },
+            Self::InvalidTable { name, .. } => Self::InvalidTable {
+                name,
+                span: Some(span),
+            },
+            Self::FunctionNotFound { name, .. } => Self::FunctionNotFound {
+                name,
+                span: Some(span),
+            },
+            Self::ParametersNotFound { name, .. } => Self::ParametersNotFound {
+                name,
+                span: Some(span),
+            },
+            Self::NotNull { column, .. } => Self::NotNull {
+                column,
+                span: Some(span),
+            },
+            other => other,
+        }
+    }
+
+    pub fn with_sql_context(self, sql: &str) -> Self {
+        let annotate = |span: Option<SqlErrorSpan>| -> Option<SqlErrorSpan> {
+            span.map(|mut span| {
+                if span.highlight.is_none() {
+                    span.highlight = build_sql_highlight(sql, &span);
+                }
+                span
+            })
+        };
+
+        match self {
+            Self::CastFail { from, to, span } => Self::CastFail {
+                from,
+                to,
+                span: annotate(span),
+            },
+            Self::InvalidColumn { name, span } => Self::InvalidColumn {
+                name,
+                span: annotate(span),
+            },
+            Self::ColumnNotFound { name, span } => Self::ColumnNotFound {
+                name,
+                span: annotate(span),
+            },
+            Self::InvalidTable { name, span } => Self::InvalidTable {
+                name,
+                span: annotate(span),
+            },
+            Self::FunctionNotFound { name, span } => Self::FunctionNotFound {
+                name,
+                span: annotate(span),
+            },
+            Self::ParametersNotFound { name, span } => Self::ParametersNotFound {
+                name,
+                span: annotate(span),
+            },
+            Self::NotNull { column, span } => Self::NotNull {
+                column,
+                span: annotate(span),
+            },
+            other => other,
+        }
+    }
+
+    pub fn sql_error_span(&self) -> Option<&SqlErrorSpan> {
+        match self {
+            DatabaseError::CastFail { span, .. }
+            | DatabaseError::InvalidColumn { span, .. }
+            | DatabaseError::ColumnNotFound { span, .. }
+            | DatabaseError::InvalidTable { span, .. }
+            | DatabaseError::FunctionNotFound { span, .. }
+            | DatabaseError::ParametersNotFound { span, .. }
+            | DatabaseError::NotNull { span, .. } => span.as_ref(),
+            _ => None,
+        }
+    }
+}
+
+fn build_sql_highlight(sql: &str, span: &SqlErrorSpan) -> Option<String> {
+    if span.line == 0 || span.start == 0 {
+        return None;
+    }
+
+    let lines = sql
+        .lines()
+        .map(|line| line.trim_end_matches('\r').to_string())
+        .collect::<Vec<_>>();
+    if lines.is_empty() || span.line > lines.len() {
+        return None;
+    }
+
+    let width = lines.len().to_string().len();
+    let mut out = String::new();
+    out.push_str(&format!("--> line {}\n", span.line));
+
+    for (i, line) in lines.iter().enumerate() {
+        let line_no = i + 1;
+        out.push_str(&format!("{line_no:>width$} | {line}\n", width = width));
+
+        if line_no == span.line {
+            let char_len = line.chars().count();
+            let start = span.start.saturating_sub(1).min(char_len);
+            let end = span.end.min(char_len).max(start + 1);
+            let marker_len = end.saturating_sub(start).max(1);
+            out.push_str(&format!(
+                "{:>width$} | {}{}\n",
+                "",
+                " ".repeat(start),
+                "^".repeat(marker_len),
+                width = width
+            ));
+        }
+    }
+
+    Some(out.trim_end().to_string())
 }

@@ -75,7 +75,7 @@ impl TableCodec {
             return Err(DatabaseError::PrimaryKeyTooManyLayers);
         }
         if value.is_null() {
-            return Err(DatabaseError::NotNull);
+            return Err(DatabaseError::not_null_column("primary key"));
         }
 
         if let DataValue::Tuple(values, _) = &value {
@@ -451,7 +451,7 @@ impl TableCodec {
 
             Ok((key_prefix, column_bytes))
         } else {
-            Err(DatabaseError::InvalidColumn(
+            Err(DatabaseError::invalid_column(
                 "column does not belong to table".to_string(),
             ))
         }

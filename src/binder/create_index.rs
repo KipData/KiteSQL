@@ -22,23 +22,25 @@ use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::index::IndexType;
 use crate::types::value::DataValue;
-use sqlparser::ast::{ObjectName, OrderByExpr};
+use sqlparser::ast::{IndexColumn, ObjectName};
 use std::sync::Arc;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_create_index(
         &mut self,
         table_name: &ObjectName,
-        name: &ObjectName,
-        exprs: &[OrderByExpr],
+        name: Option<&ObjectName>,
+        index_columns: &[IndexColumn],
         if_not_exists: bool,
         is_unique: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
         let table_name: Arc<str> = lower_case_name(table_name)?.into();
-        let index_name = lower_case_name(name)?;
+        let index_name = name
+            .ok_or(DatabaseError::InvalidIndex)
+            .and_then(lower_case_name)?;
         let ty = if is_unique {
             IndexType::Unique
-        } else if exprs.len() == 1 {
+        } else if index_columns.len() == 1 {
             IndexType::Normal
         } else {
             IndexType::Composite
@@ -52,11 +54,11 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             Source::Table(table) => TableScanOperator::build(table_name.clone(), table, true)?,
             Source::View(view) => LogicalPlan::clone(&view.plan),
         };
-        let mut columns = Vec::with_capacity(exprs.len());
+        let mut columns = Vec::with_capacity(index_columns.len());
 
-        for expr in exprs {
+        for index_column in index_columns {
             // TODO: Expression Index
-            match self.bind_expr(&expr.expr)? {
+            match self.bind_expr(&index_column.column.expr)? {
                 ScalarExpression::ColumnRef { column, .. } => columns.push(column),
                 expr => {
                     return Err(DatabaseError::UnsupportedStmt(format!(

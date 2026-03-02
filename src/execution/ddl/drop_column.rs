@@ -56,7 +56,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropColumn {
                 if is_primary {
                     throw!(
                         co,
-                        Err(DatabaseError::InvalidColumn(
+                        Err(DatabaseError::invalid_column(
                             "drop of primary key column is not allowed.".to_owned(),
                         ))
                     );
@@ -104,7 +104,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropColumn {
                 co.yield_(Ok(TupleBuilder::build_result("1".to_string())))
                     .await;
             } else if !if_exists {
-                co.yield_(Err(DatabaseError::ColumnNotFound(column_name)))
+                co.yield_(Err(DatabaseError::column_not_found(column_name)))
                     .await;
             }
         })

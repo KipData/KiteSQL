@@ -50,8 +50,8 @@ impl TpccTransaction for Delivery {
             let tuple = tx.query_one(
                 &statements[0],
                 &[
-                    ("?1", DataValue::Int8(d_id as i8)),
-                    ("?2", DataValue::Int16(args.w_id as i16)),
+                    ("$1", DataValue::Int8(d_id as i8)),
+                    ("$2", DataValue::Int16(args.w_id as i16)),
                 ],
             )?;
             let no_o_id = tuple.values[0].i32().unwrap();
@@ -63,18 +63,18 @@ impl TpccTransaction for Delivery {
             tx.execute_drain(
                 &statements[1],
                 &[
-                    ("?1", DataValue::Int32(no_o_id)),
-                    ("?2", DataValue::Int8(d_id as i8)),
-                    ("?3", DataValue::Int16(args.w_id as i16)),
+                    ("$1", DataValue::Int32(no_o_id)),
+                    ("$2", DataValue::Int8(d_id as i8)),
+                    ("$3", DataValue::Int16(args.w_id as i16)),
                 ],
             )?;
             // "SELECT o_c_id FROM orders WHERE o_id = ? AND o_d_id = ? AND o_w_id = ?"
             let tuple = tx.query_one(
                 &statements[2],
                 &[
-                    ("?1", DataValue::Int32(no_o_id)),
-                    ("?2", DataValue::Int8(d_id as i8)),
-                    ("?3", DataValue::Int16(args.w_id as i16)),
+                    ("$1", DataValue::Int32(no_o_id)),
+                    ("$2", DataValue::Int8(d_id as i8)),
+                    ("$3", DataValue::Int16(args.w_id as i16)),
                 ],
             )?;
             let c_id = tuple.values[0].i32().unwrap();
@@ -82,29 +82,29 @@ impl TpccTransaction for Delivery {
             tx.execute_drain(
                 &statements[3],
                 &[
-                    ("?1", DataValue::Int8(args.o_carrier_id as i8)),
-                    ("?2", DataValue::Int32(no_o_id)),
-                    ("?3", DataValue::Int8(d_id as i8)),
-                    ("?4", DataValue::Int16(args.w_id as i16)),
+                    ("$1", DataValue::Int8(args.o_carrier_id as i8)),
+                    ("$2", DataValue::Int32(no_o_id)),
+                    ("$3", DataValue::Int8(d_id as i8)),
+                    ("$4", DataValue::Int16(args.w_id as i16)),
                 ],
             )?;
             // "UPDATE order_line SET ol_delivery_d = ? WHERE ol_o_id = ? AND ol_d_id = ? AND ol_w_id = ?"
             tx.execute_drain(
                 &statements[4],
                 &[
-                    ("?1", DataValue::from(&now)),
-                    ("?2", DataValue::Int32(no_o_id)),
-                    ("?3", DataValue::Int8(d_id as i8)),
-                    ("?4", DataValue::Int16(args.w_id as i16)),
+                    ("$1", DataValue::from(&now)),
+                    ("$2", DataValue::Int32(no_o_id)),
+                    ("$3", DataValue::Int8(d_id as i8)),
+                    ("$4", DataValue::Int16(args.w_id as i16)),
                 ],
             )?;
             // "SELECT SUM(ol_amount) FROM order_line WHERE ol_o_id = ? AND ol_d_id = ? AND ol_w_id = ?"
             let tuple = tx.query_one(
                 &statements[5],
                 &[
-                    ("?1", DataValue::Int32(no_o_id)),
-                    ("?2", DataValue::Int8(d_id as i8)),
-                    ("?3", DataValue::Int16(args.w_id as i16)),
+                    ("$1", DataValue::Int32(no_o_id)),
+                    ("$2", DataValue::Int8(d_id as i8)),
+                    ("$3", DataValue::Int16(args.w_id as i16)),
                 ],
             )?;
             let ol_total = tuple.values[0].decimal().unwrap();
@@ -112,10 +112,10 @@ impl TpccTransaction for Delivery {
             tx.execute_drain(
                 &statements[6],
                 &[
-                    ("?1", DataValue::Decimal(ol_total)),
-                    ("?2", DataValue::Int32(c_id)),
-                    ("?3", DataValue::Int8(d_id as i8)),
-                    ("?4", DataValue::Int16(args.w_id as i16)),
+                    ("$1", DataValue::Decimal(ol_total)),
+                    ("$2", DataValue::Int32(c_id)),
+                    ("$3", DataValue::Int8(d_id as i8)),
+                    ("$4", DataValue::Int16(args.w_id as i16)),
                 ],
             )?;
         }

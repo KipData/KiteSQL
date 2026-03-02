@@ -18,13 +18,16 @@ use crate::expression;
 use crate::expression::agg::AggKind;
 use itertools::Itertools;
 use sqlparser::ast::{
-    BinaryOperator, CharLengthUnits, DataType, Expr, Function, FunctionArg, FunctionArgExpr, Ident,
-    Query, UnaryOperator, Value,
+    BinaryOperator, CharLengthUnits, DataType, DuplicateTreatment, Expr, Function, FunctionArg,
+    FunctionArgExpr, FunctionArguments, Ident, Query, TypedString, UnaryOperator, Value,
 };
 use std::collections::HashMap;
 use std::slice;
 
-use super::{lower_ident, Binder, BinderContext, QueryBindStep, SubQueryType};
+use super::{
+    attach_span_from_sqlparser_span_if_absent, attach_span_if_absent, lower_ident, Binder,
+    BinderContext, QueryBindStep, SubQueryType,
+};
 use crate::expression::function::scala::{ArcScalarFunctionImpl, ScalarFunction};
 use crate::expression::function::table::{ArcTableFunctionImpl, TableFunction};
 use crate::expression::function::FunctionSummary;
@@ -54,6 +57,29 @@ macro_rules! try_default {
 }
 
 impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T, A> {
+    fn parse_like_escape_char(escape_char: &Option<Value>) -> Result<Option<char>, DatabaseError> {
+        match escape_char {
+            None => Ok(None),
+            Some(value) => match value {
+                Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
+                    let mut chars = s.chars();
+                    let ch = chars.next().ok_or(DatabaseError::InvalidValue(
+                        "escape character must not be empty".to_string(),
+                    ))?;
+                    if chars.next().is_some() {
+                        return Err(DatabaseError::InvalidValue(
+                            "escape character must be a single character".to_string(),
+                        ));
+                    }
+                    Ok(Some(ch))
+                }
+                _ => Err(DatabaseError::InvalidValue(
+                    "escape character must be a quoted string".to_string(),
+                )),
+            },
+        }
+    }
+
     pub(crate) fn bind_expr(&mut self, expr: &Expr) -> Result<ScalarExpression, DatabaseError> {
         match expr {
             Expr::Identifier(ident) => {
@@ -62,14 +88,21 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             Expr::CompoundIdentifier(idents) => self.bind_column_ref_from_identifiers(idents, None),
             Expr::BinaryOp { left, right, op } => self.bind_binary_op_internal(left, right, op),
             Expr::Value(v) => {
-                let value = if let Value::Placeholder(name) = v {
+                let value = if let Value::Placeholder(name) = &v.value {
                     self.args
                         .as_ref()
                         .iter()
                         .find_map(|(key, value)| (key == name).then(|| value.clone()))
-                        .ok_or_else(|| DatabaseError::ParametersNotFound(name.to_string()))?
+                        .ok_or_else(|| {
+                            attach_span_if_absent(
+                                DatabaseError::parameter_not_found(name.to_string()),
+                                v,
+                            )
+                        })?
                 } else {
-                    v.try_into()?
+                    (&v.value)
+                        .try_into()
+                        .map_err(|err| attach_span_if_absent(err, v))?
                 };
                 Ok(ScalarExpression::Constant(value))
             }
@@ -81,6 +114,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 expr,
                 pattern,
                 escape_char,
+                any: _,
             } => self.bind_like(*negated, expr, pattern, escape_char),
             Expr::IsNull(expr) => self.bind_is_null(expr, false),
             Expr::IsNotNull(expr) => self.bind_is_null(expr, true),
@@ -92,14 +126,20 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             Expr::Cast {
                 expr, data_type, ..
             } => self.bind_cast(expr, data_type),
-            Expr::TypedString { data_type, value } => {
+            Expr::TypedString(TypedString {
+                data_type, value, ..
+            }) => {
                 let logical_type = LogicalType::try_from(data_type.clone())?;
+                let raw = value.clone().into_string().ok_or_else(|| {
+                    DatabaseError::InvalidValue("typed string literal must be a string".to_string())
+                })?;
                 let value = DataValue::Utf8 {
-                    value: value.to_string(),
+                    value: raw,
                     ty: Utf8Type::Variable(None),
                     unit: CharLengthUnits::Characters,
                 }
-                .cast(&logical_type)?;
+                .cast(&logical_type)
+                .map_err(|err| attach_span_if_absent(err, expr))?;
 
                 Ok(ScalarExpression::Constant(value))
             }
@@ -144,6 +184,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 expr,
                 trim_what,
                 trim_where,
+                ..
             } => {
                 let mut trim_what_expr = None;
                 if let Some(trim_what) = trim_what {
@@ -214,8 +255,8 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             Expr::Case {
                 operand,
                 conditions,
-                results,
                 else_result,
+                ..
             } => {
                 let fn_check_ty = |ty: &mut LogicalType, result_ty| {
                     if result_ty != LogicalType::SqlNull {
@@ -234,12 +275,12 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                     operand_expr = Some(Box::new(self.bind_expr(expr)?));
                 }
                 let mut expr_pairs = Vec::with_capacity(conditions.len());
-                for i in 0..conditions.len() {
-                    let result = self.bind_expr(&results[i])?;
+                for when in conditions {
+                    let result = self.bind_expr(&when.result)?;
                     let result_ty = result.return_type();
 
                     fn_check_ty(&mut ty, result_ty)?;
-                    expr_pairs.push((self.bind_expr(&conditions[i])?, result))
+                    expr_pairs.push((self.bind_expr(&when.condition)?, result))
                 }
 
                 let mut else_expr = None;
@@ -340,14 +381,15 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         negated: bool,
         expr: &Expr,
         pattern: &Expr,
-        escape_char: &Option<char>,
+        escape_char: &Option<Value>,
     ) -> Result<ScalarExpression, DatabaseError> {
         let left_expr = Box::new(self.bind_expr(expr)?);
         let right_expr = Box::new(self.bind_expr(pattern)?);
+        let escape_char = Self::parse_like_escape_char(escape_char)?;
         let op = if negated {
-            expression::BinaryOperator::NotLike(*escape_char)
+            expression::BinaryOperator::NotLike(escape_char)
         } else {
-            expression::BinaryOperator::Like(*escape_char)
+            expression::BinaryOperator::Like(escape_char)
         };
         Ok(ScalarExpression::Binary {
             op,
@@ -367,13 +409,16 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             [column] => (None, lower_ident(column)),
             [table, column] => (Some(lower_ident(table)), lower_ident(column)),
             _ => {
-                return Err(DatabaseError::InvalidColumn(
-                    idents
-                        .iter()
-                        .map(|ident| ident.value.clone())
-                        .join(".")
-                        .to_string(),
-                ))
+                let invalid_name = idents
+                    .iter()
+                    .map(|ident| ident.value.clone())
+                    .join(".")
+                    .to_string();
+                let err = DatabaseError::invalid_column(invalid_name);
+                return Err(match idents.last() {
+                    Some(ident) => attach_span_from_sqlparser_span_if_absent(err, ident.span),
+                    None => err,
+                });
             }
         };
         try_alias!(self.context, full_name);
@@ -381,13 +426,23 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             try_default!(&full_name.0, full_name.1);
         }
         if let Some(table) = full_name.0.or(bind_table_name) {
-            let source = self.context.bind_source(&table)?;
+            let source = self.context.bind_source(&table).map_err(|err| {
+                if let [table_ident, _] = idents {
+                    attach_span_from_sqlparser_span_if_absent(err, table_ident.span)
+                } else {
+                    err
+                }
+            })?;
             let schema_buf = self.table_schema_buf.entry(table.into()).or_default();
 
             Ok(ScalarExpression::column_expr(
-                source
-                    .column(&full_name.1, schema_buf)
-                    .ok_or_else(|| DatabaseError::ColumnNotFound(full_name.1.to_string()))?,
+                source.column(&full_name.1, schema_buf).ok_or_else(|| {
+                    let err = DatabaseError::column_not_found(full_name.1.to_string());
+                    match idents.last() {
+                        Some(ident) => attach_span_from_sqlparser_span_if_absent(err, ident.span),
+                        None => err,
+                    }
+                })?,
             ))
         } else {
             let op =
@@ -427,7 +482,16 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             if let Some(parent) = self.parent {
                 op(&mut got_column, &parent.context, &mut self.table_schema_buf);
             }
-            Ok(got_column.ok_or(DatabaseError::ColumnNotFound(full_name.1))?)
+            match got_column {
+                Some(column) => Ok(column),
+                None => {
+                    let err = DatabaseError::column_not_found(full_name.1.clone());
+                    Err(match idents.last() {
+                        Some(ident) => attach_span_from_sqlparser_span_if_absent(err, ident.span),
+                        None => err,
+                    })
+                }
+            }
         }
     }
 
@@ -505,11 +569,24 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 "`TableFunction` cannot bind in non-From step".to_string(),
             ));
         }
-        let mut args = Vec::with_capacity(func.args.len());
+        let (func_args, is_distinct) = match &func.args {
+            FunctionArguments::List(args) => (
+                args.args.as_slice(),
+                matches!(args.duplicate_treatment, Some(DuplicateTreatment::Distinct)),
+            ),
+            FunctionArguments::None => (&[][..], false),
+            FunctionArguments::Subquery(_) => {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "subquery function args are not supported".to_string(),
+                ))
+            }
+        };
+        let mut args = Vec::with_capacity(func_args.len());
 
-        for arg in func.args.iter() {
+        for arg in func_args {
             let arg_expr = match arg {
                 FunctionArg::Named { arg, .. } => arg,
+                FunctionArg::ExprNamed { arg, .. } => arg,
                 FunctionArg::Unnamed(arg) => arg,
             };
             match arg_expr {
@@ -530,7 +607,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                     return Err(DatabaseError::MisMatch("number of count() parameters", "1"));
                 }
                 return Ok(ScalarExpression::AggCall {
-                    distinct: func.distinct,
+                    distinct: is_distinct,
                     kind: AggKind::Count,
                     args,
                     ty: LogicalType::Integer,
@@ -543,7 +620,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 let ty = args[0].return_type();
 
                 return Ok(ScalarExpression::AggCall {
-                    distinct: func.distinct,
+                    distinct: is_distinct,
                     kind: AggKind::Sum,
                     args,
                     ty,
@@ -556,7 +633,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 let ty = args[0].return_type();
 
                 return Ok(ScalarExpression::AggCall {
-                    distinct: func.distinct,
+                    distinct: is_distinct,
                     kind: AggKind::Min,
                     args,
                     ty,
@@ -569,7 +646,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 let ty = args[0].return_type();
 
                 return Ok(ScalarExpression::AggCall {
-                    distinct: func.distinct,
+                    distinct: is_distinct,
                     kind: AggKind::Max,
                     args,
                     ty,
@@ -581,7 +658,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 }
 
                 return Ok(ScalarExpression::AggCall {
-                    distinct: func.distinct,
+                    distinct: is_distinct,
                     kind: AggKind::Avg,
                     args,
                     ty: LogicalType::Double,
@@ -678,7 +755,10 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             }));
         }
 
-        Err(DatabaseError::FunctionNotFound(summary.name.to_string()))
+        Err(attach_span_if_absent(
+            DatabaseError::function_not_found(summary.name.to_string()),
+            func,
+        ))
     }
 
     fn return_type(
