@@ -23,6 +23,35 @@ use std::collections::Bound;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+// Table data keys are `{table_hash(8)}{type_tag(1)}...`, so use hash+type as prefix.
+const ROCKSDB_FIXED_PREFIX_LEN: usize = 9;
+const ROCKSDB_BLOOM_BITS_PER_KEY: f64 = 10.0;
+const ROCKSDB_MEMTABLE_PREFIX_BLOOM_RATIO: f64 = 0.10;
+
+/// A lightweight snapshot of key RocksDB runtime indicators for tuning and diagnostics.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RocksDbMetrics {
+    pub block_cache_hit: Option<u64>,
+    pub block_cache_miss: Option<u64>,
+    pub stall_micros: Option<u64>,
+    pub compaction_pending_bytes: Option<u64>,
+    pub write_amp: Option<f64>,
+}
+
+impl RocksDbMetrics {
+    #[inline]
+    pub fn block_cache_hit_rate(&self) -> Option<f64> {
+        let hit = self.block_cache_hit?;
+        let miss = self.block_cache_miss?;
+        let total = hit + miss;
+        if total == 0 {
+            return None;
+        }
+
+        Some(hit as f64 / total as f64)
+    }
+}
+
 #[derive(Clone)]
 pub struct OptimisticRocksStorage {
     pub inner: Arc<OptimisticTransactionDB>,
@@ -36,33 +65,110 @@ impl OptimisticRocksStorage {
             inner: Arc::new(storage),
         })
     }
+
+    #[inline]
+    pub fn metrics(&self) -> RocksDbMetrics {
+        collect_metrics(
+            |name| self.inner.property_int_value(name),
+            |name| self.inner.property_value(name),
+        )
+    }
 }
 
 #[derive(Clone)]
 pub struct RocksStorage {
-    pub inner: Arc<TransactionDB>,
+    pub inner: Arc<TransactionDB<rocksdb::MultiThreaded>>,
 }
 
 impl RocksStorage {
     pub fn new(path: impl Into<PathBuf> + Send) -> Result<Self, DatabaseError> {
         let txn_opts = rocksdb::TransactionDBOptions::default();
-        let storage = TransactionDB::open(&default_opts(), &txn_opts, path.into())?;
+        let storage = TransactionDB::<rocksdb::MultiThreaded>::open(
+            &default_opts(),
+            &txn_opts,
+            path.into(),
+        )?;
 
         Ok(RocksStorage {
             inner: Arc::new(storage),
         })
     }
+
+    #[inline]
+    pub fn metrics(&self) -> RocksDbMetrics {
+        collect_metrics(
+            |name| self.inner.property_int_value(name),
+            |name| self.inner.property_value(name),
+        )
+    }
+}
+
+fn collect_metrics(
+    int_property: impl Fn(&str) -> Result<Option<u64>, rocksdb::Error>,
+    str_property: impl Fn(&str) -> Result<Option<String>, rocksdb::Error>,
+) -> RocksDbMetrics {
+    let block_cache_hit = int_property("rocksdb.block-cache-hit").ok().flatten();
+    let block_cache_miss = int_property("rocksdb.block-cache-miss").ok().flatten();
+    let stall_micros = int_property("rocksdb.stall-micros").ok().flatten();
+    let compaction_pending_bytes = int_property("rocksdb.estimate-pending-compaction-bytes")
+        .ok()
+        .flatten();
+    let write_amp = read_write_amp(&str_property);
+
+    RocksDbMetrics {
+        block_cache_hit,
+        block_cache_miss,
+        stall_micros,
+        compaction_pending_bytes,
+        write_amp,
+    }
+}
+
+fn read_write_amp(
+    str_property: &impl Fn(&str) -> Result<Option<String>, rocksdb::Error>,
+) -> Option<f64> {
+    for key in ["rocksdb.write-amp", "rocksdb.write-amplification"] {
+        if let Ok(Some(value)) = str_property(key) {
+            if let Some(number) = parse_last_f64(&value) {
+                return Some(number);
+            }
+        }
+    }
+
+    if let Ok(Some(stats)) = str_property("rocksdb.stats") {
+        for line in stats.lines() {
+            if line.to_ascii_lowercase().contains("write amplification") {
+                if let Some(number) = parse_last_f64(line) {
+                    return Some(number);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn parse_last_f64(input: &str) -> Option<f64> {
+    input
+        .split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+        .filter(|token| !token.is_empty() && *token != "." && *token != "-" && *token != "-.")
+        .rev()
+        .find_map(|token| token.parse::<f64>().ok())
 }
 
 fn default_opts() -> Options {
     let mut bb = rocksdb::BlockBasedOptions::default();
     bb.set_block_cache(&rocksdb::Cache::new_lru_cache(40 * 1_024 * 1_024));
+    bb.set_bloom_filter(ROCKSDB_BLOOM_BITS_PER_KEY, true);
     bb.set_whole_key_filtering(false);
 
     let mut opts = rocksdb::Options::default();
     opts.set_block_based_table_factory(&bb);
     opts.create_if_missing(true);
-    opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(4));
+    opts.set_memtable_prefix_bloom_ratio(ROCKSDB_MEMTABLE_PREFIX_BLOOM_RATIO);
+    opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(
+        ROCKSDB_FIXED_PREFIX_LEN,
+    ));
     opts
 }
 
@@ -100,7 +206,7 @@ pub struct OptimisticRocksTransaction<'db> {
 }
 
 pub struct RocksTransaction<'db> {
-    tx: rocksdb::Transaction<'db, TransactionDB>,
+    tx: rocksdb::Transaction<'db, TransactionDB<rocksdb::MultiThreaded>>,
     table_codec: TableCodec,
 }
 
@@ -167,11 +273,12 @@ macro_rules! impl_transaction {
                         .take_while(|(x, y)| x == y)
                         .count();
 
-                    debug_assert!(len > 0);
-                    let mut iter = self.tx.prefix_iterator(&min_bytes[..len]);
-                    iter.set_mode(lower);
+                    if len >= ROCKSDB_FIXED_PREFIX_LEN {
+                        let mut iter = self.tx.prefix_iterator(&min_bytes[..len]);
+                        iter.set_mode(lower);
 
-                    return Ok($iter { upper: max, iter });
+                        return Ok($iter { upper: max, iter });
+                    }
                 }
                 let iter = self.tx.iterator(lower);
 
@@ -206,7 +313,10 @@ impl InnerIter for OptimisticRocksIter<'_, '_> {
 
 pub struct RocksIter<'txn, 'iter> {
     upper: Bound<BumpBytes<'iter>>,
-    iter: DBIteratorWithThreadMode<'iter, rocksdb::Transaction<'txn, TransactionDB>>,
+    iter: DBIteratorWithThreadMode<
+        'iter,
+        rocksdb::Transaction<'txn, TransactionDB<rocksdb::MultiThreaded>>,
+    >,
 }
 
 impl InnerIter for RocksIter<'_, '_> {
@@ -256,6 +366,33 @@ mod test {
     use std::hash::RandomState;
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_parse_write_amp_from_stats_line() {
+        assert_eq!(
+            super::parse_last_f64("Cumulative writes: 89 writes, Write Amplification: 1.72"),
+            Some(1.72)
+        );
+        assert_eq!(super::parse_last_f64("no numeric token"), None);
+    }
+
+    #[test]
+    fn test_collect_rocksdb_metrics_snapshot() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        kite_sql
+            .run("create table t_metrics (a int primary key, b int)")?
+            .done()?;
+        kite_sql
+            .run("insert into t_metrics values (1, 10), (2, 20), (3, 30)")?
+            .done()?;
+        kite_sql.run("select * from t_metrics where a = 2")?.done()?;
+
+        let metrics = kite_sql.rocksdb_metrics();
+        let _ = metrics.block_cache_hit_rate();
+
+        Ok(())
+    }
 
     #[test]
     fn test_in_rocksdb_storage_works_with_data() -> Result<(), DatabaseError> {
