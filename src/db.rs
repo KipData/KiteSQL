@@ -33,7 +33,7 @@ use crate::parser::parse_sql;
 use crate::planner::LogicalPlan;
 use crate::storage::memory::MemoryStorage;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::storage::rocksdb::{OptimisticRocksStorage, RocksStorage};
+use crate::storage::rocksdb::{OptimisticRocksStorage, RocksDbMetrics, RocksStorage};
 use crate::storage::{StatisticsMetaCache, Storage, TableCache, Transaction, ViewCache};
 use crate::types::tuple::{SchemaRef, Tuple};
 use crate::types::value::DataValue;
@@ -473,6 +473,22 @@ impl<S: Storage> Database<S> {
             _guard: guard,
             state,
         })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Database<RocksStorage> {
+    #[inline]
+    pub fn rocksdb_metrics(&self) -> RocksDbMetrics {
+        self.storage.metrics()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Database<OptimisticRocksStorage> {
+    #[inline]
+    pub fn rocksdb_metrics(&self) -> RocksDbMetrics {
+        self.storage.metrics()
     }
 }
 
