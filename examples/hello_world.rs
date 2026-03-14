@@ -16,7 +16,7 @@
 mod app {
     use kite_sql::db::{DataBaseBuilder, ResultIter};
     use kite_sql::errors::DatabaseError;
-    use kite_sql::FromTuple;
+    use kite_sql::Model;
     use std::fs;
     use std::io::ErrorKind;
 
@@ -30,8 +30,10 @@ mod app {
         }
     }
 
-    #[derive(Default, Debug, PartialEq, FromTuple)]
+    #[derive(Default, Debug, PartialEq, Model)]
+    #[model(table = "my_struct")]
     pub struct MyStruct {
+        #[model(primary_key)]
         pub c1: i32,
         pub c2: String,
     }
@@ -49,25 +51,25 @@ mod app {
                 )",
             )?
             .done()?;
-        database
-            .run(
-                r#"
-            insert into my_struct values
-                (0, 'zero', 0),
-                (1, 'one', 1),
-                (2, 'two', 2)
-            "#,
-            )?
-            .done()?;
+        database.insert(&MyStruct {
+            c1: 0,
+            c2: "zero".to_string(),
+        })?;
+        database.insert(&MyStruct {
+            c1: 1,
+            c2: "one".to_string(),
+        })?;
+        database.insert(&MyStruct {
+            c1: 2,
+            c2: "two".to_string(),
+        })?;
 
-        database
-            .run("update my_struct set c3 = c3 + 10 where c1 = 1")?
-            .done()?;
-        database.run("delete from my_struct where c1 = 2")?.done()?;
+        let mut row = database.get::<MyStruct, _>(&1)?.expect("row should exist");
+        row.c2 = "ONE".to_string();
+        database.update(&row)?;
+        database.delete_by_id::<MyStruct, _>(&2)?;
 
-        let iter = database.run("select * from my_struct")?;
-
-        for row in iter.orm::<MyStruct>() {
+        for row in database.list::<MyStruct>()? {
             println!("{:?}", row?);
         }
 

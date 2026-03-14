@@ -17,7 +17,7 @@ use super::{
     StatementSpec,
 };
 use crate::TpccError;
-use kite_sql::db::{DBTransaction, DataBaseBuilder, Database, ResultIter, TransactionIter};
+use kite_sql::db::{prepare, DBTransaction, DataBaseBuilder, Database, ResultIter, TransactionIter};
 use kite_sql::storage::rocksdb::RocksStorage;
 use kite_sql::types::tuple::Tuple;
 
@@ -42,7 +42,7 @@ impl KiteBackend {
         for group in specs {
             let mut prepared = Vec::with_capacity(group.len());
             for spec in group {
-                let statement = self.database.prepare(spec.sql)?;
+                let statement = prepare(spec.sql)?;
                 prepared.push(PreparedStatement::Kite {
                     statement,
                     spec: spec.clone(),

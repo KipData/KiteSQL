@@ -53,10 +53,12 @@
 //! ```ignore
 //! use kite_sql::db::{DataBaseBuilder, ResultIter};
 //! use kite_sql::errors::DatabaseError;
-//! use kite_sql::FromTuple;
+//! use kite_sql::Model;
 //!
-//! #[derive(Default, Debug, PartialEq, FromTuple)]
+//! #[derive(Default, Debug, PartialEq, Model)]
+//! #[model(table = "my_struct")]
 //! struct MyStruct {
+//!     #[model(primary_key)]
 //!     pub c1: i32,
 //!     pub c2: String,
 //! }
@@ -68,13 +70,16 @@
 //!     database
 //!         .run("create table if not exists my_struct (c1 int primary key, c2 int)")?
 //!         .done()?;
-//!     database
-//!         .run("insert into my_struct values(0, 0), (1, 1)")?
-//!         .done()?;
+//!     database.insert(&MyStruct {
+//!         c1: 0,
+//!         c2: "zero".to_string(),
+//!     })?;
+//!     database.insert(&MyStruct {
+//!         c1: 1,
+//!         c2: "one".to_string(),
+//!     })?;
 //!
-//!     let iter = database.run("select * from my_struct")?;
-//!
-//!     for row in iter.orm::<MyStruct>() {
+//!     for row in database.list::<MyStruct>()? {
 //!         println!("{:?}", row?);
 //!     }
 //!     database.run("drop table my_struct")?.done()?;
@@ -109,4 +114,4 @@ pub(crate) mod utils;
 pub mod wasm;
 
 #[cfg(feature = "orm")]
-pub use kite_sql_serde_macros::FromTuple;
+pub use kite_sql_serde_macros::Model;

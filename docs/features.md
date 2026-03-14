@@ -5,35 +5,51 @@ run `cargo run --features="net"` to start service
 
 ### ORM Mapping: `features = ["orm"]`
 ```rust
-use kite_sql::FromTuple;
+use kite_sql::Model;
 
-#[derive(Default, Debug, PartialEq, FromTuple)]
-struct MyStruct {
-  c1: i32,
-  #[from_tuple(rename = "user_name")]
-  c2: String,
+#[derive(Default, Debug, PartialEq, Model)]
+#[model(table = "users")]
+struct User {
+  #[model(primary_key)]
+  id: i32,
+  #[model(rename = "user_name")]
+  name: String,
   age: Option<i32>,
+  #[model(skip)]
+  cache: String,
 }
 ```
 
-`FromTuple` automatically implements `From<(&SchemaRef, Tuple)>`, mapping columns by field name. It also supports field-level attributes:
+`Model` generates both tuple-to-struct mapping and CRUD metadata for the model.
 
-- `#[from_tuple(rename = "column_name")]`
-- `#[from_tuple(skip)]`
+Supported field attributes:
 
-Query results can be converted directly into an ORM iterator:
+- `#[model(primary_key)]`
+- `#[model(rename = "column_name")]`
+- `#[model(skip)]`
+
+Supported CRUD helpers:
+
+- `database.insert(&model)?`
+- `database.get::<User, _>(&id)?`
+- `database.list::<User>()?`
+- `database.update(&model)?`
+- `database.delete(&model)?`
+- `database.delete_by_id::<User, _>(&id)?`
+
+Query results can still be converted directly into an ORM iterator:
 
 ```rust
 use kite_sql::db::ResultIter;
 
-let iter = database.run("select c1, user_name, age from users")?;
+let iter = database.run("select id, user_name, age from users")?;
 
-for user in iter.orm::<MyStruct>() {
+for user in iter.orm::<User>() {
     println!("{:?}", user?);
 }
 ```
 
-If you need custom conversion logic, you can still use the lower-level `from_tuple!` macro with `features = ["macros"]`.
+If you need manual conversion logic, use the lower-level `from_tuple!` macro with `features = ["macros"]`.
 
 ### User-Defined Function: `features = ["macros"]`
 ```rust

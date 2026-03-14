@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod from_tuple;
+mod orm;
 mod reference_serialization;
 
 use proc_macro::TokenStream;
@@ -29,11 +29,11 @@ pub fn reference_serialization(input: TokenStream) -> TokenStream {
     }
 }
 
-#[proc_macro_derive(FromTuple, attributes(from_tuple))]
-pub fn from_tuple(input: TokenStream) -> TokenStream {
+#[proc_macro_derive(Model, attributes(model))]
+pub fn model(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
 
-    let result = from_tuple::handle(ast);
+    let result = orm::handle(ast);
     match result {
         Ok(codegen) => codegen.into(),
         Err(e) => e.to_compile_error().into(),

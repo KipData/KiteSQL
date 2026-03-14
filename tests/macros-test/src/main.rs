@@ -28,7 +28,7 @@ mod test {
     use kite_sql::types::tuple::{SchemaRef, Tuple};
     use kite_sql::types::value::{DataValue, Utf8Type};
     use kite_sql::types::LogicalType;
-    use kite_sql::{from_tuple, scala_function, table_function, FromTuple};
+    use kite_sql::{from_tuple, scala_function, table_function, Model};
     use sqlparser::ast::CharLengthUnits;
     use std::sync::Arc;
 
@@ -69,14 +69,28 @@ mod test {
         c2: String,
     }
 
-    #[derive(Default, Debug, PartialEq, FromTuple)]
+    #[derive(Default, Debug, PartialEq, Model)]
+    #[model(table = "derived_struct")]
     struct DerivedStruct {
+        #[model(primary_key)]
         c1: i32,
-        #[from_tuple(rename = "c2")]
+        #[model(rename = "c2")]
         name: String,
         age: Option<i32>,
-        #[from_tuple(skip)]
+        #[model(skip)]
         skipped: String,
+    }
+
+    #[derive(Default, Debug, PartialEq, Model)]
+    #[model(table = "users")]
+    struct User {
+        #[model(primary_key)]
+        id: i32,
+        #[model(rename = "user_name")]
+        name: String,
+        age: Option<i32>,
+        #[model(skip)]
+        cache: String,
     }
 
     from_tuple!(
@@ -106,7 +120,7 @@ mod test {
     }
 
     #[test]
-    fn test_derive_from_tuple() {
+    fn test_model_mapping() {
         let mut tuple_and_schema = build_tuple();
         tuple_and_schema.1 = Arc::new(vec![
             ColumnRef::from(ColumnCatalog::new(
@@ -185,6 +199,61 @@ mod test {
                 }
             ]
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_orm_crud() -> Result<(), DatabaseError> {
+        let database = DataBaseBuilder::path(".").build_in_memory()?;
+
+        database
+            .run("create table users (id int primary key, user_name varchar, age int)")?
+            .done()?;
+
+        let mut user = User {
+            id: 1,
+            name: "Alice".to_string(),
+            age: Some(18),
+            cache: "warm".to_string(),
+        };
+
+        database.insert(&user)?;
+
+        let loaded = database.get::<User, _>(&1)?.unwrap();
+        assert_eq!(
+            loaded,
+            User {
+                id: 1,
+                name: "Alice".to_string(),
+                age: Some(18),
+                cache: "".to_string(),
+            }
+        );
+
+        let users = database.list::<User>()?.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].name, "Alice");
+
+        user.name = "Bob".to_string();
+        user.age = None;
+        database.update(&user)?;
+
+        let updated = database.get::<User, _>(&1)?.unwrap();
+        assert_eq!(updated.name, "Bob");
+        assert_eq!(updated.age, None);
+
+        database.delete(&user)?;
+        assert!(database.get::<User, _>(&1)?.is_none());
+
+        database.insert(&User {
+            id: 2,
+            name: "Carol".to_string(),
+            age: Some(20),
+            cache: "".to_string(),
+        })?;
+        database.delete_by_id::<User, _>(&2)?;
+        assert!(database.get::<User, _>(&2)?.is_none());
 
         Ok(())
     }

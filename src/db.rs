@@ -54,6 +54,19 @@ pub(crate) type TableFunctions = HashMap<FunctionSummary, Arc<dyn TableFunctionI
 
 pub type Statement = sqlparser::ast::Statement;
 
+pub fn prepare<T: AsRef<str>>(sql: T) -> Result<Statement, DatabaseError> {
+    let mut stmts = prepare_all(sql)?;
+    stmts.pop().ok_or(DatabaseError::EmptyStatement)
+}
+
+pub fn prepare_all<T: AsRef<str>>(sql: T) -> Result<Vec<Statement>, DatabaseError> {
+    let stmts = parse_sql(sql)?;
+    if stmts.is_empty() {
+        return Err(DatabaseError::EmptyStatement);
+    }
+    Ok(stmts)
+}
+
 #[allow(dead_code)]
 pub(crate) enum MetaDataLock {
     Read(ArcRwLockReadGuard<RawRwLock, ()>),
@@ -377,19 +390,6 @@ impl<S: Storage> State<S> {
         Ok(best_plan)
     }
 
-    fn prepare<T: AsRef<str>>(&self, sql: T) -> Result<Statement, DatabaseError> {
-        let mut stmts = self.prepare_all(sql)?;
-        stmts.pop().ok_or(DatabaseError::EmptyStatement)
-    }
-
-    fn prepare_all<T: AsRef<str>>(&self, sql: T) -> Result<Vec<Statement>, DatabaseError> {
-        let stmts = parse_sql(sql)?;
-        if stmts.is_empty() {
-            return Err(DatabaseError::EmptyStatement);
-        }
-        Ok(stmts)
-    }
-
     fn execute<'a, A: AsRef<[(&'static str, DataValue)]>>(
         &'a self,
         transaction: &'a mut S::TransactionType<'_>,
@@ -427,10 +427,7 @@ impl<S: Storage> Database<S> {
     /// Run SQL queries.
     pub fn run<T: AsRef<str>>(&self, sql: T) -> Result<DatabaseIter<'_, S>, DatabaseError> {
         let sql = sql.as_ref();
-        let statements = self
-            .state
-            .prepare_all(sql)
-            .map_err(|err| err.with_sql_context(sql))?;
+        let statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
         let has_ddl = statements
             .iter()
             .try_fold(false, |has_ddl, stmt| {
@@ -484,10 +481,6 @@ impl<S: Storage> Database<S> {
 
         unsafe { drop(Box::from_raw(transaction)) };
         Err(DatabaseError::EmptyStatement.with_sql_context(sql))
-    }
-
-    pub fn prepare<T: AsRef<str>>(&self, sql: T) -> Result<Statement, DatabaseError> {
-        self.state.prepare(sql)
     }
 
     pub fn execute<A: AsRef<[(&'static str, DataValue)]>>(
@@ -654,10 +647,7 @@ pub struct DBTransaction<'a, S: Storage + 'a> {
 impl<S: Storage> DBTransaction<'_, S> {
     pub fn run<T: AsRef<str>>(&mut self, sql: T) -> Result<TransactionIter<'_>, DatabaseError> {
         let sql = sql.as_ref();
-        let mut statements = self
-            .state
-            .prepare_all(sql)
-            .map_err(|err| err.with_sql_context(sql))?;
+        let mut statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
         let last_statement = statements
             .pop()
             .ok_or_else(|| DatabaseError::EmptyStatement.with_sql_context(sql))?;
@@ -671,10 +661,6 @@ impl<S: Storage> DBTransaction<'_, S> {
 
         self.execute(&last_statement, &[])
             .map_err(|err| err.with_sql_context(sql))
-    }
-
-    pub fn prepare<T: AsRef<str>>(&self, sql: T) -> Result<Statement, DatabaseError> {
-        self.state.prepare(sql)
     }
 
     pub fn execute<A: AsRef<[(&'static str, DataValue)]>>(
@@ -853,7 +839,7 @@ pub(crate) mod test {
 
         // Filter
         {
-            let statement = kite_sql.prepare("explain select * from t1 where b > $1")?;
+            let statement = crate::db::prepare("explain select * from t1 where b > $1")?;
 
             let mut iter = kite_sql.execute(&statement, &[("$1", DataValue::Int32(0))])?;
 
@@ -866,7 +852,7 @@ pub(crate) mod test {
         }
         // Aggregate
         {
-            let statement = kite_sql.prepare(
+            let statement = crate::db::prepare(
                 "explain select a + $1, max(b + $2) from t1 where b > $3 group by a + $4",
             )?;
 
@@ -888,7 +874,7 @@ pub(crate) mod test {
             )
         }
         {
-            let statement = kite_sql.prepare("explain select *, $1 from (select * from t1 where b > $2) left join (select * from t1 where a > $3) on a > $4")?;
+            let statement = crate::db::prepare("explain select *, $1 from (select * from t1 where b > $2) left join (select * from t1 where a > $3) on a > $4")?;
 
             let mut iter = kite_sql.execute(
                 &statement,
