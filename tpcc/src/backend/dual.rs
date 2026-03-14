@@ -30,9 +30,9 @@ pub struct DualBackend {
 }
 
 impl DualBackend {
-    pub fn new(path: &str) -> Result<Self, TpccError> {
+    pub fn new(path: &str, rocksdb_stats: bool) -> Result<Self, TpccError> {
         Ok(Self {
-            kite: KiteBackend::new(path)?,
+            kite: KiteBackend::new(path, rocksdb_stats)?,
             sqlite: SqliteBackend::new_memory()?,
         })
     }
@@ -56,6 +56,10 @@ impl BackendControl for DualBackend {
             kite: self.kite.new_transaction()?,
             sqlite: self.sqlite.new_transaction()?,
         })
+    }
+
+    fn storage_metrics(&self) -> Option<String> {
+        self.kite.storage_metrics()
     }
 }
 

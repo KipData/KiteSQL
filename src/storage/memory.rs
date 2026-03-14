@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::{BumpBytes, Bytes, TableCodec};
-use crate::storage::{InnerIter, Storage, Transaction};
+use crate::storage::{EmptyStorageMetrics, InnerIter, Storage, Transaction};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, Bound, VecDeque};
 use std::rc::Rc;
@@ -31,6 +31,8 @@ impl MemoryStorage {
 }
 
 impl Storage for MemoryStorage {
+    type Metrics = EmptyStorageMetrics;
+
     type TransactionType<'a>
         = MemoryTransaction
     where

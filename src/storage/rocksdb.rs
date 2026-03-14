@@ -16,10 +16,12 @@ use crate::errors::DatabaseError;
 use crate::storage::table_codec::{BumpBytes, Bytes, TableCodec};
 use crate::storage::{InnerIter, Storage, Transaction};
 use rocksdb::{
+    statistics::{StatsLevel, Ticker},
     DBIteratorWithThreadMode, Direction, IteratorMode, OptimisticTransactionDB, Options,
     SliceTransform, TransactionDB,
 };
 use std::collections::Bound;
+use std::fmt::{self, Display, Formatter};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -38,6 +40,11 @@ pub struct RocksDbMetrics {
     pub write_amp: Option<f64>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StorageConfig {
+    pub enable_statistics: bool,
+}
+
 impl RocksDbMetrics {
     #[inline]
     pub fn block_cache_hit_rate(&self) -> Option<f64> {
@@ -52,68 +59,96 @@ impl RocksDbMetrics {
     }
 }
 
+impl Display for RocksDbMetrics {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        writeln!(f, "<RocksDB Metrics>")?;
+        writeln!(
+            f,
+            "block_cache_hit={} block_cache_miss={} block_cache_hit_rate={}",
+            format_optional_u64(self.block_cache_hit),
+            format_optional_u64(self.block_cache_miss),
+            format_optional_pct(self.block_cache_hit_rate()),
+        )?;
+        write!(
+            f,
+            "stall_micros={} pending_compaction_bytes={} write_amp={}",
+            format_optional_u64(self.stall_micros),
+            format_optional_u64(self.compaction_pending_bytes),
+            format_optional_f64(self.write_amp),
+        )
+    }
+}
+
 #[derive(Clone)]
 pub struct OptimisticRocksStorage {
     pub inner: Arc<OptimisticTransactionDB>,
+    options: Arc<Options>,
+    config: StorageConfig,
 }
 
 impl OptimisticRocksStorage {
     pub fn new(path: impl Into<PathBuf> + Send) -> Result<Self, DatabaseError> {
-        let storage = OptimisticTransactionDB::open(&default_opts(), path.into())?;
+        Self::with_config(path, StorageConfig::default())
+    }
+
+    pub fn with_config(
+        path: impl Into<PathBuf> + Send,
+        config: StorageConfig,
+    ) -> Result<Self, DatabaseError> {
+        let options = Arc::new(default_opts(config));
+        let storage = OptimisticTransactionDB::open(options.as_ref(), path.into())?;
 
         Ok(OptimisticRocksStorage {
             inner: Arc::new(storage),
+            options,
+            config,
         })
-    }
-
-    #[inline]
-    pub fn metrics(&self) -> RocksDbMetrics {
-        collect_metrics(
-            |name| self.inner.property_int_value(name),
-            |name| self.inner.property_value(name),
-        )
     }
 }
 
 #[derive(Clone)]
 pub struct RocksStorage {
     pub inner: Arc<TransactionDB<rocksdb::MultiThreaded>>,
+    options: Arc<Options>,
+    config: StorageConfig,
 }
 
 impl RocksStorage {
     pub fn new(path: impl Into<PathBuf> + Send) -> Result<Self, DatabaseError> {
+        Self::with_config(path, StorageConfig::default())
+    }
+
+    pub fn with_config(
+        path: impl Into<PathBuf> + Send,
+        config: StorageConfig,
+    ) -> Result<Self, DatabaseError> {
+        let options = Arc::new(default_opts(config));
         let txn_opts = rocksdb::TransactionDBOptions::default();
         let storage = TransactionDB::<rocksdb::MultiThreaded>::open(
-            &default_opts(),
+            options.as_ref(),
             &txn_opts,
             path.into(),
         )?;
 
         Ok(RocksStorage {
             inner: Arc::new(storage),
+            options,
+            config,
         })
-    }
-
-    #[inline]
-    pub fn metrics(&self) -> RocksDbMetrics {
-        collect_metrics(
-            |name| self.inner.property_int_value(name),
-            |name| self.inner.property_value(name),
-        )
     }
 }
 
 fn collect_metrics(
+    options: &Options,
     int_property: impl Fn(&str) -> Result<Option<u64>, rocksdb::Error>,
-    str_property: impl Fn(&str) -> Result<Option<String>, rocksdb::Error>,
 ) -> RocksDbMetrics {
-    let block_cache_hit = int_property("rocksdb.block-cache-hit").ok().flatten();
-    let block_cache_miss = int_property("rocksdb.block-cache-miss").ok().flatten();
-    let stall_micros = int_property("rocksdb.stall-micros").ok().flatten();
+    let block_cache_hit = Some(options.get_ticker_count(Ticker::BlockCacheHit));
+    let block_cache_miss = Some(options.get_ticker_count(Ticker::BlockCacheMiss));
+    let stall_micros = Some(options.get_ticker_count(Ticker::StallMicros));
     let compaction_pending_bytes = int_property("rocksdb.estimate-pending-compaction-bytes")
         .ok()
         .flatten();
-    let write_amp = read_write_amp(&str_property);
+    let write_amp = read_write_amp(options.get_statistics().as_deref());
 
     RocksDbMetrics {
         block_cache_hit,
@@ -124,18 +159,8 @@ fn collect_metrics(
     }
 }
 
-fn read_write_amp(
-    str_property: &impl Fn(&str) -> Result<Option<String>, rocksdb::Error>,
-) -> Option<f64> {
-    for key in ["rocksdb.write-amp", "rocksdb.write-amplification"] {
-        if let Ok(Some(value)) = str_property(key) {
-            if let Some(number) = parse_last_f64(&value) {
-                return Some(number);
-            }
-        }
-    }
-
-    if let Ok(Some(stats)) = str_property("rocksdb.stats") {
+fn read_write_amp(stats: Option<&str>) -> Option<f64> {
+    if let Some(stats) = stats {
         for line in stats.lines() {
             if line.to_ascii_lowercase().contains("write amplification") {
                 if let Some(number) = parse_last_f64(line) {
@@ -156,7 +181,25 @@ fn parse_last_f64(input: &str) -> Option<f64> {
         .find_map(|token| token.parse::<f64>().ok())
 }
 
-fn default_opts() -> Options {
+fn format_optional_u64(value: Option<u64>) -> String {
+    value
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn format_optional_f64(value: Option<f64>) -> String {
+    value
+        .map(|v| format!("{v:.3}"))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn format_optional_pct(value: Option<f64>) -> String {
+    value
+        .map(|v| format!("{:.2}%", v * 100.0))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn default_opts(config: StorageConfig) -> Options {
     let mut bb = rocksdb::BlockBasedOptions::default();
     bb.set_block_cache(&rocksdb::Cache::new_lru_cache(40 * 1_024 * 1_024));
     bb.set_bloom_filter(ROCKSDB_BLOOM_BITS_PER_KEY, true);
@@ -165,6 +208,10 @@ fn default_opts() -> Options {
     let mut opts = rocksdb::Options::default();
     opts.set_block_based_table_factory(&bb);
     opts.create_if_missing(true);
+    if config.enable_statistics {
+        opts.enable_statistics();
+        opts.set_statistics_level(StatsLevel::ExceptDetailedTimers);
+    }
     opts.set_memtable_prefix_bloom_ratio(ROCKSDB_MEMTABLE_PREFIX_BLOOM_RATIO);
     opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(
         ROCKSDB_FIXED_PREFIX_LEN,
@@ -173,6 +220,8 @@ fn default_opts() -> Options {
 }
 
 impl Storage for OptimisticRocksStorage {
+    type Metrics = RocksDbMetrics;
+
     type TransactionType<'a>
         = OptimisticRocksTransaction<'a>
     where
@@ -184,9 +233,21 @@ impl Storage for OptimisticRocksStorage {
             table_codec: Default::default(),
         })
     }
+
+    fn metrics(&self) -> Option<Self::Metrics> {
+        if !self.config.enable_statistics {
+            return None;
+        }
+
+        Some(collect_metrics(self.options.as_ref(), |name| {
+            self.inner.property_int_value(name)
+        }))
+    }
 }
 
 impl Storage for RocksStorage {
+    type Metrics = RocksDbMetrics;
+
     type TransactionType<'a>
         = RocksTransaction<'a>
     where
@@ -197,6 +258,16 @@ impl Storage for RocksStorage {
             tx: self.inner.transaction(),
             table_codec: Default::default(),
         })
+    }
+
+    fn metrics(&self) -> Option<Self::Metrics> {
+        if !self.config.enable_statistics {
+            return None;
+        }
+
+        Some(collect_metrics(self.options.as_ref(), |name| {
+            self.inner.property_int_value(name)
+        }))
     }
 }
 
@@ -379,16 +450,20 @@ mod test {
     #[test]
     fn test_collect_rocksdb_metrics_snapshot() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path())
+            .storage_statistics(true)
+            .build()?;
         kite_sql
             .run("create table t_metrics (a int primary key, b int)")?
             .done()?;
         kite_sql
             .run("insert into t_metrics values (1, 10), (2, 20), (3, 30)")?
             .done()?;
-        kite_sql.run("select * from t_metrics where a = 2")?.done()?;
+        kite_sql
+            .run("select * from t_metrics where a = 2")?
+            .done()?;
 
-        let metrics = kite_sql.rocksdb_metrics();
+        let metrics = kite_sql.storage_metrics().unwrap();
         let _ = metrics.block_cache_hit_rate();
 
         Ok(())

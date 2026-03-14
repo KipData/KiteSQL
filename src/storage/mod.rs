@@ -34,6 +34,7 @@ use crate::types::{ColumnId, LogicalType};
 use crate::utils::lru::SharedLruCache;
 use itertools::Itertools;
 use std::collections::{BTreeMap, Bound};
+use std::fmt::{self, Display, Formatter};
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs;
 use std::io::Cursor;
@@ -47,12 +48,27 @@ pub(crate) type StatisticsMetaCache = SharedLruCache<(TableName, IndexId), Stati
 pub(crate) type TableCache = SharedLruCache<TableName, TableCatalog>;
 pub(crate) type ViewCache = SharedLruCache<TableName, View>;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EmptyStorageMetrics;
+
+impl Display for EmptyStorageMetrics {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str("")
+    }
+}
+
 pub trait Storage: Clone {
+    type Metrics: Display;
+
     type TransactionType<'a>: Transaction
     where
         Self: 'a;
 
     fn transaction(&self) -> Result<Self::TransactionType<'_>, DatabaseError>;
+
+    fn metrics(&self) -> Option<Self::Metrics> {
+        None
+    }
 }
 
 /// Optional bounds of the reader, of the form (offset, limit).

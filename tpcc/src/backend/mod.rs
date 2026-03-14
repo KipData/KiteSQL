@@ -41,6 +41,10 @@ pub trait BackendControl: SimpleExecutor {
     ) -> Result<Vec<Vec<PreparedStatement>>, TpccError>;
 
     fn new_transaction(&self) -> Result<Self::Transaction<'_>, TpccError>;
+
+    fn storage_metrics(&self) -> Option<String> {
+        None
+    }
 }
 
 pub struct QueryResult<'a>(QueryResultKind<'a>);

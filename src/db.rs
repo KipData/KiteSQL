@@ -34,7 +34,7 @@ use crate::planner::operator::Operator;
 use crate::planner::LogicalPlan;
 use crate::storage::memory::MemoryStorage;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::storage::rocksdb::{OptimisticRocksStorage, RocksDbMetrics, RocksStorage};
+use crate::storage::rocksdb::{OptimisticRocksStorage, RocksStorage, StorageConfig};
 use crate::storage::{StatisticsMetaCache, Storage, TableCache, Transaction, ViewCache};
 use crate::types::tuple::{SchemaRef, Tuple};
 use crate::types::value::DataValue;
@@ -66,6 +66,8 @@ pub struct DataBaseBuilder {
     scala_functions: ScalaFunctions,
     table_functions: TableFunctions,
     histogram_buckets: Option<usize>,
+    #[cfg(not(target_arch = "wasm32"))]
+    storage_config: StorageConfig,
 }
 
 impl DataBaseBuilder {
@@ -75,6 +77,8 @@ impl DataBaseBuilder {
             scala_functions: Default::default(),
             table_functions: Default::default(),
             histogram_buckets: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            storage_config: Default::default(),
         };
         builder = builder.register_scala_function(CharLength::new("char_length".to_lowercase()));
         builder =
@@ -107,6 +111,12 @@ impl DataBaseBuilder {
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn storage_statistics(mut self, enable: bool) -> Self {
+        self.storage_config.enable_statistics = enable;
+        self
+    }
+
     pub fn build_with_storage<T: Storage>(self, storage: T) -> Result<Database<T>, DatabaseError> {
         Self::_build::<T>(
             storage,
@@ -130,7 +140,7 @@ impl DataBaseBuilder {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn build(self) -> Result<Database<RocksStorage>, DatabaseError> {
-        let storage = RocksStorage::new(self.path)?;
+        let storage = RocksStorage::with_config(self.path, self.storage_config)?;
 
         Self::_build::<RocksStorage>(
             storage,
@@ -153,7 +163,7 @@ impl DataBaseBuilder {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn build_optimistic(self) -> Result<Database<OptimisticRocksStorage>, DatabaseError> {
-        let storage = OptimisticRocksStorage::new(self.path)?;
+        let storage = OptimisticRocksStorage::with_config(self.path, self.storage_config)?;
 
         Self::_build::<OptimisticRocksStorage>(
             storage,
@@ -521,20 +531,9 @@ impl<S: Storage> Database<S> {
             state,
         })
     }
-}
 
-#[cfg(not(target_arch = "wasm32"))]
-impl Database<RocksStorage> {
     #[inline]
-    pub fn rocksdb_metrics(&self) -> RocksDbMetrics {
-        self.storage.metrics()
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl Database<OptimisticRocksStorage> {
-    #[inline]
-    pub fn rocksdb_metrics(&self) -> RocksDbMetrics {
+    pub fn storage_metrics(&self) -> Option<S::Metrics> {
         self.storage.metrics()
     }
 }
