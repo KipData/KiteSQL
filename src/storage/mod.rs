@@ -22,8 +22,6 @@ use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog, TableMeta, TableNam
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::Range;
 use crate::optimizer::core::statistics_meta::{StatisticMetaLoader, StatisticsMeta};
-#[cfg(not(target_arch = "wasm32"))]
-use crate::paths::require_statistics_base_dir;
 use crate::serdes::ReferenceTables;
 use crate::storage::table_codec::{BumpBytes, Bytes, TableCodec};
 use crate::types::index::{Index, IndexId, IndexMetaRef, IndexType};
@@ -35,8 +33,6 @@ use crate::utils::lru::SharedLruCache;
 use itertools::Itertools;
 use std::collections::{BTreeMap, Bound};
 use std::fmt::{self, Display, Formatter};
-#[cfg(not(target_arch = "wasm32"))]
-use std::fs;
 use std::io::Cursor;
 use std::mem;
 use std::ops::SubAssign;
@@ -376,7 +372,7 @@ pub trait Transaction: Sized {
                     unsafe { &*self.table_codec() }.index_bound(table_name, index_meta.id)?;
                 self._drop_data(index_min, index_max)?;
 
-                self.remove_table_meta(meta_cache, table_name, index_meta.id)?;
+                self.remove_statistics_meta(meta_cache, table_name, index_meta.id)?;
             }
             table_cache.remove(table_name);
 
@@ -484,6 +480,7 @@ pub trait Transaction: Sized {
     fn drop_index(
         &mut self,
         table_cache: &TableCache,
+        meta_cache: &StatisticsMetaCache,
         table_name: TableName,
         index_name: &str,
         if_exists: bool,
@@ -512,12 +509,9 @@ pub trait Transaction: Sized {
             unsafe { &*self.table_codec() }.index_bound(table_name.as_ref(), index_id)?;
         self._drop_data(index_min, index_max)?;
 
-        let statistics_min_key = unsafe { &*self.table_codec() }
-            .encode_statistics_path_key(table_name.as_ref(), index_id);
-        self.remove(&statistics_min_key)?;
+        self.remove_statistics_meta(meta_cache, &table_name, index_id)?;
 
         table_cache.remove(&table_name);
-        //  When dropping Index, the statistics file corresponding to the Index is not cleaned up and is processed uniformly by the Analyze Table.
 
         Ok(())
     }
@@ -548,12 +542,6 @@ pub trait Transaction: Sized {
 
         self.remove(&unsafe { &*self.table_codec() }.encode_root_table_key(table_name.as_ref()))?;
         table_cache.remove(&table_name);
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let path = require_statistics_base_dir().join(table_name.as_ref());
-            let _ = fs::remove_dir(path);
-        }
 
         Ok(())
     }
@@ -637,45 +625,69 @@ pub trait Transaction: Sized {
         Ok(metas)
     }
 
-    fn save_table_meta(
+    fn save_statistics_meta(
         &mut self,
         meta_cache: &StatisticsMetaCache,
         table_name: &TableName,
-        path: String,
         statistics_meta: StatisticsMeta,
     ) -> Result<(), DatabaseError> {
         let index_id = statistics_meta.index_id();
-        meta_cache.put((table_name.clone(), index_id), statistics_meta);
-
-        let (key, value) = unsafe { &*self.table_codec() }.encode_statistics_path(
-            table_name.as_ref(),
-            index_id,
-            path,
-        );
+        let (root, buckets) = statistics_meta.clone().into_parts();
+        let (key, value) =
+            unsafe { &*self.table_codec() }.encode_statistics_meta(table_name.as_ref(), &root)?;
         self.set(key, value)?;
+
+        for (ordinal, bucket) in buckets.iter().enumerate() {
+            let (key, value) = unsafe { &*self.table_codec() }.encode_statistics_bucket(
+                table_name.as_ref(),
+                index_id,
+                ordinal as u32,
+                bucket,
+            )?;
+            self.set(key, value)?;
+        }
+
+        meta_cache.put((table_name.clone(), index_id), statistics_meta);
 
         Ok(())
     }
 
-    fn table_meta_path(
+    fn statistics_meta(
         &self,
         table_name: &str,
         index_id: IndexId,
-    ) -> Result<Option<String>, DatabaseError> {
-        let key = unsafe { &*self.table_codec() }.encode_statistics_path_key(table_name, index_id);
-        self.get(&key)?
-            .map(|bytes| TableCodec::decode_statistics_path(&bytes))
+    ) -> Result<Option<StatisticsMeta>, DatabaseError> {
+        let (min, max) =
+            unsafe { &*self.table_codec() }.statistics_index_bound(table_name, index_id);
+        let mut iter = self.range(Bound::Included(min), Bound::Included(max))?;
+        let mut root = None;
+        let mut buckets = Vec::new();
+
+        while let Some((key, value)) = iter.try_next()? {
+            if key.len()
+                == unsafe { &*self.table_codec() }
+                    .encode_statistics_meta_key(table_name, index_id)
+                    .len()
+            {
+                root = Some(TableCodec::decode_statistics_meta::<Self>(&value)?);
+            } else {
+                buckets.push(TableCodec::decode_statistics_bucket::<Self>(&value)?);
+            }
+        }
+
+        root.map(|root| StatisticsMeta::from_parts(root, buckets))
             .transpose()
     }
 
-    fn remove_table_meta(
+    fn remove_statistics_meta(
         &mut self,
         meta_cache: &StatisticsMetaCache,
         table_name: &TableName,
         index_id: IndexId,
     ) -> Result<(), DatabaseError> {
-        let key = unsafe { &*self.table_codec() }.encode_statistics_path_key(table_name, index_id);
-        self.remove(&key)?;
+        let (min, max) =
+            unsafe { &*self.table_codec() }.statistics_index_bound(table_name.as_ref(), index_id);
+        self._drop_data(min, max)?;
 
         meta_cache.remove(&(table_name.clone(), index_id));
 
@@ -1721,11 +1733,24 @@ mod test {
             dbg!(value);
             assert!(iter.try_next()?.is_none());
         }
-        match transaction.drop_index(&table_cache, "t1".to_string().into(), "pk_index", false) {
+        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        match transaction.drop_index(
+            &table_cache,
+            &meta_cache,
+            "t1".to_string().into(),
+            "pk_index",
+            false,
+        ) {
             Err(DatabaseError::InvalidIndex) => (),
             _ => unreachable!(),
         }
-        transaction.drop_index(&table_cache, "t1".to_string().into(), "i1", false)?;
+        transaction.drop_index(
+            &table_cache,
+            &meta_cache,
+            "t1".to_string().into(),
+            "i1",
+            false,
+        )?;
         {
             let table = transaction
                 .table(&table_cache, "t1".to_string().into())?

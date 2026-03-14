@@ -83,7 +83,6 @@ tempfile              = { version = "3.10" }
 sqlite                = { version = "0.34" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-dirs = { version = "5" }
 rocksdb = { version = "0.23" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

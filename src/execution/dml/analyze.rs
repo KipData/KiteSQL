@@ -19,27 +19,17 @@ use crate::execution::{build_read, spawn_executor, Executor, WriteExecutor};
 use crate::expression::{BindPosition, ScalarExpression};
 use crate::optimizer::core::histogram::HistogramBuilder;
 use crate::optimizer::core::statistics_meta::StatisticsMeta;
-use crate::paths::require_statistics_base_dir;
-#[cfg(target_arch = "wasm32")]
-use crate::paths::{wasm_remove_storage_key, wasm_set_storage_item, wasm_storage_keys_with_prefix};
 use crate::planner::operator::analyze::AnalyzeOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::throw;
-use crate::types::index::{IndexId, IndexMetaRef};
+use crate::types::index::IndexId;
 use crate::types::tuple::Tuple;
 use crate::types::value::{DataValue, Utf8Type};
 use itertools::Itertools;
 use sqlparser::ast::CharLengthUnits;
 use std::borrow::Cow;
-use std::collections::HashSet;
-#[cfg(not(target_arch = "wasm32"))]
-use std::ffi::OsStr;
 use std::fmt::{self, Formatter};
-#[cfg(not(target_arch = "wasm32"))]
-use std::fs::{self, DirEntry};
-#[cfg(not(target_arch = "wasm32"))]
-use std::path::PathBuf;
 use std::sync::Arc;
 
 const DEFAULT_NUM_OF_BUCKETS: usize = 100;
@@ -47,7 +37,6 @@ const DEFAULT_NUM_OF_BUCKETS: usize = 100;
 pub struct Analyze {
     table_name: TableName,
     input: LogicalPlan,
-    index_metas: Vec<IndexMetaRef>,
     histogram_buckets: Option<usize>,
 }
 
@@ -62,10 +51,10 @@ impl From<(AnalyzeOperator, LogicalPlan)> for Analyze {
             input,
         ): (AnalyzeOperator, LogicalPlan),
     ) -> Self {
+        let _ = index_metas;
         Analyze {
             table_name,
             input,
-            index_metas,
             histogram_buckets,
         }
     }
@@ -81,12 +70,11 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze {
             let Analyze {
                 table_name,
                 mut input,
-                index_metas,
                 histogram_buckets,
             } = self;
 
             let schema = input.output_schema().clone();
-            let mut builders = Vec::with_capacity(index_metas.len());
+            let mut builders = Vec::new();
             let table = throw!(
                 co,
                 throw!(
@@ -143,16 +131,9 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze {
                 }
             }
             drop(coroutine);
-            #[cfg(target_arch = "wasm32")]
             let values = throw!(
                 co,
-                Self::persist_statistics_meta_wasm(&table_name, builders, cache.2, transaction)
-            );
-
-            #[cfg(not(target_arch = "wasm32"))]
-            let values = throw!(
-                co,
-                Self::persist_statistics_meta_native(&table_name, builders, cache.2, transaction)
+                Self::persist_statistics_meta(&table_name, builders, cache.2, transaction)
             );
 
             co.yield_(Ok(Tuple::new(None, values))).await;
@@ -169,18 +150,13 @@ struct State {
 }
 
 impl Analyze {
-    #[cfg(not(target_arch = "wasm32"))]
-    fn persist_statistics_meta_native<T: Transaction>(
+    fn persist_statistics_meta<T: Transaction>(
         table_name: &TableName,
         builders: Vec<State>,
         cache: &StatisticsMetaCache,
         transaction: *mut T,
     ) -> Result<Vec<DataValue>, DatabaseError> {
-        let dir_path = Self::build_statistics_meta_path(table_name)?;
-        fs::create_dir_all(&dir_path).map_err(DatabaseError::IO)?;
-
         let mut values = Vec::with_capacity(builders.len());
-        let mut active_index_paths = HashSet::new();
 
         for State {
             index_id,
@@ -189,95 +165,19 @@ impl Analyze {
             ..
         } in builders
         {
-            let index_file = OsStr::new(&index_id.to_string()).to_os_string();
-            let path = dir_path.join(&index_file);
-            let temp_path = path.with_extension("tmp");
-            let path_str: String = path.to_string_lossy().into();
-
             let (histogram, sketch) =
                 builder.build(histogram_buckets.unwrap_or(DEFAULT_NUM_OF_BUCKETS))?;
             let meta = StatisticsMeta::new(histogram, sketch);
 
-            meta.to_file(&temp_path)?;
+            unsafe { &mut (*transaction) }.save_statistics_meta(cache, table_name, meta)?;
             values.push(DataValue::Utf8 {
-                value: path_str.clone(),
+                value: format!("{table_name}/{index_id}"),
                 ty: Utf8Type::Variable(None),
                 unit: CharLengthUnits::Characters,
             });
-            unsafe { &mut (*transaction) }.save_table_meta(cache, table_name, path_str, meta)?;
-            fs::rename(&temp_path, &path).map_err(DatabaseError::IO)?;
-
-            active_index_paths.insert(index_file);
-        }
-
-        // clean expired index
-        for entry in fs::read_dir(dir_path).map_err(DatabaseError::IO)? {
-            let entry: DirEntry = entry.map_err(DatabaseError::IO)?;
-
-            if !active_index_paths.remove(&entry.file_name()) {
-                fs::remove_file(entry.path()).map_err(DatabaseError::IO)?;
-            }
         }
 
         Ok(values)
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn persist_statistics_meta_wasm<T: Transaction>(
-        table_name: &TableName,
-        builders: Vec<State>,
-        cache: &StatisticsMetaCache,
-        transaction: *mut T,
-    ) -> Result<Vec<DataValue>, DatabaseError> {
-        let prefix = Self::build_statistics_meta_prefix(table_name)?;
-        let mut values = Vec::with_capacity(builders.len());
-        let mut active_keys = HashSet::new();
-
-        for State {
-            index_id,
-            builder,
-            histogram_buckets,
-            ..
-        } in builders
-        {
-            let key = format!("{prefix}/{index_id}");
-            let (histogram, sketch) =
-                builder.build(histogram_buckets.unwrap_or(DEFAULT_NUM_OF_BUCKETS))?;
-            let meta = StatisticsMeta::new(histogram, sketch);
-            let encoded = meta.to_storage_string()?;
-
-            wasm_set_storage_item(&key, &encoded)?;
-            values.push(DataValue::Utf8 {
-                value: key.clone(),
-                ty: Utf8Type::Variable(None),
-                unit: CharLengthUnits::Characters,
-            });
-            unsafe { &mut (*transaction) }.save_table_meta(cache, table_name, key.clone(), meta)?;
-            active_keys.insert(key);
-        }
-
-        let keys = wasm_storage_keys_with_prefix(&(prefix.clone() + "/"))?;
-
-        for key in keys {
-            if !active_keys.contains(&key) {
-                wasm_remove_storage_key(&key)?;
-            }
-        }
-
-        Ok(values)
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn build_statistics_meta_path(table_name: &TableName) -> Result<PathBuf, DatabaseError> {
-        Ok(require_statistics_base_dir().join(table_name.as_ref()))
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn build_statistics_meta_prefix(table_name: &TableName) -> Result<String, DatabaseError> {
-        Ok(require_statistics_base_dir()
-            .join(table_name.as_ref())
-            .to_string_lossy()
-            .into_owned())
     }
 }
 
@@ -296,24 +196,21 @@ mod test {
     use crate::db::{DataBaseBuilder, ResultIter};
     use crate::errors::DatabaseError;
     use crate::execution::dml::analyze::DEFAULT_NUM_OF_BUCKETS;
-    use crate::optimizer::core::statistics_meta::StatisticsMeta;
-    use crate::paths::require_statistics_base_dir;
-    use crate::storage::rocksdb::RocksTransaction;
-    use std::ffi::OsStr;
-    use std::fs;
+    use crate::storage::{InnerIter, Storage, Transaction};
+    use std::ops::Bound;
     use tempfile::TempDir;
 
     #[test]
     fn test_analyze() -> Result<(), DatabaseError> {
-        test_statistics_meta()?;
+        test_statistics_meta_roundtrip()?;
+        test_meta_loader_uses_cache()?;
         test_clean_expired_index()?;
 
         Ok(())
     }
 
-    fn test_statistics_meta() -> Result<(), DatabaseError> {
+    fn test_statistics_meta_roundtrip() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let base_dir = require_statistics_base_dir();
         let buckets = 10;
         let kite_sql = DataBaseBuilder::path(temp_dir.path())
             .histogram_buckets(buckets)
@@ -332,29 +229,21 @@ mod test {
         }
         kite_sql.run("analyze table t1")?.done()?;
 
-        let dir_path = base_dir.join("t1");
+        let transaction = kite_sql.storage.transaction()?;
+        let table_name = "t1".to_string().into();
+        let loader = transaction.meta_loader(kite_sql.state.meta_cache());
 
-        let mut paths = Vec::new();
-
-        for entry in fs::read_dir(&dir_path)? {
-            paths.push(entry?.path());
-        }
-        paths.sort();
-
-        let statistics_meta_pk_index = StatisticsMeta::from_file::<RocksTransaction>(&paths[0])?;
-
+        let statistics_meta_pk_index = loader.load(&table_name, 0)?.unwrap();
         assert_eq!(statistics_meta_pk_index.index_id(), 0);
         assert_eq!(statistics_meta_pk_index.histogram().values_len(), 101);
         assert_eq!(statistics_meta_pk_index.histogram().buckets_len(), buckets);
 
-        let statistics_meta_b_index = StatisticsMeta::from_file::<RocksTransaction>(&paths[1])?;
-
+        let statistics_meta_b_index = loader.load(&table_name, 1)?.unwrap();
         assert_eq!(statistics_meta_b_index.index_id(), 1);
         assert_eq!(statistics_meta_b_index.histogram().values_len(), 101);
         assert_eq!(statistics_meta_b_index.histogram().buckets_len(), buckets);
 
-        let statistics_meta_p_index = StatisticsMeta::from_file::<RocksTransaction>(&paths[2])?;
-
+        let statistics_meta_p_index = loader.load(&table_name, 2)?.unwrap();
         assert_eq!(statistics_meta_p_index.index_id(), 2);
         assert_eq!(statistics_meta_p_index.histogram().values_len(), 101);
         assert_eq!(statistics_meta_p_index.histogram().buckets_len(), buckets);
@@ -362,9 +251,50 @@ mod test {
         Ok(())
     }
 
+    fn test_meta_loader_uses_cache() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+
+        kite_sql
+            .run("create table t1 (a int primary key, b int)")?
+            .done()?;
+        kite_sql.run("create index b_index on t1 (b)")?.done()?;
+
+        for i in 0..DEFAULT_NUM_OF_BUCKETS + 1 {
+            kite_sql
+                .run(format!("insert into t1 values({i}, {i})"))?
+                .done()?;
+        }
+        kite_sql.run("analyze table t1")?.done()?;
+
+        let table_name = "t1".to_string().into();
+        let mut transaction = kite_sql.storage.transaction()?;
+        assert!(transaction
+            .meta_loader(kite_sql.state.meta_cache())
+            .load(&table_name, 1)?
+            .is_some());
+
+        let (min, max) = unsafe { &*transaction.table_codec() }.statistics_index_bound("t1", 1);
+        let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        while let Some((key, _)) = iter.try_next()? {
+            keys.push(key);
+        }
+        drop(iter);
+        for key in keys {
+            transaction.remove(&key)?;
+        }
+
+        assert!(transaction
+            .meta_loader(kite_sql.state.meta_cache())
+            .load(&table_name, 1)?
+            .is_some());
+
+        Ok(())
+    }
+
     fn test_clean_expired_index() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let base_dir = require_statistics_base_dir();
         let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
 
         kite_sql
@@ -380,27 +310,27 @@ mod test {
         }
         kite_sql.run("analyze table t1")?.done()?;
 
-        let dir_path = base_dir.join("t1");
-
-        let mut file_names = Vec::new();
-
-        for entry in fs::read_dir(&dir_path)? {
-            file_names.push(entry?.file_name());
+        let transaction = kite_sql.storage.transaction()?;
+        let (min, max) = unsafe { &*transaction.table_codec() }.statistics_bound("t1");
+        let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+        let mut count = 0;
+        while iter.try_next()?.is_some() {
+            count += 1;
         }
-        file_names.sort();
-
-        assert_eq!(file_names.len(), 3);
-        assert_eq!(file_names[0], OsStr::new("0"));
-        assert_eq!(file_names[1], OsStr::new("1"));
-        assert_eq!(file_names[2], OsStr::new("2"));
+        assert!(count > 3);
+        drop(iter);
 
         kite_sql.run("alter table t1 drop column b")?.done()?;
         kite_sql.run("analyze table t1")?.done()?;
 
-        let mut entries = fs::read_dir(&dir_path)?;
-
-        assert_eq!(entries.next().unwrap()?.file_name(), OsStr::new("0"));
-        assert!(entries.next().is_none());
+        let transaction = kite_sql.storage.transaction()?;
+        let (min, max) = unsafe { &*transaction.table_codec() }.statistics_bound("t1");
+        let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+        let mut keys = 0;
+        while iter.try_next()?.is_some() {
+            keys += 1;
+        }
+        assert_eq!(keys, 1 + DEFAULT_NUM_OF_BUCKETS.min(DEFAULT_NUM_OF_BUCKETS));
 
         Ok(())
     }

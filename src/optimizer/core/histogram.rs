@@ -41,24 +41,28 @@ pub struct HistogramBuilder {
     value_index: usize,
 }
 
-// Equal depth histogram
 #[derive(Debug, Clone, PartialEq, ReferenceSerialization)]
-pub struct Histogram {
+pub struct HistogramMeta {
     index_id: IndexId,
-
     number_of_distinct_value: usize,
     null_count: usize,
     values_len: usize,
-
-    buckets: Vec<Bucket>,
+    buckets_len: usize,
     // TODO: How to use?
     // Correlation is the statistical correlation between physical row ordering and logical ordering of
     // the column values
     correlation: f64,
 }
 
+// Equal depth histogram
+#[derive(Debug, Clone, PartialEq)]
+pub struct Histogram {
+    meta: HistogramMeta,
+    buckets: Vec<Bucket>,
+}
+
 #[derive(Debug, Clone, PartialEq, ReferenceSerialization)]
-struct Bucket {
+pub struct Bucket {
     lower: DataValue,
     upper: DataValue,
     count: u64,
@@ -191,12 +195,15 @@ impl HistogramBuilder {
 
         Ok((
             Histogram {
-                index_id,
-                number_of_distinct_value,
-                null_count,
-                values_len,
+                meta: HistogramMeta {
+                    index_id,
+                    number_of_distinct_value,
+                    null_count,
+                    values_len,
+                    buckets_len: buckets.len(),
+                    correlation: Self::calc_correlation(corr_xy_sum, values_len),
+                },
                 buckets,
-                correlation: Self::calc_correlation(corr_xy_sum, values_len),
             },
             sketch,
         ))
@@ -265,16 +272,48 @@ fn is_above(
 }
 
 impl Histogram {
+    pub fn from_parts(meta: HistogramMeta, buckets: Vec<Bucket>) -> Result<Self, DatabaseError> {
+        if meta.buckets_len != buckets.len() {
+            return Err(DatabaseError::InvalidValue(format!(
+                "histogram bucket count mismatch: meta={}, actual={}",
+                meta.buckets_len,
+                buckets.len()
+            )));
+        }
+
+        Ok(Self { meta, buckets })
+    }
+
+    pub fn into_parts(self) -> (HistogramMeta, Vec<Bucket>) {
+        (self.meta, self.buckets)
+    }
+
+    pub fn meta(&self) -> &HistogramMeta {
+        &self.meta
+    }
+
+    pub fn buckets(&self) -> &[Bucket] {
+        &self.buckets
+    }
+
+    pub fn null_count(&self) -> usize {
+        self.meta.null_count
+    }
+
+    pub fn correlation(&self) -> f64 {
+        self.meta.correlation
+    }
+
     pub fn index_id(&self) -> IndexId {
-        self.index_id
+        self.meta.index_id
     }
 
     pub fn values_len(&self) -> usize {
-        self.values_len
+        self.meta.values_len
     }
 
     pub fn buckets_len(&self) -> usize {
-        self.buckets.len()
+        self.meta.buckets_len
     }
 
     pub fn collect_count(
@@ -410,14 +449,14 @@ impl Histogram {
             )
         };
 
-        let distinct_1 = OrderedFloat(1.0 / self.number_of_distinct_value as f64);
+        let distinct_1 = OrderedFloat(1.0 / self.meta.number_of_distinct_value as f64);
 
         match &ranges[*binary_i] {
             Range::Scope { min, max } => {
                 let bucket = &self.buckets[*bucket_i];
                 let mut bucket_count = bucket.count as usize;
                 if *bucket_i == 0 {
-                    bucket_count += self.null_count;
+                    bucket_count += self.meta.null_count;
                 }
 
                 let mut temp_count = 0;
@@ -515,6 +554,20 @@ impl Histogram {
     }
 }
 
+impl HistogramMeta {
+    pub fn index_id(&self) -> IndexId {
+        self.index_id
+    }
+
+    pub fn values_len(&self) -> usize {
+        self.values_len
+    }
+
+    pub fn buckets_len(&self) -> usize {
+        self.buckets_len
+    }
+}
+
 impl Bucket {
     fn empty() -> Self {
         let empty_value = DataValue::Null;
@@ -579,11 +632,11 @@ mod tests {
 
         let (histogram, _) = builder.build(5)?;
 
-        assert_eq!(histogram.correlation, 1.0);
-        assert_eq!(histogram.null_count, 2);
-        assert_eq!(histogram.buckets.len(), 5);
+        assert_eq!(histogram.correlation(), 1.0);
+        assert_eq!(histogram.null_count(), 2);
+        assert_eq!(histogram.buckets().to_vec().len(), 5);
         assert_eq!(
-            histogram.buckets,
+            histogram.buckets().to_vec(),
             vec![
                 Bucket {
                     lower: DataValue::Int32(0),
@@ -643,11 +696,11 @@ mod tests {
 
         let (histogram, _) = builder.build(5)?;
 
-        assert_eq!(histogram.correlation, -1.0);
-        assert_eq!(histogram.null_count, 2);
-        assert_eq!(histogram.buckets.len(), 5);
+        assert_eq!(histogram.correlation(), -1.0);
+        assert_eq!(histogram.null_count(), 2);
+        assert_eq!(histogram.buckets().to_vec().len(), 5);
         assert_eq!(
-            histogram.buckets,
+            histogram.buckets().to_vec(),
             vec![
                 Bucket {
                     lower: DataValue::Int32(0),
@@ -707,11 +760,11 @@ mod tests {
 
         let (histogram, _) = builder.build(4)?;
 
-        assert!(histogram.correlation < 0.0);
-        assert_eq!(histogram.null_count, 2);
-        assert_eq!(histogram.buckets.len(), 4);
+        assert!(histogram.correlation() < 0.0);
+        assert_eq!(histogram.null_count(), 2);
+        assert_eq!(histogram.buckets().to_vec().len(), 4);
         assert_eq!(
-            histogram.buckets,
+            histogram.buckets().to_vec(),
             vec![
                 Bucket {
                     lower: DataValue::Int32(0),

@@ -15,6 +15,8 @@
 use crate::catalog::view::View;
 use crate::catalog::{ColumnRef, ColumnRelation, TableMeta};
 use crate::errors::DatabaseError;
+use crate::optimizer::core::histogram::Bucket;
+use crate::optimizer::core::statistics_meta::StatisticsMetaRoot;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use crate::storage::{TableCache, Transaction};
 use crate::types::index::{Index, IndexId, IndexMeta, IndexType, INDEX_ID_LEN};
@@ -37,6 +39,7 @@ const TABLE_NAME_HASH_LEN: usize = 8;
 const KEY_TYPE_TAG_LEN: usize = 1;
 const KEY_BOUND_LEN: usize = 1;
 const TUPLE_KEY_PREFIX_LEN: usize = TABLE_NAME_HASH_LEN + KEY_TYPE_TAG_LEN + KEY_BOUND_LEN;
+const STATISTICS_BUCKET_ORD_LEN: usize = 4;
 
 static ROOT_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"Root".to_vec());
 static VIEW_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"View".to_vec());
@@ -466,22 +469,21 @@ impl TableCodec {
     }
 
     /// Key: {TableName}{STATISTICS_TAG}{BOUND_MIN_TAG}{INDEX_ID}
-    /// Value: StatisticsMeta Path
-    pub fn encode_statistics_path(
+    /// Value: StatisticsMetaRoot
+    pub fn encode_statistics_meta(
         &self,
         table_name: &str,
-        index_id: IndexId,
-        path: String,
-    ) -> (BumpBytes<'_>, BumpBytes<'_>) {
-        let key = self.encode_statistics_path_key(table_name, index_id);
-
+        statistics_meta: &StatisticsMetaRoot,
+    ) -> Result<(BumpBytes<'_>, BumpBytes<'_>), DatabaseError> {
+        let key = self.encode_statistics_meta_key(table_name, statistics_meta.index_id());
         let mut value = BumpBytes::new_in(&self.arena);
-        value.extend_from_slice(path.as_bytes());
 
-        (key, value)
+        statistics_meta.encode(&mut value, true, &mut ReferenceTables::new())?;
+
+        Ok((key, value))
     }
 
-    pub fn encode_statistics_path_key(&self, table_name: &str, index_id: IndexId) -> BumpBytes<'_> {
+    pub fn encode_statistics_meta_key(&self, table_name: &str, index_id: IndexId) -> BumpBytes<'_> {
         let mut key_prefix = self.key_prefix(CodecType::Statistics, table_name);
 
         key_prefix.push(BOUND_MIN_TAG);
@@ -489,8 +491,65 @@ impl TableCodec {
         key_prefix
     }
 
-    pub fn decode_statistics_path(bytes: &[u8]) -> Result<String, DatabaseError> {
-        Ok(String::from_utf8(bytes.to_vec())?)
+    pub fn decode_statistics_meta<T: Transaction>(
+        bytes: &[u8],
+    ) -> Result<StatisticsMetaRoot, DatabaseError> {
+        StatisticsMetaRoot::decode::<T, _>(&mut Cursor::new(bytes), None, &ReferenceTables::new())
+    }
+
+    pub fn encode_statistics_bucket(
+        &self,
+        table_name: &str,
+        index_id: IndexId,
+        ordinal: u32,
+        bucket: &Bucket,
+    ) -> Result<(BumpBytes<'_>, BumpBytes<'_>), DatabaseError> {
+        let key = self.encode_statistics_bucket_key(table_name, index_id, ordinal);
+        let mut value = BumpBytes::new_in(&self.arena);
+
+        bucket.encode(&mut value, true, &mut ReferenceTables::new())?;
+
+        Ok((key, value))
+    }
+
+    pub fn encode_statistics_bucket_key(
+        &self,
+        table_name: &str,
+        index_id: IndexId,
+        ordinal: u32,
+    ) -> BumpBytes<'_> {
+        let mut key = self.encode_statistics_meta_key(table_name, index_id);
+
+        key.push(BOUND_MIN_TAG);
+        key.extend_from_slice(&ordinal.to_be_bytes());
+        key
+    }
+
+    pub fn decode_statistics_bucket<T: Transaction>(bytes: &[u8]) -> Result<Bucket, DatabaseError> {
+        Bucket::decode::<T, _>(&mut Cursor::new(bytes), None, &ReferenceTables::new())
+    }
+
+    pub fn decode_statistics_bucket_ordinal(bytes: &[u8]) -> Result<u32, DatabaseError> {
+        let len = bytes.len();
+        let Some(ordinal_bytes) = bytes.get(len - STATISTICS_BUCKET_ORD_LEN..) else {
+            return Err(DatabaseError::InvalidValue(
+                "statistics bucket key is too short".to_string(),
+            ));
+        };
+
+        Ok(u32::from_be_bytes(ordinal_bytes.try_into().unwrap()))
+    }
+
+    pub fn statistics_index_bound(
+        &self,
+        table_name: &str,
+        index_id: IndexId,
+    ) -> (BumpBytes<'_>, BumpBytes<'_>) {
+        let min = self.encode_statistics_meta_key(table_name, index_id);
+        let mut max = min.clone();
+        max.push(BOUND_MAX_TAG);
+
+        (min, max)
     }
 
     /// Key: View{BOUND_MIN_TAG}{ViewName}
@@ -580,6 +639,8 @@ mod tests {
         ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation, TableCatalog, TableMeta,
     };
     use crate::errors::DatabaseError;
+    use crate::optimizer::core::histogram::HistogramBuilder;
+    use crate::optimizer::core::statistics_meta::StatisticsMeta;
     use crate::serdes::ReferenceTables;
     use crate::storage::rocksdb::RocksTransaction;
     use crate::storage::table_codec::{BumpBytes, TableCodec};
@@ -663,15 +724,65 @@ mod tests {
     }
 
     #[test]
-    fn test_table_codec_statistics_meta_path() {
+    fn test_table_codec_statistics_meta() -> Result<(), DatabaseError> {
         let table_codec = TableCodec {
             arena: Default::default(),
         };
-        let path = String::from("./lol");
-        let (_, bytes) = table_codec.encode_statistics_path("t1", 0, path.clone());
-        let decode_path = TableCodec::decode_statistics_path(&bytes).unwrap();
+        let index_meta = IndexMeta {
+            id: 0,
+            column_ids: vec![Ulid::new()],
+            table_name: "t1".to_string().into(),
+            pk_ty: LogicalType::Integer,
+            value_ty: LogicalType::Integer,
+            name: "pk_c1".to_string(),
+            ty: IndexType::PrimaryKey { is_multiple: false },
+        };
+        let mut builder = HistogramBuilder::new(&index_meta, Some(8));
 
-        assert_eq!(path, decode_path);
+        for value in 0..4 {
+            builder.append(&DataValue::Int32(value))?;
+        }
+        let (histogram, sketch) = builder.build(2)?;
+        let (root, buckets) = StatisticsMeta::new(histogram, sketch).into_parts();
+
+        let (_, root_bytes) = table_codec.encode_statistics_meta("t1", &root)?;
+        let decoded_root = TableCodec::decode_statistics_meta::<RocksTransaction>(&root_bytes)?;
+        assert_eq!(decoded_root.index_id(), root.index_id());
+        assert_eq!(
+            decoded_root.histogram_meta().values_len(),
+            root.histogram_meta().values_len()
+        );
+        assert_eq!(
+            decoded_root.histogram_meta().buckets_len(),
+            root.histogram_meta().buckets_len()
+        );
+        assert_eq!(
+            decoded_root.cm_sketch().estimate(&DataValue::Null),
+            root.cm_sketch().estimate(&DataValue::Null)
+        );
+
+        let bucket0_key = table_codec.encode_statistics_bucket_key("t1", 0, 0);
+        let bucket1_key = table_codec.encode_statistics_bucket_key("t1", 0, 1);
+        assert!(bucket0_key < bucket1_key);
+
+        let (bucket0_min, bucket0_max) = table_codec.statistics_index_bound("t1", 0);
+        assert!(bucket0_key >= bucket0_min);
+        assert!(bucket1_key <= bucket0_max);
+
+        let (_, bucket_bytes) = table_codec.encode_statistics_bucket("t1", 0, 0, &buckets[0])?;
+        let decoded_bucket =
+            TableCodec::decode_statistics_bucket::<RocksTransaction>(&bucket_bytes)?;
+        assert_eq!(decoded_bucket, buckets[0]);
+        assert_eq!(
+            TableCodec::decode_statistics_bucket_ordinal(&bucket0_key)?,
+            0
+        );
+        assert_eq!(
+            TableCodec::decode_statistics_bucket_ordinal(&bucket1_key)?,
+            1
+        );
+
+        Ok(())
     }
 
     #[test]
