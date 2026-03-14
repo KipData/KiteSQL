@@ -467,7 +467,7 @@ impl<S: Storage> Database<S> {
                 return Ok(DatabaseIter {
                     transaction,
                     inner,
-                    _guard: guard,
+                    _guard: Some(guard),
                 });
             }
         }
@@ -506,7 +506,7 @@ impl<S: Storage> Database<S> {
         Ok(DatabaseIter {
             transaction,
             inner,
-            _guard: guard,
+            _guard: Some(guard),
         })
     }
 
@@ -532,16 +532,16 @@ pub trait ResultIter: Iterator<Item = Result<Tuple, DatabaseError>> {
 pub struct DatabaseIter<'a, S: Storage + 'a> {
     transaction: *mut S::TransactionType<'a>,
     inner: *mut TransactionIter<'a>,
-    _guard: MetaDataLock,
+    _guard: Option<MetaDataLock>,
 }
 
 impl<S: Storage> Drop for DatabaseIter<'_, S> {
     fn drop(&mut self) {
-        if !self.transaction.is_null() {
-            unsafe { drop(Box::from_raw(self.transaction)) }
-        }
         if !self.inner.is_null() {
             unsafe { drop(Box::from_raw(self.inner)) }
+        }
+        if !self.transaction.is_null() {
+            unsafe { drop(Box::from_raw(self.transaction)) }
         }
     }
 }
@@ -550,7 +550,11 @@ impl<S: Storage> Iterator for DatabaseIter<'_, S> {
     type Item = Result<Tuple, DatabaseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        unsafe { (*self.inner).next() }
+        let result = unsafe { (*self.inner).next() };
+        if result.is_none() {
+            self._guard = None;
+        }
+        result
     }
 }
 
@@ -1028,6 +1032,54 @@ pub(crate) mod test {
             vec![DataValue::Int32(2)]
         );
         check_iter.done()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_autocommit_read_drops_iterator_before_transaction() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_optimistic()?;
+
+        kite_sql
+            .run("create table t_iter_drop (a int primary key, b int)")?
+            .done()?;
+
+        let mut tx = kite_sql.new_transaction()?;
+        tx.run("insert into t_iter_drop values (0, 0), (1, 1)")?
+            .done()?;
+
+        assert!(kite_sql.run("select * from t_iter_drop")?.next().is_none());
+
+        tx.commit()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_exhausted_database_iter_releases_mdl_guard() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_optimistic()?;
+
+        kite_sql
+            .run("create table t_iter_guard (a int primary key, b int)")?
+            .done()?;
+        kite_sql
+            .run("insert into t_iter_guard values (0, 0), (1, 1)")?
+            .done()?;
+
+        let mut iter = kite_sql.run("select * from t_iter_guard order by a")?;
+        assert_eq!(
+            iter.next().unwrap()?.values,
+            vec![DataValue::Int32(0), DataValue::Int32(0)]
+        );
+        assert_eq!(
+            iter.next().unwrap()?.values,
+            vec![DataValue::Int32(1), DataValue::Int32(1)]
+        );
+        assert!(iter.next().is_none());
+
+        kite_sql.run("drop table t_iter_guard")?.done()?;
 
         Ok(())
     }

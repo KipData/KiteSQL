@@ -18,6 +18,18 @@ mod app {
     use kite_sql::errors::DatabaseError;
     use kite_sql::implement_from_tuple;
     use kite_sql::types::value::DataValue;
+    use std::fs;
+    use std::io::ErrorKind;
+
+    const EXAMPLE_DB_PATH: &str = "./example_data/hello_world";
+
+    fn reset_example_dir() -> Result<(), DatabaseError> {
+        match fs::remove_dir_all(EXAMPLE_DB_PATH) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.into()),
+        }
+    }
 
     #[derive(Default, Debug, PartialEq)]
     pub struct MyStruct {
@@ -41,7 +53,8 @@ mod app {
     );
 
     pub fn run() -> Result<(), DatabaseError> {
-        let database = DataBaseBuilder::path("./example_data/hello_world").build()?;
+        reset_example_dir()?;
+        let database = DataBaseBuilder::path(EXAMPLE_DB_PATH).build()?;
 
         database
             .run(

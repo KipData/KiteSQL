@@ -18,9 +18,22 @@ mod app {
     use kite_sql::errors::DatabaseError;
     use kite_sql::types::tuple::Tuple;
     use kite_sql::types::value::DataValue;
+    use std::fs;
+    use std::io::ErrorKind;
+
+    const EXAMPLE_DB_PATH: &str = "./example_data/transaction";
+
+    fn reset_example_dir() -> Result<(), DatabaseError> {
+        match fs::remove_dir_all(EXAMPLE_DB_PATH) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.into()),
+        }
+    }
 
     pub fn run() -> Result<(), DatabaseError> {
-        let database = DataBaseBuilder::path("./example_data/transaction").build_optimistic()?;
+        reset_example_dir()?;
+        let database = DataBaseBuilder::path(EXAMPLE_DB_PATH).build_optimistic()?;
         database
             .run("create table if not exists t1 (c1 int primary key, c2 int)")?
             .done()?;
