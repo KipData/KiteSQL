@@ -17,6 +17,7 @@ fn main() {}
 #[cfg(test)]
 mod test {
     use kite_sql::catalog::column::{ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation};
+    use kite_sql::db::{DataBaseBuilder, ResultIter};
     use kite_sql::errors::DatabaseError;
     use kite_sql::expression::function::scala::ScalarFunctionImpl;
     use kite_sql::expression::function::table::TableFunctionImpl;
@@ -27,7 +28,7 @@ mod test {
     use kite_sql::types::tuple::{SchemaRef, Tuple};
     use kite_sql::types::value::{DataValue, Utf8Type};
     use kite_sql::types::LogicalType;
-    use kite_sql::{implement_from_tuple, scala_function, table_function};
+    use kite_sql::{from_tuple, scala_function, table_function, FromTuple};
     use sqlparser::ast::CharLengthUnits;
     use std::sync::Arc;
 
@@ -68,7 +69,17 @@ mod test {
         c2: String,
     }
 
-    implement_from_tuple!(
+    #[derive(Default, Debug, PartialEq, FromTuple)]
+    struct DerivedStruct {
+        c1: i32,
+        #[from_tuple(rename = "c2")]
+        name: String,
+        age: Option<i32>,
+        #[from_tuple(skip)]
+        skipped: String,
+    }
+
+    from_tuple!(
         MyStruct, (
             c1: i32 => |inner: &mut MyStruct, value| {
                 if let DataValue::Int32(val) = value {
@@ -92,6 +103,90 @@ mod test {
 
         assert_eq!(my_struct.c1, 9);
         assert_eq!(my_struct.c2, "LOL");
+    }
+
+    #[test]
+    fn test_derive_from_tuple() {
+        let mut tuple_and_schema = build_tuple();
+        tuple_and_schema.1 = Arc::new(vec![
+            ColumnRef::from(ColumnCatalog::new(
+                "c1".to_string(),
+                false,
+                ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
+            )),
+            ColumnRef::from(ColumnCatalog::new(
+                "c2".to_string(),
+                false,
+                ColumnDesc::new(
+                    LogicalType::Varchar(None, CharLengthUnits::Characters),
+                    None,
+                    false,
+                    None,
+                )
+                .unwrap(),
+            )),
+            ColumnRef::from(ColumnCatalog::new(
+                "age".to_string(),
+                true,
+                ColumnDesc::new(LogicalType::Integer, None, true, None).unwrap(),
+            )),
+        ]);
+        tuple_and_schema.0 = Tuple::new(
+            None,
+            vec![
+                DataValue::Int32(9),
+                DataValue::Utf8 {
+                    value: "LOL".to_string(),
+                    ty: Utf8Type::Variable(None),
+                    unit: CharLengthUnits::Characters,
+                },
+                DataValue::Null,
+            ],
+        );
+
+        let derived = DerivedStruct::from((&tuple_and_schema.1, tuple_and_schema.0));
+
+        assert_eq!(derived.c1, 9);
+        assert_eq!(derived.name, "LOL");
+        assert_eq!(derived.age, None);
+        assert_eq!(derived.skipped, "");
+    }
+
+    #[test]
+    fn test_result_iter_to_orm_iter() -> Result<(), DatabaseError> {
+        let database = DataBaseBuilder::path(".").build_in_memory()?;
+
+        database
+            .run("create table users (c1 int primary key, c2 varchar, age int)")?
+            .done()?;
+        database
+            .run("insert into users values (1, 'Alice', 18), (2, 'Bob', null)")?
+            .done()?;
+
+        let users = database
+            .run("select c1, c2, age from users order by c1")?
+            .orm::<DerivedStruct>()
+            .collect::<Result<Vec<_>, _>>()?;
+
+        assert_eq!(
+            users,
+            vec![
+                DerivedStruct {
+                    c1: 1,
+                    name: "Alice".to_string(),
+                    age: Some(18),
+                    skipped: "".to_string(),
+                },
+                DerivedStruct {
+                    c1: 2,
+                    name: "Bob".to_string(),
+                    age: None,
+                    skipped: "".to_string(),
+                }
+            ]
+        );
+
+        Ok(())
     }
 
     scala_function!(MyScalaFunction::SUM(LogicalType::Integer, LogicalType::Integer) -> LogicalType::Integer => (|v1: DataValue, v2: DataValue| {

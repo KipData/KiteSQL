@@ -53,31 +53,15 @@
 //! ```ignore
 //! use kite_sql::db::{DataBaseBuilder, ResultIter};
 //! use kite_sql::errors::DatabaseError;
-//! use kite_sql::implement_from_tuple;
-//! use kite_sql::types::value::DataValue;
+//! use kite_sql::FromTuple;
 //!
-//! #[derive(Default, Debug, PartialEq)]
+//! #[derive(Default, Debug, PartialEq, FromTuple)]
 //! struct MyStruct {
 //!     pub c1: i32,
 //!     pub c2: String,
 //! }
 //!
-//! implement_from_tuple!(
-//!     MyStruct, (
-//!         c1: i32 => |inner: &mut MyStruct, value| {
-//!             if let DataValue::Int32(Some(val)) = value {
-//!                 inner.c1 = val;
-//!             }
-//!         },
-//!         c2: String => |inner: &mut MyStruct, value| {
-//!             if let DataValue::Utf8 { value: Some(val), .. } = value {
-//!                 inner.c2 = val;
-//!             }
-//!         }
-//!     )
-//! );
-//!
-//! #[cfg(feature = "macros")]
+//! #[cfg(feature = "orm")]
 //! fn main() -> Result<(), DatabaseError> {
 //!     let database = DataBaseBuilder::path("./hello_world").build()?;
 //!
@@ -89,10 +73,9 @@
 //!         .done()?;
 //!
 //!     let iter = database.run("select * from my_struct")?;
-//!     let schema = iter.schema().clone();
 //!
-//!     for tuple in iter {
-//!         println!("{:?}", MyStruct::from((&schema, tuple?)));
+//!     for row in iter.orm::<MyStruct>() {
+//!         println!("{:?}", row?);
 //!     }
 //!     database.run("drop table my_struct")?.done()?;
 //!
@@ -112,6 +95,8 @@ mod function;
 #[cfg(feature = "macros")]
 pub mod macros;
 mod optimizer;
+#[cfg(feature = "orm")]
+pub mod orm;
 pub mod parser;
 pub mod planner;
 #[cfg(all(not(target_arch = "wasm32"), feature = "python"))]
@@ -122,3 +107,6 @@ pub mod types;
 pub(crate) mod utils;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
+
+#[cfg(feature = "orm")]
+pub use kite_sql_serde_macros::FromTuple;

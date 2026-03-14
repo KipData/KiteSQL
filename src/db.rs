@@ -541,7 +541,63 @@ impl<S: Storage> Database<S> {
 pub trait ResultIter: Iterator<Item = Result<Tuple, DatabaseError>> {
     fn schema(&self) -> &SchemaRef;
 
+    #[cfg(feature = "orm")]
+    fn orm<T>(self) -> OrmIter<Self, T>
+    where
+        Self: Sized,
+        T: for<'a> From<(&'a SchemaRef, Tuple)>,
+    {
+        OrmIter::new(self)
+    }
+
     fn done(self) -> Result<(), DatabaseError>;
+}
+
+#[cfg(feature = "orm")]
+pub struct OrmIter<I, T> {
+    inner: I,
+    schema: SchemaRef,
+    _marker: PhantomData<T>,
+}
+
+#[cfg(feature = "orm")]
+impl<I, T> OrmIter<I, T>
+where
+    I: ResultIter,
+    T: for<'a> From<(&'a SchemaRef, Tuple)>,
+{
+    fn new(inner: I) -> Self {
+        let schema = inner.schema().clone();
+
+        Self {
+            inner,
+            schema,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    pub fn done(self) -> Result<(), DatabaseError> {
+        self.inner.done()
+    }
+}
+
+#[cfg(feature = "orm")]
+impl<I, T> Iterator for OrmIter<I, T>
+where
+    I: ResultIter,
+    T: for<'a> From<(&'a SchemaRef, Tuple)>,
+{
+    type Item = Result<T, DatabaseError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner
+            .next()
+            .map(|result| result.map(|tuple| T::from((&self.schema, tuple))))
+    }
 }
 
 pub struct DatabaseIter<'a, S: Storage + 'a> {

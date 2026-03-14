@@ -3,29 +3,37 @@
 
 run `cargo run --features="net"` to start service
 
-### ORM Mapping: `features = ["macros"]`
+### ORM Mapping: `features = ["orm"]`
 ```rust
-#[derive(Default, Debug, PartialEq)]
+use kite_sql::FromTuple;
+
+#[derive(Default, Debug, PartialEq, FromTuple)]
 struct MyStruct {
   c1: i32,
+  #[from_tuple(rename = "user_name")]
   c2: String,
+  age: Option<i32>,
 }
-
-implement_from_tuple!(
-    MyStruct, (
-        c1: i32 => |inner: &mut MyStruct, value| {
-            if let DataValue::Int32(val) = value {
-                inner.c1 = val;
-            }
-        },
-        c2: String => |inner: &mut MyStruct, value| {
-            if let DataValue::Utf8 { value, .. } = value {
-                inner.c2 = value;
-            }
-        }
-    )
-);
 ```
+
+`FromTuple` automatically implements `From<(&SchemaRef, Tuple)>`, mapping columns by field name. It also supports field-level attributes:
+
+- `#[from_tuple(rename = "column_name")]`
+- `#[from_tuple(skip)]`
+
+Query results can be converted directly into an ORM iterator:
+
+```rust
+use kite_sql::db::ResultIter;
+
+let iter = database.run("select c1, user_name, age from users")?;
+
+for user in iter.orm::<MyStruct>() {
+    println!("{:?}", user?);
+}
+```
+
+If you need custom conversion logic, you can still use the lower-level `from_tuple!` macro with `features = ["macros"]`.
 
 ### User-Defined Function: `features = ["macros"]`
 ```rust
