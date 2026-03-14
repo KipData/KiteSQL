@@ -31,7 +31,7 @@ impl From<DropIndexOperator> for DropIndex {
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropIndex {
     fn execute_mut(
         self,
-        (table_cache, _, _): (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
+        (table_cache, _, meta_cache): (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
         transaction: *mut T,
     ) -> Executor<'a> {
         spawn_executor(move |co| async move {
@@ -45,6 +45,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropIndex {
                 co,
                 unsafe { &mut (*transaction) }.drop_index(
                     table_cache,
+                    meta_cache,
                     table_name,
                     &index_name,
                     if_exists

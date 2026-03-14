@@ -2,6 +2,7 @@
 CARGO ?= cargo
 WASM_PACK ?= wasm-pack
 SQLLOGIC_PATH ?= tests/slt/**/*.slt
+PYO3_PYTHON ?= /usr/bin/python3.12
 
 .PHONY: test test-python test-wasm test-slt test-all wasm-build check tpcc tpcc-dual cargo-check build wasm-examples native-examples fmt clippy
 
@@ -11,7 +12,7 @@ test:
 
 ## Run Python binding API tests implemented with pyo3.
 test-python:
-	$(CARGO) test --features python test_python_
+	PYO3_PYTHON=$(PYO3_PYTHON) $(CARGO) test --features python test_python_
 
 ## Perform a `cargo check` across the workspace.
 cargo-check:
