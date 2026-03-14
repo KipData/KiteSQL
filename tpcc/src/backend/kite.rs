@@ -26,9 +26,11 @@ pub struct KiteBackend {
 }
 
 impl KiteBackend {
-    pub fn new(path: &str) -> Result<Self, TpccError> {
+    pub fn new(path: &str, rocksdb_stats: bool) -> Result<Self, TpccError> {
         Ok(Self {
-            database: DataBaseBuilder::path(path).build()?,
+            database: DataBaseBuilder::path(path)
+                .storage_statistics(rocksdb_stats)
+                .build()?,
         })
     }
 
@@ -73,6 +75,12 @@ impl BackendControl for KiteBackend {
 
     fn new_transaction(&self) -> Result<Self::Transaction<'_>, TpccError> {
         self.start_transaction()
+    }
+
+    fn storage_metrics(&self) -> Option<String> {
+        self.database
+            .storage_metrics()
+            .map(|metrics| metrics.to_string())
     }
 }
 

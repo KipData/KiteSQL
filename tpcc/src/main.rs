@@ -105,6 +105,8 @@ struct Args {
     measure_time: u64,
     #[clap(long, default_value = "1")]
     num_ware: usize,
+    #[clap(long, default_value = "false")]
+    rocksdb_stats: bool,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -124,7 +126,7 @@ fn main() -> Result<(), TpccError> {
             if db_path.exists() {
                 fs::remove_dir_all(db_path)?;
             }
-            let backend = KiteBackend::new(&args.path)?;
+            let backend = KiteBackend::new(&args.path, args.rocksdb_stats)?;
             run_tpcc(&backend, &args, &mut rng)?;
         }
         BackendKind::Dual => {
@@ -132,7 +134,7 @@ fn main() -> Result<(), TpccError> {
             if db_path.exists() {
                 fs::remove_dir_all(db_path)?;
             }
-            let backend = DualBackend::new(&args.path)?;
+            let backend = DualBackend::new(&args.path, args.rocksdb_stats)?;
             run_tpcc(&backend, &args, &mut rng)?;
         }
     }
@@ -266,6 +268,10 @@ fn run_tpcc<B: BackendControl>(
     println!("<TpmC>");
     let tpmc = ((success[0] + late[0]) as f64 / (actual_tpcc_time.as_secs_f64() / 60.0)).round();
     println!("{} Tpmc", tpmc);
+    if let Some(metrics) = backend.storage_metrics() {
+        println!();
+        println!("{metrics}");
+    }
 
     Ok(())
 }

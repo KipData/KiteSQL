@@ -118,7 +118,7 @@ impl TableCodec {
     ///
     /// Tips:
     /// 1. Root & View & Hash full key = key_prefix
-    /// 2. hash table name makes it 4 as a fixed length, and [prefix_extractor](https://github.com/facebook/rocksdb/wiki/Prefix-Seek#defining-a-prefix) can be enabled in rocksdb
+    /// 2. table-name hash is fixed-width (8 bytes), so [prefix_extractor](https://github.com/facebook/rocksdb/wiki/Prefix-Seek#defining-a-prefix) can be enabled in rocksdb
     fn key_prefix(&self, ty: CodecType, name: &str) -> BumpBytes<'_> {
         let mut table_bytes = BumpBytes::new_in(&self.arena);
         table_bytes.extend_from_slice(Self::hash_bytes(name).as_slice());

@@ -273,6 +273,10 @@ impl Histogram {
         self.values_len
     }
 
+    pub fn buckets_len(&self) -> usize {
+        self.buckets.len()
+    }
+
     pub fn collect_count(
         &self,
         ranges: &[Range],
