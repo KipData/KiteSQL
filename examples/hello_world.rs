@@ -12,12 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "orm"))]
 mod app {
     use kite_sql::db::{DataBaseBuilder, ResultIter};
     use kite_sql::errors::DatabaseError;
-    use kite_sql::implement_from_tuple;
-    use kite_sql::types::value::DataValue;
+    use kite_sql::Model;
     use std::fs;
     use std::io::ErrorKind;
 
@@ -31,61 +30,39 @@ mod app {
         }
     }
 
-    #[derive(Default, Debug, PartialEq)]
+    #[derive(Default, Debug, PartialEq, Model)]
+    #[model(table = "my_struct")]
     pub struct MyStruct {
+        #[model(primary_key)]
         pub c1: i32,
         pub c2: String,
     }
-
-    implement_from_tuple!(
-        MyStruct, (
-            c1: i32 => |inner: &mut MyStruct, value| {
-                if let DataValue::Int32(val) = value {
-                    inner.c1 = val;
-                }
-            },
-            c2: String => |inner: &mut MyStruct, value| {
-                if let DataValue::Utf8 { value, .. } = value {
-                    inner.c2 = value;
-                }
-            }
-        )
-    );
 
     pub fn run() -> Result<(), DatabaseError> {
         reset_example_dir()?;
         let database = DataBaseBuilder::path(EXAMPLE_DB_PATH).build()?;
 
-        database
-            .run(
-                "create table if not exists my_struct (
-                    c1 int primary key,
-                    c2 varchar,
-                    c3 int
-                )",
-            )?
-            .done()?;
-        database
-            .run(
-                r#"
-            insert into my_struct values
-                (0, 'zero', 0),
-                (1, 'one', 1),
-                (2, 'two', 2)
-            "#,
-            )?
-            .done()?;
+        database.create_table_if_not_exists::<MyStruct>()?;
+        database.insert(&MyStruct {
+            c1: 0,
+            c2: "zero".to_string(),
+        })?;
+        database.insert(&MyStruct {
+            c1: 1,
+            c2: "one".to_string(),
+        })?;
+        database.insert(&MyStruct {
+            c1: 2,
+            c2: "two".to_string(),
+        })?;
 
-        database
-            .run("update my_struct set c3 = c3 + 10 where c1 = 1")?
-            .done()?;
-        database.run("delete from my_struct where c1 = 2")?.done()?;
+        let mut row = database.get::<MyStruct>(&1)?.expect("row should exist");
+        row.c2 = "ONE".to_string();
+        database.update(&row)?;
+        database.delete_by_id::<MyStruct>(&2)?;
 
-        let iter = database.run("select * from my_struct")?;
-        let schema = iter.schema().clone();
-
-        for tuple in iter {
-            println!("{:?}", MyStruct::from((&schema, tuple?)));
+        for row in database.fetch::<MyStruct>()? {
+            println!("{:?}", row?);
         }
 
         let mut agg = database.run("select count(*) from my_struct")?;
@@ -94,7 +71,7 @@ mod app {
         }
         agg.done()?;
 
-        database.run("drop table my_struct")?.done()?;
+        database.drop_table::<MyStruct>()?;
 
         Ok(())
     }
@@ -103,7 +80,10 @@ mod app {
 #[cfg(target_arch = "wasm32")]
 fn main() {}
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "macros"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "orm"))]
 fn main() -> Result<(), kite_sql::errors::DatabaseError> {
     app::run()
 }
+
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "orm")))]
+fn main() {}

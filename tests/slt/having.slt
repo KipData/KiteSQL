@@ -33,3 +33,8 @@ select x from test group by x having max(y) = 22
 
 statement error
 select count(x) from test group by count(x)
+
+query II
+select y as b, count(*) as total from test where x > 0 group by b having count(*) > 1 order by b
+----
+2 2

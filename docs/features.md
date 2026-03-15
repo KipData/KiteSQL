@@ -3,29 +3,14 @@
 
 run `cargo run --features="net"` to start service
 
-### ORM Mapping: `features = ["macros"]`
-```rust
-#[derive(Default, Debug, PartialEq)]
-struct MyStruct {
-  c1: i32,
-  c2: String,
-}
+### ORM Mapping: `features = ["orm"]`
+See [the ORM guide](../src/orm/README.md) for the full ORM guide, including:
 
-implement_from_tuple!(
-    MyStruct, (
-        c1: i32 => |inner: &mut MyStruct, value| {
-            if let DataValue::Int32(val) = value {
-                inner.c1 = val;
-            }
-        },
-        c2: String => |inner: &mut MyStruct, value| {
-            if let DataValue::Utf8 { value, .. } = value {
-                inner.c2 = value;
-            }
-        }
-    )
-);
-```
+- `#[derive(Model)]` usage and supported attributes
+- CRUD, DDL, and migration helpers
+- typed query builder APIs
+- public ORM structs, enums, and traits
+- related `ResultIter::orm::<M>()` integration
 
 ### User-Defined Function: `features = ["macros"]`
 ```rust

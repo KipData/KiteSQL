@@ -74,7 +74,9 @@ impl LogicalType {
     pub fn type_trans<T: 'static>() -> Option<LogicalType> {
         let type_id = TypeId::of::<T>();
 
-        if type_id == TypeId::of::<i8>() {
+        if type_id == TypeId::of::<bool>() {
+            Some(LogicalType::Boolean)
+        } else if type_id == TypeId::of::<i8>() {
             Some(LogicalType::Tinyint)
         } else if type_id == TypeId::of::<i16>() {
             Some(LogicalType::Smallint)

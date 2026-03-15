@@ -2,7 +2,7 @@
 
 [package]
 name          = "kite_sql"
-version       = "0.1.5"
+version       = "0.1.6"
 edition       = "2021"
 authors       = ["Kould <kould2333@gmail.com>", "Xwg <loloxwg@gmail.com>"]
 description   = "SQL as a Function for Rust"
@@ -26,6 +26,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["macros"]
 macros  = []
+orm     = []
 net     = ["dep:pgwire", "dep:async-trait", "dep:clap", "dep:env_logger", "dep:futures", "dep:log", "dep:tokio"]
 pprof   = ["pprof/criterion", "pprof/flamegraph"]
 python  = ["dep:pyo3"]
@@ -54,7 +55,7 @@ recursive             = { version = "0.1" }
 regex                 = { version = "1" }
 rust_decimal          = { version = "1" }
 serde                 = { version = "1", features = ["derive", "rc"] }
-kite_sql_serde_macros = { version = "0.1.0", path = "kite_sql_serde_macros" }
+kite_sql_serde_macros = { version = "0.1.1", path = "kite_sql_serde_macros" }
 siphasher             = { version = "1", features = ["serde"] }
 sqlparser             = { version = "0.61", features = ["serde"] }
 thiserror             = { version = "1" }

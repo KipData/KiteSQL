@@ -1,0 +1,60 @@
+statement ok
+create table alter_large (id int primary key, v1 int, v2 int)
+
+query I
+copy alter_large from 'tests/data/row_20000.csv' ( DELIMITER '|' );
+----
+20000
+
+query I
+select count(*) from alter_large
+----
+20000
+
+statement ok
+alter table alter_large add column v3 int default 7
+
+query I
+select count(*) from alter_large where v3 = 7
+----
+20000
+
+query I
+select v2 from alter_large where id = 30000
+----
+30002
+
+statement ok
+alter table alter_large drop column v1
+
+query I
+select count(*) from alter_large where v3 = 7
+----
+20000
+
+query I
+select v2 from alter_large where id = 30000
+----
+30002
+
+statement ok
+alter table alter_large alter column v2 type bigint
+
+query I
+select count(*) from alter_large where v2 >= 0
+----
+20000
+
+query I
+select v2 from alter_large where id = 30000
+----
+30002
+
+statement ok
+alter table alter_large alter column v3 set not null
+
+statement error
+insert into alter_large (id, v2) values (60000, 60002)
+
+statement ok
+drop table alter_large

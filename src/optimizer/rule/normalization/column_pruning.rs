@@ -175,6 +175,7 @@ impl ColumnPruning {
             | Operator::CopyFromFile(_)
             | Operator::CopyToFile(_)
             | Operator::AddColumn(_)
+            | Operator::ChangeColumn(_)
             | Operator::DropColumn(_)
             | Operator::Describe(_) => (),
         }

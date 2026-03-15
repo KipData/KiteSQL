@@ -13,4 +13,5 @@
 // limitations under the License.
 
 pub mod add_column;
+pub mod change_column;
 pub mod drop_column;

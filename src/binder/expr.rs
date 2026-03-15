@@ -564,11 +564,6 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
     }
 
     fn bind_function(&mut self, func: &Function) -> Result<ScalarExpression, DatabaseError> {
-        if !matches!(self.context.step_now(), QueryBindStep::From) {
-            return Err(DatabaseError::UnsupportedStmt(
-                "`TableFunction` cannot bind in non-From step".to_string(),
-            ));
-        }
         let (func_args, is_distinct) = match &func.args {
             FunctionArguments::List(args) => (
                 args.args.as_slice(),
@@ -749,6 +744,11 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             }));
         }
         if let Some(function) = self.context.table_functions.get(&summary) {
+            if !matches!(self.context.step_now(), QueryBindStep::From) {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "`TableFunction` cannot bind in non-From step".to_string(),
+                ));
+            }
             return Ok(ScalarExpression::TableFunction(TableFunction {
                 args,
                 inner: ArcTableFunctionImpl(function.clone()),

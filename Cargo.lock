@@ -1337,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "kite_sql"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "ahash 0.8.12",
  "async-trait",
@@ -1389,7 +1389,7 @@ dependencies = [
 
 [[package]]
 name = "kite_sql_serde_macros"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -1535,6 +1535,7 @@ version = "0.4.0"
 dependencies = [
  "kite_sql",
  "lazy_static",
+ "rust_decimal",
  "serde",
  "sqlparser",
  "typetag",
@@ -2931,7 +2932,7 @@ dependencies = [
 
 [[package]]
 name = "tpcc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "clap",

@@ -12,12 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::rewrite_table_in_batches;
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, spawn_executor, Executor, WriteExecutor};
-use crate::planner::LogicalPlan;
+use crate::execution::{spawn_executor, Executor, WriteExecutor};
 use crate::storage::{StatisticsMetaCache, TableCache, ViewCache};
 use crate::types::index::{Index, IndexType};
-use crate::types::tuple::Tuple;
 use crate::types::tuple_builder::TupleBuilder;
 use crate::types::value::DataValue;
 use crate::{
@@ -27,18 +26,17 @@ use itertools::Itertools;
 
 pub struct AddColumn {
     op: AddColumnOperator,
-    input: LogicalPlan,
 }
 
-impl From<(AddColumnOperator, LogicalPlan)> for AddColumn {
-    fn from((op, input): (AddColumnOperator, LogicalPlan)) -> Self {
-        Self { op, input }
+impl From<AddColumnOperator> for AddColumn {
+    fn from(op: AddColumnOperator) -> Self {
+        Self { op }
     }
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for AddColumn {
     fn execute_mut(
-        mut self,
+        self,
         cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
         transaction: *mut T,
     ) -> Executor<'a> {
@@ -49,51 +47,41 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for AddColumn {
                 if_not_exists,
             } = &self.op;
 
-            let mut unique_values = column.desc().is_unique().then(Vec::new);
-            let mut tuples = Vec::new();
-            let schema = self.input.output_schema();
-            let mut types = Vec::with_capacity(schema.len() + 1);
-
-            for column_ref in schema.iter() {
-                types.push(column_ref.datatype().clone());
-            }
-            types.push(column.datatype().clone());
-
-            let mut coroutine = build_read(self.input, cache, transaction);
-
-            for tuple in coroutine.by_ref() {
-                let mut tuple: Tuple = throw!(co, tuple);
-
-                if let Some(value) = throw!(co, column.default_value()) {
-                    if let Some(unique_values) = &mut unique_values {
-                        unique_values.push((
-                            throw!(
-                                co,
-                                tuple.pk.clone().ok_or(DatabaseError::PrimaryKeyNotFound)
-                            ),
-                            value.clone(),
-                        ));
-                    }
-                    tuple.values.push(value);
-                } else {
-                    tuple.values.push(DataValue::Null);
-                }
-                tuples.push(tuple);
-            }
-            drop(coroutine);
-
-            let serializers = types.iter().map(|ty| ty.serializable()).collect_vec();
-            for tuple in tuples {
+            let table_catalog = throw!(
+                co,
                 throw!(
                     co,
-                    unsafe { &mut (*transaction) }.append_tuple(
-                        table_name,
-                        tuple,
-                        &serializers,
-                        true
-                    )
-                );
+                    unsafe { &mut (*transaction) }.table(cache.0, table_name.clone())
+                )
+                .cloned()
+                .ok_or(DatabaseError::TableNotFound)
+            );
+            if table_catalog.get_column_by_name(column.name()).is_some() {
+                if *if_not_exists {
+                    co.yield_(Ok(TupleBuilder::build_result("1".to_string())))
+                        .await;
+                    return;
+                }
+                co.yield_(Err(DatabaseError::DuplicateColumn(
+                    column.name().to_string(),
+                )))
+                .await;
+                return;
             }
+
+            let schema = table_catalog.schema_ref().clone();
+            let old_deserializers = schema
+                .iter()
+                .map(|column_ref| column_ref.datatype().serializable())
+                .collect_vec();
+            let serializers = schema
+                .iter()
+                .map(|column_ref| column_ref.datatype().serializable())
+                .chain(::std::iter::once(column.datatype().serializable()))
+                .collect_vec();
+            let pk_ty = table_catalog.primary_keys_type().clone();
+            let default_value = throw!(co, column.default_value());
+
             let col_id = throw!(
                 co,
                 unsafe { &mut (*transaction) }.add_column(
@@ -103,25 +91,49 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for AddColumn {
                     *if_not_exists
                 )
             );
-
-            // Unique Index
-            if let (Some(unique_values), Some(unique_meta)) = (
-                unique_values,
+            let unique_meta = if column.desc().is_unique() {
                 throw!(
                     co,
                     unsafe { &mut (*transaction) }.table(cache.0, table_name.clone())
                 )
                 .and_then(|table| table.get_unique_index(&col_id))
-                .cloned(),
-            ) {
-                for (tuple_id, value) in unique_values {
-                    let index = Index::new(unique_meta.id, &value, IndexType::Unique);
-                    throw!(
-                        co,
-                        unsafe { &mut (*transaction) }.add_index(table_name, index, &tuple_id)
-                    );
-                }
-            }
+                .cloned()
+            } else {
+                None
+            };
+            let default_for_index = default_value.clone();
+
+            throw!(
+                co,
+                rewrite_table_in_batches(
+                    unsafe { &mut (*transaction) },
+                    table_name,
+                    &pk_ty,
+                    &old_deserializers,
+                    schema.len(),
+                    schema.len(),
+                    &serializers,
+                    |mut tuple| {
+                        if let Some(value) = &default_value {
+                            tuple.values.push(value.clone());
+                        } else {
+                            tuple.values.push(DataValue::Null);
+                        }
+                        Ok(tuple)
+                    },
+                    |transaction, tuple| {
+                        if let (Some(unique_meta), Some(value), Some(tuple_id)) = (
+                            unique_meta.as_ref(),
+                            default_for_index.as_ref(),
+                            tuple.pk.as_ref(),
+                        ) {
+                            let index = Index::new(unique_meta.id, value, IndexType::Unique);
+                            transaction.add_index(table_name, index, tuple_id)?;
+                        }
+                        Ok(())
+                    },
+                )
+            );
 
             co.yield_(Ok(TupleBuilder::build_result("1".to_string())))
                 .await;

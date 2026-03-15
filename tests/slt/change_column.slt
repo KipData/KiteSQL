@@ -1,0 +1,119 @@
+statement ok
+create table alter_users (id int primary key, v1 int unique, v2 int)
+
+statement ok
+insert into alter_users values (1, 11, 101), (2, 22, 202)
+
+statement ok
+alter table alter_users rename column v1 to value1
+
+query I
+select value1 from alter_users order by id
+----
+11
+22
+
+statement error
+alter table alter_users alter column value1 type int
+
+statement error
+alter table alter_users alter column id type bigint
+
+statement ok
+alter table alter_users alter column v2 type bigint
+
+query TTTTI
+describe alter_users
+----
+id Integer 4 false PRIMARY null
+value1 Integer 4 true UNIQUE null
+v2 Bigint 8 true EMPTY null
+
+query I
+select v2 from alter_users order by id
+----
+101
+202
+
+statement ok
+alter table alter_users change column v2 value2 bigint
+
+query TTTTI
+describe alter_users
+----
+id Integer 4 false PRIMARY null
+value1 Integer 4 true UNIQUE null
+value2 Bigint 8 true EMPTY null
+
+statement ok
+alter table alter_users alter column value2 set default 999
+
+statement ok
+insert into alter_users (id, value1) values (3, 33)
+
+query I
+select value2 from alter_users where id = 3
+----
+999
+
+statement ok
+alter table alter_users alter column value2 drop default
+
+statement ok
+insert into alter_users (id, value1) values (4, 44)
+
+query T
+select value2 from alter_users where id = 4
+----
+null
+
+statement error
+alter table alter_users alter column value2 set not null
+
+statement ok
+update alter_users set value2 = 404 where id = 4
+
+statement ok
+alter table alter_users alter column value2 set not null
+
+query TTTTI
+describe alter_users
+----
+id Integer 4 false PRIMARY null
+value1 Integer 4 true UNIQUE null
+value2 Bigint 8 false EMPTY null
+
+statement error
+insert into alter_users (id, value1) values (5, 55)
+
+statement ok
+alter table alter_users alter column value2 drop not null
+
+statement ok
+insert into alter_users (id, value1) values (6, 66)
+
+query T
+select value2 from alter_users where id = 6
+----
+null
+
+statement ok
+alter table alter_users modify column value2 int
+
+query TTTTI
+describe alter_users
+----
+id Integer 4 false PRIMARY null
+value1 Integer 4 true UNIQUE null
+value2 Integer 4 true EMPTY null
+
+query I
+select value2 from alter_users where value2 is not null order by id
+----
+101
+202
+999
+404
+
+statement ok
+drop table alter_users

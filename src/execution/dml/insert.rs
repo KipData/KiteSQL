@@ -105,6 +105,9 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert {
             )
             .cloned()
             {
+                // Index values must be projected from the full table schema, because
+                // omitted input columns may be filled by defaults before index maintenance.
+                let table_schema = table_catalog.schema_ref();
                 let mut index_metas = Vec::new();
                 for index_meta in table_catalog.indexes() {
                     let mut exprs = throw!(co, index_meta.column_exprs(&table_catalog));
@@ -112,14 +115,8 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert {
                         co,
                         BindPosition::bind_exprs(
                             exprs.iter_mut(),
-                            || schema.iter().map(Cow::Borrowed),
-                            |a, b| {
-                                if is_mapping_by_name {
-                                    a.name == b.name
-                                } else {
-                                    a == b
-                                }
-                            }
+                            || table_schema.iter().map(Cow::Borrowed),
+                            |a, b| a == b
                         )
                     );
                     index_metas.push((index_meta, exprs));
@@ -162,7 +159,10 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert {
                     let tuple = Tuple::new(Some(pk), values);
 
                     for (index_meta, exprs) in index_metas.iter() {
-                        let values = throw!(co, Projection::projection(&tuple, exprs, &schema));
+                        let values = throw!(
+                            co,
+                            Projection::projection(&tuple, exprs, table_schema.as_slice())
+                        );
                         let Some(value) = DataValue::values_to_tuple(values) else {
                             continue;
                         };

@@ -20,7 +20,7 @@
 ///   c2: String,
 ///}
 ///
-///implement_from_tuple!(
+///from_tuple!(
 ///     MyStruct, (
 ///         c1: i32 => |inner: &mut MyStruct, value| {
 ///             if let DataValue::Int32(Some(val)) = value {
@@ -36,7 +36,7 @@
 /// );
 /// ```
 #[macro_export]
-macro_rules! implement_from_tuple {
+macro_rules! from_tuple {
     ($struct_name:ident, ($($field_name:ident : $field_type:ty => $closure:expr),+)) => {
         impl From<(&::kite_sql::types::tuple::SchemaRef, ::kite_sql::types::tuple::Tuple)> for $struct_name {
             fn from((schema, mut tuple): (&::kite_sql::types::tuple::SchemaRef, ::kite_sql::types::tuple::Tuple)) -> Self {

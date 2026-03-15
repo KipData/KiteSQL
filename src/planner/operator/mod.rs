@@ -42,8 +42,9 @@ pub mod values;
 
 use self::{
     aggregate::AggregateOperator, alter_table::add_column::AddColumnOperator,
-    filter::FilterOperator, join::JoinOperator, limit::LimitOperator, project::ProjectOperator,
-    sort::SortOperator, table_scan::TableScanOperator,
+    alter_table::change_column::ChangeColumnOperator, filter::FilterOperator, join::JoinOperator,
+    limit::LimitOperator, project::ProjectOperator, sort::SortOperator,
+    table_scan::TableScanOperator,
 };
 use crate::catalog::ColumnRef;
 use crate::expression::ScalarExpression;
@@ -102,6 +103,7 @@ pub enum Operator {
     Analyze(AnalyzeOperator),
     // DDL
     AddColumn(AddColumnOperator),
+    ChangeColumn(ChangeColumnOperator),
     DropColumn(DropColumnOperator),
     CreateTable(CreateTableOperator),
     CreateIndex(CreateIndexOperator),
@@ -165,6 +167,7 @@ pub enum PlanImpl {
     Update,
     Delete,
     AddColumn,
+    ChangeColumn,
     DropColumn,
     CreateTable,
     DropTable,
@@ -227,6 +230,7 @@ impl Operator {
             | Operator::Delete(_)
             | Operator::Analyze(_)
             | Operator::AddColumn(_)
+            | Operator::ChangeColumn(_)
             | Operator::DropColumn(_)
             | Operator::CreateTable(_)
             | Operator::CreateIndex(_)
@@ -312,6 +316,7 @@ impl Operator {
             | Operator::Insert(_)
             | Operator::Update(_)
             | Operator::AddColumn(_)
+            | Operator::ChangeColumn(_)
             | Operator::DropColumn(_)
             | Operator::CreateTable(_)
             | Operator::CreateIndex(_)
@@ -349,6 +354,7 @@ impl fmt::Display for Operator {
             Operator::Delete(op) => write!(f, "{op}"),
             Operator::Analyze(op) => write!(f, "{op}"),
             Operator::AddColumn(op) => write!(f, "{op}"),
+            Operator::ChangeColumn(op) => write!(f, "{op}"),
             Operator::DropColumn(op) => write!(f, "{op}"),
             Operator::CreateTable(op) => write!(f, "{op}"),
             Operator::CreateIndex(op) => write!(f, "{op}"),
@@ -416,6 +422,7 @@ impl fmt::Display for PlanImpl {
             PlanImpl::Update => write!(f, "Update"),
             PlanImpl::Delete => write!(f, "Delete"),
             PlanImpl::AddColumn => write!(f, "AddColumn"),
+            PlanImpl::ChangeColumn => write!(f, "ChangeColumn"),
             PlanImpl::DropColumn => write!(f, "DropColumn"),
             PlanImpl::CreateTable => write!(f, "CreateTable"),
             PlanImpl::DropTable => write!(f, "DropTable"),
