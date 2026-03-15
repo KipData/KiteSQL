@@ -58,7 +58,7 @@ impl<S: Storage> Database<S> {
     /// }
     ///
     /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
-    /// database.run("create table users (id int primary key, name varchar)").unwrap().done().unwrap();
+    /// database.create_table::<User>().unwrap();
     /// database.insert(&User { id: 1, name: "Alice".to_string() }).unwrap();
     /// database.delete_by_id::<User>(&1).unwrap();
     /// assert!(database.get::<User>(&1).unwrap().is_none());

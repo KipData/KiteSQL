@@ -21,7 +21,7 @@ impl<S: Storage> Database<S> {
     /// }
     ///
     /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
-    /// database.run("create table users (id int primary key, name varchar)").unwrap().done().unwrap();
+    /// database.create_table::<User>().unwrap();
     /// database.insert(&User { id: 1, name: "Alice".to_string() }).unwrap();
     /// let user = database.get::<User>(&1).unwrap().unwrap();
     /// assert_eq!(user.name, "Alice");
@@ -47,7 +47,7 @@ impl<S: Storage> Database<S> {
     /// }
     ///
     /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
-    /// database.run("create table users (id int primary key, name varchar)").unwrap().done().unwrap();
+    /// database.create_table::<User>().unwrap();
     /// database.insert(&User { id: 1, name: "Alice".to_string() }).unwrap();
     ///
     /// let users = database.fetch::<User>().unwrap().collect::<Result<Vec<_>, _>>().unwrap();
