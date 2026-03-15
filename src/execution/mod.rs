@@ -249,18 +249,9 @@ pub fn build_write<'a, T: Transaction + 'a>(
 
             Delete::from((op, input)).execute_mut(cache, transaction)
         }
-        Operator::AddColumn(op) => {
-            let input = childrens.pop_only();
-            AddColumn::from((op, input)).execute_mut(cache, transaction)
-        }
-        Operator::ChangeColumn(op) => {
-            let input = childrens.pop_only();
-            ChangeColumn::from((op, input)).execute_mut(cache, transaction)
-        }
-        Operator::DropColumn(op) => {
-            let input = childrens.pop_only();
-            DropColumn::from((op, input)).execute_mut(cache, transaction)
-        }
+        Operator::AddColumn(op) => AddColumn::from(op).execute_mut(cache, transaction),
+        Operator::ChangeColumn(op) => ChangeColumn::from(op).execute_mut(cache, transaction),
+        Operator::DropColumn(op) => DropColumn::from(op).execute_mut(cache, transaction),
         Operator::CreateTable(op) => CreateTable::from(op).execute_mut(cache, transaction),
         Operator::CreateIndex(op) => {
             let input = childrens.pop_only();

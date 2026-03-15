@@ -13,23 +13,21 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, spawn_executor, Executor, WriteExecutor};
+use super::{rewrite_table_in_batches, visit_table_in_batches};
+use crate::execution::{spawn_executor, Executor, WriteExecutor};
 use crate::planner::operator::alter_table::change_column::{ChangeColumnOperator, NotNullChange};
-use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::throw;
-use crate::types::tuple::Tuple;
 use crate::types::tuple_builder::TupleBuilder;
 use itertools::Itertools;
 
 pub struct ChangeColumn {
     op: ChangeColumnOperator,
-    input: LogicalPlan,
 }
 
-impl From<(ChangeColumnOperator, LogicalPlan)> for ChangeColumn {
-    fn from((op, input): (ChangeColumnOperator, LogicalPlan)) -> Self {
-        Self { op, input }
+impl From<ChangeColumnOperator> for ChangeColumn {
+    fn from(op: ChangeColumnOperator) -> Self {
+        Self { op }
     }
 }
 
@@ -92,28 +90,73 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for ChangeColumn {
                 }
             }
 
-            let mut tuples = Vec::new();
-            if needs_data_rewrite || needs_not_null_validation {
-                let mut coroutine = build_read(self.input, cache, transaction);
+            let old_deserializers = schema
+                .iter()
+                .map(|column| column.datatype().serializable())
+                .collect_vec();
+            let pk_ty = table_catalog.primary_keys_type().clone();
 
-                for tuple in coroutine.by_ref() {
-                    let mut tuple: Tuple = throw!(co, tuple);
-                    if needs_data_rewrite {
-                        tuple.values[column_index] =
-                            throw!(co, tuple.values[column_index].clone().cast(&data_type));
-                    }
-                    if needs_not_null_validation && tuple.values[column_index].is_null() {
-                        co.yield_(Err(DatabaseError::not_null_column(new_column_name.clone())))
-                            .await;
-                        return;
-                    }
-                    if needs_data_rewrite {
-                        tuples.push(tuple);
-                    }
-                }
+            if needs_data_rewrite {
+                let serializers = schema
+                    .iter()
+                    .enumerate()
+                    .map(|(index, column)| {
+                        if index == column_index {
+                            data_type.serializable()
+                        } else {
+                            column.datatype().serializable()
+                        }
+                    })
+                    .collect_vec();
+                let target_column_name = new_column_name.clone();
+                let target_data_type = data_type.clone();
+                throw!(
+                    co,
+                    rewrite_table_in_batches(
+                        unsafe { &mut (*transaction) },
+                        &table_name,
+                        &pk_ty,
+                        &old_deserializers,
+                        schema.len(),
+                        schema.len(),
+                        &serializers,
+                        |mut tuple| {
+                            tuple.values[column_index] =
+                                tuple.values[column_index].clone().cast(&target_data_type)?;
+                            if needs_not_null_validation && tuple.values[column_index].is_null() {
+                                return Err(DatabaseError::not_null_column(
+                                    target_column_name.clone(),
+                                ));
+                            }
+                            Ok(tuple)
+                        },
+                        |_, _| Ok(()),
+                    )
+                );
+            } else if needs_not_null_validation {
+                let target_column_name = new_column_name.clone();
+                throw!(
+                    co,
+                    visit_table_in_batches(
+                        unsafe { &*transaction },
+                        &table_name,
+                        &pk_ty,
+                        &old_deserializers,
+                        schema.len(),
+                        schema.len(),
+                        |tuple| {
+                            if tuple.values[column_index].is_null() {
+                                return Err(DatabaseError::not_null_column(
+                                    target_column_name.clone(),
+                                ));
+                            }
+                            Ok(())
+                        },
+                    )
+                );
             }
 
-            let updated_table = throw!(
+            throw!(
                 co,
                 unsafe { &mut (*transaction) }.change_column(
                     cache.0,
@@ -125,24 +168,6 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for ChangeColumn {
                     &not_null_change,
                 )
             );
-
-            if needs_data_rewrite {
-                let serializers = updated_table
-                    .columns()
-                    .map(|column| column.datatype().serializable())
-                    .collect_vec();
-                for tuple in tuples {
-                    throw!(
-                        co,
-                        unsafe { &mut (*transaction) }.append_tuple(
-                            &table_name,
-                            tuple,
-                            &serializers,
-                            true,
-                        )
-                    );
-                }
-            }
 
             co.yield_(Ok(TupleBuilder::build_result(format!("{table_name}"))))
                 .await;

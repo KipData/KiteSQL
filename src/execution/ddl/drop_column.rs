@@ -13,29 +13,27 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, spawn_executor, Executor, WriteExecutor};
+use super::rewrite_table_in_batches;
+use crate::execution::{spawn_executor, Executor, WriteExecutor};
 use crate::planner::operator::alter_table::drop_column::DropColumnOperator;
-use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::throw;
-use crate::types::tuple::Tuple;
 use crate::types::tuple_builder::TupleBuilder;
 use itertools::Itertools;
 
 pub struct DropColumn {
     op: DropColumnOperator,
-    input: LogicalPlan,
 }
 
-impl From<(DropColumnOperator, LogicalPlan)> for DropColumn {
-    fn from((op, input): (DropColumnOperator, LogicalPlan)) -> Self {
-        Self { op, input }
+impl From<DropColumnOperator> for DropColumn {
+    fn from(op: DropColumnOperator) -> Self {
+        Self { op }
     }
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropColumn {
     fn execute_mut(
-        mut self,
+        self,
         cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
         transaction: *mut T,
     ) -> Executor<'a> {
@@ -46,7 +44,16 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropColumn {
                 if_exists,
             } = self.op;
 
-            let tuple_columns = self.input.output_schema();
+            let table_catalog = throw!(
+                co,
+                throw!(
+                    co,
+                    unsafe { &mut (*transaction) }.table(cache.0, table_name.clone())
+                )
+                .cloned()
+                .ok_or(DatabaseError::TableNotFound)
+            );
+            let tuple_columns = table_catalog.schema_ref().clone();
             if let Some((column_index, is_primary)) = tuple_columns
                 .iter()
                 .enumerate()
@@ -61,36 +68,34 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropColumn {
                         ))
                     );
                 }
-                let mut tuples = Vec::new();
-                let mut types = Vec::with_capacity(tuple_columns.len() - 1);
-
-                for (i, column_ref) in tuple_columns.iter().enumerate() {
-                    if i == column_index {
-                        continue;
-                    }
-                    types.push(column_ref.datatype().clone());
-                }
-                let mut coroutine = build_read(self.input, cache, transaction);
-
-                for tuple in coroutine.by_ref() {
-                    let mut tuple: Tuple = throw!(co, tuple);
-                    let _ = tuple.values.remove(column_index);
-
-                    tuples.push(tuple);
-                }
-                drop(coroutine);
-                let serializers = types.iter().map(|ty| ty.serializable()).collect_vec();
-                for tuple in tuples {
-                    throw!(
-                        co,
-                        unsafe { &mut (*transaction) }.append_tuple(
-                            &table_name,
-                            tuple,
-                            &serializers,
-                            true
-                        )
-                    );
-                }
+                let old_deserializers = tuple_columns
+                    .iter()
+                    .map(|column| column.datatype().serializable())
+                    .collect_vec();
+                let serializers = tuple_columns
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != column_index)
+                    .map(|(_, column)| column.datatype().serializable())
+                    .collect_vec();
+                let pk_ty = table_catalog.primary_keys_type().clone();
+                throw!(
+                    co,
+                    rewrite_table_in_batches(
+                        unsafe { &mut (*transaction) },
+                        &table_name,
+                        &pk_ty,
+                        &old_deserializers,
+                        tuple_columns.len(),
+                        tuple_columns.len(),
+                        &serializers,
+                        |mut tuple| {
+                            let _ = tuple.values.remove(column_index);
+                            Ok(tuple)
+                        },
+                        |_, _| Ok(()),
+                    )
+                );
                 throw!(
                     co,
                     unsafe { &mut (*transaction) }.drop_column(

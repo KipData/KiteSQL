@@ -25,7 +25,6 @@ use crate::planner::operator::alter_table::change_column::{
     ChangeColumnOperator, DefaultChange, NotNullChange,
 };
 use crate::planner::operator::alter_table::drop_column::DropColumnOperator;
-use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
@@ -72,7 +71,6 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 column_def,
                 ..
             } => {
-                let plan = TableScanOperator::build(table_name.clone(), table, true)?;
                 let column = self.bind_column(column_def, None)?;
 
                 if !is_valid_identifier(column.name()) {
@@ -87,7 +85,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         if_not_exists: *if_not_exists,
                         column,
                     }),
-                    Childrens::Only(Box::new(plan)),
+                    Childrens::None,
                 )
             }
             AlterTableOperation::DropColumn {
@@ -95,7 +93,6 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 if_exists,
                 ..
             } => {
-                let plan = TableScanOperator::build(table_name.clone(), table, true)?;
                 if column_names.len() != 1 {
                     return Err(DatabaseError::UnsupportedStmt(
                         "only dropping a single column is supported".to_string(),
@@ -109,7 +106,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         if_exists: *if_exists,
                         column_name,
                     }),
-                    Childrens::Only(Box::new(plan)),
+                    Childrens::None,
                 )
             }
             AlterTableOperation::RenameColumn {
@@ -121,7 +118,6 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 let old_column = table
                     .get_column_by_name(&old_column_name)
                     .ok_or_else(|| DatabaseError::column_not_found(old_column_name.clone()))?;
-                let plan = TableScanOperator::build(table_name.clone(), table, true)?;
 
                 if !is_valid_identifier(&new_column_name) {
                     return Err(DatabaseError::invalid_column(
@@ -138,7 +134,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         default_change: DefaultChange::NoChange,
                         not_null_change: NotNullChange::NoChange,
                     }),
-                    Childrens::Only(Box::new(plan)),
+                    Childrens::None,
                 )
             }
             AlterTableOperation::AlterColumn { column_name, op } => {
@@ -147,7 +143,6 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                     .get_column_by_name(&old_column_name)
                     .ok_or_else(|| DatabaseError::column_not_found(old_column_name.clone()))?;
                 let old_data_type = old_column.datatype().clone();
-                let plan = TableScanOperator::build(table_name.clone(), table, true)?;
 
                 let (data_type, default_change, not_null_change) = match op {
                     AlterColumnOperation::SetDataType {
@@ -200,7 +195,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         default_change,
                         not_null_change,
                     }),
-                    Childrens::Only(Box::new(plan)),
+                    Childrens::None,
                 )
             }
             AlterTableOperation::ModifyColumn {
@@ -218,7 +213,6 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 let _ = table
                     .get_column_by_name(&old_column_name)
                     .ok_or_else(|| DatabaseError::column_not_found(old_column_name.clone()))?;
-                let plan = TableScanOperator::build(table_name.clone(), table, true)?;
 
                 LogicalPlan::new(
                     Operator::ChangeColumn(ChangeColumnOperator {
@@ -229,7 +223,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         default_change: DefaultChange::NoChange,
                         not_null_change: NotNullChange::NoChange,
                     }),
-                    Childrens::Only(Box::new(plan)),
+                    Childrens::None,
                 )
             }
             AlterTableOperation::ChangeColumn {
@@ -250,7 +244,6 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 let _ = table
                     .get_column_by_name(&old_column_name)
                     .ok_or_else(|| DatabaseError::column_not_found(old_column_name.clone()))?;
-                let plan = TableScanOperator::build(table_name.clone(), table, true)?;
 
                 if !is_valid_identifier(&new_column_name) {
                     return Err(DatabaseError::invalid_column(
@@ -267,7 +260,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         default_change: DefaultChange::NoChange,
                         not_null_change: NotNullChange::NoChange,
                     }),
-                    Childrens::Only(Box::new(plan)),
+                    Childrens::None,
                 )
             }
             op => {

@@ -478,7 +478,6 @@ pub struct Database<S: Storage> {
 }
 
 impl<S: Storage> Database<S> {
-    /// Run SQL queries.
     /// Runs one or more SQL statements and returns an iterator for the final result set.
     ///
     /// Earlier statements in the same SQL string are executed eagerly. The last
