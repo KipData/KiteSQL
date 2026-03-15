@@ -17,7 +17,9 @@ use super::{
     StatementSpec,
 };
 use crate::TpccError;
-use kite_sql::db::{prepare, DBTransaction, DataBaseBuilder, Database, ResultIter, TransactionIter};
+use kite_sql::db::{
+    prepare, DBTransaction, DataBaseBuilder, Database, ResultIter, TransactionIter,
+};
 use kite_sql::storage::rocksdb::RocksStorage;
 use kite_sql::types::tuple::Tuple;
 

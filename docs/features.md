@@ -31,11 +31,12 @@ Supported field attributes:
 Supported CRUD helpers:
 
 - `database.insert(&model)?`
-- `database.get::<User, _>(&id)?`
+- `database.get::<User>(&id)?`
 - `database.list::<User>()?`
 - `database.update(&model)?`
-- `database.delete(&model)?`
-- `database.delete_by_id::<User, _>(&id)?`
+- `database.delete_by_id::<User>(&id)?`
+
+`Model` exposes the primary-key type as an associated type, so lookup and delete-by-id APIs infer the key type directly from the model.
 
 Query results can still be converted directly into an ORM iterator:
 

@@ -12,29 +12,55 @@ use sqlparser::ast::CharLengthUnits;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Static metadata about a single model field.
+///
+/// This type is primarily consumed by code generated from `#[derive(Model)]`.
 pub struct OrmField {
     pub column: &'static str,
     pub placeholder: &'static str,
     pub primary_key: bool,
 }
 
+/// Trait implemented by ORM models.
+///
+/// In normal usage you should derive this trait with `#[derive(Model)]` rather
+/// than implementing it by hand. The derive macro generates tuple mapping,
+/// cached statements and CRUD metadata for the model.
 pub trait Model: Sized + for<'a> From<(&'a SchemaRef, Tuple)> {
+    /// Rust type used as the model primary key.
+    ///
+    /// This associated type lets APIs such as
+    /// [`Database::get`](crate::orm::Database::get) and
+    /// [`Database::delete_by_id`](crate::orm::Database::delete_by_id)
+    /// infer the key type directly from the model, so callers only need to
+    /// write `database.get::<User>(&id)`.
+    type PrimaryKey: ToDataValue;
+
+    /// Returns the backing table name for the model.
     fn table_name() -> &'static str;
 
+    /// Returns metadata for every persisted field on the model.
     fn fields() -> &'static [OrmField];
 
+    /// Converts the model into named query parameters.
     fn params(&self) -> Vec<(&'static str, DataValue)>;
 
-    fn primary_key_value(&self) -> DataValue;
+    /// Returns a reference to the current primary-key value.
+    fn primary_key(&self) -> &Self::PrimaryKey;
 
+    /// Returns the cached `SELECT` statement used by [`Database::list`](crate::orm::Database::list).
     fn select_statement() -> &'static Statement;
 
+    /// Returns the cached `INSERT` statement for the model.
     fn insert_statement() -> &'static Statement;
 
+    /// Returns the cached `UPDATE` statement for the model.
     fn update_statement() -> &'static Statement;
 
+    /// Returns the cached `DELETE` statement for the model.
     fn delete_statement() -> &'static Statement;
 
+    /// Returns the cached `SELECT .. WHERE primary_key = ...` statement.
     fn find_statement() -> &'static Statement;
 
     fn primary_key_field() -> &'static OrmField {
@@ -45,16 +71,28 @@ pub trait Model: Sized + for<'a> From<(&'a SchemaRef, Tuple)> {
     }
 }
 
+/// Conversion trait from [`DataValue`] into Rust values for ORM mapping.
+///
+/// This trait is mainly intended for framework internals and derive-generated
+/// code.
 pub trait FromDataValue: Sized {
     fn logical_type() -> Option<LogicalType>;
 
     fn from_data_value(value: DataValue) -> Option<Self>;
 }
 
+/// Conversion trait from Rust values into [`DataValue`] for ORM parameters.
+///
+/// This trait is mainly intended for framework internals and derive-generated
+/// code.
 pub trait ToDataValue {
     fn to_data_value(&self) -> DataValue;
 }
 
+/// Extracts and converts a named field from a tuple using the given schema.
+///
+/// This helper is used by code generated from `#[derive(Model)]` and by the
+/// lower-level `from_tuple!` macro.
 pub fn try_get<T: FromDataValue>(
     tuple: &mut Tuple,
     schema: &SchemaRef,
@@ -218,32 +256,119 @@ where
 }
 
 impl<S: Storage> Database<S> {
+    /// Inserts a model into its backing table.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use kite_sql::db::DataBaseBuilder;
+    /// use kite_sql::Model;
+    ///
+    /// #[derive(Default, Debug, PartialEq, Model)]
+    /// #[model(table = "users")]
+    /// struct User {
+    ///     #[model(primary_key)]
+    ///     id: i32,
+    ///     name: String,
+    /// }
+    ///
+    /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
+    /// database.run("create table users (id int primary key, name varchar)").unwrap().done().unwrap();
+    /// database.insert(&User { id: 1, name: "Alice".to_string() }).unwrap();
+    /// ```
     pub fn insert<M: Model>(&self, model: &M) -> Result<(), DatabaseError> {
         self.execute(M::insert_statement(), model.params())?.done()
     }
 
+    /// Updates a model in its backing table using the primary key.
     pub fn update<M: Model>(&self, model: &M) -> Result<(), DatabaseError> {
         self.execute(M::update_statement(), model.params())?.done()
     }
 
-    pub fn delete<M: Model>(&self, model: &M) -> Result<(), DatabaseError> {
-        let params = vec![(
-            M::primary_key_field().placeholder,
-            model.primary_key_value(),
-        )];
+    /// Deletes a model from its backing table by primary key.
+    ///
+    /// The primary-key type is inferred from `M`, so callers do not need a
+    /// separate generic argument for the key type.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use kite_sql::db::DataBaseBuilder;
+    /// use kite_sql::Model;
+    ///
+    /// #[derive(Default, Debug, PartialEq, Model)]
+    /// #[model(table = "users")]
+    /// struct User {
+    ///     #[model(primary_key)]
+    ///     id: i32,
+    ///     name: String,
+    /// }
+    ///
+    /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
+    /// database.run("create table users (id int primary key, name varchar)").unwrap().done().unwrap();
+    /// database.insert(&User { id: 1, name: "Alice".to_string() }).unwrap();
+    /// database.delete_by_id::<User>(&1).unwrap();
+    /// assert!(database.get::<User>(&1).unwrap().is_none());
+    /// ```
+    pub fn delete_by_id<M: Model>(&self, key: &M::PrimaryKey) -> Result<(), DatabaseError> {
+        let params = &[(M::primary_key_field().placeholder, key.to_data_value())];
         self.execute(M::delete_statement(), params)?.done()
     }
 
-    pub fn delete_by_id<M: Model, K: ToDataValue>(&self, key: &K) -> Result<(), DatabaseError> {
-        let params = vec![(M::primary_key_field().placeholder, key.to_data_value())];
-        self.execute(M::delete_statement(), params)?.done()
-    }
-
-    pub fn get<M: Model, K: ToDataValue>(&self, key: &K) -> Result<Option<M>, DatabaseError> {
-        let params = vec![(M::primary_key_field().placeholder, key.to_data_value())];
+    /// Loads a single model by primary key.
+    ///
+    /// The key type is taken from `M::PrimaryKey`, so `database.get::<User>(&1)`
+    /// works without an extra generic parameter.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use kite_sql::db::DataBaseBuilder;
+    /// use kite_sql::Model;
+    ///
+    /// #[derive(Default, Debug, PartialEq, Model)]
+    /// #[model(table = "users")]
+    /// struct User {
+    ///     #[model(primary_key)]
+    ///     id: i32,
+    ///     name: String,
+    /// }
+    ///
+    /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
+    /// database.run("create table users (id int primary key, name varchar)").unwrap().done().unwrap();
+    /// database.insert(&User { id: 1, name: "Alice".to_string() }).unwrap();
+    /// let user = database.get::<User>(&1).unwrap().unwrap();
+    /// assert_eq!(user.name, "Alice");
+    /// ```
+    pub fn get<M: Model>(&self, key: &M::PrimaryKey) -> Result<Option<M>, DatabaseError> {
+        let params = &[(M::primary_key_field().placeholder, key.to_data_value())];
         extract_optional_model(self.execute(M::find_statement(), params)?)
     }
 
+    /// Lists all rows from the model table as a typed iterator.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use kite_sql::db::DataBaseBuilder;
+    /// use kite_sql::Model;
+    ///
+    /// #[derive(Default, Debug, PartialEq, Model)]
+    /// #[model(table = "users")]
+    /// struct User {
+    ///     #[model(primary_key)]
+    ///     id: i32,
+    ///     name: String,
+    /// }
+    ///
+    /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
+    /// database.run("create table users (id int primary key, name varchar)").unwrap().done().unwrap();
+    /// database.insert(&User { id: 1, name: "Alice".to_string() }).unwrap();
+    ///
+    /// let users = database.list::<User>().unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    /// assert_eq!(users.len(), 1);
+    /// assert_eq!(users[0].name, "Alice");
+    /// ```
     pub fn list<M: Model>(&self) -> Result<OrmIter<DatabaseIter<'_, S>, M>, DatabaseError> {
         Ok(self
             .execute(
@@ -255,32 +380,29 @@ impl<S: Storage> Database<S> {
 }
 
 impl<'a, S: Storage> DBTransaction<'a, S> {
+    /// Inserts a model inside the current transaction.
     pub fn insert<M: Model>(&mut self, model: &M) -> Result<(), DatabaseError> {
         self.execute(M::insert_statement(), model.params())?.done()
     }
 
+    /// Updates a model inside the current transaction.
     pub fn update<M: Model>(&mut self, model: &M) -> Result<(), DatabaseError> {
         self.execute(M::update_statement(), model.params())?.done()
     }
 
-    pub fn delete<M: Model>(&mut self, model: &M) -> Result<(), DatabaseError> {
-        let params = vec![(
-            M::primary_key_field().placeholder,
-            model.primary_key_value(),
-        )];
+    /// Deletes a model by primary key inside the current transaction.
+    pub fn delete_by_id<M: Model>(&mut self, key: &M::PrimaryKey) -> Result<(), DatabaseError> {
+        let params = &[(M::primary_key_field().placeholder, key.to_data_value())];
         self.execute(M::delete_statement(), params)?.done()
     }
 
-    pub fn delete_by_id<M: Model, K: ToDataValue>(&mut self, key: &K) -> Result<(), DatabaseError> {
-        let params = vec![(M::primary_key_field().placeholder, key.to_data_value())];
-        self.execute(M::delete_statement(), params)?.done()
-    }
-
-    pub fn get<M: Model, K: ToDataValue>(&mut self, key: &K) -> Result<Option<M>, DatabaseError> {
-        let params = vec![(M::primary_key_field().placeholder, key.to_data_value())];
+    /// Loads a single model by primary key inside the current transaction.
+    pub fn get<M: Model>(&mut self, key: &M::PrimaryKey) -> Result<Option<M>, DatabaseError> {
+        let params = &[(M::primary_key_field().placeholder, key.to_data_value())];
         extract_optional_model(self.execute(M::find_statement(), params)?)
     }
 
+    /// Lists all rows for a model inside the current transaction.
     pub fn list<M: Model>(&mut self) -> Result<OrmIter<TransactionIter<'_>, M>, DatabaseError> {
         Ok(self
             .execute(

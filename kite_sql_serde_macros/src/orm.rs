@@ -50,6 +50,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
     let mut column_names = Vec::new();
     let mut placeholder_names = Vec::new();
     let mut update_assignments = Vec::new();
+    let mut primary_key_type = None;
     let mut primary_key_value = None;
     let mut primary_key_column = None;
     let mut primary_key_placeholder = None;
@@ -84,8 +85,9 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             primary_key_count += 1;
             primary_key_column = Some(column_name.clone());
             primary_key_placeholder = Some(placeholder_name.clone());
+            primary_key_type = Some(quote! { #field_ty });
             primary_key_value = Some(quote! {
-                ::kite_sql::orm::ToDataValue::to_data_value(&self.#field_name)
+                &self.#field_name
             });
         } else {
             update_assignments.push(format!("{column_name} = {placeholder_name}"));
@@ -124,6 +126,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         ));
     }
 
+    let primary_key_type = primary_key_type.expect("primary key checked above");
     let primary_key_value = primary_key_value.expect("primary key checked above");
     let primary_key_column = primary_key_column.expect("primary key checked above");
     let primary_key_placeholder = primary_key_placeholder.expect("primary key checked above");
@@ -186,6 +189,8 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         impl #impl_generics ::kite_sql::orm::Model for #struct_name #ty_generics
             #where_clause
         {
+            type PrimaryKey = #primary_key_type;
+
             fn table_name() -> &'static str {
                 #table_name_lit
             }
@@ -202,7 +207,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                 ]
             }
 
-            fn primary_key_value(&self) -> ::kite_sql::types::value::DataValue {
+            fn primary_key(&self) -> &Self::PrimaryKey {
                 #primary_key_value
             }
 

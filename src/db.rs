@@ -52,13 +52,45 @@ use std::sync::Arc;
 pub(crate) type ScalaFunctions = HashMap<FunctionSummary, Arc<dyn ScalarFunctionImpl>>;
 pub(crate) type TableFunctions = HashMap<FunctionSummary, Arc<dyn TableFunctionImpl>>;
 
+/// Parsed SQL statement type used by KiteSQL execution APIs.
+///
+/// This is a type alias for `sqlparser::ast::Statement`. In most cases you do
+/// not need to construct it manually; use [`prepare`] or [`prepare_all`] to
+/// parse SQL text into statements.
 pub type Statement = sqlparser::ast::Statement;
 
+/// Parses a single SQL statement into a reusable [`Statement`].
+///
+/// This is useful when you want to parse once and execute the same statement
+/// multiple times with different parameters. If the input contains multiple
+/// statements, only the last one is returned.
+///
+/// # Examples
+///
+/// ```rust
+/// use kite_sql::db::prepare;
+///
+/// let statement = prepare("select * from users where id = $1").unwrap();
+/// println!("{statement:?}");
+/// ```
 pub fn prepare<T: AsRef<str>>(sql: T) -> Result<Statement, DatabaseError> {
     let mut stmts = prepare_all(sql)?;
     stmts.pop().ok_or(DatabaseError::EmptyStatement)
 }
 
+/// Parses one or more SQL statements into a vector of [`Statement`] values.
+///
+/// Returns [`DatabaseError::EmptyStatement`] when the input is empty or only
+/// contains whitespace.
+///
+/// # Examples
+///
+/// ```rust
+/// use kite_sql::db::prepare_all;
+///
+/// let statements = prepare_all("select 1; select 2;").unwrap();
+/// assert_eq!(statements.len(), 2);
+/// ```
 pub fn prepare_all<T: AsRef<str>>(sql: T) -> Result<Vec<Statement>, DatabaseError> {
     let stmts = parse_sql(sql)?;
     if stmts.is_empty() {
@@ -73,6 +105,10 @@ pub(crate) enum MetaDataLock {
     Write(ArcRwLockWriteGuard<RawRwLock, ()>),
 }
 
+/// Builder for creating a [`Database`] instance.
+///
+/// The builder wires together storage, built-in functions and optional runtime
+/// features before the database is opened.
 pub struct DataBaseBuilder {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     path: PathBuf,
@@ -84,6 +120,10 @@ pub struct DataBaseBuilder {
 }
 
 impl DataBaseBuilder {
+    /// Creates a builder rooted at the given database path.
+    ///
+    /// Built-in scalar functions and table functions are registered
+    /// automatically.
     pub fn path(path: impl Into<PathBuf> + Send) -> Self {
         let mut builder = DataBaseBuilder {
             path: path.into(),
@@ -105,11 +145,13 @@ impl DataBaseBuilder {
         builder
     }
 
+    /// Sets the default histogram bucket count used by `ANALYZE`.
     pub fn histogram_buckets(mut self, buckets: usize) -> Self {
         self.histogram_buckets = Some(buckets);
         self
     }
 
+    /// Registers a user-defined scalar function on the database builder.
     pub fn register_scala_function(mut self, function: Arc<dyn ScalarFunctionImpl>) -> Self {
         let summary = function.summary().clone();
 
@@ -117,6 +159,7 @@ impl DataBaseBuilder {
         self
     }
 
+    /// Registers a user-defined table function on the database builder.
     pub fn register_table_function(mut self, function: Arc<dyn TableFunctionImpl>) -> Self {
         let summary = function.summary().clone();
 
@@ -124,12 +167,14 @@ impl DataBaseBuilder {
         self
     }
 
+    /// Enables or disables RocksDB statistics collection.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn storage_statistics(mut self, enable: bool) -> Self {
         self.storage_config.enable_statistics = enable;
         self
     }
 
+    /// Builds a database using a custom storage implementation.
     pub fn build_with_storage<T: Storage>(self, storage: T) -> Result<Database<T>, DatabaseError> {
         Self::_build::<T>(
             storage,
@@ -139,6 +184,7 @@ impl DataBaseBuilder {
         )
     }
 
+    /// Builds a database for the current target platform.
     #[cfg(target_arch = "wasm32")]
     pub fn build(self) -> Result<Database<MemoryStorage>, DatabaseError> {
         let storage = MemoryStorage::new();
@@ -151,6 +197,7 @@ impl DataBaseBuilder {
         )
     }
 
+    /// Builds a RocksDB-backed database.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn build(self) -> Result<Database<RocksStorage>, DatabaseError> {
         let storage = RocksStorage::with_config(self.path, self.storage_config)?;
@@ -163,6 +210,9 @@ impl DataBaseBuilder {
         )
     }
 
+    /// Builds an in-memory database.
+    ///
+    /// This is convenient for tests, examples and temporary workloads.
     pub fn build_in_memory(self) -> Result<Database<MemoryStorage>, DatabaseError> {
         let storage = MemoryStorage::new();
 
@@ -174,6 +224,8 @@ impl DataBaseBuilder {
         )
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Builds a RocksDB-backed database that uses optimistic transactions.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn build_optimistic(self) -> Result<Database<OptimisticRocksStorage>, DatabaseError> {
         let storage = OptimisticRocksStorage::with_config(self.path, self.storage_config)?;
@@ -417,6 +469,7 @@ impl<S: Storage> State<S> {
     }
 }
 
+/// Main database handle for executing SQL and creating transactions.
 pub struct Database<S: Storage> {
     pub(crate) storage: S,
     mdl: Arc<RwLock<()>>,
@@ -425,6 +478,22 @@ pub struct Database<S: Storage> {
 
 impl<S: Storage> Database<S> {
     /// Run SQL queries.
+    /// Runs one or more SQL statements and returns an iterator for the final result set.
+    ///
+    /// Earlier statements in the same SQL string are executed eagerly. The last
+    /// statement is exposed as a streaming iterator.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use kite_sql::db::{DataBaseBuilder, ResultIter};
+    ///
+    /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
+    /// database.run("create table t (id int primary key)").unwrap().done().unwrap();
+    /// let mut iter = database.run("select * from t").unwrap();
+    /// let _schema = iter.schema().clone();
+    /// iter.done().unwrap();
+    /// ```
     pub fn run<T: AsRef<str>>(&self, sql: T) -> Result<DatabaseIter<'_, S>, DatabaseError> {
         let sql = sql.as_ref();
         let statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
@@ -483,6 +552,7 @@ impl<S: Storage> Database<S> {
         Err(DatabaseError::EmptyStatement.with_sql_context(sql))
     }
 
+    /// Executes a prepared [`Statement`] inside the current transaction.
     pub fn execute<A: AsRef<[(&'static str, DataValue)]>>(
         &self,
         statement: &Statement,
@@ -513,6 +583,10 @@ impl<S: Storage> Database<S> {
         })
     }
 
+    /// Opens a new explicit transaction.
+    ///
+    /// Statements executed through the returned transaction share the same
+    /// transactional context until [`DBTransaction::commit`] is called.
     pub fn new_transaction(&self) -> Result<DBTransaction<'_, S>, DatabaseError> {
         let guard = self.mdl.read_arc();
         let transaction = self.storage.transaction()?;
@@ -525,16 +599,32 @@ impl<S: Storage> Database<S> {
         })
     }
 
+    /// Returns storage-engine-specific metrics when supported.
+    ///
+    /// To enable metrics collection when the underlying storage supports it,
+    /// configure the database with [`DataBaseBuilder::storage_statistics(true)`](crate::db::DataBaseBuilder::storage_statistics)
+    /// during construction. If metrics collection is not enabled, this returns
+    /// `None`.
     #[inline]
     pub fn storage_metrics(&self) -> Option<S::Metrics> {
         self.storage.metrics()
     }
 }
 
+/// Common interface for result iterators returned by database execution APIs.
+///
+/// A result iterator streams [`Tuple`] values and exposes the output schema of
+/// the current statement.
 pub trait ResultIter: Iterator<Item = Result<Tuple, DatabaseError>> {
+    /// Returns the output schema for the current result set.
     fn schema(&self) -> &SchemaRef;
 
     #[cfg(feature = "orm")]
+    /// Converts this iterator into a typed ORM iterator.
+    ///
+    /// This is available when the `orm` feature is enabled and the target type
+    /// implements `From<(&SchemaRef, Tuple)>`, which is typically generated by
+    /// `#[derive(Model)]`.
     fn orm<T>(self) -> OrmIter<Self, T>
     where
         Self: Sized,
@@ -543,10 +633,12 @@ pub trait ResultIter: Iterator<Item = Result<Tuple, DatabaseError>> {
         OrmIter::new(self)
     }
 
+    /// Finishes consuming the iterator and flushes any remaining work.
     fn done(self) -> Result<(), DatabaseError>;
 }
 
 #[cfg(feature = "orm")]
+/// Typed adapter over a [`ResultIter`] that yields ORM models instead of raw tuples.
 pub struct OrmIter<I, T> {
     inner: I,
     schema: SchemaRef,
@@ -569,10 +661,12 @@ where
         }
     }
 
+    /// Returns the schema of the underlying result set.
     pub fn schema(&self) -> &SchemaRef {
         &self.schema
     }
 
+    /// Finishes the underlying raw iterator.
     pub fn done(self) -> Result<(), DatabaseError> {
         self.inner.done()
     }
@@ -593,6 +687,7 @@ where
     }
 }
 
+/// Raw result iterator returned by [`Database::run`] and [`Database::execute`].
 pub struct DatabaseIter<'a, S: Storage + 'a> {
     transaction: *mut S::TransactionType<'a>,
     inner: *mut TransactionIter<'a>,
@@ -638,6 +733,7 @@ impl<S: Storage> ResultIter for DatabaseIter<'_, S> {
     }
 }
 
+/// Explicit transaction handle created by [`Database::new_transaction`].
 pub struct DBTransaction<'a, S: Storage + 'a> {
     inner: S::TransactionType<'a>,
     _guard: ArcRwLockReadGuard<RawRwLock, ()>,
@@ -645,6 +741,7 @@ pub struct DBTransaction<'a, S: Storage + 'a> {
 }
 
 impl<S: Storage> DBTransaction<'_, S> {
+    /// Runs SQL inside the current transaction and returns the final result iterator.
     pub fn run<T: AsRef<str>>(&mut self, sql: T) -> Result<TransactionIter<'_>, DatabaseError> {
         let sql = sql.as_ref();
         let mut statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
@@ -663,6 +760,7 @@ impl<S: Storage> DBTransaction<'_, S> {
             .map_err(|err| err.with_sql_context(sql))
     }
 
+    /// Executes a prepared [`Statement`] inside the current transaction.
     pub fn execute<A: AsRef<[(&'static str, DataValue)]>>(
         &mut self,
         statement: &Statement,
@@ -677,6 +775,7 @@ impl<S: Storage> DBTransaction<'_, S> {
         Ok(TransactionIter::new(schema, executor))
     }
 
+    /// Commits the current transaction.
     pub fn commit(self) -> Result<(), DatabaseError> {
         self.inner.commit()?;
 
@@ -684,6 +783,7 @@ impl<S: Storage> DBTransaction<'_, S> {
     }
 }
 
+/// Raw result iterator returned by [`DBTransaction::run`] and [`DBTransaction::execute`].
 pub struct TransactionIter<'a> {
     executor: Executor<'a>,
     schema: SchemaRef,

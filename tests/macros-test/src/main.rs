@@ -220,7 +220,7 @@ mod test {
 
         database.insert(&user)?;
 
-        let loaded = database.get::<User, _>(&1)?.unwrap();
+        let loaded = database.get::<User>(&1)?.unwrap();
         assert_eq!(
             loaded,
             User {
@@ -239,12 +239,12 @@ mod test {
         user.age = None;
         database.update(&user)?;
 
-        let updated = database.get::<User, _>(&1)?.unwrap();
+        let updated = database.get::<User>(&1)?.unwrap();
         assert_eq!(updated.name, "Bob");
         assert_eq!(updated.age, None);
 
-        database.delete(&user)?;
-        assert!(database.get::<User, _>(&1)?.is_none());
+        database.delete_by_id::<User>(&1)?;
+        assert!(database.get::<User>(&1)?.is_none());
 
         database.insert(&User {
             id: 2,
@@ -252,8 +252,8 @@ mod test {
             age: Some(20),
             cache: "".to_string(),
         })?;
-        database.delete_by_id::<User, _>(&2)?;
-        assert!(database.get::<User, _>(&2)?.is_none());
+        database.delete_by_id::<User>(&2)?;
+        assert!(database.get::<User>(&2)?.is_none());
 
         Ok(())
     }

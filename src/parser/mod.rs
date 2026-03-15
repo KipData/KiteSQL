@@ -21,7 +21,7 @@ const DIALECT: PostgreSqlDialect = PostgreSqlDialect {};
 ///
 /// # Example
 /// ```rust
-/// use kip_sql::parser::parse_sql;
+/// use kite_sql::parser::parse_sql;
 /// let sql = "SELECT a, b, 123, myfunc(b) \
 ///            FROM table_1 \
 ///            WHERE a > b AND b < 100 \
