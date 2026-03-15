@@ -84,12 +84,13 @@ mod test {
 
     #[derive(Default, Debug, PartialEq, Model)]
     #[model(table = "users")]
+    #[model(index(name = "users_name_age_index", columns = "name, age"))]
     struct User {
         #[model(primary_key)]
         id: i32,
         #[model(rename = "user_name", unique, varchar = 32)]
         name: String,
-        #[model(default = "18")]
+        #[model(default = "18", index)]
         age: Option<i32>,
         #[model(skip)]
         cache: String,
@@ -228,6 +229,13 @@ mod test {
         let database = DataBaseBuilder::path(".").build_in_memory()?;
 
         database.create_table::<Wallet>()?;
+        for id in 1..=101 {
+            database.insert(&Wallet {
+                id,
+                balance: Decimal::new((id * 100) as i64, 2),
+            })?;
+        }
+        database.analyze::<Wallet>()?;
 
         let mut iter = database.run("describe wallets")?;
         let rows = iter.by_ref().collect::<Result<Vec<_>, _>>()?;
@@ -284,6 +292,9 @@ mod test {
         let database = DataBaseBuilder::path(".").build_in_memory()?;
 
         database.create_table::<User>()?;
+        database.run("drop index users.users_age_index")?.done()?;
+        database.create_table_if_not_exists::<User>()?;
+        database.run("drop index users.users_age_index")?.done()?;
         database.create_table_if_not_exists::<User>()?;
 
         let mut user = User {
@@ -309,6 +320,32 @@ mod test {
         let users = database.list::<User>()?.collect::<Result<Vec<_>, _>>()?;
         assert_eq!(users.len(), 1);
         assert_eq!(users[0].name, "Alice");
+
+        for id in 1000..=1100 {
+            database.insert(&User {
+                id,
+                name: format!("user_{id}"),
+                age: Some(id),
+                cache: "".to_string(),
+            })?;
+        }
+        database.analyze::<User>()?;
+
+        let mut explain_iter = database.run("explain select age from users where age = 1050")?;
+        let explain_rows = explain_iter.by_ref().collect::<Result<Vec<_>, _>>()?;
+        explain_iter.done()?;
+        let explain_plan = explain_rows
+            .iter()
+            .filter_map(|row| match row.values.first() {
+                Some(DataValue::Utf8 { value, .. }) => Some(value.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            explain_plan.contains("IndexScan By users_age_index"),
+            "unexpected explain plan: {explain_plan}"
+        );
 
         database
             .run("insert into users (id, user_name) values (9, 'DefaultAge')")?
@@ -350,6 +387,58 @@ mod test {
 
         database.drop_table::<User>()?;
         database.drop_table_if_exists::<User>()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_orm_drop_index() -> Result<(), DatabaseError> {
+        let database = DataBaseBuilder::path(".").build_in_memory()?;
+
+        database.create_table::<User>()?;
+        database.insert(&User {
+            id: 1,
+            name: "Alice".to_string(),
+            age: Some(18),
+            cache: "".to_string(),
+        })?;
+
+        let duplicate = database.insert(&User {
+            id: 2,
+            name: "Alice".to_string(),
+            age: Some(20),
+            cache: "".to_string(),
+        });
+        assert!(matches!(
+            duplicate,
+            Err(DatabaseError::DuplicateUniqueValue)
+        ));
+
+        database.drop_index::<User>("users_age_index")?;
+        database.drop_index_if_exists::<User>("users_age_index")?;
+
+        database.drop_index::<User>("uk_user_name_index")?;
+
+        database.insert(&User {
+            id: 2,
+            name: "Alice".to_string(),
+            age: Some(20),
+            cache: "".to_string(),
+        })?;
+
+        database.drop_index::<User>("users_name_age_index")?;
+        database.drop_index_if_exists::<User>("users_name_age_index")?;
+
+        assert!(matches!(
+            database.drop_index::<User>("pk_index"),
+            Err(DatabaseError::InvalidIndex)
+        ));
+        assert!(matches!(
+            database.drop_index_if_exists::<User>("pk_index"),
+            Err(DatabaseError::InvalidIndex)
+        ));
+
+        database.drop_table::<User>()?;
 
         Ok(())
     }

@@ -70,11 +70,28 @@ pub trait Model: Sized + for<'a> From<(&'a SchemaRef, Tuple)> {
     /// Returns the cached `CREATE TABLE IF NOT EXISTS` statement for the model.
     fn create_table_if_not_exists_statement() -> &'static Statement;
 
+    /// Returns cached `CREATE INDEX` statements declared by the model.
+    ///
+    /// `#[derive(Model)]` generates these from fields annotated with
+    /// `#[model(index)]`. Manual implementations can override this to provide
+    /// custom secondary indexes.
+    fn create_index_statements() -> &'static [Statement] {
+        &[]
+    }
+
+    /// Returns cached `CREATE INDEX IF NOT EXISTS` statements declared by the model.
+    fn create_index_if_not_exists_statements() -> &'static [Statement] {
+        &[]
+    }
+
     /// Returns the cached `DROP TABLE` statement for the model.
     fn drop_table_statement() -> &'static Statement;
 
     /// Returns the cached `DROP TABLE IF EXISTS` statement for the model.
     fn drop_table_if_exists_statement() -> &'static Statement;
+
+    /// Returns the cached `ANALYZE TABLE` statement for the model.
+    fn analyze_statement() -> &'static Statement;
 
     fn primary_key_field() -> &'static OrmField {
         Self::fields()
@@ -337,6 +354,9 @@ where
 impl<S: Storage> Database<S> {
     /// Creates the table described by a model.
     ///
+    /// Any secondary indexes declared with `#[model(index)]` are created after
+    /// the table itself.
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -360,19 +380,55 @@ impl<S: Storage> Database<S> {
             M::create_table_statement(),
             Vec::<(&'static str, DataValue)>::new(),
         )?
-        .done()
+        .done()?;
+
+        for statement in M::create_index_statements() {
+            self.execute(statement, Vec::<(&'static str, DataValue)>::new())?
+                .done()?;
+        }
+
+        Ok(())
     }
 
     /// Creates the model table if it does not already exist.
     ///
     /// This is useful for examples, tests and bootstrap flows where rerunning
-    /// schema initialization should stay idempotent.
+    /// schema initialization should stay idempotent. Secondary indexes declared
+    /// with `#[model(index)]` are created with `IF NOT EXISTS` as well.
     pub fn create_table_if_not_exists<M: Model>(&self) -> Result<(), DatabaseError> {
         self.execute(
             M::create_table_if_not_exists_statement(),
             Vec::<(&'static str, DataValue)>::new(),
         )?
-        .done()
+        .done()?;
+
+        for statement in M::create_index_if_not_exists_statements() {
+            self.execute(statement, Vec::<(&'static str, DataValue)>::new())?
+                .done()?;
+        }
+
+        Ok(())
+    }
+
+    /// Drops a non-primary-key model index by name.
+    ///
+    /// Primary-key indexes are managed by the table definition itself and
+    /// cannot be dropped independently.
+    pub fn drop_index<M: Model>(&self, index_name: &str) -> Result<(), DatabaseError> {
+        let sql = ::std::format!("drop index {}.{}", M::table_name(), index_name);
+        let statement = crate::db::prepare(&sql)?;
+
+        self.execute(&statement, Vec::<(&'static str, DataValue)>::new())?
+            .done()
+    }
+
+    /// Drops a non-primary-key model index by name if it exists.
+    pub fn drop_index_if_exists<M: Model>(&self, index_name: &str) -> Result<(), DatabaseError> {
+        let sql = ::std::format!("drop index if exists {}.{}", M::table_name(), index_name);
+        let statement = crate::db::prepare(&sql)?;
+
+        self.execute(&statement, Vec::<(&'static str, DataValue)>::new())?
+            .done()
     }
 
     /// Drops the model table.
@@ -410,6 +466,18 @@ impl<S: Storage> Database<S> {
     pub fn drop_table_if_exists<M: Model>(&self) -> Result<(), DatabaseError> {
         self.execute(
             M::drop_table_if_exists_statement(),
+            Vec::<(&'static str, DataValue)>::new(),
+        )?
+        .done()
+    }
+
+    /// Refreshes optimizer statistics for the model table.
+    ///
+    /// This runs `ANALYZE TABLE` for the backing table so the optimizer can use
+    /// up-to-date statistics.
+    pub fn analyze<M: Model>(&self) -> Result<(), DatabaseError> {
+        self.execute(
+            M::analyze_statement(),
             Vec::<(&'static str, DataValue)>::new(),
         )?
         .done()
@@ -539,6 +607,15 @@ impl<S: Storage> Database<S> {
 }
 
 impl<'a, S: Storage> DBTransaction<'a, S> {
+    /// Refreshes optimizer statistics for the model table inside the current transaction.
+    pub fn analyze<M: Model>(&mut self) -> Result<(), DatabaseError> {
+        self.execute(
+            M::analyze_statement(),
+            Vec::<(&'static str, DataValue)>::new(),
+        )?
+        .done()
+    }
+
     /// Inserts a model inside the current transaction.
     pub fn insert<M: Model>(&mut self, model: &M) -> Result<(), DatabaseError> {
         self.execute(M::insert_statement(), model.params())?.done()

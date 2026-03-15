@@ -9,6 +9,7 @@ use kite_sql::Model;
 
 #[derive(Default, Debug, PartialEq, Model)]
 #[model(table = "users")]
+#[model(index(name = "users_name_age_index", columns = "name, age"))]
 struct User {
   #[model(primary_key)]
   id: i32,
@@ -16,7 +17,7 @@ struct User {
   name: String,
   #[model(char = 2)]
   country: String,
-  #[model(default = "18")]
+  #[model(default = "18", index)]
   age: Option<i32>,
   #[model(skip)]
   cache: String,
@@ -33,6 +34,8 @@ Supported field attributes:
 - `#[model(char = 2)]`
 - `#[model(default = "18")]`
 - `#[model(decimal_precision = 10, decimal_scale = 2)]`
+- `#[model(index)]`
+- `#[model(index(name = "users_name_age_index", columns = "name, age"))]`
 - `#[model(rename = "column_name")]`
 - `#[model(skip)]`
 
@@ -44,14 +47,17 @@ Supported CRUD helpers:
 - `database.update(&model)?`
 - `database.delete_by_id::<User>(&id)?`
 
-Supported DDL helpers:
+Supported DDL helpers (table creation also creates any `#[model(index)]` secondary indexes):
 
 - `database.create_table::<User>()?`
 - `database.create_table_if_not_exists::<User>()?`
 - `database.drop_table::<User>()?`
 - `database.drop_table_if_exists::<User>()?`
+- `database.drop_index::<User>("users_age_index")?`
+- `database.drop_index_if_exists::<User>("users_name_age_index")?`
+- `database.analyze::<User>()?`
 
-`Model` exposes the primary-key type as an associated type, so lookup and delete-by-id APIs infer the key type directly from the model.
+`Model` exposes the primary-key type as an associated type, so lookup and delete-by-id APIs infer the key type directly from the model. Indexes declared by the model can be managed directly by name. The primary-key index is managed by the table definition and cannot be dropped independently.
 
 Query results can still be converted directly into an ORM iterator:
 
