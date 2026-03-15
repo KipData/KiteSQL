@@ -19,13 +19,14 @@ pub struct OrmField {
     pub column: &'static str,
     pub placeholder: &'static str,
     pub primary_key: bool,
+    pub unique: bool,
 }
 
 /// Trait implemented by ORM models.
 ///
 /// In normal usage you should derive this trait with `#[derive(Model)]` rather
 /// than implementing it by hand. The derive macro generates tuple mapping,
-/// cached statements and CRUD metadata for the model.
+/// cached CRUD/DDL statements and model metadata.
 pub trait Model: Sized + for<'a> From<(&'a SchemaRef, Tuple)> {
     /// Rust type used as the model primary key.
     ///
@@ -63,6 +64,18 @@ pub trait Model: Sized + for<'a> From<(&'a SchemaRef, Tuple)> {
     /// Returns the cached `SELECT .. WHERE primary_key = ...` statement.
     fn find_statement() -> &'static Statement;
 
+    /// Returns the cached `CREATE TABLE` statement for the model.
+    fn create_table_statement() -> &'static Statement;
+
+    /// Returns the cached `CREATE TABLE IF NOT EXISTS` statement for the model.
+    fn create_table_if_not_exists_statement() -> &'static Statement;
+
+    /// Returns the cached `DROP TABLE` statement for the model.
+    fn drop_table_statement() -> &'static Statement;
+
+    /// Returns the cached `DROP TABLE IF EXISTS` statement for the model.
+    fn drop_table_if_exists_statement() -> &'static Statement;
+
     fn primary_key_field() -> &'static OrmField {
         Self::fields()
             .iter()
@@ -88,6 +101,26 @@ pub trait FromDataValue: Sized {
 pub trait ToDataValue {
     fn to_data_value(&self) -> DataValue;
 }
+
+/// Maps a Rust field type to the SQL column type used by ORM DDL helpers.
+///
+/// `#[derive(Model)]` relies on this trait to build `CREATE TABLE` statements.
+/// Most built-in scalar types already implement it, and custom types can opt in
+/// by implementing this trait together with [`FromDataValue`] and [`ToDataValue`].
+pub trait ModelColumnType {
+    fn ddl_type() -> String;
+
+    fn nullable() -> bool {
+        false
+    }
+}
+
+/// Marker trait for string-like model fields that support `#[model(varchar = N)]`
+/// and `#[model(char = N)]`.
+pub trait StringType {}
+
+/// Marker trait for decimal-like model fields that support precision/scale DDL attributes.
+pub trait DecimalType {}
 
 /// Extracts and converts a named field from a tuple using the given schema.
 ///
@@ -154,6 +187,39 @@ impl_from_data_value_by_method!(NaiveTime, time);
 impl_from_data_value_by_method!(Decimal, decimal);
 
 impl_to_data_value_by_clone!(bool, i8, i16, i32, i64, u8, u16, u32, u64, f32, f64, Decimal, String);
+
+macro_rules! impl_model_column_type {
+    ($sql:expr; $($ty:ty),+ $(,)?) => {
+        $(
+            impl ModelColumnType for $ty {
+                fn ddl_type() -> String {
+                    $sql.to_string()
+                }
+            }
+        )+
+    };
+}
+
+impl_model_column_type!("boolean"; bool);
+impl_model_column_type!("tinyint"; i8);
+impl_model_column_type!("smallint"; i16);
+impl_model_column_type!("int"; i32);
+impl_model_column_type!("bigint"; i64);
+impl_model_column_type!("utinyint"; u8);
+impl_model_column_type!("usmallint"; u16);
+impl_model_column_type!("unsigned integer"; u32);
+impl_model_column_type!("ubigint"; u64);
+impl_model_column_type!("float"; f32);
+impl_model_column_type!("double"; f64);
+impl_model_column_type!("date"; NaiveDate);
+impl_model_column_type!("datetime"; NaiveDateTime);
+impl_model_column_type!("time"; NaiveTime);
+impl_model_column_type!("decimal"; Decimal);
+impl_model_column_type!("varchar"; String, Arc<str>);
+
+impl StringType for String {}
+impl StringType for Arc<str> {}
+impl DecimalType for Decimal {}
 
 impl FromDataValue for String {
     fn logical_type() -> Option<LogicalType> {
@@ -242,6 +308,19 @@ impl<T: ToDataValue> ToDataValue for Option<T> {
     }
 }
 
+impl<T: ModelColumnType> ModelColumnType for Option<T> {
+    fn ddl_type() -> String {
+        T::ddl_type()
+    }
+
+    fn nullable() -> bool {
+        true
+    }
+}
+
+impl<T: StringType> StringType for Option<T> {}
+impl<T: DecimalType> DecimalType for Option<T> {}
+
 fn extract_optional_model<I, M>(mut iter: I) -> Result<Option<M>, DatabaseError>
 where
     I: ResultIter,
@@ -256,6 +335,86 @@ where
 }
 
 impl<S: Storage> Database<S> {
+    /// Creates the table described by a model.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use kite_sql::db::DataBaseBuilder;
+    /// use kite_sql::Model;
+    ///
+    /// #[derive(Default, Debug, PartialEq, Model)]
+    /// #[model(table = "users")]
+    /// struct User {
+    ///     #[model(primary_key)]
+    ///     id: i32,
+    ///     name: String,
+    ///     age: Option<i32>,
+    /// }
+    ///
+    /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
+    /// database.create_table::<User>().unwrap();
+    /// ```
+    pub fn create_table<M: Model>(&self) -> Result<(), DatabaseError> {
+        self.execute(
+            M::create_table_statement(),
+            Vec::<(&'static str, DataValue)>::new(),
+        )?
+        .done()
+    }
+
+    /// Creates the model table if it does not already exist.
+    ///
+    /// This is useful for examples, tests and bootstrap flows where rerunning
+    /// schema initialization should stay idempotent.
+    pub fn create_table_if_not_exists<M: Model>(&self) -> Result<(), DatabaseError> {
+        self.execute(
+            M::create_table_if_not_exists_statement(),
+            Vec::<(&'static str, DataValue)>::new(),
+        )?
+        .done()
+    }
+
+    /// Drops the model table.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use kite_sql::db::DataBaseBuilder;
+    /// use kite_sql::Model;
+    ///
+    /// #[derive(Default, Debug, PartialEq, Model)]
+    /// #[model(table = "users")]
+    /// struct User {
+    ///     #[model(primary_key)]
+    ///     id: i32,
+    ///     name: String,
+    /// }
+    ///
+    /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
+    /// database.create_table::<User>().unwrap();
+    /// database.drop_table::<User>().unwrap();
+    /// ```
+    pub fn drop_table<M: Model>(&self) -> Result<(), DatabaseError> {
+        self.execute(
+            M::drop_table_statement(),
+            Vec::<(&'static str, DataValue)>::new(),
+        )?
+        .done()
+    }
+
+    /// Drops the model table if it exists.
+    ///
+    /// This variant is convenient for cleanup code that should succeed even if
+    /// the table was already removed.
+    pub fn drop_table_if_exists<M: Model>(&self) -> Result<(), DatabaseError> {
+        self.execute(
+            M::drop_table_if_exists_statement(),
+            Vec::<(&'static str, DataValue)>::new(),
+        )?
+        .done()
+    }
+
     /// Inserts a model into its backing table.
     ///
     /// # Examples
@@ -273,7 +432,7 @@ impl<S: Storage> Database<S> {
     /// }
     ///
     /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
-    /// database.run("create table users (id int primary key, name varchar)").unwrap().done().unwrap();
+    /// database.create_table::<User>().unwrap();
     /// database.insert(&User { id: 1, name: "Alice".to_string() }).unwrap();
     /// ```
     pub fn insert<M: Model>(&self, model: &M) -> Result<(), DatabaseError> {

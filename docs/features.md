@@ -12,8 +12,11 @@ use kite_sql::Model;
 struct User {
   #[model(primary_key)]
   id: i32,
-  #[model(rename = "user_name")]
+  #[model(rename = "user_name", varchar = 64)]
   name: String,
+  #[model(char = 2)]
+  country: String,
+  #[model(default = "18")]
   age: Option<i32>,
   #[model(skip)]
   cache: String,
@@ -25,6 +28,11 @@ struct User {
 Supported field attributes:
 
 - `#[model(primary_key)]`
+- `#[model(unique)]`
+- `#[model(varchar = 64)]`
+- `#[model(char = 2)]`
+- `#[model(default = "18")]`
+- `#[model(decimal_precision = 10, decimal_scale = 2)]`
 - `#[model(rename = "column_name")]`
 - `#[model(skip)]`
 
@@ -35,6 +43,13 @@ Supported CRUD helpers:
 - `database.list::<User>()?`
 - `database.update(&model)?`
 - `database.delete_by_id::<User>(&id)?`
+
+Supported DDL helpers:
+
+- `database.create_table::<User>()?`
+- `database.create_table_if_not_exists::<User>()?`
+- `database.drop_table::<User>()?`
+- `database.drop_table_if_exists::<User>()?`
 
 `Model` exposes the primary-key type as an associated type, so lookup and delete-by-id APIs infer the key type directly from the model.
 

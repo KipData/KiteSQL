@@ -19,10 +19,19 @@ struct OrmFieldOpts {
     ident: Option<Ident>,
     ty: Type,
     rename: Option<String>,
+    varchar: Option<u32>,
+    #[darling(rename = "char")]
+    char_len: Option<u32>,
+    decimal_precision: Option<u8>,
+    decimal_scale: Option<u8>,
+    #[darling(rename = "default")]
+    default_expr: Option<String>,
     #[darling(default)]
     skip: bool,
     #[darling(default)]
     primary_key: bool,
+    #[darling(default)]
+    unique: bool,
 }
 
 pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
@@ -50,6 +59,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
     let mut column_names = Vec::new();
     let mut placeholder_names = Vec::new();
     let mut update_assignments = Vec::new();
+    let mut ddl_columns = Vec::new();
     let mut primary_key_type = None;
     let mut primary_key_value = None;
     let mut primary_key_column = None;
@@ -69,14 +79,64 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                     "primary key field cannot be skipped",
                 ));
             }
+            if field.unique {
+                return Err(Error::new_spanned(
+                    field_name,
+                    "unique field cannot be skipped",
+                ));
+            }
+            if field.varchar.is_some() {
+                return Err(Error::new_spanned(
+                    field_name,
+                    "varchar field cannot be skipped",
+                ));
+            }
+            if field.char_len.is_some() {
+                return Err(Error::new_spanned(
+                    field_name,
+                    "char field cannot be skipped",
+                ));
+            }
+            if field.default_expr.is_some() {
+                return Err(Error::new_spanned(
+                    field_name,
+                    "default field cannot be skipped",
+                ));
+            }
+            if field.decimal_precision.is_some() || field.decimal_scale.is_some() {
+                return Err(Error::new_spanned(
+                    field_name,
+                    "decimal field cannot be skipped",
+                ));
+            }
             continue;
         }
 
+        let varchar_len = field.varchar;
+        let char_len = field.char_len;
+        let decimal_precision = field.decimal_precision;
+        let decimal_scale = field.decimal_scale;
+        if varchar_len.is_some() && char_len.is_some() {
+            return Err(Error::new_spanned(
+                field_name,
+                "char and varchar cannot be used together",
+            ));
+        }
+        if decimal_scale.is_some() && decimal_precision.is_none() {
+            return Err(Error::new_spanned(
+                field_name,
+                "decimal_scale requires decimal_precision",
+            ));
+        }
+        let default_expr = field
+            .default_expr
+            .map(|value| LitStr::new(&value, Span::call_site()));
         let column_name = field.rename.unwrap_or_else(|| field_name.to_string());
         let placeholder_name = format!(":{column_name}");
         let column_name_lit = LitStr::new(&column_name, Span::call_site());
         let placeholder_lit = LitStr::new(&placeholder_name, Span::call_site());
         let is_primary_key = field.primary_key;
+        let is_unique = field.unique;
 
         column_names.push(column_name.clone());
         placeholder_names.push(placeholder_name.clone());
@@ -101,6 +161,45 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             .make_where_clause()
             .predicates
             .push(parse_quote!(#field_ty : ::kite_sql::orm::ToDataValue));
+        generics
+            .make_where_clause()
+            .predicates
+            .push(parse_quote!(#field_ty : ::kite_sql::orm::ModelColumnType));
+
+        if varchar_len.is_some() || char_len.is_some() {
+            generics
+                .make_where_clause()
+                .predicates
+                .push(parse_quote!(#field_ty : ::kite_sql::orm::StringType));
+        }
+        if decimal_precision.is_some() || decimal_scale.is_some() {
+            generics
+                .make_where_clause()
+                .predicates
+                .push(parse_quote!(#field_ty : ::kite_sql::orm::DecimalType));
+        }
+
+        let ddl_type = if let Some(varchar_len) = varchar_len {
+            quote! { ::std::format!("varchar({})", #varchar_len) }
+        } else if let Some(char_len) = char_len {
+            quote! { ::std::format!("char({})", #char_len) }
+        } else if let Some(decimal_precision) = decimal_precision {
+            if let Some(decimal_scale) = decimal_scale {
+                quote! { ::std::format!("decimal({}, {})", #decimal_precision, #decimal_scale) }
+            } else {
+                quote! { ::std::format!("decimal({})", #decimal_precision) }
+            }
+        } else {
+            quote! { <#field_ty as ::kite_sql::orm::ModelColumnType>::ddl_type() }
+        };
+        let default_clause = if let Some(default_expr) = default_expr {
+            quote! {
+                column_def.push_str(" default ");
+                column_def.push_str(#default_expr);
+            }
+        } else {
+            quote! {}
+        };
 
         assignments.push(quote! {
             if let Some(value) = ::kite_sql::orm::try_get::<#field_ty>(&mut tuple, schema, #column_name_lit) {
@@ -115,6 +214,29 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                 column: #column_name_lit,
                 placeholder: #placeholder_lit,
                 primary_key: #is_primary_key,
+                unique: #is_unique,
+            }
+        });
+        ddl_columns.push(quote! {
+            {
+                let ddl_type = #ddl_type;
+                let mut column_def = ::std::format!(
+                    "{} {}",
+                    #column_name_lit,
+                    ddl_type,
+                );
+                if #is_primary_key {
+                    column_def.push_str(" primary key");
+                } else {
+                    if !<#field_ty as ::kite_sql::orm::ModelColumnType>::nullable() {
+                        column_def.push_str(" not null");
+                    }
+                    if #is_unique {
+                        column_def.push_str(" unique");
+                    }
+                }
+                #default_clause
+                column_def
             }
         });
     }
@@ -244,6 +366,46 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                     ::kite_sql::db::prepare(#find_sql).expect("failed to prepare ORM find statement")
                 });
                 &FIND_STATEMENT
+            }
+
+            fn create_table_statement() -> &'static ::kite_sql::db::Statement {
+                static CREATE_TABLE_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
+                    let sql = ::std::format!(
+                        "create table {} ({})",
+                        #table_name_lit,
+                        vec![#(#ddl_columns),*].join(", ")
+                    );
+                    ::kite_sql::db::prepare(&sql).expect("failed to prepare ORM create table statement")
+                });
+                &CREATE_TABLE_STATEMENT
+            }
+
+            fn create_table_if_not_exists_statement() -> &'static ::kite_sql::db::Statement {
+                static CREATE_TABLE_IF_NOT_EXISTS_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
+                    let sql = ::std::format!(
+                        "create table if not exists {} ({})",
+                        #table_name_lit,
+                        vec![#(#ddl_columns),*].join(", ")
+                    );
+                    ::kite_sql::db::prepare(&sql).expect("failed to prepare ORM create table if not exists statement")
+                });
+                &CREATE_TABLE_IF_NOT_EXISTS_STATEMENT
+            }
+
+            fn drop_table_statement() -> &'static ::kite_sql::db::Statement {
+                static DROP_TABLE_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
+                    let sql = ::std::format!("drop table {}", #table_name_lit);
+                    ::kite_sql::db::prepare(&sql).expect("failed to prepare ORM drop table statement")
+                });
+                &DROP_TABLE_STATEMENT
+            }
+
+            fn drop_table_if_exists_statement() -> &'static ::kite_sql::db::Statement {
+                static DROP_TABLE_IF_EXISTS_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
+                    let sql = ::std::format!("drop table if exists {}", #table_name_lit);
+                    ::kite_sql::db::prepare(&sql).expect("failed to prepare ORM drop table if exists statement")
+                });
+                &DROP_TABLE_IF_EXISTS_STATEMENT
             }
         }
     })

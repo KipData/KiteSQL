@@ -29,6 +29,7 @@ mod test {
     use kite_sql::types::value::{DataValue, Utf8Type};
     use kite_sql::types::LogicalType;
     use kite_sql::{from_tuple, scala_function, table_function, Model};
+    use rust_decimal::Decimal;
     use sqlparser::ast::CharLengthUnits;
     use std::sync::Arc;
 
@@ -86,11 +87,30 @@ mod test {
     struct User {
         #[model(primary_key)]
         id: i32,
-        #[model(rename = "user_name")]
+        #[model(rename = "user_name", unique, varchar = 32)]
         name: String,
+        #[model(default = "18")]
         age: Option<i32>,
         #[model(skip)]
         cache: String,
+    }
+
+    #[derive(Default, Debug, PartialEq, Model)]
+    #[model(table = "wallets")]
+    struct Wallet {
+        #[model(primary_key)]
+        id: i32,
+        #[model(decimal_precision = 10, decimal_scale = 2)]
+        balance: Decimal,
+    }
+
+    #[derive(Default, Debug, PartialEq, Model)]
+    #[model(table = "country_codes")]
+    struct CountryCode {
+        #[model(primary_key)]
+        id: i32,
+        #[model(char = 2)]
+        code: String,
     }
 
     from_tuple!(
@@ -204,12 +224,67 @@ mod test {
     }
 
     #[test]
+    fn test_model_decimal_ddl() -> Result<(), DatabaseError> {
+        let database = DataBaseBuilder::path(".").build_in_memory()?;
+
+        database.create_table::<Wallet>()?;
+
+        let mut iter = database.run("describe wallets")?;
+        let rows = iter.by_ref().collect::<Result<Vec<_>, _>>()?;
+        iter.done()?;
+
+        let balance = rows
+            .iter()
+            .find(|row| match &row.values[0] {
+                DataValue::Utf8 { value, .. } => value == "balance",
+                _ => false,
+            })
+            .expect("balance column should exist");
+
+        match &balance.values[1] {
+            DataValue::Utf8 { value, .. } => assert_eq!(value, "Decimal(Some(10), Some(2))"),
+            other => panic!("unexpected describe datatype: {other:?}"),
+        }
+
+        database.drop_table::<Wallet>()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_model_char_ddl() -> Result<(), DatabaseError> {
+        let database = DataBaseBuilder::path(".").build_in_memory()?;
+
+        database.create_table::<CountryCode>()?;
+
+        let mut iter = database.run("describe country_codes")?;
+        let rows = iter.by_ref().collect::<Result<Vec<_>, _>>()?;
+        iter.done()?;
+
+        let code = rows
+            .iter()
+            .find(|row| match &row.values[0] {
+                DataValue::Utf8 { value, .. } => value == "code",
+                _ => false,
+            })
+            .expect("code column should exist");
+
+        match &code.values[1] {
+            DataValue::Utf8 { value, .. } => assert_eq!(value, "Char(2, CHARACTERS)"),
+            other => panic!("unexpected describe datatype: {other:?}"),
+        }
+
+        database.drop_table::<CountryCode>()?;
+
+        Ok(())
+    }
+
+    #[test]
     fn test_orm_crud() -> Result<(), DatabaseError> {
         let database = DataBaseBuilder::path(".").build_in_memory()?;
 
-        database
-            .run("create table users (id int primary key, user_name varchar, age int)")?
-            .done()?;
+        database.create_table::<User>()?;
+        database.create_table_if_not_exists::<User>()?;
 
         let mut user = User {
             id: 1,
@@ -235,6 +310,12 @@ mod test {
         assert_eq!(users.len(), 1);
         assert_eq!(users[0].name, "Alice");
 
+        database
+            .run("insert into users (id, user_name) values (9, 'DefaultAge')")?
+            .done()?;
+        let defaulted = database.get::<User>(&9)?.unwrap();
+        assert_eq!(defaulted.age, Some(18));
+
         user.name = "Bob".to_string();
         user.age = None;
         database.update(&user)?;
@@ -252,8 +333,23 @@ mod test {
             age: Some(20),
             cache: "".to_string(),
         })?;
+
+        let duplicate = database.insert(&User {
+            id: 3,
+            name: "Carol".to_string(),
+            age: Some(22),
+            cache: "".to_string(),
+        });
+        assert!(matches!(
+            duplicate,
+            Err(DatabaseError::DuplicateUniqueValue)
+        ));
+
         database.delete_by_id::<User>(&2)?;
         assert!(database.get::<User>(&2)?.is_none());
+
+        database.drop_table::<User>()?;
+        database.drop_table_if_exists::<User>()?;
 
         Ok(())
     }

@@ -42,15 +42,7 @@ mod app {
         reset_example_dir()?;
         let database = DataBaseBuilder::path(EXAMPLE_DB_PATH).build()?;
 
-        database
-            .run(
-                "create table if not exists my_struct (
-                    c1 int primary key,
-                    c2 varchar,
-                    c3 int
-                )",
-            )?
-            .done()?;
+        database.create_table_if_not_exists::<MyStruct>()?;
         database.insert(&MyStruct {
             c1: 0,
             c2: "zero".to_string(),
@@ -79,7 +71,7 @@ mod app {
         }
         agg.done()?;
 
-        database.run("drop table my_struct")?.done()?;
+        database.drop_table::<MyStruct>()?;
 
         Ok(())
     }

@@ -67,9 +67,7 @@
 //! fn main() -> Result<(), DatabaseError> {
 //!     let database = DataBaseBuilder::path("./hello_world").build()?;
 //!
-//!     database
-//!         .run("create table if not exists my_struct (c1 int primary key, c2 int)")?
-//!         .done()?;
+//!     database.create_table_if_not_exists::<MyStruct>()?;
 //!     database.insert(&MyStruct {
 //!         c1: 0,
 //!         c2: "zero".to_string(),
@@ -82,7 +80,7 @@
 //!     for row in database.list::<MyStruct>()? {
 //!         println!("{:?}", row?);
 //!     }
-//!     database.run("drop table my_struct")?.done()?;
+//!     database.drop_table::<MyStruct>()?;
 //!
 //!     Ok(())
 //! }
