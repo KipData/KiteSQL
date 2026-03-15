@@ -32,15 +32,10 @@ impl<S: Storage> Database<S> {
     /// database.create_table::<User>().unwrap();
     /// ```
     pub fn create_table<M: Model>(&self) -> Result<(), DatabaseError> {
-        self.execute(
-            M::create_table_statement(),
-            Vec::<(&'static str, DataValue)>::new(),
-        )?
-        .done()?;
+        self.execute(M::create_table_statement(), &[])?.done()?;
 
         for statement in M::create_index_statements() {
-            self.execute(statement, Vec::<(&'static str, DataValue)>::new())?
-                .done()?;
+            self.execute(statement, &[])?.done()?;
         }
 
         Ok(())
@@ -52,15 +47,11 @@ impl<S: Storage> Database<S> {
     /// schema initialization should stay idempotent. Secondary indexes declared
     /// with `#[model(index)]` are created with `IF NOT EXISTS` as well.
     pub fn create_table_if_not_exists<M: Model>(&self) -> Result<(), DatabaseError> {
-        self.execute(
-            M::create_table_if_not_exists_statement(),
-            Vec::<(&'static str, DataValue)>::new(),
-        )?
-        .done()?;
+        self.execute(M::create_table_if_not_exists_statement(), &[])?
+            .done()?;
 
         for statement in M::create_index_if_not_exists_statements() {
-            self.execute(statement, Vec::<(&'static str, DataValue)>::new())?
-                .done()?;
+            self.execute(statement, &[])?.done()?;
         }
 
         Ok(())
@@ -279,8 +270,7 @@ impl<S: Storage> Database<S> {
         }
 
         for statement in M::create_index_if_not_exists_statements() {
-            self.execute(statement, Vec::<(&'static str, DataValue)>::new())?
-                .done()?;
+            self.execute(statement, &[])?.done()?;
         }
 
         Ok(())
@@ -294,8 +284,7 @@ impl<S: Storage> Database<S> {
         let sql = ::std::format!("drop index {}.{}", M::table_name(), index_name);
         let statement = crate::db::prepare(&sql)?;
 
-        self.execute(&statement, Vec::<(&'static str, DataValue)>::new())?
-            .done()
+        self.execute(&statement, &[])?.done()
     }
 
     /// Drops a non-primary-key model index by name if it exists.
@@ -303,8 +292,7 @@ impl<S: Storage> Database<S> {
         let sql = ::std::format!("drop index if exists {}.{}", M::table_name(), index_name);
         let statement = crate::db::prepare(&sql)?;
 
-        self.execute(&statement, Vec::<(&'static str, DataValue)>::new())?
-            .done()
+        self.execute(&statement, &[])?.done()
     }
 
     /// Drops the model table.
@@ -328,11 +316,7 @@ impl<S: Storage> Database<S> {
     /// database.drop_table::<User>().unwrap();
     /// ```
     pub fn drop_table<M: Model>(&self) -> Result<(), DatabaseError> {
-        self.execute(
-            M::drop_table_statement(),
-            Vec::<(&'static str, DataValue)>::new(),
-        )?
-        .done()
+        self.execute(M::drop_table_statement(), &[])?.done()
     }
 
     /// Drops the model table if it exists.
@@ -340,10 +324,7 @@ impl<S: Storage> Database<S> {
     /// This variant is convenient for cleanup code that should succeed even if
     /// the table was already removed.
     pub fn drop_table_if_exists<M: Model>(&self) -> Result<(), DatabaseError> {
-        self.execute(
-            M::drop_table_if_exists_statement(),
-            Vec::<(&'static str, DataValue)>::new(),
-        )?
-        .done()
+        self.execute(M::drop_table_if_exists_statement(), &[])?
+            .done()
     }
 }

@@ -65,13 +65,6 @@ macro_rules! from_tuple {
     };
 }
 
-#[macro_export]
-macro_rules! implement_from_tuple {
-    ($($tokens:tt)*) => {
-        $crate::from_tuple!($($tokens)*);
-    };
-}
-
 /// # Examples
 ///
 /// ```

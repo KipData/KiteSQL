@@ -976,10 +976,7 @@ where
 
 fn orm_analyze<E: StatementSource, M: Model>(executor: E) -> Result<(), DatabaseError> {
     executor
-        .execute_statement(
-            M::analyze_statement(),
-            Vec::<(&'static str, DataValue)>::new(),
-        )?
+        .execute_statement(M::analyze_statement(), &[])?
         .done()
 }
 
@@ -1017,9 +1014,6 @@ fn orm_list<E: StatementSource, M: Model>(
     executor: E,
 ) -> Result<OrmIter<E::Iter, M>, DatabaseError> {
     Ok(executor
-        .execute_statement(
-            M::select_statement(),
-            Vec::<(&'static str, DataValue)>::new(),
-        )?
+        .execute_statement(M::select_statement(), &[])?
         .orm::<M>())
 }
