@@ -146,7 +146,25 @@ mod test {
     struct MigratingUserV4 {
         #[model(primary_key)]
         id: i32,
-        age: String,
+        #[model(default = "18")]
+        years: i32,
+    }
+
+    #[derive(Default, Debug, PartialEq, Model)]
+    #[model(table = "migrating_users")]
+    struct MigratingUserV5 {
+        #[model(primary_key)]
+        id: i32,
+        years: Option<String>,
+    }
+
+    #[derive(Default, Debug, PartialEq, Model)]
+    #[model(table = "migrating_users")]
+    struct MigratingUserV6 {
+        #[model(primary_key)]
+        id: i32,
+        #[model(unique)]
+        years: Option<String>,
     }
 
     from_tuple!(
@@ -353,10 +371,30 @@ mod test {
             .collect::<Vec<_>>();
         assert_eq!(column_names, vec!["id", "age"]);
 
-        let incompatible = database.migrate::<MigratingUserV4>();
+        database.migrate::<MigratingUserV4>()?;
+        assert_eq!(
+            database.get::<MigratingUserV4>(&1)?,
+            Some(MigratingUserV4 { id: 1, years: 18 })
+        );
+
+        database.migrate::<MigratingUserV5>()?;
+        assert_eq!(
+            database.get::<MigratingUserV5>(&1)?,
+            Some(MigratingUserV5 {
+                id: 1,
+                years: Some("18".to_string()),
+            })
+        );
+        database.insert(&MigratingUserV5 { id: 2, years: None })?;
+        assert_eq!(
+            database.get::<MigratingUserV5>(&2)?,
+            Some(MigratingUserV5 { id: 2, years: None })
+        );
+
+        let incompatible = database.migrate::<MigratingUserV6>();
         assert!(matches!(incompatible, Err(DatabaseError::InvalidValue(_))));
 
-        database.drop_table::<MigratingUserV3>()?;
+        database.drop_table::<MigratingUserV5>()?;
 
         Ok(())
     }
