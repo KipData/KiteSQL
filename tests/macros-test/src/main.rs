@@ -114,6 +114,41 @@ mod test {
         code: String,
     }
 
+    #[derive(Default, Debug, PartialEq, Model)]
+    #[model(table = "migrating_users")]
+    struct MigratingUserV1 {
+        #[model(primary_key)]
+        id: i32,
+        name: String,
+    }
+
+    #[derive(Default, Debug, PartialEq, Model)]
+    #[model(table = "migrating_users")]
+    struct MigratingUserV2 {
+        #[model(primary_key)]
+        id: i32,
+        name: String,
+        #[model(default = "18")]
+        age: i32,
+    }
+
+    #[derive(Default, Debug, PartialEq, Model)]
+    #[model(table = "migrating_users")]
+    struct MigratingUserV3 {
+        #[model(primary_key)]
+        id: i32,
+        #[model(default = "18")]
+        age: i32,
+    }
+
+    #[derive(Default, Debug, PartialEq, Model)]
+    #[model(table = "migrating_users")]
+    struct MigratingUserV4 {
+        #[model(primary_key)]
+        id: i32,
+        age: String,
+    }
+
     from_tuple!(
         MyStruct, (
             c1: i32 => |inner: &mut MyStruct, value| {
@@ -283,6 +318,45 @@ mod test {
         }
 
         database.drop_table::<CountryCode>()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_model_migrate() -> Result<(), DatabaseError> {
+        let database = DataBaseBuilder::path(".").build_in_memory()?;
+
+        database.create_table::<MigratingUserV1>()?;
+        database.insert(&MigratingUserV1 {
+            id: 1,
+            name: "Alice".to_string(),
+        })?;
+
+        database.migrate::<MigratingUserV2>()?;
+        assert_eq!(database.get::<MigratingUserV2>(&1)?.unwrap().age, 18);
+
+        database.migrate::<MigratingUserV3>()?;
+        assert_eq!(
+            database.get::<MigratingUserV3>(&1)?,
+            Some(MigratingUserV3 { id: 1, age: 18 })
+        );
+
+        let describe_rows = database
+            .run("describe migrating_users")?
+            .collect::<Result<Vec<_>, _>>()?;
+        let column_names = describe_rows
+            .iter()
+            .filter_map(|row| match row.values.first() {
+                Some(DataValue::Utf8 { value, .. }) => Some(value.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(column_names, vec!["id", "age"]);
+
+        let incompatible = database.migrate::<MigratingUserV4>();
+        assert!(matches!(incompatible, Err(DatabaseError::InvalidValue(_))));
+
+        database.drop_table::<MigratingUserV3>()?;
 
         Ok(())
     }

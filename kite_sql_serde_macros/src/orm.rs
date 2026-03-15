@@ -69,6 +69,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
     let mut assignments = Vec::new();
     let mut params = Vec::new();
     let mut orm_fields = Vec::new();
+    let mut orm_columns = Vec::new();
     let mut column_names = Vec::new();
     let mut placeholder_names = Vec::new();
     let mut update_assignments = Vec::new();
@@ -219,13 +220,18 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         } else {
             quote! { <#field_ty as ::kite_sql::orm::ModelColumnType>::ddl_type() }
         };
-        let default_clause = if let Some(default_expr) = default_expr {
+        let default_clause = if let Some(default_expr) = &default_expr {
             quote! {
                 column_def.push_str(" default ");
                 column_def.push_str(#default_expr);
             }
         } else {
             quote! {}
+        };
+        let default_expr_tokens = if let Some(default_expr) = &default_expr {
+            quote! { Some(#default_expr) }
+        } else {
+            quote! { None }
         };
 
         assignments.push(quote! {
@@ -242,6 +248,16 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                 placeholder: #placeholder_lit,
                 primary_key: #is_primary_key,
                 unique: #is_unique,
+            }
+        });
+        orm_columns.push(quote! {
+            ::kite_sql::orm::OrmColumn {
+                name: #column_name_lit,
+                ddl_type: #ddl_type,
+                nullable: <#field_ty as ::kite_sql::orm::ModelColumnType>::nullable(),
+                primary_key: #is_primary_key,
+                unique: #is_unique,
+                default_expr: #default_expr_tokens,
             }
         });
         if is_unique {
@@ -467,6 +483,15 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                 &[
                     #(#orm_fields),*
                 ]
+            }
+
+            fn columns() -> &'static [::kite_sql::orm::OrmColumn] {
+                static ORM_COLUMNS: ::std::sync::LazyLock<::std::vec::Vec<::kite_sql::orm::OrmColumn>> = ::std::sync::LazyLock::new(|| {
+                    vec![
+                        #(#orm_columns),*
+                    ]
+                });
+                ORM_COLUMNS.as_slice()
             }
 
             fn params(&self) -> Vec<(&'static str, ::kite_sql::types::value::DataValue)> {

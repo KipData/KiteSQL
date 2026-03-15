@@ -1,14 +1,16 @@
+use crate::catalog::{ColumnRef, TableCatalog};
 use crate::db::{
     DBTransaction, Database, DatabaseIter, OrmIter, ResultIter, Statement, TransactionIter,
 };
 use crate::errors::DatabaseError;
-use crate::storage::Storage;
+use crate::storage::{Storage, Transaction};
 use crate::types::tuple::{SchemaRef, Tuple};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use rust_decimal::Decimal;
 use sqlparser::ast::CharLengthUnits;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +22,43 @@ pub struct OrmField {
     pub placeholder: &'static str,
     pub primary_key: bool,
     pub unique: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Static metadata about a single persisted model column.
+///
+/// This is primarily consumed by the built-in ORM migration helper.
+pub struct OrmColumn {
+    pub name: &'static str,
+    pub ddl_type: String,
+    pub nullable: bool,
+    pub primary_key: bool,
+    pub unique: bool,
+    pub default_expr: Option<&'static str>,
+}
+
+impl OrmColumn {
+    /// Renders the SQL column definition used by `CREATE TABLE` and migrations.
+    pub fn definition_sql(&self) -> String {
+        let mut column_def = ::std::format!("{} {}", self.name, self.ddl_type);
+
+        if self.primary_key {
+            column_def.push_str(" primary key");
+        } else {
+            if !self.nullable {
+                column_def.push_str(" not null");
+            }
+            if self.unique {
+                column_def.push_str(" unique");
+            }
+        }
+        if let Some(default_expr) = self.default_expr {
+            column_def.push_str(" default ");
+            column_def.push_str(default_expr);
+        }
+
+        column_def
+    }
 }
 
 /// Trait implemented by ORM models.
@@ -42,6 +81,14 @@ pub trait Model: Sized + for<'a> From<(&'a SchemaRef, Tuple)> {
 
     /// Returns metadata for every persisted field on the model.
     fn fields() -> &'static [OrmField];
+
+    /// Returns persisted column definitions for the model.
+    ///
+    /// `#[derive(Model)]` generates this automatically. Manual implementations
+    /// can override it to opt into [`Database::migrate`](crate::orm::Database::migrate).
+    fn columns() -> &'static [OrmColumn] {
+        &[]
+    }
 
     /// Converts the model into named query parameters.
     fn params(&self) -> Vec<(&'static str, DataValue)>;
@@ -338,6 +385,81 @@ impl<T: ModelColumnType> ModelColumnType for Option<T> {
 impl<T: StringType> StringType for Option<T> {}
 impl<T: DecimalType> DecimalType for Option<T> {}
 
+fn normalize_sql_fragment(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn canonicalize_model_type(value: &str) -> String {
+    let normalized = normalize_sql_fragment(value);
+
+    match normalized.as_str() {
+        "boolean" => "boolean".to_string(),
+        "tinyint" => "tinyint".to_string(),
+        "smallint" => "smallint".to_string(),
+        "int" | "integer" => "integer".to_string(),
+        "bigint" => "bigint".to_string(),
+        "utinyint" => "utinyint".to_string(),
+        "usmallint" => "usmallint".to_string(),
+        "unsigned integer" | "uinteger" => "uinteger".to_string(),
+        "ubigint" => "ubigint".to_string(),
+        "float" => "float".to_string(),
+        "double" => "double".to_string(),
+        "date" => "date".to_string(),
+        "datetime" => "datetime".to_string(),
+        "time" => "time(some(0))".to_string(),
+        "varchar" => "varchar(none, characters)".to_string(),
+        "decimal" => "decimal(none, none)".to_string(),
+        _ => {
+            if let Some(inner) = normalized
+                .strip_prefix("varchar(")
+                .and_then(|value| value.strip_suffix(')'))
+            {
+                return ::std::format!("varchar(some({}), characters)", inner.trim());
+            }
+            if let Some(inner) = normalized
+                .strip_prefix("char(")
+                .and_then(|value| value.strip_suffix(')'))
+            {
+                return ::std::format!("char({}, characters)", inner.trim());
+            }
+            if let Some(inner) = normalized
+                .strip_prefix("decimal(")
+                .and_then(|value| value.strip_suffix(')'))
+            {
+                let parts = inner.split(',').map(str::trim).collect::<Vec<_>>();
+                return match parts.as_slice() {
+                    [precision] => ::std::format!("decimal(some({precision}), none)"),
+                    [precision, scale] => {
+                        ::std::format!("decimal(some({precision}), some({scale}))")
+                    }
+                    _ => normalized,
+                };
+            }
+            normalized
+        }
+    }
+}
+
+fn model_column_matches_catalog(model: &OrmColumn, column: &ColumnRef) -> bool {
+    let model_default = model.default_expr.map(normalize_sql_fragment);
+    let catalog_default = column
+        .desc()
+        .default
+        .as_ref()
+        .map(|expr| normalize_sql_fragment(&expr.to_string()));
+
+    model.primary_key == column.desc().is_primary()
+        && model.unique == column.desc().is_unique()
+        && model.nullable == column.nullable()
+        && canonicalize_model_type(&model.ddl_type)
+            == normalize_sql_fragment(&column.datatype().to_string())
+        && model_default == catalog_default
+}
+
 fn extract_optional_model<I, M>(mut iter: I) -> Result<Option<M>, DatabaseError>
 where
     I: ResultIter,
@@ -352,6 +474,13 @@ where
 }
 
 impl<S: Storage> Database<S> {
+    fn table_catalog(&self, table_name: &str) -> Result<Option<TableCatalog>, DatabaseError> {
+        let transaction = self.storage.transaction()?;
+        transaction
+            .table(self.state.table_cache(), table_name.into())
+            .map(|table| table.cloned())
+    }
+
     /// Creates the table described by a model.
     ///
     /// Any secondary indexes declared with `#[model(index)]` are created after
@@ -401,6 +530,116 @@ impl<S: Storage> Database<S> {
             Vec::<(&'static str, DataValue)>::new(),
         )?
         .done()?;
+
+        for statement in M::create_index_if_not_exists_statements() {
+            self.execute(statement, Vec::<(&'static str, DataValue)>::new())?
+                .done()?;
+        }
+
+        Ok(())
+    }
+
+    /// Migrates an existing table to match the current model definition.
+    ///
+    /// This helper creates the table when it does not exist, adds missing
+    /// columns, drops columns that are no longer declared by the model, and
+    /// ensures declared secondary indexes exist.
+    ///
+    /// Renaming columns, changing primary keys, or altering an existing
+    /// column's type / nullability / uniqueness / default expression is not
+    /// performed automatically; those cases return an error so you can handle
+    /// them manually.
+    pub fn migrate<M: Model>(&self) -> Result<(), DatabaseError> {
+        let columns = M::columns();
+        if columns.is_empty() {
+            return Err(DatabaseError::UnsupportedStmt(
+                "ORM migration requires Model::columns(); #[derive(Model)] provides it automatically"
+                    .to_string(),
+            ));
+        }
+
+        let Some(table) = self.table_catalog(M::table_name())? else {
+            return self.create_table::<M>();
+        };
+
+        let model_primary_key = columns
+            .iter()
+            .find(|column| column.primary_key)
+            .ok_or(DatabaseError::PrimaryKeyNotFound)?;
+        let table_primary_key = table
+            .primary_keys()
+            .first()
+            .map(|(_, column)| column.clone())
+            .ok_or(DatabaseError::PrimaryKeyNotFound)?;
+        if table_primary_key.name() != model_primary_key.name
+            || !model_column_matches_catalog(model_primary_key, &table_primary_key)
+        {
+            return Err(DatabaseError::InvalidValue(::std::format!(
+                "ORM migration does not support changing the primary key for table `{}`",
+                M::table_name(),
+            )));
+        }
+
+        let current_columns = table
+            .columns()
+            .map(|column| (column.name().to_string(), column.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let model_columns = columns
+            .iter()
+            .map(|column| (column.name, column))
+            .collect::<BTreeMap<_, _>>();
+
+        for column in columns {
+            if let Some(current_column) = current_columns.get(column.name) {
+                if !model_column_matches_catalog(column, current_column) {
+                    return Err(DatabaseError::InvalidValue(::std::format!(
+                        "ORM migration cannot automatically alter existing column `{}` on table `{}`; use manual migration SQL instead",
+                        column.name,
+                        M::table_name(),
+                    )));
+                }
+            }
+        }
+
+        for column in table.columns() {
+            if model_columns.contains_key(column.name()) {
+                continue;
+            }
+            if column.desc().is_primary() {
+                return Err(DatabaseError::InvalidValue(::std::format!(
+                    "ORM migration cannot drop the primary key column `{}` from table `{}`",
+                    column.name(),
+                    M::table_name(),
+                )));
+            }
+
+            self.run(::std::format!(
+                "alter table {} drop column {}",
+                M::table_name(),
+                column.name(),
+            ))?
+            .done()?;
+        }
+
+        for column in columns {
+            if current_columns.contains_key(column.name) {
+                continue;
+            }
+            if column.primary_key {
+                return Err(DatabaseError::InvalidValue(::std::format!(
+                    "ORM migration cannot add a new primary key column `{}` to an existing table `{}`",
+                    column.name,
+                    M::table_name(),
+                )));
+            }
+
+            self.run(::std::format!(
+                "alter table {} add column {}",
+                M::table_name(),
+                column.definition_sql(),
+            ))?
+            .done()?;
+        }
 
         for statement in M::create_index_if_not_exists_statements() {
             self.execute(statement, Vec::<(&'static str, DataValue)>::new())?

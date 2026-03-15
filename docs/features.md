@@ -55,9 +55,12 @@ Supported DDL helpers (table creation also creates any `#[model(index)]` seconda
 - `database.drop_table_if_exists::<User>()?`
 - `database.drop_index::<User>("users_age_index")?`
 - `database.drop_index_if_exists::<User>("users_name_age_index")?`
+- `database.migrate::<User>()?`
 - `database.analyze::<User>()?`
 
 `Model` exposes the primary-key type as an associated type, so lookup and delete-by-id APIs infer the key type directly from the model. Indexes declared by the model can be managed directly by name. The primary-key index is managed by the table definition and cannot be dropped independently.
+
+Use `database.migrate::<User>()?` to keep an existing table aligned with the current struct definition. The migration helper creates missing tables, adds missing columns, drops removed columns, and recreates declared secondary indexes when needed. Column renames and in-place type or constraint changes still require manual SQL.
 
 Query results can still be converted directly into an ORM iterator:
 
