@@ -1,7 +1,7 @@
 use darling::ast::Data;
 use darling::{FromDeriveInput, FromField, FromMeta};
 use proc_macro2::{Span, TokenStream};
-use quote::quote;
+use quote::{format_ident, quote};
 use std::collections::BTreeSet;
 use syn::{parse_quote, DeriveInput, Error, Generics, Ident, LitStr, Type};
 
@@ -70,6 +70,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
     let mut params = Vec::new();
     let mut orm_fields = Vec::new();
     let mut orm_columns = Vec::new();
+    let mut field_getters = Vec::new();
     let mut column_names = Vec::new();
     let mut placeholder_names = Vec::new();
     let mut update_assignments = Vec::new();
@@ -248,6 +249,12 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                 placeholder: #placeholder_lit,
                 primary_key: #is_primary_key,
                 unique: #is_unique,
+            }
+        });
+        let getter_name = format_ident!("{}", field_name);
+        field_getters.push(quote! {
+            pub fn #getter_name() -> ::kite_sql::orm::Field<Self, #field_ty> {
+                ::kite_sql::orm::Field::new(#table_name_lit, #column_name_lit)
             }
         });
         orm_columns.push(quote! {
@@ -468,6 +475,12 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 
                 struct_instance
             }
+        }
+
+        impl #impl_generics #struct_name #ty_generics
+            #where_clause
+        {
+            #(#field_getters)*
         }
 
         impl #impl_generics ::kite_sql::orm::Model for #struct_name #ty_generics

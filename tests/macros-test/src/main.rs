@@ -400,6 +400,81 @@ mod test {
     }
 
     #[test]
+    fn test_orm_query_builder() -> Result<(), DatabaseError> {
+        let database = DataBaseBuilder::path(".").build_in_memory()?;
+
+        database.create_table::<User>()?;
+        database.run("drop index users.users_age_index")?.done()?;
+        database.insert(&User {
+            id: 1,
+            name: "Alice".to_string(),
+            age: Some(18),
+            cache: "".to_string(),
+        })?;
+        database.insert(&User {
+            id: 2,
+            name: "Bob".to_string(),
+            age: Some(30),
+            cache: "".to_string(),
+        })?;
+        database.insert(&User {
+            id: 3,
+            name: "A'lex".to_string(),
+            age: None,
+            cache: "".to_string(),
+        })?;
+
+        let adults = database
+            .select::<User>()
+            .filter(User::age().gte(18).and(User::name().like("A%")))
+            .list()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(adults.len(), 1);
+        assert_eq!(adults[0].name, "Alice");
+
+        let quoted = database
+            .select::<User>()
+            .filter(User::name().eq("A'lex"))
+            .get()?;
+        assert_eq!(quoted.unwrap().id, 3);
+
+        let ordered = database
+            .select::<User>()
+            .filter(User::age().is_null().not())
+            .order_by(User::age().desc())
+            .limit(1)
+            .get()?
+            .unwrap();
+        assert_eq!(ordered.id, 2);
+
+        let count = database
+            .select::<User>()
+            .filter(User::age().is_not_null())
+            .count()?;
+        assert_eq!(count, 2);
+
+        let exists = database
+            .select::<User>()
+            .filter(User::id().eq(2))
+            .exists()?;
+        assert!(exists);
+        let missing = database
+            .select::<User>()
+            .filter(User::id().eq(99))
+            .exists()?;
+        assert!(!missing);
+
+        let mut tx = database.new_transaction()?;
+        let in_tx = tx.select::<User>().filter(User::id().eq(2)).get()?.unwrap();
+        assert_eq!(in_tx.name, "Bob");
+        tx.commit()?;
+
+        database.drop_table::<User>()?;
+
+        Ok(())
+    }
+
+    #[test]
     fn test_orm_crud() -> Result<(), DatabaseError> {
         let database = DataBaseBuilder::path(".").build_in_memory()?;
 
