@@ -1,3 +1,5 @@
+#![doc = include_str!("README.md")]
+
 use crate::catalog::{ColumnRef, TableCatalog};
 use crate::db::{
     DBTransaction, Database, DatabaseIter, OrmIter, ResultIter, Statement, TransactionIter,

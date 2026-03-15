@@ -4,77 +4,13 @@
 run `cargo run --features="net"` to start service
 
 ### ORM Mapping: `features = ["orm"]`
-```rust
-use kite_sql::Model;
+See [the ORM guide](../src/orm/README.md) for the full ORM guide, including:
 
-#[derive(Default, Debug, PartialEq, Model)]
-#[model(table = "users")]
-#[model(index(name = "users_name_age_index", columns = "name, age"))]
-struct User {
-  #[model(primary_key)]
-  id: i32,
-  #[model(rename = "user_name", varchar = 64)]
-  name: String,
-  #[model(char = 2)]
-  country: String,
-  #[model(default = "18", index)]
-  age: Option<i32>,
-  #[model(skip)]
-  cache: String,
-}
-```
-
-`Model` generates both tuple-to-struct mapping and CRUD metadata for the model.
-
-Supported field attributes:
-
-- `#[model(primary_key)]`
-- `#[model(unique)]`
-- `#[model(varchar = 64)]`
-- `#[model(char = 2)]`
-- `#[model(default = "18")]`
-- `#[model(decimal_precision = 10, decimal_scale = 2)]`
-- `#[model(index)]`
-- `#[model(index(name = "users_name_age_index", columns = "name, age"))]`
-- `#[model(rename = "column_name")]`
-- `#[model(skip)]`
-
-Supported CRUD helpers:
-
-- `database.insert(&model)?`
-- `database.get::<User>(&id)?`
-- `database.list::<User>()?`
-- `database.update(&model)?`
-- `database.delete_by_id::<User>(&id)?`
-
-Supported DDL helpers (table creation also creates any `#[model(index)]` secondary indexes):
-
-- `database.create_table::<User>()?`
-- `database.create_table_if_not_exists::<User>()?`
-- `database.drop_table::<User>()?`
-- `database.drop_table_if_exists::<User>()?`
-- `database.drop_index::<User>("users_age_index")?`
-- `database.drop_index_if_exists::<User>("users_name_age_index")?`
-- `database.migrate::<User>()?`
-- `database.analyze::<User>()?`
-
-`Model` exposes the primary-key type as an associated type, so lookup and delete-by-id APIs infer the key type directly from the model. Indexes declared by the model can be managed directly by name. The primary-key index is managed by the table definition and cannot be dropped independently.
-
-Use `database.migrate::<User>()?` to keep an existing table aligned with the current struct definition. The migration helper creates missing tables, adds missing columns, drops removed columns, and recreates declared secondary indexes when needed. Column renames and in-place type or constraint changes still require manual SQL.
-
-Query results can still be converted directly into an ORM iterator:
-
-```rust
-use kite_sql::db::ResultIter;
-
-let iter = database.run("select id, user_name, age from users")?;
-
-for user in iter.orm::<User>() {
-    println!("{:?}", user?);
-}
-```
-
-If you need manual conversion logic, use the lower-level `from_tuple!` macro with `features = ["macros"]`.
+- `#[derive(Model)]` usage and supported attributes
+- CRUD, DDL, and migration helpers
+- typed query builder APIs
+- public ORM structs, enums, and traits
+- related `ResultIter::orm::<M>()` integration
 
 ### User-Defined Function: `features = ["macros"]`
 ```rust
