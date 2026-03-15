@@ -56,7 +56,7 @@ let adults = database
     .select::<User>()
     .filter(User::age().gte(18))
     .order_by(User::name().asc())
-    .list()?;
+    .fetch()?;
 
 for user in adults {
     println!("{:?}", user?);
@@ -119,7 +119,7 @@ The following ORM helpers are available on `Database`.
 ### DQL
 
 - `get::<M>(&key) -> Result<Option<M>, DatabaseError>`
-- `list::<M>() -> Result<OrmIter<...>, DatabaseError>`
+- `fetch::<M>() -> Result<OrmIter<...>, DatabaseError>`
 - `select::<M>() -> SelectBuilder<...>`
 
 ## Transaction ORM APIs
@@ -136,7 +136,7 @@ The following ORM helpers are available on `DBTransaction`.
 ### DQL
 
 - `get::<M>(&key) -> Result<Option<M>, DatabaseError>`
-- `list::<M>() -> Result<OrmIter<...>, DatabaseError>`
+- `fetch::<M>() -> Result<OrmIter<...>, DatabaseError>`
 - `select::<M>() -> SelectBuilder<...>`
 
 `DBTransaction` does not currently expose the ORM DDL convenience methods.
@@ -180,7 +180,7 @@ Generated field accessors return `Field<M, T>`. A field supports:
 - `limit(n)`
 - `offset(n)`
 - `raw()`
-- `list()`
+- `fetch()`
 - `get()`
 - `exists()`
 - `count()`

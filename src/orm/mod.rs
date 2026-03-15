@@ -505,7 +505,7 @@ impl<Q: SelectSource, M: Model> SelectBuilder<Q, M> {
         self.source.run_select(sql)
     }
 
-    pub fn list(self) -> Result<OrmIter<Q::Iter, M>, DatabaseError> {
+    pub fn fetch(self) -> Result<OrmIter<Q::Iter, M>, DatabaseError> {
         Ok(self.raw()?.orm::<M>())
     }
 
@@ -580,7 +580,7 @@ pub trait Model: Sized + for<'a> From<(&'a SchemaRef, Tuple)> {
     /// Returns a reference to the current primary-key value.
     fn primary_key(&self) -> &Self::PrimaryKey;
 
-    /// Returns the cached `SELECT` statement used by [`Database::list`](crate::orm::Database::list).
+    /// Returns the cached `SELECT` statement used by [`Database::fetch`](crate::orm::Database::fetch).
     fn select_statement() -> &'static Statement;
 
     /// Returns the cached `INSERT` statement for the model.

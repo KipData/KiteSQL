@@ -30,7 +30,7 @@ impl<S: Storage> Database<S> {
         orm_get::<_, M>(self, key)
     }
 
-    /// Lists all rows from the model table as a typed iterator.
+    /// Fetches all rows from the model table as a typed iterator.
     ///
     /// # Examples
     ///
@@ -50,11 +50,11 @@ impl<S: Storage> Database<S> {
     /// database.run("create table users (id int primary key, name varchar)").unwrap().done().unwrap();
     /// database.insert(&User { id: 1, name: "Alice".to_string() }).unwrap();
     ///
-    /// let users = database.list::<User>().unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    /// let users = database.fetch::<User>().unwrap().collect::<Result<Vec<_>, _>>().unwrap();
     /// assert_eq!(users.len(), 1);
     /// assert_eq!(users[0].name, "Alice");
     /// ```
-    pub fn list<M: Model>(&self) -> Result<OrmIter<DatabaseIter<'_, S>, M>, DatabaseError> {
+    pub fn fetch<M: Model>(&self) -> Result<OrmIter<DatabaseIter<'_, S>, M>, DatabaseError> {
         orm_list::<_, M>(self)
     }
 
@@ -70,8 +70,8 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
         orm_get::<_, M>(self, key)
     }
 
-    /// Lists all rows for a model inside the current transaction.
-    pub fn list<M: Model>(&mut self) -> Result<OrmIter<TransactionIter<'_>, M>, DatabaseError> {
+    /// Fetches all rows for a model inside the current transaction.
+    pub fn fetch<M: Model>(&mut self) -> Result<OrmIter<TransactionIter<'_>, M>, DatabaseError> {
         orm_list::<_, M>(self)
     }
 

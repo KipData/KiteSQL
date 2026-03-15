@@ -77,7 +77,7 @@
 //!         c2: "one".to_string(),
 //!     })?;
 //!
-//!     for row in database.list::<MyStruct>()? {
+//!     for row in database.fetch::<MyStruct>()? {
 //!         println!("{:?}", row?);
 //!     }
 //!     database.drop_table::<MyStruct>()?;

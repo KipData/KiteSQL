@@ -34,9 +34,15 @@
 - All metadata and actual data in KV Storage, and there is no state component (e.g. system table) in the middle
 - Supports extending storage for customized workloads
 - Supports most of the SQL 2016 syntax
+- Ships a built-in ORM with typed models, migrations, CRUD helpers, and a lightweight query builder
 - Ships a WebAssembly build for JavaScript runtimes
 
 #### 👉[check more](docs/features.md)
+
+## ORM
+KiteSQL includes a built-in ORM behind the `orm` feature flag. With `#[derive(Model)]`, you can define typed models and get tuple mapping, CRUD helpers, schema creation, migration support, and builder-style single-table queries.
+
+For the full ORM guide, see [`src/orm/README.md`](src/orm/README.md).
 
 ## WebAssembly
 - Build: `wasm-pack build --release --target nodejs` (outputs to `./pkg`; use `--target web` or `--target bundler` for browser/bundler setups).
@@ -69,25 +75,77 @@ for row in db.run("select * from demo"):
 ## Examples
 
 ```rust
-use kite_sql::db::{DataBaseBuilder, ResultIter};
+use kite_sql::db::DataBaseBuilder;
+use kite_sql::errors::DatabaseError;
+use kite_sql::Model;
 
-let kite_sql = DataBaseBuilder::path("./data").build()?;
+#[derive(Default, Debug, PartialEq, Model)]
+#[model(table = "users")]
+#[model(index(name = "users_name_age_idx", columns = "name, age"))]
+struct User {
+    #[model(primary_key)]
+    id: i32,
+    #[model(unique, varchar = 128)]
+    email: String,
+    #[model(rename = "user_name", varchar = 64)]
+    name: String,
+    #[model(default = "18", index)]
+    age: Option<i32>,
+}
 
-kite_sql
-    .run("create table if not exists t1 (c1 int primary key, c2 int)")?
-    .done()?;
-kite_sql
-    .run("insert into t1 values(0, 0), (1, 1)")?
-    .done()?;
+fn main() -> Result<(), DatabaseError> {
+    let database = DataBaseBuilder::path("./data").build()?;
 
-let mut iter = kite_sql.run("select * from t1")?;
+    database.migrate::<User>()?;
 
-// Query schema is available on every result iterator.
-let column_names: Vec<_> = iter.schema().iter().map(|c| c.name()).collect();
-println!("columns: {column_names:?}");
+    database.insert(&User {
+        id: 1,
+        email: "alice@example.com".to_string(),
+        name: "Alice".to_string(),
+        age: Some(18),
+    })?;
+    database.insert(&User {
+        id: 2,
+        email: "bob@example.com".to_string(),
+        name: "Bob".to_string(),
+        age: Some(24),
+    })?;
 
-for tuple in iter {
-    println!("{:?}", tuple?);
+    let mut alice = database.get::<User>(&1)?.unwrap();
+    alice.age = Some(19);
+    database.update(&alice)?;
+
+    let users = database
+        .select::<User>()
+        .filter(User::email().like("%@example.com"))
+        .and_filter(User::age().gte(18))
+        .order_by(User::name().asc())
+        .limit(10)
+        .fetch()?;
+
+    for user in users {
+        println!("{:?}", user?);
+    }
+
+    // ORM covers common model-centric workflows, while `run(...)` remains available
+    // for more advanced SQL that is easier to express directly.
+    let top_users = database.run(
+        r#"
+        select user_name, count(*) as total
+        from users
+        where age >= 18
+        group by user_name
+        having count(*) > 0
+        order by total desc, user_name asc
+        limit 5
+        "#,
+    )?;
+
+    for row in top_users {
+        println!("aggregated row: {:?}", row?);
+    }
+
+    Ok(())
 }
 ```
 

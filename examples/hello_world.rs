@@ -61,7 +61,7 @@ mod app {
         database.update(&row)?;
         database.delete_by_id::<MyStruct>(&2)?;
 
-        for row in database.list::<MyStruct>()? {
+        for row in database.fetch::<MyStruct>()? {
             println!("{:?}", row?);
         }
 

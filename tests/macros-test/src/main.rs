@@ -427,7 +427,7 @@ mod test {
         let adults = database
             .select::<User>()
             .filter(User::age().gte(18).and(User::name().like("A%")))
-            .list()?
+            .fetch()?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(adults.len(), 1);
         assert_eq!(adults[0].name, "Alice");
@@ -504,7 +504,7 @@ mod test {
             }
         );
 
-        let users = database.list::<User>()?.collect::<Result<Vec<_>, _>>()?;
+        let users = database.fetch::<User>()?.collect::<Result<Vec<_>, _>>()?;
         assert_eq!(users.len(), 1);
         assert_eq!(users[0].name, "Alice");
 
