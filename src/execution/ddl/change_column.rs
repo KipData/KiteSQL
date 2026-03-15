@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::errors::DatabaseError;
 use super::{rewrite_table_in_batches, visit_table_in_batches};
+use crate::errors::DatabaseError;
 use crate::execution::{spawn_executor, Executor, WriteExecutor};
 use crate::planner::operator::alter_table::change_column::{ChangeColumnOperator, NotNullChange};
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};

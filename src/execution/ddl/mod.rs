@@ -23,7 +23,6 @@ pub(crate) mod drop_table;
 pub(crate) mod drop_view;
 pub(crate) mod truncate;
 
-
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::TableCodec;

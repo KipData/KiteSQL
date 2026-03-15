@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::errors::DatabaseError;
 use super::rewrite_table_in_batches;
+use crate::errors::DatabaseError;
 use crate::execution::{spawn_executor, Executor, WriteExecutor};
 use crate::storage::{StatisticsMetaCache, TableCache, ViewCache};
 use crate::types::index::{Index, IndexType};
@@ -62,8 +62,10 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for AddColumn {
                         .await;
                     return;
                 }
-                co.yield_(Err(DatabaseError::DuplicateColumn(column.name().to_string())))
-                    .await;
+                co.yield_(Err(DatabaseError::DuplicateColumn(
+                    column.name().to_string(),
+                )))
+                .await;
                 return;
             }
 
