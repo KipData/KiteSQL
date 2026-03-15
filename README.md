@@ -42,35 +42,10 @@
 ## ORM
 KiteSQL includes a built-in ORM behind the `orm` feature flag. With `#[derive(Model)]`, you can define typed models and get tuple mapping, CRUD helpers, schema creation, migration support, and builder-style single-table queries.
 
+### Schema Migration
+Model changes are part of the normal workflow. KiteSQL ORM can help evolve tables for common schema updates, including adding, dropping, renaming, and changing columns, so many migrations can stay close to the Rust model definition instead of being managed as hand-written SQL.
+
 For the full ORM guide, see [`src/orm/README.md`](src/orm/README.md).
-
-## WebAssembly
-- Build: `wasm-pack build --release --target nodejs` (outputs to `./pkg`; use `--target web` or `--target bundler` for browser/bundler setups).
-- Usage:
-```js
-import { WasmDatabase } from "./pkg/kite_sql.js";
-
-const db = new WasmDatabase();
-await db.execute("create table demo(id int primary key, v int)");
-await db.execute("insert into demo values (1, 2), (2, 4)");
-const rows = db.run("select * from demo").rows();
-console.log(rows.map((r) => r.values.map((v) => v.Int32 ?? v)));
-```
-- In Node.js, provide a small `localStorage` shim if you enable statistics-related features (see `examples/wasm_index_usage.test.mjs`).
-
-## Python (PyO3)
-- Enable bindings with Cargo feature `python`.
-- Constructor is explicit: `Database(path)`; in-memory usage is `Database.in_memory()`.
-- Minimal usage:
-```python
-import kite_sql
-
-db = kite_sql.Database.in_memory()
-db.execute("create table demo(id int primary key, v int)")
-db.execute("insert into demo values (1, 2), (2, 4)")
-for row in db.run("select * from demo"):
-    print(row["values"])
-```
 
 ## Examples
 
@@ -152,6 +127,35 @@ fn main() -> Result<(), DatabaseError> {
 👉**more examples**
 - [hello_word](examples/hello_world.rs)
 - [transaction](examples/transaction.rs)
+
+
+## WebAssembly
+- Build: `wasm-pack build --release --target nodejs` (outputs to `./pkg`; use `--target web` or `--target bundler` for browser/bundler setups).
+- Usage:
+```js
+import { WasmDatabase } from "./pkg/kite_sql.js";
+
+const db = new WasmDatabase();
+await db.execute("create table demo(id int primary key, v int)");
+await db.execute("insert into demo values (1, 2), (2, 4)");
+const rows = db.run("select * from demo").rows();
+console.log(rows.map((r) => r.values.map((v) => v.Int32 ?? v)));
+```
+- In Node.js, provide a small `localStorage` shim if you enable statistics-related features (see `examples/wasm_index_usage.test.mjs`).
+
+## Python (PyO3)
+- Enable bindings with Cargo feature `python`.
+- Constructor is explicit: `Database(path)`; in-memory usage is `Database.in_memory()`.
+- Minimal usage:
+```python
+import kite_sql
+
+db = kite_sql.Database.in_memory()
+db.execute("create table demo(id int primary key, v int)")
+db.execute("insert into demo values (1, 2), (2, 4)")
+for row in db.run("select * from demo"):
+    print(row["values"])
+```
 
 ## TPC-C
 Run `make tpcc` (or `cargo run -p tpcc --release`) to execute the benchmark against the default KiteSQL storage.  
