@@ -238,6 +238,9 @@ impl LogicalPlan {
             Operator::AddColumn(_) => SchemaOutput::Schema(vec![ColumnRef::from(
                 ColumnCatalog::new_dummy("ADD COLUMN SUCCESS".to_string()),
             )]),
+            Operator::ChangeColumn(_) => SchemaOutput::Schema(vec![ColumnRef::from(
+                ColumnCatalog::new_dummy("CHANGE COLUMN SUCCESS".to_string()),
+            )]),
             Operator::DropColumn(_) => SchemaOutput::Schema(vec![ColumnRef::from(
                 ColumnCatalog::new_dummy("DROP COLUMN SUCCESS".to_string()),
             )]),

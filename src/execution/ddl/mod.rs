@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod add_column;
+pub(crate) mod change_column;
 pub(crate) mod create_index;
 pub(crate) mod create_table;
 pub(crate) mod create_view;

@@ -18,6 +18,7 @@ pub(crate) mod dql;
 pub(crate) mod execute_macro;
 
 use self::ddl::add_column::AddColumn;
+use self::ddl::change_column::ChangeColumn;
 use self::dql::join::nested_loop_join::NestedLoopJoin;
 use crate::errors::DatabaseError;
 use crate::execution::ddl::create_index::CreateIndex;
@@ -251,6 +252,10 @@ pub fn build_write<'a, T: Transaction + 'a>(
         Operator::AddColumn(op) => {
             let input = childrens.pop_only();
             AddColumn::from((op, input)).execute_mut(cache, transaction)
+        }
+        Operator::ChangeColumn(op) => {
+            let input = childrens.pop_only();
+            ChangeColumn::from((op, input)).execute_mut(cache, transaction)
         }
         Operator::DropColumn(op) => {
             let input = childrens.pop_only();

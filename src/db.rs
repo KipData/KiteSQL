@@ -360,6 +360,7 @@ fn default_optimizer_pipeline() -> HepOptimizerPipeline {
             ImplementationRuleImpl::Update,
             // DLL
             ImplementationRuleImpl::AddColumn,
+            ImplementationRuleImpl::ChangeColumn,
             ImplementationRuleImpl::CreateTable,
             ImplementationRuleImpl::DropColumn,
             ImplementationRuleImpl::DropTable,

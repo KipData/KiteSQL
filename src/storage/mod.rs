@@ -21,10 +21,12 @@ use crate::catalog::view::View;
 use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog, TableMeta, TableName};
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::Range;
+use crate::expression::ScalarExpression;
 use crate::optimizer::core::statistics_meta::{StatisticMetaLoader, StatisticsMeta};
+use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
 use crate::serdes::ReferenceTables;
 use crate::storage::table_codec::{BumpBytes, Bytes, TableCodec};
-use crate::types::index::{Index, IndexId, IndexMetaRef, IndexType};
+use crate::types::index::{Index, IndexId, IndexMeta, IndexMetaRef, IndexType};
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::{Tuple, TupleId};
 use crate::types::value::{DataValue, TupleMappingRef};
@@ -43,6 +45,27 @@ use ulid::Generator;
 pub(crate) type StatisticsMetaCache = SharedLruCache<(TableName, IndexId), StatisticsMeta>;
 pub(crate) type TableCache = SharedLruCache<TableName, TableCatalog>;
 pub(crate) type ViewCache = SharedLruCache<TableName, View>;
+
+pub(crate) fn index_value_type(
+    table: &TableCatalog,
+    column_ids: &[ColumnId],
+) -> Result<LogicalType, DatabaseError> {
+    let mut value_types = Vec::with_capacity(column_ids.len());
+    for column_id in column_ids {
+        let value_type = table
+            .get_column_by_id(column_id)
+            .ok_or_else(|| DatabaseError::column_not_found(column_id.to_string()))?
+            .datatype()
+            .clone();
+        value_types.push(value_type);
+    }
+
+    Ok(if value_types.len() == 1 {
+        value_types.pop().unwrap()
+    } else {
+        LogicalType::Tuple(value_types)
+    })
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EmptyStorageMetrics;
@@ -297,6 +320,120 @@ pub trait Transaction: Sized {
         self.remove(&key)?;
 
         Ok(())
+    }
+
+    fn rewrite_table_metadata(
+        &mut self,
+        table_cache: &TableCache,
+        table: &TableCatalog,
+    ) -> Result<(), DatabaseError> {
+        let table_name = table.name().clone();
+        let (column_min, column_max) =
+            unsafe { &*self.table_codec() }.columns_bound(table_name.as_ref());
+        self._drop_data(column_min, column_max)?;
+
+        let (index_meta_min, index_meta_max) =
+            unsafe { &*self.table_codec() }.index_meta_bound(table_name.as_ref());
+        self._drop_data(index_meta_min, index_meta_max)?;
+
+        let mut reference_tables = ReferenceTables::new();
+        let _ = reference_tables.push_or_replace(table.name());
+        for column in table.columns() {
+            let (key, value) =
+                unsafe { &*self.table_codec() }.encode_column(column, &mut reference_tables)?;
+            self.set(key, value)?;
+        }
+        for index_meta in table.indexes() {
+            let (key, value) =
+                unsafe { &*self.table_codec() }.encode_index_meta(table.name(), index_meta)?;
+            self.set(key, value)?;
+        }
+        table_cache.remove(table.name());
+
+        Ok(())
+    }
+
+    fn change_column(
+        &mut self,
+        table_cache: &TableCache,
+        table_name: &TableName,
+        old_column_name: &str,
+        new_column_name: &str,
+        new_data_type: &LogicalType,
+        default_change: &DefaultChange,
+        not_null_change: &NotNullChange,
+    ) -> Result<TableCatalog, DatabaseError> {
+        let table = self
+            .table(table_cache, table_name.clone())?
+            .cloned()
+            .ok_or(DatabaseError::TableNotFound)?;
+        let mut column_refs = Vec::with_capacity(table.columns_len());
+        let mut found = false;
+
+        if old_column_name != new_column_name && table.get_column_by_name(new_column_name).is_some()
+        {
+            return Err(DatabaseError::DuplicateColumn(new_column_name.to_string()));
+        }
+
+        for column in table.columns() {
+            let mut new_column = ColumnCatalog::clone(column);
+            if column.name() == old_column_name {
+                found = true;
+                new_column.set_name(new_column_name.to_string());
+                new_column.desc_mut().column_datatype = new_data_type.clone();
+                match default_change {
+                    DefaultChange::NoChange => {
+                        if let Some(default_expr) = new_column.desc().default.clone() {
+                            if default_expr.return_type() != *new_data_type {
+                                new_column.desc_mut().default = Some(ScalarExpression::TypeCast {
+                                    expr: Box::new(default_expr),
+                                    ty: new_data_type.clone(),
+                                });
+                            }
+                        }
+                    }
+                    DefaultChange::Set(default_expr) => {
+                        new_column.desc_mut().default = Some(default_expr.clone());
+                    }
+                    DefaultChange::Drop => {
+                        new_column.desc_mut().default = None;
+                    }
+                }
+                match not_null_change {
+                    NotNullChange::NoChange => {}
+                    NotNullChange::Set => new_column.set_nullable(false),
+                    NotNullChange::Drop => new_column.set_nullable(true),
+                }
+                if new_column.desc().is_primary() {
+                    TableCodec::check_primary_key_type(new_data_type)?;
+                    new_column.set_nullable(false);
+                }
+            }
+            column_refs.push(ColumnRef::from(new_column));
+        }
+        if !found {
+            return Err(DatabaseError::column_not_found(old_column_name.to_string()));
+        }
+
+        let temp_table = TableCatalog::reload(table_name.clone(), column_refs.clone(), vec![])?;
+        let index_metas = table
+            .indexes()
+            .map(|index_meta| {
+                Ok(Arc::new(IndexMeta {
+                    id: index_meta.id,
+                    column_ids: index_meta.column_ids.clone(),
+                    table_name: table_name.clone(),
+                    pk_ty: temp_table.primary_keys_type().clone(),
+                    value_ty: index_value_type(&temp_table, &index_meta.column_ids)?,
+                    name: index_meta.name.clone(),
+                    ty: index_meta.ty,
+                }))
+            })
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
+        let updated_table = TableCatalog::reload(table_name.clone(), column_refs, index_metas)?;
+        self.rewrite_table_metadata(table_cache, &updated_table)?;
+
+        Ok(updated_table)
     }
 
     fn add_column(
@@ -1410,6 +1547,8 @@ mod test {
     use crate::db::test::build_table;
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
+    use crate::expression::ScalarExpression;
+    use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
     use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
     use crate::storage::table_codec::TableCodec;
     use crate::storage::{

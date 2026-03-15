@@ -23,6 +23,7 @@ use crate::optimizer::core::pattern::Pattern;
 use crate::optimizer::core::rule::{ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::rule::implementation::ddl::add_column::AddColumnImplementation;
+use crate::optimizer::rule::implementation::ddl::change_column::ChangeColumnImplementation;
 use crate::optimizer::rule::implementation::ddl::create_table::CreateTableImplementation;
 use crate::optimizer::rule::implementation::ddl::drop_column::DropColumnImplementation;
 use crate::optimizer::rule::implementation::ddl::drop_table::DropTableImplementation;
@@ -76,6 +77,7 @@ pub enum ImplementationRuleImpl {
     Update,
     // DDL
     AddColumn,
+    ChangeColumn,
     CreateTable,
     DropColumn,
     DropTable,
@@ -104,6 +106,7 @@ impl MatchPattern for ImplementationRuleImpl {
             ImplementationRuleImpl::Insert => InsertImplementation.pattern(),
             ImplementationRuleImpl::Update => UpdateImplementation.pattern(),
             ImplementationRuleImpl::AddColumn => AddColumnImplementation.pattern(),
+            ImplementationRuleImpl::ChangeColumn => ChangeColumnImplementation.pattern(),
             ImplementationRuleImpl::CreateTable => CreateTableImplementation.pattern(),
             ImplementationRuleImpl::DropColumn => DropColumnImplementation.pattern(),
             ImplementationRuleImpl::DropTable => DropTableImplementation.pattern(),
@@ -177,6 +180,9 @@ impl<T: Transaction> ImplementationRule<T> for ImplementationRuleImpl {
             }
             ImplementationRuleImpl::AddColumn => {
                 AddColumnImplementation.to_expression(operator, loader, group_expr)?
+            }
+            ImplementationRuleImpl::ChangeColumn => {
+                ChangeColumnImplementation.to_expression(operator, loader, group_expr)?
             }
             ImplementationRuleImpl::CreateTable => {
                 CreateTableImplementation.to_expression(operator, loader, group_expr)?

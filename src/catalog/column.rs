@@ -176,6 +176,10 @@ impl ColumnCatalog {
         self.nullable
     }
 
+    pub(crate) fn set_nullable(&mut self, nullable: bool) {
+        self.nullable = nullable;
+    }
+
     pub fn datatype(&self) -> &LogicalType {
         &self.desc.column_datatype
     }
