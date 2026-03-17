@@ -24,14 +24,19 @@ mod test {
     use kite_sql::expression::function::FunctionSummary;
     use kite_sql::expression::BinaryOperator;
     use kite_sql::expression::ScalarExpression;
-    use kite_sql::orm::{func, QueryValue};
+    use kite_sql::orm::{func, QueryExpr, QueryValue};
     use kite_sql::types::evaluator::EvaluatorFactory;
     use kite_sql::types::tuple::{SchemaRef, Tuple};
     use kite_sql::types::value::{DataValue, Utf8Type};
     use kite_sql::types::LogicalType;
     use kite_sql::{from_tuple, scala_function, table_function, Model};
     use rust_decimal::Decimal;
-    use sqlparser::ast::CharLengthUnits;
+    use sqlparser::ast::{
+        BinaryOperator as SqlBinaryOperator, CharLengthUnits, Expr as SqlExpr, Query as SqlQuery,
+        Statement as SqlStatement,
+    };
+    use sqlparser::dialect::PostgreSqlDialect;
+    use sqlparser::parser::Parser;
     use std::sync::Arc;
 
     fn build_tuple() -> (Tuple, SchemaRef) {
@@ -63,6 +68,15 @@ mod test {
         ];
 
         (Tuple::new(None, values), schema_ref)
+    }
+
+    fn parse_query(sql: &str) -> SqlQuery {
+        let dialect = PostgreSqlDialect {};
+        let mut parser = Parser::new(&dialect).try_with_sql(sql).unwrap();
+        match parser.parse_statement().unwrap() {
+            SqlStatement::Query(query) => *query,
+            statement => panic!("expected query statement, got {statement:?}"),
+        }
     }
 
     #[derive(Default, Debug, PartialEq)]
@@ -472,6 +486,28 @@ mod test {
             .count()?;
         assert_eq!(alice_only, 1);
 
+        let in_list = database
+            .select::<User>()
+            .in_list(User::id(), [1, 3])
+            .asc(User::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            in_list.iter().map(|user| user.id).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+
+        let not_between = database
+            .select::<User>()
+            .not_between(User::id(), 2, 2)
+            .asc(User::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            not_between.iter().map(|user| user.id).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+
         let either_named_a_or_missing_age = database
             .select::<User>()
             .or(User::name().like("A%"), User::age().is_null())
@@ -492,6 +528,44 @@ mod test {
             .get()?
             .unwrap();
         assert_eq!(udf_matched.id, 1);
+
+        let cast_matched = database
+            .select::<User>()
+            .eq(User::id().cast("BIGINT")?, 2_i64)
+            .get()?
+            .unwrap();
+        assert_eq!(cast_matched.id, 2);
+
+        let raw_ast_matched = database
+            .select::<User>()
+            .filter(QueryExpr::from_ast(SqlExpr::BinaryOp {
+                left: Box::new(QueryValue::from(User::id()).into_ast()),
+                op: SqlBinaryOperator::Eq,
+                right: Box::new(QueryValue::from(3).into_ast()),
+            }))
+            .get()?
+            .unwrap();
+        assert_eq!(raw_ast_matched.id, 3);
+
+        let exists_count = database
+            .select::<User>()
+            .where_exists(parse_query("select id from users where id = 2"))
+            .count()?;
+        assert_eq!(exists_count, 3);
+
+        let in_subquery = database
+            .select::<User>()
+            .in_subquery(
+                User::id(),
+                parse_query("select id from users where id in (1, 3)"),
+            )
+            .asc(User::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            in_subquery.iter().map(|user| user.id).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
 
         let mut tx = database.new_transaction()?;
         let in_tx = tx.select::<User>().eq(User::id(), 2).get()?.unwrap();

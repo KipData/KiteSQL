@@ -14,13 +14,14 @@ use rust_decimal::Decimal;
 use sqlparser::ast::helpers::attached_token::AttachedToken;
 use sqlparser::ast::{
     AlterColumnOperation, AlterTable, AlterTableOperation, Analyze, Assignment, AssignmentTarget,
-    BinaryOperator as SqlBinaryOperator, CharLengthUnits, ColumnDef, ColumnOption, ColumnOptionDef,
-    CreateIndex, CreateTable, DataType, Delete, Expr, FromTable, Function, FunctionArg,
-    FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr, HiveDistributionStyle,
-    Ident, IndexColumn, Insert, KeyOrIndexDisplay, LimitClause, NullsDistinctOption, ObjectName,
-    ObjectType, Offset, OffsetRows, OrderBy, OrderByExpr, OrderByKind, OrderByOptions,
-    PrimaryKeyConstraint, Query, Select, SelectFlavor, SelectItem, SetExpr, TableFactor,
-    TableObject, TableWithJoins, TimezoneInfo, UniqueConstraint, Update, Value, Values,
+    BinaryOperator as SqlBinaryOperator, CastKind, CharLengthUnits, ColumnDef, ColumnOption,
+    ColumnOptionDef, CreateIndex, CreateTable, DataType, Delete, Expr, FromTable, Function,
+    FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr,
+    HiveDistributionStyle, Ident, IndexColumn, Insert, KeyOrIndexDisplay, LimitClause,
+    NullsDistinctOption, ObjectName, ObjectType, Offset, OffsetRows, OrderBy, OrderByExpr,
+    OrderByKind, OrderByOptions, PrimaryKeyConstraint, Query, Select, SelectFlavor, SelectItem,
+    SetExpr, TableFactor, TableObject, TableWithJoins, TimezoneInfo, UniqueConstraint, Update,
+    Value, Values,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -142,10 +143,10 @@ impl<M, T> Field<M, T> {
     }
 
     fn value(self) -> QueryValue {
-        QueryValue::Column {
-            table: self.table,
-            column: self.column,
-        }
+        QueryValue::from_ast(Expr::CompoundIdentifier(vec![
+            ident(self.table),
+            ident(self.column),
+        ]))
     }
 
     pub fn eq<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
@@ -187,19 +188,56 @@ impl<M, T> Field<M, T> {
     pub fn not_like<V: Into<QueryValue>>(self, pattern: V) -> QueryExpr {
         self.value().not_like(pattern)
     }
+
+    pub fn in_list<I, V>(self, values: I) -> QueryExpr
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<QueryValue>,
+    {
+        self.value().in_list(values)
+    }
+
+    pub fn not_in_list<I, V>(self, values: I) -> QueryExpr
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<QueryValue>,
+    {
+        self.value().not_in_list(values)
+    }
+
+    pub fn between<L: Into<QueryValue>, H: Into<QueryValue>>(self, low: L, high: H) -> QueryExpr {
+        self.value().between(low, high)
+    }
+
+    pub fn not_between<L: Into<QueryValue>, H: Into<QueryValue>>(
+        self,
+        low: L,
+        high: H,
+    ) -> QueryExpr {
+        self.value().not_between(low, high)
+    }
+
+    pub fn cast(self, data_type: &str) -> Result<QueryValue, DatabaseError> {
+        self.value().cast(data_type)
+    }
+
+    pub fn cast_to(self, data_type: DataType) -> QueryValue {
+        self.value().cast_to(data_type)
+    }
+
+    pub fn in_subquery(self, subquery: Query) -> QueryExpr {
+        self.value().in_subquery(subquery)
+    }
+
+    pub fn not_in_subquery(self, subquery: Query) -> QueryExpr {
+        self.value().not_in_subquery(subquery)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum QueryValue {
-    Column {
-        table: &'static str,
-        column: &'static str,
-    },
-    Param(DataValue),
-    Function {
-        name: String,
-        args: Vec<QueryValue>,
-    },
+/// A lightweight ORM expression wrapper for value-producing SQL AST nodes.
+pub struct QueryValue {
+    expr: Expr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,24 +251,9 @@ pub enum CompareOp {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum QueryExpr {
-    Compare {
-        left: QueryValue,
-        op: CompareOp,
-        right: QueryValue,
-    },
-    IsNull {
-        value: QueryValue,
-        negated: bool,
-    },
-    Like {
-        value: QueryValue,
-        pattern: QueryValue,
-        negated: bool,
-    },
-    And(Box<QueryExpr>, Box<QueryExpr>),
-    Or(Box<QueryExpr>, Box<QueryExpr>),
-    Not(Box<QueryExpr>),
+/// A lightweight ORM expression wrapper for predicate-oriented SQL AST nodes.
+pub struct QueryExpr {
+    expr: Expr,
 }
 
 pub fn func<N, I, V>(name: N, args: I) -> QueryValue
@@ -243,58 +266,53 @@ where
 }
 
 impl QueryExpr {
+    pub fn from_ast(expr: Expr) -> QueryExpr {
+        Self { expr }
+    }
+
+    pub fn as_ast(&self) -> &Expr {
+        &self.expr
+    }
+
+    pub fn into_ast(self) -> Expr {
+        self.expr
+    }
+
     pub fn and(self, rhs: QueryExpr) -> QueryExpr {
-        QueryExpr::And(Box::new(self), Box::new(rhs))
+        QueryExpr::from_ast(Expr::BinaryOp {
+            left: Box::new(nested_expr(self.into_ast())),
+            op: SqlBinaryOperator::And,
+            right: Box::new(nested_expr(rhs.into_ast())),
+        })
     }
 
     pub fn or(self, rhs: QueryExpr) -> QueryExpr {
-        QueryExpr::Or(Box::new(self), Box::new(rhs))
+        QueryExpr::from_ast(Expr::BinaryOp {
+            left: Box::new(nested_expr(self.into_ast())),
+            op: SqlBinaryOperator::Or,
+            right: Box::new(nested_expr(rhs.into_ast())),
+        })
     }
 
     pub fn not(self) -> QueryExpr {
-        QueryExpr::Not(Box::new(self))
+        QueryExpr::from_ast(Expr::UnaryOp {
+            op: sqlparser::ast::UnaryOperator::Not,
+            expr: Box::new(nested_expr(self.into_ast())),
+        })
     }
 
-    fn to_ast(&self) -> Expr {
-        match self {
-            QueryExpr::Compare { left, op, right } => Expr::BinaryOp {
-                left: Box::new(left.to_ast()),
-                op: op.as_ast(),
-                right: Box::new(right.to_ast()),
-            },
-            QueryExpr::IsNull { value, negated } => {
-                if *negated {
-                    Expr::IsNotNull(Box::new(value.to_ast()))
-                } else {
-                    Expr::IsNull(Box::new(value.to_ast()))
-                }
-            }
-            QueryExpr::Like {
-                value,
-                pattern,
-                negated,
-            } => Expr::Like {
-                negated: *negated,
-                expr: Box::new(value.to_ast()),
-                pattern: Box::new(pattern.to_ast()),
-                escape_char: None,
-                any: false,
-            },
-            QueryExpr::And(left, right) => Expr::BinaryOp {
-                left: Box::new(nested_expr(left.to_ast())),
-                op: SqlBinaryOperator::And,
-                right: Box::new(nested_expr(right.to_ast())),
-            },
-            QueryExpr::Or(left, right) => Expr::BinaryOp {
-                left: Box::new(nested_expr(left.to_ast())),
-                op: SqlBinaryOperator::Or,
-                right: Box::new(nested_expr(right.to_ast())),
-            },
-            QueryExpr::Not(inner) => Expr::UnaryOp {
-                op: sqlparser::ast::UnaryOperator::Not,
-                expr: Box::new(nested_expr(inner.to_ast())),
-            },
-        }
+    pub fn exists(subquery: Query) -> QueryExpr {
+        QueryExpr::from_ast(Expr::Exists {
+            subquery: Box::new(subquery),
+            negated: false,
+        })
+    }
+
+    pub fn not_exists(subquery: Query) -> QueryExpr {
+        QueryExpr::from_ast(Expr::Exists {
+            subquery: Box::new(subquery),
+            negated: true,
+        })
     }
 }
 
@@ -309,9 +327,9 @@ impl SortExpr {
         Self { value, desc }
     }
 
-    fn to_ast(&self) -> OrderByExpr {
+    fn into_ast(self) -> OrderByExpr {
         OrderByExpr {
-            expr: self.value.to_ast(),
+            expr: self.value.into_ast(),
             options: OrderByOptions {
                 asc: Some(!self.desc),
                 nulls_first: None,
@@ -322,94 +340,209 @@ impl SortExpr {
 }
 
 impl QueryValue {
+    pub fn from_ast(expr: Expr) -> Self {
+        Self { expr }
+    }
+
+    pub fn as_ast(&self) -> &Expr {
+        &self.expr
+    }
+
+    pub fn into_ast(self) -> Expr {
+        self.expr
+    }
+
     pub fn function<N, I, V>(name: N, args: I) -> Self
     where
         N: Into<String>,
         I: IntoIterator<Item = V>,
         V: Into<QueryValue>,
     {
-        Self::Function {
-            name: name.into(),
-            args: args.into_iter().map(Into::into).collect(),
-        }
+        let name = name.into();
+        Self::from_ast(Expr::Function(Function {
+            name: object_name(&name),
+            uses_odbc_syntax: false,
+            parameters: FunctionArguments::None,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: args
+                    .into_iter()
+                    .map(Into::into)
+                    .map(QueryValue::into_ast)
+                    .map(FunctionArgExpr::Expr)
+                    .map(FunctionArg::Unnamed)
+                    .collect(),
+                clauses: vec![],
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+        }))
     }
 
     pub fn eq<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        QueryExpr::Compare {
-            left: self,
-            op: CompareOp::Eq,
-            right: value.into(),
-        }
+        QueryExpr::from_ast(Expr::BinaryOp {
+            left: Box::new(self.into_ast()),
+            op: CompareOp::Eq.as_ast(),
+            right: Box::new(value.into().into_ast()),
+        })
     }
 
     pub fn ne<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        QueryExpr::Compare {
-            left: self,
-            op: CompareOp::Ne,
-            right: value.into(),
-        }
+        QueryExpr::from_ast(Expr::BinaryOp {
+            left: Box::new(self.into_ast()),
+            op: CompareOp::Ne.as_ast(),
+            right: Box::new(value.into().into_ast()),
+        })
     }
 
     pub fn gt<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        QueryExpr::Compare {
-            left: self,
-            op: CompareOp::Gt,
-            right: value.into(),
-        }
+        QueryExpr::from_ast(Expr::BinaryOp {
+            left: Box::new(self.into_ast()),
+            op: CompareOp::Gt.as_ast(),
+            right: Box::new(value.into().into_ast()),
+        })
     }
 
     pub fn gte<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        QueryExpr::Compare {
-            left: self,
-            op: CompareOp::Gte,
-            right: value.into(),
-        }
+        QueryExpr::from_ast(Expr::BinaryOp {
+            left: Box::new(self.into_ast()),
+            op: CompareOp::Gte.as_ast(),
+            right: Box::new(value.into().into_ast()),
+        })
     }
 
     pub fn lt<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        QueryExpr::Compare {
-            left: self,
-            op: CompareOp::Lt,
-            right: value.into(),
-        }
+        QueryExpr::from_ast(Expr::BinaryOp {
+            left: Box::new(self.into_ast()),
+            op: CompareOp::Lt.as_ast(),
+            right: Box::new(value.into().into_ast()),
+        })
     }
 
     pub fn lte<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        QueryExpr::Compare {
-            left: self,
-            op: CompareOp::Lte,
-            right: value.into(),
-        }
+        QueryExpr::from_ast(Expr::BinaryOp {
+            left: Box::new(self.into_ast()),
+            op: CompareOp::Lte.as_ast(),
+            right: Box::new(value.into().into_ast()),
+        })
     }
 
     pub fn is_null(self) -> QueryExpr {
-        QueryExpr::IsNull {
-            value: self,
-            negated: false,
-        }
+        QueryExpr::from_ast(Expr::IsNull(Box::new(self.into_ast())))
     }
 
     pub fn is_not_null(self) -> QueryExpr {
-        QueryExpr::IsNull {
-            value: self,
-            negated: true,
-        }
+        QueryExpr::from_ast(Expr::IsNotNull(Box::new(self.into_ast())))
     }
 
     pub fn like<V: Into<QueryValue>>(self, pattern: V) -> QueryExpr {
-        QueryExpr::Like {
-            value: self,
-            pattern: pattern.into(),
+        QueryExpr::from_ast(Expr::Like {
             negated: false,
-        }
+            expr: Box::new(self.into_ast()),
+            pattern: Box::new(pattern.into().into_ast()),
+            escape_char: None,
+            any: false,
+        })
     }
 
     pub fn not_like<V: Into<QueryValue>>(self, pattern: V) -> QueryExpr {
-        QueryExpr::Like {
-            value: self,
-            pattern: pattern.into(),
+        QueryExpr::from_ast(Expr::Like {
             negated: true,
-        }
+            expr: Box::new(self.into_ast()),
+            pattern: Box::new(pattern.into().into_ast()),
+            escape_char: None,
+            any: false,
+        })
+    }
+
+    pub fn in_list<I, V>(self, values: I) -> QueryExpr
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<QueryValue>,
+    {
+        QueryExpr::from_ast(Expr::InList {
+            expr: Box::new(self.into_ast()),
+            list: values
+                .into_iter()
+                .map(Into::into)
+                .map(QueryValue::into_ast)
+                .collect(),
+            negated: false,
+        })
+    }
+
+    pub fn not_in_list<I, V>(self, values: I) -> QueryExpr
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<QueryValue>,
+    {
+        QueryExpr::from_ast(Expr::InList {
+            expr: Box::new(self.into_ast()),
+            list: values
+                .into_iter()
+                .map(Into::into)
+                .map(QueryValue::into_ast)
+                .collect(),
+            negated: true,
+        })
+    }
+
+    pub fn between<L: Into<QueryValue>, H: Into<QueryValue>>(self, low: L, high: H) -> QueryExpr {
+        QueryExpr::from_ast(Expr::Between {
+            expr: Box::new(self.into_ast()),
+            negated: false,
+            low: Box::new(low.into().into_ast()),
+            high: Box::new(high.into().into_ast()),
+        })
+    }
+
+    pub fn not_between<L: Into<QueryValue>, H: Into<QueryValue>>(
+        self,
+        low: L,
+        high: H,
+    ) -> QueryExpr {
+        QueryExpr::from_ast(Expr::Between {
+            expr: Box::new(self.into_ast()),
+            negated: true,
+            low: Box::new(low.into().into_ast()),
+            high: Box::new(high.into().into_ast()),
+        })
+    }
+
+    pub fn cast(self, data_type: &str) -> Result<QueryValue, DatabaseError> {
+        Ok(self.cast_to(parse_data_type_fragment(data_type)?))
+    }
+
+    pub fn cast_to(self, data_type: DataType) -> QueryValue {
+        QueryValue::from_ast(Expr::Cast {
+            kind: CastKind::Cast,
+            expr: Box::new(self.into_ast()),
+            data_type,
+            array: false,
+            format: None,
+        })
+    }
+
+    pub fn subquery(query: Query) -> QueryValue {
+        QueryValue::from_ast(Expr::Subquery(Box::new(query)))
+    }
+
+    pub fn in_subquery(self, subquery: Query) -> QueryExpr {
+        QueryExpr::from_ast(Expr::InSubquery {
+            expr: Box::new(self.into_ast()),
+            subquery: Box::new(subquery),
+            negated: false,
+        })
+    }
+
+    pub fn not_in_subquery(self, subquery: Query) -> QueryExpr {
+        QueryExpr::from_ast(Expr::InSubquery {
+            expr: Box::new(self.into_ast()),
+            subquery: Box::new(subquery),
+            negated: true,
+        })
     }
 
     fn asc(self) -> SortExpr {
@@ -419,34 +552,6 @@ impl QueryValue {
     fn desc(self) -> SortExpr {
         SortExpr::new(self, true)
     }
-
-    fn to_ast(&self) -> Expr {
-        match self {
-            QueryValue::Column { table, column } => {
-                Expr::CompoundIdentifier(vec![ident(*table), ident(*column)])
-            }
-            QueryValue::Param(value) => data_value_to_ast_expr(value),
-            QueryValue::Function { name, args } => Expr::Function(Function {
-                name: object_name(name),
-                uses_odbc_syntax: false,
-                parameters: FunctionArguments::None,
-                args: FunctionArguments::List(FunctionArgumentList {
-                    duplicate_treatment: None,
-                    args: args
-                        .iter()
-                        .map(QueryValue::to_ast)
-                        .map(FunctionArgExpr::Expr)
-                        .map(FunctionArg::Unnamed)
-                        .collect(),
-                    clauses: vec![],
-                }),
-                filter: None,
-                null_treatment: None,
-                over: None,
-                within_group: vec![],
-            }),
-        }
-    }
 }
 
 impl<M, T> From<Field<M, T>> for QueryValue {
@@ -455,9 +560,21 @@ impl<M, T> From<Field<M, T>> for QueryValue {
     }
 }
 
+impl From<Expr> for QueryValue {
+    fn from(value: Expr) -> Self {
+        QueryValue::from_ast(value)
+    }
+}
+
+impl From<Expr> for QueryExpr {
+    fn from(value: Expr) -> Self {
+        QueryExpr::from_ast(value)
+    }
+}
+
 impl<T: ToDataValue> From<T> for QueryValue {
     fn from(value: T) -> Self {
-        QueryValue::Param(value.to_data_value())
+        QueryValue::from_ast(data_value_to_ast_expr(&value.to_data_value()))
     }
 }
 
@@ -594,6 +711,14 @@ impl<Q: StatementSource, M: Model> SelectBuilder<Q, M> {
         self.push_filter(expr.not(), FilterMode::Replace)
     }
 
+    pub fn where_exists(self, subquery: Query) -> Self {
+        self.push_filter(QueryExpr::exists(subquery), FilterMode::Replace)
+    }
+
+    pub fn where_not_exists(self, subquery: Query) -> Self {
+        self.push_filter(QueryExpr::not_exists(subquery), FilterMode::Replace)
+    }
+
     fn push_order(mut self, order: SortExpr) -> Self {
         self.order_bys.push(order);
         self
@@ -617,15 +742,46 @@ impl<Q: StatementSource, M: Model> SelectBuilder<Q, M> {
         self
     }
 
-    fn statement(&self) -> Statement {
-        orm_select_query_statement(
+    pub fn into_query(self) -> Query {
+        let SelectBuilder {
+            source: _,
+            filter,
+            order_bys,
+            limit,
+            offset,
+            ..
+        } = self;
+
+        select_query(
+            M::table_name(),
+            select_projection(M::fields()),
+            filter,
+            order_bys,
+            limit,
+            offset,
+        )
+    }
+
+    fn into_statement(self) -> (Q, Statement) {
+        let SelectBuilder {
+            source,
+            filter,
+            order_bys,
+            limit,
+            offset,
+            ..
+        } = self;
+
+        let statement = orm_select_query_statement(
             M::table_name(),
             M::fields(),
-            self.filter.as_ref(),
-            &self.order_bys,
-            self.limit,
-            self.offset,
-        )
+            filter,
+            order_bys,
+            limit,
+            offset,
+        );
+
+        (source, statement)
     }
 
     impl_select_builder_compare_methods!(eq, ne, gt, gte, lt, lte);
@@ -634,9 +790,53 @@ impl<Q: StatementSource, M: Model> SelectBuilder<Q, M> {
 
     impl_select_builder_like_methods!(like, not_like);
 
+    pub fn in_list<L, I, V>(self, left: L, values: I) -> Self
+    where
+        L: Into<QueryValue>,
+        I: IntoIterator<Item = V>,
+        V: Into<QueryValue>,
+    {
+        self.push_filter(left.into().in_list(values), FilterMode::Replace)
+    }
+
+    pub fn not_in_list<L, I, V>(self, left: L, values: I) -> Self
+    where
+        L: Into<QueryValue>,
+        I: IntoIterator<Item = V>,
+        V: Into<QueryValue>,
+    {
+        self.push_filter(left.into().not_in_list(values), FilterMode::Replace)
+    }
+
+    pub fn between<L, Low, High>(self, expr: L, low: Low, high: High) -> Self
+    where
+        L: Into<QueryValue>,
+        Low: Into<QueryValue>,
+        High: Into<QueryValue>,
+    {
+        self.push_filter(expr.into().between(low, high), FilterMode::Replace)
+    }
+
+    pub fn not_between<L, Low, High>(self, expr: L, low: Low, high: High) -> Self
+    where
+        L: Into<QueryValue>,
+        Low: Into<QueryValue>,
+        High: Into<QueryValue>,
+    {
+        self.push_filter(expr.into().not_between(low, high), FilterMode::Replace)
+    }
+
+    pub fn in_subquery<L: Into<QueryValue>>(self, left: L, subquery: Query) -> Self {
+        self.push_filter(left.into().in_subquery(subquery), FilterMode::Replace)
+    }
+
+    pub fn not_in_subquery<L: Into<QueryValue>>(self, left: L, subquery: Query) -> Self {
+        self.push_filter(left.into().not_in_subquery(subquery), FilterMode::Replace)
+    }
+
     pub fn raw(self) -> Result<Q::Iter, DatabaseError> {
-        let statement = self.statement();
-        self.source.execute_statement(&statement, &[])
+        let (source, statement) = self.into_statement();
+        source.execute_statement(&statement, &[])
     }
 
     pub fn fetch(self) -> Result<OrmIter<Q::Iter, M>, DatabaseError> {
@@ -653,8 +853,9 @@ impl<Q: StatementSource, M: Model> SelectBuilder<Q, M> {
     }
 
     pub fn count(self) -> Result<usize, DatabaseError> {
-        let statement = orm_count_statement(M::table_name(), self.filter.as_ref());
-        let mut iter = self.source.execute_statement(&statement, &[])?;
+        let SelectBuilder { source, filter, .. } = self;
+        let statement = orm_count_statement(M::table_name(), filter);
+        let mut iter = source.execute_statement(&statement, &[])?;
         let count = match iter.next().transpose()? {
             Some(tuple) => match tuple.values.first() {
                 Some(DataValue::Int32(value)) => *value as usize,
@@ -743,8 +944,8 @@ fn select_projection(fields: &[OrmField]) -> Vec<SelectItem> {
 fn select_query(
     table_name: &str,
     projection: Vec<SelectItem>,
-    filter: Option<&QueryExpr>,
-    order_bys: &[SortExpr],
+    filter: Option<QueryExpr>,
+    order_bys: Vec<SortExpr>,
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Query {
@@ -763,7 +964,7 @@ fn select_query(
             from: vec![table_with_joins(table_name)],
             lateral_views: vec![],
             prewhere: None,
-            selection: filter.map(QueryExpr::to_ast),
+            selection: filter.map(QueryExpr::into_ast),
             connect_by: vec![],
             group_by: GroupByExpr::Expressions(vec![], vec![]),
             cluster_by: vec![],
@@ -777,7 +978,7 @@ fn select_query(
             flavor: SelectFlavor::Standard,
         }))),
         order_by: (!order_bys.is_empty()).then(|| OrderBy {
-            kind: OrderByKind::Expressions(order_bys.iter().map(SortExpr::to_ast).collect()),
+            kind: OrderByKind::Expressions(order_bys.into_iter().map(SortExpr::into_ast).collect()),
             interpolate: None,
         }),
         limit_clause: if limit.is_some() || offset.is_some() {
@@ -876,7 +1077,7 @@ pub fn orm_select_statement(table_name: &str, fields: &[OrmField]) -> Statement 
         table_name,
         select_projection(fields),
         None,
-        &[],
+        vec![],
         None,
         None,
     )))
@@ -1148,8 +1349,8 @@ pub fn orm_analyze_statement(table_name: &str) -> Statement {
 fn orm_select_query_statement(
     table_name: &str,
     fields: &[OrmField],
-    filter: Option<&QueryExpr>,
-    order_bys: &[SortExpr],
+    filter: Option<QueryExpr>,
+    order_bys: Vec<SortExpr>,
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Statement {
@@ -1163,7 +1364,7 @@ fn orm_select_query_statement(
     )))
 }
 
-fn orm_count_statement(table_name: &str, filter: Option<&QueryExpr>) -> Statement {
+fn orm_count_statement(table_name: &str, filter: Option<QueryExpr>) -> Statement {
     Statement::Query(Box::new(select_query(
         table_name,
         vec![SelectItem::UnnamedExpr(Expr::Function(Function {
@@ -1181,7 +1382,7 @@ fn orm_count_statement(table_name: &str, filter: Option<&QueryExpr>) -> Statemen
             within_group: vec![],
         }))],
         filter,
-        &[],
+        vec![],
         None,
         None,
     )))

@@ -159,11 +159,32 @@ Generated field accessors return `Field<M, T>`. A field supports:
 - `is_not_null()`
 - `like(pattern)`
 - `not_like(pattern)`
+- `in_list(values)`
+- `not_in_list(values)`
+- `between(low, high)`
+- `not_between(low, high)`
+- `cast("type")`
+- `cast_to(DataType)`
+- `in_subquery(query)`
+- `not_in_subquery(query)`
 
 ### Function calls
 
 Use `func(name, args)` to build scalar function calls, including registered UDFs.
 Function calls can be used anywhere a `QueryValue` is accepted, such as filters and sorting.
+
+### AST access
+
+`QueryValue` and `QueryExpr` are lightweight wrappers around `sqlparser::ast::Expr`.
+They support:
+
+- `from_ast(expr)`
+- `as_ast()`
+- `into_ast()`
+
+This lets you mix the typed ORM helpers with lower-level AST construction when
+KiteSQL already supports an expression shape that the high-level ORM helpers do
+not expose yet.
 
 ### Boolean composition
 
@@ -172,6 +193,8 @@ Function calls can be used anywhere a `QueryValue` is accepted, such as filters 
 - `and(rhs)`
 - `or(rhs)`
 - `not()`
+- `exists(query)`
+- `not_exists(query)`
 
 ### Builder methods
 
@@ -191,10 +214,19 @@ Function calls can be used anywhere a `QueryValue` is accepted, such as filters 
 - `is_not_null(value)`
 - `like(value, pattern)`
 - `not_like(value, pattern)`
+- `in_list(value, values)`
+- `not_in_list(value, values)`
+- `between(value, low, high)`
+- `not_between(value, low, high)`
+- `in_subquery(value, query)`
+- `not_in_subquery(value, query)`
+- `where_exists(query)`
+- `where_not_exists(query)`
 - `asc(value)`
 - `desc(value)`
 - `limit(n)`
 - `offset(n)`
+- `into_query()`
 - `raw()`
 - `fetch()`
 - `get()`
@@ -204,7 +236,8 @@ Function calls can be used anywhere a `QueryValue` is accepted, such as filters 
 ### Example
 
 ```rust
-use kite_sql::orm::{func, QueryValue};
+use kite_sql::orm::{func, QueryExpr, QueryValue};
+use sqlparser::ast::{BinaryOperator, Expr};
 
 let exists = database
     .select::<User>()
@@ -232,8 +265,47 @@ let normalized = database
         2,
     )
     .get()?;
+
+let ranged = database
+    .select::<User>()
+    .between(User::id(), 1, 2)
+    .fetch()?;
+
+let typed = database
+    .select::<User>()
+    .eq(User::id().cast("BIGINT")?, 1_i64)
+    .get()?;
+
+let query_ast = database
+    .select::<User>()
+    .eq(User::id(), 1)
+    .into_query();
+
+let raw_ast = database
+    .select::<User>()
+    .filter(QueryExpr::from_ast(Expr::BinaryOp {
+        left: Box::new(QueryValue::from(User::id()).into_ast()),
+        op: BinaryOperator::Eq,
+        right: Box::new(QueryValue::from(1).into_ast()),
+    }))
+    .get()?;
+
+let mut parser = sqlparser::parser::Parser::new(&sqlparser::dialect::PostgreSqlDialect {})
+    .try_with_sql("select id from users where id = 1")?;
+let exists_subquery = match parser.parse_statement()? {
+    sqlparser::ast::Statement::Query(query) => *query,
+    _ => unreachable!(),
+};
+let uncorrelated = database
+    .select::<User>()
+    .where_exists(exists_subquery)
+    .get()?;
 # Ok::<(), kite_sql::errors::DatabaseError>(())
 ```
+
+`into_query()` exports the current model-select AST, including the default full-row
+projection. For scalar subqueries such as `IN (subquery)` and `EXISTS (subquery)`,
+use a single-column `Query` today if the binder expects one expression to be returned.
 
 ## Public structs and enums
 
@@ -271,17 +343,23 @@ A typed model field handle used by the query builder.
 
 ### `QueryValue`
 
-A query-side value node used by expressions.
-
-Variants:
-
-- `Column { table, column }`
-- `Param(DataValue)`
-- `Function { name, args }`
+A query-side wrapper around `sqlparser::ast::Expr` for value-producing expressions.
 
 Helpers:
 
 - `func(name, args)`
+- `in_list(values)`
+- `not_in_list(values)`
+- `between(low, high)`
+- `not_between(low, high)`
+- `cast("type") -> Result<QueryValue, DatabaseError>`
+- `cast_to(DataType)`
+- `subquery(query)`
+- `in_subquery(query)`
+- `not_in_subquery(query)`
+- `from_ast(expr)`
+- `as_ast()`
+- `into_ast()`
 
 ### `CompareOp`
 
@@ -298,22 +376,19 @@ Variants:
 
 ### `QueryExpr`
 
-Boolean query expression used in `where` clauses.
-
-Variants:
-
-- `Compare`
-- `IsNull`
-- `Like`
-- `And`
-- `Or`
-- `Not`
+Boolean-oriented wrapper around `sqlparser::ast::Expr`, typically used in `where`
+clauses and builder filters.
 
 Methods:
 
 - `and(rhs)`
 - `or(rhs)`
 - `not()`
+- `exists(query)`
+- `not_exists(query)`
+- `from_ast(expr)`
+- `as_ast()`
+- `into_ast()`
 
 ### `SelectBuilder<Q, M>`
 
