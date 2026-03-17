@@ -24,6 +24,7 @@ mod test {
     use kite_sql::expression::function::FunctionSummary;
     use kite_sql::expression::BinaryOperator;
     use kite_sql::expression::ScalarExpression;
+    use kite_sql::orm::{func, QueryValue};
     use kite_sql::types::evaluator::EvaluatorFactory;
     use kite_sql::types::tuple::{SchemaRef, Tuple};
     use kite_sql::types::value::{DataValue, Utf8Type};
@@ -401,7 +402,9 @@ mod test {
 
     #[test]
     fn test_orm_query_builder() -> Result<(), DatabaseError> {
-        let database = DataBaseBuilder::path(".").build_in_memory()?;
+        let database = DataBaseBuilder::path(".")
+            .register_scala_function(MyOrmFunction::new())
+            .build_in_memory()?;
 
         database.create_table::<User>()?;
         database.run("drop index users.users_age_index")?.done()?;
@@ -426,46 +429,72 @@ mod test {
 
         let adults = database
             .select::<User>()
-            .filter(User::age().gte(18).and(User::name().like("A%")))
+            .and(User::age().gte(18), User::name().like("A%"))
             .fetch()?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(adults.len(), 1);
         assert_eq!(adults[0].name, "Alice");
 
-        let quoted = database
-            .select::<User>()
-            .filter(User::name().eq("A'lex"))
-            .get()?;
+        let quoted = database.select::<User>().eq(User::name(), "A'lex").get()?;
         assert_eq!(quoted.unwrap().id, 3);
 
         let ordered = database
             .select::<User>()
-            .filter(User::age().is_null().not())
-            .order_by(User::age().desc())
+            .not(User::age().is_null())
+            .desc(User::age())
             .limit(1)
             .get()?
             .unwrap();
         assert_eq!(ordered.id, 2);
 
-        let count = database
-            .select::<User>()
-            .filter(User::age().is_not_null())
-            .count()?;
+        let count = database.select::<User>().is_not_null(User::age()).count()?;
         assert_eq!(count, 2);
 
-        let exists = database
-            .select::<User>()
-            .filter(User::id().eq(2))
-            .exists()?;
+        let exists = database.select::<User>().eq(User::id(), 2).exists()?;
         assert!(exists);
-        let missing = database
-            .select::<User>()
-            .filter(User::id().eq(99))
-            .exists()?;
+        let missing = database.select::<User>().eq(User::id(), 99).exists()?;
         assert!(!missing);
 
+        let two_users = database
+            .select::<User>()
+            .or(User::id().eq(1), User::id().eq(2))
+            .asc(User::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            two_users.iter().map(|user| user.id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        let alice_only = database
+            .select::<User>()
+            .and(User::age().is_not_null(), User::name().not_like("B%"))
+            .count()?;
+        assert_eq!(alice_only, 1);
+
+        let either_named_a_or_missing_age = database
+            .select::<User>()
+            .or(User::name().like("A%"), User::age().is_null())
+            .asc(User::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            either_named_a_or_missing_age
+                .iter()
+                .map(|user| user.id)
+                .collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+
+        let udf_matched = database
+            .select::<User>()
+            .eq(func("add_one", [QueryValue::from(User::id())]), 2)
+            .get()?
+            .unwrap();
+        assert_eq!(udf_matched.id, 1);
+
         let mut tx = database.new_transaction()?;
-        let in_tx = tx.select::<User>().filter(User::id().eq(2)).get()?.unwrap();
+        let in_tx = tx.select::<User>().eq(User::id(), 2).get()?.unwrap();
         assert_eq!(in_tx.name, "Bob");
         tx.commit()?;
 
@@ -632,6 +661,10 @@ mod test {
 
     scala_function!(MyScalaFunction::SUM(LogicalType::Integer, LogicalType::Integer) -> LogicalType::Integer => (|v1: DataValue, v2: DataValue| {
         EvaluatorFactory::binary_create(LogicalType::Integer, BinaryOperator::Plus)?.binary_eval(&v1, &v2)
+    }));
+
+    scala_function!(MyOrmFunction::ADD_ONE(LogicalType::Integer) -> LogicalType::Integer => (|v1: DataValue| {
+        Ok(DataValue::Int32(v1.i32().unwrap() + 1))
     }));
 
     table_function!(MyTableFunction::TEST_NUMBERS(LogicalType::Integer) -> [c1: LogicalType::Integer, c2: LogicalType::Integer] => (|v1: DataValue| {

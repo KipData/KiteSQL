@@ -54,8 +54,8 @@ assert_eq!(user.name, "Alice");
 
 let adults = database
     .select::<User>()
-    .filter(User::age().gte(18))
-    .order_by(User::name().asc())
+    .gte(User::age(), 18)
+    .asc(User::name())
     .fetch()?;
 
 for user in adults {
@@ -159,8 +159,11 @@ Generated field accessors return `Field<M, T>`. A field supports:
 - `is_not_null()`
 - `like(pattern)`
 - `not_like(pattern)`
-- `asc()`
-- `desc()`
+
+### Function calls
+
+Use `func(name, args)` to build scalar function calls, including registered UDFs.
+Function calls can be used anywhere a `QueryValue` is accepted, such as filters and sorting.
 
 ### Boolean composition
 
@@ -175,8 +178,21 @@ Generated field accessors return `Field<M, T>`. A field supports:
 `SelectBuilder` supports:
 
 - `filter(expr)`
-- `and_filter(expr)`
-- `order_by(order)`
+- `and(left, right)`
+- `or(left, right)`
+- `not(expr)`
+- `eq(left, right)`
+- `ne(left, right)`
+- `gt(left, right)`
+- `gte(left, right)`
+- `lt(left, right)`
+- `lte(left, right)`
+- `is_null(value)`
+- `is_not_null(value)`
+- `like(value, pattern)`
+- `not_like(value, pattern)`
+- `asc(value)`
+- `desc(value)`
 - `limit(n)`
 - `offset(n)`
 - `raw()`
@@ -188,16 +204,34 @@ Generated field accessors return `Field<M, T>`. A field supports:
 ### Example
 
 ```rust
+use kite_sql::orm::{func, QueryValue};
+
 let exists = database
     .select::<User>()
-    .filter(User::name().like("A%"))
-    .and_filter(User::age().gte(18))
+    .and(User::name().like("A%"), User::age().gte(18))
     .exists()?;
 
 let count = database
     .select::<User>()
-    .filter(User::age().is_not_null())
+    .is_not_null(User::age())
     .count()?;
+
+let top = database
+    .select::<User>()
+    .or(User::id().eq(1), User::id().eq(2))
+    .desc(User::age())
+    .get()?;
+
+let normalized = database
+    .select::<User>()
+    .eq(
+        func(
+            "add_one",
+            [QueryValue::from(User::id())],
+        ),
+        2,
+    )
+    .get()?;
 # Ok::<(), kite_sql::errors::DatabaseError>(())
 ```
 
@@ -243,6 +277,11 @@ Variants:
 
 - `Column { table, column }`
 - `Param(DataValue)`
+- `Function { name, args }`
+
+Helpers:
+
+- `func(name, args)`
 
 ### `CompareOp`
 
@@ -275,10 +314,6 @@ Methods:
 - `and(rhs)`
 - `or(rhs)`
 - `not()`
-
-### `OrderBy`
-
-A typed `ORDER BY` item created from `Field::asc()` or `Field::desc()`.
 
 ### `SelectBuilder<Q, M>`
 

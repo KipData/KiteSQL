@@ -92,90 +92,44 @@ impl<M, T> Field<M, T> {
         }
     }
 
-    pub fn eq<V: ToDataValue>(self, value: V) -> QueryExpr {
-        QueryExpr::Compare {
-            left: self.value(),
-            op: CompareOp::Eq,
-            right: QueryValue::Param(value.to_data_value()),
-        }
+    pub fn eq<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
+        self.value().eq(value)
     }
 
-    pub fn ne<V: ToDataValue>(self, value: V) -> QueryExpr {
-        QueryExpr::Compare {
-            left: self.value(),
-            op: CompareOp::Ne,
-            right: QueryValue::Param(value.to_data_value()),
-        }
+    pub fn ne<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
+        self.value().ne(value)
     }
 
-    pub fn gt<V: ToDataValue>(self, value: V) -> QueryExpr {
-        QueryExpr::Compare {
-            left: self.value(),
-            op: CompareOp::Gt,
-            right: QueryValue::Param(value.to_data_value()),
-        }
+    pub fn gt<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
+        self.value().gt(value)
     }
 
-    pub fn gte<V: ToDataValue>(self, value: V) -> QueryExpr {
-        QueryExpr::Compare {
-            left: self.value(),
-            op: CompareOp::Gte,
-            right: QueryValue::Param(value.to_data_value()),
-        }
+    pub fn gte<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
+        self.value().gte(value)
     }
 
-    pub fn lt<V: ToDataValue>(self, value: V) -> QueryExpr {
-        QueryExpr::Compare {
-            left: self.value(),
-            op: CompareOp::Lt,
-            right: QueryValue::Param(value.to_data_value()),
-        }
+    pub fn lt<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
+        self.value().lt(value)
     }
 
-    pub fn lte<V: ToDataValue>(self, value: V) -> QueryExpr {
-        QueryExpr::Compare {
-            left: self.value(),
-            op: CompareOp::Lte,
-            right: QueryValue::Param(value.to_data_value()),
-        }
+    pub fn lte<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
+        self.value().lte(value)
     }
 
     pub fn is_null(self) -> QueryExpr {
-        QueryExpr::IsNull {
-            value: self.value(),
-            negated: false,
-        }
+        self.value().is_null()
     }
 
     pub fn is_not_null(self) -> QueryExpr {
-        QueryExpr::IsNull {
-            value: self.value(),
-            negated: true,
-        }
+        self.value().is_not_null()
     }
 
-    pub fn like<V: ToDataValue>(self, pattern: V) -> QueryExpr {
-        QueryExpr::Like {
-            value: self.value(),
-            pattern: QueryValue::Param(pattern.to_data_value()),
-            negated: false,
-        }
+    pub fn like<V: Into<QueryValue>>(self, pattern: V) -> QueryExpr {
+        self.value().like(pattern)
     }
 
-    pub fn not_like<V: ToDataValue>(self, pattern: V) -> QueryExpr {
-        QueryExpr::Like {
-            value: self.value(),
-            pattern: QueryValue::Param(pattern.to_data_value()),
-            negated: true,
-        }
-    }
-
-    pub fn asc(self) -> OrderBy {
-        OrderBy::new(self.table, self.column, false)
-    }
-
-    pub fn desc(self) -> OrderBy {
-        OrderBy::new(self.table, self.column, true)
+    pub fn not_like<V: Into<QueryValue>>(self, pattern: V) -> QueryExpr {
+        self.value().not_like(pattern)
     }
 }
 
@@ -186,6 +140,10 @@ pub enum QueryValue {
         column: &'static str,
     },
     Param(DataValue),
+    Function {
+        name: String,
+        args: Vec<QueryValue>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,6 +175,15 @@ pub enum QueryExpr {
     And(Box<QueryExpr>, Box<QueryExpr>),
     Or(Box<QueryExpr>, Box<QueryExpr>),
     Not(Box<QueryExpr>),
+}
+
+pub fn func<N, I, V>(name: N, args: I) -> QueryValue
+where
+    N: Into<String>,
+    I: IntoIterator<Item = V>,
+    V: Into<QueryValue>,
+{
+    QueryValue::function(name, args)
 }
 
 impl QueryExpr {
@@ -262,34 +229,147 @@ impl QueryExpr {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OrderBy {
-    table: &'static str,
-    column: &'static str,
+#[derive(Debug, Clone, PartialEq)]
+struct SortExpr {
+    value: QueryValue,
     desc: bool,
 }
 
-impl OrderBy {
-    const fn new(table: &'static str, column: &'static str, desc: bool) -> Self {
-        Self {
-            table,
-            column,
-            desc,
-        }
+impl SortExpr {
+    fn new(value: QueryValue, desc: bool) -> Self {
+        Self { value, desc }
     }
 
     fn to_sql(&self) -> String {
         let direction = if self.desc { "desc" } else { "asc" };
-        format!("{}.{} {}", self.table, self.column, direction)
+        format!("{} {}", self.value.to_sql(), direction)
     }
 }
 
 impl QueryValue {
+    pub fn function<N, I, V>(name: N, args: I) -> Self
+    where
+        N: Into<String>,
+        I: IntoIterator<Item = V>,
+        V: Into<QueryValue>,
+    {
+        Self::Function {
+            name: name.into(),
+            args: args.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    pub fn eq<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
+        QueryExpr::Compare {
+            left: self,
+            op: CompareOp::Eq,
+            right: value.into(),
+        }
+    }
+
+    pub fn ne<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
+        QueryExpr::Compare {
+            left: self,
+            op: CompareOp::Ne,
+            right: value.into(),
+        }
+    }
+
+    pub fn gt<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
+        QueryExpr::Compare {
+            left: self,
+            op: CompareOp::Gt,
+            right: value.into(),
+        }
+    }
+
+    pub fn gte<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
+        QueryExpr::Compare {
+            left: self,
+            op: CompareOp::Gte,
+            right: value.into(),
+        }
+    }
+
+    pub fn lt<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
+        QueryExpr::Compare {
+            left: self,
+            op: CompareOp::Lt,
+            right: value.into(),
+        }
+    }
+
+    pub fn lte<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
+        QueryExpr::Compare {
+            left: self,
+            op: CompareOp::Lte,
+            right: value.into(),
+        }
+    }
+
+    pub fn is_null(self) -> QueryExpr {
+        QueryExpr::IsNull {
+            value: self,
+            negated: false,
+        }
+    }
+
+    pub fn is_not_null(self) -> QueryExpr {
+        QueryExpr::IsNull {
+            value: self,
+            negated: true,
+        }
+    }
+
+    pub fn like<V: Into<QueryValue>>(self, pattern: V) -> QueryExpr {
+        QueryExpr::Like {
+            value: self,
+            pattern: pattern.into(),
+            negated: false,
+        }
+    }
+
+    pub fn not_like<V: Into<QueryValue>>(self, pattern: V) -> QueryExpr {
+        QueryExpr::Like {
+            value: self,
+            pattern: pattern.into(),
+            negated: true,
+        }
+    }
+
+    fn asc(self) -> SortExpr {
+        SortExpr::new(self, false)
+    }
+
+    fn desc(self) -> SortExpr {
+        SortExpr::new(self, true)
+    }
+
     fn to_sql(&self) -> String {
         match self {
             QueryValue::Column { table, column } => format!("{}.{}", table, column),
             QueryValue::Param(value) => data_value_to_sql(value),
+            QueryValue::Function { name, args } => format!(
+                "{}({})",
+                name,
+                args.iter()
+                    .map(QueryValue::to_sql)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
+    }
+}
+
+impl<M, T> From<Field<M, T>> for QueryValue {
+    fn from(value: Field<M, T>) -> Self {
+        value.value()
+    }
+}
+
+impl<T: ToDataValue> From<T> for QueryValue {
+    fn from(value: T) -> Self {
+        QueryValue::Param(value.to_data_value())
     }
 }
 
@@ -409,10 +489,47 @@ impl<'a, 'tx, S: Storage> SelectSource for TransactionSelectSource<'a, 'tx, S> {
 pub struct SelectBuilder<Q: SelectSource, M: Model> {
     source: Q,
     filter: Option<QueryExpr>,
-    order_bys: Vec<OrderBy>,
+    order_bys: Vec<SortExpr>,
     limit: Option<usize>,
     offset: Option<usize>,
     _marker: PhantomData<M>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FilterMode {
+    Replace,
+    And,
+    Or,
+}
+
+macro_rules! impl_select_builder_compare_methods {
+    ($($name:ident),+ $(,)?) => {
+        $(
+            pub fn $name<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
+                self.push_filter(left.into().$name(right), FilterMode::Replace)
+            }
+        )+
+    };
+}
+
+macro_rules! impl_select_builder_null_methods {
+    ($($name:ident),+ $(,)?) => {
+        $(
+            pub fn $name<V: Into<QueryValue>>(self, value: V) -> Self {
+                self.push_filter(value.into().$name(), FilterMode::Replace)
+            }
+        )+
+    };
+}
+
+macro_rules! impl_select_builder_like_methods {
+    ($($name:ident),+ $(,)?) => {
+        $(
+            pub fn $name<L: Into<QueryValue>, R: Into<QueryValue>>(self, value: L, pattern: R) -> Self {
+                self.push_filter(value.into().$name(pattern), FilterMode::Replace)
+            }
+        )+
+    };
 }
 
 impl<Q: SelectSource, M: Model> SelectBuilder<Q, M> {
@@ -427,22 +544,44 @@ impl<Q: SelectSource, M: Model> SelectBuilder<Q, M> {
         }
     }
 
+    fn push_filter(mut self, expr: QueryExpr, mode: FilterMode) -> Self {
+        self.filter = Some(match (mode, self.filter.take()) {
+            (FilterMode::Replace, _) => expr,
+            (FilterMode::And, Some(current)) => current.and(expr),
+            (FilterMode::Or, Some(current)) => current.or(expr),
+            (_, None) => expr,
+        });
+        self
+    }
+
     pub fn filter(mut self, expr: QueryExpr) -> Self {
         self.filter = Some(expr);
         self
     }
 
-    pub fn and_filter(mut self, expr: QueryExpr) -> Self {
-        self.filter = Some(match self.filter.take() {
-            Some(current) => current.and(expr),
-            None => expr,
-        });
+    pub fn and(self, left: QueryExpr, right: QueryExpr) -> Self {
+        self.push_filter(left.and(right), FilterMode::And)
+    }
+
+    pub fn or(self, left: QueryExpr, right: QueryExpr) -> Self {
+        self.push_filter(left.or(right), FilterMode::Or)
+    }
+
+    pub fn not(self, expr: QueryExpr) -> Self {
+        self.push_filter(expr.not(), FilterMode::Replace)
+    }
+
+    fn push_order(mut self, order: SortExpr) -> Self {
+        self.order_bys.push(order);
         self
     }
 
-    pub fn order_by(mut self, order: OrderBy) -> Self {
-        self.order_bys.push(order);
-        self
+    pub fn asc<V: Into<QueryValue>>(self, value: V) -> Self {
+        self.push_order(value.into().asc())
+    }
+
+    pub fn desc<V: Into<QueryValue>>(self, value: V) -> Self {
+        self.push_order(value.into().desc())
     }
 
     pub fn limit(mut self, limit: usize) -> Self {
@@ -482,7 +621,7 @@ impl<Q: SelectSource, M: Model> SelectBuilder<Q, M> {
                 &self
                     .order_bys
                     .iter()
-                    .map(OrderBy::to_sql)
+                    .map(SortExpr::to_sql)
                     .collect::<Vec<_>>()
                     .join(", "),
             );
@@ -499,6 +638,12 @@ impl<Q: SelectSource, M: Model> SelectBuilder<Q, M> {
     fn build_sql(&self) -> String {
         self.append_filter_order_limit(self.base_select_sql())
     }
+
+    impl_select_builder_compare_methods!(eq, ne, gt, gte, lt, lte);
+
+    impl_select_builder_null_methods!(is_null, is_not_null);
+
+    impl_select_builder_like_methods!(like, not_like);
 
     pub fn raw(self) -> Result<Q::Iter, DatabaseError> {
         let sql = self.build_sql();

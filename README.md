@@ -95,9 +95,8 @@ fn main() -> Result<(), DatabaseError> {
 
     let users = database
         .select::<User>()
-        .filter(User::email().like("%@example.com"))
-        .and_filter(User::age().gte(18))
-        .order_by(User::name().asc())
+        .and(User::email().like("%@example.com"), User::age().gte(18))
+        .asc(User::name())
         .limit(10)
         .fetch()?;
 
