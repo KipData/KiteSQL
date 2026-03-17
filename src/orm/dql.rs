@@ -59,8 +59,8 @@ impl<S: Storage> Database<S> {
     }
 
     /// Starts a typed single-table query builder for the given model.
-    pub fn select<M: Model>(&self) -> SelectBuilder<DatabaseSelectSource<'_, S>, M> {
-        SelectBuilder::new(DatabaseSelectSource(self))
+    pub fn select<M: Model>(&self) -> SelectBuilder<&Database<S>, M> {
+        SelectBuilder::new(self)
     }
 }
 
@@ -76,7 +76,7 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
     }
 
     /// Starts a typed single-table query builder inside the current transaction.
-    pub fn select<M: Model>(&mut self) -> SelectBuilder<TransactionSelectSource<'_, 'a, S>, M> {
-        SelectBuilder::new(TransactionSelectSource(self))
+    pub fn select<M: Model>(&mut self) -> SelectBuilder<&mut DBTransaction<'a, S>, M> {
+        SelectBuilder::new(self)
     }
 }

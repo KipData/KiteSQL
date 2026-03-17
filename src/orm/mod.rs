@@ -11,7 +11,19 @@ use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use rust_decimal::Decimal;
-use sqlparser::ast::CharLengthUnits;
+use sqlparser::ast::helpers::attached_token::AttachedToken;
+use sqlparser::ast::{
+    AlterColumnOperation, AlterTable, AlterTableOperation, Analyze, Assignment, AssignmentTarget,
+    BinaryOperator as SqlBinaryOperator, CharLengthUnits, ColumnDef, ColumnOption, ColumnOptionDef,
+    CreateIndex, CreateTable, DataType, Delete, Expr, FromTable, Function, FunctionArg,
+    FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr, HiveDistributionStyle,
+    Ident, IndexColumn, Insert, KeyOrIndexDisplay, LimitClause, NullsDistinctOption, ObjectName,
+    ObjectType, Offset, OffsetRows, OrderBy, OrderByExpr, OrderByKind, OrderByOptions,
+    PrimaryKeyConstraint, Query, Select, SelectFlavor, SelectItem, SetExpr, TableFactor,
+    TableObject, TableWithJoins, TimezoneInfo, UniqueConstraint, Update, Value, Values,
+};
+use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser::parser::Parser;
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -65,6 +77,50 @@ impl OrmColumn {
         }
 
         column_def
+    }
+
+    fn column_def(&self) -> Result<ColumnDef, DatabaseError> {
+        let mut options = Vec::new();
+
+        if self.primary_key {
+            options.push(column_option(ColumnOption::PrimaryKey(
+                PrimaryKeyConstraint {
+                    name: None,
+                    index_name: None,
+                    index_type: None,
+                    columns: vec![],
+                    index_options: vec![],
+                    characteristics: None,
+                },
+            )));
+        } else {
+            if !self.nullable {
+                options.push(column_option(ColumnOption::NotNull));
+            }
+            if self.unique {
+                options.push(column_option(ColumnOption::Unique(UniqueConstraint {
+                    name: None,
+                    index_name: None,
+                    index_type_display: KeyOrIndexDisplay::None,
+                    index_type: None,
+                    columns: vec![],
+                    index_options: vec![],
+                    characteristics: None,
+                    nulls_distinct: NullsDistinctOption::None,
+                })));
+            }
+        }
+        if let Some(default_expr) = self.default_expr {
+            options.push(column_option(ColumnOption::Default(parse_expr_fragment(
+                default_expr,
+            )?)));
+        }
+
+        Ok(ColumnDef {
+            name: ident(self.name),
+            data_type: parse_data_type_fragment(&self.ddl_type)?,
+            options,
+        })
     }
 }
 
@@ -199,32 +255,45 @@ impl QueryExpr {
         QueryExpr::Not(Box::new(self))
     }
 
-    fn to_sql(&self) -> String {
+    fn to_ast(&self) -> Expr {
         match self {
-            QueryExpr::Compare { left, op, right } => {
-                format!("({} {} {})", left.to_sql(), op.as_sql(), right.to_sql())
-            }
+            QueryExpr::Compare { left, op, right } => Expr::BinaryOp {
+                left: Box::new(left.to_ast()),
+                op: op.as_ast(),
+                right: Box::new(right.to_ast()),
+            },
             QueryExpr::IsNull { value, negated } => {
                 if *negated {
-                    format!("({} is not null)", value.to_sql())
+                    Expr::IsNotNull(Box::new(value.to_ast()))
                 } else {
-                    format!("({} is null)", value.to_sql())
+                    Expr::IsNull(Box::new(value.to_ast()))
                 }
             }
             QueryExpr::Like {
                 value,
                 pattern,
                 negated,
-            } => {
-                if *negated {
-                    format!("({} not like {})", value.to_sql(), pattern.to_sql())
-                } else {
-                    format!("({} like {})", value.to_sql(), pattern.to_sql())
-                }
-            }
-            QueryExpr::And(left, right) => format!("({} and {})", left.to_sql(), right.to_sql()),
-            QueryExpr::Or(left, right) => format!("({} or {})", left.to_sql(), right.to_sql()),
-            QueryExpr::Not(inner) => format!("(not {})", inner.to_sql()),
+            } => Expr::Like {
+                negated: *negated,
+                expr: Box::new(value.to_ast()),
+                pattern: Box::new(pattern.to_ast()),
+                escape_char: None,
+                any: false,
+            },
+            QueryExpr::And(left, right) => Expr::BinaryOp {
+                left: Box::new(nested_expr(left.to_ast())),
+                op: SqlBinaryOperator::And,
+                right: Box::new(nested_expr(right.to_ast())),
+            },
+            QueryExpr::Or(left, right) => Expr::BinaryOp {
+                left: Box::new(nested_expr(left.to_ast())),
+                op: SqlBinaryOperator::Or,
+                right: Box::new(nested_expr(right.to_ast())),
+            },
+            QueryExpr::Not(inner) => Expr::UnaryOp {
+                op: sqlparser::ast::UnaryOperator::Not,
+                expr: Box::new(nested_expr(inner.to_ast())),
+            },
         }
     }
 }
@@ -240,9 +309,15 @@ impl SortExpr {
         Self { value, desc }
     }
 
-    fn to_sql(&self) -> String {
-        let direction = if self.desc { "desc" } else { "asc" };
-        format!("{} {}", self.value.to_sql(), direction)
+    fn to_ast(&self) -> OrderByExpr {
+        OrderByExpr {
+            expr: self.value.to_ast(),
+            options: OrderByOptions {
+                asc: Some(!self.desc),
+                nulls_first: None,
+            },
+            with_fill: None,
+        }
     }
 }
 
@@ -345,18 +420,31 @@ impl QueryValue {
         SortExpr::new(self, true)
     }
 
-    fn to_sql(&self) -> String {
+    fn to_ast(&self) -> Expr {
         match self {
-            QueryValue::Column { table, column } => format!("{}.{}", table, column),
-            QueryValue::Param(value) => data_value_to_sql(value),
-            QueryValue::Function { name, args } => format!(
-                "{}({})",
-                name,
-                args.iter()
-                    .map(QueryValue::to_sql)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+            QueryValue::Column { table, column } => {
+                Expr::CompoundIdentifier(vec![ident(*table), ident(*column)])
+            }
+            QueryValue::Param(value) => data_value_to_ast_expr(value),
+            QueryValue::Function { name, args } => Expr::Function(Function {
+                name: object_name(name),
+                uses_odbc_syntax: false,
+                parameters: FunctionArguments::None,
+                args: FunctionArguments::List(FunctionArgumentList {
+                    duplicate_treatment: None,
+                    args: args
+                        .iter()
+                        .map(QueryValue::to_ast)
+                        .map(FunctionArgExpr::Expr)
+                        .map(FunctionArg::Unnamed)
+                        .collect(),
+                    clauses: vec![],
+                }),
+                filter: None,
+                null_treatment: None,
+                over: None,
+                within_group: vec![],
+            }),
         }
     }
 }
@@ -374,52 +462,15 @@ impl<T: ToDataValue> From<T> for QueryValue {
 }
 
 impl CompareOp {
-    fn as_sql(&self) -> &'static str {
+    fn as_ast(&self) -> SqlBinaryOperator {
         match self {
-            CompareOp::Eq => "=",
-            CompareOp::Ne => "!=",
-            CompareOp::Gt => ">",
-            CompareOp::Gte => ">=",
-            CompareOp::Lt => "<",
-            CompareOp::Lte => "<=",
+            CompareOp::Eq => SqlBinaryOperator::Eq,
+            CompareOp::Ne => SqlBinaryOperator::NotEq,
+            CompareOp::Gt => SqlBinaryOperator::Gt,
+            CompareOp::Gte => SqlBinaryOperator::GtEq,
+            CompareOp::Lt => SqlBinaryOperator::Lt,
+            CompareOp::Lte => SqlBinaryOperator::LtEq,
         }
-    }
-}
-
-fn escape_sql_string(value: &str) -> String {
-    value.replace('\'', "''")
-}
-
-fn data_value_to_sql(value: &DataValue) -> String {
-    match value {
-        DataValue::Null => "null".to_string(),
-        DataValue::Boolean(value) => value.to_string(),
-        DataValue::Float32(value) => value.to_string(),
-        DataValue::Float64(value) => value.to_string(),
-        DataValue::Int8(value) => value.to_string(),
-        DataValue::Int16(value) => value.to_string(),
-        DataValue::Int32(value) => value.to_string(),
-        DataValue::Int64(value) => value.to_string(),
-        DataValue::UInt8(value) => value.to_string(),
-        DataValue::UInt16(value) => value.to_string(),
-        DataValue::UInt32(value) => value.to_string(),
-        DataValue::UInt64(value) => value.to_string(),
-        DataValue::Utf8 { value, .. } => format!("'{}'", escape_sql_string(value)),
-        DataValue::Date32(_)
-        | DataValue::Date64(_)
-        | DataValue::Time32(..)
-        | DataValue::Time64(..) => {
-            format!("'{}'", value)
-        }
-        DataValue::Decimal(value) => value.to_string(),
-        DataValue::Tuple(values, ..) => format!(
-            "({})",
-            values
-                .iter()
-                .map(data_value_to_sql)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
     }
 }
 
@@ -457,36 +508,8 @@ impl<'a, 'tx, S: Storage> StatementSource for &'a mut DBTransaction<'tx, S> {
     }
 }
 
-pub trait SelectSource {
-    type Iter: ResultIter;
-
-    fn run_select(self, sql: String) -> Result<Self::Iter, DatabaseError>;
-}
-
-#[doc(hidden)]
-pub struct DatabaseSelectSource<'a, S: Storage>(pub &'a Database<S>);
-
-impl<'a, S: Storage> SelectSource for DatabaseSelectSource<'a, S> {
-    type Iter = DatabaseIter<'a, S>;
-
-    fn run_select(self, sql: String) -> Result<Self::Iter, DatabaseError> {
-        self.0.run(sql)
-    }
-}
-
-#[doc(hidden)]
-pub struct TransactionSelectSource<'a, 'tx, S: Storage>(pub &'a mut DBTransaction<'tx, S>);
-
-impl<'a, 'tx, S: Storage> SelectSource for TransactionSelectSource<'a, 'tx, S> {
-    type Iter = TransactionIter<'a>;
-
-    fn run_select(self, sql: String) -> Result<Self::Iter, DatabaseError> {
-        self.0.run(sql)
-    }
-}
-
 /// Lightweight single-table query builder for ORM models.
-pub struct SelectBuilder<Q: SelectSource, M: Model> {
+pub struct SelectBuilder<Q: StatementSource, M: Model> {
     source: Q,
     filter: Option<QueryExpr>,
     order_bys: Vec<SortExpr>,
@@ -532,7 +555,7 @@ macro_rules! impl_select_builder_like_methods {
     };
 }
 
-impl<Q: SelectSource, M: Model> SelectBuilder<Q, M> {
+impl<Q: StatementSource, M: Model> SelectBuilder<Q, M> {
     fn new(source: Q) -> Self {
         Self {
             source,
@@ -594,49 +617,15 @@ impl<Q: SelectSource, M: Model> SelectBuilder<Q, M> {
         self
     }
 
-    fn select_columns_sql() -> String {
-        M::fields()
-            .iter()
-            .map(|field| field.column)
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-
-    fn base_select_sql(&self) -> String {
-        format!(
-            "select {} from {}",
-            Self::select_columns_sql(),
-            M::table_name()
+    fn statement(&self) -> Statement {
+        orm_select_query_statement(
+            M::table_name(),
+            M::fields(),
+            self.filter.as_ref(),
+            &self.order_bys,
+            self.limit,
+            self.offset,
         )
-    }
-
-    fn append_filter_order_limit(&self, mut sql: String) -> String {
-        if let Some(filter) = &self.filter {
-            sql.push_str(" where ");
-            sql.push_str(&filter.to_sql());
-        }
-        if !self.order_bys.is_empty() {
-            sql.push_str(" order by ");
-            sql.push_str(
-                &self
-                    .order_bys
-                    .iter()
-                    .map(SortExpr::to_sql)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            );
-        }
-        if let Some(limit) = self.limit {
-            sql.push_str(&format!(" limit {}", limit));
-        }
-        if let Some(offset) = self.offset {
-            sql.push_str(&format!(" offset {}", offset));
-        }
-        sql
-    }
-
-    fn build_sql(&self) -> String {
-        self.append_filter_order_limit(self.base_select_sql())
     }
 
     impl_select_builder_compare_methods!(eq, ne, gt, gte, lt, lte);
@@ -646,8 +635,8 @@ impl<Q: SelectSource, M: Model> SelectBuilder<Q, M> {
     impl_select_builder_like_methods!(like, not_like);
 
     pub fn raw(self) -> Result<Q::Iter, DatabaseError> {
-        let sql = self.build_sql();
-        self.source.run_select(sql)
+        let statement = self.statement();
+        self.source.execute_statement(&statement, &[])
     }
 
     pub fn fetch(self) -> Result<OrmIter<Q::Iter, M>, DatabaseError> {
@@ -664,12 +653,8 @@ impl<Q: SelectSource, M: Model> SelectBuilder<Q, M> {
     }
 
     pub fn count(self) -> Result<usize, DatabaseError> {
-        let mut sql = format!("select count(*) from {}", M::table_name());
-        if let Some(filter) = &self.filter {
-            sql.push_str(" where ");
-            sql.push_str(&filter.to_sql());
-        }
-        let mut iter = self.source.run_select(sql)?;
+        let statement = orm_count_statement(M::table_name(), self.filter.as_ref());
+        let mut iter = self.source.execute_statement(&statement, &[])?;
         let count = match iter.next().transpose()? {
             Some(tuple) => match tuple.values.first() {
                 Some(DataValue::Int32(value)) => *value as usize,
@@ -688,6 +673,623 @@ impl<Q: SelectSource, M: Model> SelectBuilder<Q, M> {
         iter.done()?;
         Ok(count)
     }
+}
+
+fn ident(value: impl Into<String>) -> Ident {
+    Ident::new(value)
+}
+
+fn object_name(value: &str) -> ObjectName {
+    value.split('.').map(ident).collect::<Vec<_>>().into()
+}
+
+fn nested_expr(expr: Expr) -> Expr {
+    Expr::Nested(Box::new(expr))
+}
+
+fn number_expr(value: impl ToString) -> Expr {
+    Expr::Value(Value::Number(value.to_string(), false).with_empty_span())
+}
+
+fn string_expr(value: impl Into<String>) -> Expr {
+    Expr::Value(Value::SingleQuotedString(value.into()).with_empty_span())
+}
+
+fn placeholder_expr(value: &str) -> Expr {
+    Expr::Value(Value::Placeholder(value.to_string()).with_empty_span())
+}
+
+fn typed_string_expr(data_type: DataType, value: impl Into<String>) -> Expr {
+    Expr::TypedString(sqlparser::ast::TypedString {
+        data_type,
+        value: Value::SingleQuotedString(value.into()).with_empty_span(),
+        uses_odbc_syntax: false,
+    })
+}
+
+fn column_option(option: ColumnOption) -> ColumnOptionDef {
+    ColumnOptionDef { name: None, option }
+}
+
+fn table_factor(table_name: &str) -> TableFactor {
+    TableFactor::Table {
+        name: object_name(table_name),
+        alias: None,
+        args: None,
+        with_hints: vec![],
+        version: None,
+        with_ordinality: false,
+        partitions: vec![],
+        json_path: None,
+        sample: None,
+        index_hints: vec![],
+    }
+}
+
+fn table_with_joins(table_name: &str) -> TableWithJoins {
+    TableWithJoins {
+        relation: table_factor(table_name),
+        joins: vec![],
+    }
+}
+
+fn select_projection(fields: &[OrmField]) -> Vec<SelectItem> {
+    fields
+        .iter()
+        .map(|field| SelectItem::UnnamedExpr(Expr::Identifier(ident(field.column))))
+        .collect()
+}
+
+fn select_query(
+    table_name: &str,
+    projection: Vec<SelectItem>,
+    filter: Option<&QueryExpr>,
+    order_bys: &[SortExpr],
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Query {
+    Query {
+        with: None,
+        body: Box::new(SetExpr::Select(Box::new(Select {
+            select_token: AttachedToken::empty(),
+            optimizer_hint: None,
+            distinct: None,
+            select_modifiers: None,
+            top: None,
+            top_before_distinct: false,
+            projection,
+            exclude: None,
+            into: None,
+            from: vec![table_with_joins(table_name)],
+            lateral_views: vec![],
+            prewhere: None,
+            selection: filter.map(QueryExpr::to_ast),
+            connect_by: vec![],
+            group_by: GroupByExpr::Expressions(vec![], vec![]),
+            cluster_by: vec![],
+            distribute_by: vec![],
+            sort_by: vec![],
+            having: None,
+            named_window: vec![],
+            qualify: None,
+            window_before_qualify: false,
+            value_table_mode: None,
+            flavor: SelectFlavor::Standard,
+        }))),
+        order_by: (!order_bys.is_empty()).then(|| OrderBy {
+            kind: OrderByKind::Expressions(order_bys.iter().map(SortExpr::to_ast).collect()),
+            interpolate: None,
+        }),
+        limit_clause: if limit.is_some() || offset.is_some() {
+            Some(LimitClause::LimitOffset {
+                limit: limit.map(number_expr),
+                offset: offset.map(|offset| Offset {
+                    value: number_expr(offset),
+                    rows: OffsetRows::None,
+                }),
+                limit_by: vec![],
+            })
+        } else {
+            None
+        },
+        fetch: None,
+        locks: vec![],
+        for_clause: None,
+        settings: None,
+        format_clause: None,
+        pipe_operators: vec![],
+    }
+}
+
+fn values_query(values: Vec<Expr>) -> Query {
+    Query {
+        with: None,
+        body: Box::new(SetExpr::Values(Values {
+            explicit_row: false,
+            value_keyword: false,
+            rows: vec![values],
+        })),
+        order_by: None,
+        limit_clause: None,
+        fetch: None,
+        locks: vec![],
+        for_clause: None,
+        settings: None,
+        format_clause: None,
+        pipe_operators: vec![],
+    }
+}
+
+fn parse_expr_fragment(value: &str) -> Result<Expr, DatabaseError> {
+    let dialect = PostgreSqlDialect {};
+    let mut parser = Parser::new(&dialect).try_with_sql(value)?;
+    parser.parse_expr().map_err(Into::into)
+}
+
+fn parse_data_type_fragment(value: &str) -> Result<DataType, DatabaseError> {
+    let dialect = PostgreSqlDialect {};
+    let mut parser = Parser::new(&dialect).try_with_sql(value)?;
+    parser.parse_data_type().map_err(Into::into)
+}
+
+fn data_value_to_ast_expr(value: &DataValue) -> Expr {
+    match value {
+        DataValue::Null => Expr::Value(Value::Null.with_empty_span()),
+        DataValue::Boolean(value) => Expr::Value(Value::Boolean(*value).with_empty_span()),
+        DataValue::Float32(value) => number_expr(value),
+        DataValue::Float64(value) => number_expr(value),
+        DataValue::Int8(value) => number_expr(value),
+        DataValue::Int16(value) => number_expr(value),
+        DataValue::Int32(value) => number_expr(value),
+        DataValue::Int64(value) => number_expr(value),
+        DataValue::UInt8(value) => number_expr(value),
+        DataValue::UInt16(value) => number_expr(value),
+        DataValue::UInt32(value) => number_expr(value),
+        DataValue::UInt64(value) => number_expr(value),
+        DataValue::Utf8 { value, .. } => string_expr(value),
+        DataValue::Date32(_) => typed_string_expr(DataType::Date, value.to_string()),
+        DataValue::Date64(_) => typed_string_expr(DataType::Datetime(None), value.to_string()),
+        DataValue::Time32(..) => {
+            typed_string_expr(DataType::Time(None, TimezoneInfo::None), value.to_string())
+        }
+        DataValue::Time64(_, _, zone) => typed_string_expr(
+            DataType::Timestamp(
+                None,
+                if *zone {
+                    TimezoneInfo::WithTimeZone
+                } else {
+                    TimezoneInfo::None
+                },
+            ),
+            value.to_string(),
+        ),
+        DataValue::Decimal(value) => number_expr(value),
+        DataValue::Tuple(values, ..) => {
+            Expr::Tuple(values.iter().map(data_value_to_ast_expr).collect())
+        }
+    }
+}
+
+#[doc(hidden)]
+pub fn orm_select_statement(table_name: &str, fields: &[OrmField]) -> Statement {
+    Statement::Query(Box::new(select_query(
+        table_name,
+        select_projection(fields),
+        None,
+        &[],
+        None,
+        None,
+    )))
+}
+
+#[doc(hidden)]
+pub fn orm_insert_statement(table_name: &str, fields: &[OrmField]) -> Statement {
+    Statement::Insert(Insert {
+        insert_token: AttachedToken::empty(),
+        optimizer_hint: None,
+        or: None,
+        ignore: false,
+        into: true,
+        table: TableObject::TableName(object_name(table_name)),
+        table_alias: None,
+        columns: fields.iter().map(|field| ident(field.column)).collect(),
+        overwrite: false,
+        source: Some(Box::new(values_query(
+            fields
+                .iter()
+                .map(|field| placeholder_expr(field.placeholder))
+                .collect(),
+        ))),
+        assignments: vec![],
+        partitioned: None,
+        after_columns: vec![],
+        has_table_keyword: false,
+        on: None,
+        returning: None,
+        replace_into: false,
+        priority: None,
+        insert_alias: None,
+        settings: None,
+        format_clause: None,
+    })
+}
+
+#[doc(hidden)]
+pub fn orm_update_statement(
+    table_name: &str,
+    fields: &[OrmField],
+    primary_key: &OrmField,
+) -> Statement {
+    Statement::Update(Update {
+        update_token: AttachedToken::empty(),
+        optimizer_hint: None,
+        table: table_with_joins(table_name),
+        assignments: fields
+            .iter()
+            .filter(|field| !field.primary_key)
+            .map(|field| Assignment {
+                target: AssignmentTarget::ColumnName(object_name(field.column)),
+                value: placeholder_expr(field.placeholder),
+            })
+            .collect(),
+        from: None,
+        selection: Some(Expr::BinaryOp {
+            left: Box::new(Expr::Identifier(ident(primary_key.column))),
+            op: SqlBinaryOperator::Eq,
+            right: Box::new(placeholder_expr(primary_key.placeholder)),
+        }),
+        returning: None,
+        or: None,
+        limit: None,
+    })
+}
+
+#[doc(hidden)]
+pub fn orm_delete_statement(table_name: &str, primary_key: &OrmField) -> Statement {
+    Statement::Delete(Delete {
+        delete_token: AttachedToken::empty(),
+        optimizer_hint: None,
+        tables: vec![],
+        from: FromTable::WithFromKeyword(vec![table_with_joins(table_name)]),
+        using: None,
+        selection: Some(Expr::BinaryOp {
+            left: Box::new(Expr::Identifier(ident(primary_key.column))),
+            op: SqlBinaryOperator::Eq,
+            right: Box::new(placeholder_expr(primary_key.placeholder)),
+        }),
+        returning: None,
+        order_by: vec![],
+        limit: None,
+    })
+}
+
+#[doc(hidden)]
+pub fn orm_find_statement(
+    table_name: &str,
+    fields: &[OrmField],
+    primary_key: &OrmField,
+) -> Statement {
+    Statement::Query(Box::new(Query {
+        with: None,
+        body: Box::new(SetExpr::Select(Box::new(Select {
+            select_token: AttachedToken::empty(),
+            optimizer_hint: None,
+            distinct: None,
+            select_modifiers: None,
+            top: None,
+            top_before_distinct: false,
+            projection: select_projection(fields),
+            exclude: None,
+            into: None,
+            from: vec![table_with_joins(table_name)],
+            lateral_views: vec![],
+            prewhere: None,
+            selection: Some(Expr::BinaryOp {
+                left: Box::new(Expr::Identifier(ident(primary_key.column))),
+                op: SqlBinaryOperator::Eq,
+                right: Box::new(placeholder_expr(primary_key.placeholder)),
+            }),
+            connect_by: vec![],
+            group_by: GroupByExpr::Expressions(vec![], vec![]),
+            cluster_by: vec![],
+            distribute_by: vec![],
+            sort_by: vec![],
+            having: None,
+            named_window: vec![],
+            qualify: None,
+            window_before_qualify: false,
+            value_table_mode: None,
+            flavor: SelectFlavor::Standard,
+        }))),
+        order_by: None,
+        limit_clause: None,
+        fetch: None,
+        locks: vec![],
+        for_clause: None,
+        settings: None,
+        format_clause: None,
+        pipe_operators: vec![],
+    }))
+}
+
+#[doc(hidden)]
+pub fn orm_create_table_statement(
+    table_name: &str,
+    columns: &[OrmColumn],
+    if_not_exists: bool,
+) -> Result<Statement, DatabaseError> {
+    Ok(Statement::CreateTable(CreateTable {
+        or_replace: false,
+        temporary: false,
+        external: false,
+        dynamic: false,
+        global: None,
+        if_not_exists,
+        transient: false,
+        volatile: false,
+        iceberg: false,
+        name: object_name(table_name),
+        columns: columns
+            .iter()
+            .map(OrmColumn::column_def)
+            .collect::<Result<Vec<_>, _>>()?,
+        constraints: vec![],
+        hive_distribution: HiveDistributionStyle::NONE,
+        hive_formats: None,
+        table_options: Default::default(),
+        file_format: None,
+        location: None,
+        query: None,
+        without_rowid: false,
+        like: None,
+        clone: None,
+        version: None,
+        comment: None,
+        on_commit: None,
+        on_cluster: None,
+        primary_key: None,
+        order_by: None,
+        partition_by: None,
+        cluster_by: None,
+        clustered_by: None,
+        inherits: None,
+        partition_of: None,
+        for_values: None,
+        strict: false,
+        copy_grants: false,
+        enable_schema_evolution: None,
+        change_tracking: None,
+        data_retention_time_in_days: None,
+        max_data_extension_time_in_days: None,
+        default_ddl_collation: None,
+        with_aggregation_policy: None,
+        with_row_access_policy: None,
+        with_tags: None,
+        external_volume: None,
+        base_location: None,
+        catalog: None,
+        catalog_sync: None,
+        storage_serialization_policy: None,
+        target_lag: None,
+        warehouse: None,
+        refresh_mode: None,
+        initialize: None,
+        require_user: false,
+    }))
+}
+
+#[doc(hidden)]
+pub fn orm_create_index_statement(
+    table_name: &str,
+    index_name: &str,
+    columns: &[&str],
+    unique: bool,
+    if_not_exists: bool,
+) -> Statement {
+    Statement::CreateIndex(CreateIndex {
+        name: Some(object_name(index_name)),
+        table_name: object_name(table_name),
+        using: None,
+        columns: columns.iter().copied().map(IndexColumn::from).collect(),
+        unique,
+        concurrently: false,
+        if_not_exists,
+        include: vec![],
+        nulls_distinct: None,
+        with: vec![],
+        predicate: None,
+        index_options: vec![],
+        alter_options: vec![],
+    })
+}
+
+#[doc(hidden)]
+pub fn orm_drop_table_statement(table_name: &str, if_exists: bool) -> Statement {
+    Statement::Drop {
+        object_type: ObjectType::Table,
+        if_exists,
+        names: vec![object_name(table_name)],
+        cascade: false,
+        restrict: false,
+        purge: false,
+        temporary: false,
+        table: None,
+    }
+}
+
+#[doc(hidden)]
+pub fn orm_drop_index_statement(table_name: &str, index_name: &str, if_exists: bool) -> Statement {
+    Statement::Drop {
+        object_type: ObjectType::Index,
+        if_exists,
+        names: vec![object_name(&format!("{table_name}.{index_name}"))],
+        cascade: false,
+        restrict: false,
+        purge: false,
+        temporary: false,
+        table: None,
+    }
+}
+
+#[doc(hidden)]
+pub fn orm_analyze_statement(table_name: &str) -> Statement {
+    Statement::Analyze(Analyze {
+        table_name: Some(object_name(table_name)),
+        partitions: None,
+        for_columns: false,
+        columns: vec![],
+        cache_metadata: false,
+        noscan: false,
+        compute_statistics: false,
+        has_table_keyword: true,
+    })
+}
+
+fn orm_select_query_statement(
+    table_name: &str,
+    fields: &[OrmField],
+    filter: Option<&QueryExpr>,
+    order_bys: &[SortExpr],
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Statement {
+    Statement::Query(Box::new(select_query(
+        table_name,
+        select_projection(fields),
+        filter,
+        order_bys,
+        limit,
+        offset,
+    )))
+}
+
+fn orm_count_statement(table_name: &str, filter: Option<&QueryExpr>) -> Statement {
+    Statement::Query(Box::new(select_query(
+        table_name,
+        vec![SelectItem::UnnamedExpr(Expr::Function(Function {
+            name: object_name("count"),
+            uses_odbc_syntax: false,
+            parameters: FunctionArguments::None,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![FunctionArg::Unnamed(FunctionArgExpr::Wildcard)],
+                clauses: vec![],
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+        }))],
+        filter,
+        &[],
+        None,
+        None,
+    )))
+}
+
+fn orm_alter_table_statement(table_name: &str, operation: AlterTableOperation) -> Statement {
+    Statement::AlterTable(AlterTable {
+        name: object_name(table_name),
+        if_exists: false,
+        only: false,
+        operations: vec![operation],
+        location: None,
+        on_cluster: None,
+        table_type: None,
+        end_token: AttachedToken::empty(),
+    })
+}
+
+fn orm_alter_column_type_statement(
+    table_name: &str,
+    column_name: &str,
+    ddl_type: &str,
+) -> Result<Statement, DatabaseError> {
+    Ok(orm_alter_table_statement(
+        table_name,
+        AlterTableOperation::AlterColumn {
+            column_name: ident(column_name),
+            op: AlterColumnOperation::SetDataType {
+                data_type: parse_data_type_fragment(ddl_type)?,
+                using: None,
+                had_set: false,
+            },
+        },
+    ))
+}
+
+fn orm_alter_column_default_statement(
+    table_name: &str,
+    column_name: &str,
+    default_expr: Option<&str>,
+) -> Result<Statement, DatabaseError> {
+    Ok(orm_alter_table_statement(
+        table_name,
+        AlterTableOperation::AlterColumn {
+            column_name: ident(column_name),
+            op: match default_expr {
+                Some(default_expr) => AlterColumnOperation::SetDefault {
+                    value: parse_expr_fragment(default_expr)?,
+                },
+                None => AlterColumnOperation::DropDefault,
+            },
+        },
+    ))
+}
+
+fn orm_alter_column_nullability_statement(
+    table_name: &str,
+    column_name: &str,
+    nullable: bool,
+) -> Statement {
+    orm_alter_table_statement(
+        table_name,
+        AlterTableOperation::AlterColumn {
+            column_name: ident(column_name),
+            op: if nullable {
+                AlterColumnOperation::DropNotNull
+            } else {
+                AlterColumnOperation::SetNotNull
+            },
+        },
+    )
+}
+
+fn orm_rename_column_statement(table_name: &str, old_name: &str, new_name: &str) -> Statement {
+    orm_alter_table_statement(
+        table_name,
+        AlterTableOperation::RenameColumn {
+            old_column_name: ident(old_name),
+            new_column_name: ident(new_name),
+        },
+    )
+}
+
+fn orm_drop_column_statement(table_name: &str, column_name: &str) -> Statement {
+    orm_alter_table_statement(
+        table_name,
+        AlterTableOperation::DropColumn {
+            has_column_keyword: true,
+            column_names: vec![ident(column_name)],
+            if_exists: false,
+            drop_behavior: None,
+        },
+    )
+}
+
+fn orm_add_column_statement(
+    table_name: &str,
+    column: &OrmColumn,
+) -> Result<Statement, DatabaseError> {
+    Ok(orm_alter_table_statement(
+        table_name,
+        AlterTableOperation::AddColumn {
+            column_keyword: true,
+            if_not_exists: false,
+            column_def: column.column_def()?,
+            column_position: None,
+        },
+    ))
 }
 
 /// Trait implemented by ORM models.

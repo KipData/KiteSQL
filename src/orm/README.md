@@ -319,16 +319,6 @@ Methods:
 
 A lightweight single-table ORM query builder.
 
-### `DatabaseSelectSource<'a, S>`
-
-Internal source adapter used by `Database::select::<M>()`.
-This type is public for generic completeness, but it is not usually used directly.
-
-### `TransactionSelectSource<'a, 'tx, S>`
-
-Internal source adapter used by `DBTransaction::select::<M>()`.
-This type is public for generic completeness, but it is not usually used directly.
-
 ## Public traits
 
 ### `Model`
@@ -370,11 +360,6 @@ Marker trait for decimal-like fields that support precision and scale annotation
 ### `StatementSource`
 
 Execution abstraction shared by `Database` and `DBTransaction` for prepared ORM statements.
-This is mostly framework infrastructure.
-
-### `SelectSource`
-
-Execution abstraction used by `SelectBuilder`.
 This is mostly framework infrastructure.
 
 ## Public helper function
