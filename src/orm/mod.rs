@@ -14,9 +14,9 @@ use rust_decimal::Decimal;
 use sqlparser::ast::helpers::attached_token::AttachedToken;
 use sqlparser::ast::{
     AlterColumnOperation, AlterTable, AlterTableOperation, Analyze, Assignment, AssignmentTarget,
-    BinaryOperator as SqlBinaryOperator, CastKind, CharLengthUnits, ColumnDef, ColumnOption,
-    ColumnOptionDef, CreateIndex, CreateTable, DataType, Delete, Expr, FromTable, Function,
-    FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr,
+    BinaryOperator as SqlBinaryOperator, CaseWhen, CastKind, CharLengthUnits, ColumnDef,
+    ColumnOption, ColumnOptionDef, CreateIndex, CreateTable, DataType, Delete, Expr, FromTable,
+    Function, FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr,
     HiveDistributionStyle, Ident, IndexColumn, Insert, KeyOrIndexDisplay, LimitClause,
     NullsDistinctOption, ObjectName, ObjectType, Offset, OffsetRows, OrderBy, OrderByExpr,
     OrderByKind, OrderByOptions, PrimaryKeyConstraint, Query, Select, SelectFlavor, SelectItem,
@@ -225,6 +225,10 @@ impl<M, T> Field<M, T> {
         self.value().cast_to(data_type)
     }
 
+    pub fn alias(self, alias: &str) -> ProjectedValue {
+        self.value().alias(alias)
+    }
+
     pub fn in_subquery<S: SubquerySource>(self, subquery: S) -> QueryExpr {
         self.value().in_subquery(subquery)
     }
@@ -238,6 +242,12 @@ impl<M, T> Field<M, T> {
 /// A lightweight ORM expression wrapper for value-producing SQL AST nodes.
 pub struct QueryValue {
     expr: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+/// A projected ORM expression, optionally carrying a select-list alias.
+pub struct ProjectedValue {
+    item: SelectItem,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,6 +273,51 @@ where
     V: Into<QueryValue>,
 {
     QueryValue::function(name, args)
+}
+
+pub fn count<V: Into<QueryValue>>(value: V) -> QueryValue {
+    QueryValue::aggregate("count", [value.into()])
+}
+
+pub fn count_all() -> QueryValue {
+    QueryValue::aggregate_all("count")
+}
+
+pub fn sum<V: Into<QueryValue>>(value: V) -> QueryValue {
+    QueryValue::aggregate("sum", [value.into()])
+}
+
+pub fn avg<V: Into<QueryValue>>(value: V) -> QueryValue {
+    QueryValue::aggregate("avg", [value.into()])
+}
+
+pub fn min<V: Into<QueryValue>>(value: V) -> QueryValue {
+    QueryValue::aggregate("min", [value.into()])
+}
+
+pub fn max<V: Into<QueryValue>>(value: V) -> QueryValue {
+    QueryValue::aggregate("max", [value.into()])
+}
+
+pub fn case_when<I, C, R, E>(conditions: I, else_result: E) -> QueryValue
+where
+    I: IntoIterator<Item = (C, R)>,
+    C: Into<QueryExpr>,
+    R: Into<QueryValue>,
+    E: Into<QueryValue>,
+{
+    QueryValue::searched_case(conditions, else_result)
+}
+
+pub fn case_value<O, I, W, R, E>(operand: O, conditions: I, else_result: E) -> QueryValue
+where
+    O: Into<QueryValue>,
+    I: IntoIterator<Item = (W, R)>,
+    W: Into<QueryValue>,
+    R: Into<QueryValue>,
+    E: Into<QueryValue>,
+{
+    QueryValue::simple_case(operand, conditions, else_result)
 }
 
 impl QueryExpr {
@@ -358,27 +413,80 @@ impl QueryValue {
         I: IntoIterator<Item = V>,
         V: Into<QueryValue>,
     {
-        let name = name.into();
-        Self::from_ast(Expr::Function(Function {
-            name: object_name(&name),
-            uses_odbc_syntax: false,
-            parameters: FunctionArguments::None,
-            args: FunctionArguments::List(FunctionArgumentList {
-                duplicate_treatment: None,
-                args: args
-                    .into_iter()
-                    .map(Into::into)
-                    .map(QueryValue::into_ast)
-                    .map(FunctionArgExpr::Expr)
-                    .map(FunctionArg::Unnamed)
-                    .collect(),
-                clauses: vec![],
-            }),
-            filter: None,
-            null_treatment: None,
-            over: None,
-            within_group: vec![],
-        }))
+        Self::function_with_args(
+            name,
+            args.into_iter()
+                .map(Into::into)
+                .map(QueryValue::into_ast)
+                .map(FunctionArgExpr::Expr),
+        )
+    }
+
+    pub fn aggregate<N, I, V>(name: N, args: I) -> Self
+    where
+        N: Into<String>,
+        I: IntoIterator<Item = V>,
+        V: Into<QueryValue>,
+    {
+        Self::function(name, args)
+    }
+
+    pub fn aggregate_all(name: impl Into<String>) -> Self {
+        Self::function_with_args(name, [FunctionArgExpr::Wildcard])
+    }
+
+    pub fn alias(self, alias: &str) -> ProjectedValue {
+        ProjectedValue {
+            item: SelectItem::ExprWithAlias {
+                expr: self.into_ast(),
+                alias: ident(alias),
+            },
+        }
+    }
+
+    pub fn searched_case<I, C, R, E>(conditions: I, else_result: E) -> Self
+    where
+        I: IntoIterator<Item = (C, R)>,
+        C: Into<QueryExpr>,
+        R: Into<QueryValue>,
+        E: Into<QueryValue>,
+    {
+        Self::from_ast(Expr::Case {
+            case_token: AttachedToken::empty(),
+            end_token: AttachedToken::empty(),
+            operand: None,
+            conditions: conditions
+                .into_iter()
+                .map(|(condition, result)| CaseWhen {
+                    condition: condition.into().into_ast(),
+                    result: result.into().into_ast(),
+                })
+                .collect(),
+            else_result: Some(Box::new(else_result.into().into_ast())),
+        })
+    }
+
+    pub fn simple_case<O, I, W, R, E>(operand: O, conditions: I, else_result: E) -> Self
+    where
+        O: Into<QueryValue>,
+        I: IntoIterator<Item = (W, R)>,
+        W: Into<QueryValue>,
+        R: Into<QueryValue>,
+        E: Into<QueryValue>,
+    {
+        Self::from_ast(Expr::Case {
+            case_token: AttachedToken::empty(),
+            end_token: AttachedToken::empty(),
+            operand: Some(Box::new(operand.into().into_ast())),
+            conditions: conditions
+                .into_iter()
+                .map(|(condition, result)| CaseWhen {
+                    condition: condition.into().into_ast(),
+                    result: result.into().into_ast(),
+                })
+                .collect(),
+            else_result: Some(Box::new(else_result.into().into_ast())),
+        })
     }
 
     pub fn eq<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
@@ -552,11 +660,47 @@ impl QueryValue {
     fn desc(self) -> SortExpr {
         SortExpr::new(self, true)
     }
+
+    fn function_with_args<N, I>(name: N, args: I) -> Self
+    where
+        N: Into<String>,
+        I: IntoIterator<Item = FunctionArgExpr>,
+    {
+        let name = name.into();
+        Self::from_ast(Expr::Function(Function {
+            name: object_name(&name),
+            uses_odbc_syntax: false,
+            parameters: FunctionArguments::None,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: args.into_iter().map(FunctionArg::Unnamed).collect(),
+                clauses: vec![],
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+        }))
+    }
 }
 
 impl<M, T> From<Field<M, T>> for QueryValue {
     fn from(value: Field<M, T>) -> Self {
         value.value()
+    }
+}
+
+impl ProjectedValue {
+    fn into_select_item(self) -> SelectItem {
+        self.item
+    }
+}
+
+impl<V: Into<QueryValue>> From<V> for ProjectedValue {
+    fn from(value: V) -> Self {
+        Self {
+            item: SelectItem::UnnamedExpr(value.into().into_ast()),
+        }
     }
 }
 
@@ -646,7 +790,7 @@ pub type ProjectValueBuilder<Q, M> = SelectBuilder<Q, M, ValueProjection>;
 pub struct ModelProjection;
 
 pub struct ValueProjection {
-    value: QueryValue,
+    value: ProjectedValue,
 }
 
 struct BuilderState<Q: StatementSource, M: Model> {
@@ -699,7 +843,7 @@ impl<M: Model> ProjectionSpec<M> for ModelProjection {
 
 impl<M: Model> ProjectionSpec<M> for ValueProjection {
     fn into_select_items(self) -> Vec<SelectItem> {
-        vec![SelectItem::UnnamedExpr(self.value.into_ast())]
+        vec![self.value.into_select_item()]
     }
 }
 
@@ -758,7 +902,7 @@ impl<Q: StatementSource, M: Model> SelectBuilder<Q, M, ModelProjection> {
 }
 
 impl<Q: StatementSource, M: Model> SelectBuilder<Q, M, ValueProjection> {
-    fn new_value<V: Into<QueryValue>>(source: Q, value: V) -> Self {
+    fn new_value<V: Into<ProjectedValue>>(source: Q, value: V) -> Self {
         Self {
             state: BuilderState::new(source),
             projection: ValueProjection {

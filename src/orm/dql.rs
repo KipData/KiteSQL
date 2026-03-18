@@ -64,7 +64,7 @@ impl<S: Storage> Database<S> {
     }
 
     /// Starts a typed single-value projection query builder for the given model.
-    pub fn project_value<M: Model, V: Into<QueryValue>>(
+    pub fn project_value<M: Model, V: Into<ProjectedValue>>(
         &self,
         value: V,
     ) -> ProjectValueBuilder<&Database<S>, M> {
@@ -89,7 +89,7 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
     }
 
     /// Starts a typed single-value projection query builder inside the current transaction.
-    pub fn project_value<M: Model, V: Into<QueryValue>>(
+    pub fn project_value<M: Model, V: Into<ProjectedValue>>(
         &mut self,
         value: V,
     ) -> ProjectValueBuilder<&mut DBTransaction<'a, S>, M> {

@@ -173,6 +173,17 @@ Generated field accessors return `Field<M, T>`. A field supports:
 Use `func(name, args)` to build scalar function calls, including registered UDFs.
 Function calls can be used anywhere a `QueryValue` is accepted, such as filters and sorting.
 
+Built-in helpers are also available for common expression shapes:
+
+- `count(expr)`
+- `count_all()`
+- `sum(expr)`
+- `avg(expr)`
+- `min(expr)`
+- `max(expr)`
+- `case_when([(cond, value), ...], else_value)`
+- `case_value(expr, [(when, value), ...], else_value)`
+
 ### AST access
 
 `QueryValue` and `QueryExpr` are lightweight wrappers around `sqlparser::ast::Expr`.
@@ -242,7 +253,7 @@ and `get::<T>()`.
 ### Example
 
 ```rust
-use kite_sql::orm::{func, QueryExpr, QueryValue};
+use kite_sql::orm::{case_when, count_all, func, QueryExpr, QueryValue};
 use sqlparser::ast::{BinaryOperator, Expr};
 
 let exists = database
@@ -286,6 +297,21 @@ let ids = database
     .project_value::<User, _>(User::id())
     .asc(User::id())
     .fetch::<i32>()?;
+
+let age_bucket = database
+    .project_value::<User, _>(
+        case_when(
+            [(User::age().is_null(), "unknown"), (User::age().lt(20), "minor")],
+            "adult",
+        )
+        .alias("age_bucket"),
+    )
+    .asc(User::id())
+    .fetch::<String>()?;
+
+let total_users = database
+    .project_value::<User, _>(count_all().alias("total_users"))
+    .get::<i32>()?;
 
 let raw_ast = database
     .select::<User>()
@@ -353,18 +379,31 @@ A query-side wrapper around `sqlparser::ast::Expr` for value-producing expressio
 Helpers:
 
 - `func(name, args)`
+- `count(expr)`
+- `count_all()`
+- `sum(expr)`
+- `avg(expr)`
+- `min(expr)`
+- `max(expr)`
+- `case_when([(cond, value), ...], else_value)`
+- `case_value(expr, [(when, value), ...], else_value)`
 - `in_list(values)`
 - `not_in_list(values)`
 - `between(low, high)`
 - `not_between(low, high)`
 - `cast("type") -> Result<QueryValue, DatabaseError>`
 - `cast_to(DataType)`
+- `alias(name)`
 - `subquery(query)`
 - `in_subquery(query)`
 - `not_in_subquery(query)`
 - `from_ast(expr)`
 - `as_ast()`
 - `into_ast()`
+
+### `ProjectedValue`
+
+A single projected expression for `project_value`, optionally carrying an alias.
 
 ### `CompareOp`
 

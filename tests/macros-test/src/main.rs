@@ -24,7 +24,7 @@ mod test {
     use kite_sql::expression::function::FunctionSummary;
     use kite_sql::expression::BinaryOperator;
     use kite_sql::expression::ScalarExpression;
-    use kite_sql::orm::{func, QueryExpr, QueryValue};
+    use kite_sql::orm::{case_value, case_when, count_all, func, sum, QueryExpr, QueryValue};
     use kite_sql::types::evaluator::EvaluatorFactory;
     use kite_sql::types::tuple::{SchemaRef, Tuple};
     use kite_sql::types::value::{DataValue, Utf8Type};
@@ -534,6 +534,42 @@ mod test {
             .eq(User::id(), 1)
             .get::<String>()?;
         assert_eq!(projected_name.as_deref(), Some("Alice"));
+
+        let age_buckets = database
+            .project_value::<User, _>(case_when(
+                [
+                    (User::age().is_null(), "unknown"),
+                    (User::age().lt(20), "minor"),
+                ],
+                "adult",
+            ))
+            .asc(User::id())
+            .fetch::<String>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(age_buckets, vec!["minor", "adult", "unknown"]);
+
+        let id_labels = database
+            .project_value::<User, _>(case_value(User::id(), [(1, "one"), (2, "two")], "other"))
+            .asc(User::id())
+            .fetch::<String>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(id_labels, vec!["one", "two", "other"]);
+
+        let id_sum = database
+            .project_value::<User, _>(sum(User::id()))
+            .get::<i32>()?;
+        assert_eq!(id_sum, Some(6));
+
+        let total_users = database
+            .project_value::<User, _>(count_all().alias("total_users"))
+            .get::<i32>()?;
+        assert_eq!(total_users, Some(3));
+
+        let aliased_total_users = database
+            .project_value::<User, _>(count_all().alias("total_users"))
+            .raw()?;
+        assert_eq!(aliased_total_users.schema()[0].name(), "total_users");
+        aliased_total_users.done()?;
 
         let raw_ast_matched = database
             .select::<User>()
