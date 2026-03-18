@@ -70,6 +70,14 @@ impl<S: Storage> Database<S> {
     ) -> ProjectValueBuilder<&Database<S>, M> {
         SelectBuilder::new_value(self, value)
     }
+
+    /// Starts a typed tuple projection query builder for the given model.
+    pub fn project_tuple<M: Model, V: IntoProjectedTuple>(
+        &self,
+        values: V,
+    ) -> ProjectTupleBuilder<&Database<S>, M> {
+        SelectBuilder::new_tuple(self, values)
+    }
 }
 
 impl<'a, S: Storage> DBTransaction<'a, S> {
@@ -94,5 +102,13 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
         value: V,
     ) -> ProjectValueBuilder<&mut DBTransaction<'a, S>, M> {
         SelectBuilder::new_value(self, value)
+    }
+
+    /// Starts a typed tuple projection query builder inside the current transaction.
+    pub fn project_tuple<M: Model, V: IntoProjectedTuple>(
+        &mut self,
+        values: V,
+    ) -> ProjectTupleBuilder<&mut DBTransaction<'a, S>, M> {
+        SelectBuilder::new_tuple(self, values)
     }
 }

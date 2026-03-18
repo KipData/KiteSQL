@@ -252,10 +252,16 @@ to start a single-value projection builder. It supports the same filtering,
 grouping, ordering, and subquery composition, and returns typed values via
 `fetch::<T>()` and `get::<T>()`.
 
+### Tuple queries
+
+Use `Database::project_tuple::<M>(values)` or `DBTransaction::project_tuple::<M>(values)`
+to project multiple expressions and decode them positionally into a Rust tuple via
+`fetch::<(T1, T2, ...)>()` and `get::<(T1, T2, ...)>()`.
+
 ### Example
 
 ```rust
-use kite_sql::orm::{case_when, count_all, func, QueryExpr, QueryValue};
+use kite_sql::orm::{case_when, count_all, func, sum, QueryExpr, QueryValue};
 use sqlparser::ast::{BinaryOperator, Expr};
 
 let exists = database
@@ -315,11 +321,21 @@ let total_users = database
     .project_value::<User, _>(count_all().alias("total_users"))
     .get::<i32>()?;
 
+let rows = database
+    .project_tuple::<User, _>((User::id(), User::name()))
+    .asc(User::id())
+    .fetch::<(i32, String)>()?;
+
 let repeated_ages = database
     .project_value::<User, _>(User::age())
     .group_by(User::age())
     .having(count_all().gt(1))
     .fetch::<Option<i32>>()?;
+
+let grouped_ids = database
+    .project_tuple::<User, _>((User::age(), sum(User::id()).alias("total_ids")))
+    .group_by(User::age())
+    .fetch::<(Option<i32>, i32)>()?;
 
 let raw_ast = database
     .select::<User>()

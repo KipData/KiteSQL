@@ -704,6 +704,33 @@ impl<V: Into<QueryValue>> From<V> for ProjectedValue {
     }
 }
 
+macro_rules! impl_into_projected_tuple {
+    ($(($($name:ident),+)),+ $(,)?) => {
+        $(
+            impl<$($name),+> IntoProjectedTuple for ($($name,)+)
+            where
+                $($name: Into<ProjectedValue>,)+
+            {
+                #[allow(non_snake_case)]
+                fn into_projected_values(self) -> Vec<ProjectedValue> {
+                    let ($($name,)+) = self;
+                    vec![$($name.into(),)+]
+                }
+            }
+        )+
+    };
+}
+
+impl_into_projected_tuple!(
+    (A, B),
+    (A, B, C),
+    (A, B, C, D),
+    (A, B, C, D, E),
+    (A, B, C, D, E, F),
+    (A, B, C, D, E, F, G),
+    (A, B, C, D, E, F, G, H),
+);
+
 impl From<Expr> for QueryValue {
     fn from(value: Expr) -> Self {
         QueryValue::from_ast(value)
@@ -786,11 +813,17 @@ pub struct SelectBuilder<Q: StatementSource, M: Model, P = ModelProjection> {
 
 /// Lightweight single-table query builder for scalar value projections.
 pub type ProjectValueBuilder<Q, M> = SelectBuilder<Q, M, ValueProjection>;
+/// Lightweight single-table query builder for tuple projections.
+pub type ProjectTupleBuilder<Q, M> = SelectBuilder<Q, M, TupleProjection>;
 
 pub struct ModelProjection;
 
 pub struct ValueProjection {
     value: ProjectedValue,
+}
+
+pub struct TupleProjection {
+    values: Vec<ProjectedValue>,
 }
 
 struct BuilderState<Q: StatementSource, M: Model> {
@@ -844,6 +877,11 @@ pub trait ProjectionSpec<M: Model> {
     fn into_select_items(self) -> Vec<SelectItem>;
 }
 
+#[doc(hidden)]
+pub trait IntoProjectedTuple {
+    fn into_projected_values(self) -> Vec<ProjectedValue>;
+}
+
 impl<M: Model> ProjectionSpec<M> for ModelProjection {
     fn into_select_items(self) -> Vec<SelectItem> {
         select_projection(M::fields())
@@ -853,6 +891,15 @@ impl<M: Model> ProjectionSpec<M> for ModelProjection {
 impl<M: Model> ProjectionSpec<M> for ValueProjection {
     fn into_select_items(self) -> Vec<SelectItem> {
         vec![self.value.into_select_item()]
+    }
+}
+
+impl<M: Model> ProjectionSpec<M> for TupleProjection {
+    fn into_select_items(self) -> Vec<SelectItem> {
+        self.values
+            .into_iter()
+            .map(ProjectedValue::into_select_item)
+            .collect()
     }
 }
 
@@ -926,6 +973,25 @@ impl<Q: StatementSource, M: Model> SelectBuilder<Q, M, ValueProjection> {
 
     pub fn get<T: FromDataValue>(self) -> Result<Option<T>, DatabaseError> {
         extract_optional_value(self.limit(1).raw()?)
+    }
+}
+
+impl<Q: StatementSource, M: Model> SelectBuilder<Q, M, TupleProjection> {
+    fn new_tuple<V: IntoProjectedTuple>(source: Q, values: V) -> Self {
+        Self {
+            state: BuilderState::new(source),
+            projection: TupleProjection {
+                values: values.into_projected_values(),
+            },
+        }
+    }
+
+    pub fn fetch<T: FromQueryTuple>(self) -> Result<ProjectTupleIter<Q::Iter, T>, DatabaseError> {
+        Ok(ProjectTupleIter::new(self.raw()?))
+    }
+
+    pub fn get<T: FromQueryTuple>(self) -> Result<Option<T>, DatabaseError> {
+        extract_optional_tuple(self.limit(1).raw()?)
     }
 }
 
@@ -1920,6 +1986,11 @@ pub trait FromDataValue: Sized {
     fn from_data_value(value: DataValue) -> Option<Self>;
 }
 
+/// Conversion trait from a projected result tuple into a Rust value.
+pub trait FromQueryTuple: Sized {
+    fn from_query_tuple(tuple: Tuple) -> Result<Self, DatabaseError>;
+}
+
 /// Typed adapter over a [`ResultIter`] that yields projected values instead of raw tuples.
 pub struct ProjectValueIter<I, T> {
     inner: I,
@@ -1930,6 +2001,30 @@ impl<I, T> ProjectValueIter<I, T>
 where
     I: ResultIter,
     T: FromDataValue,
+{
+    fn new(inner: I) -> Self {
+        Self {
+            inner,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Finishes the underlying raw iterator.
+    pub fn done(self) -> Result<(), DatabaseError> {
+        self.inner.done()
+    }
+}
+
+/// Typed adapter over a [`ResultIter`] that yields projected tuples.
+pub struct ProjectTupleIter<I, T> {
+    inner: I,
+    _marker: PhantomData<T>,
+}
+
+impl<I, T> ProjectTupleIter<I, T>
+where
+    I: ResultIter,
+    T: FromQueryTuple,
 {
     fn new(inner: I) -> Self {
         Self {
@@ -1955,6 +2050,20 @@ where
         self.inner
             .next()
             .map(|result| result.and_then(extract_value_from_tuple::<T>))
+    }
+}
+
+impl<I, T> Iterator for ProjectTupleIter<I, T>
+where
+    I: ResultIter,
+    T: FromQueryTuple,
+{
+    type Item = Result<T, DatabaseError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner
+            .next()
+            .map(|result| result.and_then(extract_projected_tuple::<T>))
     }
 }
 
@@ -2185,6 +2294,49 @@ impl<T: ModelColumnType> ModelColumnType for Option<T> {
 impl<T: StringType> StringType for Option<T> {}
 impl<T: DecimalType> DecimalType for Option<T> {}
 
+macro_rules! impl_from_query_tuple {
+    ($(($($name:ident),+)),+ $(,)?) => {
+        $(
+            impl<$($name),+> FromQueryTuple for ($($name,)+)
+            where
+                $($name: FromDataValue,)+
+            {
+                #[allow(non_snake_case)]
+                fn from_query_tuple(tuple: Tuple) -> Result<Self, DatabaseError> {
+                    let expected_len = [$(stringify!($name)),+].len();
+                    let mut values = tuple.values.into_iter();
+
+                    $(
+                        let $name = extract_projected_data_value::<$name>(
+                            values.next(),
+                            expected_len,
+                        )?;
+                    )+
+
+                    if values.next().is_some() {
+                        return Err(DatabaseError::MisMatch(
+                            "the expected tuple projection width",
+                            "the query result",
+                        ));
+                    }
+
+                    Ok(($($name,)+))
+                }
+            }
+        )+
+    };
+}
+
+impl_from_query_tuple!(
+    (A, B),
+    (A, B, C),
+    (A, B, C, D),
+    (A, B, C, D, E),
+    (A, B, C, D, E, F),
+    (A, B, C, D, E, F, G),
+    (A, B, C, D, E, F, G, H),
+);
+
 fn normalize_sql_fragment(value: &str) -> String {
     value
         .split_whitespace()
@@ -2290,16 +2442,7 @@ where
     })
 }
 
-fn extract_value_from_tuple<T: FromDataValue>(mut tuple: Tuple) -> Result<T, DatabaseError> {
-    let value = if tuple.values.len() == 1 {
-        tuple.values.swap_remove(0)
-    } else {
-        return Err(DatabaseError::MisMatch(
-            "one projected expression",
-            "the query result",
-        ));
-    };
-
+fn convert_projected_value<T: FromDataValue>(value: DataValue) -> Result<T, DatabaseError> {
     let value = match T::logical_type() {
         Some(ty) => value.cast(&ty)?,
         None => value,
@@ -2313,6 +2456,34 @@ fn extract_value_from_tuple<T: FromDataValue>(mut tuple: Tuple) -> Result<T, Dat
     })
 }
 
+fn extract_projected_data_value<T: FromDataValue>(
+    value: Option<DataValue>,
+    _expected_len: usize,
+) -> Result<T, DatabaseError> {
+    let value = value.ok_or(DatabaseError::MisMatch(
+        "the expected tuple projection width",
+        "the query result",
+    ))?;
+    convert_projected_value::<T>(value)
+}
+
+fn extract_value_from_tuple<T: FromDataValue>(mut tuple: Tuple) -> Result<T, DatabaseError> {
+    let value = if tuple.values.len() == 1 {
+        tuple.values.swap_remove(0)
+    } else {
+        return Err(DatabaseError::MisMatch(
+            "one projected expression",
+            "the query result",
+        ));
+    };
+
+    convert_projected_value::<T>(value)
+}
+
+fn extract_projected_tuple<T: FromQueryTuple>(tuple: Tuple) -> Result<T, DatabaseError> {
+    T::from_query_tuple(tuple)
+}
+
 fn extract_optional_value<I, T>(mut iter: I) -> Result<Option<T>, DatabaseError>
 where
     I: ResultIter,
@@ -2320,6 +2491,17 @@ where
 {
     Ok(match iter.next() {
         Some(tuple) => Some(extract_value_from_tuple(tuple?)?),
+        None => None,
+    })
+}
+
+fn extract_optional_tuple<I, T>(mut iter: I) -> Result<Option<T>, DatabaseError>
+where
+    I: ResultIter,
+    T: FromQueryTuple,
+{
+    Ok(match iter.next() {
+        Some(tuple) => Some(extract_projected_tuple(tuple?)?),
         None => None,
     })
 }

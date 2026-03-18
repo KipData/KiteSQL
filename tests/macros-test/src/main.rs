@@ -574,6 +574,20 @@ mod test {
             .get::<i32>()?;
         assert_eq!(total_users, Some(3));
 
+        let projected_user_rows = database
+            .project_tuple::<User, _>((User::id(), User::name()))
+            .asc(User::id())
+            .fetch::<(i32, String)>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            projected_user_rows,
+            vec![
+                (1, "Alice".to_string()),
+                (2, "Bob".to_string()),
+                (3, "A'lex".to_string()),
+            ]
+        );
+
         let aliased_total_users = database
             .project_value::<User, _>(count_all().alias("total_users"))
             .raw()?;
@@ -662,6 +676,21 @@ mod test {
             .having(count_all().gt(1))
             .count()?;
         assert_eq!(grouped_count, 1);
+
+        let grouped_scores = database
+            .project_tuple::<EventLog, _>((
+                EventLog::category(),
+                sum(EventLog::score()).alias("total_score"),
+            ))
+            .group_by(EventLog::category())
+            .having(count_all().gt(0))
+            .asc(EventLog::category())
+            .fetch::<(String, i32)>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            grouped_scores,
+            vec![("alpha".to_string(), 30), ("beta".to_string(), 5)]
+        );
 
         database.drop_table::<EventLog>()?;
 
