@@ -31,12 +31,7 @@ mod test {
     use kite_sql::types::LogicalType;
     use kite_sql::{from_tuple, scala_function, table_function, Model};
     use rust_decimal::Decimal;
-    use sqlparser::ast::{
-        BinaryOperator as SqlBinaryOperator, CharLengthUnits, Expr as SqlExpr, Query as SqlQuery,
-        Statement as SqlStatement,
-    };
-    use sqlparser::dialect::PostgreSqlDialect;
-    use sqlparser::parser::Parser;
+    use sqlparser::ast::{BinaryOperator as SqlBinaryOperator, CharLengthUnits, Expr as SqlExpr};
     use std::sync::Arc;
 
     fn build_tuple() -> (Tuple, SchemaRef) {
@@ -68,15 +63,6 @@ mod test {
         ];
 
         (Tuple::new(None, values), schema_ref)
-    }
-
-    fn parse_query(sql: &str) -> SqlQuery {
-        let dialect = PostgreSqlDialect {};
-        let mut parser = Parser::new(&dialect).try_with_sql(sql).unwrap();
-        match parser.parse_statement().unwrap() {
-            SqlStatement::Query(query) => *query,
-            statement => panic!("expected query statement, got {statement:?}"),
-        }
     }
 
     #[derive(Default, Debug, PartialEq)]
@@ -536,6 +522,19 @@ mod test {
             .unwrap();
         assert_eq!(cast_matched.id, 2);
 
+        let projected_ids = database
+            .project_value::<User, _>(User::id())
+            .asc(User::id())
+            .fetch::<i32>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(projected_ids, vec![1, 2, 3]);
+
+        let projected_name = database
+            .project_value::<User, _>(User::name())
+            .eq(User::id(), 1)
+            .get::<String>()?;
+        assert_eq!(projected_name.as_deref(), Some("Alice"));
+
         let raw_ast_matched = database
             .select::<User>()
             .filter(QueryExpr::from_ast(SqlExpr::BinaryOp {
@@ -549,7 +548,11 @@ mod test {
 
         let exists_count = database
             .select::<User>()
-            .where_exists(parse_query("select id from users where id = 2"))
+            .where_exists(
+                database
+                    .project_value::<User, _>(User::id())
+                    .eq(User::id(), 2),
+            )
             .count()?;
         assert_eq!(exists_count, 3);
 
@@ -557,7 +560,9 @@ mod test {
             .select::<User>()
             .in_subquery(
                 User::id(),
-                parse_query("select id from users where id in (1, 3)"),
+                database
+                    .project_value::<User, _>(User::id())
+                    .in_list(User::id(), [1, 3]),
             )
             .asc(User::id())
             .fetch()?

@@ -226,12 +226,18 @@ not expose yet.
 - `desc(value)`
 - `limit(n)`
 - `offset(n)`
-- `into_query()`
 - `raw()`
 - `fetch()`
 - `get()`
 - `exists()`
 - `count()`
+
+### Single-value queries
+
+Use `Database::project_value::<M>(expr)` or `DBTransaction::project_value::<M>(expr)`
+to start a single-value projection builder. It supports the same filtering,
+ordering, and subquery composition, and returns typed values via `fetch::<T>()`
+and `get::<T>()`.
 
 ### Example
 
@@ -276,10 +282,10 @@ let typed = database
     .eq(User::id().cast("BIGINT")?, 1_i64)
     .get()?;
 
-let query_ast = database
-    .select::<User>()
-    .eq(User::id(), 1)
-    .into_query();
+let ids = database
+    .project_value::<User, _>(User::id())
+    .asc(User::id())
+    .fetch::<i32>()?;
 
 let raw_ast = database
     .select::<User>()
@@ -290,22 +296,21 @@ let raw_ast = database
     }))
     .get()?;
 
-let mut parser = sqlparser::parser::Parser::new(&sqlparser::dialect::PostgreSqlDialect {})
-    .try_with_sql("select id from users where id = 1")?;
-let exists_subquery = match parser.parse_statement()? {
-    sqlparser::ast::Statement::Query(query) => *query,
-    _ => unreachable!(),
-};
 let uncorrelated = database
     .select::<User>()
-    .where_exists(exists_subquery)
+    .where_exists(
+        database
+            .project_value::<User, _>(User::id())
+            .eq(User::id(), 1),
+    )
     .get()?;
 # Ok::<(), kite_sql::errors::DatabaseError>(())
 ```
 
-`into_query()` exports the current model-select AST, including the default full-row
-projection. For scalar subqueries such as `IN (subquery)` and `EXISTS (subquery)`,
-use a single-column `Query` today if the binder expects one expression to be returned.
+For scalar subqueries such as `IN (subquery)` and `EXISTS (subquery)`,
+use `Database::project_value::<M>(...)` or `DBTransaction::project_value::<M>(...)`
+to build a single-column subquery directly when the binder expects one expression
+to be returned.
 
 ## Public structs and enums
 
@@ -393,6 +398,10 @@ Methods:
 ### `SelectBuilder<Q, M>`
 
 A lightweight single-table ORM query builder.
+
+Use `Database::project_value::<M>(expr)` or `DBTransaction::project_value::<M>(expr)`
+to create the matching single-value projection builder. It still supports filters,
+ordering, subquery composition, and typed `fetch::<T>()` / `get::<T>()`.
 
 ## Public traits
 

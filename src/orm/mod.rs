@@ -225,11 +225,11 @@ impl<M, T> Field<M, T> {
         self.value().cast_to(data_type)
     }
 
-    pub fn in_subquery(self, subquery: Query) -> QueryExpr {
+    pub fn in_subquery<S: SubquerySource>(self, subquery: S) -> QueryExpr {
         self.value().in_subquery(subquery)
     }
 
-    pub fn not_in_subquery(self, subquery: Query) -> QueryExpr {
+    pub fn not_in_subquery<S: SubquerySource>(self, subquery: S) -> QueryExpr {
         self.value().not_in_subquery(subquery)
     }
 }
@@ -301,16 +301,16 @@ impl QueryExpr {
         })
     }
 
-    pub fn exists(subquery: Query) -> QueryExpr {
+    pub fn exists<S: SubquerySource>(subquery: S) -> QueryExpr {
         QueryExpr::from_ast(Expr::Exists {
-            subquery: Box::new(subquery),
+            subquery: Box::new(subquery.into_subquery()),
             negated: false,
         })
     }
 
-    pub fn not_exists(subquery: Query) -> QueryExpr {
+    pub fn not_exists<S: SubquerySource>(subquery: S) -> QueryExpr {
         QueryExpr::from_ast(Expr::Exists {
-            subquery: Box::new(subquery),
+            subquery: Box::new(subquery.into_subquery()),
             negated: true,
         })
     }
@@ -525,22 +525,22 @@ impl QueryValue {
         })
     }
 
-    pub fn subquery(query: Query) -> QueryValue {
-        QueryValue::from_ast(Expr::Subquery(Box::new(query)))
+    pub fn subquery<S: SubquerySource>(query: S) -> QueryValue {
+        QueryValue::from_ast(Expr::Subquery(Box::new(query.into_subquery())))
     }
 
-    pub fn in_subquery(self, subquery: Query) -> QueryExpr {
+    pub fn in_subquery<S: SubquerySource>(self, subquery: S) -> QueryExpr {
         QueryExpr::from_ast(Expr::InSubquery {
             expr: Box::new(self.into_ast()),
-            subquery: Box::new(subquery),
+            subquery: Box::new(subquery.into_subquery()),
             negated: false,
         })
     }
 
-    pub fn not_in_subquery(self, subquery: Query) -> QueryExpr {
+    pub fn not_in_subquery<S: SubquerySource>(self, subquery: S) -> QueryExpr {
         QueryExpr::from_ast(Expr::InSubquery {
             expr: Box::new(self.into_ast()),
-            subquery: Box::new(subquery),
+            subquery: Box::new(subquery.into_subquery()),
             negated: true,
         })
     }
@@ -625,14 +625,82 @@ impl<'a, 'tx, S: Storage> StatementSource for &'a mut DBTransaction<'tx, S> {
     }
 }
 
+mod private {
+    pub trait Sealed {}
+}
+
+#[doc(hidden)]
+pub trait SubquerySource: private::Sealed {
+    fn into_subquery(self) -> Query;
+}
+
 /// Lightweight single-table query builder for ORM models.
-pub struct SelectBuilder<Q: StatementSource, M: Model> {
+pub struct SelectBuilder<Q: StatementSource, M: Model, P = ModelProjection> {
+    state: BuilderState<Q, M>,
+    projection: P,
+}
+
+/// Lightweight single-table query builder for scalar value projections.
+pub type ProjectValueBuilder<Q, M> = SelectBuilder<Q, M, ValueProjection>;
+
+pub struct ModelProjection;
+
+pub struct ValueProjection {
+    value: QueryValue,
+}
+
+struct BuilderState<Q: StatementSource, M: Model> {
     source: Q,
     filter: Option<QueryExpr>,
     order_bys: Vec<SortExpr>,
     limit: Option<usize>,
     offset: Option<usize>,
     _marker: PhantomData<M>,
+}
+
+impl<Q: StatementSource, M: Model> BuilderState<Q, M> {
+    fn new(source: Q) -> Self {
+        Self {
+            source,
+            filter: None,
+            order_bys: Vec::new(),
+            limit: None,
+            offset: None,
+            _marker: PhantomData,
+        }
+    }
+
+    fn push_filter(mut self, expr: QueryExpr, mode: FilterMode) -> Self {
+        self.filter = Some(match (mode, self.filter.take()) {
+            (FilterMode::Replace, _) => expr,
+            (FilterMode::And, Some(current)) => current.and(expr),
+            (FilterMode::Or, Some(current)) => current.or(expr),
+            (_, None) => expr,
+        });
+        self
+    }
+
+    fn push_order(mut self, order: SortExpr) -> Self {
+        self.order_bys.push(order);
+        self
+    }
+}
+
+#[doc(hidden)]
+pub trait ProjectionSpec<M: Model> {
+    fn into_select_items(self) -> Vec<SelectItem>;
+}
+
+impl<M: Model> ProjectionSpec<M> for ModelProjection {
+    fn into_select_items(self) -> Vec<SelectItem> {
+        select_projection(M::fields())
+    }
+}
+
+impl<M: Model> ProjectionSpec<M> for ValueProjection {
+    fn into_select_items(self) -> Vec<SelectItem> {
+        vec![SelectItem::UnnamedExpr(self.value.into_ast())]
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -672,89 +740,135 @@ macro_rules! impl_select_builder_like_methods {
     };
 }
 
-impl<Q: StatementSource, M: Model> SelectBuilder<Q, M> {
+impl<Q: StatementSource, M: Model> SelectBuilder<Q, M, ModelProjection> {
     fn new(source: Q) -> Self {
         Self {
-            source,
-            filter: None,
-            order_bys: Vec::new(),
-            limit: None,
-            offset: None,
-            _marker: PhantomData,
+            state: BuilderState::new(source),
+            projection: ModelProjection,
         }
     }
 
-    fn push_filter(mut self, expr: QueryExpr, mode: FilterMode) -> Self {
-        self.filter = Some(match (mode, self.filter.take()) {
-            (FilterMode::Replace, _) => expr,
-            (FilterMode::And, Some(current)) => current.and(expr),
-            (FilterMode::Or, Some(current)) => current.or(expr),
-            (_, None) => expr,
-        });
-        self
+    pub fn fetch(self) -> Result<OrmIter<Q::Iter, M>, DatabaseError> {
+        Ok(self.raw()?.orm::<M>())
+    }
+
+    pub fn get(self) -> Result<Option<M>, DatabaseError> {
+        extract_optional_model(self.limit(1).raw()?)
+    }
+}
+
+impl<Q: StatementSource, M: Model> SelectBuilder<Q, M, ValueProjection> {
+    fn new_value<V: Into<QueryValue>>(source: Q, value: V) -> Self {
+        Self {
+            state: BuilderState::new(source),
+            projection: ValueProjection {
+                value: value.into(),
+            },
+        }
+    }
+
+    pub fn fetch<T: FromDataValue>(self) -> Result<ProjectValueIter<Q::Iter, T>, DatabaseError> {
+        Ok(ProjectValueIter::new(self.raw()?))
+    }
+
+    pub fn get<T: FromDataValue>(self) -> Result<Option<T>, DatabaseError> {
+        extract_optional_value(self.limit(1).raw()?)
+    }
+}
+
+impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> SelectBuilder<Q, M, P> {
+    fn push_filter(self, expr: QueryExpr, mode: FilterMode) -> Self {
+        Self {
+            state: self.state.push_filter(expr, mode),
+            projection: self.projection,
+        }
     }
 
     pub fn filter(mut self, expr: QueryExpr) -> Self {
-        self.filter = Some(expr);
+        self.state.filter = Some(expr);
         self
     }
 
     pub fn and(self, left: QueryExpr, right: QueryExpr) -> Self {
-        self.push_filter(left.and(right), FilterMode::And)
+        Self {
+            state: self.state.push_filter(left.and(right), FilterMode::And),
+            projection: self.projection,
+        }
     }
 
     pub fn or(self, left: QueryExpr, right: QueryExpr) -> Self {
-        self.push_filter(left.or(right), FilterMode::Or)
+        Self {
+            state: self.state.push_filter(left.or(right), FilterMode::Or),
+            projection: self.projection,
+        }
     }
 
     pub fn not(self, expr: QueryExpr) -> Self {
-        self.push_filter(expr.not(), FilterMode::Replace)
+        Self {
+            state: self.state.push_filter(expr.not(), FilterMode::Replace),
+            projection: self.projection,
+        }
     }
 
-    pub fn where_exists(self, subquery: Query) -> Self {
-        self.push_filter(QueryExpr::exists(subquery), FilterMode::Replace)
+    pub fn where_exists<S: SubquerySource>(self, subquery: S) -> Self {
+        Self {
+            state: self
+                .state
+                .push_filter(QueryExpr::exists(subquery), FilterMode::Replace),
+            projection: self.projection,
+        }
     }
 
-    pub fn where_not_exists(self, subquery: Query) -> Self {
-        self.push_filter(QueryExpr::not_exists(subquery), FilterMode::Replace)
-    }
-
-    fn push_order(mut self, order: SortExpr) -> Self {
-        self.order_bys.push(order);
-        self
+    pub fn where_not_exists<S: SubquerySource>(self, subquery: S) -> Self {
+        Self {
+            state: self
+                .state
+                .push_filter(QueryExpr::not_exists(subquery), FilterMode::Replace),
+            projection: self.projection,
+        }
     }
 
     pub fn asc<V: Into<QueryValue>>(self, value: V) -> Self {
-        self.push_order(value.into().asc())
+        Self {
+            state: self.state.push_order(value.into().asc()),
+            projection: self.projection,
+        }
     }
 
     pub fn desc<V: Into<QueryValue>>(self, value: V) -> Self {
-        self.push_order(value.into().desc())
+        Self {
+            state: self.state.push_order(value.into().desc()),
+            projection: self.projection,
+        }
     }
 
     pub fn limit(mut self, limit: usize) -> Self {
-        self.limit = Some(limit);
+        self.state.limit = Some(limit);
         self
     }
 
     pub fn offset(mut self, offset: usize) -> Self {
-        self.offset = Some(offset);
+        self.state.offset = Some(offset);
         self
     }
 
-    pub fn into_query(self) -> Query {
+    fn build_query(self) -> Query {
         let SelectBuilder {
-            source: _,
-            filter,
-            order_bys,
-            limit,
-            offset,
-            ..
+            state:
+                BuilderState {
+                    source: _,
+                    filter,
+                    order_bys,
+                    limit,
+                    offset,
+                    ..
+                },
+            projection,
         } = self;
 
         select_query(
             M::table_name(),
-            select_projection(M::fields()),
+            projection.into_select_items(),
             filter,
             order_bys,
             limit,
@@ -764,22 +878,26 @@ impl<Q: StatementSource, M: Model> SelectBuilder<Q, M> {
 
     fn into_statement(self) -> (Q, Statement) {
         let SelectBuilder {
-            source,
-            filter,
-            order_bys,
-            limit,
-            offset,
-            ..
+            state:
+                BuilderState {
+                    source,
+                    filter,
+                    order_bys,
+                    limit,
+                    offset,
+                    ..
+                },
+            projection,
         } = self;
 
-        let statement = orm_select_query_statement(
+        let statement = Statement::Query(Box::new(select_query(
             M::table_name(),
-            M::fields(),
+            projection.into_select_items(),
             filter,
             order_bys,
             limit,
             offset,
-        );
+        )));
 
         (source, statement)
     }
@@ -796,7 +914,12 @@ impl<Q: StatementSource, M: Model> SelectBuilder<Q, M> {
         I: IntoIterator<Item = V>,
         V: Into<QueryValue>,
     {
-        self.push_filter(left.into().in_list(values), FilterMode::Replace)
+        Self {
+            state: self
+                .state
+                .push_filter(left.into().in_list(values), FilterMode::Replace),
+            projection: self.projection,
+        }
     }
 
     pub fn not_in_list<L, I, V>(self, left: L, values: I) -> Self
@@ -805,7 +928,12 @@ impl<Q: StatementSource, M: Model> SelectBuilder<Q, M> {
         I: IntoIterator<Item = V>,
         V: Into<QueryValue>,
     {
-        self.push_filter(left.into().not_in_list(values), FilterMode::Replace)
+        Self {
+            state: self
+                .state
+                .push_filter(left.into().not_in_list(values), FilterMode::Replace),
+            projection: self.projection,
+        }
     }
 
     pub fn between<L, Low, High>(self, expr: L, low: Low, high: High) -> Self
@@ -814,7 +942,12 @@ impl<Q: StatementSource, M: Model> SelectBuilder<Q, M> {
         Low: Into<QueryValue>,
         High: Into<QueryValue>,
     {
-        self.push_filter(expr.into().between(low, high), FilterMode::Replace)
+        Self {
+            state: self
+                .state
+                .push_filter(expr.into().between(low, high), FilterMode::Replace),
+            projection: self.projection,
+        }
     }
 
     pub fn not_between<L, Low, High>(self, expr: L, low: Low, high: High) -> Self
@@ -823,28 +956,39 @@ impl<Q: StatementSource, M: Model> SelectBuilder<Q, M> {
         Low: Into<QueryValue>,
         High: Into<QueryValue>,
     {
-        self.push_filter(expr.into().not_between(low, high), FilterMode::Replace)
+        Self {
+            state: self
+                .state
+                .push_filter(expr.into().not_between(low, high), FilterMode::Replace),
+            projection: self.projection,
+        }
     }
 
-    pub fn in_subquery<L: Into<QueryValue>>(self, left: L, subquery: Query) -> Self {
-        self.push_filter(left.into().in_subquery(subquery), FilterMode::Replace)
+    pub fn in_subquery<L: Into<QueryValue>, S: SubquerySource>(self, left: L, subquery: S) -> Self {
+        Self {
+            state: self
+                .state
+                .push_filter(left.into().in_subquery(subquery), FilterMode::Replace),
+            projection: self.projection,
+        }
     }
 
-    pub fn not_in_subquery<L: Into<QueryValue>>(self, left: L, subquery: Query) -> Self {
-        self.push_filter(left.into().not_in_subquery(subquery), FilterMode::Replace)
+    pub fn not_in_subquery<L: Into<QueryValue>, S: SubquerySource>(
+        self,
+        left: L,
+        subquery: S,
+    ) -> Self {
+        Self {
+            state: self
+                .state
+                .push_filter(left.into().not_in_subquery(subquery), FilterMode::Replace),
+            projection: self.projection,
+        }
     }
 
     pub fn raw(self) -> Result<Q::Iter, DatabaseError> {
         let (source, statement) = self.into_statement();
         source.execute_statement(&statement, &[])
-    }
-
-    pub fn fetch(self) -> Result<OrmIter<Q::Iter, M>, DatabaseError> {
-        Ok(self.raw()?.orm::<M>())
-    }
-
-    pub fn get(self) -> Result<Option<M>, DatabaseError> {
-        extract_optional_model(self.limit(1).raw()?)
     }
 
     pub fn exists(self) -> Result<bool, DatabaseError> {
@@ -853,7 +997,7 @@ impl<Q: StatementSource, M: Model> SelectBuilder<Q, M> {
     }
 
     pub fn count(self) -> Result<usize, DatabaseError> {
-        let SelectBuilder { source, filter, .. } = self;
+        let BuilderState { source, filter, .. } = self.state;
         let statement = orm_count_statement(M::table_name(), filter);
         let mut iter = source.execute_statement(&statement, &[])?;
         let count = match iter.next().transpose()? {
@@ -873,6 +1017,17 @@ impl<Q: StatementSource, M: Model> SelectBuilder<Q, M> {
         };
         iter.done()?;
         Ok(count)
+    }
+}
+
+impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> private::Sealed
+    for SelectBuilder<Q, M, P>
+{
+}
+
+impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> SubquerySource for SelectBuilder<Q, M, P> {
+    fn into_subquery(self) -> Query {
+        self.build_query()
     }
 }
 
@@ -1346,24 +1501,6 @@ pub fn orm_analyze_statement(table_name: &str) -> Statement {
     })
 }
 
-fn orm_select_query_statement(
-    table_name: &str,
-    fields: &[OrmField],
-    filter: Option<QueryExpr>,
-    order_bys: Vec<SortExpr>,
-    limit: Option<usize>,
-    offset: Option<usize>,
-) -> Statement {
-    Statement::Query(Box::new(select_query(
-        table_name,
-        select_projection(fields),
-        filter,
-        order_bys,
-        limit,
-        offset,
-    )))
-}
-
 fn orm_count_statement(table_name: &str, filter: Option<QueryExpr>) -> Statement {
     Statement::Query(Box::new(select_query(
         table_name,
@@ -1588,6 +1725,44 @@ pub trait FromDataValue: Sized {
     fn logical_type() -> Option<LogicalType>;
 
     fn from_data_value(value: DataValue) -> Option<Self>;
+}
+
+/// Typed adapter over a [`ResultIter`] that yields projected values instead of raw tuples.
+pub struct ProjectValueIter<I, T> {
+    inner: I,
+    _marker: PhantomData<T>,
+}
+
+impl<I, T> ProjectValueIter<I, T>
+where
+    I: ResultIter,
+    T: FromDataValue,
+{
+    fn new(inner: I) -> Self {
+        Self {
+            inner,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Finishes the underlying raw iterator.
+    pub fn done(self) -> Result<(), DatabaseError> {
+        self.inner.done()
+    }
+}
+
+impl<I, T> Iterator for ProjectValueIter<I, T>
+where
+    I: ResultIter,
+    T: FromDataValue,
+{
+    type Item = Result<T, DatabaseError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner
+            .next()
+            .map(|result| result.and_then(extract_value_from_tuple::<T>))
+    }
 }
 
 /// Conversion trait from Rust values into [`DataValue`] for ORM parameters.
@@ -1918,6 +2093,40 @@ where
 
     Ok(match iter.next() {
         Some(tuple) => Some(M::from((&schema, tuple?))),
+        None => None,
+    })
+}
+
+fn extract_value_from_tuple<T: FromDataValue>(mut tuple: Tuple) -> Result<T, DatabaseError> {
+    let value = if tuple.values.len() == 1 {
+        tuple.values.swap_remove(0)
+    } else {
+        return Err(DatabaseError::MisMatch(
+            "one projected expression",
+            "the query result",
+        ));
+    };
+
+    let value = match T::logical_type() {
+        Some(ty) => value.cast(&ty)?,
+        None => value,
+    };
+
+    T::from_data_value(value).ok_or_else(|| {
+        DatabaseError::InvalidValue(format!(
+            "failed to convert projected value into {}",
+            std::any::type_name::<T>()
+        ))
+    })
+}
+
+fn extract_optional_value<I, T>(mut iter: I) -> Result<Option<T>, DatabaseError>
+where
+    I: ResultIter,
+    T: FromDataValue,
+{
+    Ok(match iter.next() {
+        Some(tuple) => Some(extract_value_from_tuple(tuple?)?),
         None => None,
     })
 }

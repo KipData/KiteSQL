@@ -62,6 +62,14 @@ impl<S: Storage> Database<S> {
     pub fn select<M: Model>(&self) -> SelectBuilder<&Database<S>, M> {
         SelectBuilder::new(self)
     }
+
+    /// Starts a typed single-value projection query builder for the given model.
+    pub fn project_value<M: Model, V: Into<QueryValue>>(
+        &self,
+        value: V,
+    ) -> ProjectValueBuilder<&Database<S>, M> {
+        SelectBuilder::new_value(self, value)
+    }
 }
 
 impl<'a, S: Storage> DBTransaction<'a, S> {
@@ -78,5 +86,13 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
     /// Starts a typed single-table query builder inside the current transaction.
     pub fn select<M: Model>(&mut self) -> SelectBuilder<&mut DBTransaction<'a, S>, M> {
         SelectBuilder::new(self)
+    }
+
+    /// Starts a typed single-value projection query builder inside the current transaction.
+    pub fn project_value<M: Model, V: Into<QueryValue>>(
+        &mut self,
+        value: V,
+    ) -> ProjectValueBuilder<&mut DBTransaction<'a, S>, M> {
+        SelectBuilder::new_value(self, value)
     }
 }
