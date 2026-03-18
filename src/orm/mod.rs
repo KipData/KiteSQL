@@ -796,6 +796,8 @@ pub struct ValueProjection {
 struct BuilderState<Q: StatementSource, M: Model> {
     source: Q,
     filter: Option<QueryExpr>,
+    group_bys: Vec<QueryValue>,
+    having: Option<QueryExpr>,
     order_bys: Vec<SortExpr>,
     limit: Option<usize>,
     offset: Option<usize>,
@@ -807,6 +809,8 @@ impl<Q: StatementSource, M: Model> BuilderState<Q, M> {
         Self {
             source,
             filter: None,
+            group_bys: Vec::new(),
+            having: None,
             order_bys: Vec::new(),
             limit: None,
             offset: None,
@@ -826,6 +830,11 @@ impl<Q: StatementSource, M: Model> BuilderState<Q, M> {
 
     fn push_order(mut self, order: SortExpr) -> Self {
         self.order_bys.push(order);
+        self
+    }
+
+    fn push_group_by(mut self, expr: QueryValue) -> Self {
+        self.group_bys.push(expr);
         self
     }
 }
@@ -972,6 +981,18 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> SelectBuilder<Q, M, P> 
         }
     }
 
+    pub fn group_by<V: Into<QueryValue>>(self, value: V) -> Self {
+        Self {
+            state: self.state.push_group_by(value.into()),
+            projection: self.projection,
+        }
+    }
+
+    pub fn having(mut self, expr: QueryExpr) -> Self {
+        self.state.having = Some(expr);
+        self
+    }
+
     pub fn asc<V: Into<QueryValue>>(self, value: V) -> Self {
         Self {
             state: self.state.push_order(value.into().asc()),
@@ -1002,6 +1023,8 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> SelectBuilder<Q, M, P> 
                 BuilderState {
                     source: _,
                     filter,
+                    group_bys,
+                    having,
                     order_bys,
                     limit,
                     offset,
@@ -1014,6 +1037,8 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> SelectBuilder<Q, M, P> 
             M::table_name(),
             projection.into_select_items(),
             filter,
+            group_bys,
+            having,
             order_bys,
             limit,
             offset,
@@ -1026,6 +1051,8 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> SelectBuilder<Q, M, P> 
                 BuilderState {
                     source,
                     filter,
+                    group_bys,
+                    having,
                     order_bys,
                     limit,
                     offset,
@@ -1038,6 +1065,8 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> SelectBuilder<Q, M, P> 
             M::table_name(),
             projection.into_select_items(),
             filter,
+            group_bys,
+            having,
             order_bys,
             limit,
             offset,
@@ -1141,6 +1170,17 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> SelectBuilder<Q, M, P> 
     }
 
     pub fn count(self) -> Result<usize, DatabaseError> {
+        let has_grouping = !self.state.group_bys.is_empty() || self.state.having.is_some();
+        if has_grouping {
+            let mut iter = self.raw()?;
+            let mut count = 0usize;
+            while iter.next().transpose()?.is_some() {
+                count += 1;
+            }
+            iter.done()?;
+            return Ok(count);
+        }
+
         let BuilderState { source, filter, .. } = self.state;
         let statement = orm_count_statement(M::table_name(), filter);
         let mut iter = source.execute_statement(&statement, &[])?;
@@ -1244,6 +1284,8 @@ fn select_query(
     table_name: &str,
     projection: Vec<SelectItem>,
     filter: Option<QueryExpr>,
+    group_bys: Vec<QueryValue>,
+    having: Option<QueryExpr>,
     order_bys: Vec<SortExpr>,
     limit: Option<usize>,
     offset: Option<usize>,
@@ -1265,11 +1307,14 @@ fn select_query(
             prewhere: None,
             selection: filter.map(QueryExpr::into_ast),
             connect_by: vec![],
-            group_by: GroupByExpr::Expressions(vec![], vec![]),
+            group_by: GroupByExpr::Expressions(
+                group_bys.into_iter().map(QueryValue::into_ast).collect(),
+                vec![],
+            ),
             cluster_by: vec![],
             distribute_by: vec![],
             sort_by: vec![],
-            having: None,
+            having: having.map(QueryExpr::into_ast),
             named_window: vec![],
             qualify: None,
             window_before_qualify: false,
@@ -1375,6 +1420,8 @@ pub fn orm_select_statement(table_name: &str, fields: &[OrmField]) -> Statement 
     Statement::Query(Box::new(select_query(
         table_name,
         select_projection(fields),
+        None,
+        vec![],
         None,
         vec![],
         None,
@@ -1663,6 +1710,8 @@ fn orm_count_statement(table_name: &str, filter: Option<QueryExpr>) -> Statement
             within_group: vec![],
         }))],
         filter,
+        vec![],
+        None,
         vec![],
         None,
         None,

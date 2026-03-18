@@ -233,6 +233,8 @@ not expose yet.
 - `not_in_subquery(value, query)`
 - `where_exists(query)`
 - `where_not_exists(query)`
+- `group_by(value)`
+- `having(expr)`
 - `asc(value)`
 - `desc(value)`
 - `limit(n)`
@@ -247,8 +249,8 @@ not expose yet.
 
 Use `Database::project_value::<M>(expr)` or `DBTransaction::project_value::<M>(expr)`
 to start a single-value projection builder. It supports the same filtering,
-ordering, and subquery composition, and returns typed values via `fetch::<T>()`
-and `get::<T>()`.
+grouping, ordering, and subquery composition, and returns typed values via
+`fetch::<T>()` and `get::<T>()`.
 
 ### Example
 
@@ -312,6 +314,12 @@ let age_bucket = database
 let total_users = database
     .project_value::<User, _>(count_all().alias("total_users"))
     .get::<i32>()?;
+
+let repeated_ages = database
+    .project_value::<User, _>(User::age())
+    .group_by(User::age())
+    .having(count_all().gt(1))
+    .fetch::<Option<i32>>()?;
 
 let raw_ast = database
     .select::<User>()

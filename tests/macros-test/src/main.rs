@@ -116,6 +116,15 @@ mod test {
     }
 
     #[derive(Default, Debug, PartialEq, Model)]
+    #[model(table = "event_logs")]
+    struct EventLog {
+        #[model(primary_key)]
+        id: i32,
+        category: String,
+        score: i32,
+    }
+
+    #[derive(Default, Debug, PartialEq, Model)]
     #[model(table = "migrating_users")]
     struct MigratingUserV1 {
         #[model(primary_key)]
@@ -614,6 +623,47 @@ mod test {
         tx.commit()?;
 
         database.drop_table::<User>()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_orm_group_by_builder() -> Result<(), DatabaseError> {
+        let database = DataBaseBuilder::path(".").build_in_memory()?;
+
+        database.create_table::<EventLog>()?;
+        database.insert(&EventLog {
+            id: 1,
+            category: "alpha".to_string(),
+            score: 10,
+        })?;
+        database.insert(&EventLog {
+            id: 2,
+            category: "alpha".to_string(),
+            score: 20,
+        })?;
+        database.insert(&EventLog {
+            id: 3,
+            category: "beta".to_string(),
+            score: 5,
+        })?;
+
+        let repeated_categories = database
+            .project_value::<EventLog, _>(EventLog::category())
+            .group_by(EventLog::category())
+            .having(count_all().gt(1))
+            .fetch::<String>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(repeated_categories, vec!["alpha"]);
+
+        let grouped_count = database
+            .project_value::<EventLog, _>(EventLog::category())
+            .group_by(EventLog::category())
+            .having(count_all().gt(1))
+            .count()?;
+        assert_eq!(grouped_count, 1);
+
+        database.drop_table::<EventLog>()?;
 
         Ok(())
     }
