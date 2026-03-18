@@ -113,3 +113,5 @@ pub mod wasm;
 
 #[cfg(feature = "orm")]
 pub use kite_sql_serde_macros::Model;
+#[cfg(feature = "orm")]
+pub use kite_sql_serde_macros::Projection;

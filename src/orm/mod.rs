@@ -807,6 +807,16 @@ impl ProjectedValue {
     }
 }
 
+#[doc(hidden)]
+pub fn projection_value<M: Model>(column: &'static str, alias: &'static str) -> ProjectedValue {
+    Field::<M, ()>::new(M::table_name(), column).alias(alias)
+}
+
+#[doc(hidden)]
+pub fn projection_column<M: Model>(column: &'static str) -> ProjectedValue {
+    ProjectedValue::from(Field::<M, ()>::new(M::table_name(), column))
+}
+
 impl<V: Into<QueryValue>> From<V> for ProjectedValue {
     fn from(value: V) -> Self {
         Self {
@@ -942,6 +952,11 @@ pub struct TupleProjection {
     values: Vec<ProjectedValue>,
 }
 
+#[doc(hidden)]
+pub struct StructProjection<T> {
+    _marker: PhantomData<T>,
+}
+
 struct BuilderState<Q: StatementSource, M: Model> {
     source: Q,
     filter: Option<QueryExpr>,
@@ -993,6 +1008,13 @@ pub trait ProjectionSpec<M: Model> {
     fn into_select_items(self) -> Vec<SelectItem>;
 }
 
+/// Declares a struct-backed ORM projection used by [`FromBuilder::project`].
+///
+/// This trait is typically derived with `#[derive(Projection)]`.
+pub trait Projection: for<'a> From<(&'a SchemaRef, Tuple)> {
+    fn projected_values<M: Model>() -> Vec<ProjectedValue>;
+}
+
 #[doc(hidden)]
 pub trait IntoProjectedTuple {
     fn into_projected_values(self) -> Vec<ProjectedValue>;
@@ -1013,6 +1035,15 @@ impl<M: Model> ProjectionSpec<M> for ValueProjection {
 impl<M: Model> ProjectionSpec<M> for TupleProjection {
     fn into_select_items(self) -> Vec<SelectItem> {
         self.values
+            .into_iter()
+            .map(ProjectedValue::into_select_item)
+            .collect()
+    }
+}
+
+impl<M: Model, T: Projection> ProjectionSpec<M> for StructProjection<T> {
+    fn into_select_items(self) -> Vec<SelectItem> {
+        T::projected_values::<M>()
             .into_iter()
             .map(ProjectedValue::into_select_item)
             .collect()
@@ -1055,6 +1086,12 @@ impl<Q: StatementSource, M: Model, P> FromBuilder<Q, M, P> {
 }
 
 impl<Q: StatementSource, M: Model> FromBuilder<Q, M, ModelProjection> {
+    pub fn project<T: Projection>(self) -> ProjectionBuilder<Q, M, StructProjection<T>> {
+        self.with_projection(StructProjection {
+            _marker: PhantomData,
+        })
+    }
+
     pub fn project_value<V: Into<ProjectedValue>>(
         self,
         value: V,
@@ -1248,6 +1285,16 @@ impl<Q: StatementSource, M: Model> FromBuilder<Q, M, TupleProjection> {
 
     pub fn get<T: FromQueryTuple>(self) -> Result<Option<T>, DatabaseError> {
         extract_optional_tuple(self.limit(1).raw()?)
+    }
+}
+
+impl<Q: StatementSource, M: Model, T: Projection> FromBuilder<Q, M, StructProjection<T>> {
+    pub fn fetch(self) -> Result<OrmIter<Q::Iter, T>, DatabaseError> {
+        Ok(self.raw()?.orm::<T>())
+    }
+
+    pub fn get(self) -> Result<Option<T>, DatabaseError> {
+        extract_optional_row(self.limit(1).raw()?)
     }
 }
 
@@ -2716,15 +2763,23 @@ fn model_column_rename_compatible(model: &OrmColumn, column: &ColumnRef) -> bool
         && model_column_default(model) == catalog_column_default(column)
 }
 
-fn extract_optional_model<I, M>(mut iter: I) -> Result<Option<M>, DatabaseError>
+fn extract_optional_model<I, M>(iter: I) -> Result<Option<M>, DatabaseError>
 where
     I: ResultIter,
     M: Model,
 {
+    extract_optional_row(iter)
+}
+
+fn extract_optional_row<I, T>(mut iter: I) -> Result<Option<T>, DatabaseError>
+where
+    I: ResultIter,
+    T: for<'a> From<(&'a SchemaRef, Tuple)>,
+{
     let schema = iter.schema().clone();
 
     Ok(match iter.next() {
-        Some(tuple) => Some(M::from((&schema, tuple?))),
+        Some(tuple) => Some(T::from((&schema, tuple?))),
         None => None,
     })
 }

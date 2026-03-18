@@ -29,7 +29,7 @@ mod test {
     use kite_sql::types::tuple::{SchemaRef, Tuple};
     use kite_sql::types::value::{DataValue, Utf8Type};
     use kite_sql::types::LogicalType;
-    use kite_sql::{from_tuple, scala_function, table_function, Model};
+    use kite_sql::{from_tuple, scala_function, table_function, Model, Projection};
     use rust_decimal::Decimal;
     use sqlparser::ast::{BinaryOperator as SqlBinaryOperator, CharLengthUnits, Expr as SqlExpr};
     use std::sync::Arc;
@@ -122,6 +122,14 @@ mod test {
         id: i32,
         category: String,
         score: i32,
+    }
+
+    #[derive(Default, Debug, PartialEq, Projection)]
+    struct UserSummary {
+        id: i32,
+        #[projection(rename = "user_name")]
+        display_name: String,
+        age: Option<i32>,
     }
 
     #[derive(Default, Debug, PartialEq, Model)]
@@ -595,12 +603,64 @@ mod test {
             ]
         );
 
+        let projected_users = database
+            .from::<User>()
+            .project::<UserSummary>()
+            .asc(User::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            projected_users,
+            vec![
+                UserSummary {
+                    id: 1,
+                    display_name: "Alice".to_string(),
+                    age: Some(18),
+                },
+                UserSummary {
+                    id: 2,
+                    display_name: "Bob".to_string(),
+                    age: Some(30),
+                },
+                UserSummary {
+                    id: 3,
+                    display_name: "A'lex".to_string(),
+                    age: None,
+                },
+            ]
+        );
+
+        let projected_user = database
+            .from::<User>()
+            .project::<UserSummary>()
+            .eq(User::id(), 1)
+            .get()?;
+        assert_eq!(
+            projected_user,
+            Some(UserSummary {
+                id: 1,
+                display_name: "Alice".to_string(),
+                age: Some(18),
+            })
+        );
+
         let aliased_total_users = database
             .from::<User>()
             .project_value(count_all().alias("total_users"))
             .raw()?;
         assert_eq!(aliased_total_users.schema()[0].name(), "total_users");
         aliased_total_users.done()?;
+
+        let projected_schema = database.from::<User>().project::<UserSummary>().raw()?;
+        assert_eq!(
+            projected_schema
+                .schema()
+                .iter()
+                .map(|column| column.name().to_string())
+                .collect::<Vec<_>>(),
+            vec!["id", "display_name", "age"]
+        );
+        projected_schema.done()?;
 
         let raw_ast_matched = database
             .from::<User>()

@@ -150,8 +150,8 @@ The query flow is:
 
 - start with `from::<M>()`
 - optionally add filters, grouping, ordering, and limits
-- either fetch full `M` rows, or switch into a projection with `project_value(...)`
-  or `project_tuple(...)`
+- either fetch full `M` rows, or switch into a projection with `project::<P>()`,
+  `project_value(...)`, or `project_tuple(...)`
 
 ### Field expressions
 
@@ -219,8 +219,8 @@ not expose yet.
 ### Shared builder methods
 
 `FromBuilder` supports the following methods, and the same chainable query
-methods remain available after calling `project_value(...)` or
-`project_tuple(...)`:
+methods remain available after calling `project::<P>()`, `project_value(...)`,
+or `project_tuple(...)`:
 
 - `filter(expr)`
 - `and(left, right)`
@@ -256,6 +256,20 @@ methods remain available after calling `project_value(...)` or
 - `exists()`
 - `count()`
 
+### Struct projections
+
+Use `Database::from::<M>().project::<P>()` or
+`DBTransaction::from::<M>().project::<P>()` to project rows into a dedicated
+DTO-like struct. `P` is typically a `#[derive(Projection)]` type whose field
+names match the projected output names.
+
+Field-level renaming is supported with `#[projection(rename = "...")]`, which
+maps a DTO field to a different source column while still aliasing the result
+back to the DTO field name.
+
+If you need expression-based outputs, prefer `project_value(...)` or
+`project_tuple(...)` and assign explicit names with `.alias(...)`.
+
 ### Single-value queries
 
 Use `Database::from::<M>().project_value(expr)` or
@@ -276,8 +290,17 @@ expressions and decode them positionally into a Rust tuple via
 ### Example
 
 ```rust
+use kite_sql::Projection;
 use kite_sql::orm::{case_when, count_all, func, sum, QueryExpr, QueryValue};
 use sqlparser::ast::{BinaryOperator, Expr};
+
+#[derive(Default, Projection)]
+struct UserSummary {
+    id: i32,
+    #[projection(rename = "user_name")]
+    display_name: String,
+    age: Option<i32>,
+}
 
 let exists = database
     .from::<User>()
@@ -315,6 +338,12 @@ let typed = database
     .from::<User>()
     .eq(User::id().cast("BIGINT")?, 1_i64)
     .get()?;
+
+let summaries = database
+    .from::<User>()
+    .project::<UserSummary>()
+    .asc(User::id())
+    .fetch()?;
 
 let ids = database
     .from::<User>()
@@ -357,6 +386,16 @@ let grouped_ids = database
     .project_tuple((User::age(), sum(User::id()).alias("total_ids")))
     .group_by(User::age())
     .fetch::<(Option<i32>, i32)>()?;
+
+let grouped_stats = database
+    .from::<EventLog>()
+    .project_tuple((
+        EventLog::category(),
+        sum(EventLog::score()).alias("total_score"),
+        count_all().alias("total_count"),
+    ))
+    .group_by(EventLog::category())
+    .fetch::<(String, i32, i32)>()?;
 
 let raw_ast = database
     .from::<User>()
@@ -460,8 +499,8 @@ Helpers:
 
 ### `ProjectedValue`
 
-A projected select-list item used by `project_value(...)` and `project_tuple(...)`,
-optionally carrying an alias.
+A projected select-list item used by `project::<P>()`, `project_value(...)`,
+and `project_tuple(...)`, optionally carrying an alias.
 
 ### `CompareOp`
 
@@ -499,8 +538,9 @@ A lightweight single-table ORM query builder.
 `FromBuilder` is the public entry point for ORM DQL construction.
 
 By default it selects full model rows and supports `fetch()` / `get()` into `M`.
-Calling `project_value(...)` or `project_tuple(...)` keeps the same query chain
-but changes the final decoding shape to a scalar or tuple result.
+Calling `project::<P>()`, `project_value(...)`, or `project_tuple(...)` keeps
+the same query chain but changes the final decoding shape to a struct, scalar,
+or tuple result.
 
 ## Public traits
 
@@ -519,6 +559,16 @@ Important associated items:
 - cached statement getters such as `select_statement()` and `insert_statement()`
 
 In most cases, you should derive this trait instead of implementing it manually.
+
+### `Projection`
+
+The DTO projection trait implemented by `#[derive(Projection)]`.
+
+It powers `Database::from::<M>().project::<P>()` and
+`DBTransaction::from::<M>().project::<P>()`.
+
+Derived projections declare their source model with
+matching field names, and may use `rename` on fields.
 
 ### `FromDataValue`
 
