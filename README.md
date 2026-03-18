@@ -94,7 +94,7 @@ fn main() -> Result<(), DatabaseError> {
     database.update(&alice)?;
 
     let users = database
-        .select::<User>()
+        .from::<User>()
         .and(User::email().like("%@example.com"), User::age().gte(18))
         .asc(User::name())
         .limit(10)

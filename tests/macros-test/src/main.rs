@@ -437,18 +437,18 @@ mod test {
         })?;
 
         let adults = database
-            .select::<User>()
+            .from::<User>()
             .and(User::age().gte(18), User::name().like("A%"))
             .fetch()?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(adults.len(), 1);
         assert_eq!(adults[0].name, "Alice");
 
-        let quoted = database.select::<User>().eq(User::name(), "A'lex").get()?;
+        let quoted = database.from::<User>().eq(User::name(), "A'lex").get()?;
         assert_eq!(quoted.unwrap().id, 3);
 
         let ordered = database
-            .select::<User>()
+            .from::<User>()
             .not(User::age().is_null())
             .desc(User::age())
             .limit(1)
@@ -456,16 +456,16 @@ mod test {
             .unwrap();
         assert_eq!(ordered.id, 2);
 
-        let count = database.select::<User>().is_not_null(User::age()).count()?;
+        let count = database.from::<User>().is_not_null(User::age()).count()?;
         assert_eq!(count, 2);
 
-        let exists = database.select::<User>().eq(User::id(), 2).exists()?;
+        let exists = database.from::<User>().eq(User::id(), 2).exists()?;
         assert!(exists);
-        let missing = database.select::<User>().eq(User::id(), 99).exists()?;
+        let missing = database.from::<User>().eq(User::id(), 99).exists()?;
         assert!(!missing);
 
         let two_users = database
-            .select::<User>()
+            .from::<User>()
             .or(User::id().eq(1), User::id().eq(2))
             .asc(User::id())
             .fetch()?
@@ -476,13 +476,13 @@ mod test {
         );
 
         let alice_only = database
-            .select::<User>()
+            .from::<User>()
             .and(User::age().is_not_null(), User::name().not_like("B%"))
             .count()?;
         assert_eq!(alice_only, 1);
 
         let in_list = database
-            .select::<User>()
+            .from::<User>()
             .in_list(User::id(), [1, 3])
             .asc(User::id())
             .fetch()?
@@ -493,7 +493,7 @@ mod test {
         );
 
         let not_between = database
-            .select::<User>()
+            .from::<User>()
             .not_between(User::id(), 2, 2)
             .asc(User::id())
             .fetch()?
@@ -504,7 +504,7 @@ mod test {
         );
 
         let either_named_a_or_missing_age = database
-            .select::<User>()
+            .from::<User>()
             .or(User::name().like("A%"), User::age().is_null())
             .asc(User::id())
             .fetch()?
@@ -518,34 +518,37 @@ mod test {
         );
 
         let udf_matched = database
-            .select::<User>()
+            .from::<User>()
             .eq(func("add_one", [QueryValue::from(User::id())]), 2)
             .get()?
             .unwrap();
         assert_eq!(udf_matched.id, 1);
 
         let cast_matched = database
-            .select::<User>()
+            .from::<User>()
             .eq(User::id().cast("BIGINT")?, 2_i64)
             .get()?
             .unwrap();
         assert_eq!(cast_matched.id, 2);
 
         let projected_ids = database
-            .project_value::<User, _>(User::id())
+            .from::<User>()
+            .project_value(User::id())
             .asc(User::id())
             .fetch::<i32>()?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(projected_ids, vec![1, 2, 3]);
 
         let projected_name = database
-            .project_value::<User, _>(User::name())
+            .from::<User>()
+            .project_value(User::name())
             .eq(User::id(), 1)
             .get::<String>()?;
         assert_eq!(projected_name.as_deref(), Some("Alice"));
 
         let age_buckets = database
-            .project_value::<User, _>(case_when(
+            .from::<User>()
+            .project_value(case_when(
                 [
                     (User::age().is_null(), "unknown"),
                     (User::age().lt(20), "minor"),
@@ -558,24 +561,28 @@ mod test {
         assert_eq!(age_buckets, vec!["minor", "adult", "unknown"]);
 
         let id_labels = database
-            .project_value::<User, _>(case_value(User::id(), [(1, "one"), (2, "two")], "other"))
+            .from::<User>()
+            .project_value(case_value(User::id(), [(1, "one"), (2, "two")], "other"))
             .asc(User::id())
             .fetch::<String>()?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(id_labels, vec!["one", "two", "other"]);
 
         let id_sum = database
-            .project_value::<User, _>(sum(User::id()))
+            .from::<User>()
+            .project_value(sum(User::id()))
             .get::<i32>()?;
         assert_eq!(id_sum, Some(6));
 
         let total_users = database
-            .project_value::<User, _>(count_all().alias("total_users"))
+            .from::<User>()
+            .project_value(count_all().alias("total_users"))
             .get::<i32>()?;
         assert_eq!(total_users, Some(3));
 
         let projected_user_rows = database
-            .project_tuple::<User, _>((User::id(), User::name()))
+            .from::<User>()
+            .project_tuple((User::id(), User::name()))
             .asc(User::id())
             .fetch::<(i32, String)>()?
             .collect::<Result<Vec<_>, _>>()?;
@@ -589,13 +596,14 @@ mod test {
         );
 
         let aliased_total_users = database
-            .project_value::<User, _>(count_all().alias("total_users"))
+            .from::<User>()
+            .project_value(count_all().alias("total_users"))
             .raw()?;
         assert_eq!(aliased_total_users.schema()[0].name(), "total_users");
         aliased_total_users.done()?;
 
         let raw_ast_matched = database
-            .select::<User>()
+            .from::<User>()
             .filter(QueryExpr::from_ast(SqlExpr::BinaryOp {
                 left: Box::new(QueryValue::from(User::id()).into_ast()),
                 op: SqlBinaryOperator::Eq,
@@ -606,21 +614,23 @@ mod test {
         assert_eq!(raw_ast_matched.id, 3);
 
         let exists_count = database
-            .select::<User>()
+            .from::<User>()
             .where_exists(
                 database
-                    .project_value::<User, _>(User::id())
+                    .from::<User>()
+                    .project_value(User::id())
                     .eq(User::id(), 2),
             )
             .count()?;
         assert_eq!(exists_count, 3);
 
         let in_subquery = database
-            .select::<User>()
+            .from::<User>()
             .in_subquery(
                 User::id(),
                 database
-                    .project_value::<User, _>(User::id())
+                    .from::<User>()
+                    .project_value(User::id())
                     .in_list(User::id(), [1, 3]),
             )
             .asc(User::id())
@@ -632,7 +642,7 @@ mod test {
         );
 
         let mut tx = database.new_transaction()?;
-        let in_tx = tx.select::<User>().eq(User::id(), 2).get()?.unwrap();
+        let in_tx = tx.from::<User>().eq(User::id(), 2).get()?.unwrap();
         assert_eq!(in_tx.name, "Bob");
         tx.commit()?;
 
@@ -663,7 +673,8 @@ mod test {
         })?;
 
         let repeated_categories = database
-            .project_value::<EventLog, _>(EventLog::category())
+            .from::<EventLog>()
+            .project_value(EventLog::category())
             .group_by(EventLog::category())
             .having(count_all().gt(1))
             .fetch::<String>()?
@@ -671,14 +682,16 @@ mod test {
         assert_eq!(repeated_categories, vec!["alpha"]);
 
         let grouped_count = database
-            .project_value::<EventLog, _>(EventLog::category())
+            .from::<EventLog>()
+            .project_value(EventLog::category())
             .group_by(EventLog::category())
             .having(count_all().gt(1))
             .count()?;
         assert_eq!(grouped_count, 1);
 
         let grouped_scores = database
-            .project_tuple::<EventLog, _>((
+            .from::<EventLog>()
+            .project_tuple((
                 EventLog::category(),
                 sum(EventLog::score()).alias("total_score"),
             ))

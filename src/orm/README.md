@@ -53,7 +53,7 @@ let user = database.get::<User>(&1)?.unwrap();
 assert_eq!(user.name, "Alice");
 
 let adults = database
-    .select::<User>()
+    .from::<User>()
     .gte(User::age(), 18)
     .asc(User::name())
     .fetch()?;
@@ -120,7 +120,7 @@ The following ORM helpers are available on `Database`.
 
 - `get::<M>(&key) -> Result<Option<M>, DatabaseError>`
 - `fetch::<M>() -> Result<OrmIter<...>, DatabaseError>`
-- `select::<M>() -> SelectBuilder<...>`
+- `from::<M>() -> FromBuilder<...>`
 
 ## Transaction ORM APIs
 
@@ -137,13 +137,21 @@ The following ORM helpers are available on `DBTransaction`.
 
 - `get::<M>(&key) -> Result<Option<M>, DatabaseError>`
 - `fetch::<M>() -> Result<OrmIter<...>, DatabaseError>`
-- `select::<M>() -> SelectBuilder<...>`
+- `from::<M>() -> FromBuilder<...>`
 
 `DBTransaction` does not currently expose the ORM DDL convenience methods.
 
 ## Query builder API
 
-`Database::select::<M>()` and `DBTransaction::select::<M>()` return a typed `SelectBuilder`.
+`Database::from::<M>()` and `DBTransaction::from::<M>()` start a typed query
+from one ORM model table.
+
+The query flow is:
+
+- start with `from::<M>()`
+- optionally add filters, grouping, ordering, and limits
+- either fetch full `M` rows, or switch into a projection with `project_value(...)`
+  or `project_tuple(...)`
 
 ### Field expressions
 
@@ -165,6 +173,7 @@ Generated field accessors return `Field<M, T>`. A field supports:
 - `not_between(low, high)`
 - `cast("type")`
 - `cast_to(DataType)`
+- `alias(name)`
 - `in_subquery(query)`
 - `not_in_subquery(query)`
 
@@ -207,9 +216,11 @@ not expose yet.
 - `exists(query)`
 - `not_exists(query)`
 
-### Builder methods
+### Shared builder methods
 
-`SelectBuilder` supports:
+`FromBuilder` supports the following methods, and the same chainable query
+methods remain available after calling `project_value(...)` or
+`project_tuple(...)`:
 
 - `filter(expr)`
 - `and(left, right)`
@@ -247,15 +258,19 @@ not expose yet.
 
 ### Single-value queries
 
-Use `Database::project_value::<M>(expr)` or `DBTransaction::project_value::<M>(expr)`
-to start a single-value projection builder. It supports the same filtering,
-grouping, ordering, and subquery composition, and returns typed values via
+Use `Database::from::<M>().project_value(expr)` or
+`DBTransaction::from::<M>().project_value(expr)` to project a single
+expression. The resulting query still supports the same filtering, grouping,
+ordering, and subquery composition, and returns typed values via
 `fetch::<T>()` and `get::<T>()`.
+
+This is also the intended entry point for scalar subqueries.
 
 ### Tuple queries
 
-Use `Database::project_tuple::<M>(values)` or `DBTransaction::project_tuple::<M>(values)`
-to project multiple expressions and decode them positionally into a Rust tuple via
+Use `Database::from::<M>().project_tuple(values)` or
+`DBTransaction::from::<M>().project_tuple(values)` to project multiple
+expressions and decode them positionally into a Rust tuple via
 `fetch::<(T1, T2, ...)>()` and `get::<(T1, T2, ...)>()`.
 
 ### Example
@@ -265,23 +280,23 @@ use kite_sql::orm::{case_when, count_all, func, sum, QueryExpr, QueryValue};
 use sqlparser::ast::{BinaryOperator, Expr};
 
 let exists = database
-    .select::<User>()
+    .from::<User>()
     .and(User::name().like("A%"), User::age().gte(18))
     .exists()?;
 
 let count = database
-    .select::<User>()
+    .from::<User>()
     .is_not_null(User::age())
     .count()?;
 
 let top = database
-    .select::<User>()
+    .from::<User>()
     .or(User::id().eq(1), User::id().eq(2))
     .desc(User::age())
     .get()?;
 
 let normalized = database
-    .select::<User>()
+    .from::<User>()
     .eq(
         func(
             "add_one",
@@ -292,22 +307,24 @@ let normalized = database
     .get()?;
 
 let ranged = database
-    .select::<User>()
+    .from::<User>()
     .between(User::id(), 1, 2)
     .fetch()?;
 
 let typed = database
-    .select::<User>()
+    .from::<User>()
     .eq(User::id().cast("BIGINT")?, 1_i64)
     .get()?;
 
 let ids = database
-    .project_value::<User, _>(User::id())
+    .from::<User>()
+    .project_value(User::id())
     .asc(User::id())
     .fetch::<i32>()?;
 
 let age_bucket = database
-    .project_value::<User, _>(
+    .from::<User>()
+    .project_value(
         case_when(
             [(User::age().is_null(), "unknown"), (User::age().lt(20), "minor")],
             "adult",
@@ -318,27 +335,31 @@ let age_bucket = database
     .fetch::<String>()?;
 
 let total_users = database
-    .project_value::<User, _>(count_all().alias("total_users"))
+    .from::<User>()
+    .project_value(count_all().alias("total_users"))
     .get::<i32>()?;
 
 let rows = database
-    .project_tuple::<User, _>((User::id(), User::name()))
+    .from::<User>()
+    .project_tuple((User::id(), User::name()))
     .asc(User::id())
     .fetch::<(i32, String)>()?;
 
 let repeated_ages = database
-    .project_value::<User, _>(User::age())
+    .from::<User>()
+    .project_value(User::age())
     .group_by(User::age())
     .having(count_all().gt(1))
     .fetch::<Option<i32>>()?;
 
 let grouped_ids = database
-    .project_tuple::<User, _>((User::age(), sum(User::id()).alias("total_ids")))
+    .from::<User>()
+    .project_tuple((User::age(), sum(User::id()).alias("total_ids")))
     .group_by(User::age())
     .fetch::<(Option<i32>, i32)>()?;
 
 let raw_ast = database
-    .select::<User>()
+    .from::<User>()
     .filter(QueryExpr::from_ast(Expr::BinaryOp {
         left: Box::new(QueryValue::from(User::id()).into_ast()),
         op: BinaryOperator::Eq,
@@ -347,20 +368,21 @@ let raw_ast = database
     .get()?;
 
 let uncorrelated = database
-    .select::<User>()
+    .from::<User>()
     .where_exists(
         database
-            .project_value::<User, _>(User::id())
+            .from::<User>()
+            .project_value(User::id())
             .eq(User::id(), 1),
     )
     .get()?;
 # Ok::<(), kite_sql::errors::DatabaseError>(())
 ```
 
-For scalar subqueries such as `IN (subquery)` and `EXISTS (subquery)`,
-use `Database::project_value::<M>(...)` or `DBTransaction::project_value::<M>(...)`
-to build a single-column subquery directly when the binder expects one expression
-to be returned.
+For scalar subqueries such as `IN (subquery)` and `EXISTS (subquery)`, use
+`Database::from::<M>().project_value(...)` or
+`DBTransaction::from::<M>().project_value(...)` to build a single-column
+subquery directly when the binder expects one expression to be returned.
 
 ## Public structs and enums
 
@@ -396,12 +418,23 @@ Methods:
 
 A typed model field handle used by the query builder.
 
+Common methods:
+
+- comparisons such as `eq`, `gt`, `lt`
+- null checks such as `is_null`
+- pattern matching such as `like`
+- range and membership checks such as `between` and `in_list`
+- `cast`, `cast_to`
+- `alias`
+- subquery predicates such as `in_subquery`
+
 ### `QueryValue`
 
 A query-side wrapper around `sqlparser::ast::Expr` for value-producing expressions.
 
 Helpers:
 
+- comparisons such as `eq`, `gt`, `lt`
 - `func(name, args)`
 - `count(expr)`
 - `count_all()`
@@ -427,7 +460,8 @@ Helpers:
 
 ### `ProjectedValue`
 
-A single projected expression for `project_value`, optionally carrying an alias.
+A projected select-list item used by `project_value(...)` and `project_tuple(...)`,
+optionally carrying an alias.
 
 ### `CompareOp`
 
@@ -458,13 +492,15 @@ Methods:
 - `as_ast()`
 - `into_ast()`
 
-### `SelectBuilder<Q, M>`
+### `FromBuilder<Q, M>`
 
 A lightweight single-table ORM query builder.
 
-Use `Database::project_value::<M>(expr)` or `DBTransaction::project_value::<M>(expr)`
-to create the matching single-value projection builder. It still supports filters,
-ordering, subquery composition, and typed `fetch::<T>()` / `get::<T>()`.
+`FromBuilder` is the public entry point for ORM DQL construction.
+
+By default it selects full model rows and supports `fetch()` / `get()` into `M`.
+Calling `project_value(...)` or `project_tuple(...)` keeps the same query chain
+but changes the final decoding shape to a scalar or tuple result.
 
 ## Public traits
 

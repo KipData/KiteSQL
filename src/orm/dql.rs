@@ -59,24 +59,8 @@ impl<S: Storage> Database<S> {
     }
 
     /// Starts a typed single-table query builder for the given model.
-    pub fn select<M: Model>(&self) -> SelectBuilder<&Database<S>, M> {
-        SelectBuilder::new(self)
-    }
-
-    /// Starts a typed single-value projection query builder for the given model.
-    pub fn project_value<M: Model, V: Into<ProjectedValue>>(
-        &self,
-        value: V,
-    ) -> ProjectValueBuilder<&Database<S>, M> {
-        SelectBuilder::new_value(self, value)
-    }
-
-    /// Starts a typed tuple projection query builder for the given model.
-    pub fn project_tuple<M: Model, V: IntoProjectedTuple>(
-        &self,
-        values: V,
-    ) -> ProjectTupleBuilder<&Database<S>, M> {
-        SelectBuilder::new_tuple(self, values)
+    pub fn from<M: Model>(&self) -> FromBuilder<&Database<S>, M> {
+        FromBuilder::from_inner(QueryBuilder::new(self))
     }
 }
 
@@ -92,23 +76,7 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
     }
 
     /// Starts a typed single-table query builder inside the current transaction.
-    pub fn select<M: Model>(&mut self) -> SelectBuilder<&mut DBTransaction<'a, S>, M> {
-        SelectBuilder::new(self)
-    }
-
-    /// Starts a typed single-value projection query builder inside the current transaction.
-    pub fn project_value<M: Model, V: Into<ProjectedValue>>(
-        &mut self,
-        value: V,
-    ) -> ProjectValueBuilder<&mut DBTransaction<'a, S>, M> {
-        SelectBuilder::new_value(self, value)
-    }
-
-    /// Starts a typed tuple projection query builder inside the current transaction.
-    pub fn project_tuple<M: Model, V: IntoProjectedTuple>(
-        &mut self,
-        values: V,
-    ) -> ProjectTupleBuilder<&mut DBTransaction<'a, S>, M> {
-        SelectBuilder::new_tuple(self, values)
+    pub fn from<M: Model>(&mut self) -> FromBuilder<&mut DBTransaction<'a, S>, M> {
+        FromBuilder::from_inner(QueryBuilder::new(self))
     }
 }

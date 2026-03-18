@@ -133,6 +133,181 @@ pub struct Field<M, T> {
     _marker: PhantomData<(M, T)>,
 }
 
+trait ValueExpressionOps: Sized {
+    fn into_query_value(self) -> QueryValue;
+
+    fn eq_expr<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
+        QueryExpr::from_ast(Expr::BinaryOp {
+            left: Box::new(self.into_query_value().into_ast()),
+            op: CompareOp::Eq.as_ast(),
+            right: Box::new(value.into().into_ast()),
+        })
+    }
+
+    fn ne_expr<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
+        QueryExpr::from_ast(Expr::BinaryOp {
+            left: Box::new(self.into_query_value().into_ast()),
+            op: CompareOp::Ne.as_ast(),
+            right: Box::new(value.into().into_ast()),
+        })
+    }
+
+    fn gt_expr<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
+        QueryExpr::from_ast(Expr::BinaryOp {
+            left: Box::new(self.into_query_value().into_ast()),
+            op: CompareOp::Gt.as_ast(),
+            right: Box::new(value.into().into_ast()),
+        })
+    }
+
+    fn gte_expr<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
+        QueryExpr::from_ast(Expr::BinaryOp {
+            left: Box::new(self.into_query_value().into_ast()),
+            op: CompareOp::Gte.as_ast(),
+            right: Box::new(value.into().into_ast()),
+        })
+    }
+
+    fn lt_expr<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
+        QueryExpr::from_ast(Expr::BinaryOp {
+            left: Box::new(self.into_query_value().into_ast()),
+            op: CompareOp::Lt.as_ast(),
+            right: Box::new(value.into().into_ast()),
+        })
+    }
+
+    fn lte_expr<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
+        QueryExpr::from_ast(Expr::BinaryOp {
+            left: Box::new(self.into_query_value().into_ast()),
+            op: CompareOp::Lte.as_ast(),
+            right: Box::new(value.into().into_ast()),
+        })
+    }
+
+    fn is_null_expr(self) -> QueryExpr {
+        QueryExpr::from_ast(Expr::IsNull(Box::new(self.into_query_value().into_ast())))
+    }
+
+    fn is_not_null_expr(self) -> QueryExpr {
+        QueryExpr::from_ast(Expr::IsNotNull(Box::new(
+            self.into_query_value().into_ast(),
+        )))
+    }
+
+    fn like_expr<V: Into<QueryValue>>(self, pattern: V) -> QueryExpr {
+        QueryExpr::from_ast(Expr::Like {
+            negated: false,
+            expr: Box::new(self.into_query_value().into_ast()),
+            pattern: Box::new(pattern.into().into_ast()),
+            escape_char: None,
+            any: false,
+        })
+    }
+
+    fn not_like_expr<V: Into<QueryValue>>(self, pattern: V) -> QueryExpr {
+        QueryExpr::from_ast(Expr::Like {
+            negated: true,
+            expr: Box::new(self.into_query_value().into_ast()),
+            pattern: Box::new(pattern.into().into_ast()),
+            escape_char: None,
+            any: false,
+        })
+    }
+
+    fn in_list_expr<I, V>(self, values: I) -> QueryExpr
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<QueryValue>,
+    {
+        QueryExpr::from_ast(Expr::InList {
+            expr: Box::new(self.into_query_value().into_ast()),
+            list: values
+                .into_iter()
+                .map(Into::into)
+                .map(QueryValue::into_ast)
+                .collect(),
+            negated: false,
+        })
+    }
+
+    fn not_in_list_expr<I, V>(self, values: I) -> QueryExpr
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<QueryValue>,
+    {
+        QueryExpr::from_ast(Expr::InList {
+            expr: Box::new(self.into_query_value().into_ast()),
+            list: values
+                .into_iter()
+                .map(Into::into)
+                .map(QueryValue::into_ast)
+                .collect(),
+            negated: true,
+        })
+    }
+
+    fn between_expr<L: Into<QueryValue>, H: Into<QueryValue>>(self, low: L, high: H) -> QueryExpr {
+        QueryExpr::from_ast(Expr::Between {
+            expr: Box::new(self.into_query_value().into_ast()),
+            negated: false,
+            low: Box::new(low.into().into_ast()),
+            high: Box::new(high.into().into_ast()),
+        })
+    }
+
+    fn not_between_expr<L: Into<QueryValue>, H: Into<QueryValue>>(
+        self,
+        low: L,
+        high: H,
+    ) -> QueryExpr {
+        QueryExpr::from_ast(Expr::Between {
+            expr: Box::new(self.into_query_value().into_ast()),
+            negated: true,
+            low: Box::new(low.into().into_ast()),
+            high: Box::new(high.into().into_ast()),
+        })
+    }
+
+    fn cast_value(self, data_type: &str) -> Result<QueryValue, DatabaseError> {
+        Ok(self.cast_to_value(parse_data_type_fragment(data_type)?))
+    }
+
+    fn cast_to_value(self, data_type: DataType) -> QueryValue {
+        QueryValue::from_ast(Expr::Cast {
+            kind: CastKind::Cast,
+            expr: Box::new(self.into_query_value().into_ast()),
+            data_type,
+            array: false,
+            format: None,
+        })
+    }
+
+    fn alias_value(self, alias: &str) -> ProjectedValue {
+        ProjectedValue {
+            item: SelectItem::ExprWithAlias {
+                expr: self.into_query_value().into_ast(),
+                alias: ident(alias),
+            },
+        }
+    }
+
+    fn in_subquery_expr<S: SubquerySource>(self, subquery: S) -> QueryExpr {
+        QueryExpr::from_ast(Expr::InSubquery {
+            expr: Box::new(self.into_query_value().into_ast()),
+            subquery: Box::new(subquery.into_subquery()),
+            negated: false,
+        })
+    }
+
+    fn not_in_subquery_expr<S: SubquerySource>(self, subquery: S) -> QueryExpr {
+        QueryExpr::from_ast(Expr::InSubquery {
+            expr: Box::new(self.into_query_value().into_ast()),
+            subquery: Box::new(subquery.into_subquery()),
+            negated: true,
+        })
+    }
+}
+
 impl<M, T> Field<M, T> {
     pub const fn new(table: &'static str, column: &'static str) -> Self {
         Self {
@@ -150,43 +325,43 @@ impl<M, T> Field<M, T> {
     }
 
     pub fn eq<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        self.value().eq(value)
+        ValueExpressionOps::eq_expr(self, value)
     }
 
     pub fn ne<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        self.value().ne(value)
+        ValueExpressionOps::ne_expr(self, value)
     }
 
     pub fn gt<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        self.value().gt(value)
+        ValueExpressionOps::gt_expr(self, value)
     }
 
     pub fn gte<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        self.value().gte(value)
+        ValueExpressionOps::gte_expr(self, value)
     }
 
     pub fn lt<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        self.value().lt(value)
+        ValueExpressionOps::lt_expr(self, value)
     }
 
     pub fn lte<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        self.value().lte(value)
+        ValueExpressionOps::lte_expr(self, value)
     }
 
     pub fn is_null(self) -> QueryExpr {
-        self.value().is_null()
+        ValueExpressionOps::is_null_expr(self)
     }
 
     pub fn is_not_null(self) -> QueryExpr {
-        self.value().is_not_null()
+        ValueExpressionOps::is_not_null_expr(self)
     }
 
     pub fn like<V: Into<QueryValue>>(self, pattern: V) -> QueryExpr {
-        self.value().like(pattern)
+        ValueExpressionOps::like_expr(self, pattern)
     }
 
     pub fn not_like<V: Into<QueryValue>>(self, pattern: V) -> QueryExpr {
-        self.value().not_like(pattern)
+        ValueExpressionOps::not_like_expr(self, pattern)
     }
 
     pub fn in_list<I, V>(self, values: I) -> QueryExpr
@@ -194,7 +369,7 @@ impl<M, T> Field<M, T> {
         I: IntoIterator<Item = V>,
         V: Into<QueryValue>,
     {
-        self.value().in_list(values)
+        ValueExpressionOps::in_list_expr(self, values)
     }
 
     pub fn not_in_list<I, V>(self, values: I) -> QueryExpr
@@ -202,11 +377,11 @@ impl<M, T> Field<M, T> {
         I: IntoIterator<Item = V>,
         V: Into<QueryValue>,
     {
-        self.value().not_in_list(values)
+        ValueExpressionOps::not_in_list_expr(self, values)
     }
 
     pub fn between<L: Into<QueryValue>, H: Into<QueryValue>>(self, low: L, high: H) -> QueryExpr {
-        self.value().between(low, high)
+        ValueExpressionOps::between_expr(self, low, high)
     }
 
     pub fn not_between<L: Into<QueryValue>, H: Into<QueryValue>>(
@@ -214,27 +389,27 @@ impl<M, T> Field<M, T> {
         low: L,
         high: H,
     ) -> QueryExpr {
-        self.value().not_between(low, high)
+        ValueExpressionOps::not_between_expr(self, low, high)
     }
 
     pub fn cast(self, data_type: &str) -> Result<QueryValue, DatabaseError> {
-        self.value().cast(data_type)
+        ValueExpressionOps::cast_value(self, data_type)
     }
 
     pub fn cast_to(self, data_type: DataType) -> QueryValue {
-        self.value().cast_to(data_type)
+        ValueExpressionOps::cast_to_value(self, data_type)
     }
 
     pub fn alias(self, alias: &str) -> ProjectedValue {
-        self.value().alias(alias)
+        ValueExpressionOps::alias_value(self, alias)
     }
 
     pub fn in_subquery<S: SubquerySource>(self, subquery: S) -> QueryExpr {
-        self.value().in_subquery(subquery)
+        ValueExpressionOps::in_subquery_expr(self, subquery)
     }
 
     pub fn not_in_subquery<S: SubquerySource>(self, subquery: S) -> QueryExpr {
-        self.value().not_in_subquery(subquery)
+        ValueExpressionOps::not_in_subquery_expr(self, subquery)
     }
 }
 
@@ -490,79 +665,43 @@ impl QueryValue {
     }
 
     pub fn eq<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        QueryExpr::from_ast(Expr::BinaryOp {
-            left: Box::new(self.into_ast()),
-            op: CompareOp::Eq.as_ast(),
-            right: Box::new(value.into().into_ast()),
-        })
+        ValueExpressionOps::eq_expr(self, value)
     }
 
     pub fn ne<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        QueryExpr::from_ast(Expr::BinaryOp {
-            left: Box::new(self.into_ast()),
-            op: CompareOp::Ne.as_ast(),
-            right: Box::new(value.into().into_ast()),
-        })
+        ValueExpressionOps::ne_expr(self, value)
     }
 
     pub fn gt<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        QueryExpr::from_ast(Expr::BinaryOp {
-            left: Box::new(self.into_ast()),
-            op: CompareOp::Gt.as_ast(),
-            right: Box::new(value.into().into_ast()),
-        })
+        ValueExpressionOps::gt_expr(self, value)
     }
 
     pub fn gte<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        QueryExpr::from_ast(Expr::BinaryOp {
-            left: Box::new(self.into_ast()),
-            op: CompareOp::Gte.as_ast(),
-            right: Box::new(value.into().into_ast()),
-        })
+        ValueExpressionOps::gte_expr(self, value)
     }
 
     pub fn lt<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        QueryExpr::from_ast(Expr::BinaryOp {
-            left: Box::new(self.into_ast()),
-            op: CompareOp::Lt.as_ast(),
-            right: Box::new(value.into().into_ast()),
-        })
+        ValueExpressionOps::lt_expr(self, value)
     }
 
     pub fn lte<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        QueryExpr::from_ast(Expr::BinaryOp {
-            left: Box::new(self.into_ast()),
-            op: CompareOp::Lte.as_ast(),
-            right: Box::new(value.into().into_ast()),
-        })
+        ValueExpressionOps::lte_expr(self, value)
     }
 
     pub fn is_null(self) -> QueryExpr {
-        QueryExpr::from_ast(Expr::IsNull(Box::new(self.into_ast())))
+        ValueExpressionOps::is_null_expr(self)
     }
 
     pub fn is_not_null(self) -> QueryExpr {
-        QueryExpr::from_ast(Expr::IsNotNull(Box::new(self.into_ast())))
+        ValueExpressionOps::is_not_null_expr(self)
     }
 
     pub fn like<V: Into<QueryValue>>(self, pattern: V) -> QueryExpr {
-        QueryExpr::from_ast(Expr::Like {
-            negated: false,
-            expr: Box::new(self.into_ast()),
-            pattern: Box::new(pattern.into().into_ast()),
-            escape_char: None,
-            any: false,
-        })
+        ValueExpressionOps::like_expr(self, pattern)
     }
 
     pub fn not_like<V: Into<QueryValue>>(self, pattern: V) -> QueryExpr {
-        QueryExpr::from_ast(Expr::Like {
-            negated: true,
-            expr: Box::new(self.into_ast()),
-            pattern: Box::new(pattern.into().into_ast()),
-            escape_char: None,
-            any: false,
-        })
+        ValueExpressionOps::not_like_expr(self, pattern)
     }
 
     pub fn in_list<I, V>(self, values: I) -> QueryExpr
@@ -570,15 +709,7 @@ impl QueryValue {
         I: IntoIterator<Item = V>,
         V: Into<QueryValue>,
     {
-        QueryExpr::from_ast(Expr::InList {
-            expr: Box::new(self.into_ast()),
-            list: values
-                .into_iter()
-                .map(Into::into)
-                .map(QueryValue::into_ast)
-                .collect(),
-            negated: false,
-        })
+        ValueExpressionOps::in_list_expr(self, values)
     }
 
     pub fn not_in_list<I, V>(self, values: I) -> QueryExpr
@@ -586,24 +717,11 @@ impl QueryValue {
         I: IntoIterator<Item = V>,
         V: Into<QueryValue>,
     {
-        QueryExpr::from_ast(Expr::InList {
-            expr: Box::new(self.into_ast()),
-            list: values
-                .into_iter()
-                .map(Into::into)
-                .map(QueryValue::into_ast)
-                .collect(),
-            negated: true,
-        })
+        ValueExpressionOps::not_in_list_expr(self, values)
     }
 
     pub fn between<L: Into<QueryValue>, H: Into<QueryValue>>(self, low: L, high: H) -> QueryExpr {
-        QueryExpr::from_ast(Expr::Between {
-            expr: Box::new(self.into_ast()),
-            negated: false,
-            low: Box::new(low.into().into_ast()),
-            high: Box::new(high.into().into_ast()),
-        })
+        ValueExpressionOps::between_expr(self, low, high)
     }
 
     pub fn not_between<L: Into<QueryValue>, H: Into<QueryValue>>(
@@ -611,26 +729,15 @@ impl QueryValue {
         low: L,
         high: H,
     ) -> QueryExpr {
-        QueryExpr::from_ast(Expr::Between {
-            expr: Box::new(self.into_ast()),
-            negated: true,
-            low: Box::new(low.into().into_ast()),
-            high: Box::new(high.into().into_ast()),
-        })
+        ValueExpressionOps::not_between_expr(self, low, high)
     }
 
     pub fn cast(self, data_type: &str) -> Result<QueryValue, DatabaseError> {
-        Ok(self.cast_to(parse_data_type_fragment(data_type)?))
+        ValueExpressionOps::cast_value(self, data_type)
     }
 
     pub fn cast_to(self, data_type: DataType) -> QueryValue {
-        QueryValue::from_ast(Expr::Cast {
-            kind: CastKind::Cast,
-            expr: Box::new(self.into_ast()),
-            data_type,
-            array: false,
-            format: None,
-        })
+        ValueExpressionOps::cast_to_value(self, data_type)
     }
 
     pub fn subquery<S: SubquerySource>(query: S) -> QueryValue {
@@ -638,19 +745,11 @@ impl QueryValue {
     }
 
     pub fn in_subquery<S: SubquerySource>(self, subquery: S) -> QueryExpr {
-        QueryExpr::from_ast(Expr::InSubquery {
-            expr: Box::new(self.into_ast()),
-            subquery: Box::new(subquery.into_subquery()),
-            negated: false,
-        })
+        ValueExpressionOps::in_subquery_expr(self, subquery)
     }
 
     pub fn not_in_subquery<S: SubquerySource>(self, subquery: S) -> QueryExpr {
-        QueryExpr::from_ast(Expr::InSubquery {
-            expr: Box::new(self.into_ast()),
-            subquery: Box::new(subquery.into_subquery()),
-            negated: true,
-        })
+        ValueExpressionOps::not_in_subquery_expr(self, subquery)
     }
 
     fn asc(self) -> SortExpr {
@@ -687,6 +786,18 @@ impl QueryValue {
 impl<M, T> From<Field<M, T>> for QueryValue {
     fn from(value: Field<M, T>) -> Self {
         value.value()
+    }
+}
+
+impl<M, T> ValueExpressionOps for Field<M, T> {
+    fn into_query_value(self) -> QueryValue {
+        self.value()
+    }
+}
+
+impl ValueExpressionOps for QueryValue {
+    fn into_query_value(self) -> QueryValue {
+        self
     }
 }
 
@@ -805,23 +916,28 @@ pub trait SubquerySource: private::Sealed {
     fn into_subquery(self) -> Query;
 }
 
-/// Lightweight single-table query builder for ORM models.
-pub struct SelectBuilder<Q: StatementSource, M: Model, P = ModelProjection> {
+struct QueryBuilder<Q: StatementSource, M: Model, P = ModelProjection> {
     state: BuilderState<Q, M>,
     projection: P,
 }
 
-/// Lightweight single-table query builder for scalar value projections.
-pub type ProjectValueBuilder<Q, M> = SelectBuilder<Q, M, ValueProjection>;
-/// Lightweight single-table query builder for tuple projections.
-pub type ProjectTupleBuilder<Q, M> = SelectBuilder<Q, M, TupleProjection>;
+/// Lightweight single-table query builder for ORM models.
+pub struct FromBuilder<Q: StatementSource, M: Model, P = ModelProjection> {
+    inner: QueryBuilder<Q, M, P>,
+}
 
+#[doc(hidden)]
+pub type ProjectionBuilder<Q, M, P> = FromBuilder<Q, M, P>;
+
+#[doc(hidden)]
 pub struct ModelProjection;
 
+#[doc(hidden)]
 pub struct ValueProjection {
     value: ProjectedValue,
 }
 
+#[doc(hidden)]
 pub struct TupleProjection {
     values: Vec<ProjectedValue>,
 }
@@ -910,44 +1026,52 @@ enum FilterMode {
     Or,
 }
 
-macro_rules! impl_select_builder_compare_methods {
-    ($($name:ident),+ $(,)?) => {
-        $(
-            pub fn $name<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
-                self.push_filter(left.into().$name(right), FilterMode::Replace)
-            }
-        )+
-    };
-}
-
-macro_rules! impl_select_builder_null_methods {
-    ($($name:ident),+ $(,)?) => {
-        $(
-            pub fn $name<V: Into<QueryValue>>(self, value: V) -> Self {
-                self.push_filter(value.into().$name(), FilterMode::Replace)
-            }
-        )+
-    };
-}
-
-macro_rules! impl_select_builder_like_methods {
-    ($($name:ident),+ $(,)?) => {
-        $(
-            pub fn $name<L: Into<QueryValue>, R: Into<QueryValue>>(self, value: L, pattern: R) -> Self {
-                self.push_filter(value.into().$name(pattern), FilterMode::Replace)
-            }
-        )+
-    };
-}
-
-impl<Q: StatementSource, M: Model> SelectBuilder<Q, M, ModelProjection> {
+impl<Q: StatementSource, M: Model> QueryBuilder<Q, M, ModelProjection> {
     fn new(source: Q) -> Self {
         Self {
             state: BuilderState::new(source),
             projection: ModelProjection,
         }
     }
+}
 
+impl<Q: StatementSource, M: Model, P> QueryBuilder<Q, M, P> {
+    fn with_projection<P2>(self, projection: P2) -> QueryBuilder<Q, M, P2> {
+        QueryBuilder {
+            state: self.state,
+            projection,
+        }
+    }
+}
+
+impl<Q: StatementSource, M: Model, P> FromBuilder<Q, M, P> {
+    fn from_inner(inner: QueryBuilder<Q, M, P>) -> Self {
+        Self { inner }
+    }
+
+    fn with_projection<P2>(self, projection: P2) -> FromBuilder<Q, M, P2> {
+        FromBuilder::from_inner(self.inner.with_projection(projection))
+    }
+}
+
+impl<Q: StatementSource, M: Model> FromBuilder<Q, M, ModelProjection> {
+    pub fn project_value<V: Into<ProjectedValue>>(
+        self,
+        value: V,
+    ) -> ProjectionBuilder<Q, M, ValueProjection> {
+        self.with_projection(ValueProjection {
+            value: value.into(),
+        })
+    }
+
+    pub fn project_tuple<V: IntoProjectedTuple>(
+        self,
+        values: V,
+    ) -> ProjectionBuilder<Q, M, TupleProjection> {
+        self.with_projection(TupleProjection {
+            values: values.into_projected_values(),
+        })
+    }
     pub fn fetch(self) -> Result<OrmIter<Q::Iter, M>, DatabaseError> {
         Ok(self.raw()?.orm::<M>())
     }
@@ -957,16 +1081,157 @@ impl<Q: StatementSource, M: Model> SelectBuilder<Q, M, ModelProjection> {
     }
 }
 
-impl<Q: StatementSource, M: Model> SelectBuilder<Q, M, ValueProjection> {
-    fn new_value<V: Into<ProjectedValue>>(source: Q, value: V) -> Self {
-        Self {
-            state: BuilderState::new(source),
-            projection: ValueProjection {
-                value: value.into(),
-            },
-        }
+impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
+    pub fn filter(self, expr: QueryExpr) -> Self {
+        Self::from_inner(self.inner.filter(expr))
     }
 
+    pub fn and(self, left: QueryExpr, right: QueryExpr) -> Self {
+        Self::from_inner(self.inner.and(left, right))
+    }
+
+    pub fn or(self, left: QueryExpr, right: QueryExpr) -> Self {
+        Self::from_inner(self.inner.or(left, right))
+    }
+
+    pub fn not(self, expr: QueryExpr) -> Self {
+        Self::from_inner(self.inner.not(expr))
+    }
+
+    pub fn where_exists<S: SubquerySource>(self, subquery: S) -> Self {
+        Self::from_inner(self.inner.where_exists(subquery))
+    }
+
+    pub fn where_not_exists<S: SubquerySource>(self, subquery: S) -> Self {
+        Self::from_inner(self.inner.where_not_exists(subquery))
+    }
+
+    pub fn group_by<V: Into<QueryValue>>(self, value: V) -> Self {
+        Self::from_inner(self.inner.group_by(value))
+    }
+
+    pub fn having(self, expr: QueryExpr) -> Self {
+        Self::from_inner(self.inner.having(expr))
+    }
+
+    pub fn asc<V: Into<QueryValue>>(self, value: V) -> Self {
+        Self::from_inner(self.inner.asc(value))
+    }
+
+    pub fn desc<V: Into<QueryValue>>(self, value: V) -> Self {
+        Self::from_inner(self.inner.desc(value))
+    }
+
+    pub fn limit(self, limit: usize) -> Self {
+        Self::from_inner(self.inner.limit(limit))
+    }
+
+    pub fn offset(self, offset: usize) -> Self {
+        Self::from_inner(self.inner.offset(offset))
+    }
+
+    pub fn eq<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
+        Self::from_inner(self.inner.eq(left, right))
+    }
+
+    pub fn ne<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
+        Self::from_inner(self.inner.ne(left, right))
+    }
+
+    pub fn gt<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
+        Self::from_inner(self.inner.gt(left, right))
+    }
+
+    pub fn gte<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
+        Self::from_inner(self.inner.gte(left, right))
+    }
+
+    pub fn lt<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
+        Self::from_inner(self.inner.lt(left, right))
+    }
+
+    pub fn lte<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
+        Self::from_inner(self.inner.lte(left, right))
+    }
+
+    pub fn is_null<V: Into<QueryValue>>(self, value: V) -> Self {
+        Self::from_inner(self.inner.is_null(value))
+    }
+
+    pub fn is_not_null<V: Into<QueryValue>>(self, value: V) -> Self {
+        Self::from_inner(self.inner.is_not_null(value))
+    }
+
+    pub fn like<L: Into<QueryValue>, R: Into<QueryValue>>(self, value: L, pattern: R) -> Self {
+        Self::from_inner(self.inner.like(value, pattern))
+    }
+
+    pub fn not_like<L: Into<QueryValue>, R: Into<QueryValue>>(self, value: L, pattern: R) -> Self {
+        Self::from_inner(self.inner.not_like(value, pattern))
+    }
+
+    pub fn in_list<L, I, V>(self, left: L, values: I) -> Self
+    where
+        L: Into<QueryValue>,
+        I: IntoIterator<Item = V>,
+        V: Into<QueryValue>,
+    {
+        Self::from_inner(self.inner.in_list(left, values))
+    }
+
+    pub fn not_in_list<L, I, V>(self, left: L, values: I) -> Self
+    where
+        L: Into<QueryValue>,
+        I: IntoIterator<Item = V>,
+        V: Into<QueryValue>,
+    {
+        Self::from_inner(self.inner.not_in_list(left, values))
+    }
+
+    pub fn between<L, Low, High>(self, expr: L, low: Low, high: High) -> Self
+    where
+        L: Into<QueryValue>,
+        Low: Into<QueryValue>,
+        High: Into<QueryValue>,
+    {
+        Self::from_inner(self.inner.between(expr, low, high))
+    }
+
+    pub fn not_between<L, Low, High>(self, expr: L, low: Low, high: High) -> Self
+    where
+        L: Into<QueryValue>,
+        Low: Into<QueryValue>,
+        High: Into<QueryValue>,
+    {
+        Self::from_inner(self.inner.not_between(expr, low, high))
+    }
+
+    pub fn in_subquery<L: Into<QueryValue>, S: SubquerySource>(self, left: L, subquery: S) -> Self {
+        Self::from_inner(self.inner.in_subquery(left, subquery))
+    }
+
+    pub fn not_in_subquery<L: Into<QueryValue>, S: SubquerySource>(
+        self,
+        left: L,
+        subquery: S,
+    ) -> Self {
+        Self::from_inner(self.inner.not_in_subquery(left, subquery))
+    }
+
+    pub fn raw(self) -> Result<Q::Iter, DatabaseError> {
+        self.inner.raw()
+    }
+
+    pub fn exists(self) -> Result<bool, DatabaseError> {
+        self.inner.exists()
+    }
+
+    pub fn count(self) -> Result<usize, DatabaseError> {
+        self.inner.count()
+    }
+}
+
+impl<Q: StatementSource, M: Model> FromBuilder<Q, M, ValueProjection> {
     pub fn fetch<T: FromDataValue>(self) -> Result<ProjectValueIter<Q::Iter, T>, DatabaseError> {
         Ok(ProjectValueIter::new(self.raw()?))
     }
@@ -976,16 +1241,7 @@ impl<Q: StatementSource, M: Model> SelectBuilder<Q, M, ValueProjection> {
     }
 }
 
-impl<Q: StatementSource, M: Model> SelectBuilder<Q, M, TupleProjection> {
-    fn new_tuple<V: IntoProjectedTuple>(source: Q, values: V) -> Self {
-        Self {
-            state: BuilderState::new(source),
-            projection: TupleProjection {
-                values: values.into_projected_values(),
-            },
-        }
-    }
-
+impl<Q: StatementSource, M: Model> FromBuilder<Q, M, TupleProjection> {
     pub fn fetch<T: FromQueryTuple>(self) -> Result<ProjectTupleIter<Q::Iter, T>, DatabaseError> {
         Ok(ProjectTupleIter::new(self.raw()?))
     }
@@ -995,7 +1251,7 @@ impl<Q: StatementSource, M: Model> SelectBuilder<Q, M, TupleProjection> {
     }
 }
 
-impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> SelectBuilder<Q, M, P> {
+impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
     fn push_filter(self, expr: QueryExpr, mode: FilterMode) -> Self {
         Self {
             state: self.state.push_filter(expr, mode),
@@ -1084,7 +1340,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> SelectBuilder<Q, M, P> 
     }
 
     fn build_query(self) -> Query {
-        let SelectBuilder {
+        let QueryBuilder {
             state:
                 BuilderState {
                     source: _,
@@ -1112,7 +1368,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> SelectBuilder<Q, M, P> 
     }
 
     fn into_statement(self) -> (Q, Statement) {
-        let SelectBuilder {
+        let QueryBuilder {
             state:
                 BuilderState {
                     source,
@@ -1141,11 +1397,45 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> SelectBuilder<Q, M, P> 
         (source, statement)
     }
 
-    impl_select_builder_compare_methods!(eq, ne, gt, gte, lt, lte);
+    pub fn eq<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
+        self.push_filter(left.into().eq(right), FilterMode::Replace)
+    }
 
-    impl_select_builder_null_methods!(is_null, is_not_null);
+    pub fn ne<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
+        self.push_filter(left.into().ne(right), FilterMode::Replace)
+    }
 
-    impl_select_builder_like_methods!(like, not_like);
+    pub fn gt<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
+        self.push_filter(left.into().gt(right), FilterMode::Replace)
+    }
+
+    pub fn gte<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
+        self.push_filter(left.into().gte(right), FilterMode::Replace)
+    }
+
+    pub fn lt<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
+        self.push_filter(left.into().lt(right), FilterMode::Replace)
+    }
+
+    pub fn lte<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
+        self.push_filter(left.into().lte(right), FilterMode::Replace)
+    }
+
+    pub fn is_null<V: Into<QueryValue>>(self, value: V) -> Self {
+        self.push_filter(value.into().is_null(), FilterMode::Replace)
+    }
+
+    pub fn is_not_null<V: Into<QueryValue>>(self, value: V) -> Self {
+        self.push_filter(value.into().is_not_null(), FilterMode::Replace)
+    }
+
+    pub fn like<L: Into<QueryValue>, R: Into<QueryValue>>(self, value: L, pattern: R) -> Self {
+        self.push_filter(value.into().like(pattern), FilterMode::Replace)
+    }
+
+    pub fn not_like<L: Into<QueryValue>, R: Into<QueryValue>>(self, value: L, pattern: R) -> Self {
+        self.push_filter(value.into().not_like(pattern), FilterMode::Replace)
+    }
 
     pub fn in_list<L, I, V>(self, left: L, values: I) -> Self
     where
@@ -1270,14 +1560,11 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> SelectBuilder<Q, M, P> 
     }
 }
 
-impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> private::Sealed
-    for SelectBuilder<Q, M, P>
-{
-}
+impl<Q: StatementSource, M: Model, P> private::Sealed for FromBuilder<Q, M, P> {}
 
-impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> SubquerySource for SelectBuilder<Q, M, P> {
+impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> SubquerySource for FromBuilder<Q, M, P> {
     fn into_subquery(self) -> Query {
-        self.build_query()
+        self.inner.build_query()
     }
 }
 
