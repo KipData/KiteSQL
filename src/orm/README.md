@@ -193,19 +193,6 @@ Built-in helpers are also available for common expression shapes:
 - `case_when([(cond, value), ...], else_value)`
 - `case_value(expr, [(when, value), ...], else_value)`
 
-### AST access
-
-`QueryValue` and `QueryExpr` are lightweight wrappers around `sqlparser::ast::Expr`.
-They support:
-
-- `from_ast(expr)`
-- `as_ast()`
-- `into_ast()`
-
-This lets you mix the typed ORM helpers with lower-level AST construction when
-KiteSQL already supports an expression shape that the high-level ORM helpers do
-not expose yet.
-
 ### Boolean composition
 
 `QueryExpr` supports:
@@ -314,67 +301,35 @@ In practice:
 
 ### Example
 
+Struct projection:
+
 ```rust
 use kite_sql::Projection;
-use kite_sql::orm::{case_when, count_all, func, sum, QueryExpr, QueryValue};
-use sqlparser::ast::{BinaryOperator, Expr};
 
 #[derive(Default, Projection)]
 struct UserSummary {
     id: i32,
     #[projection(rename = "user_name")]
     display_name: String,
-    age: Option<i32>,
 }
-
-let exists = database
-    .from::<User>()
-    .and(User::name().like("A%"), User::age().gte(18))
-    .exists()?;
-
-let count = database
-    .from::<User>()
-    .is_not_null(User::age())
-    .count()?;
-
-let top = database
-    .from::<User>()
-    .or(User::id().eq(1), User::id().eq(2))
-    .desc(User::age())
-    .get()?;
-
-let normalized = database
-    .from::<User>()
-    .eq(
-        func(
-            "add_one",
-            [QueryValue::from(User::id())],
-        ),
-        2,
-    )
-    .get()?;
-
-let ranged = database
-    .from::<User>()
-    .between(User::id(), 1, 2)
-    .fetch()?;
-
-let typed = database
-    .from::<User>()
-    .eq(User::id().cast("BIGINT")?, 1_i64)
-    .get()?;
 
 let summaries = database
     .from::<User>()
     .project::<UserSummary>()
     .asc(User::id())
     .fetch()?;
+# Ok::<(), kite_sql::errors::DatabaseError>(())
+```
 
-let ids = database
+Single-value projection:
+
+```rust
+use kite_sql::orm::{case_when, count_all};
+
+let total_users = database
     .from::<User>()
-    .project_value(User::id())
-    .asc(User::id())
-    .fetch::<i32>()?;
+    .project_value(count_all().alias("total_users"))
+    .get::<i32>()?;
 
 let age_bucket = database
     .from::<User>()
@@ -385,32 +340,14 @@ let age_bucket = database
         )
         .alias("age_bucket"),
     )
-    .asc(User::id())
     .fetch::<String>()?;
+# Ok::<(), kite_sql::errors::DatabaseError>(())
+```
 
-let total_users = database
-    .from::<User>()
-    .project_value(count_all().alias("total_users"))
-    .get::<i32>()?;
+Tuple projection with aggregates:
 
-let rows = database
-    .from::<User>()
-    .project_tuple((User::id(), User::name()))
-    .asc(User::id())
-    .fetch::<(i32, String)>()?;
-
-let repeated_ages = database
-    .from::<User>()
-    .project_value(User::age())
-    .group_by(User::age())
-    .having(count_all().gt(1))
-    .fetch::<Option<i32>>()?;
-
-let grouped_ids = database
-    .from::<User>()
-    .project_tuple((User::age(), sum(User::id()).alias("total_ids")))
-    .group_by(User::age())
-    .fetch::<(Option<i32>, i32)>()?;
+```rust
+use kite_sql::orm::{count_all, sum};
 
 let grouped_stats = database
     .from::<EventLog>()
@@ -421,14 +358,17 @@ let grouped_stats = database
     ))
     .group_by(EventLog::category())
     .fetch::<(String, i32, i32)>()?;
+# Ok::<(), kite_sql::errors::DatabaseError>(())
+```
 
-let raw_ast = database
+Subqueries:
+
+```rust
+use kite_sql::orm::{func, QueryValue};
+
+let normalized = database
     .from::<User>()
-    .filter(QueryExpr::from_ast(Expr::BinaryOp {
-        left: Box::new(QueryValue::from(User::id()).into_ast()),
-        op: BinaryOperator::Eq,
-        right: Box::new(QueryValue::from(1).into_ast()),
-    }))
+    .eq(func("add_one", [QueryValue::from(User::id())]), 2)
     .get()?;
 
 let uncorrelated = database
@@ -448,41 +388,13 @@ For scalar subqueries such as `IN (subquery)` and `EXISTS (subquery)`, use
 `DBTransaction::from::<M>().project_value(...)` to build a single-column
 subquery directly when the binder expects one expression to be returned.
 
-## Public structs and enums
-
-### `OrmField`
-
-Static metadata for one persisted field.
-
-Fields:
-
-- `column`
-- `placeholder`
-- `primary_key`
-- `unique`
-
-### `OrmColumn`
-
-Static metadata for one persisted column used by table creation and migration.
-
-Fields:
-
-- `name`
-- `ddl_type`
-- `nullable`
-- `primary_key`
-- `unique`
-- `default_expr`
-
-Methods:
-
-- `definition_sql()`
+## Key types
 
 ### `Field<M, T>`
 
-A typed model field handle used by the query builder.
+The typed column handle returned by generated accessors such as `User::id()`.
 
-Common methods:
+You usually use it to build expressions:
 
 - comparisons such as `eq`, `gt`, `lt`
 - null checks such as `is_null`
@@ -494,80 +406,44 @@ Common methods:
 
 ### `QueryValue`
 
-A query-side wrapper around `sqlparser::ast::Expr` for value-producing expressions.
+The value expression type used throughout ORM query building.
 
-Helpers:
+Use it for:
 
-- comparisons such as `eq`, `gt`, `lt`
-- `func(name, args)`
-- `count(expr)`
-- `count_all()`
-- `sum(expr)`
-- `avg(expr)`
-- `min(expr)`
-- `max(expr)`
-- `case_when([(cond, value), ...], else_value)`
-- `case_value(expr, [(when, value), ...], else_value)`
-- `in_list(values)`
-- `not_in_list(values)`
-- `between(low, high)`
-- `not_between(low, high)`
-- `cast("type") -> Result<QueryValue, DatabaseError>`
-- `cast_to(DataType)`
-- `alias(name)`
-- `subquery(query)`
-- `in_subquery(query)`
-- `not_in_subquery(query)`
-- `from_ast(expr)`
-- `as_ast()`
-- `into_ast()`
+- function calls such as `func(name, args)`
+- aggregates such as `count`, `sum`, `avg`, `min`, `max`
+- `CASE` expressions
+- casts
+- aliased projection expressions
+- scalar subqueries
 
-### `ProjectedValue`
-
-A projected select-list item used by `project::<P>()`, `project_value(...)`,
-and `project_tuple(...)`, optionally carrying an alias.
-
-### `CompareOp`
-
-Comparison operator used by `QueryExpr`.
-
-Variants:
-
-- `Eq`
-- `Ne`
-- `Gt`
-- `Gte`
-- `Lt`
-- `Lte`
+`QueryValue` also supports comparison and predicate helpers such as `eq`,
+`ne`, `gt`, `gte`, `lt`, `lte`, `like`, `in_list`, `between`, and subquery
+predicates when you need to keep composing expressions.
 
 ### `QueryExpr`
 
-Boolean-oriented wrapper around `sqlparser::ast::Expr`, typically used in `where`
-clauses and builder filters.
+The boolean expression type used for filtering and `HAVING`.
 
-Methods:
+Common helpers:
 
 - `and(rhs)`
 - `or(rhs)`
 - `not()`
 - `exists(query)`
 - `not_exists(query)`
-- `from_ast(expr)`
-- `as_ast()`
-- `into_ast()`
 
 ### `FromBuilder<Q, M>`
 
-A lightweight single-table ORM query builder.
+The main single-table ORM query builder returned by `from::<M>()`.
 
-`FromBuilder` is the public entry point for ORM DQL construction.
+It starts in full-model mode and can later switch into:
 
-By default it selects full model rows and supports `fetch()` / `get()` into `M`.
-Calling `project::<P>()`, `project_value(...)`, or `project_tuple(...)` keeps
-the same query chain but changes the final decoding shape to a struct, scalar,
-or tuple result.
+- `project::<P>()` for DTO structs
+- `project_value(...)` for scalar results
+- `project_tuple(...)` for tuple results
 
-## Public traits
+## Key traits
 
 ### `Model`
 
@@ -595,6 +471,8 @@ It powers `Database::from::<M>().project::<P>()` and
 Derived projections declare their source model with
 matching field names, and may use `rename` on fields.
 
+## Extension traits
+
 ### `FromDataValue`
 
 Converts a `DataValue` into a Rust value during ORM mapping.
@@ -614,18 +492,6 @@ Marker trait for string-like fields that support `#[model(varchar = N)]` and `#[
 ### `DecimalType`
 
 Marker trait for decimal-like fields that support precision and scale annotations.
-
-### `StatementSource`
-
-Execution abstraction shared by `Database` and `DBTransaction` for prepared ORM statements.
-This is mostly framework infrastructure.
-
-## Public helper function
-
-### `try_get`
-
-`try_get` extracts a named field from a tuple and converts it into a Rust value.
-It is primarily intended for derive-generated code and low-level integrations.
 
 ## Migration behavior
 

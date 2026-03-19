@@ -24,14 +24,14 @@ mod test {
     use kite_sql::expression::function::FunctionSummary;
     use kite_sql::expression::BinaryOperator;
     use kite_sql::expression::ScalarExpression;
-    use kite_sql::orm::{case_value, case_when, count_all, func, sum, QueryExpr, QueryValue};
+    use kite_sql::orm::{case_value, case_when, count_all, func, max, min, sum, QueryValue};
     use kite_sql::types::evaluator::EvaluatorFactory;
     use kite_sql::types::tuple::{SchemaRef, Tuple};
     use kite_sql::types::value::{DataValue, Utf8Type};
     use kite_sql::types::LogicalType;
     use kite_sql::{from_tuple, scala_function, table_function, Model, Projection};
     use rust_decimal::Decimal;
-    use sqlparser::ast::{BinaryOperator as SqlBinaryOperator, CharLengthUnits, Expr as SqlExpr};
+    use sqlparser::ast::{CharLengthUnits, DataType as SqlDataType};
     use std::sync::Arc;
 
     fn build_tuple() -> (Tuple, SchemaRef) {
@@ -532,12 +532,26 @@ mod test {
             .unwrap();
         assert_eq!(udf_matched.id, 1);
 
+        let query_value_function_matched = database
+            .from::<User>()
+            .eq(QueryValue::function("add_one", [User::id()]), 3)
+            .get()?
+            .unwrap();
+        assert_eq!(query_value_function_matched.id, 2);
+
         let cast_matched = database
             .from::<User>()
             .eq(User::id().cast("BIGINT")?, 2_i64)
             .get()?
             .unwrap();
         assert_eq!(cast_matched.id, 2);
+
+        let cast_to_matched = database
+            .from::<User>()
+            .eq(User::id().cast_to(SqlDataType::BigInt(None)), 3_i64)
+            .get()?
+            .unwrap();
+        assert_eq!(cast_to_matched.id, 3);
 
         let projected_ids = database
             .from::<User>()
@@ -568,6 +582,23 @@ mod test {
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(age_buckets, vec!["minor", "adult", "unknown"]);
 
+        let searched_case_buckets = database
+            .from::<User>()
+            .project_value(
+                QueryValue::searched_case(
+                    [
+                        (User::age().is_null(), "unknown"),
+                        (User::age().lt(20), "minor"),
+                    ],
+                    "adult",
+                )
+                .alias("age_bucket"),
+            )
+            .asc(User::id())
+            .fetch::<String>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(searched_case_buckets, vec!["minor", "adult", "unknown"]);
+
         let id_labels = database
             .from::<User>()
             .project_value(case_value(User::id(), [(1, "one"), (2, "two")], "other"))
@@ -575,6 +606,17 @@ mod test {
             .fetch::<String>()?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(id_labels, vec!["one", "two", "other"]);
+
+        let simple_case_labels = database
+            .from::<User>()
+            .project_value(
+                QueryValue::simple_case(User::id(), [(1, "one"), (2, "two")], "other")
+                    .alias("id_label"),
+            )
+            .asc(User::id())
+            .fetch::<String>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(simple_case_labels, vec!["one", "two", "other"]);
 
         let id_sum = database
             .from::<User>()
@@ -587,6 +629,18 @@ mod test {
             .project_value(count_all().alias("total_users"))
             .get::<i32>()?;
         assert_eq!(total_users, Some(3));
+
+        let min_user_id = database
+            .from::<User>()
+            .project_value(min(User::id()).alias("min_user_id"))
+            .get::<i32>()?;
+        assert_eq!(min_user_id, Some(1));
+
+        let max_user_id = database
+            .from::<User>()
+            .project_value(max(User::id()).alias("max_user_id"))
+            .get::<i32>()?;
+        assert_eq!(max_user_id, Some(3));
 
         let projected_user_rows = database
             .from::<User>()
@@ -602,6 +656,35 @@ mod test {
                 (3, "A'lex".to_string()),
             ]
         );
+
+        let udf_projection = database
+            .from::<User>()
+            .project_tuple((
+                User::id(),
+                func("add_one", [QueryValue::from(User::id())]).alias("next_id"),
+            ))
+            .asc(User::id())
+            .fetch::<(i32, i32)>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(udf_projection, vec![(1, 2), (2, 3), (3, 4)]);
+
+        let udf_projection_schema = database
+            .from::<User>()
+            .project_tuple((
+                User::id(),
+                QueryValue::function("add_one", [User::id()]).alias("next_id"),
+            ))
+            .asc(User::id())
+            .raw()?;
+        assert_eq!(
+            udf_projection_schema
+                .schema()
+                .iter()
+                .map(|column| column.name().to_string())
+                .collect::<Vec<_>>(),
+            vec!["id", "next_id"]
+        );
+        udf_projection_schema.done()?;
 
         let projected_users = database
             .from::<User>()
@@ -662,17 +745,6 @@ mod test {
         );
         projected_schema.done()?;
 
-        let raw_ast_matched = database
-            .from::<User>()
-            .filter(QueryExpr::from_ast(SqlExpr::BinaryOp {
-                left: Box::new(QueryValue::from(User::id()).into_ast()),
-                op: SqlBinaryOperator::Eq,
-                right: Box::new(QueryValue::from(3).into_ast()),
-            }))
-            .get()?
-            .unwrap();
-        assert_eq!(raw_ast_matched.id, 3);
-
         let exists_count = database
             .from::<User>()
             .where_exists(
@@ -683,6 +755,28 @@ mod test {
             )
             .count()?;
         assert_eq!(exists_count, 3);
+
+        let not_exists_count = database
+            .from::<User>()
+            .where_not_exists(
+                database
+                    .from::<User>()
+                    .project_value(User::id())
+                    .eq(User::id(), 99),
+            )
+            .count()?;
+        assert_eq!(not_exists_count, 3);
+
+        let blocked_by_not_exists = database
+            .from::<User>()
+            .where_not_exists(
+                database
+                    .from::<User>()
+                    .project_value(User::id())
+                    .eq(User::id(), 2),
+            )
+            .count()?;
+        assert_eq!(blocked_by_not_exists, 0);
 
         let in_subquery = database
             .from::<User>()
@@ -699,6 +793,25 @@ mod test {
         assert_eq!(
             in_subquery.iter().map(|user| user.id).collect::<Vec<_>>(),
             vec![1, 3]
+        );
+
+        let not_in_subquery = database
+            .from::<User>()
+            .not_in_subquery(
+                User::id(),
+                database
+                    .from::<User>()
+                    .project_value(User::id())
+                    .in_list(User::id(), [1, 3]),
+            )
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            not_in_subquery
+                .iter()
+                .map(|user| user.id)
+                .collect::<Vec<_>>(),
+            vec![2]
         );
 
         let mut tx = database.new_transaction()?;
@@ -764,6 +877,43 @@ mod test {
             grouped_scores,
             vec![("alpha".to_string(), 30), ("beta".to_string(), 5)]
         );
+
+        let grouped_stats = database
+            .from::<EventLog>()
+            .project_tuple((
+                EventLog::category(),
+                sum(EventLog::score()).alias("total_score"),
+                count_all().alias("total_count"),
+            ))
+            .group_by(EventLog::category())
+            .having(count_all().gt(0))
+            .asc(EventLog::category())
+            .fetch::<(String, i32, i32)>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            grouped_stats,
+            vec![("alpha".to_string(), 30, 2), ("beta".to_string(), 5, 1),]
+        );
+
+        let grouped_stats_schema = database
+            .from::<EventLog>()
+            .project_tuple((
+                EventLog::category(),
+                sum(EventLog::score()).alias("total_score"),
+                count_all().alias("total_count"),
+            ))
+            .group_by(EventLog::category())
+            .asc(EventLog::category())
+            .raw()?;
+        assert_eq!(
+            grouped_stats_schema
+                .schema()
+                .iter()
+                .map(|column| column.name().to_string())
+                .collect::<Vec<_>>(),
+            vec!["category", "total_score", "total_count"]
+        );
+        grouped_stats_schema.done()?;
 
         database.drop_table::<EventLog>()?;
 

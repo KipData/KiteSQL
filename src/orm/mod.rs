@@ -37,6 +37,7 @@ mod dql;
 /// Static metadata about a single model field.
 ///
 /// This type is primarily consumed by code generated from `#[derive(Model)]`.
+#[doc(hidden)]
 pub struct OrmField {
     pub column: &'static str,
     pub placeholder: &'static str,
@@ -48,6 +49,7 @@ pub struct OrmField {
 /// Static metadata about a single persisted model column.
 ///
 /// This is primarily consumed by the built-in ORM migration helper.
+#[doc(hidden)]
 pub struct OrmColumn {
     pub name: &'static str,
     pub ddl_type: String,
@@ -58,28 +60,6 @@ pub struct OrmColumn {
 }
 
 impl OrmColumn {
-    /// Renders the SQL column definition used by `CREATE TABLE` and migrations.
-    pub fn definition_sql(&self) -> String {
-        let mut column_def = ::std::format!("{} {}", self.name, self.ddl_type);
-
-        if self.primary_key {
-            column_def.push_str(" primary key");
-        } else {
-            if !self.nullable {
-                column_def.push_str(" not null");
-            }
-            if self.unique {
-                column_def.push_str(" unique");
-            }
-        }
-        if let Some(default_expr) = self.default_expr {
-            column_def.push_str(" default ");
-            column_def.push_str(default_expr);
-        }
-
-        column_def
-    }
-
     fn column_def(&self) -> Result<ColumnDef, DatabaseError> {
         let mut options = Vec::new();
 
@@ -127,6 +107,9 @@ impl OrmColumn {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Typed column handle generated for `#[derive(Model)]` query builders.
+///
+/// Most users obtain this through generated model accessors such as `User::id()`
+/// rather than constructing it directly.
 pub struct Field<M, T> {
     table: &'static str,
     column: &'static str,
@@ -137,78 +120,78 @@ trait ValueExpressionOps: Sized {
     fn into_query_value(self) -> QueryValue;
 
     fn eq_expr<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        QueryExpr::from_ast(Expr::BinaryOp {
-            left: Box::new(self.into_query_value().into_ast()),
+        QueryExpr::from_expr(Expr::BinaryOp {
+            left: Box::new(self.into_query_value().into_expr()),
             op: CompareOp::Eq.as_ast(),
-            right: Box::new(value.into().into_ast()),
+            right: Box::new(value.into().into_expr()),
         })
     }
 
     fn ne_expr<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        QueryExpr::from_ast(Expr::BinaryOp {
-            left: Box::new(self.into_query_value().into_ast()),
+        QueryExpr::from_expr(Expr::BinaryOp {
+            left: Box::new(self.into_query_value().into_expr()),
             op: CompareOp::Ne.as_ast(),
-            right: Box::new(value.into().into_ast()),
+            right: Box::new(value.into().into_expr()),
         })
     }
 
     fn gt_expr<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        QueryExpr::from_ast(Expr::BinaryOp {
-            left: Box::new(self.into_query_value().into_ast()),
+        QueryExpr::from_expr(Expr::BinaryOp {
+            left: Box::new(self.into_query_value().into_expr()),
             op: CompareOp::Gt.as_ast(),
-            right: Box::new(value.into().into_ast()),
+            right: Box::new(value.into().into_expr()),
         })
     }
 
     fn gte_expr<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        QueryExpr::from_ast(Expr::BinaryOp {
-            left: Box::new(self.into_query_value().into_ast()),
+        QueryExpr::from_expr(Expr::BinaryOp {
+            left: Box::new(self.into_query_value().into_expr()),
             op: CompareOp::Gte.as_ast(),
-            right: Box::new(value.into().into_ast()),
+            right: Box::new(value.into().into_expr()),
         })
     }
 
     fn lt_expr<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        QueryExpr::from_ast(Expr::BinaryOp {
-            left: Box::new(self.into_query_value().into_ast()),
+        QueryExpr::from_expr(Expr::BinaryOp {
+            left: Box::new(self.into_query_value().into_expr()),
             op: CompareOp::Lt.as_ast(),
-            right: Box::new(value.into().into_ast()),
+            right: Box::new(value.into().into_expr()),
         })
     }
 
     fn lte_expr<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
-        QueryExpr::from_ast(Expr::BinaryOp {
-            left: Box::new(self.into_query_value().into_ast()),
+        QueryExpr::from_expr(Expr::BinaryOp {
+            left: Box::new(self.into_query_value().into_expr()),
             op: CompareOp::Lte.as_ast(),
-            right: Box::new(value.into().into_ast()),
+            right: Box::new(value.into().into_expr()),
         })
     }
 
     fn is_null_expr(self) -> QueryExpr {
-        QueryExpr::from_ast(Expr::IsNull(Box::new(self.into_query_value().into_ast())))
+        QueryExpr::from_expr(Expr::IsNull(Box::new(self.into_query_value().into_expr())))
     }
 
     fn is_not_null_expr(self) -> QueryExpr {
-        QueryExpr::from_ast(Expr::IsNotNull(Box::new(
-            self.into_query_value().into_ast(),
+        QueryExpr::from_expr(Expr::IsNotNull(Box::new(
+            self.into_query_value().into_expr(),
         )))
     }
 
     fn like_expr<V: Into<QueryValue>>(self, pattern: V) -> QueryExpr {
-        QueryExpr::from_ast(Expr::Like {
+        QueryExpr::from_expr(Expr::Like {
             negated: false,
-            expr: Box::new(self.into_query_value().into_ast()),
-            pattern: Box::new(pattern.into().into_ast()),
+            expr: Box::new(self.into_query_value().into_expr()),
+            pattern: Box::new(pattern.into().into_expr()),
             escape_char: None,
             any: false,
         })
     }
 
     fn not_like_expr<V: Into<QueryValue>>(self, pattern: V) -> QueryExpr {
-        QueryExpr::from_ast(Expr::Like {
+        QueryExpr::from_expr(Expr::Like {
             negated: true,
-            expr: Box::new(self.into_query_value().into_ast()),
-            pattern: Box::new(pattern.into().into_ast()),
+            expr: Box::new(self.into_query_value().into_expr()),
+            pattern: Box::new(pattern.into().into_expr()),
             escape_char: None,
             any: false,
         })
@@ -219,12 +202,12 @@ trait ValueExpressionOps: Sized {
         I: IntoIterator<Item = V>,
         V: Into<QueryValue>,
     {
-        QueryExpr::from_ast(Expr::InList {
-            expr: Box::new(self.into_query_value().into_ast()),
+        QueryExpr::from_expr(Expr::InList {
+            expr: Box::new(self.into_query_value().into_expr()),
             list: values
                 .into_iter()
                 .map(Into::into)
-                .map(QueryValue::into_ast)
+                .map(QueryValue::into_expr)
                 .collect(),
             negated: false,
         })
@@ -235,23 +218,23 @@ trait ValueExpressionOps: Sized {
         I: IntoIterator<Item = V>,
         V: Into<QueryValue>,
     {
-        QueryExpr::from_ast(Expr::InList {
-            expr: Box::new(self.into_query_value().into_ast()),
+        QueryExpr::from_expr(Expr::InList {
+            expr: Box::new(self.into_query_value().into_expr()),
             list: values
                 .into_iter()
                 .map(Into::into)
-                .map(QueryValue::into_ast)
+                .map(QueryValue::into_expr)
                 .collect(),
             negated: true,
         })
     }
 
     fn between_expr<L: Into<QueryValue>, H: Into<QueryValue>>(self, low: L, high: H) -> QueryExpr {
-        QueryExpr::from_ast(Expr::Between {
-            expr: Box::new(self.into_query_value().into_ast()),
+        QueryExpr::from_expr(Expr::Between {
+            expr: Box::new(self.into_query_value().into_expr()),
             negated: false,
-            low: Box::new(low.into().into_ast()),
-            high: Box::new(high.into().into_ast()),
+            low: Box::new(low.into().into_expr()),
+            high: Box::new(high.into().into_expr()),
         })
     }
 
@@ -260,11 +243,11 @@ trait ValueExpressionOps: Sized {
         low: L,
         high: H,
     ) -> QueryExpr {
-        QueryExpr::from_ast(Expr::Between {
-            expr: Box::new(self.into_query_value().into_ast()),
+        QueryExpr::from_expr(Expr::Between {
+            expr: Box::new(self.into_query_value().into_expr()),
             negated: true,
-            low: Box::new(low.into().into_ast()),
-            high: Box::new(high.into().into_ast()),
+            low: Box::new(low.into().into_expr()),
+            high: Box::new(high.into().into_expr()),
         })
     }
 
@@ -273,9 +256,9 @@ trait ValueExpressionOps: Sized {
     }
 
     fn cast_to_value(self, data_type: DataType) -> QueryValue {
-        QueryValue::from_ast(Expr::Cast {
+        QueryValue::from_expr(Expr::Cast {
             kind: CastKind::Cast,
-            expr: Box::new(self.into_query_value().into_ast()),
+            expr: Box::new(self.into_query_value().into_expr()),
             data_type,
             array: false,
             format: None,
@@ -285,23 +268,23 @@ trait ValueExpressionOps: Sized {
     fn alias_value(self, alias: &str) -> ProjectedValue {
         ProjectedValue {
             item: SelectItem::ExprWithAlias {
-                expr: self.into_query_value().into_ast(),
+                expr: self.into_query_value().into_expr(),
                 alias: ident(alias),
             },
         }
     }
 
     fn in_subquery_expr<S: SubquerySource>(self, subquery: S) -> QueryExpr {
-        QueryExpr::from_ast(Expr::InSubquery {
-            expr: Box::new(self.into_query_value().into_ast()),
+        QueryExpr::from_expr(Expr::InSubquery {
+            expr: Box::new(self.into_query_value().into_expr()),
             subquery: Box::new(subquery.into_subquery()),
             negated: false,
         })
     }
 
     fn not_in_subquery_expr<S: SubquerySource>(self, subquery: S) -> QueryExpr {
-        QueryExpr::from_ast(Expr::InSubquery {
-            expr: Box::new(self.into_query_value().into_ast()),
+        QueryExpr::from_expr(Expr::InSubquery {
+            expr: Box::new(self.into_query_value().into_expr()),
             subquery: Box::new(subquery.into_subquery()),
             negated: true,
         })
@@ -309,6 +292,7 @@ trait ValueExpressionOps: Sized {
 }
 
 impl<M, T> Field<M, T> {
+    #[doc(hidden)]
     pub const fn new(table: &'static str, column: &'static str) -> Self {
         Self {
             table,
@@ -318,52 +302,63 @@ impl<M, T> Field<M, T> {
     }
 
     fn value(self) -> QueryValue {
-        QueryValue::from_ast(Expr::CompoundIdentifier(vec![
+        QueryValue::from_expr(Expr::CompoundIdentifier(vec![
             ident(self.table),
             ident(self.column),
         ]))
     }
 
+    /// Builds `field = value`.
     pub fn eq<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
         ValueExpressionOps::eq_expr(self, value)
     }
 
+    /// Builds `field <> value`.
     pub fn ne<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
         ValueExpressionOps::ne_expr(self, value)
     }
 
+    /// Builds `field > value`.
     pub fn gt<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
         ValueExpressionOps::gt_expr(self, value)
     }
 
+    /// Builds `field >= value`.
     pub fn gte<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
         ValueExpressionOps::gte_expr(self, value)
     }
 
+    /// Builds `field < value`.
     pub fn lt<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
         ValueExpressionOps::lt_expr(self, value)
     }
 
+    /// Builds `field <= value`.
     pub fn lte<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
         ValueExpressionOps::lte_expr(self, value)
     }
 
+    /// Builds `field IS NULL`.
     pub fn is_null(self) -> QueryExpr {
         ValueExpressionOps::is_null_expr(self)
     }
 
+    /// Builds `field IS NOT NULL`.
     pub fn is_not_null(self) -> QueryExpr {
         ValueExpressionOps::is_not_null_expr(self)
     }
 
+    /// Builds `field LIKE pattern`.
     pub fn like<V: Into<QueryValue>>(self, pattern: V) -> QueryExpr {
         ValueExpressionOps::like_expr(self, pattern)
     }
 
+    /// Builds `field NOT LIKE pattern`.
     pub fn not_like<V: Into<QueryValue>>(self, pattern: V) -> QueryExpr {
         ValueExpressionOps::not_like_expr(self, pattern)
     }
 
+    /// Builds `field IN (...)`.
     pub fn in_list<I, V>(self, values: I) -> QueryExpr
     where
         I: IntoIterator<Item = V>,
@@ -372,6 +367,7 @@ impl<M, T> Field<M, T> {
         ValueExpressionOps::in_list_expr(self, values)
     }
 
+    /// Builds `field NOT IN (...)`.
     pub fn not_in_list<I, V>(self, values: I) -> QueryExpr
     where
         I: IntoIterator<Item = V>,
@@ -380,10 +376,12 @@ impl<M, T> Field<M, T> {
         ValueExpressionOps::not_in_list_expr(self, values)
     }
 
+    /// Builds `field BETWEEN low AND high`.
     pub fn between<L: Into<QueryValue>, H: Into<QueryValue>>(self, low: L, high: H) -> QueryExpr {
         ValueExpressionOps::between_expr(self, low, high)
     }
 
+    /// Builds `field NOT BETWEEN low AND high`.
     pub fn not_between<L: Into<QueryValue>, H: Into<QueryValue>>(
         self,
         low: L,
@@ -392,22 +390,27 @@ impl<M, T> Field<M, T> {
         ValueExpressionOps::not_between_expr(self, low, high)
     }
 
+    /// Casts this field using a SQL type string such as `"BIGINT"`.
     pub fn cast(self, data_type: &str) -> Result<QueryValue, DatabaseError> {
         ValueExpressionOps::cast_value(self, data_type)
     }
 
+    /// Casts this field using an explicit SQL AST data type.
     pub fn cast_to(self, data_type: DataType) -> QueryValue {
         ValueExpressionOps::cast_to_value(self, data_type)
     }
 
+    /// Aliases this field in the select list.
     pub fn alias(self, alias: &str) -> ProjectedValue {
         ValueExpressionOps::alias_value(self, alias)
     }
 
+    /// Builds `field IN (subquery)`.
     pub fn in_subquery<S: SubquerySource>(self, subquery: S) -> QueryExpr {
         ValueExpressionOps::in_subquery_expr(self, subquery)
     }
 
+    /// Builds `field NOT IN (subquery)`.
     pub fn not_in_subquery<S: SubquerySource>(self, subquery: S) -> QueryExpr {
         ValueExpressionOps::not_in_subquery_expr(self, subquery)
     }
@@ -415,18 +418,30 @@ impl<M, T> Field<M, T> {
 
 #[derive(Debug, Clone, PartialEq)]
 /// A lightweight ORM expression wrapper for value-producing SQL AST nodes.
+///
+/// `QueryValue` is the common currency for computed ORM expressions such as
+/// functions, aggregates, `CASE` expressions, casts, and subqueries.
+///
+/// It also supports the same comparison and predicate-style composition used by
+/// [`Field`], including helpers such as `eq`, `gt`, `like`, `in_list`, and
+/// `between`.
 pub struct QueryValue {
     expr: Expr,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 /// A projected ORM expression, optionally carrying a select-list alias.
+///
+/// This is typically produced by calling `.alias(...)` on a [`Field`] or
+/// [`QueryValue`], and then passed into `project_value(...)` or
+/// `project_tuple(...)`.
+#[doc(hidden)]
 pub struct ProjectedValue {
     item: SelectItem,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompareOp {
+enum CompareOp {
     Eq,
     Ne,
     Gt,
@@ -437,10 +452,22 @@ pub enum CompareOp {
 
 #[derive(Debug, Clone, PartialEq)]
 /// A lightweight ORM expression wrapper for predicate-oriented SQL AST nodes.
+///
+/// `QueryExpr` is used for `WHERE` and `HAVING` clauses, as well as boolean
+/// composition such as `and`, `or`, and `not`.
 pub struct QueryExpr {
     expr: Expr,
 }
 
+/// Builds a scalar function call expression.
+///
+/// This is commonly used for UDFs registered on the database.
+///
+/// ```rust,ignore
+/// let expr = kite_sql::orm::func("add_one", [User::id()]);
+/// let row = database.from::<User>().eq(expr, 2).get()?;
+/// # Ok::<(), kite_sql::errors::DatabaseError>(())
+/// ```
 pub fn func<N, I, V>(name: N, args: I) -> QueryValue
 where
     N: Into<String>,
@@ -450,30 +477,53 @@ where
     QueryValue::function(name, args)
 }
 
+/// Builds `count(expr)`.
 pub fn count<V: Into<QueryValue>>(value: V) -> QueryValue {
     QueryValue::aggregate("count", [value.into()])
 }
 
+/// Builds `count(*)`.
+///
+/// ```rust,ignore
+/// let total = database
+///     .from::<User>()
+///     .project_value(kite_sql::orm::count_all().alias("total_users"))
+///     .get::<i32>()?;
+/// # Ok::<(), kite_sql::errors::DatabaseError>(())
+/// ```
 pub fn count_all() -> QueryValue {
     QueryValue::aggregate_all("count")
 }
 
+/// Builds `sum(expr)`.
 pub fn sum<V: Into<QueryValue>>(value: V) -> QueryValue {
     QueryValue::aggregate("sum", [value.into()])
 }
 
+/// Builds `avg(expr)`.
 pub fn avg<V: Into<QueryValue>>(value: V) -> QueryValue {
     QueryValue::aggregate("avg", [value.into()])
 }
 
+/// Builds `min(expr)`.
 pub fn min<V: Into<QueryValue>>(value: V) -> QueryValue {
     QueryValue::aggregate("min", [value.into()])
 }
 
+/// Builds `max(expr)`.
 pub fn max<V: Into<QueryValue>>(value: V) -> QueryValue {
     QueryValue::aggregate("max", [value.into()])
 }
 
+/// Builds a searched `CASE WHEN ... THEN ... ELSE ... END` expression.
+///
+/// ```rust,ignore
+/// let bucket = kite_sql::orm::case_when(
+///     [(User::age().is_null(), "unknown"), (User::age().lt(20), "minor")],
+///     "adult",
+/// );
+/// # let _ = bucket;
+/// ```
 pub fn case_when<I, C, R, E>(conditions: I, else_result: E) -> QueryValue
 where
     I: IntoIterator<Item = (C, R)>,
@@ -484,6 +534,7 @@ where
     QueryValue::searched_case(conditions, else_result)
 }
 
+/// Builds a simple `CASE value WHEN ... THEN ... ELSE ... END` expression.
 pub fn case_value<O, I, W, R, E>(operand: O, conditions: I, else_result: E) -> QueryValue
 where
     O: Into<QueryValue>,
@@ -496,50 +547,59 @@ where
 }
 
 impl QueryExpr {
-    pub fn from_ast(expr: Expr) -> QueryExpr {
+    fn from_expr(expr: Expr) -> QueryExpr {
         Self { expr }
     }
 
-    pub fn as_ast(&self) -> &Expr {
-        &self.expr
-    }
-
-    pub fn into_ast(self) -> Expr {
+    fn into_expr(self) -> Expr {
         self.expr
     }
 
+    /// Combines two predicates with `AND`.
     pub fn and(self, rhs: QueryExpr) -> QueryExpr {
-        QueryExpr::from_ast(Expr::BinaryOp {
-            left: Box::new(nested_expr(self.into_ast())),
+        QueryExpr::from_expr(Expr::BinaryOp {
+            left: Box::new(nested_expr(self.into_expr())),
             op: SqlBinaryOperator::And,
-            right: Box::new(nested_expr(rhs.into_ast())),
+            right: Box::new(nested_expr(rhs.into_expr())),
         })
     }
 
+    /// Combines two predicates with `OR`.
     pub fn or(self, rhs: QueryExpr) -> QueryExpr {
-        QueryExpr::from_ast(Expr::BinaryOp {
-            left: Box::new(nested_expr(self.into_ast())),
+        QueryExpr::from_expr(Expr::BinaryOp {
+            left: Box::new(nested_expr(self.into_expr())),
             op: SqlBinaryOperator::Or,
-            right: Box::new(nested_expr(rhs.into_ast())),
+            right: Box::new(nested_expr(rhs.into_expr())),
         })
     }
 
+    /// Negates a predicate with `NOT`.
     pub fn not(self) -> QueryExpr {
-        QueryExpr::from_ast(Expr::UnaryOp {
+        QueryExpr::from_expr(Expr::UnaryOp {
             op: sqlparser::ast::UnaryOperator::Not,
-            expr: Box::new(nested_expr(self.into_ast())),
+            expr: Box::new(nested_expr(self.into_expr())),
         })
     }
 
+    /// Builds an `EXISTS (subquery)` predicate.
+    ///
+    /// ```rust,ignore
+    /// let expr = kite_sql::orm::QueryExpr::exists(
+    ///     database.from::<User>().project_value(User::id()).eq(User::id(), 1),
+    /// );
+    /// let found = database.from::<User>().filter(expr).exists()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn exists<S: SubquerySource>(subquery: S) -> QueryExpr {
-        QueryExpr::from_ast(Expr::Exists {
+        QueryExpr::from_expr(Expr::Exists {
             subquery: Box::new(subquery.into_subquery()),
             negated: false,
         })
     }
 
+    /// Builds a `NOT EXISTS (subquery)` predicate.
     pub fn not_exists<S: SubquerySource>(subquery: S) -> QueryExpr {
-        QueryExpr::from_ast(Expr::Exists {
+        QueryExpr::from_expr(Expr::Exists {
             subquery: Box::new(subquery.into_subquery()),
             negated: true,
         })
@@ -559,7 +619,7 @@ impl SortExpr {
 
     fn into_ast(self) -> OrderByExpr {
         OrderByExpr {
-            expr: self.value.into_ast(),
+            expr: self.value.into_expr(),
             options: OrderByOptions {
                 asc: Some(!self.desc),
                 nulls_first: None,
@@ -570,18 +630,21 @@ impl SortExpr {
 }
 
 impl QueryValue {
-    pub fn from_ast(expr: Expr) -> Self {
+    fn from_expr(expr: Expr) -> Self {
         Self { expr }
     }
 
-    pub fn as_ast(&self) -> &Expr {
-        &self.expr
-    }
-
-    pub fn into_ast(self) -> Expr {
+    fn into_expr(self) -> Expr {
         self.expr
     }
 
+    /// Builds a scalar function call.
+    ///
+    /// ```rust,ignore
+    /// let expr = kite_sql::orm::QueryValue::function("add_one", [User::id()]);
+    /// let row = database.from::<User>().eq(expr, 2).get()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn function<N, I, V>(name: N, args: I) -> Self
     where
         N: Into<String>,
@@ -592,11 +655,12 @@ impl QueryValue {
             name,
             args.into_iter()
                 .map(Into::into)
-                .map(QueryValue::into_ast)
+                .map(QueryValue::into_expr)
                 .map(FunctionArgExpr::Expr),
         )
     }
 
+    /// Builds an aggregate function call such as `sum(expr)` or `count(expr)`.
     pub fn aggregate<N, I, V>(name: N, args: I) -> Self
     where
         N: Into<String>,
@@ -606,19 +670,22 @@ impl QueryValue {
         Self::function(name, args)
     }
 
+    /// Builds an aggregate function call that uses `*`, such as `count(*)`.
     pub fn aggregate_all(name: impl Into<String>) -> Self {
         Self::function_with_args(name, [FunctionArgExpr::Wildcard])
     }
 
+    /// Assigns a select-list alias to this value expression.
     pub fn alias(self, alias: &str) -> ProjectedValue {
         ProjectedValue {
             item: SelectItem::ExprWithAlias {
-                expr: self.into_ast(),
+                expr: self.into_expr(),
                 alias: ident(alias),
             },
         }
     }
 
+    /// Builds a searched `CASE WHEN ... THEN ... ELSE ... END` expression.
     pub fn searched_case<I, C, R, E>(conditions: I, else_result: E) -> Self
     where
         I: IntoIterator<Item = (C, R)>,
@@ -626,21 +693,22 @@ impl QueryValue {
         R: Into<QueryValue>,
         E: Into<QueryValue>,
     {
-        Self::from_ast(Expr::Case {
+        Self::from_expr(Expr::Case {
             case_token: AttachedToken::empty(),
             end_token: AttachedToken::empty(),
             operand: None,
             conditions: conditions
                 .into_iter()
                 .map(|(condition, result)| CaseWhen {
-                    condition: condition.into().into_ast(),
-                    result: result.into().into_ast(),
+                    condition: condition.into().into_expr(),
+                    result: result.into().into_expr(),
                 })
                 .collect(),
-            else_result: Some(Box::new(else_result.into().into_ast())),
+            else_result: Some(Box::new(else_result.into().into_expr())),
         })
     }
 
+    /// Builds a simple `CASE value WHEN ... THEN ... ELSE ... END` expression.
     pub fn simple_case<O, I, W, R, E>(operand: O, conditions: I, else_result: E) -> Self
     where
         O: Into<QueryValue>,
@@ -649,61 +717,72 @@ impl QueryValue {
         R: Into<QueryValue>,
         E: Into<QueryValue>,
     {
-        Self::from_ast(Expr::Case {
+        Self::from_expr(Expr::Case {
             case_token: AttachedToken::empty(),
             end_token: AttachedToken::empty(),
-            operand: Some(Box::new(operand.into().into_ast())),
+            operand: Some(Box::new(operand.into().into_expr())),
             conditions: conditions
                 .into_iter()
                 .map(|(condition, result)| CaseWhen {
-                    condition: condition.into().into_ast(),
-                    result: result.into().into_ast(),
+                    condition: condition.into().into_expr(),
+                    result: result.into().into_expr(),
                 })
                 .collect(),
-            else_result: Some(Box::new(else_result.into().into_ast())),
+            else_result: Some(Box::new(else_result.into().into_expr())),
         })
     }
 
+    /// Builds `expr = value`.
     pub fn eq<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
         ValueExpressionOps::eq_expr(self, value)
     }
 
+    /// Builds `expr <> value`.
     pub fn ne<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
         ValueExpressionOps::ne_expr(self, value)
     }
 
+    /// Builds `expr > value`.
     pub fn gt<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
         ValueExpressionOps::gt_expr(self, value)
     }
 
+    /// Builds `expr >= value`.
     pub fn gte<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
         ValueExpressionOps::gte_expr(self, value)
     }
 
+    /// Builds `expr < value`.
     pub fn lt<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
         ValueExpressionOps::lt_expr(self, value)
     }
 
+    /// Builds `expr <= value`.
     pub fn lte<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
         ValueExpressionOps::lte_expr(self, value)
     }
 
+    /// Builds `expr IS NULL`.
     pub fn is_null(self) -> QueryExpr {
         ValueExpressionOps::is_null_expr(self)
     }
 
+    /// Builds `expr IS NOT NULL`.
     pub fn is_not_null(self) -> QueryExpr {
         ValueExpressionOps::is_not_null_expr(self)
     }
 
+    /// Builds `expr LIKE pattern`.
     pub fn like<V: Into<QueryValue>>(self, pattern: V) -> QueryExpr {
         ValueExpressionOps::like_expr(self, pattern)
     }
 
+    /// Builds `expr NOT LIKE pattern`.
     pub fn not_like<V: Into<QueryValue>>(self, pattern: V) -> QueryExpr {
         ValueExpressionOps::not_like_expr(self, pattern)
     }
 
+    /// Builds `expr IN (...)`.
     pub fn in_list<I, V>(self, values: I) -> QueryExpr
     where
         I: IntoIterator<Item = V>,
@@ -712,6 +791,7 @@ impl QueryValue {
         ValueExpressionOps::in_list_expr(self, values)
     }
 
+    /// Builds `expr NOT IN (...)`.
     pub fn not_in_list<I, V>(self, values: I) -> QueryExpr
     where
         I: IntoIterator<Item = V>,
@@ -720,10 +800,12 @@ impl QueryValue {
         ValueExpressionOps::not_in_list_expr(self, values)
     }
 
+    /// Builds `expr BETWEEN low AND high`.
     pub fn between<L: Into<QueryValue>, H: Into<QueryValue>>(self, low: L, high: H) -> QueryExpr {
         ValueExpressionOps::between_expr(self, low, high)
     }
 
+    /// Builds `expr NOT BETWEEN low AND high`.
     pub fn not_between<L: Into<QueryValue>, H: Into<QueryValue>>(
         self,
         low: L,
@@ -732,22 +814,35 @@ impl QueryValue {
         ValueExpressionOps::not_between_expr(self, low, high)
     }
 
+    /// Casts this expression using a SQL type string such as `"BIGINT"`.
     pub fn cast(self, data_type: &str) -> Result<QueryValue, DatabaseError> {
         ValueExpressionOps::cast_value(self, data_type)
     }
 
+    /// Casts this expression using an explicit SQL AST data type.
+    ///
+    /// ```rust,ignore
+    /// use sqlparser::ast::DataType;
+    ///
+    /// let expr = User::id().cast_to(DataType::BigInt(None));
+    /// let row = database.from::<User>().eq(expr, 1_i64).get()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn cast_to(self, data_type: DataType) -> QueryValue {
         ValueExpressionOps::cast_to_value(self, data_type)
     }
 
+    /// Wraps a query builder as a scalar subquery expression.
     pub fn subquery<S: SubquerySource>(query: S) -> QueryValue {
-        QueryValue::from_ast(Expr::Subquery(Box::new(query.into_subquery())))
+        QueryValue::from_expr(Expr::Subquery(Box::new(query.into_subquery())))
     }
 
+    /// Builds `expr IN (subquery)`.
     pub fn in_subquery<S: SubquerySource>(self, subquery: S) -> QueryExpr {
         ValueExpressionOps::in_subquery_expr(self, subquery)
     }
 
+    /// Builds `expr NOT IN (subquery)`.
     pub fn not_in_subquery<S: SubquerySource>(self, subquery: S) -> QueryExpr {
         ValueExpressionOps::not_in_subquery_expr(self, subquery)
     }
@@ -766,7 +861,7 @@ impl QueryValue {
         I: IntoIterator<Item = FunctionArgExpr>,
     {
         let name = name.into();
-        Self::from_ast(Expr::Function(Function {
+        Self::from_expr(Expr::Function(Function {
             name: object_name(&name),
             uses_odbc_syntax: false,
             parameters: FunctionArguments::None,
@@ -820,7 +915,7 @@ pub fn projection_column<M: Model>(column: &'static str) -> ProjectedValue {
 impl<V: Into<QueryValue>> From<V> for ProjectedValue {
     fn from(value: V) -> Self {
         Self {
-            item: SelectItem::UnnamedExpr(value.into().into_ast()),
+            item: SelectItem::UnnamedExpr(value.into().into_expr()),
         }
     }
 }
@@ -852,21 +947,9 @@ impl_into_projected_tuple!(
     (A, B, C, D, E, F, G, H),
 );
 
-impl From<Expr> for QueryValue {
-    fn from(value: Expr) -> Self {
-        QueryValue::from_ast(value)
-    }
-}
-
-impl From<Expr> for QueryExpr {
-    fn from(value: Expr) -> Self {
-        QueryExpr::from_ast(value)
-    }
-}
-
 impl<T: ToDataValue> From<T> for QueryValue {
     fn from(value: T) -> Self {
-        QueryValue::from_ast(data_value_to_ast_expr(&value.to_data_value()))
+        QueryValue::from_expr(data_value_to_ast_expr(&value.to_data_value()))
     }
 }
 
@@ -883,9 +966,11 @@ impl CompareOp {
     }
 }
 
+#[doc(hidden)]
 pub trait StatementSource {
     type Iter: ResultIter;
 
+    /// Executes a prepared ORM statement with named parameters.
     fn execute_statement<A: AsRef<[(&'static str, DataValue)]>>(
         self,
         statement: &Statement,
@@ -932,12 +1017,12 @@ struct QueryBuilder<Q: StatementSource, M: Model, P = ModelProjection> {
 }
 
 /// Lightweight single-table query builder for ORM models.
+///
+/// This is the main entry point returned by `Database::from::<M>()` and
+/// `DBTransaction::from::<M>()`.
 pub struct FromBuilder<Q: StatementSource, M: Model, P = ModelProjection> {
     inner: QueryBuilder<Q, M, P>,
 }
-
-#[doc(hidden)]
-pub type ProjectionBuilder<Q, M, P> = FromBuilder<Q, M, P>;
 
 #[doc(hidden)]
 pub struct ModelProjection;
@@ -1012,6 +1097,7 @@ pub trait ProjectionSpec<M: Model> {
 ///
 /// This trait is typically derived with `#[derive(Projection)]`.
 pub trait Projection: for<'a> From<(&'a SchemaRef, Tuple)> {
+    /// Returns the projected select-list items for model `M`.
     fn projected_values<M: Model>() -> Vec<ProjectedValue>;
 }
 
@@ -1086,127 +1172,184 @@ impl<Q: StatementSource, M: Model, P> FromBuilder<Q, M, P> {
 }
 
 impl<Q: StatementSource, M: Model> FromBuilder<Q, M, ModelProjection> {
-    pub fn project<T: Projection>(self) -> ProjectionBuilder<Q, M, StructProjection<T>> {
+    /// Switches the query into a struct projection.
+    ///
+    /// ```rust,ignore
+    /// #[derive(Default, kite_sql::Projection)]
+    /// struct UserSummary {
+    ///     id: i32,
+    ///     #[projection(rename = "user_name")]
+    ///     display_name: String,
+    /// }
+    ///
+    /// let users = database.from::<User>().project::<UserSummary>().fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
+    pub fn project<T: Projection>(self) -> FromBuilder<Q, M, StructProjection<T>> {
         self.with_projection(StructProjection {
             _marker: PhantomData,
         })
     }
 
+    /// Switches the query into a single-value projection.
+    ///
+    /// ```rust,ignore
+    /// let ids = database
+    ///     .from::<User>()
+    ///     .project_value(User::id())
+    ///     .fetch::<i32>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn project_value<V: Into<ProjectedValue>>(
         self,
         value: V,
-    ) -> ProjectionBuilder<Q, M, ValueProjection> {
+    ) -> FromBuilder<Q, M, ValueProjection> {
         self.with_projection(ValueProjection {
             value: value.into(),
         })
     }
 
+    /// Switches the query into a tuple projection.
+    ///
+    /// ```rust,ignore
+    /// let rows = database
+    ///     .from::<User>()
+    ///     .project_tuple((User::id(), User::name()))
+    ///     .fetch::<(i32, String)>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn project_tuple<V: IntoProjectedTuple>(
         self,
         values: V,
-    ) -> ProjectionBuilder<Q, M, TupleProjection> {
+    ) -> FromBuilder<Q, M, TupleProjection> {
         self.with_projection(TupleProjection {
             values: values.into_projected_values(),
         })
     }
+
+    /// Executes the query and decodes rows into the model type.
     pub fn fetch(self) -> Result<OrmIter<Q::Iter, M>, DatabaseError> {
         Ok(self.raw()?.orm::<M>())
     }
 
+    /// Executes the query with `LIMIT 1` semantics and decodes one model row.
     pub fn get(self) -> Result<Option<M>, DatabaseError> {
         extract_optional_model(self.limit(1).raw()?)
     }
 }
 
 impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
+    /// Replaces the current `WHERE` predicate.
     pub fn filter(self, expr: QueryExpr) -> Self {
         Self::from_inner(self.inner.filter(expr))
     }
 
+    /// Appends `left AND right` to the current filter state.
     pub fn and(self, left: QueryExpr, right: QueryExpr) -> Self {
         Self::from_inner(self.inner.and(left, right))
     }
 
+    /// Appends `left OR right` to the current filter state.
     pub fn or(self, left: QueryExpr, right: QueryExpr) -> Self {
         Self::from_inner(self.inner.or(left, right))
     }
 
+    /// Replaces the current filter with `NOT expr`.
     pub fn not(self, expr: QueryExpr) -> Self {
         Self::from_inner(self.inner.not(expr))
     }
 
+    /// Replaces the current filter with `EXISTS (subquery)`.
     pub fn where_exists<S: SubquerySource>(self, subquery: S) -> Self {
         Self::from_inner(self.inner.where_exists(subquery))
     }
 
+    /// Replaces the current filter with `NOT EXISTS (subquery)`.
     pub fn where_not_exists<S: SubquerySource>(self, subquery: S) -> Self {
         Self::from_inner(self.inner.where_not_exists(subquery))
     }
 
+    /// Appends a `GROUP BY` expression.
     pub fn group_by<V: Into<QueryValue>>(self, value: V) -> Self {
         Self::from_inner(self.inner.group_by(value))
     }
 
+    /// Sets the `HAVING` predicate.
     pub fn having(self, expr: QueryExpr) -> Self {
         Self::from_inner(self.inner.having(expr))
     }
 
+    /// Appends an ascending sort key.
     pub fn asc<V: Into<QueryValue>>(self, value: V) -> Self {
         Self::from_inner(self.inner.asc(value))
     }
 
+    /// Appends a descending sort key.
     pub fn desc<V: Into<QueryValue>>(self, value: V) -> Self {
         Self::from_inner(self.inner.desc(value))
     }
 
+    /// Sets the query `LIMIT`.
     pub fn limit(self, limit: usize) -> Self {
         Self::from_inner(self.inner.limit(limit))
     }
 
+    /// Sets the query `OFFSET`.
     pub fn offset(self, offset: usize) -> Self {
         Self::from_inner(self.inner.offset(offset))
     }
 
+    /// Appends `left = right` to the filter state.
     pub fn eq<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
         Self::from_inner(self.inner.eq(left, right))
     }
 
+    /// Appends `left <> right` to the filter state.
     pub fn ne<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
         Self::from_inner(self.inner.ne(left, right))
     }
 
+    /// Appends `left > right` to the filter state.
     pub fn gt<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
         Self::from_inner(self.inner.gt(left, right))
     }
 
+    /// Appends `left >= right` to the filter state.
     pub fn gte<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
         Self::from_inner(self.inner.gte(left, right))
     }
 
+    /// Appends `left < right` to the filter state.
     pub fn lt<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
         Self::from_inner(self.inner.lt(left, right))
     }
 
+    /// Appends `left <= right` to the filter state.
     pub fn lte<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
         Self::from_inner(self.inner.lte(left, right))
     }
 
+    /// Appends `value IS NULL` to the filter state.
     pub fn is_null<V: Into<QueryValue>>(self, value: V) -> Self {
         Self::from_inner(self.inner.is_null(value))
     }
 
+    /// Appends `value IS NOT NULL` to the filter state.
     pub fn is_not_null<V: Into<QueryValue>>(self, value: V) -> Self {
         Self::from_inner(self.inner.is_not_null(value))
     }
 
+    /// Appends `value LIKE pattern` to the filter state.
     pub fn like<L: Into<QueryValue>, R: Into<QueryValue>>(self, value: L, pattern: R) -> Self {
         Self::from_inner(self.inner.like(value, pattern))
     }
 
+    /// Appends `value NOT LIKE pattern` to the filter state.
     pub fn not_like<L: Into<QueryValue>, R: Into<QueryValue>>(self, value: L, pattern: R) -> Self {
         Self::from_inner(self.inner.not_like(value, pattern))
     }
 
+    /// Appends `left IN (...)` to the filter state.
     pub fn in_list<L, I, V>(self, left: L, values: I) -> Self
     where
         L: Into<QueryValue>,
@@ -1216,6 +1359,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
         Self::from_inner(self.inner.in_list(left, values))
     }
 
+    /// Appends `left NOT IN (...)` to the filter state.
     pub fn not_in_list<L, I, V>(self, left: L, values: I) -> Self
     where
         L: Into<QueryValue>,
@@ -1225,6 +1369,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
         Self::from_inner(self.inner.not_in_list(left, values))
     }
 
+    /// Appends `expr BETWEEN low AND high` to the filter state.
     pub fn between<L, Low, High>(self, expr: L, low: Low, high: High) -> Self
     where
         L: Into<QueryValue>,
@@ -1234,6 +1379,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
         Self::from_inner(self.inner.between(expr, low, high))
     }
 
+    /// Appends `expr NOT BETWEEN low AND high` to the filter state.
     pub fn not_between<L, Low, High>(self, expr: L, low: Low, high: High) -> Self
     where
         L: Into<QueryValue>,
@@ -1243,10 +1389,12 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
         Self::from_inner(self.inner.not_between(expr, low, high))
     }
 
+    /// Appends `left IN (subquery)` to the filter state.
     pub fn in_subquery<L: Into<QueryValue>, S: SubquerySource>(self, left: L, subquery: S) -> Self {
         Self::from_inner(self.inner.in_subquery(left, subquery))
     }
 
+    /// Appends `left NOT IN (subquery)` to the filter state.
     pub fn not_in_subquery<L: Into<QueryValue>, S: SubquerySource>(
         self,
         left: L,
@@ -1255,44 +1403,53 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
         Self::from_inner(self.inner.not_in_subquery(left, subquery))
     }
 
+    /// Executes the query and returns the raw result iterator.
     pub fn raw(self) -> Result<Q::Iter, DatabaseError> {
         self.inner.raw()
     }
 
+    /// Returns whether the query produces at least one row.
     pub fn exists(self) -> Result<bool, DatabaseError> {
         self.inner.exists()
     }
 
+    /// Returns the row count for the current query shape.
     pub fn count(self) -> Result<usize, DatabaseError> {
         self.inner.count()
     }
 }
 
 impl<Q: StatementSource, M: Model> FromBuilder<Q, M, ValueProjection> {
+    /// Executes a single-value projection and decodes each row into `T`.
     pub fn fetch<T: FromDataValue>(self) -> Result<ProjectValueIter<Q::Iter, T>, DatabaseError> {
         Ok(ProjectValueIter::new(self.raw()?))
     }
 
+    /// Executes a single-value projection and decodes one value.
     pub fn get<T: FromDataValue>(self) -> Result<Option<T>, DatabaseError> {
         extract_optional_value(self.limit(1).raw()?)
     }
 }
 
 impl<Q: StatementSource, M: Model> FromBuilder<Q, M, TupleProjection> {
+    /// Executes a tuple projection and decodes each row into `T`.
     pub fn fetch<T: FromQueryTuple>(self) -> Result<ProjectTupleIter<Q::Iter, T>, DatabaseError> {
         Ok(ProjectTupleIter::new(self.raw()?))
     }
 
+    /// Executes a tuple projection and decodes one row into `T`.
     pub fn get<T: FromQueryTuple>(self) -> Result<Option<T>, DatabaseError> {
         extract_optional_tuple(self.limit(1).raw()?)
     }
 }
 
 impl<Q: StatementSource, M: Model, T: Projection> FromBuilder<Q, M, StructProjection<T>> {
+    /// Executes a struct projection and decodes each row into `T`.
     pub fn fetch(self) -> Result<OrmIter<Q::Iter, T>, DatabaseError> {
         Ok(self.raw()?.orm::<T>())
     }
 
+    /// Executes a struct projection and decodes one row into `T`.
     pub fn get(self) -> Result<Option<T>, DatabaseError> {
         extract_optional_row(self.limit(1).raw()?)
     }
@@ -1306,33 +1463,33 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
         }
     }
 
-    pub fn filter(mut self, expr: QueryExpr) -> Self {
+    fn filter(mut self, expr: QueryExpr) -> Self {
         self.state.filter = Some(expr);
         self
     }
 
-    pub fn and(self, left: QueryExpr, right: QueryExpr) -> Self {
+    fn and(self, left: QueryExpr, right: QueryExpr) -> Self {
         Self {
             state: self.state.push_filter(left.and(right), FilterMode::And),
             projection: self.projection,
         }
     }
 
-    pub fn or(self, left: QueryExpr, right: QueryExpr) -> Self {
+    fn or(self, left: QueryExpr, right: QueryExpr) -> Self {
         Self {
             state: self.state.push_filter(left.or(right), FilterMode::Or),
             projection: self.projection,
         }
     }
 
-    pub fn not(self, expr: QueryExpr) -> Self {
+    fn not(self, expr: QueryExpr) -> Self {
         Self {
             state: self.state.push_filter(expr.not(), FilterMode::Replace),
             projection: self.projection,
         }
     }
 
-    pub fn where_exists<S: SubquerySource>(self, subquery: S) -> Self {
+    fn where_exists<S: SubquerySource>(self, subquery: S) -> Self {
         Self {
             state: self
                 .state
@@ -1341,7 +1498,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
         }
     }
 
-    pub fn where_not_exists<S: SubquerySource>(self, subquery: S) -> Self {
+    fn where_not_exists<S: SubquerySource>(self, subquery: S) -> Self {
         Self {
             state: self
                 .state
@@ -1350,38 +1507,38 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
         }
     }
 
-    pub fn group_by<V: Into<QueryValue>>(self, value: V) -> Self {
+    fn group_by<V: Into<QueryValue>>(self, value: V) -> Self {
         Self {
             state: self.state.push_group_by(value.into()),
             projection: self.projection,
         }
     }
 
-    pub fn having(mut self, expr: QueryExpr) -> Self {
+    fn having(mut self, expr: QueryExpr) -> Self {
         self.state.having = Some(expr);
         self
     }
 
-    pub fn asc<V: Into<QueryValue>>(self, value: V) -> Self {
+    fn asc<V: Into<QueryValue>>(self, value: V) -> Self {
         Self {
             state: self.state.push_order(value.into().asc()),
             projection: self.projection,
         }
     }
 
-    pub fn desc<V: Into<QueryValue>>(self, value: V) -> Self {
+    fn desc<V: Into<QueryValue>>(self, value: V) -> Self {
         Self {
             state: self.state.push_order(value.into().desc()),
             projection: self.projection,
         }
     }
 
-    pub fn limit(mut self, limit: usize) -> Self {
+    fn limit(mut self, limit: usize) -> Self {
         self.state.limit = Some(limit);
         self
     }
 
-    pub fn offset(mut self, offset: usize) -> Self {
+    fn offset(mut self, offset: usize) -> Self {
         self.state.offset = Some(offset);
         self
     }
@@ -1444,47 +1601,47 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
         (source, statement)
     }
 
-    pub fn eq<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
+    fn eq<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
         self.push_filter(left.into().eq(right), FilterMode::Replace)
     }
 
-    pub fn ne<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
+    fn ne<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
         self.push_filter(left.into().ne(right), FilterMode::Replace)
     }
 
-    pub fn gt<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
+    fn gt<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
         self.push_filter(left.into().gt(right), FilterMode::Replace)
     }
 
-    pub fn gte<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
+    fn gte<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
         self.push_filter(left.into().gte(right), FilterMode::Replace)
     }
 
-    pub fn lt<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
+    fn lt<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
         self.push_filter(left.into().lt(right), FilterMode::Replace)
     }
 
-    pub fn lte<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
+    fn lte<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
         self.push_filter(left.into().lte(right), FilterMode::Replace)
     }
 
-    pub fn is_null<V: Into<QueryValue>>(self, value: V) -> Self {
+    fn is_null<V: Into<QueryValue>>(self, value: V) -> Self {
         self.push_filter(value.into().is_null(), FilterMode::Replace)
     }
 
-    pub fn is_not_null<V: Into<QueryValue>>(self, value: V) -> Self {
+    fn is_not_null<V: Into<QueryValue>>(self, value: V) -> Self {
         self.push_filter(value.into().is_not_null(), FilterMode::Replace)
     }
 
-    pub fn like<L: Into<QueryValue>, R: Into<QueryValue>>(self, value: L, pattern: R) -> Self {
+    fn like<L: Into<QueryValue>, R: Into<QueryValue>>(self, value: L, pattern: R) -> Self {
         self.push_filter(value.into().like(pattern), FilterMode::Replace)
     }
 
-    pub fn not_like<L: Into<QueryValue>, R: Into<QueryValue>>(self, value: L, pattern: R) -> Self {
+    fn not_like<L: Into<QueryValue>, R: Into<QueryValue>>(self, value: L, pattern: R) -> Self {
         self.push_filter(value.into().not_like(pattern), FilterMode::Replace)
     }
 
-    pub fn in_list<L, I, V>(self, left: L, values: I) -> Self
+    fn in_list<L, I, V>(self, left: L, values: I) -> Self
     where
         L: Into<QueryValue>,
         I: IntoIterator<Item = V>,
@@ -1498,7 +1655,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
         }
     }
 
-    pub fn not_in_list<L, I, V>(self, left: L, values: I) -> Self
+    fn not_in_list<L, I, V>(self, left: L, values: I) -> Self
     where
         L: Into<QueryValue>,
         I: IntoIterator<Item = V>,
@@ -1512,7 +1669,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
         }
     }
 
-    pub fn between<L, Low, High>(self, expr: L, low: Low, high: High) -> Self
+    fn between<L, Low, High>(self, expr: L, low: Low, high: High) -> Self
     where
         L: Into<QueryValue>,
         Low: Into<QueryValue>,
@@ -1526,7 +1683,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
         }
     }
 
-    pub fn not_between<L, Low, High>(self, expr: L, low: Low, high: High) -> Self
+    fn not_between<L, Low, High>(self, expr: L, low: Low, high: High) -> Self
     where
         L: Into<QueryValue>,
         Low: Into<QueryValue>,
@@ -1540,7 +1697,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
         }
     }
 
-    pub fn in_subquery<L: Into<QueryValue>, S: SubquerySource>(self, left: L, subquery: S) -> Self {
+    fn in_subquery<L: Into<QueryValue>, S: SubquerySource>(self, left: L, subquery: S) -> Self {
         Self {
             state: self
                 .state
@@ -1549,11 +1706,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
         }
     }
 
-    pub fn not_in_subquery<L: Into<QueryValue>, S: SubquerySource>(
-        self,
-        left: L,
-        subquery: S,
-    ) -> Self {
+    fn not_in_subquery<L: Into<QueryValue>, S: SubquerySource>(self, left: L, subquery: S) -> Self {
         Self {
             state: self
                 .state
@@ -1562,17 +1715,17 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
         }
     }
 
-    pub fn raw(self) -> Result<Q::Iter, DatabaseError> {
+    fn raw(self) -> Result<Q::Iter, DatabaseError> {
         let (source, statement) = self.into_statement();
         source.execute_statement(&statement, &[])
     }
 
-    pub fn exists(self) -> Result<bool, DatabaseError> {
+    fn exists(self) -> Result<bool, DatabaseError> {
         let mut iter = self.limit(1).raw()?;
         Ok(iter.next().transpose()?.is_some())
     }
 
-    pub fn count(self) -> Result<usize, DatabaseError> {
+    fn count(self) -> Result<usize, DatabaseError> {
         let has_grouping = !self.state.group_bys.is_empty() || self.state.having.is_some();
         if has_grouping {
             let mut iter = self.raw()?;
@@ -1705,16 +1858,16 @@ fn select_query(
             from: vec![table_with_joins(table_name)],
             lateral_views: vec![],
             prewhere: None,
-            selection: filter.map(QueryExpr::into_ast),
+            selection: filter.map(QueryExpr::into_expr),
             connect_by: vec![],
             group_by: GroupByExpr::Expressions(
-                group_bys.into_iter().map(QueryValue::into_ast).collect(),
+                group_bys.into_iter().map(QueryValue::into_expr).collect(),
                 vec![],
             ),
             cluster_by: vec![],
             distribute_by: vec![],
             sort_by: vec![],
-            having: having.map(QueryExpr::into_ast),
+            having: having.map(QueryExpr::into_expr),
             named_window: vec![],
             qualify: None,
             window_before_qualify: false,
@@ -2302,6 +2455,7 @@ pub trait Model: Sized + for<'a> From<(&'a SchemaRef, Tuple)> {
     /// Returns the cached `ANALYZE TABLE` statement for the model.
     fn analyze_statement() -> &'static Statement;
 
+    /// Returns metadata for the primary-key field.
     fn primary_key_field() -> &'static OrmField {
         Self::fields()
             .iter()
@@ -2315,17 +2469,24 @@ pub trait Model: Sized + for<'a> From<(&'a SchemaRef, Tuple)> {
 /// This trait is mainly intended for framework internals and derive-generated
 /// code.
 pub trait FromDataValue: Sized {
+    /// Returns the logical SQL type used for conversion, when one is required.
     fn logical_type() -> Option<LogicalType>;
 
+    /// Attempts to convert a raw [`DataValue`] into `Self`.
     fn from_data_value(value: DataValue) -> Option<Self>;
 }
 
 /// Conversion trait from a projected result tuple into a Rust value.
+///
+/// This is implemented for tuples such as `(i32, String)` by the ORM itself.
 pub trait FromQueryTuple: Sized {
+    /// Decodes one projected tuple into `Self`.
     fn from_query_tuple(tuple: Tuple) -> Result<Self, DatabaseError>;
 }
 
 /// Typed adapter over a [`ResultIter`] that yields projected values instead of raw tuples.
+///
+/// This is returned by `project_value(...).fetch::<T>()`.
 pub struct ProjectValueIter<I, T> {
     inner: I,
     _marker: PhantomData<T>,
@@ -2350,6 +2511,8 @@ where
 }
 
 /// Typed adapter over a [`ResultIter`] that yields projected tuples.
+///
+/// This is returned by `project_tuple(...).fetch::<T>()`.
 pub struct ProjectTupleIter<I, T> {
     inner: I,
     _marker: PhantomData<T>,
@@ -2378,6 +2541,7 @@ where
     I: ResultIter,
     T: FromDataValue,
 {
+    /// Each item is one projected scalar value decoded into `T`.
     type Item = Result<T, DatabaseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -2392,6 +2556,7 @@ where
     I: ResultIter,
     T: FromQueryTuple,
 {
+    /// Each item is one projected row decoded into `T`.
     type Item = Result<T, DatabaseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -2406,6 +2571,7 @@ where
 /// This trait is mainly intended for framework internals and derive-generated
 /// code.
 pub trait ToDataValue {
+    /// Converts the value into a [`DataValue`].
     fn to_data_value(&self) -> DataValue;
 }
 
@@ -2415,8 +2581,10 @@ pub trait ToDataValue {
 /// Most built-in scalar types already implement it, and custom types can opt in
 /// by implementing this trait together with [`FromDataValue`] and [`ToDataValue`].
 pub trait ModelColumnType {
+    /// Returns the SQL type name used in ORM-generated DDL.
     fn ddl_type() -> String;
 
+    /// Whether this field type maps to a nullable SQL column.
     fn nullable() -> bool {
         false
     }
@@ -2424,15 +2592,16 @@ pub trait ModelColumnType {
 
 /// Marker trait for string-like model fields that support `#[model(varchar = N)]`
 /// and `#[model(char = N)]`.
+///
+/// This is mainly used by the `Model` derive macro.
 pub trait StringType {}
 
 /// Marker trait for decimal-like model fields that support precision/scale DDL attributes.
+///
+/// This is mainly used by the `Model` derive macro.
 pub trait DecimalType {}
 
-/// Extracts and converts a named field from a tuple using the given schema.
-///
-/// This helper is used by code generated from `#[derive(Model)]` and by the
-/// lower-level `from_tuple!` macro.
+#[doc(hidden)]
 pub fn try_get<T: FromDataValue>(
     tuple: &mut Tuple,
     schema: &SchemaRef,
