@@ -270,6 +270,12 @@ back to the DTO field name.
 If you need expression-based outputs, prefer `project_value(...)` or
 `project_tuple(...)` and assign explicit names with `.alias(...)`.
 
+Use `project::<P>()` when:
+
+- you want a DTO-style result type instead of full `M`
+- selected outputs are plain columns, optionally with renamed field mapping
+- you want field-name-based decoding instead of positional tuple decoding
+
 ### Single-value queries
 
 Use `Database::from::<M>().project_value(expr)` or
@@ -280,12 +286,31 @@ ordering, and subquery composition, and returns typed values via
 
 This is also the intended entry point for scalar subqueries.
 
+Use `project_value(...)` when:
+
+- the query returns exactly one value per row
+- you want scalar decoding such as `i32`, `String`, or `Option<T>`
+- you are building scalar subqueries such as `IN (subquery)`
+- the output is an expression or aggregate rather than a DTO field mapping
+
 ### Tuple queries
 
 Use `Database::from::<M>().project_tuple(values)` or
 `DBTransaction::from::<M>().project_tuple(values)` to project multiple
 expressions and decode them positionally into a Rust tuple via
 `fetch::<(T1, T2, ...)>()` and `get::<(T1, T2, ...)>()`.
+
+Use `project_tuple(...)` when:
+
+- you need multiple outputs but do not want to define a DTO type
+- the projection contains expressions, aggregates, or custom aliases
+- positional decoding is acceptable
+
+In practice:
+
+- `project::<P>()`: named-field DTO mapping
+- `project_value(...)`: one expression, one decoded value
+- `project_tuple(...)`: multiple expressions, positional decoding
 
 ### Example
 
