@@ -15,8 +15,8 @@ use sqlparser::ast::helpers::attached_token::AttachedToken;
 use sqlparser::ast::{
     AlterColumnOperation, AlterTable, AlterTableOperation, Analyze, Assignment, AssignmentTarget,
     BinaryOperator as SqlBinaryOperator, CaseWhen, CastKind, CharLengthUnits, ColumnDef,
-    ColumnOption, ColumnOptionDef, CreateIndex, CreateTable, DataType, Delete, Expr, FromTable,
-    Distinct, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments,
+    ColumnOption, ColumnOptionDef, CreateIndex, CreateTable, DataType, Delete, Distinct, Expr,
+    FromTable, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments,
     GroupByExpr, HiveDistributionStyle, Ident, IndexColumn, Insert, KeyOrIndexDisplay, LimitClause,
     NullsDistinctOption, ObjectName, ObjectType, Offset, OffsetRows, OrderBy, OrderByExpr,
     OrderByKind, OrderByOptions, PrimaryKeyConstraint, Query, Select, SelectFlavor, SelectItem,
@@ -118,6 +118,45 @@ pub struct Field<M, T> {
 
 trait ValueExpressionOps: Sized {
     fn into_query_value(self) -> QueryValue;
+
+    fn binary_value_expr<V: Into<QueryValue>>(self, op: SqlBinaryOperator, value: V) -> QueryValue {
+        QueryValue::from_expr(Expr::BinaryOp {
+            left: Box::new(self.into_query_value().into_expr()),
+            op,
+            right: Box::new(value.into().into_expr()),
+        })
+    }
+
+    fn unary_value_expr(self, op: sqlparser::ast::UnaryOperator) -> QueryValue {
+        QueryValue::from_expr(Expr::UnaryOp {
+            op,
+            expr: Box::new(self.into_query_value().into_expr()),
+        })
+    }
+
+    fn add_expr<V: Into<QueryValue>>(self, value: V) -> QueryValue {
+        self.binary_value_expr(SqlBinaryOperator::Plus, value)
+    }
+
+    fn sub_expr<V: Into<QueryValue>>(self, value: V) -> QueryValue {
+        self.binary_value_expr(SqlBinaryOperator::Minus, value)
+    }
+
+    fn mul_expr<V: Into<QueryValue>>(self, value: V) -> QueryValue {
+        self.binary_value_expr(SqlBinaryOperator::Multiply, value)
+    }
+
+    fn div_expr<V: Into<QueryValue>>(self, value: V) -> QueryValue {
+        self.binary_value_expr(SqlBinaryOperator::Divide, value)
+    }
+
+    fn modulo_expr<V: Into<QueryValue>>(self, value: V) -> QueryValue {
+        self.binary_value_expr(SqlBinaryOperator::Modulo, value)
+    }
+
+    fn neg_expr(self) -> QueryValue {
+        self.unary_value_expr(sqlparser::ast::UnaryOperator::Minus)
+    }
 
     fn eq_expr<V: Into<QueryValue>>(self, value: V) -> QueryExpr {
         QueryExpr::from_expr(Expr::BinaryOp {
@@ -306,6 +345,36 @@ impl<M, T> Field<M, T> {
             ident(self.table),
             ident(self.column),
         ]))
+    }
+
+    /// Builds `field + value`.
+    pub fn add<V: Into<QueryValue>>(self, value: V) -> QueryValue {
+        ValueExpressionOps::add_expr(self, value)
+    }
+
+    /// Builds `field - value`.
+    pub fn sub<V: Into<QueryValue>>(self, value: V) -> QueryValue {
+        ValueExpressionOps::sub_expr(self, value)
+    }
+
+    /// Builds `field * value`.
+    pub fn mul<V: Into<QueryValue>>(self, value: V) -> QueryValue {
+        ValueExpressionOps::mul_expr(self, value)
+    }
+
+    /// Builds `field / value`.
+    pub fn div<V: Into<QueryValue>>(self, value: V) -> QueryValue {
+        ValueExpressionOps::div_expr(self, value)
+    }
+
+    /// Builds `field % value`.
+    pub fn modulo<V: Into<QueryValue>>(self, value: V) -> QueryValue {
+        ValueExpressionOps::modulo_expr(self, value)
+    }
+
+    /// Builds unary `-field`.
+    pub fn neg(self) -> QueryValue {
+        ValueExpressionOps::neg_expr(self)
     }
 
     /// Builds `field = value`.
@@ -730,6 +799,36 @@ impl QueryValue {
                 .collect(),
             else_result: Some(Box::new(else_result.into().into_expr())),
         })
+    }
+
+    /// Builds `expr + value`.
+    pub fn add<V: Into<QueryValue>>(self, value: V) -> QueryValue {
+        ValueExpressionOps::add_expr(self, value)
+    }
+
+    /// Builds `expr - value`.
+    pub fn sub<V: Into<QueryValue>>(self, value: V) -> QueryValue {
+        ValueExpressionOps::sub_expr(self, value)
+    }
+
+    /// Builds `expr * value`.
+    pub fn mul<V: Into<QueryValue>>(self, value: V) -> QueryValue {
+        ValueExpressionOps::mul_expr(self, value)
+    }
+
+    /// Builds `expr / value`.
+    pub fn div<V: Into<QueryValue>>(self, value: V) -> QueryValue {
+        ValueExpressionOps::div_expr(self, value)
+    }
+
+    /// Builds `expr % value`.
+    pub fn modulo<V: Into<QueryValue>>(self, value: V) -> QueryValue {
+        ValueExpressionOps::modulo_expr(self, value)
+    }
+
+    /// Builds unary `-expr`.
+    pub fn neg(self) -> QueryValue {
+        ValueExpressionOps::neg_expr(self)
     }
 
     /// Builds `expr = value`.

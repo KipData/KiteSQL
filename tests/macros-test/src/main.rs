@@ -553,6 +553,27 @@ mod test {
             .unwrap();
         assert_eq!(cast_to_matched.id, 3);
 
+        let add_matched = database
+            .from::<User>()
+            .eq(User::id().add(1), 3)
+            .get()?
+            .unwrap();
+        assert_eq!(add_matched.id, 2);
+
+        let sub_matched = database
+            .from::<User>()
+            .eq(User::id().sub(1), 2)
+            .get()?
+            .unwrap();
+        assert_eq!(sub_matched.id, 3);
+
+        let neg_matched = database
+            .from::<User>()
+            .eq(User::id().neg(), -1)
+            .get()?
+            .unwrap();
+        assert_eq!(neg_matched.id, 1);
+
         let projected_ids = database
             .from::<User>()
             .project_value(User::id())
@@ -560,6 +581,22 @@ mod test {
             .fetch::<i32>()?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(projected_ids, vec![1, 2, 3]);
+
+        let arithmetic_projection = database
+            .from::<User>()
+            .project_tuple((
+                User::id(),
+                User::id().mul(10).alias("times_ten"),
+                User::id().div(2).alias("half_id"),
+                User::id().modulo(2).alias("id_mod_2"),
+            ))
+            .asc(User::id())
+            .fetch::<(i32, i32, i32, i32)>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            arithmetic_projection,
+            vec![(1, 10, 0, 1), (2, 20, 1, 0), (3, 30, 1, 1)]
+        );
 
         let projected_name = database
             .from::<User>()
@@ -617,6 +654,17 @@ mod test {
             .fetch::<String>()?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(simple_case_labels, vec!["one", "two", "other"]);
+
+        let arithmetic_query_value = database
+            .from::<User>()
+            .project_value(
+                QueryValue::function("add_one", [User::id()])
+                    .add(10)
+                    .alias("boosted_id"),
+            )
+            .eq(User::id(), 1)
+            .get::<i32>()?;
+        assert_eq!(arithmetic_query_value, Some(12));
 
         let id_sum = database
             .from::<User>()

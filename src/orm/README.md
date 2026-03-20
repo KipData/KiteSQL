@@ -157,6 +157,12 @@ The query flow is:
 
 Generated field accessors return `Field<M, T>`. A field supports:
 
+- `add(value)`
+- `sub(value)`
+- `mul(value)`
+- `div(value)`
+- `modulo(value)`
+- `neg()`
 - `eq(value)`
 - `ne(value)`
 - `gt(value)`
@@ -421,6 +427,9 @@ Use it for:
 `QueryValue` also supports comparison and predicate helpers such as `eq`,
 `ne`, `gt`, `gte`, `lt`, `lte`, `like`, `in_list`, `between`, and subquery
 predicates when you need to keep composing expressions.
+
+It also supports arithmetic composition such as `add`, `sub`, `mul`, `div`,
+`modulo`, and unary `neg`.
 
 ### `QueryExpr`
 
