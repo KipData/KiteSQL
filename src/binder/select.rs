@@ -79,6 +79,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         } else {
             None
         };
+        let is_plain_select = matches!(query.body.borrow(), SetExpr::Select(_));
         let mut plan = match query.body.borrow() {
             SetExpr::Select(select) => self.bind_select(select, order_by_exprs),
             SetExpr::Query(query) => self.bind_query(query),
@@ -96,12 +97,41 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             }
         }?;
 
+        if !is_plain_select {
+            if let Some(order_by_exprs) = order_by_exprs {
+                plan = self.bind_top_level_orderby(plan, order_by_exprs)?;
+            }
+        }
+
         if let Some(limit_clause) = query.limit_clause.clone() {
             plan = self.bind_limit(plan, limit_clause)?;
         }
 
         self.context.step(origin_step);
         Ok(plan)
+    }
+
+    fn bind_top_level_orderby(
+        &mut self,
+        mut plan: LogicalPlan,
+        orderbys: &[OrderByExpr],
+    ) -> Result<LogicalPlan, DatabaseError> {
+        let saved_aliases = self.context.expr_aliases.clone();
+        for column in plan.output_schema().iter() {
+            self.context.add_alias(
+                None,
+                column.name().to_string(),
+                ScalarExpression::column_expr(column.clone()),
+            );
+        }
+
+        let sort_fields = self.extract_having_orderby_aggregate(&None, orderbys)?.1;
+        self.context.expr_aliases = saved_aliases;
+
+        Ok(match sort_fields {
+            Some(sort_fields) => self.bind_sort(plan, sort_fields),
+            None => plan,
+        })
     }
 
     pub(crate) fn bind_select(
@@ -318,8 +348,42 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 ))
             }
         };
-        let mut left_plan = self.bind_set_expr(left)?;
-        let mut right_plan = self.bind_set_expr(right)?;
+        let BinderContext {
+            table_cache,
+            view_cache,
+            transaction,
+            scala_functions,
+            table_functions,
+            temp_table_id,
+            ..
+        } = &self.context;
+        let mut left_binder = Binder::new(
+            BinderContext::new(
+                table_cache,
+                view_cache,
+                *transaction,
+                scala_functions,
+                table_functions,
+                temp_table_id.clone(),
+            ),
+            self.args,
+            Some(self),
+        );
+        let mut right_binder = Binder::new(
+            BinderContext::new(
+                table_cache,
+                view_cache,
+                *transaction,
+                scala_functions,
+                table_functions,
+                temp_table_id.clone(),
+            ),
+            self.args,
+            Some(self),
+        );
+
+        let mut left_plan = left_binder.bind_set_expr(left)?;
+        let mut right_plan = right_binder.bind_set_expr(right)?;
 
         let mut left_schema = left_plan.output_schema();
         let mut right_schema = right_plan.output_schema();

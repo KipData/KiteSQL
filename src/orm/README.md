@@ -233,6 +233,14 @@ Set operations are available after the query output shape is fixed.
 Call `.all()` after `union(...)` or `except(...)` when you want multiset
 semantics instead of the default distinct result.
 
+After a set query is formed, you can still apply result-level methods such as
+`asc(...)`, `desc(...)`, `limit(...)`, `offset(...)`, `fetch()`, `get()`,
+`exists()`, and `count()`.
+
+For set-query ordering, field inputs are interpreted by their output column
+name, so `asc(User::id())` orders by the projected `id` column of the set
+result.
+
 ```rust
 let user_ids = database
     .from::<User>()
@@ -245,6 +253,8 @@ let total_ids = database
     .project_value(User::id())
     .union(database.from::<Order>().project_value(Order::user_id()))
     .all()
+    .asc(User::id())
+    .limit(3)
     .count()?;
 
 let users_without_orders = database
@@ -313,6 +323,11 @@ or `project_tuple(...)`:
 - `get()`
 - `exists()`
 - `count()`
+
+After `union(...)` or `except(...)`, the resulting set-query builder keeps the
+result-level subset of this API: `all()`, `asc(...)`, `desc(...)`, `limit(...)`,
+`offset(...)`, `raw()`, `fetch()`, `get()`, `exists()`, `count()`,
+`union(...)`, and `except(...)`.
 
 ### Struct projections
 

@@ -1655,10 +1655,33 @@ impl<Q: StatementSource, M: Model, P> SetQueryBuilder<Q, M, P> {
         self
     }
 
+    /// Appends an ascending sort key to the set query result.
+    pub fn asc<V: Into<QueryValue>>(mut self, value: V) -> Self {
+        query_push_order(&mut self.query, set_query_order_value(value.into()).asc());
+        self
+    }
+
+    /// Appends a descending sort key to the set query result.
+    pub fn desc<V: Into<QueryValue>>(mut self, value: V) -> Self {
+        query_push_order(&mut self.query, set_query_order_value(value.into()).desc());
+        self
+    }
+
+    /// Sets the set query `LIMIT`.
+    pub fn limit(mut self, limit: usize) -> Self {
+        query_set_limit(&mut self.query, limit);
+        self
+    }
+
+    /// Sets the set query `OFFSET`.
+    pub fn offset(mut self, offset: usize) -> Self {
+        query_set_offset(&mut self.query, offset);
+        self
+    }
+
     /// Executes the set query and returns the raw result iterator.
     pub fn raw(self) -> Result<Q::Iter, DatabaseError> {
-        self.source
-            .execute_statement(&Statement::Query(Box::new(self.query)), &[])
+        execute_query(self.source, self.query)
     }
 
     /// Returns whether the set query produces at least one row.
@@ -1672,8 +1695,7 @@ impl<Q: StatementSource, M: Model, P> SetQueryBuilder<Q, M, P> {
     /// # Ok::<(), kite_sql::errors::DatabaseError>(())
     /// ```
     pub fn exists(self) -> Result<bool, DatabaseError> {
-        let mut iter = self.raw()?;
-        Ok(iter.next().transpose()?.is_some())
+        query_exists(self.source, self.query)
     }
 
     /// Returns the row count of the set query result.
@@ -1687,13 +1709,7 @@ impl<Q: StatementSource, M: Model, P> SetQueryBuilder<Q, M, P> {
     /// # Ok::<(), kite_sql::errors::DatabaseError>(())
     /// ```
     pub fn count(self) -> Result<usize, DatabaseError> {
-        let mut iter = self.raw()?;
-        let mut count = 0usize;
-        while iter.next().transpose()?.is_some() {
-            count += 1;
-        }
-        iter.done()?;
-        Ok(count)
+        query_count(self.source, self.query)
     }
 
     /// Appends `UNION` to the current set query.
@@ -2515,7 +2531,10 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
 
     fn raw(self) -> Result<Q::Iter, DatabaseError> {
         let (source, statement) = self.into_statement();
-        source.execute_statement(&statement, &[])
+        match statement {
+            Statement::Query(query) => execute_query(source, *query),
+            _ => source.execute_statement(&statement, &[]),
+        }
     }
 
     fn exists(self) -> Result<bool, DatabaseError> {
@@ -2877,6 +2896,93 @@ fn set_query_quantifier(query: &mut Query, set_quantifier: SetQuantifier) {
     {
         *current = set_quantifier;
     }
+}
+
+fn set_query_order_value(value: QueryValue) -> QueryValue {
+    match value.into_expr() {
+        Expr::CompoundIdentifier(mut parts) => QueryValue::from_expr(Expr::Identifier(
+            parts.pop().expect("compound identifier must not be empty"),
+        )),
+        expr => QueryValue::from_expr(expr),
+    }
+}
+
+fn query_push_order(query: &mut Query, order: SortExpr) {
+    let order_expr = order.into_ast();
+    match query.order_by.as_mut() {
+        Some(order_by) => match &mut order_by.kind {
+            OrderByKind::Expressions(exprs) => exprs.push(order_expr),
+            OrderByKind::All(_) => {
+                order_by.kind = OrderByKind::Expressions(vec![order_expr]);
+            }
+        },
+        None => {
+            query.order_by = Some(OrderBy {
+                kind: OrderByKind::Expressions(vec![order_expr]),
+                interpolate: None,
+            });
+        }
+    }
+}
+
+fn query_set_limit(query: &mut Query, limit: usize) {
+    let offset = query_current_offset(query);
+    query.limit_clause = Some(LimitClause::LimitOffset {
+        limit: Some(number_expr(limit)),
+        offset,
+        limit_by: vec![],
+    });
+}
+
+fn query_set_offset(query: &mut Query, offset: usize) {
+    let limit = query_current_limit(query);
+    query.limit_clause = Some(LimitClause::LimitOffset {
+        limit,
+        offset: Some(Offset {
+            value: number_expr(offset),
+            rows: OffsetRows::None,
+        }),
+        limit_by: vec![],
+    });
+}
+
+fn query_current_limit(query: &Query) -> Option<Expr> {
+    match &query.limit_clause {
+        Some(LimitClause::LimitOffset { limit, .. }) => limit.clone(),
+        Some(LimitClause::OffsetCommaLimit { limit, .. }) => Some(limit.clone()),
+        None => None,
+    }
+}
+
+fn query_current_offset(query: &Query) -> Option<Offset> {
+    match &query.limit_clause {
+        Some(LimitClause::LimitOffset { offset, .. }) => offset.clone(),
+        Some(LimitClause::OffsetCommaLimit { offset, .. }) => Some(Offset {
+            value: offset.clone(),
+            rows: OffsetRows::None,
+        }),
+        None => None,
+    }
+}
+
+fn execute_query<Q: StatementSource>(source: Q, query: Query) -> Result<Q::Iter, DatabaseError> {
+    source.execute_statement(&Statement::Query(Box::new(query)), &[])
+}
+
+fn query_exists<Q: StatementSource>(source: Q, mut query: Query) -> Result<bool, DatabaseError> {
+    query_set_limit(&mut query, 1);
+    let mut iter = execute_query(source, query)?;
+    Ok(iter.next().transpose()?.is_some())
+}
+
+fn query_count<Q: StatementSource>(source: Q, query: Query) -> Result<usize, DatabaseError> {
+    let mut iter = execute_query(source, query)?;
+    let mut count = 0usize;
+    while iter.next().transpose()?.is_some() {
+        count += 1;
+    }
+    iter.done()?;
+    Ok(count)
 }
 
 fn values_query(values: Vec<Expr>) -> Query {

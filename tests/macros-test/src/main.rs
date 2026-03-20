@@ -1110,6 +1110,28 @@ mod test {
             .count()?;
         assert_eq!(union_all_count, 6);
 
+        let ordered_union_ids = database
+            .from::<User>()
+            .project_value(User::id())
+            .union(database.from::<Order>().project_value(Order::user_id()))
+            .all()
+            .asc(User::id())
+            .offset(1)
+            .limit(3)
+            .fetch::<i32>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(ordered_union_ids, vec![1, 1, 2]);
+
+        let ordered_union_count = database
+            .from::<User>()
+            .project_value(User::id())
+            .union(database.from::<Order>().project_value(Order::user_id()))
+            .all()
+            .asc(User::id())
+            .limit(2)
+            .count()?;
+        assert_eq!(ordered_union_count, 2);
+
         let except_ids = database
             .from::<Order>()
             .project_value(Order::user_id())
@@ -1130,6 +1152,7 @@ mod test {
             .project_value(Order::user_id())
             .except(database.from::<User>().project_value(User::id()))
             .all()
+            .asc(Order::user_id())
             .fetch::<i32>()?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(except_all_ids, vec![1]);
