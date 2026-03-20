@@ -385,26 +385,27 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         right_plan,
                     ))
                 } else {
-                    let distinct_exprs = left_schema
+                    let left_distinct_exprs = left_schema
+                        .iter()
+                        .cloned()
+                        .map(ScalarExpression::column_expr)
+                        .collect_vec();
+                    let right_distinct_exprs = right_schema
                         .iter()
                         .cloned()
                         .map(ScalarExpression::column_expr)
                         .collect_vec();
 
-                    let except_op = Operator::Except(ExceptOperator {
-                        left_schema_ref: left_schema.clone(),
-                        _right_schema_ref: right_schema.clone(),
-                    });
+                    left_plan = self.bind_distinct(left_plan, left_distinct_exprs);
+                    right_plan = self.bind_distinct(right_plan, right_distinct_exprs);
+                    left_schema = left_plan.output_schema();
+                    right_schema = right_plan.output_schema();
 
-                    Ok(self.bind_distinct(
-                        LogicalPlan::new(
-                            except_op,
-                            Childrens::Twins {
-                                left: Box::new(left_plan),
-                                right: Box::new(right_plan),
-                            },
-                        ),
-                        distinct_exprs,
+                    Ok(ExceptOperator::build(
+                        left_schema.clone(),
+                        right_schema.clone(),
+                        left_plan,
+                        right_plan,
                     ))
                 }
             }
