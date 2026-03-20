@@ -1281,6 +1281,43 @@ mod test {
             .count()?;
         assert_eq!(blocked_by_not_exists, 0);
 
+        let users_with_orders = database
+            .from::<User>()
+            .filter(kite_sql::orm::QueryExpr::exists(
+                database
+                    .from::<Order>()
+                    .project_value(Order::id())
+                    .eq(Order::user_id(), User::id()),
+            ))
+            .asc(User::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            users_with_orders
+                .iter()
+                .map(|user| user.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        let users_without_orders = database
+            .from::<User>()
+            .filter(kite_sql::orm::QueryExpr::not_exists(
+                database
+                    .from::<Order>()
+                    .project_value(Order::id())
+                    .eq(Order::user_id(), User::id()),
+            ))
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            users_without_orders
+                .iter()
+                .map(|user| user.id)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+
         let max_id_user = database
             .from::<User>()
             .eq(

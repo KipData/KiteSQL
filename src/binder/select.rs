@@ -864,60 +864,21 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 let mut filter = vec![];
 
                 let (mut plan, join_ty) = match sub_query {
-                    SubQueryType::SubQuery(plan) => (plan, JoinType::Inner),
-                    SubQueryType::ExistsSubQuery(is_not, plan) => {
-                        let limit = LimitOperator::build(None, Some(1), plan);
-                        let mut agg = AggregateOperator::build(
-                            limit,
-                            vec![ScalarExpression::AggCall {
-                                distinct: false,
-                                kind: AggKind::Count,
-                                args: vec![ScalarExpression::Constant(DataValue::Utf8 {
-                                    value: "*".to_string(),
-                                    ty: Utf8Type::Fixed(1),
-                                    unit: CharLengthUnits::Characters,
-                                })],
-                                ty: LogicalType::Integer,
-                            }],
-                            vec![],
-                            false,
-                        );
-                        let filter = FilterOperator::build(
-                            ScalarExpression::Binary {
-                                op: if is_not {
-                                    BinaryOperator::NotEq
-                                } else {
-                                    BinaryOperator::Eq
-                                },
-                                left_expr: Box::new(ScalarExpression::column_expr(
-                                    agg.output_schema()[0].clone(),
-                                )),
-                                right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(
-                                    1,
-                                ))),
-                                evaluator: None,
-                                ty: LogicalType::Boolean,
-                            },
-                            agg,
-                            false,
-                        );
-                        let projection = ProjectOperator {
-                            exprs: vec![ScalarExpression::Constant(DataValue::Int32(1))],
+                    SubQueryType::SubQuery { plan, .. } => (plan, JoinType::Inner),
+                    SubQueryType::ExistsSubQuery {
+                        negated,
+                        plan,
+                        correlated,
+                    } => {
+                        children = if correlated {
+                            Self::bind_correlated_exists(children, plan, negated)?
+                        } else {
+                            Self::bind_uncorrelated_exists(children, plan, negated)
                         };
-                        let plan = LogicalPlan::new(
-                            Operator::Project(projection),
-                            Childrens::Only(Box::new(filter)),
-                        );
-                        children = LJoinOperator::build(
-                            children,
-                            plan,
-                            JoinCondition::None,
-                            JoinType::Cross,
-                        );
                         continue;
                     }
-                    SubQueryType::InSubQuery(is_not, plan) => {
-                        let join_ty = if is_not {
+                    SubQueryType::InSubQuery { negated, plan, .. } => {
+                        let join_ty = if negated {
                             JoinType::LeftAnti
                         } else {
                             JoinType::LeftSemi
@@ -935,15 +896,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 )?;
 
                 // combine multiple filter exprs into one BinaryExpr
-                let join_filter = filter
-                    .into_iter()
-                    .reduce(|acc, expr| ScalarExpression::Binary {
-                        op: BinaryOperator::And,
-                        left_expr: Box::new(acc),
-                        right_expr: Box::new(expr),
-                        evaluator: None,
-                        ty: LogicalType::Boolean,
-                    });
+                let join_filter = Self::combine_conjuncts(filter);
 
                 children = LJoinOperator::build(
                     children,
@@ -958,6 +911,224 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             return Ok(children);
         }
         Ok(FilterOperator::build(predicate, children, false))
+    }
+
+    fn bind_correlated_exists(
+        mut children: LogicalPlan,
+        plan: LogicalPlan,
+        negated: bool,
+    ) -> Result<LogicalPlan, DatabaseError> {
+        let mut on_keys: Vec<(ScalarExpression, ScalarExpression)> = vec![];
+        let mut filter = vec![];
+        let join_ty = if negated {
+            JoinType::LeftAnti
+        } else {
+            JoinType::LeftSemi
+        };
+        let (mut plan, correlated_filters) =
+            Self::prepare_correlated_exists_plan(plan, children.output_schema())?;
+
+        for expr in correlated_filters {
+            Self::extract_join_keys(
+                expr,
+                &mut on_keys,
+                &mut filter,
+                children.output_schema(),
+                plan.output_schema(),
+            )?;
+        }
+
+        children = LJoinOperator::build(
+            children,
+            plan,
+            JoinCondition::On {
+                on: on_keys,
+                filter: Self::combine_conjuncts(filter),
+            },
+            join_ty,
+        );
+        Ok(children)
+    }
+
+    fn bind_uncorrelated_exists(
+        children: LogicalPlan,
+        plan: LogicalPlan,
+        negated: bool,
+    ) -> LogicalPlan {
+        let limit = LimitOperator::build(None, Some(1), plan);
+        let mut agg = AggregateOperator::build(
+            limit,
+            vec![ScalarExpression::AggCall {
+                distinct: false,
+                kind: AggKind::Count,
+                args: vec![ScalarExpression::Constant(DataValue::Utf8 {
+                    value: "*".to_string(),
+                    ty: Utf8Type::Fixed(1),
+                    unit: CharLengthUnits::Characters,
+                })],
+                ty: LogicalType::Integer,
+            }],
+            vec![],
+            false,
+        );
+        let filter = FilterOperator::build(
+            ScalarExpression::Binary {
+                op: if negated {
+                    BinaryOperator::NotEq
+                } else {
+                    BinaryOperator::Eq
+                },
+                left_expr: Box::new(ScalarExpression::column_expr(
+                    agg.output_schema()[0].clone(),
+                )),
+                right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(1))),
+                evaluator: None,
+                ty: LogicalType::Boolean,
+            },
+            agg,
+            false,
+        );
+        let projection = ProjectOperator {
+            exprs: vec![ScalarExpression::Constant(DataValue::Int32(1))],
+        };
+        let plan = LogicalPlan::new(
+            Operator::Project(projection),
+            Childrens::Only(Box::new(filter)),
+        );
+
+        LJoinOperator::build(children, plan, JoinCondition::None, JoinType::Cross)
+    }
+
+    fn plan_has_correlated_refs(plan: &LogicalPlan, left_schema: &Schema) -> bool {
+        let contains = |column: &ColumnRef| {
+            left_schema
+                .iter()
+                .any(|left| left.summary() == column.summary())
+        };
+
+        if plan.operator.referenced_columns(true).iter().any(contains) {
+            return true;
+        }
+
+        match plan.childrens.as_ref() {
+            Childrens::Only(child) => Self::plan_has_correlated_refs(child, left_schema),
+            Childrens::Twins { left, right } => {
+                Self::plan_has_correlated_refs(left, left_schema)
+                    || Self::plan_has_correlated_refs(right, left_schema)
+            }
+            Childrens::None => false,
+        }
+    }
+
+    fn expr_has_correlated_refs(expr: &ScalarExpression, left_schema: &Schema) -> bool {
+        expr.referenced_columns(true).iter().any(|column| {
+            left_schema
+                .iter()
+                .any(|left| left.summary() == column.summary())
+        })
+    }
+
+    fn split_conjuncts(expr: ScalarExpression, exprs: &mut Vec<ScalarExpression>) {
+        match expr.unpack_alias() {
+            ScalarExpression::Binary {
+                op: BinaryOperator::And,
+                left_expr,
+                right_expr,
+                ..
+            } => {
+                Self::split_conjuncts(*left_expr, exprs);
+                Self::split_conjuncts(*right_expr, exprs);
+            }
+            expr => exprs.push(expr),
+        }
+    }
+
+    fn combine_conjuncts(exprs: Vec<ScalarExpression>) -> Option<ScalarExpression> {
+        exprs
+            .into_iter()
+            .reduce(|acc, expr| ScalarExpression::Binary {
+                op: BinaryOperator::And,
+                left_expr: Box::new(acc),
+                right_expr: Box::new(expr),
+                evaluator: None,
+                ty: LogicalType::Boolean,
+            })
+    }
+
+    fn prepare_correlated_exists_plan(
+        plan: LogicalPlan,
+        left_schema: &Schema,
+    ) -> Result<(LogicalPlan, Vec<ScalarExpression>), DatabaseError> {
+        match plan.childrens.as_ref() {
+            Childrens::Only(_) => {}
+            Childrens::Twins { .. } => {
+                if Self::plan_has_correlated_refs(&plan, left_schema) {
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "correlated EXISTS/NOT EXISTS does not support set or join subqueries"
+                            .to_string(),
+                    ));
+                }
+            }
+            Childrens::None => {}
+        }
+
+        match plan {
+            LogicalPlan {
+                operator: Operator::Filter(op),
+                childrens,
+                ..
+            } => {
+                let child = childrens.pop_only();
+                let (child, mut correlated_filters) =
+                    Self::prepare_correlated_exists_plan(child, left_schema)?;
+                let mut local_filters = Vec::new();
+                let mut predicates = Vec::new();
+                Self::split_conjuncts(op.predicate, &mut predicates);
+                for predicate in predicates {
+                    if Self::expr_has_correlated_refs(&predicate, left_schema) {
+                        correlated_filters.push(predicate);
+                    } else {
+                        local_filters.push(predicate);
+                    }
+                }
+                let plan = if let Some(predicate) = Self::combine_conjuncts(local_filters) {
+                    FilterOperator::build(predicate, child, op.having)
+                } else {
+                    child
+                };
+                Ok((plan, correlated_filters))
+            }
+            LogicalPlan {
+                operator: Operator::Project(_),
+                childrens,
+                ..
+            }
+            | LogicalPlan {
+                operator: Operator::Sort(_),
+                childrens,
+                ..
+            }
+            | LogicalPlan {
+                operator: Operator::Limit(_),
+                childrens,
+                ..
+            }
+            | LogicalPlan {
+                operator: Operator::TopK(_),
+                childrens,
+                ..
+            } => Self::prepare_correlated_exists_plan(childrens.pop_only(), left_schema),
+            plan => {
+                if Self::plan_has_correlated_refs(&plan, left_schema) {
+                    Err(DatabaseError::UnsupportedStmt(
+                        "correlated EXISTS/NOT EXISTS only supports filter-based subqueries"
+                            .to_string(),
+                    ))
+                } else {
+                    Ok((plan, vec![]))
+                }
+            }
+        }
     }
 
     fn bind_having(
