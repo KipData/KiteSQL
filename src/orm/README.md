@@ -149,7 +149,7 @@ from one ORM model table.
 The query flow is:
 
 - start with `from::<M>()`
-- optionally add filters, grouping, ordering, and limits
+- optionally add `distinct`, filters, grouping, ordering, and limits
 - either fetch full `M` rows, or switch into a projection with `project::<P>()`,
   `project_value(...)`, or `project_tuple(...)`
 
@@ -210,6 +210,7 @@ methods remain available after calling `project::<P>()`, `project_value(...)`,
 or `project_tuple(...)`:
 
 - `filter(expr)`
+- `distinct()`
 - `and(left, right)`
 - `or(left, right)`
 - `not(expr)`

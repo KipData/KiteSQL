@@ -854,6 +854,31 @@ mod test {
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(repeated_categories, vec!["alpha"]);
 
+        let distinct_categories = database
+            .from::<EventLog>()
+            .distinct()
+            .project_value(EventLog::category())
+            .asc(EventLog::category())
+            .fetch::<String>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(distinct_categories, vec!["alpha", "beta"]);
+
+        let distinct_category_count = database
+            .from::<EventLog>()
+            .distinct()
+            .project_value(EventLog::category())
+            .count()?;
+        assert_eq!(distinct_category_count, 2);
+
+        let distinct_limited_count = database
+            .from::<EventLog>()
+            .distinct()
+            .project_value(EventLog::category())
+            .asc(EventLog::category())
+            .limit(1)
+            .count()?;
+        assert_eq!(distinct_limited_count, 1);
+
         let grouped_count = database
             .from::<EventLog>()
             .project_value(EventLog::category())

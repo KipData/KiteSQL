@@ -16,8 +16,8 @@ use sqlparser::ast::{
     AlterColumnOperation, AlterTable, AlterTableOperation, Analyze, Assignment, AssignmentTarget,
     BinaryOperator as SqlBinaryOperator, CaseWhen, CastKind, CharLengthUnits, ColumnDef,
     ColumnOption, ColumnOptionDef, CreateIndex, CreateTable, DataType, Delete, Expr, FromTable,
-    Function, FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr,
-    HiveDistributionStyle, Ident, IndexColumn, Insert, KeyOrIndexDisplay, LimitClause,
+    Distinct, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments,
+    GroupByExpr, HiveDistributionStyle, Ident, IndexColumn, Insert, KeyOrIndexDisplay, LimitClause,
     NullsDistinctOption, ObjectName, ObjectType, Offset, OffsetRows, OrderBy, OrderByExpr,
     OrderByKind, OrderByOptions, PrimaryKeyConstraint, Query, Select, SelectFlavor, SelectItem,
     SetExpr, TableFactor, TableObject, TableWithJoins, TimezoneInfo, UniqueConstraint, Update,
@@ -1044,6 +1044,7 @@ pub struct StructProjection<T> {
 
 struct BuilderState<Q: StatementSource, M: Model> {
     source: Q,
+    distinct: bool,
     filter: Option<QueryExpr>,
     group_bys: Vec<QueryValue>,
     having: Option<QueryExpr>,
@@ -1057,6 +1058,7 @@ impl<Q: StatementSource, M: Model> BuilderState<Q, M> {
     fn new(source: Q) -> Self {
         Self {
             source,
+            distinct: false,
             filter: None,
             group_bys: Vec::new(),
             having: None,
@@ -1084,6 +1086,11 @@ impl<Q: StatementSource, M: Model> BuilderState<Q, M> {
 
     fn push_group_by(mut self, expr: QueryValue) -> Self {
         self.group_bys.push(expr);
+        self
+    }
+
+    fn with_distinct(mut self) -> Self {
+        self.distinct = true;
         self
     }
 }
@@ -1242,6 +1249,20 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
     /// Replaces the current `WHERE` predicate.
     pub fn filter(self, expr: QueryExpr) -> Self {
         Self::from_inner(self.inner.filter(expr))
+    }
+
+    /// Applies `SELECT DISTINCT` to the current query.
+    ///
+    /// ```rust,ignore
+    /// let categories = database
+    ///     .from::<EventLog>()
+    ///     .distinct()
+    ///     .project_value(EventLog::category())
+    ///     .fetch::<String>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
+    pub fn distinct(self) -> Self {
+        Self::from_inner(self.inner.distinct())
     }
 
     /// Appends `left AND right` to the current filter state.
@@ -1468,6 +1489,13 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
         self
     }
 
+    fn distinct(self) -> Self {
+        Self {
+            state: self.state.with_distinct(),
+            projection: self.projection,
+        }
+    }
+
     fn and(self, left: QueryExpr, right: QueryExpr) -> Self {
         Self {
             state: self.state.push_filter(left.and(right), FilterMode::And),
@@ -1548,6 +1576,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
             state:
                 BuilderState {
                     source: _,
+                    distinct,
                     filter,
                     group_bys,
                     having,
@@ -1562,6 +1591,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
         select_query(
             M::table_name(),
             projection.into_select_items(),
+            distinct,
             filter,
             group_bys,
             having,
@@ -1576,6 +1606,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
             state:
                 BuilderState {
                     source,
+                    distinct,
                     filter,
                     group_bys,
                     having,
@@ -1590,6 +1621,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
         let statement = Statement::Query(Box::new(select_query(
             M::table_name(),
             projection.into_select_items(),
+            distinct,
             filter,
             group_bys,
             having,
@@ -1726,8 +1758,12 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
     }
 
     fn count(self) -> Result<usize, DatabaseError> {
-        let has_grouping = !self.state.group_bys.is_empty() || self.state.having.is_some();
-        if has_grouping {
+        let is_shape_sensitive = self.state.distinct
+            || !self.state.group_bys.is_empty()
+            || self.state.having.is_some()
+            || self.state.limit.is_some()
+            || self.state.offset.is_some();
+        if is_shape_sensitive {
             let mut iter = self.raw()?;
             let mut count = 0usize;
             while iter.next().transpose()?.is_some() {
@@ -1836,6 +1872,7 @@ fn select_projection(fields: &[OrmField]) -> Vec<SelectItem> {
 fn select_query(
     table_name: &str,
     projection: Vec<SelectItem>,
+    distinct: bool,
     filter: Option<QueryExpr>,
     group_bys: Vec<QueryValue>,
     having: Option<QueryExpr>,
@@ -1848,7 +1885,7 @@ fn select_query(
         body: Box::new(SetExpr::Select(Box::new(Select {
             select_token: AttachedToken::empty(),
             optimizer_hint: None,
-            distinct: None,
+            distinct: distinct.then_some(Distinct::Distinct),
             select_modifiers: None,
             top: None,
             top_before_distinct: false,
@@ -1973,6 +2010,7 @@ pub fn orm_select_statement(table_name: &str, fields: &[OrmField]) -> Statement 
     Statement::Query(Box::new(select_query(
         table_name,
         select_projection(fields),
+        false,
         None,
         vec![],
         None,
@@ -2262,6 +2300,7 @@ fn orm_count_statement(table_name: &str, filter: Option<QueryExpr>) -> Statement
             over: None,
             within_group: vec![],
         }))],
+        false,
         filter,
         vec![],
         None,
