@@ -478,6 +478,16 @@ mod test {
             amount: 300,
         })?;
 
+        database.create_table::<Wallet>()?;
+        database.insert(&Wallet {
+            id: 1,
+            balance: Decimal::new(5000, 2),
+        })?;
+        database.insert(&Wallet {
+            id: 3,
+            balance: Decimal::new(1250, 2),
+        })?;
+
         let adults = database
             .from::<User>()
             .and(User::age().gte(18), User::name().like("A%"))
@@ -976,6 +986,22 @@ mod test {
             ]
         );
 
+        let using_joined_rows = database
+            .from::<User>()
+            .inner_join::<Wallet>()
+            .using(User::id())
+            .project_tuple((User::name(), Wallet::balance()))
+            .asc(User::id())
+            .fetch::<(String, Decimal)>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            using_joined_rows,
+            vec![
+                ("Alice".to_string(), Decimal::new(5000, 2)),
+                ("A'lex".to_string(), Decimal::new(1250, 2)),
+            ]
+        );
+
         let left_joined_rows = database
             .from::<User>()
             .alias("u")
@@ -1000,6 +1026,7 @@ mod test {
         assert_eq!(in_tx.name, "Bob");
         tx.commit()?;
 
+        database.drop_table::<Wallet>()?;
         database.drop_table::<Order>()?;
         database.drop_table::<User>()?;
 

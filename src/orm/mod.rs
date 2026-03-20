@@ -126,7 +126,7 @@ struct QuerySource {
 struct JoinSpec {
     source: QuerySource,
     kind: JoinKind,
-    on: QueryExpr,
+    constraint: JoinConstraint,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,10 +155,9 @@ impl QuerySource {
 
 impl JoinSpec {
     fn into_ast(self) -> Join {
-        let constraint = JoinConstraint::On(self.on.into_expr());
         let join_operator = match self.kind {
-            JoinKind::Inner => JoinOperator::Inner(constraint),
-            JoinKind::Left => JoinOperator::Left(constraint),
+            JoinKind::Inner => JoinOperator::Inner(self.constraint),
+            JoinKind::Left => JoinOperator::Left(self.constraint),
         };
 
         Join {
@@ -1296,6 +1295,46 @@ pub trait IntoProjectedTuple {
     fn into_projected_values(self) -> Vec<ProjectedValue>;
 }
 
+#[doc(hidden)]
+pub trait IntoJoinColumns {
+    fn into_join_columns(self) -> Vec<ObjectName>;
+}
+
+impl<M, T> IntoJoinColumns for Field<M, T> {
+    fn into_join_columns(self) -> Vec<ObjectName> {
+        vec![object_name(self.column)]
+    }
+}
+
+macro_rules! impl_into_join_columns {
+    ($(($($name:ident),+)),+ $(,)?) => {
+        $(
+            impl<$($name),+> IntoJoinColumns for ($($name,)+)
+            where
+                $($name: IntoJoinColumns,)+
+            {
+                #[allow(non_snake_case)]
+                fn into_join_columns(self) -> Vec<ObjectName> {
+                    let ($($name,)+) = self;
+                    let mut columns = Vec::new();
+                    $(columns.extend($name.into_join_columns());)+
+                    columns
+                }
+            }
+        )+
+    };
+}
+
+impl_into_join_columns!(
+    (A, B),
+    (A, B, C),
+    (A, B, C, D),
+    (A, B, C, D, E),
+    (A, B, C, D, E, F),
+    (A, B, C, D, E, F, G),
+    (A, B, C, D, E, F, G, H),
+);
+
 impl<M: Model> ProjectionSpec<M> for ModelProjection {
     fn into_select_items(self, relation: &str) -> Vec<SelectItem> {
         select_projection(M::fields(), relation)
@@ -1390,7 +1429,30 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> JoinOnBuilder<Q, M, P> 
     /// # Ok::<(), kite_sql::errors::DatabaseError>(())
     /// ```
     pub fn on(self, expr: QueryExpr) -> FromBuilder<Q, M, P> {
-        FromBuilder::from_inner(self.inner.join(self.join_source, self.join_kind, expr))
+        FromBuilder::from_inner(self.inner.join(
+            self.join_source,
+            self.join_kind,
+            JoinConstraint::On(expr.into_expr()),
+        ))
+    }
+
+    /// Completes a pending join with a `USING (...)` column list.
+    ///
+    /// ```rust,ignore
+    /// let rows = database
+    ///     .from::<User>()
+    ///     .inner_join::<Wallet>()
+    ///     .using(User::id())
+    ///     .project_tuple((User::name(), Wallet::balance()))
+    ///     .fetch::<(String, rust_decimal::Decimal)>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
+    pub fn using<C: IntoJoinColumns>(self, columns: C) -> FromBuilder<Q, M, P> {
+        FromBuilder::from_inner(self.inner.join(
+            self.join_source,
+            self.join_kind,
+            JoinConstraint::Using(columns.into_join_columns()),
+        ))
     }
 }
 
@@ -1464,7 +1526,7 @@ impl<Q: StatementSource, M: Model> FromBuilder<Q, M, ModelProjection> {
 impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
     /// Starts an `INNER JOIN` against another model source.
     ///
-    /// Call `.on(...)` to supply the join condition. Use `.alias(...)` only
+    /// Call `.on(...)` or `.using(...)` to supply the join condition. Use `.alias(...)` only
     /// when explicit qualification is needed, such as self-joins.
     pub fn inner_join<J: Model>(self) -> JoinOnBuilder<Q, M, P> {
         JoinOnBuilder {
@@ -1476,7 +1538,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
 
     /// Starts a `LEFT JOIN` against another model source.
     ///
-    /// Call `.on(...)` to supply the join condition. Use `.alias(...)` only
+    /// Call `.on(...)` or `.using(...)` to supply the join condition. Use `.alias(...)` only
     /// when explicit qualification is needed, such as self-joins.
     pub fn left_join<J: Model>(self) -> JoinOnBuilder<Q, M, P> {
         JoinOnBuilder {
@@ -1724,12 +1786,17 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
         }
     }
 
-    fn join(self, join_source: QuerySource, join_kind: JoinKind, on: QueryExpr) -> Self {
+    fn join(
+        self,
+        join_source: QuerySource,
+        join_kind: JoinKind,
+        constraint: JoinConstraint,
+    ) -> Self {
         Self {
             state: self.state.push_join(JoinSpec {
                 source: join_source,
                 kind: join_kind,
-                on,
+                constraint,
             }),
             projection: self.projection,
         }

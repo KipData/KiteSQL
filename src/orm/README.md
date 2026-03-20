@@ -149,9 +149,9 @@ from one ORM model table.
 If you need an explicit relation alias, call `.alias("name")` on a source or
 pending join, and re-qualify fields with `Field::qualify("name")` where needed.
 
-For ordinary multi-table queries, `inner_join::<N>().on(...)` and
-`left_join::<N>().on(...)` are enough. Aliases are mainly useful for self-joins
-or when you want explicit qualification.
+For ordinary multi-table queries, `inner_join::<N>().on(...)`,
+`left_join::<N>().on(...)`, and `using(...)` cover most cases. Aliases are
+mainly useful for self-joins or when you want explicit qualification.
 
 The query flow is:
 
@@ -226,7 +226,9 @@ or `project_tuple(...)`:
 - `filter(expr)`
 - `alias(name)`
 - `inner_join::<N>().on(expr)`
+- `inner_join::<N>().using(columns)`
 - `left_join::<N>().on(expr)`
+- `left_join::<N>().using(columns)`
 - `distinct()`
 - `and(left, right)`
 - `or(left, right)`
