@@ -233,6 +233,36 @@ Set operations are available after the query output shape is fixed.
 Call `.all()` after `union(...)` or `except(...)` when you want multiset
 semantics instead of the default distinct result.
 
+```rust
+let user_ids = database
+    .from::<User>()
+    .project_value(User::id())
+    .union(database.from::<Order>().project_value(Order::user_id()))
+    .fetch::<i32>()?;
+
+let total_ids = database
+    .from::<User>()
+    .project_value(User::id())
+    .union(database.from::<Order>().project_value(Order::user_id()))
+    .all()
+    .count()?;
+
+let users_without_orders = database
+    .from::<User>()
+    .in_subquery(
+        User::id(),
+        database
+            .from::<User>()
+            .project_value(User::id())
+            .except(database.from::<Order>().project_value(Order::user_id())),
+    )
+    .fetch()?;
+# let _ = user_ids;
+# let _ = total_ids;
+# let _ = users_without_orders;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
 ### Shared builder methods
 
 `FromBuilder` supports the following methods, and the same chainable query

@@ -1594,6 +1594,15 @@ impl<Q: StatementSource, M: Model, P> FromBuilder<Q, M, P> {
     }
 
     /// Builds a `UNION` set query with another query of the same shape.
+    ///
+    /// ```rust,ignore
+    /// let ids = database
+    ///     .from::<User>()
+    ///     .project_value(User::id())
+    ///     .union(database.from::<Order>().project_value(Order::user_id()))
+    ///     .fetch::<i32>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn union<R>(self, rhs: R) -> SetQueryBuilder<Q, M, P>
     where
         Self: QueryOperand<Source = Q, Model = M, Projection = P>,
@@ -1603,6 +1612,15 @@ impl<Q: StatementSource, M: Model, P> FromBuilder<Q, M, P> {
     }
 
     /// Builds an `EXCEPT` set query with another query of the same shape.
+    ///
+    /// ```rust,ignore
+    /// let users_without_orders = database
+    ///     .from::<User>()
+    ///     .project_value(User::id())
+    ///     .except(database.from::<Order>().project_value(Order::user_id()))
+    ///     .fetch::<i32>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn except<R>(self, rhs: R) -> SetQueryBuilder<Q, M, P>
     where
         Self: QueryOperand<Source = Q, Model = M, Projection = P>,
@@ -1622,6 +1640,16 @@ impl<Q: StatementSource, M: Model, P> SetQueryBuilder<Q, M, P> {
     }
 
     /// Marks the preceding set operation as `ALL`.
+    ///
+    /// ```rust,ignore
+    /// let total = database
+    ///     .from::<User>()
+    ///     .project_value(User::id())
+    ///     .union(database.from::<Order>().project_value(Order::user_id()))
+    ///     .all()
+    ///     .count()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn all(mut self) -> Self {
         set_query_quantifier(&mut self.query, SetQuantifier::All);
         self
@@ -1634,12 +1662,30 @@ impl<Q: StatementSource, M: Model, P> SetQueryBuilder<Q, M, P> {
     }
 
     /// Returns whether the set query produces at least one row.
+    ///
+    /// ```rust,ignore
+    /// let has_ids = database
+    ///     .from::<User>()
+    ///     .project_value(User::id())
+    ///     .union(database.from::<Order>().project_value(Order::user_id()))
+    ///     .exists()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn exists(self) -> Result<bool, DatabaseError> {
         let mut iter = self.raw()?;
         Ok(iter.next().transpose()?.is_some())
     }
 
     /// Returns the row count of the set query result.
+    ///
+    /// ```rust,ignore
+    /// let total = database
+    ///     .from::<User>()
+    ///     .project_value(User::id())
+    ///     .union(database.from::<Order>().project_value(Order::user_id()))
+    ///     .count()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn count(self) -> Result<usize, DatabaseError> {
         let mut iter = self.raw()?;
         let mut count = 0usize;
