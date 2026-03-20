@@ -272,6 +272,9 @@ Field-level renaming is supported with `#[projection(rename = "...")]`, which
 maps a DTO field to a different source column while still aliasing the result
 back to the DTO field name.
 
+For join projections, you can also pin a field to a specific relation or alias
+with `#[projection(from = "...")]`.
+
 If you need expression-based outputs, prefer `project_value(...)` or
 `project_tuple(...)` and assign explicit names with `.alias(...)`.
 
@@ -284,6 +287,27 @@ let rows = database
     .on(User::id().eq(Order::user_id()))
     .project_tuple((User::name(), Order::amount()))
     .fetch::<(String, i32)>()?;
+# let _ = rows;
+# Ok::<(), kite_sql::errors::DatabaseError>(())
+```
+
+Join DTOs can still use `project::<P>()` when fields declare their source:
+
+```rust
+#[derive(Default, Debug, PartialEq, kite_sql::Projection)]
+struct UserOrderSummary {
+    #[projection(from = "users", rename = "user_name")]
+    display_name: String,
+    #[projection(from = "orders")]
+    amount: i32,
+}
+
+let rows = database
+    .from::<User>()
+    .inner_join::<Order>()
+    .on(User::id().eq(Order::user_id()))
+    .project::<UserOrderSummary>()
+    .fetch()?;
 # let _ = rows;
 # Ok::<(), kite_sql::errors::DatabaseError>(())
 ```

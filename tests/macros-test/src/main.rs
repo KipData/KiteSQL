@@ -141,6 +141,14 @@ mod test {
         age: Option<i32>,
     }
 
+    #[derive(Default, Debug, PartialEq, Projection)]
+    struct UserOrderSummary {
+        #[projection(from = "users", rename = "user_name")]
+        display_name: String,
+        #[projection(from = "orders")]
+        amount: i32,
+    }
+
     #[derive(Default, Debug, PartialEq, Model)]
     #[model(table = "migrating_users")]
     struct MigratingUserV1 {
@@ -941,6 +949,32 @@ mod test {
             .on(User::id().qualify("u").eq(Order::user_id().qualify("o")))
             .count()?;
         assert_eq!(joined_count, 3);
+
+        let joined_projection = database
+            .from::<User>()
+            .inner_join::<Order>()
+            .on(User::id().eq(Order::user_id()))
+            .project::<UserOrderSummary>()
+            .asc(Order::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            joined_projection,
+            vec![
+                UserOrderSummary {
+                    display_name: "Alice".to_string(),
+                    amount: 100,
+                },
+                UserOrderSummary {
+                    display_name: "Alice".to_string(),
+                    amount: 200,
+                },
+                UserOrderSummary {
+                    display_name: "Bob".to_string(),
+                    amount: 300,
+                },
+            ]
+        );
 
         let left_joined_rows = database
             .from::<User>()

@@ -18,6 +18,7 @@ struct ProjectionFieldOpts {
     ident: Option<Ident>,
     ty: Type,
     rename: Option<String>,
+    from: Option<String>,
 }
 
 pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
@@ -40,6 +41,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             ident,
             ty: field_ty,
             rename,
+            from,
         } = field;
         let field_name = ident.ok_or_else(|| {
             Error::new_spanned(struct_name, "Projection only supports named struct fields")
@@ -48,6 +50,12 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         let source_name = rename.clone().unwrap_or_else(|| field_name_string.clone());
         let source_name_lit = LitStr::new(&source_name, Span::call_site());
         let field_name_lit = LitStr::new(&field_name_string, Span::call_site());
+        let relation_expr = if let Some(source_relation) = from {
+            let relation_lit = LitStr::new(&source_relation, Span::call_site());
+            quote!(#relation_lit)
+        } else {
+            quote!(relation)
+        };
 
         generics
             .make_where_clause()
@@ -56,11 +64,11 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 
         projected_values.push(if rename.is_some() {
             quote! {
-                ::kite_sql::orm::projection_value(#source_name_lit, relation, #field_name_lit)
+                ::kite_sql::orm::projection_value(#source_name_lit, #relation_expr, #field_name_lit)
             }
         } else {
             quote! {
-                ::kite_sql::orm::projection_column(#source_name_lit, relation)
+                ::kite_sql::orm::projection_column(#source_name_lit, #relation_expr)
             }
         });
         assignments.push(quote! {
