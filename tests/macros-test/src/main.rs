@@ -1208,6 +1208,154 @@ mod test {
     }
 
     #[test]
+    fn test_orm_expression_and_set_query_helpers() -> Result<(), DatabaseError> {
+        let database = DataBaseBuilder::path(".").build_in_memory()?;
+
+        database.create_table::<User>()?;
+        database.insert(&User {
+            id: 1,
+            name: "Alice".to_string(),
+            age: Some(18),
+            cache: "".to_string(),
+        })?;
+        database.insert(&User {
+            id: 2,
+            name: "Bob".to_string(),
+            age: Some(30),
+            cache: "".to_string(),
+        })?;
+        database.insert(&User {
+            id: 3,
+            name: "Carol".to_string(),
+            age: None,
+            cache: "".to_string(),
+        })?;
+
+        database.create_table::<Order>()?;
+        database.insert(&Order {
+            id: 1,
+            user_id: 1,
+            amount: 100,
+        })?;
+        database.insert(&Order {
+            id: 2,
+            user_id: 1,
+            amount: 200,
+        })?;
+        database.insert(&Order {
+            id: 3,
+            user_id: 2,
+            amount: 300,
+        })?;
+
+        let exists_count = database
+            .from::<User>()
+            .filter(kite_sql::orm::QueryExpr::exists(
+                database
+                    .from::<Order>()
+                    .project_value(Order::id())
+                    .eq(Order::id(), 1),
+            ))
+            .count()?;
+        assert_eq!(exists_count, 3);
+
+        let not_exists_count = database
+            .from::<User>()
+            .filter(kite_sql::orm::QueryExpr::not_exists(
+                database
+                    .from::<Order>()
+                    .project_value(Order::id())
+                    .eq(Order::id(), 99),
+            ))
+            .count()?;
+        assert_eq!(not_exists_count, 3);
+
+        let blocked_by_not_exists = database
+            .from::<User>()
+            .filter(kite_sql::orm::QueryExpr::not_exists(
+                database
+                    .from::<Order>()
+                    .project_value(Order::id())
+                    .eq(Order::id(), 1),
+            ))
+            .count()?;
+        assert_eq!(blocked_by_not_exists, 0);
+
+        let max_id_user = database
+            .from::<User>()
+            .eq(
+                User::id(),
+                QueryValue::subquery(database.from::<User>().project_value(max(User::id()))),
+            )
+            .get()?
+            .unwrap();
+        assert_eq!(max_id_user.id, 3);
+
+        let union_user = database
+            .from::<User>()
+            .eq(User::id(), 2)
+            .union(database.from::<User>().eq(User::id(), 2))
+            .all()
+            .get()?
+            .unwrap();
+        assert_eq!(union_user.id, 2);
+
+        let union_value = database
+            .from::<User>()
+            .project_value(User::id())
+            .eq(User::id(), 2)
+            .union(
+                database
+                    .from::<Order>()
+                    .project_value(Order::user_id())
+                    .eq(Order::user_id(), 2),
+            )
+            .all()
+            .get::<i32>()?;
+        assert_eq!(union_value, Some(2));
+
+        let union_tuple = database
+            .from::<User>()
+            .eq(User::id(), 2)
+            .project_tuple((User::id(), User::name()))
+            .union(
+                database
+                    .from::<User>()
+                    .eq(User::id(), 2)
+                    .project_tuple((User::id(), User::name())),
+            )
+            .all()
+            .get::<(i32, String)>()?;
+        assert_eq!(union_tuple, Some((2, "Bob".to_string())));
+
+        let union_projection = database
+            .from::<User>()
+            .eq(User::id(), 2)
+            .project::<UserSummary>()
+            .union(
+                database
+                    .from::<User>()
+                    .eq(User::id(), 2)
+                    .project::<UserSummary>(),
+            )
+            .all()
+            .get()?;
+        assert_eq!(
+            union_projection,
+            Some(UserSummary {
+                id: 2,
+                display_name: "Bob".to_string(),
+                age: Some(30),
+            })
+        );
+
+        database.drop_table::<Order>()?;
+        database.drop_table::<User>()?;
+
+        Ok(())
+    }
+
+    #[test]
     fn test_orm_group_by_builder() -> Result<(), DatabaseError> {
         let database = DataBaseBuilder::path(".").build_in_memory()?;
 
