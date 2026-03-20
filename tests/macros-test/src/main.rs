@@ -1078,6 +1078,20 @@ mod test {
         union_ids.sort();
         assert_eq!(union_ids, vec![1, 2, 3]);
 
+        let union_count = database
+            .from::<User>()
+            .project_value(User::id())
+            .union(database.from::<Order>().project_value(Order::user_id()))
+            .count()?;
+        assert_eq!(union_count, 3);
+
+        let union_exists = database
+            .from::<User>()
+            .project_value(User::id())
+            .union(database.from::<Order>().project_value(Order::user_id()))
+            .exists()?;
+        assert!(union_exists);
+
         let mut union_all_ids = database
             .from::<User>()
             .project_value(User::id())
@@ -1088,6 +1102,14 @@ mod test {
         union_all_ids.sort();
         assert_eq!(union_all_ids, vec![1, 1, 1, 2, 2, 3]);
 
+        let union_all_count = database
+            .from::<User>()
+            .project_value(User::id())
+            .union(database.from::<Order>().project_value(Order::user_id()))
+            .all()
+            .count()?;
+        assert_eq!(union_all_count, 6);
+
         let except_ids = database
             .from::<Order>()
             .project_value(Order::user_id())
@@ -1095,6 +1117,13 @@ mod test {
             .fetch::<i32>()?
             .collect::<Result<Vec<_>, _>>()?;
         assert!(except_ids.is_empty());
+
+        let except_exists = database
+            .from::<Order>()
+            .project_value(Order::user_id())
+            .except(database.from::<User>().project_value(User::id()))
+            .exists()?;
+        assert!(!except_exists);
 
         let except_all_ids = database
             .from::<Order>()
@@ -1104,6 +1133,25 @@ mod test {
             .fetch::<i32>()?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(except_all_ids, vec![1]);
+
+        let users_without_orders = database
+            .from::<User>()
+            .in_subquery(
+                User::id(),
+                database
+                    .from::<User>()
+                    .project_value(User::id())
+                    .except(database.from::<Order>().project_value(Order::user_id())),
+            )
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            users_without_orders
+                .iter()
+                .map(|user| user.id)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
 
         let left_joined_rows = database
             .from::<User>()
