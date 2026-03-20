@@ -564,6 +564,14 @@ impl<M, T> Field<M, T> {
 /// It also supports the same comparison and predicate-style composition used by
 /// [`Field`], including helpers such as `eq`, `gt`, `like`, `in_list`, and
 /// `between`.
+///
+/// ```rust,ignore
+/// let adults = database
+///     .from::<User>()
+///     .filter(User::age().gt(18))
+///     .fetch()?;
+/// # Ok::<(), kite_sql::errors::DatabaseError>(())
+/// ```
 pub struct QueryValue {
     expr: Expr,
 }
@@ -740,6 +748,12 @@ impl QueryExpr {
     }
 
     /// Combines two predicates with `OR`.
+    ///
+    /// ```rust,ignore
+    /// let expr = User::name().like("A%").or(User::name().like("B%"));
+    /// let users = database.from::<User>().filter(expr).fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn or(self, rhs: QueryExpr) -> QueryExpr {
         QueryExpr::from_expr(Expr::BinaryOp {
             left: Box::new(nested_expr(self.into_expr())),
@@ -749,6 +763,12 @@ impl QueryExpr {
     }
 
     /// Negates a predicate with `NOT`.
+    ///
+    /// ```rust,ignore
+    /// let expr = User::name().like("A%").not();
+    /// let users = database.from::<User>().filter(expr).fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn not(self) -> QueryExpr {
         QueryExpr::from_expr(Expr::UnaryOp {
             op: sqlparser::ast::UnaryOperator::Not,
@@ -844,6 +864,12 @@ impl QueryValue {
     }
 
     /// Builds an aggregate function call such as `sum(expr)` or `count(expr)`.
+    ///
+    /// ```rust,ignore
+    /// let total = kite_sql::orm::QueryValue::aggregate("sum", [Order::amount()]);
+    /// let row = database.from::<Order>().project_value(total).get::<i32>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn aggregate<N, I, V>(name: N, args: I) -> Self
     where
         N: Into<String>,
@@ -854,6 +880,12 @@ impl QueryValue {
     }
 
     /// Builds an aggregate function call that uses `*`, such as `count(*)`.
+    ///
+    /// ```rust,ignore
+    /// let total = kite_sql::orm::QueryValue::aggregate_all("count").alias("total");
+    /// let row = database.from::<User>().project_value(total).get::<i32>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn aggregate_all(name: impl Into<String>) -> Self {
         Self::function_with_args(name, [FunctionArgExpr::Wildcard])
     }
@@ -913,6 +945,19 @@ impl QueryValue {
     }
 
     /// Builds a simple `CASE value WHEN ... THEN ... ELSE ... END` expression.
+    ///
+    /// ```rust,ignore
+    /// let label = kite_sql::orm::QueryValue::simple_case(
+    ///     User::status(),
+    ///     [("active", "enabled"), ("disabled", "blocked")],
+    ///     "other",
+    /// );
+    /// let rows = database
+    ///     .from::<User>()
+    ///     .project_tuple((User::id(), label.alias("status_label")))
+    ///     .fetch::<(i32, String)>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn simple_case<O, I, W, R, E>(operand: O, conditions: I, else_result: E) -> Self
     where
         O: Into<QueryValue>,
@@ -1049,6 +1094,12 @@ impl QueryValue {
     }
 
     /// Casts this expression using a SQL type string such as `"BIGINT"`.
+    ///
+    /// ```rust,ignore
+    /// let expr = User::id().cast("BIGINT")?;
+    /// let row = database.from::<User>().eq(expr, 1_i64).get()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn cast(self, data_type: &str) -> Result<QueryValue, DatabaseError> {
         ValueExpressionOps::cast_value(self, data_type)
     }
@@ -1083,11 +1134,27 @@ impl QueryValue {
     }
 
     /// Builds `expr IN (subquery)`.
+    ///
+    /// ```rust,ignore
+    /// let expr = User::id().in_subquery(
+    ///     database.from::<Order>().project_value(Order::user_id()),
+    /// );
+    /// let users = database.from::<User>().filter(expr).fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn in_subquery<S: SubquerySource>(self, subquery: S) -> QueryExpr {
         ValueExpressionOps::in_subquery_expr(self, subquery)
     }
 
     /// Builds `expr NOT IN (subquery)`.
+    ///
+    /// ```rust,ignore
+    /// let expr = User::id().not_in_subquery(
+    ///     database.from::<Order>().project_value(Order::user_id()),
+    /// );
+    /// let users = database.from::<User>().filter(expr).fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn not_in_subquery<S: SubquerySource>(self, subquery: S) -> QueryExpr {
         ValueExpressionOps::not_in_subquery_expr(self, subquery)
     }
@@ -1375,6 +1442,18 @@ pub trait ProjectionSpec<M: Model> {
 /// Declares a struct-backed ORM projection used by [`FromBuilder::project`].
 ///
 /// This trait is typically derived with `#[derive(Projection)]`.
+///
+/// ```rust,ignore
+/// #[derive(Default, kite_sql::Projection)]
+/// struct UserSummary {
+///     id: i32,
+///     #[projection(rename = "user_name")]
+///     display_name: String,
+/// }
+///
+/// let rows = database.from::<User>().project::<UserSummary>().fetch()?;
+/// # Ok::<(), kite_sql::errors::DatabaseError>(())
+/// ```
 pub trait Projection: for<'a> From<(&'a SchemaRef, Tuple)> {
     /// Returns the projected select-list items for model `M`.
     fn projected_values<M: Model>(relation: &str) -> Vec<ProjectedValue>;
@@ -2007,16 +2086,40 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
     }
 
     /// Appends `left AND right` to the current filter state.
+    ///
+    /// ```rust,ignore
+    /// let users = database
+    ///     .from::<User>()
+    ///     .and(User::age().gte(18), User::name().like("A%"))
+    ///     .fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn and(self, left: QueryExpr, right: QueryExpr) -> Self {
         Self::from_inner(self.inner.and(left, right))
     }
 
     /// Appends `left OR right` to the current filter state.
+    ///
+    /// ```rust,ignore
+    /// let users = database
+    ///     .from::<User>()
+    ///     .or(User::name().like("A%"), User::name().like("B%"))
+    ///     .fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn or(self, left: QueryExpr, right: QueryExpr) -> Self {
         Self::from_inner(self.inner.or(left, right))
     }
 
     /// Replaces the current filter with `NOT expr`.
+    ///
+    /// ```rust,ignore
+    /// let users = database
+    ///     .from::<User>()
+    ///     .not(User::name().like("A%"))
+    ///     .fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn not(self, expr: QueryExpr) -> Self {
         Self::from_inner(self.inner.not(expr))
     }
@@ -2040,6 +2143,19 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
     }
 
     /// Replaces the current filter with `NOT EXISTS (subquery)`.
+    ///
+    /// ```rust,ignore
+    /// let users = database
+    ///     .from::<User>()
+    ///     .where_not_exists(
+    ///         database
+    ///             .from::<Order>()
+    ///             .project_value(Order::id())
+    ///             .eq(Order::user_id(), User::id()),
+    ///     )
+    ///     .fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn where_not_exists<S: SubquerySource>(self, subquery: S) -> Self {
         Self::from_inner(self.inner.where_not_exists(subquery))
     }
@@ -2059,6 +2175,16 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
     }
 
     /// Sets the `HAVING` predicate.
+    ///
+    /// ```rust,ignore
+    /// let rows = database
+    ///     .from::<EventLog>()
+    ///     .project_tuple((EventLog::category(), kite_sql::orm::count(EventLog::id())))
+    ///     .group_by(EventLog::category())
+    ///     .having(kite_sql::orm::count(EventLog::id()).gt(10))
+    ///     .fetch::<(String, i32)>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn having(self, expr: QueryExpr) -> Self {
         Self::from_inner(self.inner.having(expr))
     }
@@ -2110,56 +2236,120 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
     }
 
     /// Appends `left = right` to the filter state.
+    ///
+    /// ```rust,ignore
+    /// let user = database.from::<User>().eq(User::id(), 1).get()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn eq<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
         Self::from_inner(self.inner.eq(left, right))
     }
 
     /// Appends `left <> right` to the filter state.
+    ///
+    /// ```rust,ignore
+    /// let users = database.from::<User>().ne(User::id(), 1).fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn ne<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
         Self::from_inner(self.inner.ne(left, right))
     }
 
     /// Appends `left > right` to the filter state.
+    ///
+    /// ```rust,ignore
+    /// let adults = database.from::<User>().gt(User::age(), 18).fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn gt<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
         Self::from_inner(self.inner.gt(left, right))
     }
 
     /// Appends `left >= right` to the filter state.
+    ///
+    /// ```rust,ignore
+    /// let adults = database.from::<User>().gte(User::age(), 18).fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn gte<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
         Self::from_inner(self.inner.gte(left, right))
     }
 
     /// Appends `left < right` to the filter state.
+    ///
+    /// ```rust,ignore
+    /// let younger = database.from::<User>().lt(User::age(), 18).fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn lt<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
         Self::from_inner(self.inner.lt(left, right))
     }
 
     /// Appends `left <= right` to the filter state.
+    ///
+    /// ```rust,ignore
+    /// let users = database.from::<User>().lte(User::id(), 10).fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn lte<L: Into<QueryValue>, R: Into<QueryValue>>(self, left: L, right: R) -> Self {
         Self::from_inner(self.inner.lte(left, right))
     }
 
     /// Appends `value IS NULL` to the filter state.
+    ///
+    /// ```rust,ignore
+    /// let users = database.from::<User>().is_null(User::age()).fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn is_null<V: Into<QueryValue>>(self, value: V) -> Self {
         Self::from_inner(self.inner.is_null(value))
     }
 
     /// Appends `value IS NOT NULL` to the filter state.
+    ///
+    /// ```rust,ignore
+    /// let users = database.from::<User>().is_not_null(User::age()).fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn is_not_null<V: Into<QueryValue>>(self, value: V) -> Self {
         Self::from_inner(self.inner.is_not_null(value))
     }
 
     /// Appends `value LIKE pattern` to the filter state.
+    ///
+    /// ```rust,ignore
+    /// let users = database
+    ///     .from::<User>()
+    ///     .like(User::name(), "A%")
+    ///     .fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn like<L: Into<QueryValue>, R: Into<QueryValue>>(self, value: L, pattern: R) -> Self {
         Self::from_inner(self.inner.like(value, pattern))
     }
 
     /// Appends `value NOT LIKE pattern` to the filter state.
+    ///
+    /// ```rust,ignore
+    /// let users = database
+    ///     .from::<User>()
+    ///     .not_like(User::name(), "A%")
+    ///     .fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn not_like<L: Into<QueryValue>, R: Into<QueryValue>>(self, value: L, pattern: R) -> Self {
         Self::from_inner(self.inner.not_like(value, pattern))
     }
 
     /// Appends `left IN (...)` to the filter state.
+    ///
+    /// ```rust,ignore
+    /// let users = database
+    ///     .from::<User>()
+    ///     .in_list(User::id(), [1, 2, 3])
+    ///     .fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn in_list<L, I, V>(self, left: L, values: I) -> Self
     where
         L: Into<QueryValue>,
@@ -2170,6 +2360,14 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
     }
 
     /// Appends `left NOT IN (...)` to the filter state.
+    ///
+    /// ```rust,ignore
+    /// let users = database
+    ///     .from::<User>()
+    ///     .not_in_list(User::id(), [1, 2, 3])
+    ///     .fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn not_in_list<L, I, V>(self, left: L, values: I) -> Self
     where
         L: Into<QueryValue>,
@@ -2180,6 +2378,14 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
     }
 
     /// Appends `expr BETWEEN low AND high` to the filter state.
+    ///
+    /// ```rust,ignore
+    /// let users = database
+    ///     .from::<User>()
+    ///     .between(User::age(), 18, 30)
+    ///     .fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn between<L, Low, High>(self, expr: L, low: Low, high: High) -> Self
     where
         L: Into<QueryValue>,
@@ -2190,6 +2396,14 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
     }
 
     /// Appends `expr NOT BETWEEN low AND high` to the filter state.
+    ///
+    /// ```rust,ignore
+    /// let users = database
+    ///     .from::<User>()
+    ///     .not_between(User::age(), 18, 30)
+    ///     .fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn not_between<L, Low, High>(self, expr: L, low: Low, high: High) -> Self
     where
         L: Into<QueryValue>,
@@ -2200,11 +2414,33 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
     }
 
     /// Appends `left IN (subquery)` to the filter state.
+    ///
+    /// ```rust,ignore
+    /// let users = database
+    ///     .from::<User>()
+    ///     .in_subquery(
+    ///         User::id(),
+    ///         database.from::<Order>().project_value(Order::user_id()),
+    ///     )
+    ///     .fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn in_subquery<L: Into<QueryValue>, S: SubquerySource>(self, left: L, subquery: S) -> Self {
         Self::from_inner(self.inner.in_subquery(left, subquery))
     }
 
     /// Appends `left NOT IN (subquery)` to the filter state.
+    ///
+    /// ```rust,ignore
+    /// let users = database
+    ///     .from::<User>()
+    ///     .not_in_subquery(
+    ///         User::id(),
+    ///         database.from::<Order>().project_value(Order::user_id()),
+    ///     )
+    ///     .fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn not_in_subquery<L: Into<QueryValue>, S: SubquerySource>(
         self,
         left: L,
@@ -2353,7 +2589,7 @@ impl<Q: StatementSource, M: Model> SetQueryBuilder<Q, M, ModelProjection> {
         Ok(self.raw()?.orm::<M>())
     }
 
-    /// Executes the set query and decodes one model row.
+    /// Executes the set query with `LIMIT 1` semantics and decodes one model row.
     ///
     /// ```rust,ignore
     /// let user = database
@@ -2363,7 +2599,7 @@ impl<Q: StatementSource, M: Model> SetQueryBuilder<Q, M, ModelProjection> {
     /// # Ok::<(), kite_sql::errors::DatabaseError>(())
     /// ```
     pub fn get(self) -> Result<Option<M>, DatabaseError> {
-        extract_optional_model(self.raw()?)
+        extract_optional_model(self.limit(1).raw()?)
     }
 }
 
@@ -2382,7 +2618,7 @@ impl<Q: StatementSource, M: Model> SetQueryBuilder<Q, M, ValueProjection> {
         Ok(ProjectValueIter::new(self.raw()?))
     }
 
-    /// Executes the set query and decodes one value.
+    /// Executes the set query with `LIMIT 1` semantics and decodes one value.
     ///
     /// ```rust,ignore
     /// let id = database
@@ -2394,7 +2630,7 @@ impl<Q: StatementSource, M: Model> SetQueryBuilder<Q, M, ValueProjection> {
     /// # Ok::<(), kite_sql::errors::DatabaseError>(())
     /// ```
     pub fn get<T: FromDataValue>(self) -> Result<Option<T>, DatabaseError> {
-        extract_optional_value(self.raw()?)
+        extract_optional_value(self.limit(1).raw()?)
     }
 }
 
@@ -2413,7 +2649,7 @@ impl<Q: StatementSource, M: Model> SetQueryBuilder<Q, M, TupleProjection> {
         Ok(ProjectTupleIter::new(self.raw()?))
     }
 
-    /// Executes the set query and decodes one tuple row.
+    /// Executes the set query with `LIMIT 1` semantics and decodes one tuple row.
     ///
     /// ```rust,ignore
     /// let row = database
@@ -2424,7 +2660,7 @@ impl<Q: StatementSource, M: Model> SetQueryBuilder<Q, M, TupleProjection> {
     /// # Ok::<(), kite_sql::errors::DatabaseError>(())
     /// ```
     pub fn get<T: FromQueryTuple>(self) -> Result<Option<T>, DatabaseError> {
-        extract_optional_tuple(self.raw()?)
+        extract_optional_tuple(self.limit(1).raw()?)
     }
 }
 
@@ -2450,7 +2686,7 @@ impl<Q: StatementSource, M: Model, T: Projection> SetQueryBuilder<Q, M, StructPr
         Ok(self.raw()?.orm::<T>())
     }
 
-    /// Executes the set query and decodes one projected row.
+    /// Executes the set query with `LIMIT 1` semantics and decodes one projected row.
     ///
     /// ```rust,ignore
     /// #[derive(Default, kite_sql::Projection)]
@@ -2468,7 +2704,7 @@ impl<Q: StatementSource, M: Model, T: Projection> SetQueryBuilder<Q, M, StructPr
     /// # Ok::<(), kite_sql::errors::DatabaseError>(())
     /// ```
     pub fn get(self) -> Result<Option<T>, DatabaseError> {
-        extract_optional_row(self.raw()?)
+        extract_optional_row(self.limit(1).raw()?)
     }
 }
 
@@ -3800,7 +4036,18 @@ pub trait Model: Sized + for<'a> From<(&'a SchemaRef, Tuple)> {
 /// Conversion trait from [`DataValue`] into Rust values for ORM mapping.
 ///
 /// This trait is mainly intended for framework internals and derive-generated
-/// code.
+/// code, but it also powers scalar projections such as [`FromBuilder::project_value`].
+///
+/// Built-in scalar types already implement this trait, so most users only need
+/// to pick the target type when decoding:
+///
+/// ```rust,ignore
+/// let ids = database
+///     .from::<User>()
+///     .project_value(User::id())
+///     .fetch::<i32>()?;
+/// # Ok::<(), kite_sql::errors::DatabaseError>(())
+/// ```
 pub trait FromDataValue: Sized {
     /// Returns the logical SQL type used for conversion, when one is required.
     fn logical_type() -> Option<LogicalType>;
@@ -3812,6 +4059,14 @@ pub trait FromDataValue: Sized {
 /// Conversion trait from a projected result tuple into a Rust value.
 ///
 /// This is implemented for tuples such as `(i32, String)` by the ORM itself.
+///
+/// ```rust,ignore
+/// let rows = database
+///     .from::<User>()
+///     .project_tuple((User::id(), User::name()))
+///     .fetch::<(i32, String)>()?;
+/// # Ok::<(), kite_sql::errors::DatabaseError>(())
+/// ```
 pub trait FromQueryTuple: Sized {
     /// Decodes one projected tuple into `Self`.
     fn from_query_tuple(tuple: Tuple) -> Result<Self, DatabaseError>;
@@ -3819,7 +4074,19 @@ pub trait FromQueryTuple: Sized {
 
 /// Typed adapter over a [`ResultIter`] that yields projected values instead of raw tuples.
 ///
-/// This is returned by `project_value(...).fetch::<T>()`.
+/// This is returned by [`FromBuilder::project_value`] followed by `fetch::<T>()`.
+///
+/// ```rust,ignore
+/// let mut ids = database
+///     .from::<User>()
+///     .project_value(User::id())
+///     .fetch::<i32>()?;
+///
+/// let first = ids.next().transpose()?;
+/// ids.done()?;
+/// # let _ = first;
+/// # Ok::<(), kite_sql::errors::DatabaseError>(())
+/// ```
 pub struct ProjectValueIter<I, T> {
     inner: I,
     _marker: PhantomData<T>,
@@ -3837,7 +4104,10 @@ where
         }
     }
 
-    /// Finishes the underlying raw iterator.
+    /// Finishes the underlying raw iterator explicitly.
+    ///
+    /// This is useful when you stop iterating early and want to release the
+    /// underlying result stream.
     pub fn done(self) -> Result<(), DatabaseError> {
         self.inner.done()
     }
@@ -3845,7 +4115,19 @@ where
 
 /// Typed adapter over a [`ResultIter`] that yields projected tuples.
 ///
-/// This is returned by `project_tuple(...).fetch::<T>()`.
+/// This is returned by [`FromBuilder::project_tuple`] followed by `fetch::<T>()`.
+///
+/// ```rust,ignore
+/// let mut rows = database
+///     .from::<User>()
+///     .project_tuple((User::id(), User::name()))
+///     .fetch::<(i32, String)>()?;
+///
+/// let first = rows.next().transpose()?;
+/// rows.done()?;
+/// # let _ = first;
+/// # Ok::<(), kite_sql::errors::DatabaseError>(())
+/// ```
 pub struct ProjectTupleIter<I, T> {
     inner: I,
     _marker: PhantomData<T>,
@@ -3863,7 +4145,10 @@ where
         }
     }
 
-    /// Finishes the underlying raw iterator.
+    /// Finishes the underlying raw iterator explicitly.
+    ///
+    /// This is useful when you stop iterating early and want to release the
+    /// underlying result stream.
     pub fn done(self) -> Result<(), DatabaseError> {
         self.inner.done()
     }
@@ -3902,7 +4187,8 @@ where
 /// Conversion trait from Rust values into [`DataValue`] for ORM parameters.
 ///
 /// This trait is mainly intended for framework internals and derive-generated
-/// code.
+/// code. It is what allows model fields, filter values, and primary keys to be
+/// passed into prepared ORM statements.
 pub trait ToDataValue {
     /// Converts the value into a [`DataValue`].
     fn to_data_value(&self) -> DataValue;
@@ -3913,6 +4199,9 @@ pub trait ToDataValue {
 /// `#[derive(Model)]` relies on this trait to build `CREATE TABLE` statements.
 /// Most built-in scalar types already implement it, and custom types can opt in
 /// by implementing this trait together with [`FromDataValue`] and [`ToDataValue`].
+///
+/// This trait only affects ORM-generated DDL. Query decoding still goes through
+/// [`FromDataValue`], and bound parameters still go through [`ToDataValue`].
 pub trait ModelColumnType {
     /// Returns the SQL type name used in ORM-generated DDL.
     fn ddl_type() -> String;
@@ -3926,12 +4215,16 @@ pub trait ModelColumnType {
 /// Marker trait for string-like model fields that support `#[model(varchar = N)]`
 /// and `#[model(char = N)]`.
 ///
-/// This is mainly used by the `Model` derive macro.
+/// This is mainly used by the `Model` derive macro and usually does not need to
+/// be implemented manually unless you are introducing a custom string wrapper
+/// type.
 pub trait StringType {}
 
 /// Marker trait for decimal-like model fields that support precision/scale DDL attributes.
 ///
-/// This is mainly used by the `Model` derive macro.
+/// This is mainly used by the `Model` derive macro and usually does not need to
+/// be implemented manually unless you are introducing a custom decimal wrapper
+/// type.
 pub trait DecimalType {}
 
 #[doc(hidden)]

@@ -109,9 +109,12 @@ The following ORM helpers are available on `Database`.
 - `drop_table::<M>()`
 - `drop_table_if_exists::<M>()`
 
-### DML
+### Maintenance
 
 - `analyze::<M>()`: refreshes optimizer statistics for the model table
+
+### DML
+
 - `insert::<M>(&model)`
 - `update::<M>(&model)`
 - `delete_by_id::<M>(&key)`
@@ -126,9 +129,12 @@ The following ORM helpers are available on `Database`.
 
 The following ORM helpers are available on `DBTransaction`.
 
-### DML
+### Maintenance
 
 - `analyze::<M>()`
+
+### DML
+
 - `insert::<M>(&model)`
 - `update::<M>(&model)`
 - `delete_by_id::<M>(&key)`
@@ -152,78 +158,33 @@ pending join, and re-qualify fields with `Field::qualify("name")` where needed.
 For ordinary multi-table queries, `inner_join::<N>().on(...)`,
 `left_join::<N>().on(...)`, `right_join::<N>().on(...)`,
 `full_join::<N>().on(...)`, `cross_join::<N>()`, and `using(...)` cover most
-cases. Aliases are mainly useful for self-joins or when you want explicit
-qualification.
+cases. Aliases are mainly useful for self-joins or when explicit qualification
+helps readability.
 
-The query flow is:
+The usual flow is:
 
 - start with `from::<M>()`
-- optionally add `distinct`, filters, grouping, ordering, and limits
-- either fetch full `M` rows, or switch into a projection with `project::<P>()`,
+- add filters, joins, grouping, ordering, and limits as needed
+- keep full-model output, or switch into `project::<P>()`,
   `project_value(...)`, or `project_tuple(...)`
-- once the output shape is fixed, you can build set queries with `union(...)`,
+- once the output shape is fixed, compose set queries with `union(...)`,
   `except(...)`, and optional `.all()`
 
-### Field expressions
+Most expression building starts from generated fields such as `User::id()` and
+`User::name()`. Field values support arithmetic, comparison, null checks,
+pattern matching, range checks, casts, aliases, and subquery predicates. For
+computed expressions, use `QueryValue` helpers such as `func`, `count`,
+`count_all`, `sum`, `avg`, `min`, `max`, `case_when`, and `case_value`.
 
-Generated field accessors return `Field<M, T>`. A field supports:
+Boolean composition lives on `QueryExpr` through `and`, `or`, `not`, `exists`,
+and `not_exists`.
 
-- `add(value)`
-- `sub(value)`
-- `mul(value)`
-- `div(value)`
-- `modulo(value)`
-- `neg()`
-- `eq(value)`
-- `ne(value)`
-- `gt(value)`
-- `gte(value)`
-- `lt(value)`
-- `lte(value)`
-- `is_null()`
-- `is_not_null()`
-- `like(pattern)`
-- `not_like(pattern)`
-- `in_list(values)`
-- `not_in_list(values)`
-- `between(low, high)`
-- `not_between(low, high)`
-- `cast("type")`
-- `cast_to(DataType)`
-- `alias(name)`
-- `qualify(relation)`
-- `in_subquery(query)`
-- `not_in_subquery(query)`
-
-### Function calls
-
-Use `func(name, args)` to build scalar function calls, including registered UDFs.
-Function calls can be used anywhere a `QueryValue` is accepted, such as filters and sorting.
-
-Built-in helpers are also available for common expression shapes:
-
-- `count(expr)`
-- `count_all()`
-- `sum(expr)`
-- `avg(expr)`
-- `min(expr)`
-- `max(expr)`
-- `case_when([(cond, value), ...], else_value)`
-- `case_value(expr, [(when, value), ...], else_value)`
-
-### Boolean composition
-
-`QueryExpr` supports:
-
-- `and(rhs)`
-- `or(rhs)`
-- `not()`
-- `exists(query)`
-- `not_exists(query)`
+Detailed method-by-method examples live in the rustdoc for `Field`,
+`QueryValue`, `QueryExpr`, `FromBuilder`, and `SetQueryBuilder`.
 
 ### Set queries
 
-Set operations are available after the query output shape is fixed.
+Set operations are available after the output shape is fixed:
 
 - model rows: `from::<User>().union(...)`
 - single values: `project_value(...).union(...)`
@@ -236,10 +197,6 @@ semantics instead of the default distinct result.
 After a set query is formed, you can still apply result-level methods such as
 `asc(...)`, `desc(...)`, `limit(...)`, `offset(...)`, `fetch()`, `get()`,
 `exists()`, and `count()`.
-
-For set-query ordering, field inputs are interpreted by their output column
-name, so `asc(User::id())` orders by the projected `id` column of the set
-result.
 
 ```rust
 let user_ids = database
@@ -256,78 +213,10 @@ let total_ids = database
     .asc(User::id())
     .limit(3)
     .count()?;
-
-let users_without_orders = database
-    .from::<User>()
-    .in_subquery(
-        User::id(),
-        database
-            .from::<User>()
-            .project_value(User::id())
-            .except(database.from::<Order>().project_value(Order::user_id())),
-    )
-    .fetch()?;
 # let _ = user_ids;
 # let _ = total_ids;
-# let _ = users_without_orders;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
-
-### Shared builder methods
-
-`FromBuilder` supports the following methods, and the same chainable query
-methods remain available after calling `project::<P>()`, `project_value(...)`,
-or `project_tuple(...)`:
-
-- `filter(expr)`
-- `alias(name)`
-- `inner_join::<N>().on(expr)`
-- `inner_join::<N>().using(columns)`
-- `left_join::<N>().on(expr)`
-- `left_join::<N>().using(columns)`
-- `right_join::<N>().on(expr)`
-- `right_join::<N>().using(columns)`
-- `full_join::<N>().on(expr)`
-- `full_join::<N>().using(columns)`
-- `cross_join::<N>()`
-- `distinct()`
-- `and(left, right)`
-- `or(left, right)`
-- `not(expr)`
-- `eq(left, right)`
-- `ne(left, right)`
-- `gt(left, right)`
-- `gte(left, right)`
-- `lt(left, right)`
-- `lte(left, right)`
-- `is_null(value)`
-- `is_not_null(value)`
-- `like(value, pattern)`
-- `not_like(value, pattern)`
-- `in_list(value, values)`
-- `not_in_list(value, values)`
-- `between(value, low, high)`
-- `not_between(value, low, high)`
-- `in_subquery(value, query)`
-- `not_in_subquery(value, query)`
-- `where_exists(query)`
-- `where_not_exists(query)`
-- `group_by(value)`
-- `having(expr)`
-- `asc(value)`
-- `desc(value)`
-- `limit(n)`
-- `offset(n)`
-- `raw()`
-- `fetch()`
-- `get()`
-- `exists()`
-- `count()`
-
-After `union(...)` or `except(...)`, the resulting set-query builder keeps the
-result-level subset of this API: `all()`, `asc(...)`, `desc(...)`, `limit(...)`,
-`offset(...)`, `raw()`, `fetch()`, `get()`, `exists()`, `count()`,
-`union(...)`, and `except(...)`.
 
 ### Struct projections
 
@@ -345,40 +234,6 @@ with `#[projection(from = "...")]`.
 
 If you need expression-based outputs, prefer `project_value(...)` or
 `project_tuple(...)` and assign explicit names with `.alias(...)`.
-
-### Join example
-
-```rust
-let rows = database
-    .from::<User>()
-    .inner_join::<Order>()
-    .on(User::id().eq(Order::user_id()))
-    .project_tuple((User::name(), Order::amount()))
-    .fetch::<(String, i32)>()?;
-# let _ = rows;
-# Ok::<(), kite_sql::errors::DatabaseError>(())
-```
-
-Join DTOs can still use `project::<P>()` when fields declare their source:
-
-```rust
-#[derive(Default, Debug, PartialEq, kite_sql::Projection)]
-struct UserOrderSummary {
-    #[projection(from = "users", rename = "user_name")]
-    display_name: String,
-    #[projection(from = "orders")]
-    amount: i32,
-}
-
-let rows = database
-    .from::<User>()
-    .inner_join::<Order>()
-    .on(User::id().eq(Order::user_id()))
-    .project::<UserOrderSummary>()
-    .fetch()?;
-# let _ = rows;
-# Ok::<(), kite_sql::errors::DatabaseError>(())
-```
 
 Use `project::<P>()` when:
 
@@ -400,7 +255,7 @@ Use `project_value(...)` when:
 
 - the query returns exactly one value per row
 - you want scalar decoding such as `i32`, `String`, or `Option<T>`
-- you are building scalar subqueries such as `IN (subquery)`
+- you are building scalar subqueries
 - the output is an expression or aggregate rather than a DTO field mapping
 
 ### Tuple queries
@@ -425,28 +280,23 @@ In practice:
 Result helpers:
 
 - `fetch()`: iterate over all matching rows
-- `get()`: fetch at most one row or value
+- `get()`: fetch at most one row or value with `LIMIT 1` semantics
 - `raw()`: access the underlying tuple/schema iterator directly
 
-Minimal examples:
+### Representative examples
+
+Join with tuple projection:
 
 ```rust
-let first_user = database.from::<User>().asc(User::id()).get()?;
-
-let first_id = database
+let rows = database
     .from::<User>()
-    .project_value(User::id())
-    .asc(User::id())
-    .get::<i32>()?;
-
-let raw_rows = database.from::<User>().limit(1).raw()?;
-# raw_rows.done()?;
-# let _ = first_user;
-# let _ = first_id;
-# Ok::<(), Box<dyn std::error::Error>>(())
+    .inner_join::<Order>()
+    .on(User::id().eq(Order::user_id()))
+    .project_tuple((User::name(), Order::amount()))
+    .fetch::<(String, i32)>()?;
+# let _ = rows;
+# Ok::<(), kite_sql::errors::DatabaseError>(())
 ```
-
-### Example
 
 Struct projection:
 
@@ -468,7 +318,7 @@ let summaries = database
 # Ok::<(), kite_sql::errors::DatabaseError>(())
 ```
 
-Single-value projection:
+Value projection with expression:
 
 ```rust
 use kite_sql::orm::{case_when, count_all};
@@ -488,6 +338,8 @@ let age_bucket = database
         .alias("age_bucket"),
     )
     .fetch::<String>()?;
+# let _ = total_users;
+# let _ = age_bucket;
 # Ok::<(), kite_sql::errors::DatabaseError>(())
 ```
 
@@ -505,35 +357,23 @@ let grouped_stats = database
     ))
     .group_by(EventLog::category())
     .fetch::<(String, i32, i32)>()?;
+# let _ = grouped_stats;
 # Ok::<(), kite_sql::errors::DatabaseError>(())
 ```
 
-Subqueries:
+Scalar subquery:
 
 ```rust
-use kite_sql::orm::{func, QueryValue};
-
-let normalized = database
+let users = database
     .from::<User>()
-    .eq(func("add_one", [QueryValue::from(User::id())]), 2)
-    .get()?;
-
-let uncorrelated = database
-    .from::<User>()
-    .where_exists(
-        database
-            .from::<User>()
-            .project_value(User::id())
-            .eq(User::id(), 1),
+    .in_subquery(
+        User::id(),
+        database.from::<Order>().project_value(Order::user_id()),
     )
-    .get()?;
+    .fetch()?;
+# let _ = users;
 # Ok::<(), kite_sql::errors::DatabaseError>(())
 ```
-
-For scalar subqueries such as `IN (subquery)` and `EXISTS (subquery)`, use
-`Database::from::<M>().project_value(...)` or
-`DBTransaction::from::<M>().project_value(...)` to build a single-column
-subquery directly when the binder expects one expression to be returned.
 
 ## Key types
 
@@ -550,6 +390,8 @@ You usually use it to build expressions:
 - `cast`, `cast_to`
 - `alias`
 - subquery predicates such as `in_subquery`
+
+See the rustdoc on `Field` for the full method surface and minimal examples.
 
 ### `QueryValue`
 
@@ -571,6 +413,8 @@ predicates when you need to keep composing expressions.
 It also supports arithmetic composition such as `add`, `sub`, `mul`, `div`,
 `modulo`, and unary `neg`.
 
+See the rustdoc on `QueryValue` for the full method surface and minimal examples.
+
 ### `QueryExpr`
 
 The boolean expression type used for filtering and `HAVING`.
@@ -583,6 +427,8 @@ Common helpers:
 - `exists(query)`
 - `not_exists(query)`
 
+See the rustdoc on `QueryExpr` for minimal examples.
+
 ### `FromBuilder<Q, M>`
 
 The main single-table ORM query builder returned by `from::<M>()`.
@@ -592,6 +438,16 @@ It starts in full-model mode and can later switch into:
 - `project::<P>()` for DTO structs
 - `project_value(...)` for scalar results
 - `project_tuple(...)` for tuple results
+
+See the rustdoc on `FromBuilder` and `SetQueryBuilder` for the full chainable API.
+
+### `SetQueryBuilder<Q, M>`
+
+The result-level builder produced by `union(...)` and `except(...)`.
+
+It keeps the projection shape of the queries you combine, and supports
+result-level operations such as `all()`, `asc(...)`, `desc(...)`, `limit(...)`,
+`offset(...)`, `fetch()`, `get()`, `exists()`, and `count()`.
 
 ## Key traits
 
