@@ -610,6 +610,15 @@ where
 }
 
 /// Builds `count(expr)`.
+///
+/// ```rust,ignore
+/// let grouped = database
+///     .from::<EventLog>()
+///     .project_tuple((EventLog::category(), kite_sql::orm::count(EventLog::id())))
+///     .group_by(EventLog::category())
+///     .fetch::<(String, i32)>()?;
+/// # Ok::<(), kite_sql::errors::DatabaseError>(())
+/// ```
 pub fn count<V: Into<QueryValue>>(value: V) -> QueryValue {
     QueryValue::aggregate("count", [value.into()])
 }
@@ -628,6 +637,14 @@ pub fn count_all() -> QueryValue {
 }
 
 /// Builds `sum(expr)`.
+///
+/// ```rust,ignore
+/// let totals = database
+///     .from::<Order>()
+///     .project_value(kite_sql::orm::sum(Order::amount()))
+///     .get::<i32>()?;
+/// # Ok::<(), kite_sql::errors::DatabaseError>(())
+/// ```
 pub fn sum<V: Into<QueryValue>>(value: V) -> QueryValue {
     QueryValue::aggregate("sum", [value.into()])
 }
@@ -667,6 +684,19 @@ where
 }
 
 /// Builds a simple `CASE value WHEN ... THEN ... ELSE ... END` expression.
+///
+/// ```rust,ignore
+/// let label = kite_sql::orm::case_value(
+///     User::age(),
+///     [(18, "adult"), (30, "senior")],
+///     "other",
+/// );
+/// let rows = database
+///     .from::<User>()
+///     .project_tuple((User::id(), label.alias("age_label")))
+///     .fetch::<(i32, String)>()?;
+/// # Ok::<(), kite_sql::errors::DatabaseError>(())
+/// ```
 pub fn case_value<O, I, W, R, E>(operand: O, conditions: I, else_result: E) -> QueryValue
 where
     O: Into<QueryValue>,
@@ -688,6 +718,12 @@ impl QueryExpr {
     }
 
     /// Combines two predicates with `AND`.
+    ///
+    /// ```rust,ignore
+    /// let expr = User::age().gte(18).and(User::name().like("A%"));
+    /// let users = database.from::<User>().filter(expr).fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn and(self, rhs: QueryExpr) -> QueryExpr {
         QueryExpr::from_expr(Expr::BinaryOp {
             left: Box::new(nested_expr(self.into_expr())),
@@ -730,6 +766,14 @@ impl QueryExpr {
     }
 
     /// Builds a `NOT EXISTS (subquery)` predicate.
+    ///
+    /// ```rust,ignore
+    /// let expr = kite_sql::orm::QueryExpr::not_exists(
+    ///     database.from::<Order>().project_value(Order::id()).eq(Order::user_id(), User::id()),
+    /// );
+    /// let users = database.from::<User>().filter(expr).fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn not_exists<S: SubquerySource>(subquery: S) -> QueryExpr {
         QueryExpr::from_expr(Expr::Exists {
             subquery: Box::new(subquery.into_subquery()),
@@ -808,6 +852,15 @@ impl QueryValue {
     }
 
     /// Assigns a select-list alias to this value expression.
+    ///
+    /// ```rust,ignore
+    /// let rows = database
+    ///     .from::<Order>()
+    ///     .project_value(kite_sql::orm::sum(Order::amount()).alias("total_amount"))
+    ///     .raw()?;
+    /// # rows.done()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn alias(self, alias: &str) -> ProjectedValue {
         ProjectedValue {
             item: SelectItem::ExprWithAlias {
@@ -818,6 +871,18 @@ impl QueryValue {
     }
 
     /// Builds a searched `CASE WHEN ... THEN ... ELSE ... END` expression.
+    ///
+    /// ```rust,ignore
+    /// let label = kite_sql::orm::QueryValue::searched_case(
+    ///     [(User::age().is_null(), "unknown"), (User::age().lt(18), "minor")],
+    ///     "adult",
+    /// );
+    /// let rows = database
+    ///     .from::<User>()
+    ///     .project_tuple((User::name(), label.alias("age_group")))
+    ///     .fetch::<(String, String)>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn searched_case<I, C, R, E>(conditions: I, else_result: E) -> Self
     where
         I: IntoIterator<Item = (C, R)>,
@@ -995,6 +1060,17 @@ impl QueryValue {
     }
 
     /// Wraps a query builder as a scalar subquery expression.
+    ///
+    /// ```rust,ignore
+    /// let max_amount = kite_sql::orm::QueryValue::subquery(
+    ///     database.from::<Order>().project_value(kite_sql::orm::max(Order::amount())),
+    /// );
+    /// let row = database
+    ///     .from::<Order>()
+    ///     .eq(Order::amount(), max_amount)
+    ///     .get()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn subquery<S: SubquerySource>(query: S) -> QueryValue {
         QueryValue::from_expr(Expr::Subquery(Box::new(query.into_subquery())))
     }
@@ -1405,6 +1481,15 @@ impl<Q: StatementSource, M: Model, P> FromBuilder<Q, M, P> {
     }
 
     /// Applies a relation alias to the current source.
+    ///
+    /// ```rust,ignore
+    /// let user = database
+    ///     .from::<User>()
+    ///     .alias("u")
+    ///     .eq(User::id().qualify("u"), 1)
+    ///     .get()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn alias(self, alias: impl Into<String>) -> Self {
         FromBuilder::from_inner(self.inner.with_alias(alias))
     }
@@ -1412,6 +1497,9 @@ impl<Q: StatementSource, M: Model, P> FromBuilder<Q, M, P> {
 
 impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> JoinOnBuilder<Q, M, P> {
     /// Applies a relation alias to the pending join source.
+    ///
+    /// This is mainly useful for self-joins or when you want explicit source
+    /// names in projected columns.
     pub fn alias(mut self, alias: impl Into<String>) -> Self {
         self.join_source = self.join_source.with_alias(alias);
         self
@@ -1549,6 +1637,14 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
     }
 
     /// Replaces the current `WHERE` predicate.
+    ///
+    /// ```rust,ignore
+    /// let adults = database
+    ///     .from::<User>()
+    ///     .filter(User::age().gte(18))
+    ///     .fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn filter(self, expr: QueryExpr) -> Self {
         Self::from_inner(self.inner.filter(expr))
     }
@@ -1583,6 +1679,19 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
     }
 
     /// Replaces the current filter with `EXISTS (subquery)`.
+    ///
+    /// ```rust,ignore
+    /// let users = database
+    ///     .from::<User>()
+    ///     .where_exists(
+    ///         database
+    ///             .from::<Order>()
+    ///             .project_value(Order::id())
+    ///             .eq(Order::user_id(), User::id()),
+    ///     )
+    ///     .fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn where_exists<S: SubquerySource>(self, subquery: S) -> Self {
         Self::from_inner(self.inner.where_exists(subquery))
     }
@@ -1593,6 +1702,15 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
     }
 
     /// Appends a `GROUP BY` expression.
+    ///
+    /// ```rust,ignore
+    /// let rows = database
+    ///     .from::<EventLog>()
+    ///     .project_tuple((EventLog::category(), kite_sql::orm::count(EventLog::id())))
+    ///     .group_by(EventLog::category())
+    ///     .fetch::<(String, i32)>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn group_by<V: Into<QueryValue>>(self, value: V) -> Self {
         Self::from_inner(self.inner.group_by(value))
     }
@@ -1603,6 +1721,14 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
     }
 
     /// Appends an ascending sort key.
+    ///
+    /// ```rust,ignore
+    /// let users = database
+    ///     .from::<User>()
+    ///     .asc(User::name())
+    ///     .fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn asc<V: Into<QueryValue>>(self, value: V) -> Self {
         Self::from_inner(self.inner.asc(value))
     }
@@ -1727,16 +1853,29 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
     }
 
     /// Executes the query and returns the raw result iterator.
+    ///
+    /// This is mainly useful when you want access to the raw tuple/schema pair
+    /// instead of ORM decoding.
     pub fn raw(self) -> Result<Q::Iter, DatabaseError> {
         self.inner.raw()
     }
 
     /// Returns whether the query produces at least one row.
+    ///
+    /// ```rust,ignore
+    /// let found = database.from::<User>().eq(User::id(), 1).exists()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn exists(self) -> Result<bool, DatabaseError> {
         self.inner.exists()
     }
 
     /// Returns the row count for the current query shape.
+    ///
+    /// ```rust,ignore
+    /// let adult_count = database.from::<User>().gte(User::age(), 18).count()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn count(self) -> Result<usize, DatabaseError> {
         self.inner.count()
     }
