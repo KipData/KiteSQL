@@ -487,6 +487,10 @@ mod test {
             id: 3,
             balance: Decimal::new(1250, 2),
         })?;
+        database.insert(&Wallet {
+            id: 4,
+            balance: Decimal::new(9999, 2),
+        })?;
 
         let adults = database
             .from::<User>()
@@ -999,6 +1003,69 @@ mod test {
             vec![
                 ("Alice".to_string(), Decimal::new(5000, 2)),
                 ("A'lex".to_string(), Decimal::new(1250, 2)),
+            ]
+        );
+
+        let mut right_joined_rows = database
+            .from::<User>()
+            .right_join::<Wallet>()
+            .on(User::id().eq(Wallet::id()))
+            .project_tuple((User::name(), Wallet::id()))
+            .fetch::<(Option<String>, i32)>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        right_joined_rows.sort_by_key(|(_, wallet_id)| *wallet_id);
+        assert_eq!(
+            right_joined_rows,
+            vec![
+                (Some("Alice".to_string()), 1),
+                (Some("A'lex".to_string()), 3),
+                (None, 4),
+            ]
+        );
+
+        let mut full_joined_rows = database
+            .from::<User>()
+            .full_join::<Wallet>()
+            .using(User::id())
+            .project_tuple((User::id(), Wallet::id()))
+            .fetch::<(Option<i32>, Option<i32>)>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        full_joined_rows.sort_by_key(|(user_id, wallet_id)| {
+            (user_id.unwrap_or(i32::MAX), wallet_id.unwrap_or(i32::MAX))
+        });
+        assert_eq!(
+            full_joined_rows,
+            vec![
+                (Some(1), Some(1)),
+                (Some(2), None),
+                (Some(3), Some(3)),
+                (None, Some(4))
+            ]
+        );
+
+        let cross_joined_count = database.from::<User>().cross_join::<Wallet>().count()?;
+        assert_eq!(cross_joined_count, 9);
+
+        let cross_joined_rows = database
+            .from::<User>()
+            .cross_join::<Wallet>()
+            .project_tuple((User::id(), Wallet::id()))
+            .asc(User::id())
+            .asc(Wallet::id())
+            .fetch::<(i32, i32)>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            cross_joined_rows,
+            vec![
+                (1, 1),
+                (1, 3),
+                (1, 4),
+                (2, 1),
+                (2, 3),
+                (2, 4),
+                (3, 1),
+                (3, 3),
+                (3, 4),
             ]
         );
 

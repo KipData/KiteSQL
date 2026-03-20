@@ -150,8 +150,10 @@ If you need an explicit relation alias, call `.alias("name")` on a source or
 pending join, and re-qualify fields with `Field::qualify("name")` where needed.
 
 For ordinary multi-table queries, `inner_join::<N>().on(...)`,
-`left_join::<N>().on(...)`, and `using(...)` cover most cases. Aliases are
-mainly useful for self-joins or when you want explicit qualification.
+`left_join::<N>().on(...)`, `right_join::<N>().on(...)`,
+`full_join::<N>().on(...)`, `cross_join::<N>()`, and `using(...)` cover most
+cases. Aliases are mainly useful for self-joins or when you want explicit
+qualification.
 
 The query flow is:
 
@@ -229,6 +231,11 @@ or `project_tuple(...)`:
 - `inner_join::<N>().using(columns)`
 - `left_join::<N>().on(expr)`
 - `left_join::<N>().using(columns)`
+- `right_join::<N>().on(expr)`
+- `right_join::<N>().using(columns)`
+- `full_join::<N>().on(expr)`
+- `full_join::<N>().using(columns)`
+- `cross_join::<N>()`
 - `distinct()`
 - `and(left, right)`
 - `or(left, right)`

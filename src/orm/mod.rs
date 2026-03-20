@@ -133,6 +133,9 @@ struct JoinSpec {
 enum JoinKind {
     Inner,
     Left,
+    Right,
+    Full,
+    Cross,
 }
 
 impl QuerySource {
@@ -158,6 +161,9 @@ impl JoinSpec {
         let join_operator = match self.kind {
             JoinKind::Inner => JoinOperator::Inner(self.constraint),
             JoinKind::Left => JoinOperator::Left(self.constraint),
+            JoinKind::Right => JoinOperator::Right(self.constraint),
+            JoinKind::Full => JoinOperator::FullOuter(self.constraint),
+            JoinKind::Cross => JoinOperator::CrossJoin(self.constraint),
         };
 
         Join {
@@ -1634,6 +1640,41 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
             join_source: QuerySource::model::<J>(),
             join_kind: JoinKind::Left,
         }
+    }
+
+    /// Starts a `RIGHT JOIN` against another model source.
+    ///
+    /// Call `.on(...)` or `.using(...)` to supply the join condition. Use `.alias(...)` only
+    /// when explicit qualification is needed, such as self-joins.
+    pub fn right_join<J: Model>(self) -> JoinOnBuilder<Q, M, P> {
+        JoinOnBuilder {
+            inner: self.inner,
+            join_source: QuerySource::model::<J>(),
+            join_kind: JoinKind::Right,
+        }
+    }
+
+    /// Starts a `FULL OUTER JOIN` against another model source.
+    ///
+    /// Call `.on(...)` or `.using(...)` to supply the join condition. Use `.alias(...)` only
+    /// when explicit qualification is needed, such as self-joins.
+    pub fn full_join<J: Model>(self) -> JoinOnBuilder<Q, M, P> {
+        JoinOnBuilder {
+            inner: self.inner,
+            join_source: QuerySource::model::<J>(),
+            join_kind: JoinKind::Full,
+        }
+    }
+
+    /// Starts a `CROSS JOIN` against another model source.
+    ///
+    /// `CROSS JOIN` does not take an `ON` or `USING` clause.
+    pub fn cross_join<J: Model>(self) -> Self {
+        Self::from_inner(self.inner.join(
+            QuerySource::model::<J>(),
+            JoinKind::Cross,
+            JoinConstraint::None,
+        ))
     }
 
     /// Replaces the current `WHERE` predicate.
