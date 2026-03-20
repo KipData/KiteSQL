@@ -17,11 +17,11 @@ use sqlparser::ast::{
     BinaryOperator as SqlBinaryOperator, CaseWhen, CastKind, CharLengthUnits, ColumnDef,
     ColumnOption, ColumnOptionDef, CreateIndex, CreateTable, DataType, Delete, Distinct, Expr,
     FromTable, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments,
-    GroupByExpr, HiveDistributionStyle, Ident, IndexColumn, Insert, KeyOrIndexDisplay, LimitClause,
-    NullsDistinctOption, ObjectName, ObjectType, Offset, OffsetRows, OrderBy, OrderByExpr,
-    OrderByKind, OrderByOptions, PrimaryKeyConstraint, Query, Select, SelectFlavor, SelectItem,
-    SetExpr, TableAlias, TableFactor, TableObject, TableWithJoins, TimezoneInfo, UniqueConstraint,
-    Update, Value, Values,
+    GroupByExpr, HiveDistributionStyle, Ident, IndexColumn, Insert, Join, JoinConstraint,
+    JoinOperator, KeyOrIndexDisplay, LimitClause, NullsDistinctOption, ObjectName, ObjectType,
+    Offset, OffsetRows, OrderBy, OrderByExpr, OrderByKind, OrderByOptions, PrimaryKeyConstraint,
+    Query, Select, SelectFlavor, SelectItem, SetExpr, TableAlias, TableFactor, TableObject,
+    TableWithJoins, TimezoneInfo, UniqueConstraint, Update, Value, Values,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -122,6 +122,19 @@ struct QuerySource {
     alias: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct JoinSpec {
+    source: QuerySource,
+    kind: JoinKind,
+    on: QueryExpr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JoinKind {
+    Inner,
+    Left,
+}
+
 impl QuerySource {
     fn model<M: Model>() -> Self {
         Self {
@@ -130,15 +143,29 @@ impl QuerySource {
         }
     }
 
-    fn aliased<M: Model>(alias: impl Into<String>) -> Self {
-        Self {
-            table_name: M::table_name().to_string(),
-            alias: Some(alias.into()),
-        }
-    }
-
     fn relation_name(&self) -> &str {
         self.alias.as_deref().unwrap_or(&self.table_name)
+    }
+
+    fn with_alias(mut self, alias: impl Into<String>) -> Self {
+        self.alias = Some(alias.into());
+        self
+    }
+}
+
+impl JoinSpec {
+    fn into_ast(self) -> Join {
+        let constraint = JoinConstraint::On(self.on.into_expr());
+        let join_operator = match self.kind {
+            JoinKind::Inner => JoinOperator::Inner(constraint),
+            JoinKind::Left => JoinOperator::Left(constraint),
+        };
+
+        Join {
+            relation: source_table_factor(&self.source),
+            global: false,
+            join_operator,
+        }
     }
 }
 
@@ -374,7 +401,8 @@ impl<M, T> Field<M, T> {
     ///
     /// ```rust,ignore
     /// let user = database
-    ///     .from_alias::<User>("u")
+    ///     .from::<User>()
+    ///     .alias("u")
     ///     .eq(User::id().qualify("u"), 1)
     ///     .get()?;
     /// # Ok::<(), kite_sql::errors::DatabaseError>(())
@@ -1164,6 +1192,13 @@ pub struct FromBuilder<Q: StatementSource, M: Model, P = ModelProjection> {
 }
 
 #[doc(hidden)]
+pub struct JoinOnBuilder<Q: StatementSource, M: Model, P> {
+    inner: QueryBuilder<Q, M, P>,
+    join_source: QuerySource,
+    join_kind: JoinKind,
+}
+
+#[doc(hidden)]
 pub struct ModelProjection;
 
 #[doc(hidden)]
@@ -1184,6 +1219,7 @@ pub struct StructProjection<T> {
 struct BuilderState<Q: StatementSource, M: Model> {
     source: Q,
     query_source: QuerySource,
+    joins: Vec<JoinSpec>,
     distinct: bool,
     filter: Option<QueryExpr>,
     group_bys: Vec<QueryValue>,
@@ -1199,6 +1235,7 @@ impl<Q: StatementSource, M: Model> BuilderState<Q, M> {
         Self {
             source,
             query_source,
+            joins: Vec::new(),
             distinct: false,
             filter: None,
             group_bys: Vec::new(),
@@ -1234,6 +1271,11 @@ impl<Q: StatementSource, M: Model> BuilderState<Q, M> {
         self.distinct = true;
         self
     }
+
+    fn push_join(mut self, join: JoinSpec) -> Self {
+        self.joins.push(join);
+        self
+    }
 }
 
 #[doc(hidden)]
@@ -1255,8 +1297,8 @@ pub trait IntoProjectedTuple {
 }
 
 impl<M: Model> ProjectionSpec<M> for ModelProjection {
-    fn into_select_items(self, _relation: &str) -> Vec<SelectItem> {
-        select_projection(M::fields())
+    fn into_select_items(self, relation: &str) -> Vec<SelectItem> {
+        select_projection(M::fields(), relation)
     }
 }
 
@@ -1298,13 +1340,6 @@ impl<Q: StatementSource, M: Model> QueryBuilder<Q, M, ModelProjection> {
             projection: ModelProjection,
         }
     }
-
-    fn aliased(source: Q, alias: impl Into<String>) -> Self {
-        Self {
-            state: BuilderState::new(source, QuerySource::aliased::<M>(alias)),
-            projection: ModelProjection,
-        }
-    }
 }
 
 impl<Q: StatementSource, M: Model, P> QueryBuilder<Q, M, P> {
@@ -1313,6 +1348,11 @@ impl<Q: StatementSource, M: Model, P> QueryBuilder<Q, M, P> {
             state: self.state,
             projection,
         }
+    }
+
+    fn with_alias(mut self, alias: impl Into<String>) -> Self {
+        self.state.query_source = self.state.query_source.with_alias(alias);
+        self
     }
 }
 
@@ -1323,6 +1363,34 @@ impl<Q: StatementSource, M: Model, P> FromBuilder<Q, M, P> {
 
     fn with_projection<P2>(self, projection: P2) -> FromBuilder<Q, M, P2> {
         FromBuilder::from_inner(self.inner.with_projection(projection))
+    }
+
+    /// Applies a relation alias to the current source.
+    pub fn alias(self, alias: impl Into<String>) -> Self {
+        FromBuilder::from_inner(self.inner.with_alias(alias))
+    }
+}
+
+impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> JoinOnBuilder<Q, M, P> {
+    /// Applies a relation alias to the pending join source.
+    pub fn alias(mut self, alias: impl Into<String>) -> Self {
+        self.join_source = self.join_source.with_alias(alias);
+        self
+    }
+
+    /// Completes a pending join with an `ON` condition.
+    ///
+    /// ```rust,ignore
+    /// let rows = database
+    ///     .from::<User>()
+    ///     .inner_join::<Order>()
+    ///     .on(User::id().eq(Order::user_id()))
+    ///     .project_tuple((User::name(), Order::amount()))
+    ///     .fetch::<(String, i32)>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
+    pub fn on(self, expr: QueryExpr) -> FromBuilder<Q, M, P> {
+        FromBuilder::from_inner(self.inner.join(self.join_source, self.join_kind, expr))
     }
 }
 
@@ -1394,6 +1462,30 @@ impl<Q: StatementSource, M: Model> FromBuilder<Q, M, ModelProjection> {
 }
 
 impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
+    /// Starts an `INNER JOIN` against another model source.
+    ///
+    /// Call `.on(...)` to supply the join condition. Use `.alias(...)` only
+    /// when explicit qualification is needed, such as self-joins.
+    pub fn inner_join<J: Model>(self) -> JoinOnBuilder<Q, M, P> {
+        JoinOnBuilder {
+            inner: self.inner,
+            join_source: QuerySource::model::<J>(),
+            join_kind: JoinKind::Inner,
+        }
+    }
+
+    /// Starts a `LEFT JOIN` against another model source.
+    ///
+    /// Call `.on(...)` to supply the join condition. Use `.alias(...)` only
+    /// when explicit qualification is needed, such as self-joins.
+    pub fn left_join<J: Model>(self) -> JoinOnBuilder<Q, M, P> {
+        JoinOnBuilder {
+            inner: self.inner,
+            join_source: QuerySource::model::<J>(),
+            join_kind: JoinKind::Left,
+        }
+    }
+
     /// Replaces the current `WHERE` predicate.
     pub fn filter(self, expr: QueryExpr) -> Self {
         Self::from_inner(self.inner.filter(expr))
@@ -1632,6 +1724,17 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
         }
     }
 
+    fn join(self, join_source: QuerySource, join_kind: JoinKind, on: QueryExpr) -> Self {
+        Self {
+            state: self.state.push_join(JoinSpec {
+                source: join_source,
+                kind: join_kind,
+                on,
+            }),
+            projection: self.projection,
+        }
+    }
+
     fn filter(mut self, expr: QueryExpr) -> Self {
         self.state.filter = Some(expr);
         self
@@ -1725,6 +1828,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
                 BuilderState {
                     source: _,
                     query_source,
+                    joins,
                     distinct,
                     filter,
                     group_bys,
@@ -1739,6 +1843,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
 
         select_query(
             &query_source,
+            joins,
             projection.into_select_items(query_source.relation_name()),
             distinct,
             filter,
@@ -1756,6 +1861,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
                 BuilderState {
                     source,
                     query_source,
+                    joins,
                     distinct,
                     filter,
                     group_bys,
@@ -1770,6 +1876,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
 
         let statement = Statement::Query(Box::new(select_query(
             &query_source,
+            joins,
             projection.into_select_items(query_source.relation_name()),
             distinct,
             filter,
@@ -1926,10 +2033,11 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
         let BuilderState {
             source,
             query_source,
+            joins,
             filter,
             ..
         } = self.state;
-        let statement = orm_count_statement(&query_source, filter);
+        let statement = orm_count_statement(&query_source, joins, filter);
         let mut iter = source.execute_statement(&statement, &[])?;
         let count = match iter.next().transpose()? {
             Some(tuple) => match tuple.values.first() {
@@ -2043,22 +2151,25 @@ fn table_with_joins(table_name: &str) -> TableWithJoins {
     }
 }
 
-fn source_table_with_joins(source: &QuerySource) -> TableWithJoins {
+fn source_table_with_joins(source: &QuerySource, joins: Vec<JoinSpec>) -> TableWithJoins {
     TableWithJoins {
         relation: source_table_factor(source),
-        joins: vec![],
+        joins: joins.into_iter().map(JoinSpec::into_ast).collect(),
     }
 }
 
-fn select_projection(fields: &[OrmField]) -> Vec<SelectItem> {
+fn select_projection(fields: &[OrmField], relation: &str) -> Vec<SelectItem> {
     fields
         .iter()
-        .map(|field| SelectItem::UnnamedExpr(Expr::Identifier(ident(field.column))))
+        .map(|field| {
+            SelectItem::UnnamedExpr(qualified_column_value(relation, field.column).into_expr())
+        })
         .collect()
 }
 
 fn select_query(
     source: &QuerySource,
+    joins: Vec<JoinSpec>,
     projection: Vec<SelectItem>,
     distinct: bool,
     filter: Option<QueryExpr>,
@@ -2080,7 +2191,7 @@ fn select_query(
             projection,
             exclude: None,
             into: None,
-            from: vec![source_table_with_joins(source)],
+            from: vec![source_table_with_joins(source, joins)],
             lateral_views: vec![],
             prewhere: None,
             selection: filter.map(QueryExpr::into_expr),
@@ -2200,7 +2311,8 @@ pub fn orm_select_statement(table_name: &str, fields: &[OrmField]) -> Statement 
             table_name: table_name.to_string(),
             alias: None,
         },
-        select_projection(fields),
+        vec![],
+        select_projection(fields, table_name),
         false,
         None,
         vec![],
@@ -2307,7 +2419,7 @@ pub fn orm_find_statement(
             select_modifiers: None,
             top: None,
             top_before_distinct: false,
-            projection: select_projection(fields),
+            projection: select_projection(fields, table_name),
             exclude: None,
             into: None,
             from: vec![table_with_joins(table_name)],
@@ -2474,9 +2586,14 @@ pub fn orm_analyze_statement(table_name: &str) -> Statement {
     })
 }
 
-fn orm_count_statement(source: &QuerySource, filter: Option<QueryExpr>) -> Statement {
+fn orm_count_statement(
+    source: &QuerySource,
+    joins: Vec<JoinSpec>,
+    filter: Option<QueryExpr>,
+) -> Statement {
     Statement::Query(Box::new(select_query(
         source,
+        joins,
         vec![SelectItem::UnnamedExpr(Expr::Function(Function {
             name: object_name("count"),
             uses_odbc_syntax: false,

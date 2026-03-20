@@ -124,6 +124,15 @@ mod test {
         score: i32,
     }
 
+    #[derive(Default, Debug, PartialEq, Model)]
+    #[model(table = "orders")]
+    struct Order {
+        #[model(primary_key)]
+        id: i32,
+        user_id: i32,
+        amount: i32,
+    }
+
     #[derive(Default, Debug, PartialEq, Projection)]
     struct UserSummary {
         id: i32,
@@ -442,6 +451,23 @@ mod test {
             name: "A'lex".to_string(),
             age: None,
             cache: "".to_string(),
+        })?;
+
+        database.create_table::<Order>()?;
+        database.insert(&Order {
+            id: 1,
+            user_id: 1,
+            amount: 100,
+        })?;
+        database.insert(&Order {
+            id: 2,
+            user_id: 1,
+            amount: 200,
+        })?;
+        database.insert(&Order {
+            id: 3,
+            user_id: 2,
+            amount: 300,
         })?;
 
         let adults = database
@@ -863,14 +889,16 @@ mod test {
         );
 
         let aliased_user = database
-            .from_alias::<User>("u")
+            .from::<User>()
+            .alias("u")
             .eq(User::id().qualify("u"), 2)
             .get()?
             .unwrap();
         assert_eq!(aliased_user.name, "Bob");
 
         let aliased_projection = database
-            .from_alias::<User>("u")
+            .from::<User>()
+            .alias("u")
             .project::<UserSummary>()
             .eq(User::id().qualify("u"), 2)
             .get()?;
@@ -883,11 +911,62 @@ mod test {
             })
         );
 
+        let joined_rows = database
+            .from::<User>()
+            .alias("u")
+            .inner_join::<Order>()
+            .alias("o")
+            .on(User::id().qualify("u").eq(Order::user_id().qualify("o")))
+            .project_tuple((
+                User::name().qualify("u").alias("user_name"),
+                Order::amount().qualify("o").alias("order_amount"),
+            ))
+            .asc(Order::id().qualify("o"))
+            .fetch::<(String, i32)>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            joined_rows,
+            vec![
+                ("Alice".to_string(), 100),
+                ("Alice".to_string(), 200),
+                ("Bob".to_string(), 300),
+            ]
+        );
+
+        let joined_count = database
+            .from::<User>()
+            .alias("u")
+            .inner_join::<Order>()
+            .alias("o")
+            .on(User::id().qualify("u").eq(Order::user_id().qualify("o")))
+            .count()?;
+        assert_eq!(joined_count, 3);
+
+        let left_joined_rows = database
+            .from::<User>()
+            .alias("u")
+            .left_join::<Order>()
+            .alias("o")
+            .on(User::id().qualify("u").eq(Order::user_id().qualify("o")))
+            .project_tuple((
+                User::id().qualify("u").alias("user_id"),
+                Order::amount().qualify("o").alias("order_amount"),
+            ))
+            .asc(User::id().qualify("u"))
+            .asc(Order::id().qualify("o"))
+            .fetch::<(i32, Option<i32>)>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            left_joined_rows,
+            vec![(1, Some(100)), (1, Some(200)), (2, Some(300)), (3, None)]
+        );
+
         let mut tx = database.new_transaction()?;
         let in_tx = tx.from::<User>().eq(User::id(), 2).get()?.unwrap();
         assert_eq!(in_tx.name, "Bob");
         tx.commit()?;
 
+        database.drop_table::<Order>()?;
         database.drop_table::<User>()?;
 
         Ok(())

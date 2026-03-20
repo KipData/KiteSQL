@@ -121,7 +121,6 @@ The following ORM helpers are available on `Database`.
 - `get::<M>(&key) -> Result<Option<M>, DatabaseError>`
 - `fetch::<M>() -> Result<OrmIter<...>, DatabaseError>`
 - `from::<M>() -> FromBuilder<...>`
-- `from_alias::<M>(alias) -> FromBuilder<...>`
 
 ## Transaction ORM APIs
 
@@ -139,7 +138,6 @@ The following ORM helpers are available on `DBTransaction`.
 - `get::<M>(&key) -> Result<Option<M>, DatabaseError>`
 - `fetch::<M>() -> Result<OrmIter<...>, DatabaseError>`
 - `from::<M>() -> FromBuilder<...>`
-- `from_alias::<M>(alias) -> FromBuilder<...>`
 
 `DBTransaction` does not currently expose the ORM DDL convenience methods.
 
@@ -148,8 +146,12 @@ The following ORM helpers are available on `DBTransaction`.
 `Database::from::<M>()` and `DBTransaction::from::<M>()` start a typed query
 from one ORM model table.
 
-If you need an explicit table alias, use `from_alias::<M>("alias")` and
-re-qualify fields with `Field::qualify("alias")` where needed.
+If you need an explicit relation alias, call `.alias("name")` on a source or
+pending join, and re-qualify fields with `Field::qualify("name")` where needed.
+
+For ordinary multi-table queries, `inner_join::<N>().on(...)` and
+`left_join::<N>().on(...)` are enough. Aliases are mainly useful for self-joins
+or when you want explicit qualification.
 
 The query flow is:
 
@@ -222,6 +224,9 @@ methods remain available after calling `project::<P>()`, `project_value(...)`,
 or `project_tuple(...)`:
 
 - `filter(expr)`
+- `alias(name)`
+- `inner_join::<N>().on(expr)`
+- `left_join::<N>().on(expr)`
 - `distinct()`
 - `and(left, right)`
 - `or(left, right)`
@@ -269,6 +274,19 @@ back to the DTO field name.
 
 If you need expression-based outputs, prefer `project_value(...)` or
 `project_tuple(...)` and assign explicit names with `.alias(...)`.
+
+### Join example
+
+```rust
+let rows = database
+    .from::<User>()
+    .inner_join::<Order>()
+    .on(User::id().eq(Order::user_id()))
+    .project_tuple((User::name(), Order::amount()))
+    .fetch::<(String, i32)>()?;
+# let _ = rows;
+# Ok::<(), kite_sql::errors::DatabaseError>(())
+```
 
 Use `project::<P>()` when:
 
