@@ -422,6 +422,30 @@ In practice:
 - `project_value(...)`: one expression, one decoded value
 - `project_tuple(...)`: multiple expressions, positional decoding
 
+Result helpers:
+
+- `fetch()`: iterate over all matching rows
+- `get()`: fetch at most one row or value
+- `raw()`: access the underlying tuple/schema iterator directly
+
+Minimal examples:
+
+```rust
+let first_user = database.from::<User>().asc(User::id()).get()?;
+
+let first_id = database
+    .from::<User>()
+    .project_value(User::id())
+    .asc(User::id())
+    .get::<i32>()?;
+
+let raw_rows = database.from::<User>().limit(1).raw()?;
+# raw_rows.done()?;
+# let _ = first_user;
+# let _ = first_id;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
 ### Example
 
 Struct projection:

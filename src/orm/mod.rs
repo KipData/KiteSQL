@@ -1656,30 +1656,82 @@ impl<Q: StatementSource, M: Model, P> SetQueryBuilder<Q, M, P> {
     }
 
     /// Appends an ascending sort key to the set query result.
+    ///
+    /// ```rust,ignore
+    /// let ids = database
+    ///     .from::<User>()
+    ///     .project_value(User::id())
+    ///     .union(database.from::<Order>().project_value(Order::user_id()))
+    ///     .asc(User::id())
+    ///     .fetch::<i32>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn asc<V: Into<QueryValue>>(mut self, value: V) -> Self {
         query_push_order(&mut self.query, set_query_order_value(value.into()).asc());
         self
     }
 
     /// Appends a descending sort key to the set query result.
+    ///
+    /// ```rust,ignore
+    /// let ids = database
+    ///     .from::<User>()
+    ///     .project_value(User::id())
+    ///     .union(database.from::<Order>().project_value(Order::user_id()))
+    ///     .desc(User::id())
+    ///     .fetch::<i32>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn desc<V: Into<QueryValue>>(mut self, value: V) -> Self {
         query_push_order(&mut self.query, set_query_order_value(value.into()).desc());
         self
     }
 
     /// Sets the set query `LIMIT`.
+    ///
+    /// ```rust,ignore
+    /// let top_two = database
+    ///     .from::<User>()
+    ///     .project_value(User::id())
+    ///     .union(database.from::<Order>().project_value(Order::user_id()))
+    ///     .asc(User::id())
+    ///     .limit(2)
+    ///     .fetch::<i32>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn limit(mut self, limit: usize) -> Self {
         query_set_limit(&mut self.query, limit);
         self
     }
 
     /// Sets the set query `OFFSET`.
+    ///
+    /// ```rust,ignore
+    /// let skipped = database
+    ///     .from::<User>()
+    ///     .project_value(User::id())
+    ///     .union(database.from::<Order>().project_value(Order::user_id()))
+    ///     .asc(User::id())
+    ///     .offset(1)
+    ///     .fetch::<i32>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn offset(mut self, offset: usize) -> Self {
         query_set_offset(&mut self.query, offset);
         self
     }
 
     /// Executes the set query and returns the raw result iterator.
+    ///
+    /// ```rust,ignore
+    /// let rows = database
+    ///     .from::<User>()
+    ///     .project_value(User::id())
+    ///     .union(database.from::<Order>().project_value(Order::user_id()))
+    ///     .raw()?;
+    /// # rows.done()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn raw(self) -> Result<Q::Iter, DatabaseError> {
         execute_query(self.source, self.query)
     }
@@ -1713,6 +1765,16 @@ impl<Q: StatementSource, M: Model, P> SetQueryBuilder<Q, M, P> {
     }
 
     /// Appends `UNION` to the current set query.
+    ///
+    /// ```rust,ignore
+    /// let ids = database
+    ///     .from::<User>()
+    ///     .project_value(User::id())
+    ///     .union(database.from::<Order>().project_value(Order::user_id()))
+    ///     .union(database.from::<Wallet>().project_value(Wallet::id()))
+    ///     .fetch::<i32>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn union<R>(self, rhs: R) -> Self
     where
         Self: QueryOperand<Source = Q, Model = M, Projection = P>,
@@ -1722,6 +1784,16 @@ impl<Q: StatementSource, M: Model, P> SetQueryBuilder<Q, M, P> {
     }
 
     /// Appends `EXCEPT` to the current set query.
+    ///
+    /// ```rust,ignore
+    /// let ids = database
+    ///     .from::<User>()
+    ///     .project_value(User::id())
+    ///     .union(database.from::<Order>().project_value(Order::user_id()))
+    ///     .except(database.from::<Wallet>().project_value(Wallet::id()))
+    ///     .fetch::<i32>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn except<R>(self, rhs: R) -> Self
     where
         Self: QueryOperand<Source = Q, Model = M, Projection = P>,
@@ -2005,16 +2077,34 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
     }
 
     /// Appends a descending sort key.
+    ///
+    /// ```rust,ignore
+    /// let users = database
+    ///     .from::<User>()
+    ///     .desc(User::id())
+    ///     .fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn desc<V: Into<QueryValue>>(self, value: V) -> Self {
         Self::from_inner(self.inner.desc(value))
     }
 
     /// Sets the query `LIMIT`.
+    ///
+    /// ```rust,ignore
+    /// let first_two = database.from::<User>().asc(User::id()).limit(2).fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn limit(self, limit: usize) -> Self {
         Self::from_inner(self.inner.limit(limit))
     }
 
     /// Sets the query `OFFSET`.
+    ///
+    /// ```rust,ignore
+    /// let later_users = database.from::<User>().asc(User::id()).offset(1).fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn offset(self, offset: usize) -> Self {
         Self::from_inner(self.inner.offset(offset))
     }
@@ -2127,6 +2217,12 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
     ///
     /// This is mainly useful when you want access to the raw tuple/schema pair
     /// instead of ORM decoding.
+    ///
+    /// ```rust,ignore
+    /// let rows = database.from::<User>().eq(User::id(), 1).raw()?;
+    /// # rows.done()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn raw(self) -> Result<Q::Iter, DatabaseError> {
         self.inner.raw()
     }
@@ -2154,11 +2250,25 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
 
 impl<Q: StatementSource, M: Model> FromBuilder<Q, M, ValueProjection> {
     /// Executes a single-value projection and decodes each row into `T`.
+    ///
+    /// ```rust,ignore
+    /// let ids = database.from::<User>().project_value(User::id()).fetch::<i32>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn fetch<T: FromDataValue>(self) -> Result<ProjectValueIter<Q::Iter, T>, DatabaseError> {
         Ok(ProjectValueIter::new(self.raw()?))
     }
 
     /// Executes a single-value projection and decodes one value.
+    ///
+    /// ```rust,ignore
+    /// let first_id = database
+    ///     .from::<User>()
+    ///     .project_value(User::id())
+    ///     .asc(User::id())
+    ///     .get::<i32>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn get<T: FromDataValue>(self) -> Result<Option<T>, DatabaseError> {
         extract_optional_value(self.limit(1).raw()?)
     }
@@ -2166,11 +2276,28 @@ impl<Q: StatementSource, M: Model> FromBuilder<Q, M, ValueProjection> {
 
 impl<Q: StatementSource, M: Model> FromBuilder<Q, M, TupleProjection> {
     /// Executes a tuple projection and decodes each row into `T`.
+    ///
+    /// ```rust,ignore
+    /// let rows = database
+    ///     .from::<User>()
+    ///     .project_tuple((User::id(), User::name()))
+    ///     .fetch::<(i32, String)>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn fetch<T: FromQueryTuple>(self) -> Result<ProjectTupleIter<Q::Iter, T>, DatabaseError> {
         Ok(ProjectTupleIter::new(self.raw()?))
     }
 
     /// Executes a tuple projection and decodes one row into `T`.
+    ///
+    /// ```rust,ignore
+    /// let row = database
+    ///     .from::<User>()
+    ///     .project_tuple((User::id(), User::name()))
+    ///     .asc(User::id())
+    ///     .get::<(i32, String)>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn get<T: FromQueryTuple>(self) -> Result<Option<T>, DatabaseError> {
         extract_optional_tuple(self.limit(1).raw()?)
     }
@@ -2178,11 +2305,35 @@ impl<Q: StatementSource, M: Model> FromBuilder<Q, M, TupleProjection> {
 
 impl<Q: StatementSource, M: Model, T: Projection> FromBuilder<Q, M, StructProjection<T>> {
     /// Executes a struct projection and decodes each row into `T`.
+    ///
+    /// ```rust,ignore
+    /// #[derive(Default, kite_sql::Projection)]
+    /// struct UserSummary {
+    ///     id: i32,
+    ///     #[projection(rename = "user_name")]
+    ///     display_name: String,
+    /// }
+    ///
+    /// let rows = database.from::<User>().project::<UserSummary>().fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn fetch(self) -> Result<OrmIter<Q::Iter, T>, DatabaseError> {
         Ok(self.raw()?.orm::<T>())
     }
 
     /// Executes a struct projection and decodes one row into `T`.
+    ///
+    /// ```rust,ignore
+    /// #[derive(Default, kite_sql::Projection)]
+    /// struct UserSummary {
+    ///     id: i32,
+    ///     #[projection(rename = "user_name")]
+    ///     display_name: String,
+    /// }
+    ///
+    /// let row = database.from::<User>().project::<UserSummary>().get()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn get(self) -> Result<Option<T>, DatabaseError> {
         extract_optional_row(self.limit(1).raw()?)
     }
@@ -2190,11 +2341,27 @@ impl<Q: StatementSource, M: Model, T: Projection> FromBuilder<Q, M, StructProjec
 
 impl<Q: StatementSource, M: Model> SetQueryBuilder<Q, M, ModelProjection> {
     /// Executes the set query and decodes rows into the model type.
+    ///
+    /// ```rust,ignore
+    /// let users = database
+    ///     .from::<User>()
+    ///     .union(database.from::<ArchivedUser>())
+    ///     .fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn fetch(self) -> Result<OrmIter<Q::Iter, M>, DatabaseError> {
         Ok(self.raw()?.orm::<M>())
     }
 
     /// Executes the set query and decodes one model row.
+    ///
+    /// ```rust,ignore
+    /// let user = database
+    ///     .from::<User>()
+    ///     .union(database.from::<ArchivedUser>())
+    ///     .get()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn get(self) -> Result<Option<M>, DatabaseError> {
         extract_optional_model(self.raw()?)
     }
@@ -2202,11 +2369,30 @@ impl<Q: StatementSource, M: Model> SetQueryBuilder<Q, M, ModelProjection> {
 
 impl<Q: StatementSource, M: Model> SetQueryBuilder<Q, M, ValueProjection> {
     /// Executes the set query and decodes each row into `T`.
+    ///
+    /// ```rust,ignore
+    /// let ids = database
+    ///     .from::<User>()
+    ///     .project_value(User::id())
+    ///     .union(database.from::<Order>().project_value(Order::user_id()))
+    ///     .fetch::<i32>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn fetch<T: FromDataValue>(self) -> Result<ProjectValueIter<Q::Iter, T>, DatabaseError> {
         Ok(ProjectValueIter::new(self.raw()?))
     }
 
     /// Executes the set query and decodes one value.
+    ///
+    /// ```rust,ignore
+    /// let id = database
+    ///     .from::<User>()
+    ///     .project_value(User::id())
+    ///     .union(database.from::<Order>().project_value(Order::user_id()))
+    ///     .asc(User::id())
+    ///     .get::<i32>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn get<T: FromDataValue>(self) -> Result<Option<T>, DatabaseError> {
         extract_optional_value(self.raw()?)
     }
@@ -2214,11 +2400,29 @@ impl<Q: StatementSource, M: Model> SetQueryBuilder<Q, M, ValueProjection> {
 
 impl<Q: StatementSource, M: Model> SetQueryBuilder<Q, M, TupleProjection> {
     /// Executes the set query and decodes each row into `T`.
+    ///
+    /// ```rust,ignore
+    /// let rows = database
+    ///     .from::<User>()
+    ///     .project_tuple((User::id(), User::name()))
+    ///     .union(database.from::<ArchivedUser>().project_tuple((ArchivedUser::id(), ArchivedUser::name())))
+    ///     .fetch::<(i32, String)>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn fetch<T: FromQueryTuple>(self) -> Result<ProjectTupleIter<Q::Iter, T>, DatabaseError> {
         Ok(ProjectTupleIter::new(self.raw()?))
     }
 
     /// Executes the set query and decodes one tuple row.
+    ///
+    /// ```rust,ignore
+    /// let row = database
+    ///     .from::<User>()
+    ///     .project_tuple((User::id(), User::name()))
+    ///     .union(database.from::<ArchivedUser>().project_tuple((ArchivedUser::id(), ArchivedUser::name())))
+    ///     .get::<(i32, String)>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn get<T: FromQueryTuple>(self) -> Result<Option<T>, DatabaseError> {
         extract_optional_tuple(self.raw()?)
     }
@@ -2226,11 +2430,43 @@ impl<Q: StatementSource, M: Model> SetQueryBuilder<Q, M, TupleProjection> {
 
 impl<Q: StatementSource, M: Model, T: Projection> SetQueryBuilder<Q, M, StructProjection<T>> {
     /// Executes the set query and decodes rows into the struct projection type.
+    ///
+    /// ```rust,ignore
+    /// #[derive(Default, kite_sql::Projection)]
+    /// struct UserSummary {
+    ///     id: i32,
+    ///     #[projection(rename = "user_name")]
+    ///     display_name: String,
+    /// }
+    ///
+    /// let rows = database
+    ///     .from::<User>()
+    ///     .project::<UserSummary>()
+    ///     .union(database.from::<ArchivedUser>().project::<UserSummary>())
+    ///     .fetch()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn fetch(self) -> Result<OrmIter<Q::Iter, T>, DatabaseError> {
         Ok(self.raw()?.orm::<T>())
     }
 
     /// Executes the set query and decodes one projected row.
+    ///
+    /// ```rust,ignore
+    /// #[derive(Default, kite_sql::Projection)]
+    /// struct UserSummary {
+    ///     id: i32,
+    ///     #[projection(rename = "user_name")]
+    ///     display_name: String,
+    /// }
+    ///
+    /// let row = database
+    ///     .from::<User>()
+    ///     .project::<UserSummary>()
+    ///     .union(database.from::<ArchivedUser>().project::<UserSummary>())
+    ///     .get()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn get(self) -> Result<Option<T>, DatabaseError> {
         extract_optional_row(self.raw()?)
     }
