@@ -877,7 +877,20 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         };
                         continue;
                     }
-                    SubQueryType::InSubQuery { negated, plan, .. } => {
+                    SubQueryType::InSubQuery {
+                        negated,
+                        plan,
+                        correlated,
+                    } => {
+                        if correlated {
+                            children = Self::bind_correlated_in_subquery(
+                                children,
+                                plan,
+                                negated,
+                                predicate.clone(),
+                            )?;
+                            continue;
+                        }
                         let join_ty = if negated {
                             JoinType::LeftAnti
                         } else {
@@ -997,6 +1010,80 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         );
 
         LJoinOperator::build(children, plan, JoinCondition::None, JoinType::Cross)
+    }
+
+    fn bind_correlated_in_subquery(
+        mut children: LogicalPlan,
+        plan: LogicalPlan,
+        negated: bool,
+        predicate: ScalarExpression,
+    ) -> Result<LogicalPlan, DatabaseError> {
+        let mut on_keys: Vec<(ScalarExpression, ScalarExpression)> = vec![];
+        let mut filter = vec![];
+        let join_ty = if negated {
+            JoinType::LeftAnti
+        } else {
+            JoinType::LeftSemi
+        };
+        let (mut plan, correlated_filters) =
+            Self::prepare_correlated_exists_plan(plan, children.output_schema())?;
+        let predicate = Self::rewrite_correlated_in_predicate(predicate);
+
+        Self::extract_join_keys(
+            predicate,
+            &mut on_keys,
+            &mut filter,
+            children.output_schema(),
+            plan.output_schema(),
+        )?;
+
+        for expr in correlated_filters {
+            Self::extract_join_keys(
+                expr,
+                &mut on_keys,
+                &mut filter,
+                children.output_schema(),
+                plan.output_schema(),
+            )?;
+        }
+
+        children = LJoinOperator::build(
+            children,
+            plan,
+            JoinCondition::On {
+                on: on_keys,
+                filter: Self::combine_conjuncts(filter),
+            },
+            join_ty,
+        );
+        Ok(children)
+    }
+
+    fn rewrite_correlated_in_predicate(predicate: ScalarExpression) -> ScalarExpression {
+        let strip_projection_alias = |expr: Box<ScalarExpression>| match *expr {
+            ScalarExpression::Alias {
+                expr,
+                alias: AliasType::Expr(_),
+            } => expr,
+            expr => Box::new(expr),
+        };
+
+        match predicate {
+            ScalarExpression::Binary {
+                op,
+                left_expr,
+                right_expr,
+                ty,
+                ..
+            } if op == BinaryOperator::Eq => ScalarExpression::Binary {
+                op,
+                left_expr: strip_projection_alias(left_expr),
+                right_expr: strip_projection_alias(right_expr),
+                evaluator: None,
+                ty,
+            },
+            predicate => predicate,
+        }
     }
 
     fn plan_has_correlated_refs(plan: &LogicalPlan, left_schema: &Schema) -> bool {

@@ -191,7 +191,10 @@ impl EvaluatorBind {
             Childrens::Only(child) => Self::_apply(child)?,
             Childrens::Twins { left, right } => {
                 Self::_apply(left)?;
-                if matches!(plan.operator, Operator::Join(_)) {
+                if matches!(
+                    plan.operator,
+                    Operator::Join(_) | Operator::Union(_) | Operator::Except(_)
+                ) {
                     Self::_apply(right)?;
                 }
             }

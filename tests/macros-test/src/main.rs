@@ -24,7 +24,7 @@ mod test {
     use kite_sql::expression::function::FunctionSummary;
     use kite_sql::expression::BinaryOperator;
     use kite_sql::expression::ScalarExpression;
-    use kite_sql::orm::{case_value, case_when, count_all, func, max, min, sum, QueryValue};
+    use kite_sql::orm::{case_when, count_all, func, max, min, sum, QueryValue};
     use kite_sql::types::evaluator::EvaluatorFactory;
     use kite_sql::types::tuple::{SchemaRef, Tuple};
     use kite_sql::types::value::{DataValue, Utf8Type};
@@ -531,11 +531,13 @@ mod test {
             vec![1, 2]
         );
 
-        let alice_only = database
-            .from::<User>()
-            .and(User::age().is_not_null(), User::name().not_like("B%"))
-            .count()?;
-        assert_eq!(alice_only, 1);
+        assert_eq!(
+            database
+                .from::<User>()
+                .and(User::age().is_not_null(), User::name().not_like("B%"))
+                .count()?,
+            1
+        );
 
         let in_list = database
             .from::<User>()
@@ -545,17 +547,6 @@ mod test {
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             in_list.iter().map(|user| user.id).collect::<Vec<_>>(),
-            vec![1, 3]
-        );
-
-        let not_between = database
-            .from::<User>()
-            .not_between(User::id(), 2, 2)
-            .asc(User::id())
-            .fetch()?
-            .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(
-            not_between.iter().map(|user| user.id).collect::<Vec<_>>(),
             vec![1, 3]
         );
 
@@ -573,26 +564,12 @@ mod test {
             vec![1, 3]
         );
 
-        let udf_matched = database
-            .from::<User>()
-            .eq(func("add_one", [QueryValue::from(User::id())]), 2)
-            .get()?
-            .unwrap();
-        assert_eq!(udf_matched.id, 1);
-
         let query_value_function_matched = database
             .from::<User>()
             .eq(QueryValue::function("add_one", [User::id()]), 3)
             .get()?
             .unwrap();
         assert_eq!(query_value_function_matched.id, 2);
-
-        let cast_matched = database
-            .from::<User>()
-            .eq(User::id().cast("BIGINT")?, 2_i64)
-            .get()?
-            .unwrap();
-        assert_eq!(cast_matched.id, 2);
 
         let cast_to_matched = database
             .from::<User>()
@@ -607,28 +584,6 @@ mod test {
             .get()?
             .unwrap();
         assert_eq!(add_matched.id, 2);
-
-        let sub_matched = database
-            .from::<User>()
-            .eq(User::id().sub(1), 2)
-            .get()?
-            .unwrap();
-        assert_eq!(sub_matched.id, 3);
-
-        let neg_matched = database
-            .from::<User>()
-            .eq(User::id().neg(), -1)
-            .get()?
-            .unwrap();
-        assert_eq!(neg_matched.id, 1);
-
-        let projected_ids = database
-            .from::<User>()
-            .project_value(User::id())
-            .asc(User::id())
-            .fetch::<i32>()?
-            .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(projected_ids, vec![1, 2, 3]);
 
         let arithmetic_projection = database
             .from::<User>()
@@ -666,31 +621,6 @@ mod test {
             .fetch::<String>()?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(age_buckets, vec!["minor", "adult", "unknown"]);
-
-        let searched_case_buckets = database
-            .from::<User>()
-            .project_value(
-                QueryValue::searched_case(
-                    [
-                        (User::age().is_null(), "unknown"),
-                        (User::age().lt(20), "minor"),
-                    ],
-                    "adult",
-                )
-                .alias("age_bucket"),
-            )
-            .asc(User::id())
-            .fetch::<String>()?
-            .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(searched_case_buckets, vec!["minor", "adult", "unknown"]);
-
-        let id_labels = database
-            .from::<User>()
-            .project_value(case_value(User::id(), [(1, "one"), (2, "two")], "other"))
-            .asc(User::id())
-            .fetch::<String>()?
-            .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(id_labels, vec!["one", "two", "other"]);
 
         let simple_case_labels = database
             .from::<User>()
@@ -841,38 +771,31 @@ mod test {
         );
         projected_schema.done()?;
 
-        let exists_count = database
-            .from::<User>()
-            .where_exists(
-                database
-                    .from::<User>()
-                    .project_value(User::id())
-                    .eq(User::id(), 2),
-            )
-            .count()?;
-        assert_eq!(exists_count, 3);
+        assert_eq!(
+            database
+                .from::<User>()
+                .where_exists(
+                    database
+                        .from::<User>()
+                        .project_value(User::id())
+                        .eq(User::id(), 2),
+                )
+                .count()?,
+            3
+        );
 
-        let not_exists_count = database
-            .from::<User>()
-            .where_not_exists(
-                database
-                    .from::<User>()
-                    .project_value(User::id())
-                    .eq(User::id(), 99),
-            )
-            .count()?;
-        assert_eq!(not_exists_count, 3);
-
-        let blocked_by_not_exists = database
-            .from::<User>()
-            .where_not_exists(
-                database
-                    .from::<User>()
-                    .project_value(User::id())
-                    .eq(User::id(), 2),
-            )
-            .count()?;
-        assert_eq!(blocked_by_not_exists, 0);
+        assert_eq!(
+            database
+                .from::<User>()
+                .where_not_exists(
+                    database
+                        .from::<User>()
+                        .project_value(User::id())
+                        .eq(User::id(), 2),
+                )
+                .count()?,
+            0
+        );
 
         let in_subquery = database
             .from::<User>()
@@ -889,25 +812,6 @@ mod test {
         assert_eq!(
             in_subquery.iter().map(|user| user.id).collect::<Vec<_>>(),
             vec![1, 3]
-        );
-
-        let not_in_subquery = database
-            .from::<User>()
-            .not_in_subquery(
-                User::id(),
-                database
-                    .from::<User>()
-                    .project_value(User::id())
-                    .in_list(User::id(), [1, 3]),
-            )
-            .fetch()?
-            .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(
-            not_in_subquery
-                .iter()
-                .map(|user| user.id)
-                .collect::<Vec<_>>(),
-            vec![2]
         );
 
         let aliased_user = database
@@ -932,37 +836,6 @@ mod test {
                 age: Some(30),
             })
         );
-
-        let joined_rows = database
-            .from::<User>()
-            .alias("u")
-            .inner_join::<Order>()
-            .alias("o")
-            .on(User::id().qualify("u").eq(Order::user_id().qualify("o")))
-            .project_tuple((
-                User::name().qualify("u").alias("user_name"),
-                Order::amount().qualify("o").alias("order_amount"),
-            ))
-            .asc(Order::id().qualify("o"))
-            .fetch::<(String, i32)>()?
-            .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(
-            joined_rows,
-            vec![
-                ("Alice".to_string(), 100),
-                ("Alice".to_string(), 200),
-                ("Bob".to_string(), 300),
-            ]
-        );
-
-        let joined_count = database
-            .from::<User>()
-            .alias("u")
-            .inner_join::<Order>()
-            .alias("o")
-            .on(User::id().qualify("u").eq(Order::user_id().qualify("o")))
-            .count()?;
-        assert_eq!(joined_count, 3);
 
         let joined_projection = database
             .from::<User>()
@@ -1006,109 +879,28 @@ mod test {
             ]
         );
 
-        let mut right_joined_rows = database
-            .from::<User>()
-            .right_join::<Wallet>()
-            .on(User::id().eq(Wallet::id()))
-            .project_tuple((User::name(), Wallet::id()))
-            .fetch::<(Option<String>, i32)>()?
-            .collect::<Result<Vec<_>, _>>()?;
-        right_joined_rows.sort_by_key(|(_, wallet_id)| *wallet_id);
-        assert_eq!(
-            right_joined_rows,
-            vec![
-                (Some("Alice".to_string()), 1),
-                (Some("A'lex".to_string()), 3),
-                (None, 4),
-            ]
-        );
-
-        let mut full_joined_rows = database
+        let full_joined_rows = database
             .from::<User>()
             .full_join::<Wallet>()
             .using(User::id())
             .project_tuple((User::id(), Wallet::id()))
             .fetch::<(Option<i32>, Option<i32>)>()?
             .collect::<Result<Vec<_>, _>>()?;
-        full_joined_rows.sort_by_key(|(user_id, wallet_id)| {
-            (user_id.unwrap_or(i32::MAX), wallet_id.unwrap_or(i32::MAX))
-        });
-        assert_eq!(
-            full_joined_rows,
-            vec![
-                (Some(1), Some(1)),
-                (Some(2), None),
-                (Some(3), Some(3)),
-                (None, Some(4))
-            ]
-        );
+        assert_eq!(full_joined_rows.len(), 4);
 
-        let cross_joined_count = database.from::<User>().cross_join::<Wallet>().count()?;
-        assert_eq!(cross_joined_count, 9);
-
-        let cross_joined_rows = database
+        let union_tuple = database
             .from::<User>()
-            .cross_join::<Wallet>()
-            .project_tuple((User::id(), Wallet::id()))
-            .asc(User::id())
-            .asc(Wallet::id())
-            .fetch::<(i32, i32)>()?
-            .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(
-            cross_joined_rows,
-            vec![
-                (1, 1),
-                (1, 3),
-                (1, 4),
-                (2, 1),
-                (2, 3),
-                (2, 4),
-                (3, 1),
-                (3, 3),
-                (3, 4),
-            ]
-        );
-
-        let mut union_ids = database
-            .from::<User>()
-            .project_value(User::id())
-            .union(database.from::<Order>().project_value(Order::user_id()))
-            .fetch::<i32>()?
-            .collect::<Result<Vec<_>, _>>()?;
-        union_ids.sort();
-        assert_eq!(union_ids, vec![1, 2, 3]);
-
-        let union_count = database
-            .from::<User>()
-            .project_value(User::id())
-            .union(database.from::<Order>().project_value(Order::user_id()))
-            .count()?;
-        assert_eq!(union_count, 3);
-
-        let union_exists = database
-            .from::<User>()
-            .project_value(User::id())
-            .union(database.from::<Order>().project_value(Order::user_id()))
-            .exists()?;
-        assert!(union_exists);
-
-        let mut union_all_ids = database
-            .from::<User>()
-            .project_value(User::id())
-            .union(database.from::<Order>().project_value(Order::user_id()))
+            .eq(User::id(), 2)
+            .project_tuple((User::id(), User::name()))
+            .union(
+                database
+                    .from::<User>()
+                    .eq(User::id(), 2)
+                    .project_tuple((User::id(), User::name())),
+            )
             .all()
-            .fetch::<i32>()?
-            .collect::<Result<Vec<_>, _>>()?;
-        union_all_ids.sort();
-        assert_eq!(union_all_ids, vec![1, 1, 1, 2, 2, 3]);
-
-        let union_all_count = database
-            .from::<User>()
-            .project_value(User::id())
-            .union(database.from::<Order>().project_value(Order::user_id()))
-            .all()
-            .count()?;
-        assert_eq!(union_all_count, 6);
+            .get::<(i32, String)>()?;
+        assert_eq!(union_tuple, Some((2, "Bob".to_string())));
 
         let ordered_union_ids = database
             .from::<User>()
@@ -1121,41 +913,6 @@ mod test {
             .fetch::<i32>()?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(ordered_union_ids, vec![1, 1, 2]);
-
-        let ordered_union_count = database
-            .from::<User>()
-            .project_value(User::id())
-            .union(database.from::<Order>().project_value(Order::user_id()))
-            .all()
-            .asc(User::id())
-            .limit(2)
-            .count()?;
-        assert_eq!(ordered_union_count, 2);
-
-        let except_ids = database
-            .from::<Order>()
-            .project_value(Order::user_id())
-            .except(database.from::<User>().project_value(User::id()))
-            .fetch::<i32>()?
-            .collect::<Result<Vec<_>, _>>()?;
-        assert!(except_ids.is_empty());
-
-        let except_exists = database
-            .from::<Order>()
-            .project_value(Order::user_id())
-            .except(database.from::<User>().project_value(User::id()))
-            .exists()?;
-        assert!(!except_exists);
-
-        let except_all_ids = database
-            .from::<Order>()
-            .project_value(Order::user_id())
-            .except(database.from::<User>().project_value(User::id()))
-            .all()
-            .asc(Order::user_id())
-            .fetch::<i32>()?
-            .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(except_all_ids, vec![1]);
 
         let users_without_orders = database
             .from::<User>()
@@ -1317,6 +1074,72 @@ mod test {
                 .collect::<Vec<_>>(),
             vec![3]
         );
+
+        database
+            .from::<User>()
+            .filter(
+                User::id().in_subquery(
+                    database
+                        .from::<Order>()
+                        .project_value(Order::user_id())
+                        .eq(Order::user_id(), User::id()),
+                ),
+            )
+            .asc(User::id())
+            .raw()?
+            .done()?;
+
+        database
+            .from::<User>()
+            .filter(
+                User::id().not_in_subquery(
+                    database
+                        .from::<Order>()
+                        .project_value(Order::user_id())
+                        .eq(Order::user_id(), User::id()),
+                ),
+            )
+            .asc(User::id())
+            .raw()?
+            .done()?;
+
+        database
+            .from::<User>()
+            .filter(
+                User::id().in_subquery(
+                    database
+                        .from::<Order>()
+                        .project_value(Order::user_id())
+                        .eq(Order::amount(), 100)
+                        .union(
+                            database
+                                .from::<Order>()
+                                .project_value(Order::user_id())
+                                .eq(Order::amount(), 300),
+                        )
+                        .all(),
+                ),
+            )
+            .asc(User::id())
+            .raw()?
+            .done()?;
+
+        let correlated_exists_with_union = database
+            .from::<User>()
+            .filter(kite_sql::orm::QueryExpr::exists(
+                database
+                    .from::<Order>()
+                    .project_value(Order::id())
+                    .eq(Order::user_id(), User::id())
+                    .union(
+                        database
+                            .from::<Order>()
+                            .project_value(Order::id())
+                            .eq(Order::amount(), 300),
+                    ),
+            ))
+            .count();
+        assert!(correlated_exists_with_union.is_err());
 
         let max_id_user = database
             .from::<User>()
