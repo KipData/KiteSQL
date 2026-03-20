@@ -20,8 +20,9 @@ use sqlparser::ast::{
     GroupByExpr, HiveDistributionStyle, Ident, IndexColumn, Insert, Join, JoinConstraint,
     JoinOperator, KeyOrIndexDisplay, LimitClause, NullsDistinctOption, ObjectName, ObjectType,
     Offset, OffsetRows, OrderBy, OrderByExpr, OrderByKind, OrderByOptions, PrimaryKeyConstraint,
-    Query, Select, SelectFlavor, SelectItem, SetExpr, TableAlias, TableFactor, TableObject,
-    TableWithJoins, TimezoneInfo, UniqueConstraint, Update, Value, Values,
+    Query, Select, SelectFlavor, SelectItem, SetExpr, SetOperator, SetQuantifier, TableAlias,
+    TableFactor, TableObject, TableWithJoins, TimezoneInfo, UniqueConstraint, Update, Value,
+    Values,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -1273,6 +1274,13 @@ pub struct FromBuilder<Q: StatementSource, M: Model, P = ModelProjection> {
 }
 
 #[doc(hidden)]
+pub struct SetQueryBuilder<Q: StatementSource, M: Model, P = ModelProjection> {
+    source: Q,
+    query: Query,
+    _marker: PhantomData<(M, P)>,
+}
+
+#[doc(hidden)]
 pub struct JoinOnBuilder<Q: StatementSource, M: Model, P> {
     inner: QueryBuilder<Q, M, P>,
     join_source: QuerySource,
@@ -1382,6 +1390,52 @@ pub trait IntoJoinColumns {
     fn into_join_columns(self) -> Vec<ObjectName>;
 }
 
+#[doc(hidden)]
+pub trait QueryOperand: private::Sealed + Sized {
+    type Source: StatementSource;
+    type Model: Model;
+    type Projection;
+    type Shape;
+
+    fn into_query_parts(self) -> (Self::Source, Query);
+
+    fn into_query(self) -> Query {
+        self.into_query_parts().1
+    }
+
+    fn union<R>(self, rhs: R) -> SetQueryBuilder<Self::Source, Self::Model, Self::Projection>
+    where
+        R: QueryOperand<Source = Self::Source, Projection = Self::Projection, Shape = Self::Shape>,
+    {
+        let (source, left_query) = self.into_query_parts();
+        SetQueryBuilder::new(
+            source,
+            set_operation_query(
+                left_query,
+                rhs.into_query(),
+                SetOperator::Union,
+                SetQuantifier::Distinct,
+            ),
+        )
+    }
+
+    fn except<R>(self, rhs: R) -> SetQueryBuilder<Self::Source, Self::Model, Self::Projection>
+    where
+        R: QueryOperand<Source = Self::Source, Projection = Self::Projection, Shape = Self::Shape>,
+    {
+        let (source, left_query) = self.into_query_parts();
+        SetQueryBuilder::new(
+            source,
+            set_operation_query(
+                left_query,
+                rhs.into_query(),
+                SetOperator::Except,
+                SetQuantifier::Distinct,
+            ),
+        )
+    }
+}
+
 impl<M, T> IntoJoinColumns for Field<M, T> {
     fn into_join_columns(self) -> Vec<ObjectName> {
         vec![object_name(self.column)]
@@ -1475,6 +1529,45 @@ impl<Q: StatementSource, M: Model, P> QueryBuilder<Q, M, P> {
         self.state.query_source = self.state.query_source.with_alias(alias);
         self
     }
+
+    fn into_query_parts(self) -> (Q, Query)
+    where
+        P: ProjectionSpec<M>,
+    {
+        let QueryBuilder {
+            state:
+                BuilderState {
+                    source,
+                    query_source,
+                    joins,
+                    distinct,
+                    filter,
+                    group_bys,
+                    having,
+                    order_bys,
+                    limit,
+                    offset,
+                    ..
+                },
+            projection,
+        } = self;
+
+        (
+            source,
+            select_query(
+                &query_source,
+                joins,
+                projection.into_select_items(query_source.relation_name()),
+                distinct,
+                filter,
+                group_bys,
+                having,
+                order_bys,
+                limit,
+                offset,
+            ),
+        )
+    }
 }
 
 impl<Q: StatementSource, M: Model, P> FromBuilder<Q, M, P> {
@@ -1498,6 +1591,81 @@ impl<Q: StatementSource, M: Model, P> FromBuilder<Q, M, P> {
     /// ```
     pub fn alias(self, alias: impl Into<String>) -> Self {
         FromBuilder::from_inner(self.inner.with_alias(alias))
+    }
+
+    /// Builds a `UNION` set query with another query of the same shape.
+    pub fn union<R>(self, rhs: R) -> SetQueryBuilder<Q, M, P>
+    where
+        Self: QueryOperand<Source = Q, Model = M, Projection = P>,
+        R: QueryOperand<Source = Q, Projection = P, Shape = <Self as QueryOperand>::Shape>,
+    {
+        QueryOperand::union(self, rhs)
+    }
+
+    /// Builds an `EXCEPT` set query with another query of the same shape.
+    pub fn except<R>(self, rhs: R) -> SetQueryBuilder<Q, M, P>
+    where
+        Self: QueryOperand<Source = Q, Model = M, Projection = P>,
+        R: QueryOperand<Source = Q, Projection = P, Shape = <Self as QueryOperand>::Shape>,
+    {
+        QueryOperand::except(self, rhs)
+    }
+}
+
+impl<Q: StatementSource, M: Model, P> SetQueryBuilder<Q, M, P> {
+    fn new(source: Q, query: Query) -> Self {
+        Self {
+            source,
+            query,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Marks the preceding set operation as `ALL`.
+    pub fn all(mut self) -> Self {
+        set_query_quantifier(&mut self.query, SetQuantifier::All);
+        self
+    }
+
+    /// Executes the set query and returns the raw result iterator.
+    pub fn raw(self) -> Result<Q::Iter, DatabaseError> {
+        self.source
+            .execute_statement(&Statement::Query(Box::new(self.query)), &[])
+    }
+
+    /// Returns whether the set query produces at least one row.
+    pub fn exists(self) -> Result<bool, DatabaseError> {
+        let mut iter = self.raw()?;
+        Ok(iter.next().transpose()?.is_some())
+    }
+
+    /// Returns the row count of the set query result.
+    pub fn count(self) -> Result<usize, DatabaseError> {
+        let mut iter = self.raw()?;
+        let mut count = 0usize;
+        while iter.next().transpose()?.is_some() {
+            count += 1;
+        }
+        iter.done()?;
+        Ok(count)
+    }
+
+    /// Appends `UNION` to the current set query.
+    pub fn union<R>(self, rhs: R) -> Self
+    where
+        Self: QueryOperand<Source = Q, Model = M, Projection = P>,
+        R: QueryOperand<Source = Q, Projection = P, Shape = <Self as QueryOperand>::Shape>,
+    {
+        QueryOperand::union(self, rhs)
+    }
+
+    /// Appends `EXCEPT` to the current set query.
+    pub fn except<R>(self, rhs: R) -> Self
+    where
+        Self: QueryOperand<Source = Q, Model = M, Projection = P>,
+        R: QueryOperand<Source = Q, Projection = P, Shape = <Self as QueryOperand>::Shape>,
+    {
+        QueryOperand::except(self, rhs)
     }
 }
 
@@ -1958,6 +2126,54 @@ impl<Q: StatementSource, M: Model, T: Projection> FromBuilder<Q, M, StructProjec
     }
 }
 
+impl<Q: StatementSource, M: Model> SetQueryBuilder<Q, M, ModelProjection> {
+    /// Executes the set query and decodes rows into the model type.
+    pub fn fetch(self) -> Result<OrmIter<Q::Iter, M>, DatabaseError> {
+        Ok(self.raw()?.orm::<M>())
+    }
+
+    /// Executes the set query and decodes one model row.
+    pub fn get(self) -> Result<Option<M>, DatabaseError> {
+        extract_optional_model(self.raw()?)
+    }
+}
+
+impl<Q: StatementSource, M: Model> SetQueryBuilder<Q, M, ValueProjection> {
+    /// Executes the set query and decodes each row into `T`.
+    pub fn fetch<T: FromDataValue>(self) -> Result<ProjectValueIter<Q::Iter, T>, DatabaseError> {
+        Ok(ProjectValueIter::new(self.raw()?))
+    }
+
+    /// Executes the set query and decodes one value.
+    pub fn get<T: FromDataValue>(self) -> Result<Option<T>, DatabaseError> {
+        extract_optional_value(self.raw()?)
+    }
+}
+
+impl<Q: StatementSource, M: Model> SetQueryBuilder<Q, M, TupleProjection> {
+    /// Executes the set query and decodes each row into `T`.
+    pub fn fetch<T: FromQueryTuple>(self) -> Result<ProjectTupleIter<Q::Iter, T>, DatabaseError> {
+        Ok(ProjectTupleIter::new(self.raw()?))
+    }
+
+    /// Executes the set query and decodes one tuple row.
+    pub fn get<T: FromQueryTuple>(self) -> Result<Option<T>, DatabaseError> {
+        extract_optional_tuple(self.raw()?)
+    }
+}
+
+impl<Q: StatementSource, M: Model, T: Projection> SetQueryBuilder<Q, M, StructProjection<T>> {
+    /// Executes the set query and decodes rows into the struct projection type.
+    pub fn fetch(self) -> Result<OrmIter<Q::Iter, T>, DatabaseError> {
+        Ok(self.raw()?.orm::<T>())
+    }
+
+    /// Executes the set query and decodes one projected row.
+    pub fn get(self) -> Result<Option<T>, DatabaseError> {
+        extract_optional_row(self.raw()?)
+    }
+}
+
 impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
     fn push_filter(self, expr: QueryExpr, mode: FilterMode) -> Self {
         Self {
@@ -2308,9 +2524,109 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
 
 impl<Q: StatementSource, M: Model, P> private::Sealed for FromBuilder<Q, M, P> {}
 
+impl<Q: StatementSource, M: Model, P> private::Sealed for SetQueryBuilder<Q, M, P> {}
+
 impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> SubquerySource for FromBuilder<Q, M, P> {
     fn into_subquery(self) -> Query {
         self.inner.build_query()
+    }
+}
+
+impl<Q: StatementSource, M: Model, P> SubquerySource for SetQueryBuilder<Q, M, P> {
+    fn into_subquery(self) -> Query {
+        self.query
+    }
+}
+
+impl<Q: StatementSource, M: Model> QueryOperand for FromBuilder<Q, M, ModelProjection> {
+    type Source = Q;
+    type Model = M;
+    type Projection = ModelProjection;
+    type Shape = M;
+
+    fn into_query_parts(self) -> (Self::Source, Query) {
+        self.inner.into_query_parts()
+    }
+}
+
+impl<Q: StatementSource, M: Model> QueryOperand for FromBuilder<Q, M, ValueProjection> {
+    type Source = Q;
+    type Model = M;
+    type Projection = ValueProjection;
+    type Shape = ValueProjection;
+
+    fn into_query_parts(self) -> (Self::Source, Query) {
+        self.inner.into_query_parts()
+    }
+}
+
+impl<Q: StatementSource, M: Model> QueryOperand for FromBuilder<Q, M, TupleProjection> {
+    type Source = Q;
+    type Model = M;
+    type Projection = TupleProjection;
+    type Shape = TupleProjection;
+
+    fn into_query_parts(self) -> (Self::Source, Query) {
+        self.inner.into_query_parts()
+    }
+}
+
+impl<Q: StatementSource, M: Model, T: Projection> QueryOperand
+    for FromBuilder<Q, M, StructProjection<T>>
+{
+    type Source = Q;
+    type Model = M;
+    type Projection = StructProjection<T>;
+    type Shape = T;
+
+    fn into_query_parts(self) -> (Self::Source, Query) {
+        self.inner.into_query_parts()
+    }
+}
+
+impl<Q: StatementSource, M: Model> QueryOperand for SetQueryBuilder<Q, M, ModelProjection> {
+    type Source = Q;
+    type Model = M;
+    type Projection = ModelProjection;
+    type Shape = M;
+
+    fn into_query_parts(self) -> (Self::Source, Query) {
+        (self.source, self.query)
+    }
+}
+
+impl<Q: StatementSource, M: Model> QueryOperand for SetQueryBuilder<Q, M, ValueProjection> {
+    type Source = Q;
+    type Model = M;
+    type Projection = ValueProjection;
+    type Shape = ValueProjection;
+
+    fn into_query_parts(self) -> (Self::Source, Query) {
+        (self.source, self.query)
+    }
+}
+
+impl<Q: StatementSource, M: Model> QueryOperand for SetQueryBuilder<Q, M, TupleProjection> {
+    type Source = Q;
+    type Model = M;
+    type Projection = TupleProjection;
+    type Shape = TupleProjection;
+
+    fn into_query_parts(self) -> (Self::Source, Query) {
+        (self.source, self.query)
+    }
+}
+
+impl<Q: StatementSource, M: Model, T: Projection> QueryOperand
+    for SetQueryBuilder<Q, M, StructProjection<T>>
+{
+    type Source = Q;
+    type Model = M;
+    type Projection = StructProjection<T>;
+    type Shape = T;
+
+    fn into_query_parts(self) -> (Self::Source, Query) {
+        (self.source, self.query)
     }
 }
 
@@ -2479,6 +2795,41 @@ fn select_query(
         settings: None,
         format_clause: None,
         pipe_operators: vec![],
+    }
+}
+
+fn set_operation_query(
+    left: Query,
+    right: Query,
+    op: SetOperator,
+    set_quantifier: SetQuantifier,
+) -> Query {
+    Query {
+        with: None,
+        body: Box::new(SetExpr::SetOperation {
+            op,
+            set_quantifier,
+            left: Box::new(SetExpr::Query(Box::new(left))),
+            right: Box::new(SetExpr::Query(Box::new(right))),
+        }),
+        order_by: None,
+        limit_clause: None,
+        fetch: None,
+        locks: vec![],
+        for_clause: None,
+        settings: None,
+        format_clause: None,
+        pipe_operators: vec![],
+    }
+}
+
+fn set_query_quantifier(query: &mut Query, set_quantifier: SetQuantifier) {
+    if let SetExpr::SetOperation {
+        set_quantifier: current,
+        ..
+    } = query.body.as_mut()
+    {
+        *current = set_quantifier;
     }
 }
 

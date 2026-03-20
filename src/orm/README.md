@@ -161,6 +161,8 @@ The query flow is:
 - optionally add `distinct`, filters, grouping, ordering, and limits
 - either fetch full `M` rows, or switch into a projection with `project::<P>()`,
   `project_value(...)`, or `project_tuple(...)`
+- once the output shape is fixed, you can build set queries with `union(...)`,
+  `except(...)`, and optional `.all()`
 
 ### Field expressions
 
@@ -218,6 +220,18 @@ Built-in helpers are also available for common expression shapes:
 - `not()`
 - `exists(query)`
 - `not_exists(query)`
+
+### Set queries
+
+Set operations are available after the query output shape is fixed.
+
+- model rows: `from::<User>().union(...)`
+- single values: `project_value(...).union(...)`
+- tuples: `project_tuple(...).except(...)`
+- struct projections: `project::<P>().union(...)`
+
+Call `.all()` after `union(...)` or `except(...)` when you want multiset
+semantics instead of the default distinct result.
 
 ### Shared builder methods
 

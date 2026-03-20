@@ -1069,6 +1069,42 @@ mod test {
             ]
         );
 
+        let mut union_ids = database
+            .from::<User>()
+            .project_value(User::id())
+            .union(database.from::<Order>().project_value(Order::user_id()))
+            .fetch::<i32>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        union_ids.sort();
+        assert_eq!(union_ids, vec![1, 2, 3]);
+
+        let mut union_all_ids = database
+            .from::<User>()
+            .project_value(User::id())
+            .union(database.from::<Order>().project_value(Order::user_id()))
+            .all()
+            .fetch::<i32>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        union_all_ids.sort();
+        assert_eq!(union_all_ids, vec![1, 1, 1, 2, 2, 3]);
+
+        let except_ids = database
+            .from::<Order>()
+            .project_value(Order::user_id())
+            .except(database.from::<User>().project_value(User::id()))
+            .fetch::<i32>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(except_ids.is_empty());
+
+        let except_all_ids = database
+            .from::<Order>()
+            .project_value(Order::user_id())
+            .except(database.from::<User>().project_value(User::id()))
+            .all()
+            .fetch::<i32>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(except_all_ids, vec![1]);
+
         let left_joined_rows = database
             .from::<User>()
             .alias("u")
