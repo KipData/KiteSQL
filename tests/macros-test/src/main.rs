@@ -862,6 +862,27 @@ mod test {
             vec![2]
         );
 
+        let aliased_user = database
+            .from_alias::<User>("u")
+            .eq(User::id().qualify("u"), 2)
+            .get()?
+            .unwrap();
+        assert_eq!(aliased_user.name, "Bob");
+
+        let aliased_projection = database
+            .from_alias::<User>("u")
+            .project::<UserSummary>()
+            .eq(User::id().qualify("u"), 2)
+            .get()?;
+        assert_eq!(
+            aliased_projection,
+            Some(UserSummary {
+                id: 2,
+                display_name: "Bob".to_string(),
+                age: Some(30),
+            })
+        );
+
         let mut tx = database.new_transaction()?;
         let in_tx = tx.from::<User>().eq(User::id(), 2).get()?.unwrap();
         assert_eq!(in_tx.name, "Bob");

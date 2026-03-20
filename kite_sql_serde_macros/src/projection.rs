@@ -56,11 +56,11 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 
         projected_values.push(if rename.is_some() {
             quote! {
-                ::kite_sql::orm::projection_value::<M>(#source_name_lit, #field_name_lit)
+                ::kite_sql::orm::projection_value(#source_name_lit, relation, #field_name_lit)
             }
         } else {
             quote! {
-                ::kite_sql::orm::projection_column::<M>(#source_name_lit)
+                ::kite_sql::orm::projection_column(#source_name_lit, relation)
             }
         });
         assignments.push(quote! {
@@ -76,7 +76,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         impl #impl_generics ::kite_sql::orm::Projection for #struct_name #ty_generics
         #where_clause
         {
-            fn projected_values<M: ::kite_sql::orm::Model>() -> ::std::vec::Vec<::kite_sql::orm::ProjectedValue> {
+            fn projected_values<M: ::kite_sql::orm::Model>(relation: &str) -> ::std::vec::Vec<::kite_sql::orm::ProjectedValue> {
                 vec![#(#projected_values),*]
             }
         }

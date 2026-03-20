@@ -121,6 +121,7 @@ The following ORM helpers are available on `Database`.
 - `get::<M>(&key) -> Result<Option<M>, DatabaseError>`
 - `fetch::<M>() -> Result<OrmIter<...>, DatabaseError>`
 - `from::<M>() -> FromBuilder<...>`
+- `from_alias::<M>(alias) -> FromBuilder<...>`
 
 ## Transaction ORM APIs
 
@@ -138,6 +139,7 @@ The following ORM helpers are available on `DBTransaction`.
 - `get::<M>(&key) -> Result<Option<M>, DatabaseError>`
 - `fetch::<M>() -> Result<OrmIter<...>, DatabaseError>`
 - `from::<M>() -> FromBuilder<...>`
+- `from_alias::<M>(alias) -> FromBuilder<...>`
 
 `DBTransaction` does not currently expose the ORM DDL convenience methods.
 
@@ -145,6 +147,9 @@ The following ORM helpers are available on `DBTransaction`.
 
 `Database::from::<M>()` and `DBTransaction::from::<M>()` start a typed query
 from one ORM model table.
+
+If you need an explicit table alias, use `from_alias::<M>("alias")` and
+re-qualify fields with `Field::qualify("alias")` where needed.
 
 The query flow is:
 
@@ -180,6 +185,7 @@ Generated field accessors return `Field<M, T>`. A field supports:
 - `cast("type")`
 - `cast_to(DataType)`
 - `alias(name)`
+- `qualify(relation)`
 - `in_subquery(query)`
 - `not_in_subquery(query)`
 

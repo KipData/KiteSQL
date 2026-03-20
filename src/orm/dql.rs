@@ -62,6 +62,14 @@ impl<S: Storage> Database<S> {
     pub fn from<M: Model>(&self) -> FromBuilder<&Database<S>, M> {
         FromBuilder::from_inner(QueryBuilder::new(self))
     }
+
+    /// Starts a typed single-table query builder using a table alias.
+    ///
+    /// Fields can be rebound to the alias with [`Field::qualified`] when the
+    /// query needs explicit qualification.
+    pub fn from_alias<M: Model>(&self, alias: impl Into<String>) -> FromBuilder<&Database<S>, M> {
+        FromBuilder::from_inner(QueryBuilder::aliased(self, alias))
+    }
 }
 
 impl<'a, S: Storage> DBTransaction<'a, S> {
@@ -78,5 +86,13 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
     /// Starts a typed single-table query builder inside the current transaction.
     pub fn from<M: Model>(&mut self) -> FromBuilder<&mut DBTransaction<'a, S>, M> {
         FromBuilder::from_inner(QueryBuilder::new(self))
+    }
+
+    /// Starts a typed single-table query builder using a table alias inside the current transaction.
+    pub fn from_alias<M: Model>(
+        &mut self,
+        alias: impl Into<String>,
+    ) -> FromBuilder<&mut DBTransaction<'a, S>, M> {
+        FromBuilder::from_inner(QueryBuilder::aliased(self, alias))
     }
 }

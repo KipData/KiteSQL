@@ -20,8 +20,8 @@ use sqlparser::ast::{
     GroupByExpr, HiveDistributionStyle, Ident, IndexColumn, Insert, KeyOrIndexDisplay, LimitClause,
     NullsDistinctOption, ObjectName, ObjectType, Offset, OffsetRows, OrderBy, OrderByExpr,
     OrderByKind, OrderByOptions, PrimaryKeyConstraint, Query, Select, SelectFlavor, SelectItem,
-    SetExpr, TableFactor, TableObject, TableWithJoins, TimezoneInfo, UniqueConstraint, Update,
-    Value, Values,
+    SetExpr, TableAlias, TableFactor, TableObject, TableWithJoins, TimezoneInfo, UniqueConstraint,
+    Update, Value, Values,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -114,6 +114,32 @@ pub struct Field<M, T> {
     table: &'static str,
     column: &'static str,
     _marker: PhantomData<(M, T)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QuerySource {
+    table_name: String,
+    alias: Option<String>,
+}
+
+impl QuerySource {
+    fn model<M: Model>() -> Self {
+        Self {
+            table_name: M::table_name().to_string(),
+            alias: None,
+        }
+    }
+
+    fn aliased<M: Model>(alias: impl Into<String>) -> Self {
+        Self {
+            table_name: M::table_name().to_string(),
+            alias: Some(alias.into()),
+        }
+    }
+
+    fn relation_name(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.table_name)
+    }
 }
 
 trait ValueExpressionOps: Sized {
@@ -341,10 +367,20 @@ impl<M, T> Field<M, T> {
     }
 
     fn value(self) -> QueryValue {
-        QueryValue::from_expr(Expr::CompoundIdentifier(vec![
-            ident(self.table),
-            ident(self.column),
-        ]))
+        qualified_column_value(self.table, self.column)
+    }
+
+    /// Re-qualifies this field with a different source name such as a table alias.
+    ///
+    /// ```rust,ignore
+    /// let user = database
+    ///     .from_alias::<User>("u")
+    ///     .eq(User::id().qualify("u"), 1)
+    ///     .get()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
+    pub fn qualify(self, relation: &str) -> QueryValue {
+        qualified_column_value(relation, self.column)
     }
 
     /// Builds `field + value`.
@@ -1002,13 +1038,17 @@ impl ProjectedValue {
 }
 
 #[doc(hidden)]
-pub fn projection_value<M: Model>(column: &'static str, alias: &'static str) -> ProjectedValue {
-    Field::<M, ()>::new(M::table_name(), column).alias(alias)
+pub fn projection_value(
+    column: &'static str,
+    relation: &str,
+    alias: &'static str,
+) -> ProjectedValue {
+    qualified_column_value(relation, column).alias(alias)
 }
 
 #[doc(hidden)]
-pub fn projection_column<M: Model>(column: &'static str) -> ProjectedValue {
-    ProjectedValue::from(Field::<M, ()>::new(M::table_name(), column))
+pub fn projection_column(column: &'static str, relation: &str) -> ProjectedValue {
+    ProjectedValue::from(qualified_column_value(relation, column))
 }
 
 impl<V: Into<QueryValue>> From<V> for ProjectedValue {
@@ -1143,6 +1183,7 @@ pub struct StructProjection<T> {
 
 struct BuilderState<Q: StatementSource, M: Model> {
     source: Q,
+    query_source: QuerySource,
     distinct: bool,
     filter: Option<QueryExpr>,
     group_bys: Vec<QueryValue>,
@@ -1154,9 +1195,10 @@ struct BuilderState<Q: StatementSource, M: Model> {
 }
 
 impl<Q: StatementSource, M: Model> BuilderState<Q, M> {
-    fn new(source: Q) -> Self {
+    fn new(source: Q, query_source: QuerySource) -> Self {
         Self {
             source,
+            query_source,
             distinct: false,
             filter: None,
             group_bys: Vec::new(),
@@ -1196,7 +1238,7 @@ impl<Q: StatementSource, M: Model> BuilderState<Q, M> {
 
 #[doc(hidden)]
 pub trait ProjectionSpec<M: Model> {
-    fn into_select_items(self) -> Vec<SelectItem>;
+    fn into_select_items(self, relation: &str) -> Vec<SelectItem>;
 }
 
 /// Declares a struct-backed ORM projection used by [`FromBuilder::project`].
@@ -1204,7 +1246,7 @@ pub trait ProjectionSpec<M: Model> {
 /// This trait is typically derived with `#[derive(Projection)]`.
 pub trait Projection: for<'a> From<(&'a SchemaRef, Tuple)> {
     /// Returns the projected select-list items for model `M`.
-    fn projected_values<M: Model>() -> Vec<ProjectedValue>;
+    fn projected_values<M: Model>(relation: &str) -> Vec<ProjectedValue>;
 }
 
 #[doc(hidden)]
@@ -1213,19 +1255,19 @@ pub trait IntoProjectedTuple {
 }
 
 impl<M: Model> ProjectionSpec<M> for ModelProjection {
-    fn into_select_items(self) -> Vec<SelectItem> {
+    fn into_select_items(self, _relation: &str) -> Vec<SelectItem> {
         select_projection(M::fields())
     }
 }
 
 impl<M: Model> ProjectionSpec<M> for ValueProjection {
-    fn into_select_items(self) -> Vec<SelectItem> {
+    fn into_select_items(self, _relation: &str) -> Vec<SelectItem> {
         vec![self.value.into_select_item()]
     }
 }
 
 impl<M: Model> ProjectionSpec<M> for TupleProjection {
-    fn into_select_items(self) -> Vec<SelectItem> {
+    fn into_select_items(self, _relation: &str) -> Vec<SelectItem> {
         self.values
             .into_iter()
             .map(ProjectedValue::into_select_item)
@@ -1234,8 +1276,8 @@ impl<M: Model> ProjectionSpec<M> for TupleProjection {
 }
 
 impl<M: Model, T: Projection> ProjectionSpec<M> for StructProjection<T> {
-    fn into_select_items(self) -> Vec<SelectItem> {
-        T::projected_values::<M>()
+    fn into_select_items(self, relation: &str) -> Vec<SelectItem> {
+        T::projected_values::<M>(relation)
             .into_iter()
             .map(ProjectedValue::into_select_item)
             .collect()
@@ -1252,7 +1294,14 @@ enum FilterMode {
 impl<Q: StatementSource, M: Model> QueryBuilder<Q, M, ModelProjection> {
     fn new(source: Q) -> Self {
         Self {
-            state: BuilderState::new(source),
+            state: BuilderState::new(source, QuerySource::model::<M>()),
+            projection: ModelProjection,
+        }
+    }
+
+    fn aliased(source: Q, alias: impl Into<String>) -> Self {
+        Self {
+            state: BuilderState::new(source, QuerySource::aliased::<M>(alias)),
             projection: ModelProjection,
         }
     }
@@ -1675,6 +1724,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
             state:
                 BuilderState {
                     source: _,
+                    query_source,
                     distinct,
                     filter,
                     group_bys,
@@ -1688,8 +1738,8 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
         } = self;
 
         select_query(
-            M::table_name(),
-            projection.into_select_items(),
+            &query_source,
+            projection.into_select_items(query_source.relation_name()),
             distinct,
             filter,
             group_bys,
@@ -1705,6 +1755,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
             state:
                 BuilderState {
                     source,
+                    query_source,
                     distinct,
                     filter,
                     group_bys,
@@ -1718,8 +1769,8 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
         } = self;
 
         let statement = Statement::Query(Box::new(select_query(
-            M::table_name(),
-            projection.into_select_items(),
+            &query_source,
+            projection.into_select_items(query_source.relation_name()),
             distinct,
             filter,
             group_bys,
@@ -1872,8 +1923,13 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
             return Ok(count);
         }
 
-        let BuilderState { source, filter, .. } = self.state;
-        let statement = orm_count_statement(M::table_name(), filter);
+        let BuilderState {
+            source,
+            query_source,
+            filter,
+            ..
+        } = self.state;
+        let statement = orm_count_statement(&query_source, filter);
         let mut iter = source.execute_statement(&statement, &[])?;
         let count = match iter.next().transpose()? {
             Some(tuple) => match tuple.values.first() {
@@ -1909,6 +1965,13 @@ fn ident(value: impl Into<String>) -> Ident {
 
 fn object_name(value: &str) -> ObjectName {
     value.split('.').map(ident).collect::<Vec<_>>().into()
+}
+
+fn qualified_column_value(relation: &str, column: &str) -> QueryValue {
+    QueryValue::from_expr(Expr::CompoundIdentifier(vec![
+        ident(relation),
+        ident(column),
+    ]))
 }
 
 fn nested_expr(expr: Expr) -> Expr {
@@ -1954,9 +2017,35 @@ fn table_factor(table_name: &str) -> TableFactor {
     }
 }
 
+fn source_table_factor(source: &QuerySource) -> TableFactor {
+    TableFactor::Table {
+        name: object_name(&source.table_name),
+        alias: source.alias.as_ref().map(|alias| TableAlias {
+            explicit: true,
+            name: ident(alias),
+            columns: vec![],
+        }),
+        args: None,
+        with_hints: vec![],
+        version: None,
+        with_ordinality: false,
+        partitions: vec![],
+        json_path: None,
+        sample: None,
+        index_hints: vec![],
+    }
+}
+
 fn table_with_joins(table_name: &str) -> TableWithJoins {
     TableWithJoins {
         relation: table_factor(table_name),
+        joins: vec![],
+    }
+}
+
+fn source_table_with_joins(source: &QuerySource) -> TableWithJoins {
+    TableWithJoins {
+        relation: source_table_factor(source),
         joins: vec![],
     }
 }
@@ -1969,7 +2058,7 @@ fn select_projection(fields: &[OrmField]) -> Vec<SelectItem> {
 }
 
 fn select_query(
-    table_name: &str,
+    source: &QuerySource,
     projection: Vec<SelectItem>,
     distinct: bool,
     filter: Option<QueryExpr>,
@@ -1991,7 +2080,7 @@ fn select_query(
             projection,
             exclude: None,
             into: None,
-            from: vec![table_with_joins(table_name)],
+            from: vec![source_table_with_joins(source)],
             lateral_views: vec![],
             prewhere: None,
             selection: filter.map(QueryExpr::into_expr),
@@ -2107,7 +2196,10 @@ fn data_value_to_ast_expr(value: &DataValue) -> Expr {
 #[doc(hidden)]
 pub fn orm_select_statement(table_name: &str, fields: &[OrmField]) -> Statement {
     Statement::Query(Box::new(select_query(
-        table_name,
+        &QuerySource {
+            table_name: table_name.to_string(),
+            alias: None,
+        },
         select_projection(fields),
         false,
         None,
@@ -2382,9 +2474,9 @@ pub fn orm_analyze_statement(table_name: &str) -> Statement {
     })
 }
 
-fn orm_count_statement(table_name: &str, filter: Option<QueryExpr>) -> Statement {
+fn orm_count_statement(source: &QuerySource, filter: Option<QueryExpr>) -> Statement {
     Statement::Query(Box::new(select_query(
-        table_name,
+        source,
         vec![SelectItem::UnnamedExpr(Expr::Function(Function {
             name: object_name("count"),
             uses_odbc_syntax: false,
