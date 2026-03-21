@@ -1160,6 +1160,15 @@ mod test {
             .unwrap();
         assert_eq!(union_user.id, 2);
 
+        let ordered_union_user = database
+            .from::<User>()
+            .eq(User::id(), 1)
+            .union(database.from::<User>().eq(User::id(), 2))
+            .desc(User::id())
+            .get()?
+            .unwrap();
+        assert_eq!(ordered_union_user.id, 2);
+
         let union_value = database
             .from::<User>()
             .project_value(User::id())
@@ -1173,6 +1182,15 @@ mod test {
             .all()
             .get::<i32>()?;
         assert_eq!(union_value, Some(2));
+
+        let ordered_union_value = database
+            .from::<User>()
+            .project_value(User::id())
+            .union(database.from::<Order>().project_value(Order::user_id()))
+            .all()
+            .desc(User::id())
+            .get::<i32>()?;
+        assert_eq!(ordered_union_value, Some(3));
 
         let union_tuple = database
             .from::<User>()
@@ -1188,6 +1206,20 @@ mod test {
             .get::<(i32, String)>()?;
         assert_eq!(union_tuple, Some((2, "Bob".to_string())));
 
+        let ordered_union_tuple = database
+            .from::<User>()
+            .eq(User::id(), 1)
+            .project_tuple((User::id(), User::name()))
+            .union(
+                database
+                    .from::<User>()
+                    .eq(User::id(), 2)
+                    .project_tuple((User::id(), User::name())),
+            )
+            .desc(User::id())
+            .get::<(i32, String)>()?;
+        assert_eq!(ordered_union_tuple, Some((2, "Bob".to_string())));
+
         let union_projection = database
             .from::<User>()
             .eq(User::id(), 2)
@@ -1202,6 +1234,27 @@ mod test {
             .get()?;
         assert_eq!(
             union_projection,
+            Some(UserSummary {
+                id: 2,
+                display_name: "Bob".to_string(),
+                age: Some(30),
+            })
+        );
+
+        let ordered_union_projection = database
+            .from::<User>()
+            .eq(User::id(), 1)
+            .project::<UserSummary>()
+            .union(
+                database
+                    .from::<User>()
+                    .eq(User::id(), 2)
+                    .project::<UserSummary>(),
+            )
+            .desc(User::id())
+            .get()?;
+        assert_eq!(
+            ordered_union_projection,
             Some(UserSummary {
                 id: 2,
                 display_name: "Bob".to_string(),
