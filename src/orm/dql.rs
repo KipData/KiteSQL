@@ -109,12 +109,6 @@ impl<S: Storage> Database<S> {
     }
 
     /// Lists all view names.
-    ///
-    /// ```rust,ignore
-    /// let views = database.show_views()?.collect::<Result<Vec<_>, _>>()?;
-    /// # let _ = views;
-    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
-    /// ```
     pub fn show_views(
         &self,
     ) -> Result<ProjectValueIter<DatabaseIter<'_, S>, String>, DatabaseError> {

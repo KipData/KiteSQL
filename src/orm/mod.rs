@@ -1969,6 +1969,9 @@ impl<Q: StatementSource, M: Model, P> SetQueryBuilder<Q, M, P> {
 
     /// Applies `NULLS FIRST` to the most recently added sort key.
     ///
+    /// Tips: call this immediately after `asc(...)` or `desc(...)`.
+    /// Without a preceding sort key, this method is a no-op.
+    ///
     /// ```rust,ignore
     /// let ids = database
     ///     .from::<User>()
@@ -2001,6 +2004,9 @@ impl<Q: StatementSource, M: Model, P> SetQueryBuilder<Q, M, P> {
     }
 
     /// Applies `NULLS LAST` to the most recently added sort key.
+    ///
+    /// Tips: call this immediately after `asc(...)` or `desc(...)`.
+    /// Without a preceding sort key, this method is a no-op.
     ///
     /// ```rust,ignore
     /// let ids = database
@@ -2074,6 +2080,7 @@ impl<Q: StatementSource, M: Model, P> SetQueryBuilder<Q, M, P> {
     ///     .project_value(User::id())
     ///     .union(database.from::<Order>().project_value(Order::user_id()))
     ///     .explain()?;
+    /// assert!(plan.contains("Union"));
     /// # let _ = plan;
     /// # Ok::<(), kite_sql::errors::DatabaseError>(())
     /// ```
@@ -2690,6 +2697,9 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
 
     /// Applies `NULLS FIRST` to the most recently added sort key.
     ///
+    /// Tips: call this immediately after `asc(...)` or `desc(...)`.
+    /// Without a preceding sort key, this method is a no-op.
+    ///
     /// ```rust,ignore
     /// let users = database
     ///     .from::<User>()
@@ -2704,6 +2714,9 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
     }
 
     /// Applies `NULLS LAST` to the most recently added sort key.
+    ///
+    /// Tips: call this immediately after `asc(...)` or `desc(...)`.
+    /// Without a preceding sort key, this method is a no-op.
     ///
     /// ```rust,ignore
     /// let users = database
@@ -2987,6 +3000,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
     ///     .eq(User::id(), 1)
     ///     .project_value(User::name())
     ///     .explain()?;
+    /// assert!(plan.contains("TableScan"));
     /// # let _ = plan;
     /// # Ok::<(), kite_sql::errors::DatabaseError>(())
     /// ```

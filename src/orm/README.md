@@ -64,16 +64,16 @@ for user in adults {
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-## Derive macro
+## Model derive
 
 `#[derive(Model)]` is the intended entry point for ORM models.
 
-### Struct attributes
+Struct attributes:
 
 - `#[model(table = "users")]`: sets the backing table name
 - `#[model(index(name = "idx", columns = "a, b"))]`: declares a secondary index at the model level
 
-### Field attributes
+Field attributes:
 
 - `#[model(primary_key)]`
 - `#[model(unique)]`
@@ -85,142 +85,30 @@ for user in adults {
 - `#[model(decimal_precision = 10, decimal_scale = 2)]`
 - `#[model(skip)]`
 
-### Generated helpers
+The derive macro generates the `Model` implementation, tuple decoding, cached
+read/insert/DDL statements, migration metadata, and typed field getters such as
+`User::id()` and `User::name()`.
 
-The derive macro generates:
-
-- the `Model` trait implementation
-- tuple mapping from query results into the Rust struct
-- cached statements for model reads, inserts, and DDL
-- static column metadata for migrations
-- typed field getters such as `User::id()` and `User::name()`
-
-## Database ORM APIs
-
-The following ORM helpers are available on `Database`.
-
-### DDL
-
-- `create_table::<M>()`: creates the table and any declared secondary indexes
-- `create_table_if_not_exists::<M>()`: idempotent table and index creation
-- `migrate::<M>()`: aligns an existing table with the current model definition
-- `truncate::<M>()`
-- `create_view(name, query_builder)`
-- `create_or_replace_view(name, query_builder)`
-- `drop_view(name)`
-- `drop_view_if_exists(name)`
-- `drop_index::<M>(index_name)`
-- `drop_index_if_exists::<M>(index_name)`
-- `drop_table::<M>()`
-- `drop_table_if_exists::<M>()`
-
-### Maintenance
-
-- `analyze::<M>()`: refreshes optimizer statistics for the model table
-
-### DML
-
-- `insert::<M>(&model)`
-- `insert_many::<M>(models)`
-- `from::<M>()...insert::<Target>()`
-- `from::<M>()...project_...().insert_into::<Target>(...)`
-- `from::<M>()...overwrite::<Target>()`
-- `from::<M>()...project_...().overwrite_into::<Target>(...)`
-- `from::<M>()...update().set(...).execute()`
-- `from::<M>()...delete()`
-
-### DQL
-
-- `get::<M>(&key) -> Result<Option<M>, DatabaseError>`
-- `fetch::<M>() -> Result<OrmIter<...>, DatabaseError>`
-- `show_tables() -> Result<ProjectValueIter<..., String>, DatabaseError>`
-- `show_views() -> Result<ProjectValueIter<..., String>, DatabaseError>`
-- `describe::<M>() -> Result<OrmIter<..., DescribeColumn>, DatabaseError>`
-- `from::<M>() -> FromBuilder<...>`
-
-## Transaction ORM APIs
-
-The following ORM helpers are available on `DBTransaction`.
-
-### Maintenance
-
-- `analyze::<M>()`
-
-### DML
-
-- `insert::<M>(&model)`
-- `insert_many::<M>(models)`
-- `from::<M>()...insert::<Target>()`
-- `from::<M>()...project_...().insert_into::<Target>(...)`
-- `from::<M>()...overwrite::<Target>()`
-- `from::<M>()...project_...().overwrite_into::<Target>(...)`
-- `from::<M>()...update().set(...).execute()`
-- `from::<M>()...delete()`
-
-### DQL
-
-- `get::<M>(&key) -> Result<Option<M>, DatabaseError>`
-- `fetch::<M>() -> Result<OrmIter<...>, DatabaseError>`
-- `show_tables() -> Result<ProjectValueIter<..., String>, DatabaseError>`
-- `show_views() -> Result<ProjectValueIter<..., String>, DatabaseError>`
-- `describe::<M>() -> Result<OrmIter<..., DescribeColumn>, DatabaseError>`
-- `from::<M>() -> FromBuilder<...>`
-
-`DBTransaction` does not currently expose the ORM DDL convenience methods.
-
-## Query builder API
+## Query Builder
 
 `Database::from::<M>()` and `DBTransaction::from::<M>()` start a typed query
 from one ORM model table.
 
-If you need an explicit relation alias, call `.alias("name")` on a source or
-pending join, and re-qualify fields with `Field::qualify("name")` where needed.
-
-For ordinary multi-table queries, `inner_join::<N>().on(...)`,
-`left_join::<N>().on(...)`, `right_join::<N>().on(...)`,
-`full_join::<N>().on(...)`, `cross_join::<N>()`, and `using(...)` cover most
-cases. Aliases are mainly useful for self-joins or when explicit qualification
-helps readability.
-
 The usual flow is:
 
 - start with `from::<M>()`
-- add filters, joins, grouping, ordering, and limits as needed
+- add filters, joins, grouping, ordering, and limits
 - keep full-model output, or switch into `project::<P>()`,
   `project_value(...)`, or `project_tuple(...)`
 - once the output shape is fixed, compose set queries with `union(...)`,
   `except(...)`, and optional `.all()`
 
-For native single-table mutations, reuse the same filtered `from::<M>()`
-entrypoint and then finish with `insert::<Target>()`, `insert_into(...)`,
-`overwrite::<Target>()`, `overwrite_into(...)`, `update()`, or `delete()`.
-Here `overwrite*` follows the engine's `INSERT OVERWRITE` semantics, meaning
-conflicting target rows are replaced rather than the whole table being cleared:
-
-```rust
-database.from::<ArchivedUser>().insert::<User>()?;
-
-database
-    .from::<ArchivedUser>()
-    .project_tuple((ArchivedUser::id(), ArchivedUser::name()))
-    .insert_into::<UserNameSnapshot, _>((UserNameSnapshot::id(), UserNameSnapshot::name()))?;
-
-database.from::<ArchivedUser>().eq(ArchivedUser::id(), 2).overwrite::<User>()?;
-
-database
-    .from::<User>()
-    .eq(User::id(), 1)
-    .update()
-    .set(User::name(), "Bob")
-    .set(User::age(), Some(20))
-    .execute()?;
-
-database
-    .from::<User>()
-    .eq(User::id(), 2)
-    .delete()?;
-# Ok::<(), Box<dyn std::error::Error>>(())
-```
+If you need an explicit relation alias, call `.alias("name")` on a source or
+pending join, and re-qualify fields with `Field::qualify("name")` where
+needed. For ordinary multi-table queries, `inner_join::<N>().on(...)`,
+`left_join::<N>().on(...)`, `right_join::<N>().on(...)`,
+`full_join::<N>().on(...)`, `cross_join::<N>()`, and `using(...)` cover most
+cases.
 
 Most expression building starts from generated fields such as `User::id()` and
 `User::name()`. Field values support arithmetic, comparison, null checks,
@@ -231,8 +119,22 @@ computed expressions, use `QueryValue` helpers such as `func`, `count`,
 Boolean composition lives on `QueryExpr` through `and`, `or`, `not`, `exists`,
 and `not_exists`.
 
-Detailed method-by-method examples live in the rustdoc for `Field`,
-`QueryValue`, `QueryExpr`, `FromBuilder`, and `SetQueryBuilder`.
+### Projections
+
+Use full-model fetches when the query still matches `M`, or switch to one of
+the projection modes:
+
+- `project::<P>()`: decode rows into a DTO-style struct
+- `project_value(...)`: decode one expression per row into a scalar type
+- `project_tuple(...)`: decode multiple expressions positionally into a tuple
+
+For `project::<P>()`, `P` is typically a `#[derive(Projection)]` type whose
+field names match the output names. Use `#[projection(rename = "...")]` to map
+DTO fields to differently named source columns, and `#[projection(from = "...")]`
+for join projections that need an explicit source relation.
+
+If the output is expression-based, prefer `project_value(...)` or
+`project_tuple(...)` and assign explicit names with `.alias(...)`.
 
 ### Set queries
 
@@ -250,336 +152,96 @@ After a set query is formed, you can still apply result-level methods such as
 `asc(...)`, `desc(...)`, `nulls_first()`, `nulls_last()`, `limit(...)`,
 `offset(...)`, `fetch()`, `get()`, `exists()`, `count()`, and `explain()`.
 
-```rust
-let user_ids = database
-    .from::<User>()
-    .project_value(User::id())
-    .union(database.from::<Order>().project_value(Order::user_id()))
-    .fetch::<i32>()?;
+Tips: `nulls_first()` and `nulls_last()` only affect the most recently added
+sort key from `asc(...)` or `desc(...)`.
 
-let total_ids = database
-    .from::<User>()
-    .project_value(User::id())
-    .union(database.from::<Order>().project_value(Order::user_id()))
-    .all()
-    .asc(User::id())
-    .limit(3)
-    .count()?;
-# let _ = user_ids;
-# let _ = total_ids;
-# Ok::<(), Box<dyn std::error::Error>>(())
-```
-
-### Struct projections
-
-Use `Database::from::<M>().project::<P>()` or
-`DBTransaction::from::<M>().project::<P>()` to project rows into a dedicated
-DTO-like struct. `P` is typically a `#[derive(Projection)]` type whose field
-names match the projected output names.
-
-Field-level renaming is supported with `#[projection(rename = "...")]`, which
-maps a DTO field to a different source column while still aliasing the result
-back to the DTO field name.
-
-For join projections, you can also pin a field to a specific relation or alias
-with `#[projection(from = "...")]`.
-
-If you need expression-based outputs, prefer `project_value(...)` or
-`project_tuple(...)` and assign explicit names with `.alias(...)`.
-
-Use `project::<P>()` when:
-
-- you want a DTO-style result type instead of full `M`
-- selected outputs are plain columns, optionally with renamed field mapping
-- you want field-name-based decoding instead of positional tuple decoding
-
-### Single-value queries
-
-Use `Database::from::<M>().project_value(expr)` or
-`DBTransaction::from::<M>().project_value(expr)` to project a single
-expression. The resulting query still supports the same filtering, grouping,
-ordering, and subquery composition, and returns typed values via
-`fetch::<T>()` and `get::<T>()`.
-
-This is also the intended entry point for scalar subqueries.
-
-Use `project_value(...)` when:
-
-- the query returns exactly one value per row
-- you want scalar decoding such as `i32`, `String`, or `Option<T>`
-- you are building scalar subqueries
-- the output is an expression or aggregate rather than a DTO field mapping
-
-### Tuple queries
-
-Use `Database::from::<M>().project_tuple(values)` or
-`DBTransaction::from::<M>().project_tuple(values)` to project multiple
-expressions and decode them positionally into a Rust tuple via
-`fetch::<(T1, T2, ...)>()` and `get::<(T1, T2, ...)>()`.
-
-Use `project_tuple(...)` when:
-
-- you need multiple outputs but do not want to define a DTO type
-- the projection contains expressions, aggregates, or custom aliases
-- positional decoding is acceptable
-
-In practice:
-
-- `project::<P>()`: named-field DTO mapping
-- `project_value(...)`: one expression, one decoded value
-- `project_tuple(...)`: multiple expressions, positional decoding
-
-Result helpers:
-
-- `fetch()`: iterate over all matching rows
-- `get()`: fetch at most one row or value with `LIMIT 1` semantics
-- `raw()`: access the underlying tuple/schema iterator directly
-
-### Representative examples
-
-Join with tuple projection:
-
-```rust
-let rows = database
-    .from::<User>()
-    .inner_join::<Order>()
-    .on(User::id().eq(Order::user_id()))
-    .project_tuple((User::name(), Order::amount()))
-    .fetch::<(String, i32)>()?;
-# let _ = rows;
-# Ok::<(), kite_sql::errors::DatabaseError>(())
-```
-
-Struct projection:
-
-```rust
-use kite_sql::Projection;
-
-#[derive(Default, Projection)]
-struct UserSummary {
-    id: i32,
-    #[projection(rename = "user_name")]
-    display_name: String,
-}
-
-let summaries = database
-    .from::<User>()
-    .project::<UserSummary>()
-    .asc(User::id())
-    .fetch()?;
-# Ok::<(), kite_sql::errors::DatabaseError>(())
-```
-
-Value projection with expression:
-
-```rust
-use kite_sql::orm::{case_when, count_all};
-
-let total_users = database
-    .from::<User>()
-    .project_value(count_all().alias("total_users"))
-    .get::<i32>()?;
-
-let age_bucket = database
-    .from::<User>()
-    .project_value(
-        case_when(
-            [(User::age().is_null(), "unknown"), (User::age().lt(20), "minor")],
-            "adult",
-        )
-        .alias("age_bucket"),
-    )
-    .fetch::<String>()?;
-# let _ = total_users;
-# let _ = age_bucket;
-# Ok::<(), kite_sql::errors::DatabaseError>(())
-```
+For richer combinations such as join projections, grouping, scalar subqueries,
+and set queries, prefer the rustdoc on `FromBuilder`, `SetQueryBuilder`,
+`Field`, `QueryValue`, and `QueryExpr`.
 
-Tuple projection with aggregates:
+## Change Operations
 
-```rust
-use kite_sql::orm::{count_all, sum};
+The ORM supports both schema changes and data changes.
 
-let grouped_stats = database
-    .from::<EventLog>()
-    .project_tuple((
-        EventLog::category(),
-        sum(EventLog::score()).alias("total_score"),
-        count_all().alias("total_count"),
-    ))
-    .group_by(EventLog::category())
-    .fetch::<(String, i32, i32)>()?;
-# let _ = grouped_stats;
-# Ok::<(), kite_sql::errors::DatabaseError>(())
-```
+### Schema changes
 
-Scalar subquery:
+On `Database`:
 
-```rust
-let users = database
-    .from::<User>()
-    .in_subquery(
-        User::id(),
-        database.from::<Order>().project_value(Order::user_id()),
-    )
-    .fetch()?;
-# let _ = users;
-# Ok::<(), kite_sql::errors::DatabaseError>(())
-```
+- `create_table::<M>()`
+- `create_table_if_not_exists::<M>()`
+- `migrate::<M>()`
+- `drop_index::<M>(index_name)`
+- `drop_index_if_exists::<M>(index_name)`
+- `drop_table::<M>()`
+- `drop_table_if_exists::<M>()`
+- `truncate::<M>()`
+- `create_view(name, query_builder)`
+- `create_or_replace_view(name, query_builder)`
+- `drop_view(name)`
+- `drop_view_if_exists(name)`
 
-## Key types
+`DBTransaction` does not currently expose the ORM DDL convenience methods.
 
-### `Field<M, T>`
+Typical schema maintenance uses the same model types and query builders:
+create tables from `Model`, truncate by model, and create or replace views from
+ORM queries.
 
-The typed column handle returned by generated accessors such as `User::id()`.
+### Data changes
 
-You usually use it to build expressions:
+For common model-oriented writes:
 
-- comparisons such as `eq`, `gt`, `lt`
-- null checks such as `is_null`
-- pattern matching such as `like`
-- range and membership checks such as `between` and `in_list`
-- `cast`, `cast_to`
-- `alias`
-- subquery predicates such as `in_subquery`
+- `insert::<M>(&model)`
+- `insert_many::<M>(models)`
 
-See the rustdoc on `Field` for the full method surface and minimal examples.
+For query-driven writes, reuse the same filtered `from::<M>()` entrypoint and
+finish with:
 
-### `QueryValue`
+- `insert::<Target>()`
+- `insert_into::<Target>(...)`
+- `overwrite::<Target>()`
+- `overwrite_into::<Target>(...)`
+- `update().set(...).execute()`
+- `delete()`
 
-The value expression type used throughout ORM query building.
+Here `overwrite*` follows the engine's `INSERT OVERWRITE` semantics, meaning
+conflicting target rows are replaced rather than the whole table being cleared.
 
-Use it for:
+For model-oriented writes, use `insert` and `insert_many`. For query-driven
+writes, compose from `from::<M>()` and finish with `insert`, `overwrite`,
+`update`, or `delete`.
 
-- function calls such as `func(name, args)`
-- aggregates such as `count`, `sum`, `avg`, `min`, `max`
-- `CASE` expressions
-- casts
-- aliased projection expressions
-- scalar subqueries
+Query-driven writes are intentionally shaped like read queries first, so the
+same filters, joins, and projections can flow into the final write operation.
 
-`QueryValue` also supports comparison and predicate helpers such as `eq`,
-`ne`, `gt`, `gte`, `lt`, `lte`, `like`, `in_list`, `between`, and subquery
-predicates when you need to keep composing expressions.
+## Introspection / Maintenance
 
-It also supports arithmetic composition such as `add`, `sub`, `mul`, `div`,
-`modulo`, and unary `neg`.
+The ORM also exposes light-weight introspection and maintenance helpers.
 
-See the rustdoc on `QueryValue` for the full method surface and minimal examples.
+On `Database`:
 
-### `QueryExpr`
+- `show_tables()`
+- `show_views()`
+- `describe::<M>()`
+- `from::<M>()...explain()`
+- `analyze::<M>()`
 
-The boolean expression type used for filtering and `HAVING`.
+On `DBTransaction`:
 
-Common helpers:
+- `show_tables()`
+- `show_views()`
+- `describe::<M>()`
 
-- `and(rhs)`
-- `or(rhs)`
-- `not()`
-- `exists(query)`
-- `not_exists(query)`
+These helpers are intended for light-weight inspection around ORM-managed
+tables, without dropping down to raw SQL for common metadata queries.
 
-See the rustdoc on `QueryExpr` for minimal examples.
+## Further reading
 
-### `FromBuilder<Q, M>`
+Detailed method-by-method examples live in the rustdoc for:
 
-The main single-table ORM query builder returned by `from::<M>()`.
-
-It starts in full-model mode and can later switch into:
-
-- `project::<P>()` for DTO structs
-- `project_value(...)` for scalar results
-- `project_tuple(...)` for tuple results
-
-See the rustdoc on `FromBuilder` and `SetQueryBuilder` for the full chainable API.
-
-### `SetQueryBuilder<Q, M>`
-
-The result-level builder produced by `union(...)` and `except(...)`.
-
-It keeps the projection shape of the queries you combine, and supports
-result-level operations such as `all()`, `asc(...)`, `desc(...)`, `limit(...)`,
-`offset(...)`, `fetch()`, `get()`, `exists()`, and `count()`.
-
-## Key traits
-
-### `Model`
-
-The core ORM trait implemented by `#[derive(Model)]`.
-
-Important associated items:
-
-- `type PrimaryKey`
-- `table_name()`
-- `fields()`
-- `columns()`
-- `params(&self)`
-- `primary_key(&self)`
-- cached statement getters such as `select_statement()` and `insert_statement()`
-
-In most cases, you should derive this trait instead of implementing it manually.
-
-### `Projection`
-
-The DTO projection trait implemented by `#[derive(Projection)]`.
-
-It powers `Database::from::<M>().project::<P>()` and
-`DBTransaction::from::<M>().project::<P>()`.
-
-Derived projections declare their source model with
-matching field names, and may use `rename` on fields.
-
-## Extension traits
-
-### `FromDataValue`
-
-Converts a `DataValue` into a Rust value during ORM mapping.
-
-### `ToDataValue`
-
-Converts a Rust value into a `DataValue` for ORM parameters and query expressions.
-
-### `ModelColumnType`
-
-Maps a Rust type to the SQL DDL type used by ORM table creation and migration.
-
-### `StringType`
-
-Marker trait for string-like fields that support `#[model(varchar = N)]` and `#[model(char = N)]`.
-
-### `DecimalType`
-
-Marker trait for decimal-like fields that support precision and scale annotations.
-
-## Migration behavior
-
-`migrate::<M>()` is intended to preserve existing data whenever possible.
-
-Current behavior:
-
-- creates the table if it does not exist
-- adds missing columns
-- drops removed columns
-- applies supported `CHANGE COLUMN` updates for compatible existing columns
-- can infer safe renames in straightforward cases
-- can update type, default, and nullability when supported by the engine
-
-Current limitations:
-
-- primary key changes are rejected
-- unique-constraint changes are rejected
-- the primary-key index is managed by the table and cannot be dropped independently
-- changing the type of an indexed column is intentionally conservative
-
-## Related APIs outside `crate::orm`
-
-ORM models can also be created from arbitrary query results through `ResultIter::orm::<M>()`:
-
-```rust
-let iter = database.run("select id, user_name, age from users")?;
-let users = iter.orm::<User>();
-# let _ = users;
-# Ok::<(), kite_sql::errors::DatabaseError>(())
-```
-
-If you need custom tuple-to-struct mapping without `#[derive(Model)]`, use the lower-level `from_tuple!` macro with `features = ["macros"]`.
+- `Field<M, T>`
+- `QueryValue`
+- `QueryExpr`
+- `FromBuilder<Q, M>`
+- `SetQueryBuilder<Q, M>`
+- `Projection`
+- `Model`

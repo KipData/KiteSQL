@@ -35,6 +35,29 @@ impl<S: Storage> Database<S> {
     }
 
     /// Inserts multiple models into their backing table.
+    ///
+    /// ```rust
+    /// use kite_sql::db::DataBaseBuilder;
+    /// use kite_sql::Model;
+    ///
+    /// #[derive(Default, Debug, PartialEq, Model)]
+    /// #[model(table = "users")]
+    /// struct User {
+    ///     #[model(primary_key)]
+    ///     id: i32,
+    ///     name: String,
+    /// }
+    ///
+    /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
+    /// database.create_table::<User>().unwrap();
+    /// database
+    ///     .insert_many([
+    ///         User { id: 1, name: "Alice".to_string() },
+    ///         User { id: 2, name: "Bob".to_string() },
+    ///     ])
+    ///     .unwrap();
+    /// assert_eq!(database.fetch::<User>().unwrap().count(), 2);
+    /// ```
     pub fn insert_many<M, I, B>(&self, models: I) -> Result<(), DatabaseError>
     where
         M: Model,
