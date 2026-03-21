@@ -5,7 +5,7 @@ KiteSQL provides a built-in ORM behind `features = ["orm"]`.
 The ORM is centered around `#[derive(Model)]`. It generates:
 
 - tuple-to-struct mapping
-- cached CRUD statements
+- cached model statements
 - cached DDL statements
 - migration metadata
 - typed field accessors for query building
@@ -91,7 +91,7 @@ The derive macro generates:
 
 - the `Model` trait implementation
 - tuple mapping from query results into the Rust struct
-- cached statements for DDL and CRUD
+- cached statements for model reads, inserts, and DDL
 - static column metadata for migrations
 - typed field getters such as `User::id()` and `User::name()`
 
@@ -116,8 +116,8 @@ The following ORM helpers are available on `Database`.
 ### DML
 
 - `insert::<M>(&model)`
-- `update::<M>(&model)`
-- `delete_by_id::<M>(&key)`
+- `from::<M>()...update().set(...).execute()`
+- `from::<M>()...delete()`
 
 ### DQL
 
@@ -136,8 +136,8 @@ The following ORM helpers are available on `DBTransaction`.
 ### DML
 
 - `insert::<M>(&model)`
-- `update::<M>(&model)`
-- `delete_by_id::<M>(&key)`
+- `from::<M>()...update().set(...).execute()`
+- `from::<M>()...delete()`
 
 ### DQL
 
@@ -169,6 +169,25 @@ The usual flow is:
   `project_value(...)`, or `project_tuple(...)`
 - once the output shape is fixed, compose set queries with `union(...)`,
   `except(...)`, and optional `.all()`
+
+For native single-table mutations, reuse the same filtered `from::<M>()`
+entrypoint and then switch into `update()` or `delete()`:
+
+```rust
+database
+    .from::<User>()
+    .eq(User::id(), 1)
+    .update()
+    .set(User::name(), "Bob")
+    .set(User::age(), Some(20))
+    .execute()?;
+
+database
+    .from::<User>()
+    .eq(User::id(), 2)
+    .delete()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
 Most expression building starts from generated fields such as `User::id()` and
 `User::name()`. Field values support arithmetic, comparison, null checks,

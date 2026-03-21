@@ -467,27 +467,6 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                 &INSERT_STATEMENT
             }
 
-            fn update_statement() -> &'static ::kite_sql::db::Statement {
-                static UPDATE_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
-                    ::kite_sql::orm::orm_update_statement(
-                        #table_name_lit,
-                        <#struct_name #ty_generics as ::kite_sql::orm::Model>::fields(),
-                        <#struct_name #ty_generics as ::kite_sql::orm::Model>::primary_key_field(),
-                    )
-                });
-                &UPDATE_STATEMENT
-            }
-
-            fn delete_statement() -> &'static ::kite_sql::db::Statement {
-                static DELETE_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
-                    ::kite_sql::orm::orm_delete_statement(
-                        #table_name_lit,
-                        <#struct_name #ty_generics as ::kite_sql::orm::Model>::primary_key_field(),
-                    )
-                });
-                &DELETE_STATEMENT
-            }
-
             fn find_statement() -> &'static ::kite_sql::db::Statement {
                 static FIND_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
                     ::kite_sql::orm::orm_find_statement(

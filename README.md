@@ -33,7 +33,7 @@ KiteSQL supports direct SQL execution, typed ORM models, schema migration, and b
 ## Key Features
 - A lightweight embedded SQL database fully rewritten in Rust
 - A Rust-native relational API alongside direct SQL execution
-- Typed ORM models with migrations, CRUD helpers, and a lightweight query builder
+- Typed ORM models with migrations and a lightweight typed query/mutation builder
 - Higher write speed with an application-friendly embedding model
 - All metadata and actual data in KV storage, with no intermediate stateful service layer
 - Extensible storage integration for customized workloads
@@ -43,7 +43,7 @@ KiteSQL supports direct SQL execution, typed ORM models, schema migration, and b
 #### 👉[check more](docs/features.md)
 
 ## ORM
-KiteSQL includes a built-in ORM behind the `orm` feature flag. With `#[derive(Model)]`, you can define typed models and get tuple mapping, CRUD helpers, schema creation, migration support, and builder-style single-table queries.
+KiteSQL includes a built-in ORM behind the `orm` feature flag. With `#[derive(Model)]`, you can define typed models and get tuple mapping, schema creation, migration support, and builder-style single-table queries and mutations.
 
 ### Schema Migration
 Model changes are part of the normal workflow. KiteSQL ORM can help evolve tables for common schema updates, including adding, dropping, renaming, and changing columns, so many migrations can stay close to the Rust model definition instead of being managed as hand-written SQL.
@@ -89,9 +89,17 @@ fn main() -> Result<(), DatabaseError> {
         age: Some(24),
     })?;
 
-    let mut alice = database.get::<User>(&1)?.unwrap();
-    alice.age = Some(19);
-    database.update(&alice)?;
+    database
+        .from::<User>()
+        .eq(User::id(), 1)
+        .update()
+        .set(User::age(), Some(19))
+        .execute()?;
+
+    database
+        .from::<User>()
+        .eq(User::id(), 2)
+        .delete()?;
 
     let users = database
         .from::<User>()
@@ -104,7 +112,7 @@ fn main() -> Result<(), DatabaseError> {
         println!("{:?}", user?);
     }
 
-    // ORM covers common model-centric workflows, while `run(...)` remains available
+    // ORM covers common typed table workflows, while `run(...)` remains available
     // for more advanced SQL that is easier to express directly.
     let top_users = database.run(
         r#"

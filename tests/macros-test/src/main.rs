@@ -1390,7 +1390,7 @@ mod test {
     }
 
     #[test]
-    fn test_orm_crud() -> Result<(), DatabaseError> {
+    fn test_orm_model_lifecycle() -> Result<(), DatabaseError> {
         let database = DataBaseBuilder::path(".").build_in_memory()?;
 
         database.create_table::<User>()?;
@@ -1399,7 +1399,7 @@ mod test {
         database.run("drop index users.users_age_index")?.done()?;
         database.create_table_if_not_exists::<User>()?;
 
-        let mut user = User {
+        let user = User {
             id: 1,
             name: "Alice".to_string(),
             age: Some(18),
@@ -1455,15 +1455,19 @@ mod test {
         let defaulted = database.get::<User>(&9)?.unwrap();
         assert_eq!(defaulted.age, Some(18));
 
-        user.name = "Bob".to_string();
-        user.age = None;
-        database.update(&user)?;
+        database
+            .from::<User>()
+            .eq(User::id(), 1)
+            .update()
+            .set(User::name(), "Bob")
+            .set(User::age(), None::<i32>)
+            .execute()?;
 
         let updated = database.get::<User>(&1)?.unwrap();
         assert_eq!(updated.name, "Bob");
         assert_eq!(updated.age, None);
 
-        database.delete_by_id::<User>(&1)?;
+        database.from::<User>().eq(User::id(), 1).delete()?;
         assert!(database.get::<User>(&1)?.is_none());
 
         database.insert(&User {
@@ -1484,11 +1488,81 @@ mod test {
             Err(DatabaseError::DuplicateUniqueValue)
         ));
 
-        database.delete_by_id::<User>(&2)?;
+        database.from::<User>().eq(User::id(), 2).delete()?;
         assert!(database.get::<User>(&2)?.is_none());
 
         database.drop_table::<User>()?;
         database.drop_table_if_exists::<User>()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_orm_update_delete_builder() -> Result<(), DatabaseError> {
+        let database = DataBaseBuilder::path(".").build_in_memory()?;
+        database.create_table::<User>()?;
+
+        for (id, name, age) in [
+            (1, "Alice", Some(18)),
+            (2, "Bob", Some(19)),
+            (3, "Carol", Some(20)),
+        ] {
+            database.insert(&User {
+                id,
+                name: name.to_string(),
+                age,
+                cache: String::new(),
+            })?;
+        }
+
+        database
+            .from::<User>()
+            .alias("u")
+            .eq(User::id().qualify("u"), 1)
+            .update()
+            .set(User::name(), "BuilderAlice")
+            .set(User::age(), None::<i32>)
+            .execute()?;
+
+        let updated = database.get::<User>(&1)?.unwrap();
+        assert_eq!(updated.name, "BuilderAlice");
+        assert_eq!(updated.age, None);
+
+        database
+            .from::<User>()
+            .eq(User::id(), 2)
+            .update()
+            .set_expr(User::age(), User::id().add(20))
+            .execute()?;
+
+        assert_eq!(database.get::<User>(&2)?.unwrap().age, Some(22));
+
+        database
+            .from::<User>()
+            .alias("u")
+            .eq(User::name().qualify("u"), "Carol")
+            .delete()?;
+        assert!(database.get::<User>(&3)?.is_none());
+
+        let empty_update = database.from::<User>().eq(User::id(), 1).update().execute();
+        assert!(matches!(empty_update, Err(DatabaseError::ColumnsEmpty)));
+
+        let ordered_delete = database.from::<User>().asc(User::id()).delete();
+        assert!(matches!(
+            ordered_delete,
+            Err(DatabaseError::UnsupportedStmt(message)) if message.contains("order by")
+        ));
+
+        let limited_update = database
+            .from::<User>()
+            .limit(1)
+            .update()
+            .set(User::name(), "ignored")
+            .execute();
+        assert!(matches!(
+            limited_update,
+            Err(DatabaseError::UnsupportedStmt(message)) if message.contains("limit")
+        ));
 
         Ok(())
     }

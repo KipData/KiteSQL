@@ -403,6 +403,16 @@ impl<M, T> Field<M, T> {
         qualified_column_value(self.table, self.column)
     }
 
+    fn orm_field(self) -> &'static OrmField
+    where
+        M: Model,
+    {
+        M::fields()
+            .iter()
+            .find(|field| field.column == self.column)
+            .expect("ORM field metadata must exist for generated model fields")
+    }
+
     /// Re-qualifies this field with a different source name such as a table alias.
     ///
     /// ```rust,ignore
@@ -1347,6 +1357,15 @@ pub struct SetQueryBuilder<Q: StatementSource, M: Model, P = ModelProjection> {
     _marker: PhantomData<(M, P)>,
 }
 
+/// ORM update builder produced from [`FromBuilder::update`].
+///
+/// This builder currently supports single-table updates with optional `WHERE`
+/// filters inherited from [`FromBuilder`].
+pub struct UpdateBuilder<Q: StatementSource, M: Model> {
+    state: BuilderState<Q, M>,
+    assignments: Vec<UpdateAssignment>,
+}
+
 #[doc(hidden)]
 pub struct JoinOnBuilder<Q: StatementSource, M: Model, P> {
     inner: QueryBuilder<Q, M, P>,
@@ -1384,6 +1403,23 @@ struct BuilderState<Q: StatementSource, M: Model> {
     limit: Option<usize>,
     offset: Option<usize>,
     _marker: PhantomData<M>,
+}
+
+struct UpdateAssignment {
+    column: &'static str,
+    placeholder: &'static str,
+    value: UpdateAssignmentValue,
+}
+
+enum UpdateAssignmentValue {
+    Param(DataValue),
+    Expr(QueryValue),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MutationKind {
+    Update,
+    Delete,
 }
 
 impl<Q: StatementSource, M: Model> BuilderState<Q, M> {
@@ -1431,6 +1467,45 @@ impl<Q: StatementSource, M: Model> BuilderState<Q, M> {
     fn push_join(mut self, join: JoinSpec) -> Self {
         self.joins.push(join);
         self
+    }
+}
+
+impl MutationKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            MutationKind::Update => "update",
+            MutationKind::Delete => "delete",
+        }
+    }
+}
+
+impl UpdateAssignment {
+    fn new(column: &'static str, placeholder: &'static str, value: UpdateAssignmentValue) -> Self {
+        Self {
+            column,
+            placeholder,
+            value,
+        }
+    }
+
+    fn into_parts(self) -> (Assignment, Option<(&'static str, DataValue)>) {
+        let placeholder = self.placeholder;
+        match self.value {
+            UpdateAssignmentValue::Param(value) => (
+                Assignment {
+                    target: AssignmentTarget::ColumnName(object_name(self.column)),
+                    value: placeholder_expr(placeholder),
+                },
+                Some((placeholder, value)),
+            ),
+            UpdateAssignmentValue::Expr(value) => (
+                Assignment {
+                    target: AssignmentTarget::ColumnName(object_name(self.column)),
+                    value: value.into_expr(),
+                },
+                None,
+            ),
+        }
     }
 }
 
@@ -1882,6 +1957,105 @@ impl<Q: StatementSource, M: Model, P> SetQueryBuilder<Q, M, P> {
     }
 }
 
+impl<Q: StatementSource, M: Model> UpdateBuilder<Q, M> {
+    fn new(state: BuilderState<Q, M>) -> Self {
+        Self {
+            state,
+            assignments: Vec::new(),
+        }
+    }
+
+    fn with_assignment(
+        mut self,
+        column: &'static str,
+        placeholder: &'static str,
+        value: UpdateAssignmentValue,
+    ) -> Self {
+        let assignment = UpdateAssignment::new(column, placeholder, value);
+        if let Some(existing) = self
+            .assignments
+            .iter_mut()
+            .find(|existing| existing.column == column)
+        {
+            *existing = assignment;
+        } else {
+            self.assignments.push(assignment);
+        }
+        self
+    }
+
+    /// Assigns a constant value to a model field.
+    ///
+    /// ```rust,ignore
+    /// database
+    ///     .from::<User>()
+    ///     .eq(User::id(), 1)
+    ///     .update()
+    ///     .set(User::name(), "Bob")
+    ///     .set(User::age(), Some(20))
+    ///     .execute()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
+    pub fn set<T, V: ToDataValue>(self, field: Field<M, T>, value: V) -> Self {
+        let orm_field = field.orm_field();
+        self.with_assignment(
+            orm_field.column,
+            orm_field.placeholder,
+            UpdateAssignmentValue::Param(value.to_data_value()),
+        )
+    }
+
+    /// Assigns a computed SQL expression to a model field.
+    ///
+    /// ```rust,ignore
+    /// database
+    ///     .from::<User>()
+    ///     .eq(User::id(), 1)
+    ///     .update()
+    ///     .set_expr(User::age(), User::age().add(1))
+    ///     .execute()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
+    pub fn set_expr<T, V: Into<QueryValue>>(self, field: Field<M, T>, value: V) -> Self {
+        let orm_field = field.orm_field();
+        self.with_assignment(
+            orm_field.column,
+            orm_field.placeholder,
+            UpdateAssignmentValue::Expr(value.into()),
+        )
+    }
+
+    /// Executes the update statement.
+    pub fn execute(self) -> Result<(), DatabaseError> {
+        if self.assignments.is_empty() {
+            return Err(DatabaseError::ColumnsEmpty);
+        }
+
+        validate_mutation_state(&self.state, MutationKind::Update)?;
+
+        let UpdateBuilder { state, assignments } = self;
+        let BuilderState {
+            source,
+            query_source,
+            filter,
+            ..
+        } = state;
+
+        let mut statement_assignments = Vec::with_capacity(assignments.len());
+        let mut params = Vec::new();
+        for assignment in assignments {
+            let (assignment, param) = assignment.into_parts();
+            statement_assignments.push(assignment);
+            if let Some(param) = param {
+                params.push(param);
+            }
+        }
+
+        let statement = orm_update_builder_statement(&query_source, filter, statement_assignments);
+        source.execute_statement(&statement, params)?.done()
+    }
+}
+
 impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> JoinOnBuilder<Q, M, P> {
     /// Applies a relation alias to the pending join source.
     ///
@@ -1932,6 +2106,37 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> JoinOnBuilder<Q, M, P> 
 }
 
 impl<Q: StatementSource, M: Model> FromBuilder<Q, M, ModelProjection> {
+    /// Starts a single-table `UPDATE` builder for the current model source.
+    ///
+    /// Chain one or more `.set(...)` or `.set_expr(...)` calls, then finish
+    /// with `.execute()`.
+    ///
+    /// ```rust,ignore
+    /// database
+    ///     .from::<User>()
+    ///     .eq(User::id(), 1)
+    ///     .update()
+    ///     .set(User::name(), "Bob")
+    ///     .execute()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
+    pub fn update(self) -> UpdateBuilder<Q, M> {
+        UpdateBuilder::new(self.inner.state)
+    }
+
+    /// Executes a single-table `DELETE` for the current filtered source.
+    ///
+    /// ```rust,ignore
+    /// database
+    ///     .from::<User>()
+    ///     .eq(User::id(), 1)
+    ///     .delete()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
+    pub fn delete(self) -> Result<(), DatabaseError> {
+        self.inner.delete()
+    }
+
     /// Switches the query into a struct projection.
     ///
     /// ```rust,ignore
@@ -3057,6 +3262,21 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
         iter.done()?;
         Ok(count)
     }
+
+    fn delete(self) -> Result<(), DatabaseError> {
+        validate_mutation_state(&self.state, MutationKind::Delete)?;
+
+        let BuilderState {
+            source,
+            query_source,
+            filter,
+            ..
+        } = self.state;
+
+        source
+            .execute_statement(&orm_delete_builder_statement(&query_source, filter), &[])?
+            .done()
+    }
 }
 
 impl<Q: StatementSource, M: Model, P> private::Sealed for FromBuilder<Q, M, P> {}
@@ -3258,6 +3478,51 @@ fn source_table_with_joins(source: &QuerySource, joins: Vec<JoinSpec>) -> TableW
     }
 }
 
+fn validate_mutation_state<Q: StatementSource, M: Model>(
+    state: &BuilderState<Q, M>,
+    kind: MutationKind,
+) -> Result<(), DatabaseError> {
+    let operation = kind.as_str();
+
+    if !state.joins.is_empty() {
+        return Err(DatabaseError::UnsupportedStmt(format!(
+            "ORM {operation} builder does not support joins"
+        )));
+    }
+    if state.distinct {
+        return Err(DatabaseError::UnsupportedStmt(format!(
+            "ORM {operation} builder does not support distinct"
+        )));
+    }
+    if !state.group_bys.is_empty() {
+        return Err(DatabaseError::UnsupportedStmt(format!(
+            "ORM {operation} builder does not support group by"
+        )));
+    }
+    if state.having.is_some() {
+        return Err(DatabaseError::UnsupportedStmt(format!(
+            "ORM {operation} builder does not support having"
+        )));
+    }
+    if !state.order_bys.is_empty() {
+        return Err(DatabaseError::UnsupportedStmt(format!(
+            "ORM {operation} builder does not support order by"
+        )));
+    }
+    if state.limit.is_some() {
+        return Err(DatabaseError::UnsupportedStmt(format!(
+            "ORM {operation} builder does not support limit"
+        )));
+    }
+    if state.offset.is_some() {
+        return Err(DatabaseError::UnsupportedStmt(format!(
+            "ORM {operation} builder does not support offset"
+        )));
+    }
+
+    Ok(())
+}
+
 fn select_projection(fields: &[OrmField], relation: &str) -> Vec<SelectItem> {
     fields
         .iter()
@@ -3441,6 +3706,38 @@ fn execute_query<Q: StatementSource>(source: Q, query: Query) -> Result<Q::Iter,
     source.execute_statement(&Statement::Query(Box::new(query)), &[])
 }
 
+fn orm_update_builder_statement(
+    source: &QuerySource,
+    filter: Option<QueryExpr>,
+    assignments: Vec<Assignment>,
+) -> Statement {
+    Statement::Update(Update {
+        update_token: AttachedToken::empty(),
+        optimizer_hint: None,
+        table: source_table_with_joins(source, vec![]),
+        assignments,
+        from: None,
+        selection: filter.map(QueryExpr::into_expr),
+        returning: None,
+        or: None,
+        limit: None,
+    })
+}
+
+fn orm_delete_builder_statement(source: &QuerySource, filter: Option<QueryExpr>) -> Statement {
+    Statement::Delete(Delete {
+        delete_token: AttachedToken::empty(),
+        optimizer_hint: None,
+        tables: vec![],
+        from: FromTable::WithFromKeyword(vec![source_table_with_joins(source, vec![])]),
+        using: None,
+        selection: filter.map(QueryExpr::into_expr),
+        returning: None,
+        order_by: vec![],
+        limit: None,
+    })
+}
+
 fn query_exists<Q: StatementSource>(source: Q, mut query: Query) -> Result<bool, DatabaseError> {
     query_set_limit(&mut query, 1);
     let mut iter = execute_query(source, query)?;
@@ -3574,55 +3871,6 @@ pub fn orm_insert_statement(table_name: &str, fields: &[OrmField]) -> Statement 
         insert_alias: None,
         settings: None,
         format_clause: None,
-    })
-}
-
-#[doc(hidden)]
-pub fn orm_update_statement(
-    table_name: &str,
-    fields: &[OrmField],
-    primary_key: &OrmField,
-) -> Statement {
-    Statement::Update(Update {
-        update_token: AttachedToken::empty(),
-        optimizer_hint: None,
-        table: table_with_joins(table_name),
-        assignments: fields
-            .iter()
-            .filter(|field| !field.primary_key)
-            .map(|field| Assignment {
-                target: AssignmentTarget::ColumnName(object_name(field.column)),
-                value: placeholder_expr(field.placeholder),
-            })
-            .collect(),
-        from: None,
-        selection: Some(Expr::BinaryOp {
-            left: Box::new(Expr::Identifier(ident(primary_key.column))),
-            op: SqlBinaryOperator::Eq,
-            right: Box::new(placeholder_expr(primary_key.placeholder)),
-        }),
-        returning: None,
-        or: None,
-        limit: None,
-    })
-}
-
-#[doc(hidden)]
-pub fn orm_delete_statement(table_name: &str, primary_key: &OrmField) -> Statement {
-    Statement::Delete(Delete {
-        delete_token: AttachedToken::empty(),
-        optimizer_hint: None,
-        tables: vec![],
-        from: FromTable::WithFromKeyword(vec![table_with_joins(table_name)]),
-        using: None,
-        selection: Some(Expr::BinaryOp {
-            left: Box::new(Expr::Identifier(ident(primary_key.column))),
-            op: SqlBinaryOperator::Eq,
-            right: Box::new(placeholder_expr(primary_key.placeholder)),
-        }),
-        returning: None,
-        order_by: vec![],
-        limit: None,
     })
 }
 
@@ -3949,13 +4197,12 @@ fn orm_add_column_statement(
 ///
 /// In normal usage you should derive this trait with `#[derive(Model)]` rather
 /// than implementing it by hand. The derive macro generates tuple mapping,
-/// cached CRUD/DDL statements and model metadata.
+/// cached model/DDL statements and model metadata.
 pub trait Model: Sized + for<'a> From<(&'a SchemaRef, Tuple)> {
     /// Rust type used as the model primary key.
     ///
     /// This associated type lets APIs such as
-    /// [`Database::get`](crate::orm::Database::get) and
-    /// [`Database::delete_by_id`](crate::orm::Database::delete_by_id)
+    /// [`Database::get`](crate::orm::Database::get)
     /// infer the key type directly from the model, so callers only need to
     /// write `database.get::<User>(&id)`.
     type PrimaryKey: ToDataValue;
@@ -3985,12 +4232,6 @@ pub trait Model: Sized + for<'a> From<(&'a SchemaRef, Tuple)> {
 
     /// Returns the cached `INSERT` statement for the model.
     fn insert_statement() -> &'static Statement;
-
-    /// Returns the cached `UPDATE` statement for the model.
-    fn update_statement() -> &'static Statement;
-
-    /// Returns the cached `DELETE` statement for the model.
-    fn delete_statement() -> &'static Statement;
 
     /// Returns the cached `SELECT .. WHERE primary_key = ...` statement.
     fn find_statement() -> &'static Statement;
@@ -4652,22 +4893,6 @@ fn orm_analyze<E: StatementSource, M: Model>(executor: E) -> Result<(), Database
 fn orm_insert<E: StatementSource, M: Model>(executor: E, model: &M) -> Result<(), DatabaseError> {
     executor
         .execute_statement(M::insert_statement(), model.params())?
-        .done()
-}
-
-fn orm_update<E: StatementSource, M: Model>(executor: E, model: &M) -> Result<(), DatabaseError> {
-    executor
-        .execute_statement(M::update_statement(), model.params())?
-        .done()
-}
-
-fn orm_delete_by_id<E: StatementSource, M: Model>(
-    executor: E,
-    key: &M::PrimaryKey,
-) -> Result<(), DatabaseError> {
-    let params = [(M::primary_key_field().placeholder, key.to_data_value())];
-    executor
-        .execute_statement(M::delete_statement(), params)?
         .done()
 }
 

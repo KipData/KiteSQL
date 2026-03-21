@@ -56,10 +56,13 @@ mod app {
             c2: "two".to_string(),
         })?;
 
-        let mut row = database.get::<MyStruct>(&1)?.expect("row should exist");
-        row.c2 = "ONE".to_string();
-        database.update(&row)?;
-        database.delete_by_id::<MyStruct>(&2)?;
+        database
+            .from::<MyStruct>()
+            .eq(MyStruct::c1(), 1)
+            .update()
+            .set(MyStruct::c2(), "ONE")
+            .execute()?;
+        database.from::<MyStruct>().eq(MyStruct::c1(), 2).delete()?;
 
         for row in database.fetch::<MyStruct>()? {
             println!("{:?}", row?);
