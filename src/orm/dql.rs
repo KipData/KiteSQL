@@ -59,11 +59,47 @@ impl<S: Storage> Database<S> {
     }
 
     /// Starts a typed single-table query builder for the given model.
+    ///
+    /// ```rust
+    /// use kite_sql::db::DataBaseBuilder;
+    /// use kite_sql::Model;
+    ///
+    /// #[derive(Default, Debug, PartialEq, Model)]
+    /// #[model(table = "users")]
+    /// struct User {
+    ///     #[model(primary_key)]
+    ///     id: i32,
+    ///     name: String,
+    /// }
+    ///
+    /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
+    /// database.create_table::<User>().unwrap();
+    /// let count = database.from::<User>().count().unwrap();
+    /// assert_eq!(count, 0);
+    /// ```
     pub fn from<M: Model>(&self) -> FromBuilder<&Database<S>, M> {
         FromBuilder::from_inner(QueryBuilder::new(self))
     }
 
     /// Lists all table names.
+    ///
+    /// ```rust
+    /// use kite_sql::db::DataBaseBuilder;
+    /// use kite_sql::Model;
+    ///
+    /// #[derive(Default, Debug, PartialEq, Model)]
+    /// #[model(table = "users")]
+    /// struct User {
+    ///     #[model(primary_key)]
+    ///     id: i32,
+    ///     name: String,
+    /// }
+    ///
+    /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
+    /// database.create_table::<User>().unwrap();
+    /// let tables = database.show_tables().unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    /// assert!(tables.iter().any(|name| name == "users"));
+    /// ```
     pub fn show_tables(
         &self,
     ) -> Result<ProjectValueIter<DatabaseIter<'_, S>, String>, DatabaseError> {
@@ -73,6 +109,12 @@ impl<S: Storage> Database<S> {
     }
 
     /// Lists all view names.
+    ///
+    /// ```rust,ignore
+    /// let views = database.show_views()?.collect::<Result<Vec<_>, _>>()?;
+    /// # let _ = views;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn show_views(
         &self,
     ) -> Result<ProjectValueIter<DatabaseIter<'_, S>, String>, DatabaseError> {
@@ -82,6 +124,24 @@ impl<S: Storage> Database<S> {
     }
 
     /// Describes the schema of the model table.
+    ///
+    /// ```rust
+    /// use kite_sql::db::DataBaseBuilder;
+    /// use kite_sql::Model;
+    ///
+    /// #[derive(Default, Debug, PartialEq, Model)]
+    /// #[model(table = "users")]
+    /// struct User {
+    ///     #[model(primary_key)]
+    ///     id: i32,
+    ///     name: String,
+    /// }
+    ///
+    /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
+    /// database.create_table::<User>().unwrap();
+    /// let columns = database.describe::<User>().unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    /// assert!(columns.iter().any(|column| column.field == "id"));
+    /// ```
     pub fn describe<M: Model>(
         &self,
     ) -> Result<OrmIter<DatabaseIter<'_, S>, DescribeColumn>, DatabaseError> {

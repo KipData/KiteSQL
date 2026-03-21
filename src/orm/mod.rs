@@ -1968,6 +1968,17 @@ impl<Q: StatementSource, M: Model, P> SetQueryBuilder<Q, M, P> {
     }
 
     /// Applies `NULLS FIRST` to the most recently added sort key.
+    ///
+    /// ```rust,ignore
+    /// let ids = database
+    ///     .from::<User>()
+    ///     .project_value(User::age())
+    ///     .asc(User::age())
+    ///     .nulls_first()
+    ///     .fetch::<Option<i32>>()?;
+    /// # let _ = ids;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn nulls_first(mut self) -> Self {
         query_set_last_order_nulls(&mut self.query, true);
         self
@@ -1990,6 +2001,17 @@ impl<Q: StatementSource, M: Model, P> SetQueryBuilder<Q, M, P> {
     }
 
     /// Applies `NULLS LAST` to the most recently added sort key.
+    ///
+    /// ```rust,ignore
+    /// let ids = database
+    ///     .from::<User>()
+    ///     .project_value(User::age())
+    ///     .desc(User::age())
+    ///     .nulls_last()
+    ///     .fetch::<Option<i32>>()?;
+    /// # let _ = ids;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn nulls_last(mut self) -> Self {
         query_set_last_order_nulls(&mut self.query, false);
         self
@@ -2045,6 +2067,16 @@ impl<Q: StatementSource, M: Model, P> SetQueryBuilder<Q, M, P> {
     }
 
     /// Returns the logical plan text for the current set query.
+    ///
+    /// ```rust,ignore
+    /// let plan = database
+    ///     .from::<User>()
+    ///     .project_value(User::id())
+    ///     .union(database.from::<Order>().project_value(Order::user_id()))
+    ///     .explain()?;
+    /// # let _ = plan;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn explain(self) -> Result<String, DatabaseError> {
         query_explain(self.source, self.query)
     }
@@ -2657,11 +2689,31 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
     }
 
     /// Applies `NULLS FIRST` to the most recently added sort key.
+    ///
+    /// ```rust,ignore
+    /// let users = database
+    ///     .from::<User>()
+    ///     .asc(User::age())
+    ///     .nulls_first()
+    ///     .fetch()?;
+    /// # let _ = users;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn nulls_first(self) -> Self {
         Self::from_inner(self.inner.nulls_first())
     }
 
     /// Applies `NULLS LAST` to the most recently added sort key.
+    ///
+    /// ```rust,ignore
+    /// let users = database
+    ///     .from::<User>()
+    ///     .desc(User::age())
+    ///     .nulls_last()
+    ///     .fetch()?;
+    /// # let _ = users;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn nulls_last(self) -> Self {
         Self::from_inner(self.inner.nulls_last())
     }
@@ -2928,6 +2980,16 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
     }
 
     /// Returns the logical plan text for the current query.
+    ///
+    /// ```rust,ignore
+    /// let plan = database
+    ///     .from::<User>()
+    ///     .eq(User::id(), 1)
+    ///     .project_value(User::name())
+    ///     .explain()?;
+    /// # let _ = plan;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
     pub fn explain(self) -> Result<String, DatabaseError> {
         self.inner.explain()
     }
