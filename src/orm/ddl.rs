@@ -57,6 +57,50 @@ impl<S: Storage> Database<S> {
         Ok(())
     }
 
+    /// Truncates the model table.
+    pub fn truncate<M: Model>(&self) -> Result<(), DatabaseError> {
+        self.execute(&orm_truncate_statement(M::table_name()), &[])?
+            .done()
+    }
+
+    /// Creates a view from an ORM query builder.
+    pub fn create_view<Q: SubquerySource>(
+        &self,
+        view_name: &str,
+        query: Q,
+    ) -> Result<(), DatabaseError> {
+        self.execute(
+            &orm_create_view_statement(view_name, query.into_subquery(), false),
+            &[],
+        )?
+        .done()
+    }
+
+    /// Creates or replaces a view from an ORM query builder.
+    pub fn create_or_replace_view<Q: SubquerySource>(
+        &self,
+        view_name: &str,
+        query: Q,
+    ) -> Result<(), DatabaseError> {
+        self.execute(
+            &orm_create_view_statement(view_name, query.into_subquery(), true),
+            &[],
+        )?
+        .done()
+    }
+
+    /// Drops a view by name.
+    pub fn drop_view(&self, view_name: &str) -> Result<(), DatabaseError> {
+        self.execute(&orm_drop_view_statement(view_name, false), &[])?
+            .done()
+    }
+
+    /// Drops a view by name if it exists.
+    pub fn drop_view_if_exists(&self, view_name: &str) -> Result<(), DatabaseError> {
+        self.execute(&orm_drop_view_statement(view_name, true), &[])?
+            .done()
+    }
+
     /// Migrates an existing table to match the current model definition.
     ///
     /// This helper creates the table when it does not exist, adds missing

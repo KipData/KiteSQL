@@ -12,17 +12,18 @@ use crate::types::LogicalType;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use rust_decimal::Decimal;
 use sqlparser::ast::helpers::attached_token::AttachedToken;
+use sqlparser::ast::TruncateTableTarget;
 use sqlparser::ast::{
     AlterColumnOperation, AlterTable, AlterTableOperation, Analyze, Assignment, AssignmentTarget,
     BinaryOperator as SqlBinaryOperator, CaseWhen, CastKind, CharLengthUnits, ColumnDef,
-    ColumnOption, ColumnOptionDef, CreateIndex, CreateTable, DataType, Delete, Distinct, Expr,
-    FromTable, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments,
-    GroupByExpr, HiveDistributionStyle, Ident, IndexColumn, Insert, Join, JoinConstraint,
-    JoinOperator, KeyOrIndexDisplay, LimitClause, NullsDistinctOption, ObjectName, ObjectType,
-    Offset, OffsetRows, OrderBy, OrderByExpr, OrderByKind, OrderByOptions, PrimaryKeyConstraint,
-    Query, Select, SelectFlavor, SelectItem, SetExpr, SetOperator, SetQuantifier, TableAlias,
-    TableFactor, TableObject, TableWithJoins, TimezoneInfo, UniqueConstraint, Update, Value,
-    Values,
+    ColumnOption, ColumnOptionDef, CreateIndex, CreateTable, CreateTableOptions, CreateView,
+    DataType, Delete, Distinct, Expr, FromTable, Function, FunctionArg, FunctionArgExpr,
+    FunctionArgumentList, FunctionArguments, GroupByExpr, HiveDistributionStyle, Ident,
+    IndexColumn, Insert, Join, JoinConstraint, JoinOperator, KeyOrIndexDisplay, LimitClause,
+    NullsDistinctOption, ObjectName, ObjectType, Offset, OffsetRows, OrderBy, OrderByExpr,
+    OrderByKind, OrderByOptions, PrimaryKeyConstraint, Query, Select, SelectFlavor, SelectItem,
+    SetExpr, SetOperator, SetQuantifier, TableAlias, TableFactor, TableObject, TableWithJoins,
+    TimezoneInfo, Truncate, UniqueConstraint, Update, Value, Values, ViewColumnDef,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -823,11 +824,21 @@ impl QueryExpr {
 struct SortExpr {
     value: QueryValue,
     desc: bool,
+    nulls_first: Option<bool>,
 }
 
 impl SortExpr {
     fn new(value: QueryValue, desc: bool) -> Self {
-        Self { value, desc }
+        Self {
+            value,
+            desc,
+            nulls_first: None,
+        }
+    }
+
+    fn with_nulls(mut self, nulls_first: bool) -> Self {
+        self.nulls_first = Some(nulls_first);
+        self
     }
 
     fn into_ast(self) -> OrderByExpr {
@@ -835,7 +846,7 @@ impl SortExpr {
             expr: self.value.into_expr(),
             options: OrderByOptions {
                 asc: Some(!self.desc),
-                nulls_first: None,
+                nulls_first: self.nulls_first,
             },
             with_fill: None,
         }
@@ -1919,6 +1930,12 @@ impl<Q: StatementSource, M: Model, P> SetQueryBuilder<Q, M, P> {
         self
     }
 
+    /// Applies `NULLS FIRST` to the most recently added sort key.
+    pub fn nulls_first(mut self) -> Self {
+        query_set_last_order_nulls(&mut self.query, true);
+        self
+    }
+
     /// Appends a descending sort key to the set query result.
     ///
     /// ```rust,ignore
@@ -1932,6 +1949,12 @@ impl<Q: StatementSource, M: Model, P> SetQueryBuilder<Q, M, P> {
     /// ```
     pub fn desc<V: Into<QueryValue>>(mut self, value: V) -> Self {
         query_push_order(&mut self.query, set_query_order_value(value.into()).desc());
+        self
+    }
+
+    /// Applies `NULLS LAST` to the most recently added sort key.
+    pub fn nulls_last(mut self) -> Self {
+        query_set_last_order_nulls(&mut self.query, false);
         self
     }
 
@@ -2591,6 +2614,16 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
         Self::from_inner(self.inner.asc(value))
     }
 
+    /// Applies `NULLS FIRST` to the most recently added sort key.
+    pub fn nulls_first(self) -> Self {
+        Self::from_inner(self.inner.nulls_first())
+    }
+
+    /// Applies `NULLS LAST` to the most recently added sort key.
+    pub fn nulls_last(self) -> Self {
+        Self::from_inner(self.inner.nulls_last())
+    }
+
     /// Appends a descending sort key.
     ///
     /// ```rust,ignore
@@ -3225,6 +3258,20 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
             state: self.state.push_order(value.into().asc()),
             projection: self.projection,
         }
+    }
+
+    fn nulls_first(mut self) -> Self {
+        if let Some(last) = self.state.order_bys.last_mut() {
+            *last = last.clone().with_nulls(true);
+        }
+        self
+    }
+
+    fn nulls_last(mut self) -> Self {
+        if let Some(last) = self.state.order_bys.last_mut() {
+            *last = last.clone().with_nulls(false);
+        }
+        self
     }
 
     fn desc<V: Into<QueryValue>>(self, value: V) -> Self {
@@ -3889,6 +3936,19 @@ fn query_push_order(query: &mut Query, order: SortExpr) {
     }
 }
 
+fn query_set_last_order_nulls(query: &mut Query, nulls_first: bool) {
+    if let Some(order_by) = query.order_by.as_mut() {
+        match &mut order_by.kind {
+            OrderByKind::Expressions(exprs) => {
+                if let Some(last) = exprs.last_mut() {
+                    last.options.nulls_first = Some(nulls_first);
+                }
+            }
+            OrderByKind::All(_) => {}
+        }
+    }
+}
+
 fn query_set_limit(query: &mut Query, limit: usize) {
     let offset = query_current_offset(query);
     query.limit_clause = Some(LimitClause::LimitOffset {
@@ -4109,6 +4169,19 @@ pub fn orm_select_statement(table_name: &str, fields: &[OrmField]) -> Statement 
 
 #[doc(hidden)]
 pub fn orm_insert_statement(table_name: &str, fields: &[OrmField]) -> Statement {
+    orm_insert_values_statement(table_name, fields, false)
+}
+
+#[doc(hidden)]
+pub fn orm_overwrite_statement(table_name: &str, fields: &[OrmField]) -> Statement {
+    orm_insert_values_statement(table_name, fields, true)
+}
+
+fn orm_insert_values_statement(
+    table_name: &str,
+    fields: &[OrmField],
+    overwrite: bool,
+) -> Statement {
     Statement::Insert(Insert {
         insert_token: AttachedToken::empty(),
         optimizer_hint: None,
@@ -4118,7 +4191,7 @@ pub fn orm_insert_statement(table_name: &str, fields: &[OrmField]) -> Statement 
         table: TableObject::TableName(object_name(table_name)),
         table_alias: None,
         columns: fields.iter().map(|field| ident(field.column)).collect(),
-        overwrite: false,
+        overwrite,
         source: Some(Box::new(values_query(
             fields
                 .iter()
@@ -4137,6 +4210,59 @@ pub fn orm_insert_statement(table_name: &str, fields: &[OrmField]) -> Statement 
         settings: None,
         format_clause: None,
     })
+}
+
+#[doc(hidden)]
+pub fn orm_truncate_statement(table_name: &str) -> Statement {
+    Statement::Truncate(Truncate {
+        table_names: vec![TruncateTableTarget {
+            name: object_name(table_name),
+            only: false,
+            has_asterisk: false,
+        }],
+        partitions: None,
+        table: true,
+        if_exists: false,
+        identity: None,
+        cascade: None,
+        on_cluster: None,
+    })
+}
+
+#[doc(hidden)]
+pub fn orm_create_view_statement(view_name: &str, query: Query, or_replace: bool) -> Statement {
+    Statement::CreateView(CreateView {
+        or_alter: false,
+        or_replace,
+        materialized: false,
+        secure: false,
+        name: object_name(view_name),
+        name_before_not_exists: false,
+        columns: Vec::<ViewColumnDef>::new(),
+        query: Box::new(query),
+        options: CreateTableOptions::None,
+        cluster_by: vec![],
+        comment: None,
+        with_no_schema_binding: false,
+        if_not_exists: false,
+        temporary: false,
+        to: None,
+        params: None,
+    })
+}
+
+#[doc(hidden)]
+pub fn orm_drop_view_statement(view_name: &str, if_exists: bool) -> Statement {
+    Statement::Drop {
+        object_type: ObjectType::View,
+        if_exists,
+        names: vec![object_name(view_name)],
+        cascade: false,
+        restrict: false,
+        purge: false,
+        temporary: false,
+        table: None,
+    }
 }
 
 #[doc(hidden)]
@@ -5156,9 +5282,19 @@ fn orm_analyze<E: StatementSource, M: Model>(executor: E) -> Result<(), Database
 }
 
 fn orm_insert<E: StatementSource, M: Model>(executor: E, model: &M) -> Result<(), DatabaseError> {
-    executor
-        .execute_statement(M::insert_statement(), model.params())?
-        .done()
+    orm_insert_model(executor, M::insert_statement(), model.params())
+}
+
+fn orm_insert_model<E, A>(
+    executor: E,
+    statement: &Statement,
+    params: A,
+) -> Result<(), DatabaseError>
+where
+    E: StatementSource,
+    A: AsRef<[(&'static str, DataValue)]>,
+{
+    executor.execute_statement(statement, params)?.done()
 }
 
 fn orm_get<E: StatementSource, M: Model>(

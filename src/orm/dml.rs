@@ -1,4 +1,5 @@
 use super::*;
+use std::borrow::Borrow;
 
 impl<S: Storage> Database<S> {
     /// Refreshes optimizer statistics for the model table.
@@ -32,6 +33,19 @@ impl<S: Storage> Database<S> {
     pub fn insert<M: Model>(&self, model: &M) -> Result<(), DatabaseError> {
         orm_insert::<_, M>(self, model)
     }
+
+    /// Inserts multiple models into their backing table.
+    pub fn insert_many<M, I, B>(&self, models: I) -> Result<(), DatabaseError>
+    where
+        M: Model,
+        I: IntoIterator<Item = B>,
+        B: Borrow<M>,
+    {
+        for model in models {
+            orm_insert::<_, M>(self, model.borrow())?;
+        }
+        Ok(())
+    }
 }
 
 impl<'a, S: Storage> DBTransaction<'a, S> {
@@ -43,5 +57,18 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
     /// Inserts a model inside the current transaction.
     pub fn insert<M: Model>(&mut self, model: &M) -> Result<(), DatabaseError> {
         orm_insert::<_, M>(self, model)
+    }
+
+    /// Inserts multiple models inside the current transaction.
+    pub fn insert_many<M, I, B>(&mut self, models: I) -> Result<(), DatabaseError>
+    where
+        M: Model,
+        I: IntoIterator<Item = B>,
+        B: Borrow<M>,
+    {
+        for model in models {
+            orm_insert::<_, M>(&mut *self, model.borrow())?;
+        }
+        Ok(())
     }
 }

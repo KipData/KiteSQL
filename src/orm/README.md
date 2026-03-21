@@ -104,6 +104,11 @@ The following ORM helpers are available on `Database`.
 - `create_table::<M>()`: creates the table and any declared secondary indexes
 - `create_table_if_not_exists::<M>()`: idempotent table and index creation
 - `migrate::<M>()`: aligns an existing table with the current model definition
+- `truncate::<M>()`
+- `create_view(name, query_builder)`
+- `create_or_replace_view(name, query_builder)`
+- `drop_view(name)`
+- `drop_view_if_exists(name)`
 - `drop_index::<M>(index_name)`
 - `drop_index_if_exists::<M>(index_name)`
 - `drop_table::<M>()`
@@ -116,6 +121,7 @@ The following ORM helpers are available on `Database`.
 ### DML
 
 - `insert::<M>(&model)`
+- `insert_many::<M>(models)`
 - `from::<M>()...insert::<Target>()`
 - `from::<M>()...project_...().insert_into::<Target>(...)`
 - `from::<M>()...overwrite::<Target>()`
@@ -140,6 +146,7 @@ The following ORM helpers are available on `DBTransaction`.
 ### DML
 
 - `insert::<M>(&model)`
+- `insert_many::<M>(models)`
 - `from::<M>()...insert::<Target>()`
 - `from::<M>()...project_...().insert_into::<Target>(...)`
 - `from::<M>()...overwrite::<Target>()`
@@ -234,8 +241,8 @@ Call `.all()` after `union(...)` or `except(...)` when you want multiset
 semantics instead of the default distinct result.
 
 After a set query is formed, you can still apply result-level methods such as
-`asc(...)`, `desc(...)`, `limit(...)`, `offset(...)`, `fetch()`, `get()`,
-`exists()`, and `count()`.
+`asc(...)`, `desc(...)`, `nulls_first()`, `nulls_last()`, `limit(...)`,
+`offset(...)`, `fetch()`, `get()`, `exists()`, and `count()`.
 
 ```rust
 let user_ids = database

@@ -1673,6 +1673,124 @@ mod test {
     }
 
     #[test]
+    fn test_orm_extended_write_and_ddl_helpers() -> Result<(), DatabaseError> {
+        let database = DataBaseBuilder::path(".").build_in_memory()?;
+        database.create_table::<User>()?;
+
+        database.insert_many([
+            User {
+                id: 1,
+                name: "Alice".to_string(),
+                age: Some(18),
+                cache: String::new(),
+            },
+            User {
+                id: 2,
+                name: "Bob".to_string(),
+                age: None,
+                cache: String::new(),
+            },
+            User {
+                id: 3,
+                name: "Carol".to_string(),
+                age: Some(30),
+                cache: String::new(),
+            },
+        ])?;
+
+        let ages_nulls_first = database
+            .from::<User>()
+            .project_value(User::age())
+            .asc(User::age())
+            .nulls_first()
+            .fetch::<Option<i32>>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(ages_nulls_first, vec![None, Some(18), Some(30)]);
+
+        let ages_nulls_last = database
+            .from::<User>()
+            .project_value(User::age())
+            .asc(User::age())
+            .nulls_last()
+            .fetch::<Option<i32>>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(ages_nulls_last, vec![Some(18), Some(30), None]);
+
+        let set_query_ages = database
+            .from::<User>()
+            .project_value(User::age())
+            .eq(User::id(), 1)
+            .union(database.from::<User>().project_value(User::age()))
+            .all()
+            .desc(User::age())
+            .nulls_first()
+            .fetch::<Option<i32>>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(set_query_ages, vec![None, Some(30), Some(18), Some(18)]);
+
+        let mut tx = database.new_transaction()?;
+        tx.insert_many([User {
+            id: 4,
+            name: "Dora".to_string(),
+            age: None,
+            cache: String::new(),
+        }])?;
+        tx.commit()?;
+
+        let updated_users = database
+            .from::<User>()
+            .asc(User::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            updated_users
+                .iter()
+                .map(|user| (user.id, user.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "Alice"), (2, "Bob"), (3, "Carol"), (4, "Dora")]
+        );
+
+        database.create_view(
+            "user_names",
+            database
+                .from::<User>()
+                .project_tuple((User::id(), User::name())),
+        )?;
+
+        let mut view_rows = database
+            .run("select * from user_names")?
+            .orm::<UserNameSnapshot>()
+            .collect::<Result<Vec<_>, _>>()?;
+        view_rows.sort_by_key(|row| row.id);
+        assert_eq!(view_rows.len(), 4);
+        assert_eq!(view_rows[0].name, "Alice");
+
+        database.create_or_replace_view(
+            "user_names",
+            database
+                .from::<User>()
+                .eq(User::id(), 2)
+                .project_tuple((User::id(), User::name())),
+        )?;
+
+        let replaced_view_rows = database
+            .run("select * from user_names")?
+            .orm::<UserNameSnapshot>()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(replaced_view_rows.len(), 1);
+        assert_eq!(replaced_view_rows[0].id, 2);
+        assert_eq!(replaced_view_rows[0].name, "Bob");
+
+        database.drop_view("user_names")?;
+        database.drop_view_if_exists("user_names")?;
+
+        database.truncate::<User>()?;
+        assert_eq!(database.from::<User>().count()?, 0);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_orm_drop_index() -> Result<(), DatabaseError> {
         let database = DataBaseBuilder::path(".").build_in_memory()?;
 
