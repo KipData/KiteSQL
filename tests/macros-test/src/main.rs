@@ -116,6 +116,15 @@ mod test {
     }
 
     #[derive(Default, Debug, PartialEq, Model)]
+    #[model(table = "user_name_snapshots")]
+    struct UserNameSnapshot {
+        #[model(primary_key)]
+        id: i32,
+        #[model(rename = "user_name", varchar = 32)]
+        name: String,
+    }
+
+    #[derive(Default, Debug, PartialEq, Model)]
     #[model(table = "event_logs")]
     struct EventLog {
         #[model(primary_key)]
@@ -131,6 +140,19 @@ mod test {
         id: i32,
         user_id: i32,
         amount: i32,
+    }
+
+    #[derive(Default, Debug, PartialEq, Model)]
+    #[model(table = "archived_users")]
+    struct ArchivedUser {
+        #[model(primary_key)]
+        id: i32,
+        #[model(rename = "user_name", unique, varchar = 32)]
+        name: String,
+        #[model(default = "18")]
+        age: Option<i32>,
+        #[model(skip)]
+        cache: String,
     }
 
     #[derive(Default, Debug, PartialEq, Projection)]
@@ -1563,6 +1585,89 @@ mod test {
             limited_update,
             Err(DatabaseError::UnsupportedStmt(message)) if message.contains("limit")
         ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_orm_insert_query_builder() -> Result<(), DatabaseError> {
+        let database = DataBaseBuilder::path(".").build_in_memory()?;
+        database.create_table::<User>()?;
+        database.create_table::<ArchivedUser>()?;
+
+        for (id, name, age) in [(1, "Alice", Some(18)), (2, "Bob", Some(19))] {
+            database.insert(&ArchivedUser {
+                id,
+                name: name.to_string(),
+                age,
+                cache: String::new(),
+            })?;
+        }
+
+        database.from::<ArchivedUser>().insert::<User>()?;
+
+        let inserted_users = database
+            .from::<User>()
+            .asc(User::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(inserted_users.len(), 2);
+        assert_eq!(inserted_users[0].name, "Alice");
+        assert_eq!(inserted_users[1].name, "Bob");
+
+        database.create_table::<UserNameSnapshot>()?;
+        database
+            .from::<ArchivedUser>()
+            .project_tuple((ArchivedUser::id(), ArchivedUser::name()))
+            .insert_into::<UserNameSnapshot, _>((
+                UserNameSnapshot::id(),
+                UserNameSnapshot::name(),
+            ))?;
+
+        let snapshots = database
+            .from::<UserNameSnapshot>()
+            .asc(UserNameSnapshot::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].name, "Alice");
+        assert_eq!(snapshots[1].name, "Bob");
+
+        database
+            .from::<ArchivedUser>()
+            .eq(ArchivedUser::id(), 2)
+            .overwrite::<User>()?;
+
+        let overwritten_users = database
+            .from::<User>()
+            .asc(User::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(overwritten_users.len(), 2);
+        assert_eq!(overwritten_users[0].id, 1);
+        assert_eq!(overwritten_users[0].name, "Alice");
+        assert_eq!(overwritten_users[1].id, 2);
+        assert_eq!(overwritten_users[1].name, "Bob");
+
+        database
+            .from::<ArchivedUser>()
+            .eq(ArchivedUser::id(), 1)
+            .project_tuple((ArchivedUser::id(), ArchivedUser::name()))
+            .overwrite_into::<UserNameSnapshot, _>((
+                UserNameSnapshot::id(),
+                UserNameSnapshot::name(),
+            ))?;
+
+        let overwritten_snapshots = database
+            .from::<UserNameSnapshot>()
+            .asc(UserNameSnapshot::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(overwritten_snapshots.len(), 2);
+        assert_eq!(overwritten_snapshots[0].id, 1);
+        assert_eq!(overwritten_snapshots[0].name, "Alice");
+        assert_eq!(overwritten_snapshots[1].id, 2);
+        assert_eq!(overwritten_snapshots[1].name, "Bob");
 
         Ok(())
     }

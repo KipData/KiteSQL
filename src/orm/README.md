@@ -116,6 +116,10 @@ The following ORM helpers are available on `Database`.
 ### DML
 
 - `insert::<M>(&model)`
+- `from::<M>()...insert::<Target>()`
+- `from::<M>()...project_...().insert_into::<Target>(...)`
+- `from::<M>()...overwrite::<Target>()`
+- `from::<M>()...project_...().overwrite_into::<Target>(...)`
 - `from::<M>()...update().set(...).execute()`
 - `from::<M>()...delete()`
 
@@ -136,6 +140,10 @@ The following ORM helpers are available on `DBTransaction`.
 ### DML
 
 - `insert::<M>(&model)`
+- `from::<M>()...insert::<Target>()`
+- `from::<M>()...project_...().insert_into::<Target>(...)`
+- `from::<M>()...overwrite::<Target>()`
+- `from::<M>()...project_...().overwrite_into::<Target>(...)`
 - `from::<M>()...update().set(...).execute()`
 - `from::<M>()...delete()`
 
@@ -171,9 +179,21 @@ The usual flow is:
   `except(...)`, and optional `.all()`
 
 For native single-table mutations, reuse the same filtered `from::<M>()`
-entrypoint and then switch into `update()` or `delete()`:
+entrypoint and then finish with `insert::<Target>()`, `insert_into(...)`,
+`overwrite::<Target>()`, `overwrite_into(...)`, `update()`, or `delete()`.
+Here `overwrite*` follows the engine's `INSERT OVERWRITE` semantics, meaning
+conflicting target rows are replaced rather than the whole table being cleared:
 
 ```rust
+database.from::<ArchivedUser>().insert::<User>()?;
+
+database
+    .from::<ArchivedUser>()
+    .project_tuple((ArchivedUser::id(), ArchivedUser::name()))
+    .insert_into::<UserNameSnapshot, _>((UserNameSnapshot::id(), UserNameSnapshot::name()))?;
+
+database.from::<ArchivedUser>().eq(ArchivedUser::id(), 2).overwrite::<User>()?;
+
 database
     .from::<User>()
     .eq(User::id(), 1)

@@ -1545,6 +1545,11 @@ pub trait IntoJoinColumns {
 }
 
 #[doc(hidden)]
+pub trait IntoInsertColumns<T: Model> {
+    fn into_insert_columns(self) -> Vec<Ident>;
+}
+
+#[doc(hidden)]
 pub trait QueryOperand: private::Sealed + Sized {
     type Source: StatementSource;
     type Model: Model;
@@ -1596,6 +1601,12 @@ impl<M, T> IntoJoinColumns for Field<M, T> {
     }
 }
 
+impl<M: Model, T> IntoInsertColumns<M> for Field<M, T> {
+    fn into_insert_columns(self) -> Vec<Ident> {
+        vec![ident(self.column)]
+    }
+}
+
 macro_rules! impl_into_join_columns {
     ($(($($name:ident),+)),+ $(,)?) => {
         $(
@@ -1616,6 +1627,35 @@ macro_rules! impl_into_join_columns {
 }
 
 impl_into_join_columns!(
+    (A, B),
+    (A, B, C),
+    (A, B, C, D),
+    (A, B, C, D, E),
+    (A, B, C, D, E, F),
+    (A, B, C, D, E, F, G),
+    (A, B, C, D, E, F, G, H),
+);
+
+macro_rules! impl_into_insert_columns {
+    ($(($($name:ident),+)),+ $(,)?) => {
+        $(
+            impl<Target: Model, $($name),+> IntoInsertColumns<Target> for ($($name,)+)
+            where
+                $($name: IntoInsertColumns<Target>,)+
+            {
+                #[allow(non_snake_case)]
+                fn into_insert_columns(self) -> Vec<Ident> {
+                    let ($($name,)+) = self;
+                    let mut columns = Vec::new();
+                    $(columns.extend($name.into_insert_columns());)+
+                    columns
+                }
+            }
+        )+
+    };
+}
+
+impl_into_insert_columns!(
     (A, B),
     (A, B, C),
     (A, B, C, D),
@@ -1781,6 +1821,60 @@ impl<Q: StatementSource, M: Model, P> FromBuilder<Q, M, P> {
         R: QueryOperand<Source = Q, Projection = P, Shape = <Self as QueryOperand>::Shape>,
     {
         QueryOperand::except(self, rhs)
+    }
+
+    /// Inserts the current query result into a target model table.
+    ///
+    /// Use this when the query output is a partial projection and you want to
+    /// choose the destination columns explicitly.
+    ///
+    /// ```rust,ignore
+    /// database
+    ///     .from::<ArchivedUser>()
+    ///     .project_tuple((ArchivedUser::id(), ArchivedUser::name()))
+    ///     .insert_into::<User, _>((User::id(), User::name()))?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
+    pub fn insert_into<Target: Model, C: IntoInsertColumns<Target>>(
+        self,
+        columns: C,
+    ) -> Result<(), DatabaseError>
+    where
+        Self: QueryOperand<Source = Q, Model = M, Projection = P>,
+    {
+        let (source, query) = QueryOperand::into_query_parts(self);
+        execute_insert_query(
+            source,
+            orm_insert_query_statement(
+                Target::table_name(),
+                columns.into_insert_columns(),
+                query,
+                false,
+            ),
+        )
+    }
+
+    /// Inserts the current query result with `INSERT OVERWRITE` semantics.
+    ///
+    /// Use this when the query output is a partial projection and you want to
+    /// choose the destination columns explicitly.
+    pub fn overwrite_into<Target: Model, C: IntoInsertColumns<Target>>(
+        self,
+        columns: C,
+    ) -> Result<(), DatabaseError>
+    where
+        Self: QueryOperand<Source = Q, Model = M, Projection = P>,
+    {
+        let (source, query) = QueryOperand::into_query_parts(self);
+        execute_insert_query(
+            source,
+            orm_insert_query_statement(
+                Target::table_name(),
+                columns.into_insert_columns(),
+                query,
+                true,
+            ),
+        )
     }
 }
 
@@ -1955,6 +2049,60 @@ impl<Q: StatementSource, M: Model, P> SetQueryBuilder<Q, M, P> {
     {
         QueryOperand::except(self, rhs)
     }
+
+    /// Inserts the current query result into a target model table.
+    ///
+    /// Use this when the query output is a partial projection and you want to
+    /// choose the destination columns explicitly.
+    ///
+    /// ```rust,ignore
+    /// database
+    ///     .from::<ArchivedUser>()
+    ///     .project_tuple((ArchivedUser::id(), ArchivedUser::name()))
+    ///     .insert_into::<User, _>((User::id(), User::name()))?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
+    pub fn insert_into<Target: Model, C: IntoInsertColumns<Target>>(
+        self,
+        columns: C,
+    ) -> Result<(), DatabaseError>
+    where
+        Self: QueryOperand<Source = Q, Model = M, Projection = P>,
+    {
+        let (source, query) = QueryOperand::into_query_parts(self);
+        execute_insert_query(
+            source,
+            orm_insert_query_statement(
+                Target::table_name(),
+                columns.into_insert_columns(),
+                query,
+                false,
+            ),
+        )
+    }
+
+    /// Inserts the current set-query result with `INSERT OVERWRITE` semantics.
+    ///
+    /// Use this when the query output is a partial projection and you want to
+    /// choose the destination columns explicitly.
+    pub fn overwrite_into<Target: Model, C: IntoInsertColumns<Target>>(
+        self,
+        columns: C,
+    ) -> Result<(), DatabaseError>
+    where
+        Self: QueryOperand<Source = Q, Model = M, Projection = P>,
+    {
+        let (source, query) = QueryOperand::into_query_parts(self);
+        execute_insert_query(
+            source,
+            orm_insert_query_statement(
+                Target::table_name(),
+                columns.into_insert_columns(),
+                query,
+                true,
+            ),
+        )
+    }
 }
 
 impl<Q: StatementSource, M: Model> UpdateBuilder<Q, M> {
@@ -2106,6 +2254,42 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> JoinOnBuilder<Q, M, P> 
 }
 
 impl<Q: StatementSource, M: Model> FromBuilder<Q, M, ModelProjection> {
+    /// Inserts full-row query results into another model table.
+    ///
+    /// This is the query-builder form of `INSERT INTO ... SELECT ...` when the
+    /// source query already yields all destination columns in order.
+    ///
+    /// ```rust,ignore
+    /// database.from::<ArchivedUser>().insert::<User>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
+    pub fn insert<Target: Model>(self) -> Result<(), DatabaseError> {
+        let (source, query) = QueryOperand::into_query_parts(self);
+        execute_insert_query(
+            source,
+            orm_insert_query_statement(
+                Target::table_name(),
+                model_insert_columns::<Target>(),
+                query,
+                false,
+            ),
+        )
+    }
+
+    /// Inserts the current full-row query result with `INSERT OVERWRITE` semantics.
+    pub fn overwrite<Target: Model>(self) -> Result<(), DatabaseError> {
+        let (source, query) = QueryOperand::into_query_parts(self);
+        execute_insert_query(
+            source,
+            orm_insert_query_statement(
+                Target::table_name(),
+                model_insert_columns::<Target>(),
+                query,
+                true,
+            ),
+        )
+    }
+
     /// Starts a single-table `UPDATE` builder for the current model source.
     ///
     /// Chain one or more `.set(...)` or `.set_expr(...)` calls, then finish
@@ -2781,6 +2965,42 @@ impl<Q: StatementSource, M: Model, T: Projection> FromBuilder<Q, M, StructProjec
 }
 
 impl<Q: StatementSource, M: Model> SetQueryBuilder<Q, M, ModelProjection> {
+    /// Inserts full-row set-query results into another model table.
+    ///
+    /// ```rust,ignore
+    /// database
+    ///     .from::<ArchivedUser>()
+    ///     .union(database.from::<LegacyUser>())
+    ///     .insert::<User>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
+    pub fn insert<Target: Model>(self) -> Result<(), DatabaseError> {
+        let (source, query) = QueryOperand::into_query_parts(self);
+        execute_insert_query(
+            source,
+            orm_insert_query_statement(
+                Target::table_name(),
+                model_insert_columns::<Target>(),
+                query,
+                false,
+            ),
+        )
+    }
+
+    /// Inserts the current full-row set-query result with `INSERT OVERWRITE` semantics.
+    pub fn overwrite<Target: Model>(self) -> Result<(), DatabaseError> {
+        let (source, query) = QueryOperand::into_query_parts(self);
+        execute_insert_query(
+            source,
+            orm_insert_query_statement(
+                Target::table_name(),
+                model_insert_columns::<Target>(),
+                query,
+                true,
+            ),
+        )
+    }
+
     /// Executes the set query and decodes rows into the model type.
     ///
     /// ```rust,ignore
@@ -3532,6 +3752,13 @@ fn select_projection(fields: &[OrmField], relation: &str) -> Vec<SelectItem> {
         .collect()
 }
 
+fn model_insert_columns<M: Model>() -> Vec<Ident> {
+    M::fields()
+        .iter()
+        .map(|field| ident(field.column))
+        .collect()
+}
+
 fn select_query(
     source: &QuerySource,
     joins: Vec<JoinSpec>,
@@ -3706,6 +3933,13 @@ fn execute_query<Q: StatementSource>(source: Q, query: Query) -> Result<Q::Iter,
     source.execute_statement(&Statement::Query(Box::new(query)), &[])
 }
 
+fn execute_insert_query<Q: StatementSource>(
+    source: Q,
+    statement: Statement,
+) -> Result<(), DatabaseError> {
+    source.execute_statement(&statement, &[])?.done()
+}
+
 fn orm_update_builder_statement(
     source: &QuerySource,
     filter: Option<QueryExpr>,
@@ -3721,6 +3955,37 @@ fn orm_update_builder_statement(
         returning: None,
         or: None,
         limit: None,
+    })
+}
+
+fn orm_insert_query_statement(
+    table_name: &str,
+    columns: Vec<Ident>,
+    query: Query,
+    overwrite: bool,
+) -> Statement {
+    Statement::Insert(Insert {
+        insert_token: AttachedToken::empty(),
+        optimizer_hint: None,
+        or: None,
+        ignore: false,
+        into: true,
+        table: TableObject::TableName(object_name(table_name)),
+        table_alias: None,
+        columns,
+        overwrite,
+        source: Some(Box::new(query)),
+        assignments: vec![],
+        partitioned: None,
+        after_columns: vec![],
+        has_table_keyword: false,
+        on: None,
+        returning: None,
+        replace_into: false,
+        priority: None,
+        insert_alias: None,
+        settings: None,
+        format_clause: None,
     })
 }
 
