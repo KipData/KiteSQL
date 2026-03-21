@@ -96,3 +96,74 @@ drop table t2;
 
 statement ok
 drop table t3;
+
+statement ok
+create table users(id int primary key, age int);
+
+statement ok
+create table orders(id int primary key, user_id int, amount int);
+
+statement ok
+insert into users values (1, 18), (2, 30), (3, 40);
+
+statement ok
+insert into orders values (1, 1, 100), (2, 1, 200), (3, 2, 300);
+
+query I rowsort
+select id from users
+where exists (
+    select 1 from orders where orders.user_id = users.id
+);
+----
+1
+2
+
+query I rowsort
+select id from users
+where not exists (
+    select 1 from orders where orders.user_id = users.id
+);
+----
+3
+
+query I rowsort
+select id from users
+where id in (
+    select user_id from orders where orders.user_id = users.id
+);
+----
+1
+2
+
+query I rowsort
+select id from users
+where id not in (
+    select user_id from orders where orders.user_id = users.id
+);
+----
+3
+
+query I rowsort
+select id from users
+where id in (
+    select user_id from orders where amount = 100
+    union all
+    select user_id from orders where amount = 300
+);
+----
+1
+2
+
+statement error
+select count(*) from users
+where exists (
+    select id from orders where orders.user_id = users.id
+    union
+    select id from orders where amount = 300
+);
+
+statement ok
+drop table users;
+
+statement ok
+drop table orders;

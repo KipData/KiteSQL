@@ -16,7 +16,7 @@ use crate::execution::{build_read, spawn_executor, Executor, ReadExecutor};
 use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::throw;
-use ahash::{HashSet, HashSetExt};
+use ahash::{HashMap, HashMapExt};
 pub struct Except {
     left_input: LogicalPlan,
     right_input: LogicalPlan,
@@ -45,20 +45,24 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Except {
 
             let mut coroutine = build_read(right_input, cache, transaction);
 
-            let mut except_col = HashSet::new();
+            let mut except_col = HashMap::new();
 
             for tuple in coroutine.by_ref() {
                 let tuple = throw!(co, tuple);
-                except_col.insert(tuple);
+                *except_col.entry(tuple).or_insert(0usize) += 1;
             }
 
             let coroutine = build_read(left_input, cache, transaction);
 
             for tuple in coroutine {
                 let tuple = throw!(co, tuple);
-                if !except_col.contains(&tuple) {
-                    co.yield_(Ok(tuple)).await;
+                if let Some(count) = except_col.get_mut(&tuple) {
+                    if *count > 0 {
+                        *count -= 1;
+                        continue;
+                    }
                 }
+                co.yield_(Ok(tuple)).await;
             }
         })
     }

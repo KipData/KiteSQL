@@ -59,8 +59,89 @@ impl<S: Storage> Database<S> {
     }
 
     /// Starts a typed single-table query builder for the given model.
-    pub fn select<M: Model>(&self) -> SelectBuilder<DatabaseSelectSource<'_, S>, M> {
-        SelectBuilder::new(DatabaseSelectSource(self))
+    ///
+    /// ```rust
+    /// use kite_sql::db::DataBaseBuilder;
+    /// use kite_sql::Model;
+    ///
+    /// #[derive(Default, Debug, PartialEq, Model)]
+    /// #[model(table = "users")]
+    /// struct User {
+    ///     #[model(primary_key)]
+    ///     id: i32,
+    ///     name: String,
+    /// }
+    ///
+    /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
+    /// database.create_table::<User>().unwrap();
+    /// let count = database.from::<User>().count().unwrap();
+    /// assert_eq!(count, 0);
+    /// ```
+    pub fn from<M: Model>(&self) -> FromBuilder<&Database<S>, M> {
+        FromBuilder::from_inner(QueryBuilder::new(self))
+    }
+
+    /// Lists all table names.
+    ///
+    /// ```rust
+    /// use kite_sql::db::DataBaseBuilder;
+    /// use kite_sql::Model;
+    ///
+    /// #[derive(Default, Debug, PartialEq, Model)]
+    /// #[model(table = "users")]
+    /// struct User {
+    ///     #[model(primary_key)]
+    ///     id: i32,
+    ///     name: String,
+    /// }
+    ///
+    /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
+    /// database.create_table::<User>().unwrap();
+    /// let tables = database.show_tables().unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    /// assert!(tables.iter().any(|name| name == "users"));
+    /// ```
+    pub fn show_tables(
+        &self,
+    ) -> Result<ProjectValueIter<DatabaseIter<'_, S>, String>, DatabaseError> {
+        Ok(ProjectValueIter::new(
+            self.execute(&orm_show_tables_statement(), &[])?,
+        ))
+    }
+
+    /// Lists all view names.
+    pub fn show_views(
+        &self,
+    ) -> Result<ProjectValueIter<DatabaseIter<'_, S>, String>, DatabaseError> {
+        Ok(ProjectValueIter::new(
+            self.execute(&orm_show_views_statement(), &[])?,
+        ))
+    }
+
+    /// Describes the schema of the model table.
+    ///
+    /// ```rust
+    /// use kite_sql::db::DataBaseBuilder;
+    /// use kite_sql::Model;
+    ///
+    /// #[derive(Default, Debug, PartialEq, Model)]
+    /// #[model(table = "users")]
+    /// struct User {
+    ///     #[model(primary_key)]
+    ///     id: i32,
+    ///     name: String,
+    /// }
+    ///
+    /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
+    /// database.create_table::<User>().unwrap();
+    /// let columns = database.describe::<User>().unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    /// assert!(columns.iter().any(|column| column.field == "id"));
+    /// ```
+    pub fn describe<M: Model>(
+        &self,
+    ) -> Result<OrmIter<DatabaseIter<'_, S>, DescribeColumn>, DatabaseError> {
+        Ok(self
+            .execute(&orm_describe_statement(M::table_name()), &[])?
+            .orm::<DescribeColumn>())
     }
 }
 
@@ -76,7 +157,34 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
     }
 
     /// Starts a typed single-table query builder inside the current transaction.
-    pub fn select<M: Model>(&mut self) -> SelectBuilder<TransactionSelectSource<'_, 'a, S>, M> {
-        SelectBuilder::new(TransactionSelectSource(self))
+    pub fn from<M: Model>(&mut self) -> FromBuilder<&mut DBTransaction<'a, S>, M> {
+        FromBuilder::from_inner(QueryBuilder::new(self))
+    }
+
+    /// Lists all table names inside the current transaction.
+    pub fn show_tables(
+        &mut self,
+    ) -> Result<ProjectValueIter<TransactionIter<'_>, String>, DatabaseError> {
+        Ok(ProjectValueIter::new(
+            self.execute(&orm_show_tables_statement(), &[])?,
+        ))
+    }
+
+    /// Lists all view names inside the current transaction.
+    pub fn show_views(
+        &mut self,
+    ) -> Result<ProjectValueIter<TransactionIter<'_>, String>, DatabaseError> {
+        Ok(ProjectValueIter::new(
+            self.execute(&orm_show_views_statement(), &[])?,
+        ))
+    }
+
+    /// Describes the schema of the model table inside the current transaction.
+    pub fn describe<M: Model>(
+        &mut self,
+    ) -> Result<OrmIter<TransactionIter<'_>, DescribeColumn>, DatabaseError> {
+        Ok(self
+            .execute(&orm_describe_statement(M::table_name()), &[])?
+            .orm::<DescribeColumn>())
     }
 }

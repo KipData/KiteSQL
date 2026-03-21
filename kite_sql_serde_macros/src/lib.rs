@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod orm;
+mod projection;
 mod reference_serialization;
 
 use proc_macro::TokenStream;
@@ -34,6 +35,17 @@ pub fn model(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
 
     let result = orm::handle(ast);
+    match result {
+        Ok(codegen) => codegen.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+#[proc_macro_derive(Projection, attributes(projection))]
+pub fn projection(input: TokenStream) -> TokenStream {
+    let ast = parse_macro_input!(input as DeriveInput);
+
+    let result = projection::handle(ast);
     match result {
         Ok(codegen) => codegen.into(),
         Err(e) => e.to_compile_error().into(),

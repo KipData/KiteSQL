@@ -5,7 +5,7 @@ KiteSQL provides a built-in ORM behind `features = ["orm"]`.
 The ORM is centered around `#[derive(Model)]`. It generates:
 
 - tuple-to-struct mapping
-- cached CRUD statements
+- cached model statements
 - cached DDL statements
 - migration metadata
 - typed field accessors for query building
@@ -53,9 +53,9 @@ let user = database.get::<User>(&1)?.unwrap();
 assert_eq!(user.name, "Alice");
 
 let adults = database
-    .select::<User>()
-    .filter(User::age().gte(18))
-    .order_by(User::name().asc())
+    .from::<User>()
+    .gte(User::age(), 18)
+    .asc(User::name())
     .fetch()?;
 
 for user in adults {
@@ -64,16 +64,16 @@ for user in adults {
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-## Derive macro
+## Model derive
 
 `#[derive(Model)]` is the intended entry point for ORM models.
 
-### Struct attributes
+Struct attributes:
 
 - `#[model(table = "users")]`: sets the backing table name
 - `#[model(index(name = "idx", columns = "a, b"))]`: declares a secondary index at the model level
 
-### Field attributes
+Field attributes:
 
 - `#[model(primary_key)]`
 - `#[model(unique)]`
@@ -85,299 +85,163 @@ for user in adults {
 - `#[model(decimal_precision = 10, decimal_scale = 2)]`
 - `#[model(skip)]`
 
-### Generated helpers
+The derive macro generates the `Model` implementation, tuple decoding, cached
+read/insert/DDL statements, migration metadata, and typed field getters such as
+`User::id()` and `User::name()`.
 
-The derive macro generates:
+## Query Builder
 
-- the `Model` trait implementation
-- tuple mapping from query results into the Rust struct
-- cached statements for DDL and CRUD
-- static column metadata for migrations
-- typed field getters such as `User::id()` and `User::name()`
+`Database::from::<M>()` and `DBTransaction::from::<M>()` start a typed query
+from one ORM model table.
 
-## Database ORM APIs
+The usual flow is:
 
-The following ORM helpers are available on `Database`.
+- start with `from::<M>()`
+- add filters, joins, grouping, ordering, and limits
+- keep full-model output, or switch into `project::<P>()`,
+  `project_value(...)`, or `project_tuple(...)`
+- once the output shape is fixed, compose set queries with `union(...)`,
+  `except(...)`, and optional `.all()`
 
-### DDL
+If you need an explicit relation alias, call `.alias("name")` on a source or
+pending join, and re-qualify fields with `Field::qualify("name")` where
+needed. For ordinary multi-table queries, `inner_join::<N>().on(...)`,
+`left_join::<N>().on(...)`, `right_join::<N>().on(...)`,
+`full_join::<N>().on(...)`, `cross_join::<N>()`, and `using(...)` cover most
+cases.
 
-- `create_table::<M>()`: creates the table and any declared secondary indexes
-- `create_table_if_not_exists::<M>()`: idempotent table and index creation
-- `migrate::<M>()`: aligns an existing table with the current model definition
+Most expression building starts from generated fields such as `User::id()` and
+`User::name()`. Field values support arithmetic, comparison, null checks,
+pattern matching, range checks, casts, aliases, and subquery predicates. For
+computed expressions, use `QueryValue` helpers such as `func`, `count`,
+`count_all`, `sum`, `avg`, `min`, `max`, `case_when`, and `case_value`.
+
+Boolean composition lives on `QueryExpr` through `and`, `or`, `not`, `exists`,
+and `not_exists`.
+
+### Projections
+
+Use full-model fetches when the query still matches `M`, or switch to one of
+the projection modes:
+
+- `project::<P>()`: decode rows into a DTO-style struct
+- `project_value(...)`: decode one expression per row into a scalar type
+- `project_tuple(...)`: decode multiple expressions positionally into a tuple
+
+For `project::<P>()`, `P` is typically a `#[derive(Projection)]` type whose
+field names match the output names. Use `#[projection(rename = "...")]` to map
+DTO fields to differently named source columns, and `#[projection(from = "...")]`
+for join projections that need an explicit source relation.
+
+If the output is expression-based, prefer `project_value(...)` or
+`project_tuple(...)` and assign explicit names with `.alias(...)`.
+
+### Set queries
+
+Set operations are available after the output shape is fixed:
+
+- model rows: `from::<User>().union(...)`
+- single values: `project_value(...).union(...)`
+- tuples: `project_tuple(...).except(...)`
+- struct projections: `project::<P>().union(...)`
+
+Call `.all()` after `union(...)` or `except(...)` when you want multiset
+semantics instead of the default distinct result.
+
+After a set query is formed, you can still apply result-level methods such as
+`asc(...)`, `desc(...)`, `nulls_first()`, `nulls_last()`, `limit(...)`,
+`offset(...)`, `fetch()`, `get()`, `exists()`, `count()`, and `explain()`.
+
+Tips: `nulls_first()` and `nulls_last()` only affect the most recently added
+sort key from `asc(...)` or `desc(...)`.
+
+For richer combinations such as join projections, grouping, scalar subqueries,
+and set queries, prefer the rustdoc on `FromBuilder`, `SetQueryBuilder`,
+`Field`, `QueryValue`, and `QueryExpr`.
+
+## Change Operations
+
+The ORM supports both schema changes and data changes.
+
+### Schema changes
+
+On `Database`:
+
+- `create_table::<M>()`
+- `create_table_if_not_exists::<M>()`
+- `migrate::<M>()`
 - `drop_index::<M>(index_name)`
 - `drop_index_if_exists::<M>(index_name)`
 - `drop_table::<M>()`
 - `drop_table_if_exists::<M>()`
-
-### DML
-
-- `analyze::<M>()`: refreshes optimizer statistics for the model table
-- `insert::<M>(&model)`
-- `update::<M>(&model)`
-- `delete_by_id::<M>(&key)`
-
-### DQL
-
-- `get::<M>(&key) -> Result<Option<M>, DatabaseError>`
-- `fetch::<M>() -> Result<OrmIter<...>, DatabaseError>`
-- `select::<M>() -> SelectBuilder<...>`
-
-## Transaction ORM APIs
-
-The following ORM helpers are available on `DBTransaction`.
-
-### DML
-
-- `analyze::<M>()`
-- `insert::<M>(&model)`
-- `update::<M>(&model)`
-- `delete_by_id::<M>(&key)`
-
-### DQL
-
-- `get::<M>(&key) -> Result<Option<M>, DatabaseError>`
-- `fetch::<M>() -> Result<OrmIter<...>, DatabaseError>`
-- `select::<M>() -> SelectBuilder<...>`
+- `truncate::<M>()`
+- `create_view(name, query_builder)`
+- `create_or_replace_view(name, query_builder)`
+- `drop_view(name)`
+- `drop_view_if_exists(name)`
 
 `DBTransaction` does not currently expose the ORM DDL convenience methods.
 
-## Query builder API
+Typical schema maintenance uses the same model types and query builders:
+create tables from `Model`, truncate by model, and create or replace views from
+ORM queries.
 
-`Database::select::<M>()` and `DBTransaction::select::<M>()` return a typed `SelectBuilder`.
+### Data changes
 
-### Field expressions
+For common model-oriented writes:
 
-Generated field accessors return `Field<M, T>`. A field supports:
+- `insert::<M>(&model)`
+- `insert_many::<M>(models)`
 
-- `eq(value)`
-- `ne(value)`
-- `gt(value)`
-- `gte(value)`
-- `lt(value)`
-- `lte(value)`
-- `is_null()`
-- `is_not_null()`
-- `like(pattern)`
-- `not_like(pattern)`
-- `asc()`
-- `desc()`
+For query-driven writes, reuse the same filtered `from::<M>()` entrypoint and
+finish with:
 
-### Boolean composition
+- `insert::<Target>()`
+- `insert_into::<Target>(...)`
+- `overwrite::<Target>()`
+- `overwrite_into::<Target>(...)`
+- `update().set(...).execute()`
+- `delete()`
 
-`QueryExpr` supports:
+Here `overwrite*` follows the engine's `INSERT OVERWRITE` semantics, meaning
+conflicting target rows are replaced rather than the whole table being cleared.
 
-- `and(rhs)`
-- `or(rhs)`
-- `not()`
+For model-oriented writes, use `insert` and `insert_many`. For query-driven
+writes, compose from `from::<M>()` and finish with `insert`, `overwrite`,
+`update`, or `delete`.
 
-### Builder methods
+Query-driven writes are intentionally shaped like read queries first, so the
+same filters, joins, and projections can flow into the final write operation.
 
-`SelectBuilder` supports:
+## Introspection / Maintenance
 
-- `filter(expr)`
-- `and_filter(expr)`
-- `order_by(order)`
-- `limit(n)`
-- `offset(n)`
-- `raw()`
-- `fetch()`
-- `get()`
-- `exists()`
-- `count()`
+The ORM also exposes light-weight introspection and maintenance helpers.
 
-### Example
+On `Database`:
 
-```rust
-let exists = database
-    .select::<User>()
-    .filter(User::name().like("A%"))
-    .and_filter(User::age().gte(18))
-    .exists()?;
+- `show_tables()`
+- `show_views()`
+- `describe::<M>()`
+- `from::<M>()...explain()`
+- `analyze::<M>()`
 
-let count = database
-    .select::<User>()
-    .filter(User::age().is_not_null())
-    .count()?;
-# Ok::<(), kite_sql::errors::DatabaseError>(())
-```
+On `DBTransaction`:
 
-## Public structs and enums
+- `show_tables()`
+- `show_views()`
+- `describe::<M>()`
 
-### `OrmField`
+These helpers are intended for light-weight inspection around ORM-managed
+tables, without dropping down to raw SQL for common metadata queries.
 
-Static metadata for one persisted field.
+## Further reading
 
-Fields:
+Detailed method-by-method examples live in the rustdoc for:
 
-- `column`
-- `placeholder`
-- `primary_key`
-- `unique`
-
-### `OrmColumn`
-
-Static metadata for one persisted column used by table creation and migration.
-
-Fields:
-
-- `name`
-- `ddl_type`
-- `nullable`
-- `primary_key`
-- `unique`
-- `default_expr`
-
-Methods:
-
-- `definition_sql()`
-
-### `Field<M, T>`
-
-A typed model field handle used by the query builder.
-
-### `QueryValue`
-
-A query-side value node used by expressions.
-
-Variants:
-
-- `Column { table, column }`
-- `Param(DataValue)`
-
-### `CompareOp`
-
-Comparison operator used by `QueryExpr`.
-
-Variants:
-
-- `Eq`
-- `Ne`
-- `Gt`
-- `Gte`
-- `Lt`
-- `Lte`
-
-### `QueryExpr`
-
-Boolean query expression used in `where` clauses.
-
-Variants:
-
-- `Compare`
-- `IsNull`
-- `Like`
-- `And`
-- `Or`
-- `Not`
-
-Methods:
-
-- `and(rhs)`
-- `or(rhs)`
-- `not()`
-
-### `OrderBy`
-
-A typed `ORDER BY` item created from `Field::asc()` or `Field::desc()`.
-
-### `SelectBuilder<Q, M>`
-
-A lightweight single-table ORM query builder.
-
-### `DatabaseSelectSource<'a, S>`
-
-Internal source adapter used by `Database::select::<M>()`.
-This type is public for generic completeness, but it is not usually used directly.
-
-### `TransactionSelectSource<'a, 'tx, S>`
-
-Internal source adapter used by `DBTransaction::select::<M>()`.
-This type is public for generic completeness, but it is not usually used directly.
-
-## Public traits
-
-### `Model`
-
-The core ORM trait implemented by `#[derive(Model)]`.
-
-Important associated items:
-
-- `type PrimaryKey`
-- `table_name()`
-- `fields()`
-- `columns()`
-- `params(&self)`
-- `primary_key(&self)`
-- cached statement getters such as `select_statement()` and `insert_statement()`
-
-In most cases, you should derive this trait instead of implementing it manually.
-
-### `FromDataValue`
-
-Converts a `DataValue` into a Rust value during ORM mapping.
-
-### `ToDataValue`
-
-Converts a Rust value into a `DataValue` for ORM parameters and query expressions.
-
-### `ModelColumnType`
-
-Maps a Rust type to the SQL DDL type used by ORM table creation and migration.
-
-### `StringType`
-
-Marker trait for string-like fields that support `#[model(varchar = N)]` and `#[model(char = N)]`.
-
-### `DecimalType`
-
-Marker trait for decimal-like fields that support precision and scale annotations.
-
-### `StatementSource`
-
-Execution abstraction shared by `Database` and `DBTransaction` for prepared ORM statements.
-This is mostly framework infrastructure.
-
-### `SelectSource`
-
-Execution abstraction used by `SelectBuilder`.
-This is mostly framework infrastructure.
-
-## Public helper function
-
-### `try_get`
-
-`try_get` extracts a named field from a tuple and converts it into a Rust value.
-It is primarily intended for derive-generated code and low-level integrations.
-
-## Migration behavior
-
-`migrate::<M>()` is intended to preserve existing data whenever possible.
-
-Current behavior:
-
-- creates the table if it does not exist
-- adds missing columns
-- drops removed columns
-- applies supported `CHANGE COLUMN` updates for compatible existing columns
-- can infer safe renames in straightforward cases
-- can update type, default, and nullability when supported by the engine
-
-Current limitations:
-
-- primary key changes are rejected
-- unique-constraint changes are rejected
-- the primary-key index is managed by the table and cannot be dropped independently
-- changing the type of an indexed column is intentionally conservative
-
-## Related APIs outside `crate::orm`
-
-ORM models can also be created from arbitrary query results through `ResultIter::orm::<M>()`:
-
-```rust
-let iter = database.run("select id, user_name, age from users")?;
-let users = iter.orm::<User>();
-# let _ = users;
-# Ok::<(), kite_sql::errors::DatabaseError>(())
-```
-
-If you need custom tuple-to-struct mapping without `#[derive(Model)]`, use the lower-level `from_tuple!` macro with `features = ["macros"]`.
+- `Field<M, T>`
+- `QueryValue`
+- `QueryExpr`
+- `FromBuilder<Q, M>`
+- `SetQueryBuilder<Q, M>`
+- `Projection`
+- `Model`

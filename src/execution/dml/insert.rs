@@ -89,22 +89,16 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert {
 
             let schema = input.output_schema().clone();
 
-            let primary_keys = schema
-                .iter()
-                .filter_map(|column| column.desc().primary().map(|i| (i, column)))
-                .sorted_by_key(|(i, _)| *i)
-                .map(|(_, col)| col.key(is_mapping_by_name))
-                .collect_vec();
-            if primary_keys.is_empty() {
-                throw!(co, Err(DatabaseError::not_null()))
-            }
-
             if let Some(table_catalog) = throw!(
                 co,
                 unsafe { &mut (*transaction) }.table(cache.0, table_name.clone())
             )
             .cloned()
             {
+                if table_catalog.primary_keys().is_empty() {
+                    throw!(co, Err(DatabaseError::not_null()))
+                }
+
                 // Index values must be projected from the full table schema, because
                 // omitted input columns may be filled by defaults before index maintenance.
                 let table_schema = table_catalog.schema_ref();
@@ -140,7 +134,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert {
                     let mut values = Vec::with_capacity(table_catalog.columns_len());
 
                     for col in table_catalog.columns() {
-                        let value = {
+                        let mut value = {
                             let mut value = tuple_map.remove(&col.key(is_mapping_by_name));
 
                             if value.is_none() {
@@ -148,6 +142,10 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert {
                             }
                             value.unwrap_or(DataValue::Null)
                         };
+                        if !value.is_null() && &value.logical_type() != col.datatype() {
+                            value = throw!(co, value.cast(col.datatype()));
+                        }
+                        throw!(co, value.check_len(col.datatype()));
                         if value.is_null() && !col.nullable() {
                             co.yield_(Err(DatabaseError::not_null_column(col.name().to_string())))
                                 .await;

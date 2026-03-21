@@ -147,9 +147,20 @@ pub enum QueryBindStep {
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub enum SubQueryType {
-    SubQuery(LogicalPlan),
-    ExistsSubQuery(bool, LogicalPlan),
-    InSubQuery(bool, LogicalPlan),
+    SubQuery {
+        plan: LogicalPlan,
+        correlated: bool,
+    },
+    ExistsSubQuery {
+        negated: bool,
+        plan: LogicalPlan,
+        correlated: bool,
+    },
+    InSubQuery {
+        negated: bool,
+        plan: LogicalPlan,
+        correlated: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +189,7 @@ pub struct BinderContext<'a, T: Transaction> {
 
     bind_step: QueryBindStep,
     sub_queries: HashMap<QueryBindStep, Vec<SubQueryType>>,
+    has_outer_refs: bool,
 
     temp_table_id: Arc<AtomicUsize>,
     pub(crate) allow_default: bool,
@@ -249,6 +261,7 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
             using: Default::default(),
             bind_step: QueryBindStep::From,
             sub_queries: Default::default(),
+            has_outer_refs: false,
             temp_table_id,
             allow_default: false,
         }
@@ -283,6 +296,14 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
 
     pub fn sub_queries_at_now(&mut self) -> Option<Vec<SubQueryType>> {
         self.sub_queries.remove(&self.bind_step)
+    }
+
+    pub fn mark_outer_ref(&mut self) {
+        self.has_outer_refs = true;
+    }
+
+    pub fn has_outer_refs(&self) -> bool {
+        self.has_outer_refs
     }
 
     pub fn table(&self, table_name: TableName) -> Result<Option<&TableCatalog>, DatabaseError> {
@@ -476,20 +497,20 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
                         "insert without source is not supported".to_string(),
                     )
                 })?;
-                // TODO: support body on Insert
-                if let SetExpr::Values(values) = source.body.as_ref() {
-                    self.bind_insert(
+                match source.body.as_ref() {
+                    SetExpr::Values(values) => self.bind_insert(
                         table_name,
                         &insert.columns,
                         &values.rows,
                         insert.overwrite,
                         false,
-                    )?
-                } else {
-                    return Err(DatabaseError::UnsupportedStmt(format!(
-                        "insert body: {:#?}",
-                        source.body
-                    )));
+                    )?,
+                    _ => self.bind_insert_query(
+                        table_name,
+                        &insert.columns,
+                        source,
+                        insert.overwrite,
+                    )?,
                 }
             }
             Statement::Update(update) => {

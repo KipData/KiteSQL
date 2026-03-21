@@ -57,6 +57,69 @@ impl<S: Storage> Database<S> {
         Ok(())
     }
 
+    /// Truncates the model table.
+    ///
+    /// ```rust
+    /// use kite_sql::db::DataBaseBuilder;
+    /// use kite_sql::Model;
+    ///
+    /// #[derive(Default, Debug, PartialEq, Model)]
+    /// #[model(table = "users")]
+    /// struct User {
+    ///     #[model(primary_key)]
+    ///     id: i32,
+    ///     name: String,
+    /// }
+    ///
+    /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
+    /// database.create_table::<User>().unwrap();
+    /// database.insert(&User { id: 1, name: "Alice".to_string() }).unwrap();
+    /// database.truncate::<User>().unwrap();
+    /// assert_eq!(database.fetch::<User>().unwrap().count(), 0);
+    /// ```
+    pub fn truncate<M: Model>(&self) -> Result<(), DatabaseError> {
+        self.execute(&orm_truncate_statement(M::table_name()), &[])?
+            .done()
+    }
+
+    /// Creates a view from an ORM query builder.
+    pub fn create_view<Q: SubquerySource>(
+        &self,
+        view_name: &str,
+        query: Q,
+    ) -> Result<(), DatabaseError> {
+        self.execute(
+            &orm_create_view_statement(view_name, query.into_subquery(), false),
+            &[],
+        )?
+        .done()
+    }
+
+    /// Creates or replaces a view from an ORM query builder.
+    pub fn create_or_replace_view<Q: SubquerySource>(
+        &self,
+        view_name: &str,
+        query: Q,
+    ) -> Result<(), DatabaseError> {
+        self.execute(
+            &orm_create_view_statement(view_name, query.into_subquery(), true),
+            &[],
+        )?
+        .done()
+    }
+
+    /// Drops a view by name.
+    pub fn drop_view(&self, view_name: &str) -> Result<(), DatabaseError> {
+        self.execute(&orm_drop_view_statement(view_name, false), &[])?
+            .done()
+    }
+
+    /// Drops a view by name if it exists.
+    pub fn drop_view_if_exists(&self, view_name: &str) -> Result<(), DatabaseError> {
+        self.execute(&orm_drop_view_statement(view_name, true), &[])?
+            .done()
+    }
+
     /// Migrates an existing table to match the current model definition.
     ///
     /// This helper creates the table when it does not exist, adds missing
@@ -135,47 +198,30 @@ impl<S: Storage> Database<S> {
             }
 
             if !model_column_type_matches_catalog(column, current_column) {
-                self.run(::std::format!(
-                    "alter table {} alter column {} type {}",
+                let statement = orm_alter_column_type_statement(
                     M::table_name(),
                     column.name,
-                    column.ddl_type,
-                ))?
-                .done()?;
+                    &column.ddl_type,
+                )?;
+                self.execute(&statement, &[])?.done()?;
             }
 
             if model_column_default(column) != catalog_column_default(current_column) {
-                if let Some(default_expr) = column.default_expr {
-                    self.run(::std::format!(
-                        "alter table {} alter column {} set default {}",
-                        M::table_name(),
-                        column.name,
-                        default_expr,
-                    ))?
-                    .done()?;
-                } else {
-                    self.run(::std::format!(
-                        "alter table {} alter column {} drop default",
-                        M::table_name(),
-                        column.name,
-                    ))?
-                    .done()?;
-                }
+                let statement = orm_alter_column_default_statement(
+                    M::table_name(),
+                    column.name,
+                    column.default_expr,
+                )?;
+                self.execute(&statement, &[])?.done()?;
             }
 
             if column.nullable != current_column.nullable() {
-                let op = if column.nullable {
-                    "drop not null"
-                } else {
-                    "set not null"
-                };
-                self.run(::std::format!(
-                    "alter table {} alter column {} {}",
+                let statement = orm_alter_column_nullability_statement(
                     M::table_name(),
                     column.name,
-                    op,
-                ))?
-                .done()?;
+                    column.nullable,
+                );
+                self.execute(&statement, &[])?.done()?;
             }
         }
 
@@ -217,13 +263,8 @@ impl<S: Storage> Database<S> {
         }
 
         for (old_name, new_name) in rename_pairs {
-            self.run(::std::format!(
-                "alter table {} rename column {} to {}",
-                M::table_name(),
-                old_name,
-                new_name,
-            ))?
-            .done()?;
+            let statement = orm_rename_column_statement(M::table_name(), &old_name, new_name);
+            self.execute(&statement, &[])?.done()?;
         }
 
         for column in table.columns() {
@@ -240,12 +281,8 @@ impl<S: Storage> Database<S> {
                 )));
             }
 
-            self.run(::std::format!(
-                "alter table {} drop column {}",
-                M::table_name(),
-                column.name(),
-            ))?
-            .done()?;
+            let statement = orm_drop_column_statement(M::table_name(), column.name());
+            self.execute(&statement, &[])?.done()?;
         }
 
         for column in columns {
@@ -261,12 +298,8 @@ impl<S: Storage> Database<S> {
                 )));
             }
 
-            self.run(::std::format!(
-                "alter table {} add column {}",
-                M::table_name(),
-                column.definition_sql(),
-            ))?
-            .done()?;
+            let statement = orm_add_column_statement(M::table_name(), column)?;
+            self.execute(&statement, &[])?.done()?;
         }
 
         for statement in M::create_index_if_not_exists_statements() {
@@ -281,16 +314,14 @@ impl<S: Storage> Database<S> {
     /// Primary-key indexes are managed by the table definition itself and
     /// cannot be dropped independently.
     pub fn drop_index<M: Model>(&self, index_name: &str) -> Result<(), DatabaseError> {
-        let sql = ::std::format!("drop index {}.{}", M::table_name(), index_name);
-        let statement = crate::db::prepare(&sql)?;
+        let statement = orm_drop_index_statement(M::table_name(), index_name, false);
 
         self.execute(&statement, &[])?.done()
     }
 
     /// Drops a non-primary-key model index by name if it exists.
     pub fn drop_index_if_exists<M: Model>(&self, index_name: &str) -> Result<(), DatabaseError> {
-        let sql = ::std::format!("drop index if exists {}.{}", M::table_name(), index_name);
-        let statement = crate::db::prepare(&sql)?;
+        let statement = orm_drop_index_statement(M::table_name(), index_name, true);
 
         self.execute(&statement, &[])?.done()
     }

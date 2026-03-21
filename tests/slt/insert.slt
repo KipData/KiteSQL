@@ -31,12 +31,22 @@ insert into t values (8,NULL,NULL,NULL)
 statement ok
 insert overwrite t values (1, 9, 9, 9)
 
+statement ok
+insert into t(id, v2) select id + 10, cast(v1 as varchar) from t where id < 2
+
+statement ok
+insert into t select id + 20, v1, v2, v3 from t where id in (0, 1)
+
 query IIII rowsort
 select * from t
 ----
 0 1 10 100
 1 9 9 9
+10 null 1 null
+11 null 9 null
 2 2 20 200
+20 1 10 100
+21 9 9 9
 3 3 30 300
 4 4 40 400
 5 1 10 100

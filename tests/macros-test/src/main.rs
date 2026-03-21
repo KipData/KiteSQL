@@ -24,13 +24,14 @@ mod test {
     use kite_sql::expression::function::FunctionSummary;
     use kite_sql::expression::BinaryOperator;
     use kite_sql::expression::ScalarExpression;
+    use kite_sql::orm::{case_when, count_all, func, max, min, sum, QueryValue};
     use kite_sql::types::evaluator::EvaluatorFactory;
     use kite_sql::types::tuple::{SchemaRef, Tuple};
     use kite_sql::types::value::{DataValue, Utf8Type};
     use kite_sql::types::LogicalType;
-    use kite_sql::{from_tuple, scala_function, table_function, Model};
+    use kite_sql::{from_tuple, scala_function, table_function, Model, Projection};
     use rust_decimal::Decimal;
-    use sqlparser::ast::CharLengthUnits;
+    use sqlparser::ast::{CharLengthUnits, DataType as SqlDataType};
     use std::sync::Arc;
 
     fn build_tuple() -> (Tuple, SchemaRef) {
@@ -112,6 +113,62 @@ mod test {
         id: i32,
         #[model(char = 2)]
         code: String,
+    }
+
+    #[derive(Default, Debug, PartialEq, Model)]
+    #[model(table = "user_name_snapshots")]
+    struct UserNameSnapshot {
+        #[model(primary_key)]
+        id: i32,
+        #[model(rename = "user_name", varchar = 32)]
+        name: String,
+    }
+
+    #[derive(Default, Debug, PartialEq, Model)]
+    #[model(table = "event_logs")]
+    struct EventLog {
+        #[model(primary_key)]
+        id: i32,
+        category: String,
+        score: i32,
+    }
+
+    #[derive(Default, Debug, PartialEq, Model)]
+    #[model(table = "orders")]
+    struct Order {
+        #[model(primary_key)]
+        id: i32,
+        user_id: i32,
+        amount: i32,
+    }
+
+    #[derive(Default, Debug, PartialEq, Model)]
+    #[model(table = "archived_users")]
+    struct ArchivedUser {
+        #[model(primary_key)]
+        id: i32,
+        #[model(rename = "user_name", unique, varchar = 32)]
+        name: String,
+        #[model(default = "18")]
+        age: Option<i32>,
+        #[model(skip)]
+        cache: String,
+    }
+
+    #[derive(Default, Debug, PartialEq, Projection)]
+    struct UserSummary {
+        id: i32,
+        #[projection(rename = "user_name")]
+        display_name: String,
+        age: Option<i32>,
+    }
+
+    #[derive(Default, Debug, PartialEq, Projection)]
+    struct UserOrderSummary {
+        #[projection(from = "users", rename = "user_name")]
+        display_name: String,
+        #[projection(from = "orders")]
+        amount: i32,
     }
 
     #[derive(Default, Debug, PartialEq, Model)]
@@ -401,7 +458,9 @@ mod test {
 
     #[test]
     fn test_orm_query_builder() -> Result<(), DatabaseError> {
-        let database = DataBaseBuilder::path(".").build_in_memory()?;
+        let database = DataBaseBuilder::path(".")
+            .register_scala_function(MyOrmFunction::new())
+            .build_in_memory()?;
 
         database.create_table::<User>()?;
         database.run("drop index users.users_age_index")?.done()?;
@@ -424,58 +483,936 @@ mod test {
             cache: "".to_string(),
         })?;
 
+        database.create_table::<Order>()?;
+        database.insert(&Order {
+            id: 1,
+            user_id: 1,
+            amount: 100,
+        })?;
+        database.insert(&Order {
+            id: 2,
+            user_id: 1,
+            amount: 200,
+        })?;
+        database.insert(&Order {
+            id: 3,
+            user_id: 2,
+            amount: 300,
+        })?;
+
+        database.create_table::<Wallet>()?;
+        database.insert(&Wallet {
+            id: 1,
+            balance: Decimal::new(5000, 2),
+        })?;
+        database.insert(&Wallet {
+            id: 3,
+            balance: Decimal::new(1250, 2),
+        })?;
+        database.insert(&Wallet {
+            id: 4,
+            balance: Decimal::new(9999, 2),
+        })?;
+
         let adults = database
-            .select::<User>()
-            .filter(User::age().gte(18).and(User::name().like("A%")))
+            .from::<User>()
+            .and(User::age().gte(18), User::name().like("A%"))
             .fetch()?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(adults.len(), 1);
         assert_eq!(adults[0].name, "Alice");
 
-        let quoted = database
-            .select::<User>()
-            .filter(User::name().eq("A'lex"))
-            .get()?;
+        let quoted = database.from::<User>().eq(User::name(), "A'lex").get()?;
         assert_eq!(quoted.unwrap().id, 3);
 
         let ordered = database
-            .select::<User>()
-            .filter(User::age().is_null().not())
-            .order_by(User::age().desc())
+            .from::<User>()
+            .not(User::age().is_null())
+            .desc(User::age())
             .limit(1)
             .get()?
             .unwrap();
         assert_eq!(ordered.id, 2);
 
-        let count = database
-            .select::<User>()
-            .filter(User::age().is_not_null())
-            .count()?;
+        let count = database.from::<User>().is_not_null(User::age()).count()?;
         assert_eq!(count, 2);
 
-        let exists = database
-            .select::<User>()
-            .filter(User::id().eq(2))
-            .exists()?;
+        let exists = database.from::<User>().eq(User::id(), 2).exists()?;
         assert!(exists);
-        let missing = database
-            .select::<User>()
-            .filter(User::id().eq(99))
-            .exists()?;
+        let missing = database.from::<User>().eq(User::id(), 99).exists()?;
         assert!(!missing);
 
+        let two_users = database
+            .from::<User>()
+            .or(User::id().eq(1), User::id().eq(2))
+            .asc(User::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            two_users.iter().map(|user| user.id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        assert_eq!(
+            database
+                .from::<User>()
+                .and(User::age().is_not_null(), User::name().not_like("B%"))
+                .count()?,
+            1
+        );
+
+        let in_list = database
+            .from::<User>()
+            .in_list(User::id(), [1, 3])
+            .asc(User::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            in_list.iter().map(|user| user.id).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+
+        let either_named_a_or_missing_age = database
+            .from::<User>()
+            .or(User::name().like("A%"), User::age().is_null())
+            .asc(User::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            either_named_a_or_missing_age
+                .iter()
+                .map(|user| user.id)
+                .collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+
+        let query_value_function_matched = database
+            .from::<User>()
+            .eq(QueryValue::function("add_one", [User::id()]), 3)
+            .get()?
+            .unwrap();
+        assert_eq!(query_value_function_matched.id, 2);
+
+        let cast_to_matched = database
+            .from::<User>()
+            .eq(User::id().cast_to(SqlDataType::BigInt(None)), 3_i64)
+            .get()?
+            .unwrap();
+        assert_eq!(cast_to_matched.id, 3);
+
+        let add_matched = database
+            .from::<User>()
+            .eq(User::id().add(1), 3)
+            .get()?
+            .unwrap();
+        assert_eq!(add_matched.id, 2);
+
+        let arithmetic_projection = database
+            .from::<User>()
+            .project_tuple((
+                User::id(),
+                User::id().mul(10).alias("times_ten"),
+                User::id().div(2).alias("half_id"),
+                User::id().modulo(2).alias("id_mod_2"),
+            ))
+            .asc(User::id())
+            .fetch::<(i32, i32, i32, i32)>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            arithmetic_projection,
+            vec![(1, 10, 0, 1), (2, 20, 1, 0), (3, 30, 1, 1)]
+        );
+
+        let projected_name = database
+            .from::<User>()
+            .project_value(User::name())
+            .eq(User::id(), 1)
+            .get::<String>()?;
+        assert_eq!(projected_name.as_deref(), Some("Alice"));
+
+        let age_buckets = database
+            .from::<User>()
+            .project_value(case_when(
+                [
+                    (User::age().is_null(), "unknown"),
+                    (User::age().lt(20), "minor"),
+                ],
+                "adult",
+            ))
+            .asc(User::id())
+            .fetch::<String>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(age_buckets, vec!["minor", "adult", "unknown"]);
+
+        let simple_case_labels = database
+            .from::<User>()
+            .project_value(
+                QueryValue::simple_case(User::id(), [(1, "one"), (2, "two")], "other")
+                    .alias("id_label"),
+            )
+            .asc(User::id())
+            .fetch::<String>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(simple_case_labels, vec!["one", "two", "other"]);
+
+        let arithmetic_query_value = database
+            .from::<User>()
+            .project_value(
+                QueryValue::function("add_one", [User::id()])
+                    .add(10)
+                    .alias("boosted_id"),
+            )
+            .eq(User::id(), 1)
+            .get::<i32>()?;
+        assert_eq!(arithmetic_query_value, Some(12));
+
+        let id_sum = database
+            .from::<User>()
+            .project_value(sum(User::id()))
+            .get::<i32>()?;
+        assert_eq!(id_sum, Some(6));
+
+        let total_users = database
+            .from::<User>()
+            .project_value(count_all().alias("total_users"))
+            .get::<i32>()?;
+        assert_eq!(total_users, Some(3));
+
+        let min_user_id = database
+            .from::<User>()
+            .project_value(min(User::id()).alias("min_user_id"))
+            .get::<i32>()?;
+        assert_eq!(min_user_id, Some(1));
+
+        let max_user_id = database
+            .from::<User>()
+            .project_value(max(User::id()).alias("max_user_id"))
+            .get::<i32>()?;
+        assert_eq!(max_user_id, Some(3));
+
+        let projected_user_rows = database
+            .from::<User>()
+            .project_tuple((User::id(), User::name()))
+            .asc(User::id())
+            .fetch::<(i32, String)>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            projected_user_rows,
+            vec![
+                (1, "Alice".to_string()),
+                (2, "Bob".to_string()),
+                (3, "A'lex".to_string()),
+            ]
+        );
+
+        let udf_projection = database
+            .from::<User>()
+            .project_tuple((
+                User::id(),
+                func("add_one", [QueryValue::from(User::id())]).alias("next_id"),
+            ))
+            .asc(User::id())
+            .fetch::<(i32, i32)>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(udf_projection, vec![(1, 2), (2, 3), (3, 4)]);
+
+        let udf_projection_schema = database
+            .from::<User>()
+            .project_tuple((
+                User::id(),
+                QueryValue::function("add_one", [User::id()]).alias("next_id"),
+            ))
+            .asc(User::id())
+            .raw()?;
+        assert_eq!(
+            udf_projection_schema
+                .schema()
+                .iter()
+                .map(|column| column.name().to_string())
+                .collect::<Vec<_>>(),
+            vec!["id", "next_id"]
+        );
+        udf_projection_schema.done()?;
+
+        let projected_users = database
+            .from::<User>()
+            .project::<UserSummary>()
+            .asc(User::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            projected_users,
+            vec![
+                UserSummary {
+                    id: 1,
+                    display_name: "Alice".to_string(),
+                    age: Some(18),
+                },
+                UserSummary {
+                    id: 2,
+                    display_name: "Bob".to_string(),
+                    age: Some(30),
+                },
+                UserSummary {
+                    id: 3,
+                    display_name: "A'lex".to_string(),
+                    age: None,
+                },
+            ]
+        );
+
+        let projected_user = database
+            .from::<User>()
+            .project::<UserSummary>()
+            .eq(User::id(), 1)
+            .get()?;
+        assert_eq!(
+            projected_user,
+            Some(UserSummary {
+                id: 1,
+                display_name: "Alice".to_string(),
+                age: Some(18),
+            })
+        );
+
+        let aliased_total_users = database
+            .from::<User>()
+            .project_value(count_all().alias("total_users"))
+            .raw()?;
+        assert_eq!(aliased_total_users.schema()[0].name(), "total_users");
+        aliased_total_users.done()?;
+
+        let projected_schema = database.from::<User>().project::<UserSummary>().raw()?;
+        assert_eq!(
+            projected_schema
+                .schema()
+                .iter()
+                .map(|column| column.name().to_string())
+                .collect::<Vec<_>>(),
+            vec!["id", "display_name", "age"]
+        );
+        projected_schema.done()?;
+
+        assert_eq!(
+            database
+                .from::<User>()
+                .where_exists(
+                    database
+                        .from::<User>()
+                        .project_value(User::id())
+                        .eq(User::id(), 2),
+                )
+                .count()?,
+            3
+        );
+
+        assert_eq!(
+            database
+                .from::<User>()
+                .where_not_exists(
+                    database
+                        .from::<User>()
+                        .project_value(User::id())
+                        .eq(User::id(), 2),
+                )
+                .count()?,
+            0
+        );
+
+        let in_subquery = database
+            .from::<User>()
+            .in_subquery(
+                User::id(),
+                database
+                    .from::<User>()
+                    .project_value(User::id())
+                    .in_list(User::id(), [1, 3]),
+            )
+            .asc(User::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            in_subquery.iter().map(|user| user.id).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+
+        let aliased_user = database
+            .from::<User>()
+            .alias("u")
+            .eq(User::id().qualify("u"), 2)
+            .get()?
+            .unwrap();
+        assert_eq!(aliased_user.name, "Bob");
+
+        let aliased_projection = database
+            .from::<User>()
+            .alias("u")
+            .project::<UserSummary>()
+            .eq(User::id().qualify("u"), 2)
+            .get()?;
+        assert_eq!(
+            aliased_projection,
+            Some(UserSummary {
+                id: 2,
+                display_name: "Bob".to_string(),
+                age: Some(30),
+            })
+        );
+
+        let joined_projection = database
+            .from::<User>()
+            .inner_join::<Order>()
+            .on(User::id().eq(Order::user_id()))
+            .project::<UserOrderSummary>()
+            .asc(Order::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            joined_projection,
+            vec![
+                UserOrderSummary {
+                    display_name: "Alice".to_string(),
+                    amount: 100,
+                },
+                UserOrderSummary {
+                    display_name: "Alice".to_string(),
+                    amount: 200,
+                },
+                UserOrderSummary {
+                    display_name: "Bob".to_string(),
+                    amount: 300,
+                },
+            ]
+        );
+
+        let using_joined_rows = database
+            .from::<User>()
+            .inner_join::<Wallet>()
+            .using(User::id())
+            .project_tuple((User::name(), Wallet::balance()))
+            .asc(User::id())
+            .fetch::<(String, Decimal)>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            using_joined_rows,
+            vec![
+                ("Alice".to_string(), Decimal::new(5000, 2)),
+                ("A'lex".to_string(), Decimal::new(1250, 2)),
+            ]
+        );
+
+        let full_joined_rows = database
+            .from::<User>()
+            .full_join::<Wallet>()
+            .using(User::id())
+            .project_tuple((User::id(), Wallet::id()))
+            .fetch::<(Option<i32>, Option<i32>)>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(full_joined_rows.len(), 4);
+
+        let union_tuple = database
+            .from::<User>()
+            .eq(User::id(), 2)
+            .project_tuple((User::id(), User::name()))
+            .union(
+                database
+                    .from::<User>()
+                    .eq(User::id(), 2)
+                    .project_tuple((User::id(), User::name())),
+            )
+            .all()
+            .get::<(i32, String)>()?;
+        assert_eq!(union_tuple, Some((2, "Bob".to_string())));
+
+        let ordered_union_ids = database
+            .from::<User>()
+            .project_value(User::id())
+            .union(database.from::<Order>().project_value(Order::user_id()))
+            .all()
+            .asc(User::id())
+            .offset(1)
+            .limit(3)
+            .fetch::<i32>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(ordered_union_ids, vec![1, 1, 2]);
+
+        let users_without_orders = database
+            .from::<User>()
+            .in_subquery(
+                User::id(),
+                database
+                    .from::<User>()
+                    .project_value(User::id())
+                    .except(database.from::<Order>().project_value(Order::user_id())),
+            )
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            users_without_orders
+                .iter()
+                .map(|user| user.id)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+
+        let left_joined_rows = database
+            .from::<User>()
+            .alias("u")
+            .left_join::<Order>()
+            .alias("o")
+            .on(User::id().qualify("u").eq(Order::user_id().qualify("o")))
+            .project_tuple((
+                User::id().qualify("u").alias("user_id"),
+                Order::amount().qualify("o").alias("order_amount"),
+            ))
+            .asc(User::id().qualify("u"))
+            .asc(Order::id().qualify("o"))
+            .fetch::<(i32, Option<i32>)>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            left_joined_rows,
+            vec![(1, Some(100)), (1, Some(200)), (2, Some(300)), (3, None)]
+        );
+
         let mut tx = database.new_transaction()?;
-        let in_tx = tx.select::<User>().filter(User::id().eq(2)).get()?.unwrap();
+        let in_tx = tx.from::<User>().eq(User::id(), 2).get()?.unwrap();
         assert_eq!(in_tx.name, "Bob");
         tx.commit()?;
 
+        database.drop_table::<Wallet>()?;
+        database.drop_table::<Order>()?;
         database.drop_table::<User>()?;
 
         Ok(())
     }
 
     #[test]
-    fn test_orm_crud() -> Result<(), DatabaseError> {
+    fn test_orm_expression_and_set_query_helpers() -> Result<(), DatabaseError> {
+        let database = DataBaseBuilder::path(".").build_in_memory()?;
+
+        database.create_table::<User>()?;
+        database.insert(&User {
+            id: 1,
+            name: "Alice".to_string(),
+            age: Some(18),
+            cache: "".to_string(),
+        })?;
+        database.insert(&User {
+            id: 2,
+            name: "Bob".to_string(),
+            age: Some(30),
+            cache: "".to_string(),
+        })?;
+        database.insert(&User {
+            id: 3,
+            name: "Carol".to_string(),
+            age: None,
+            cache: "".to_string(),
+        })?;
+
+        database.create_table::<Order>()?;
+        database.insert(&Order {
+            id: 1,
+            user_id: 1,
+            amount: 100,
+        })?;
+        database.insert(&Order {
+            id: 2,
+            user_id: 1,
+            amount: 200,
+        })?;
+        database.insert(&Order {
+            id: 3,
+            user_id: 2,
+            amount: 300,
+        })?;
+
+        let exists_count = database
+            .from::<User>()
+            .filter(kite_sql::orm::QueryExpr::exists(
+                database
+                    .from::<Order>()
+                    .project_value(Order::id())
+                    .eq(Order::id(), 1),
+            ))
+            .count()?;
+        assert_eq!(exists_count, 3);
+
+        let not_exists_count = database
+            .from::<User>()
+            .filter(kite_sql::orm::QueryExpr::not_exists(
+                database
+                    .from::<Order>()
+                    .project_value(Order::id())
+                    .eq(Order::id(), 99),
+            ))
+            .count()?;
+        assert_eq!(not_exists_count, 3);
+
+        let blocked_by_not_exists = database
+            .from::<User>()
+            .filter(kite_sql::orm::QueryExpr::not_exists(
+                database
+                    .from::<Order>()
+                    .project_value(Order::id())
+                    .eq(Order::id(), 1),
+            ))
+            .count()?;
+        assert_eq!(blocked_by_not_exists, 0);
+
+        let users_with_orders = database
+            .from::<User>()
+            .filter(kite_sql::orm::QueryExpr::exists(
+                database
+                    .from::<Order>()
+                    .project_value(Order::id())
+                    .eq(Order::user_id(), User::id()),
+            ))
+            .asc(User::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            users_with_orders
+                .iter()
+                .map(|user| user.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        let users_without_orders = database
+            .from::<User>()
+            .filter(kite_sql::orm::QueryExpr::not_exists(
+                database
+                    .from::<Order>()
+                    .project_value(Order::id())
+                    .eq(Order::user_id(), User::id()),
+            ))
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            users_without_orders
+                .iter()
+                .map(|user| user.id)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+
+        database
+            .from::<User>()
+            .filter(
+                User::id().in_subquery(
+                    database
+                        .from::<Order>()
+                        .project_value(Order::user_id())
+                        .eq(Order::user_id(), User::id()),
+                ),
+            )
+            .asc(User::id())
+            .raw()?
+            .done()?;
+
+        database
+            .from::<User>()
+            .filter(
+                User::id().not_in_subquery(
+                    database
+                        .from::<Order>()
+                        .project_value(Order::user_id())
+                        .eq(Order::user_id(), User::id()),
+                ),
+            )
+            .asc(User::id())
+            .raw()?
+            .done()?;
+
+        database
+            .from::<User>()
+            .filter(
+                User::id().in_subquery(
+                    database
+                        .from::<Order>()
+                        .project_value(Order::user_id())
+                        .eq(Order::amount(), 100)
+                        .union(
+                            database
+                                .from::<Order>()
+                                .project_value(Order::user_id())
+                                .eq(Order::amount(), 300),
+                        )
+                        .all(),
+                ),
+            )
+            .asc(User::id())
+            .raw()?
+            .done()?;
+
+        let correlated_exists_with_union = database
+            .from::<User>()
+            .filter(kite_sql::orm::QueryExpr::exists(
+                database
+                    .from::<Order>()
+                    .project_value(Order::id())
+                    .eq(Order::user_id(), User::id())
+                    .union(
+                        database
+                            .from::<Order>()
+                            .project_value(Order::id())
+                            .eq(Order::amount(), 300),
+                    ),
+            ))
+            .count();
+        assert!(correlated_exists_with_union.is_err());
+
+        let max_id_user = database
+            .from::<User>()
+            .eq(
+                User::id(),
+                QueryValue::subquery(database.from::<User>().project_value(max(User::id()))),
+            )
+            .get()?
+            .unwrap();
+        assert_eq!(max_id_user.id, 3);
+
+        let union_user = database
+            .from::<User>()
+            .eq(User::id(), 2)
+            .union(database.from::<User>().eq(User::id(), 2))
+            .all()
+            .get()?
+            .unwrap();
+        assert_eq!(union_user.id, 2);
+
+        let ordered_union_user = database
+            .from::<User>()
+            .eq(User::id(), 1)
+            .union(database.from::<User>().eq(User::id(), 2))
+            .desc(User::id())
+            .get()?
+            .unwrap();
+        assert_eq!(ordered_union_user.id, 2);
+
+        let union_value = database
+            .from::<User>()
+            .project_value(User::id())
+            .eq(User::id(), 2)
+            .union(
+                database
+                    .from::<Order>()
+                    .project_value(Order::user_id())
+                    .eq(Order::user_id(), 2),
+            )
+            .all()
+            .get::<i32>()?;
+        assert_eq!(union_value, Some(2));
+
+        let ordered_union_value = database
+            .from::<User>()
+            .project_value(User::id())
+            .union(database.from::<Order>().project_value(Order::user_id()))
+            .all()
+            .desc(User::id())
+            .get::<i32>()?;
+        assert_eq!(ordered_union_value, Some(3));
+
+        let union_tuple = database
+            .from::<User>()
+            .eq(User::id(), 2)
+            .project_tuple((User::id(), User::name()))
+            .union(
+                database
+                    .from::<User>()
+                    .eq(User::id(), 2)
+                    .project_tuple((User::id(), User::name())),
+            )
+            .all()
+            .get::<(i32, String)>()?;
+        assert_eq!(union_tuple, Some((2, "Bob".to_string())));
+
+        let ordered_union_tuple = database
+            .from::<User>()
+            .eq(User::id(), 1)
+            .project_tuple((User::id(), User::name()))
+            .union(
+                database
+                    .from::<User>()
+                    .eq(User::id(), 2)
+                    .project_tuple((User::id(), User::name())),
+            )
+            .desc(User::id())
+            .get::<(i32, String)>()?;
+        assert_eq!(ordered_union_tuple, Some((2, "Bob".to_string())));
+
+        let union_projection = database
+            .from::<User>()
+            .eq(User::id(), 2)
+            .project::<UserSummary>()
+            .union(
+                database
+                    .from::<User>()
+                    .eq(User::id(), 2)
+                    .project::<UserSummary>(),
+            )
+            .all()
+            .get()?;
+        assert_eq!(
+            union_projection,
+            Some(UserSummary {
+                id: 2,
+                display_name: "Bob".to_string(),
+                age: Some(30),
+            })
+        );
+
+        let ordered_union_projection = database
+            .from::<User>()
+            .eq(User::id(), 1)
+            .project::<UserSummary>()
+            .union(
+                database
+                    .from::<User>()
+                    .eq(User::id(), 2)
+                    .project::<UserSummary>(),
+            )
+            .desc(User::id())
+            .get()?;
+        assert_eq!(
+            ordered_union_projection,
+            Some(UserSummary {
+                id: 2,
+                display_name: "Bob".to_string(),
+                age: Some(30),
+            })
+        );
+
+        database.drop_table::<Order>()?;
+        database.drop_table::<User>()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_orm_group_by_builder() -> Result<(), DatabaseError> {
+        let database = DataBaseBuilder::path(".").build_in_memory()?;
+
+        database.create_table::<EventLog>()?;
+        database.insert(&EventLog {
+            id: 1,
+            category: "alpha".to_string(),
+            score: 10,
+        })?;
+        database.insert(&EventLog {
+            id: 2,
+            category: "alpha".to_string(),
+            score: 20,
+        })?;
+        database.insert(&EventLog {
+            id: 3,
+            category: "beta".to_string(),
+            score: 5,
+        })?;
+
+        let repeated_categories = database
+            .from::<EventLog>()
+            .project_value(EventLog::category())
+            .group_by(EventLog::category())
+            .having(count_all().gt(1))
+            .fetch::<String>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(repeated_categories, vec!["alpha"]);
+
+        let distinct_categories = database
+            .from::<EventLog>()
+            .distinct()
+            .project_value(EventLog::category())
+            .asc(EventLog::category())
+            .fetch::<String>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(distinct_categories, vec!["alpha", "beta"]);
+
+        let distinct_category_count = database
+            .from::<EventLog>()
+            .distinct()
+            .project_value(EventLog::category())
+            .count()?;
+        assert_eq!(distinct_category_count, 2);
+
+        let distinct_limited_count = database
+            .from::<EventLog>()
+            .distinct()
+            .project_value(EventLog::category())
+            .asc(EventLog::category())
+            .limit(1)
+            .count()?;
+        assert_eq!(distinct_limited_count, 1);
+
+        let grouped_count = database
+            .from::<EventLog>()
+            .project_value(EventLog::category())
+            .group_by(EventLog::category())
+            .having(count_all().gt(1))
+            .count()?;
+        assert_eq!(grouped_count, 1);
+
+        let grouped_scores = database
+            .from::<EventLog>()
+            .project_tuple((
+                EventLog::category(),
+                sum(EventLog::score()).alias("total_score"),
+            ))
+            .group_by(EventLog::category())
+            .having(count_all().gt(0))
+            .asc(EventLog::category())
+            .fetch::<(String, i32)>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            grouped_scores,
+            vec![("alpha".to_string(), 30), ("beta".to_string(), 5)]
+        );
+
+        let grouped_stats = database
+            .from::<EventLog>()
+            .project_tuple((
+                EventLog::category(),
+                sum(EventLog::score()).alias("total_score"),
+                count_all().alias("total_count"),
+            ))
+            .group_by(EventLog::category())
+            .having(count_all().gt(0))
+            .asc(EventLog::category())
+            .fetch::<(String, i32, i32)>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            grouped_stats,
+            vec![("alpha".to_string(), 30, 2), ("beta".to_string(), 5, 1),]
+        );
+
+        let grouped_stats_schema = database
+            .from::<EventLog>()
+            .project_tuple((
+                EventLog::category(),
+                sum(EventLog::score()).alias("total_score"),
+                count_all().alias("total_count"),
+            ))
+            .group_by(EventLog::category())
+            .asc(EventLog::category())
+            .raw()?;
+        assert_eq!(
+            grouped_stats_schema
+                .schema()
+                .iter()
+                .map(|column| column.name().to_string())
+                .collect::<Vec<_>>(),
+            vec!["category", "total_score", "total_count"]
+        );
+        grouped_stats_schema.done()?;
+
+        database.drop_table::<EventLog>()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_orm_model_lifecycle() -> Result<(), DatabaseError> {
         let database = DataBaseBuilder::path(".").build_in_memory()?;
 
         database.create_table::<User>()?;
@@ -484,7 +1421,7 @@ mod test {
         database.run("drop index users.users_age_index")?.done()?;
         database.create_table_if_not_exists::<User>()?;
 
-        let mut user = User {
+        let user = User {
             id: 1,
             name: "Alice".to_string(),
             age: Some(18),
@@ -540,15 +1477,19 @@ mod test {
         let defaulted = database.get::<User>(&9)?.unwrap();
         assert_eq!(defaulted.age, Some(18));
 
-        user.name = "Bob".to_string();
-        user.age = None;
-        database.update(&user)?;
+        database
+            .from::<User>()
+            .eq(User::id(), 1)
+            .update()
+            .set(User::name(), "Bob")
+            .set(User::age(), None::<i32>)
+            .execute()?;
 
         let updated = database.get::<User>(&1)?.unwrap();
         assert_eq!(updated.name, "Bob");
         assert_eq!(updated.age, None);
 
-        database.delete_by_id::<User>(&1)?;
+        database.from::<User>().eq(User::id(), 1).delete()?;
         assert!(database.get::<User>(&1)?.is_none());
 
         database.insert(&User {
@@ -569,11 +1510,346 @@ mod test {
             Err(DatabaseError::DuplicateUniqueValue)
         ));
 
-        database.delete_by_id::<User>(&2)?;
+        database.from::<User>().eq(User::id(), 2).delete()?;
         assert!(database.get::<User>(&2)?.is_none());
 
         database.drop_table::<User>()?;
         database.drop_table_if_exists::<User>()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_orm_update_delete_builder() -> Result<(), DatabaseError> {
+        let database = DataBaseBuilder::path(".").build_in_memory()?;
+        database.create_table::<User>()?;
+
+        for (id, name, age) in [
+            (1, "Alice", Some(18)),
+            (2, "Bob", Some(19)),
+            (3, "Carol", Some(20)),
+        ] {
+            database.insert(&User {
+                id,
+                name: name.to_string(),
+                age,
+                cache: String::new(),
+            })?;
+        }
+
+        database
+            .from::<User>()
+            .alias("u")
+            .eq(User::id().qualify("u"), 1)
+            .update()
+            .set(User::name(), "BuilderAlice")
+            .set(User::age(), None::<i32>)
+            .execute()?;
+
+        let updated = database.get::<User>(&1)?.unwrap();
+        assert_eq!(updated.name, "BuilderAlice");
+        assert_eq!(updated.age, None);
+
+        database
+            .from::<User>()
+            .eq(User::id(), 2)
+            .update()
+            .set_expr(User::age(), User::id().add(20))
+            .execute()?;
+
+        assert_eq!(database.get::<User>(&2)?.unwrap().age, Some(22));
+
+        database
+            .from::<User>()
+            .alias("u")
+            .eq(User::name().qualify("u"), "Carol")
+            .delete()?;
+        assert!(database.get::<User>(&3)?.is_none());
+
+        let empty_update = database.from::<User>().eq(User::id(), 1).update().execute();
+        assert!(matches!(empty_update, Err(DatabaseError::ColumnsEmpty)));
+
+        let ordered_delete = database.from::<User>().asc(User::id()).delete();
+        assert!(matches!(
+            ordered_delete,
+            Err(DatabaseError::UnsupportedStmt(message)) if message.contains("order by")
+        ));
+
+        let limited_update = database
+            .from::<User>()
+            .limit(1)
+            .update()
+            .set(User::name(), "ignored")
+            .execute();
+        assert!(matches!(
+            limited_update,
+            Err(DatabaseError::UnsupportedStmt(message)) if message.contains("limit")
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_orm_insert_query_builder() -> Result<(), DatabaseError> {
+        let database = DataBaseBuilder::path(".").build_in_memory()?;
+        database.create_table::<User>()?;
+        database.create_table::<ArchivedUser>()?;
+
+        for (id, name, age) in [(1, "Alice", Some(18)), (2, "Bob", Some(19))] {
+            database.insert(&ArchivedUser {
+                id,
+                name: name.to_string(),
+                age,
+                cache: String::new(),
+            })?;
+        }
+
+        database.from::<ArchivedUser>().insert::<User>()?;
+
+        let inserted_users = database
+            .from::<User>()
+            .asc(User::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(inserted_users.len(), 2);
+        assert_eq!(inserted_users[0].name, "Alice");
+        assert_eq!(inserted_users[1].name, "Bob");
+
+        database.create_table::<UserNameSnapshot>()?;
+        database
+            .from::<ArchivedUser>()
+            .project_tuple((ArchivedUser::id(), ArchivedUser::name()))
+            .insert_into::<UserNameSnapshot, _>((
+                UserNameSnapshot::id(),
+                UserNameSnapshot::name(),
+            ))?;
+
+        let snapshots = database
+            .from::<UserNameSnapshot>()
+            .asc(UserNameSnapshot::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].name, "Alice");
+        assert_eq!(snapshots[1].name, "Bob");
+
+        database
+            .from::<ArchivedUser>()
+            .eq(ArchivedUser::id(), 2)
+            .overwrite::<User>()?;
+
+        let overwritten_users = database
+            .from::<User>()
+            .asc(User::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(overwritten_users.len(), 2);
+        assert_eq!(overwritten_users[0].id, 1);
+        assert_eq!(overwritten_users[0].name, "Alice");
+        assert_eq!(overwritten_users[1].id, 2);
+        assert_eq!(overwritten_users[1].name, "Bob");
+
+        database
+            .from::<ArchivedUser>()
+            .eq(ArchivedUser::id(), 1)
+            .project_tuple((ArchivedUser::id(), ArchivedUser::name()))
+            .overwrite_into::<UserNameSnapshot, _>((
+                UserNameSnapshot::id(),
+                UserNameSnapshot::name(),
+            ))?;
+
+        let overwritten_snapshots = database
+            .from::<UserNameSnapshot>()
+            .asc(UserNameSnapshot::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(overwritten_snapshots.len(), 2);
+        assert_eq!(overwritten_snapshots[0].id, 1);
+        assert_eq!(overwritten_snapshots[0].name, "Alice");
+        assert_eq!(overwritten_snapshots[1].id, 2);
+        assert_eq!(overwritten_snapshots[1].name, "Bob");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_orm_extended_write_and_ddl_helpers() -> Result<(), DatabaseError> {
+        let database = DataBaseBuilder::path(".").build_in_memory()?;
+        database.create_table::<User>()?;
+
+        database.insert_many([
+            User {
+                id: 1,
+                name: "Alice".to_string(),
+                age: Some(18),
+                cache: String::new(),
+            },
+            User {
+                id: 2,
+                name: "Bob".to_string(),
+                age: None,
+                cache: String::new(),
+            },
+            User {
+                id: 3,
+                name: "Carol".to_string(),
+                age: Some(30),
+                cache: String::new(),
+            },
+        ])?;
+
+        let ages_nulls_first = database
+            .from::<User>()
+            .project_value(User::age())
+            .asc(User::age())
+            .nulls_first()
+            .fetch::<Option<i32>>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(ages_nulls_first, vec![None, Some(18), Some(30)]);
+
+        let ages_nulls_last = database
+            .from::<User>()
+            .project_value(User::age())
+            .asc(User::age())
+            .nulls_last()
+            .fetch::<Option<i32>>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(ages_nulls_last, vec![Some(18), Some(30), None]);
+
+        let set_query_ages = database
+            .from::<User>()
+            .project_value(User::age())
+            .eq(User::id(), 1)
+            .union(database.from::<User>().project_value(User::age()))
+            .all()
+            .desc(User::age())
+            .nulls_first()
+            .fetch::<Option<i32>>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(set_query_ages, vec![None, Some(30), Some(18), Some(18)]);
+
+        let mut tx = database.new_transaction()?;
+        tx.insert_many([User {
+            id: 4,
+            name: "Dora".to_string(),
+            age: None,
+            cache: String::new(),
+        }])?;
+        tx.commit()?;
+
+        let updated_users = database
+            .from::<User>()
+            .asc(User::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            updated_users
+                .iter()
+                .map(|user| (user.id, user.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "Alice"), (2, "Bob"), (3, "Carol"), (4, "Dora")]
+        );
+
+        database.create_view(
+            "user_names",
+            database
+                .from::<User>()
+                .project_tuple((User::id(), User::name())),
+        )?;
+
+        let mut view_rows = database
+            .run("select * from user_names")?
+            .orm::<UserNameSnapshot>()
+            .collect::<Result<Vec<_>, _>>()?;
+        view_rows.sort_by_key(|row| row.id);
+        assert_eq!(view_rows.len(), 4);
+        assert_eq!(view_rows[0].name, "Alice");
+
+        database.create_or_replace_view(
+            "user_names",
+            database
+                .from::<User>()
+                .eq(User::id(), 2)
+                .project_tuple((User::id(), User::name())),
+        )?;
+
+        let replaced_view_rows = database
+            .run("select * from user_names")?
+            .orm::<UserNameSnapshot>()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(replaced_view_rows.len(), 1);
+        assert_eq!(replaced_view_rows[0].id, 2);
+        assert_eq!(replaced_view_rows[0].name, "Bob");
+
+        database.drop_view("user_names")?;
+        database.drop_view_if_exists("user_names")?;
+
+        database.truncate::<User>()?;
+        assert_eq!(database.from::<User>().count()?, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_orm_introspection_helpers() -> Result<(), DatabaseError> {
+        let database = DataBaseBuilder::path(".").build_in_memory()?;
+        database.create_table::<User>()?;
+        database.create_table::<Wallet>()?;
+        database.create_view(
+            "user_names",
+            database
+                .from::<User>()
+                .project_tuple((User::id(), User::name())),
+        )?;
+
+        let tables = database.show_tables()?.collect::<Result<Vec<_>, _>>()?;
+        assert!(tables.iter().any(|name| name == "users"));
+        assert!(tables.iter().any(|name| name == "wallets"));
+
+        let views = database.show_views()?.collect::<Result<Vec<_>, _>>()?;
+        assert!(views.iter().any(|name| name == "user_names"));
+
+        let describe_rows = database
+            .describe::<User>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(describe_rows.iter().any(|column| column.field == "id"));
+        assert!(describe_rows
+            .iter()
+            .any(|column| column.field == "user_name"));
+        assert!(
+            describe_rows
+                .iter()
+                .find(|column| column.field == "id")
+                .map(|column| column.key.as_str())
+                == Some("PRIMARY")
+        );
+
+        let plan = database
+            .from::<User>()
+            .eq(User::id(), 1)
+            .project_value(User::name())
+            .explain()?;
+        assert_eq!(
+            plan,
+            "Projection [users.user_name] [Project => (Sort Option: Follow)]\n  Filter (users.id = 1), Is Having: false [Filter => (Sort Option: Follow)]\n    TableScan users -> [id, user_name] [SeqScan => (Sort Option: None)]"
+        );
+
+        let set_plan = database
+            .from::<User>()
+            .project_value(User::id())
+            .union(database.from::<Wallet>().project_value(Wallet::id()))
+            .explain()?;
+        assert_eq!(
+            set_plan,
+            "Aggregate [] -> Group By [users.id] [HashAggregate => (Sort Option: None)]\n  Union: [id]\n    Projection [users.id] [Project => (Sort Option: Follow)]\n      TableScan users -> [id] [SeqScan => (Sort Option: None)]\n    Projection [wallets.id] [Project => (Sort Option: Follow)]\n      TableScan wallets -> [id] [SeqScan => (Sort Option: None)]"
+        );
+
+        let mut tx = database.new_transaction()?;
+        let tx_tables = tx.show_tables()?.collect::<Result<Vec<_>, _>>()?;
+        assert!(tx_tables.iter().any(|name| name == "users"));
+        let tx_describe = tx.describe::<Wallet>()?.collect::<Result<Vec<_>, _>>()?;
+        assert!(tx_describe.iter().any(|column| column.field == "balance"));
+        tx.commit()?;
 
         Ok(())
     }
@@ -632,6 +1908,10 @@ mod test {
 
     scala_function!(MyScalaFunction::SUM(LogicalType::Integer, LogicalType::Integer) -> LogicalType::Integer => (|v1: DataValue, v2: DataValue| {
         EvaluatorFactory::binary_create(LogicalType::Integer, BinaryOperator::Plus)?.binary_eval(&v1, &v2)
+    }));
+
+    scala_function!(MyOrmFunction::ADD_ONE(LogicalType::Integer) -> LogicalType::Integer => (|v1: DataValue| {
+        Ok(DataValue::Int32(v1.i32().unwrap() + 1))
     }));
 
     table_function!(MyTableFunction::TEST_NUMBERS(LogicalType::Integer) -> [c1: LogicalType::Integer, c2: LogicalType::Integer] => (|v1: DataValue| {

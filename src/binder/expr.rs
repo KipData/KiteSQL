@@ -197,24 +197,30 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 })
             }
             Expr::Exists { subquery, negated } => {
-                let (sub_query, column) = self.bind_subquery(None, subquery)?;
+                let (sub_query, column, correlated) = self.bind_subquery(None, subquery)?;
                 let (_, sub_query) = if !self.context.is_step(&QueryBindStep::Where) {
                     self.bind_temp_table(column, sub_query)?
                 } else {
                     (column, sub_query)
                 };
-                self.context
-                    .sub_query(SubQueryType::ExistsSubQuery(*negated, sub_query));
+                self.context.sub_query(SubQueryType::ExistsSubQuery {
+                    negated: *negated,
+                    plan: sub_query,
+                    correlated,
+                });
                 Ok(ScalarExpression::Constant(DataValue::Boolean(true)))
             }
             Expr::Subquery(subquery) => {
-                let (sub_query, column) = self.bind_subquery(None, subquery)?;
+                let (sub_query, column, correlated) = self.bind_subquery(None, subquery)?;
                 let (expr, sub_query) = if !self.context.is_step(&QueryBindStep::Where) {
                     self.bind_temp_table(column, sub_query)?
                 } else {
                     (column, sub_query)
                 };
-                self.context.sub_query(SubQueryType::SubQuery(sub_query));
+                self.context.sub_query(SubQueryType::SubQuery {
+                    plan: sub_query,
+                    correlated,
+                });
                 Ok(expr)
             }
             Expr::InSubquery {
@@ -223,7 +229,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 negated,
             } => {
                 let left_expr = Box::new(self.bind_expr(expr)?);
-                let (sub_query, column) =
+                let (sub_query, column, correlated) =
                     self.bind_subquery(Some(left_expr.return_type()), subquery)?;
 
                 if !self.context.is_step(&QueryBindStep::Where) {
@@ -233,8 +239,11 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 }
 
                 let (alias_expr, sub_query) = self.bind_temp_table(column, sub_query)?;
-                self.context
-                    .sub_query(SubQueryType::InSubQuery(*negated, sub_query));
+                self.context.sub_query(SubQueryType::InSubQuery {
+                    negated: *negated,
+                    plan: sub_query,
+                    correlated,
+                });
 
                 Ok(ScalarExpression::Binary {
                     op: expression::BinaryOperator::Eq,
@@ -325,7 +334,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         &mut self,
         in_ty: Option<LogicalType>,
         subquery: &Query,
-    ) -> Result<(LogicalPlan, ScalarExpression), DatabaseError> {
+    ) -> Result<(LogicalPlan, ScalarExpression, bool), DatabaseError> {
         let BinderContext {
             table_cache,
             view_cache,
@@ -348,6 +357,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             Some(self),
         );
         let mut sub_query = binder.bind_query(subquery)?;
+        let correlated = binder.context.has_outer_refs();
         let sub_query_schema = sub_query.output_schema();
 
         let fn_check = |len: usize| {
@@ -373,7 +383,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
 
             ScalarExpression::column_expr(sub_query_schema[0].clone())
         };
-        Ok((sub_query, expr))
+        Ok((sub_query, expr, correlated))
     }
 
     pub fn bind_like(
@@ -426,13 +436,27 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             try_default!(&full_name.0, full_name.1);
         }
         if let Some(table) = full_name.0.or(bind_table_name) {
-            let source = self.context.bind_source(&table).map_err(|err| {
-                if let [table_ident, _] = idents {
-                    attach_span_from_sqlparser_span_if_absent(err, table_ident.span)
-                } else {
-                    err
+            let source = match self.context.bind_source(&table) {
+                Ok(source) => source,
+                Err(err) => {
+                    if let Some(parent) = self.parent {
+                        self.context.mark_outer_ref();
+                        parent.context.bind_source(&table).map_err(|_| {
+                            if let [table_ident, _] = idents {
+                                attach_span_from_sqlparser_span_if_absent(err, table_ident.span)
+                            } else {
+                                err
+                            }
+                        })?
+                    } else {
+                        return Err(if let [table_ident, _] = idents {
+                            attach_span_from_sqlparser_span_if_absent(err, table_ident.span)
+                        } else {
+                            err
+                        });
+                    }
                 }
-            })?;
+            };
             let schema_buf = self.table_schema_buf.entry(table.into()).or_default();
 
             Ok(ScalarExpression::column_expr(
@@ -454,7 +478,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                             break;
                         }
                         if let Some(alias) = alias {
-                            *got_column = self.context.expr_aliases.iter().find_map(
+                            *got_column = context.expr_aliases.iter().find_map(
                                 |((alias_table, alias_column), expr)| {
                                     matches!(
                                         alias_table
@@ -479,8 +503,11 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             let mut got_column = None;
 
             op(&mut got_column, &self.context, &mut self.table_schema_buf);
-            if let Some(parent) = self.parent {
-                op(&mut got_column, &parent.context, &mut self.table_schema_buf);
+            if got_column.is_none() {
+                if let Some(parent) = self.parent {
+                    self.context.mark_outer_ref();
+                    op(&mut got_column, &parent.context, &mut self.table_schema_buf);
+                }
             }
             match got_column {
                 Some(column) => Ok(column),

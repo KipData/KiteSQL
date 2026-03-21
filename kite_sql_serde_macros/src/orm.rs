@@ -73,10 +73,8 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
     let mut field_getters = Vec::new();
     let mut column_names = Vec::new();
     let mut placeholder_names = Vec::new();
-    let mut update_assignments = Vec::new();
-    let mut ddl_columns = Vec::new();
-    let mut create_index_sqls = Vec::new();
-    let mut create_index_if_not_exists_sqls = Vec::new();
+    let mut create_index_statements = Vec::new();
+    let mut create_index_if_not_exists_statements = Vec::new();
     let mut persisted_columns = Vec::new();
     let mut index_names = BTreeSet::new();
     index_names.insert("pk_index".to_string());
@@ -179,7 +177,6 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                 &self.#field_name
             });
         } else {
-            update_assignments.push(format!("{column_name} = {placeholder_name}"));
         }
 
         generics
@@ -220,14 +217,6 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             }
         } else {
             quote! { <#field_ty as ::kite_sql::orm::ModelColumnType>::ddl_type() }
-        };
-        let default_clause = if let Some(default_expr) = &default_expr {
-            quote! {
-                column_def.push_str(" default ");
-                column_def.push_str(#default_expr);
-            }
-        } else {
-            quote! {}
         };
         let default_expr_tokens = if let Some(default_expr) = &default_expr {
             quote! { Some(#default_expr) }
@@ -278,50 +267,33 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         }
         if is_index {
             let index_name = format!("{table_name}_{column_name}_index");
+            let index_name_lit = LitStr::new(&index_name, Span::call_site());
+            let column_name_for_index = column_name_lit.clone();
             if !index_names.insert(index_name.clone()) {
                 return Err(Error::new_spanned(
                     struct_name,
                     format!("duplicate ORM index name: {}", index_name),
                 ));
             }
-            create_index_sqls.push(LitStr::new(
-                &format!(
-                    "create index {} on {} ({})",
-                    index_name, table_name, column_name
-                ),
-                Span::call_site(),
-            ));
-            create_index_if_not_exists_sqls.push(LitStr::new(
-                &format!(
-                    "create index if not exists {} on {} ({})",
-                    index_name, table_name, column_name
-                ),
-                Span::call_site(),
-            ));
+            create_index_statements.push(quote! {
+                ::kite_sql::orm::orm_create_index_statement(
+                    #table_name_lit,
+                    #index_name_lit,
+                    &[#column_name_for_index],
+                    false,
+                    false,
+                )
+            });
+            create_index_if_not_exists_statements.push(quote! {
+                ::kite_sql::orm::orm_create_index_statement(
+                    #table_name_lit,
+                    #index_name_lit,
+                    &[#column_name_for_index],
+                    false,
+                    true,
+                )
+            });
         }
-
-        ddl_columns.push(quote! {
-            {
-                let ddl_type = #ddl_type;
-                let mut column_def = ::std::format!(
-                    "{} {}",
-                    #column_name_lit,
-                    ddl_type,
-                );
-                if #is_primary_key {
-                    column_def.push_str(" primary key");
-                } else {
-                    if !<#field_ty as ::kite_sql::orm::ModelColumnType>::nullable() {
-                        column_def.push_str(" not null");
-                    }
-                    if #is_unique {
-                        column_def.push_str(" unique");
-                    }
-                }
-                #default_clause
-                column_def
-            }
-        });
     }
 
     for index in orm_opts.indexes {
@@ -382,31 +354,30 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             ));
         }
 
-        let index_columns = resolved_columns.join(", ");
-        let create_prefix = if index.unique {
-            "create unique index"
-        } else {
-            "create index"
-        };
-        let create_if_not_exists_prefix = if index.unique {
-            "create unique index if not exists"
-        } else {
-            "create index if not exists"
-        };
-        create_index_sqls.push(LitStr::new(
-            &format!(
-                "{} {} on {} ({})",
-                create_prefix, index.name, table_name, index_columns
-            ),
-            Span::call_site(),
-        ));
-        create_index_if_not_exists_sqls.push(LitStr::new(
-            &format!(
-                "{} {} on {} ({})",
-                create_if_not_exists_prefix, index.name, table_name, index_columns
-            ),
-            Span::call_site(),
-        ));
+        let index_name_lit = LitStr::new(&index.name, Span::call_site());
+        let index_columns = resolved_columns
+            .iter()
+            .map(|column| LitStr::new(column, Span::call_site()))
+            .collect::<Vec<_>>();
+        let is_unique = index.unique;
+        create_index_statements.push(quote! {
+            ::kite_sql::orm::orm_create_index_statement(
+                #table_name_lit,
+                #index_name_lit,
+                &[#(#index_columns),*],
+                #is_unique,
+                false,
+            )
+        });
+        create_index_if_not_exists_statements.push(quote! {
+            ::kite_sql::orm::orm_create_index_statement(
+                #table_name_lit,
+                #index_name_lit,
+                &[#(#index_columns),*],
+                #is_unique,
+                true,
+            )
+        });
     }
 
     if primary_key_count != 1 {
@@ -418,49 +389,8 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 
     let primary_key_type = primary_key_type.expect("primary key checked above");
     let primary_key_value = primary_key_value.expect("primary key checked above");
-    let primary_key_column = primary_key_column.expect("primary key checked above");
-    let primary_key_placeholder = primary_key_placeholder.expect("primary key checked above");
-    let select_sql = LitStr::new(
-        &format!("select {} from {}", column_names.join(", "), table_name,),
-        Span::call_site(),
-    );
-    let insert_sql = LitStr::new(
-        &format!(
-            "insert into {} ({}) values ({})",
-            table_name,
-            column_names.join(", "),
-            placeholder_names.join(", "),
-        ),
-        Span::call_site(),
-    );
-    let update_sql = LitStr::new(
-        &format!(
-            "update {} set {} where {} = {}",
-            table_name,
-            update_assignments.join(", "),
-            primary_key_column,
-            primary_key_placeholder,
-        ),
-        Span::call_site(),
-    );
-    let delete_sql = LitStr::new(
-        &format!(
-            "delete from {} where {} = {}",
-            table_name, primary_key_column, primary_key_placeholder,
-        ),
-        Span::call_site(),
-    );
-    let find_sql = LitStr::new(
-        &format!(
-            "select {} from {} where {} = {}",
-            column_names.join(", "),
-            table_name,
-            primary_key_column,
-            primary_key_placeholder,
-        ),
-        Span::call_site(),
-    );
-    let analyze_sql = LitStr::new(&format!("analyze table {}", table_name), Span::call_site());
+    let _primary_key_column = primary_key_column.expect("primary key checked above");
+    let _primary_key_placeholder = primary_key_placeholder.expect("primary key checked above");
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     Ok(quote! {
@@ -519,59 +449,55 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 
             fn select_statement() -> &'static ::kite_sql::db::Statement {
                 static SELECT_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
-                    ::kite_sql::db::prepare(#select_sql).expect("failed to prepare ORM select statement")
+                    ::kite_sql::orm::orm_select_statement(
+                        #table_name_lit,
+                        <#struct_name #ty_generics as ::kite_sql::orm::Model>::fields(),
+                    )
                 });
                 &SELECT_STATEMENT
             }
 
             fn insert_statement() -> &'static ::kite_sql::db::Statement {
                 static INSERT_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
-                    ::kite_sql::db::prepare(#insert_sql).expect("failed to prepare ORM insert statement")
+                    ::kite_sql::orm::orm_insert_statement(
+                        #table_name_lit,
+                        <#struct_name #ty_generics as ::kite_sql::orm::Model>::fields(),
+                    )
                 });
                 &INSERT_STATEMENT
             }
 
-            fn update_statement() -> &'static ::kite_sql::db::Statement {
-                static UPDATE_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
-                    ::kite_sql::db::prepare(#update_sql).expect("failed to prepare ORM update statement")
-                });
-                &UPDATE_STATEMENT
-            }
-
-            fn delete_statement() -> &'static ::kite_sql::db::Statement {
-                static DELETE_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
-                    ::kite_sql::db::prepare(#delete_sql).expect("failed to prepare ORM delete statement")
-                });
-                &DELETE_STATEMENT
-            }
-
             fn find_statement() -> &'static ::kite_sql::db::Statement {
                 static FIND_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
-                    ::kite_sql::db::prepare(#find_sql).expect("failed to prepare ORM find statement")
+                    ::kite_sql::orm::orm_find_statement(
+                        #table_name_lit,
+                        <#struct_name #ty_generics as ::kite_sql::orm::Model>::fields(),
+                        <#struct_name #ty_generics as ::kite_sql::orm::Model>::primary_key_field(),
+                    )
                 });
                 &FIND_STATEMENT
             }
 
             fn create_table_statement() -> &'static ::kite_sql::db::Statement {
                 static CREATE_TABLE_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
-                    let sql = ::std::format!(
-                        "create table {} ({})",
+                    ::kite_sql::orm::orm_create_table_statement(
                         #table_name_lit,
-                        vec![#(#ddl_columns),*].join(", ")
-                    );
-                    ::kite_sql::db::prepare(&sql).expect("failed to prepare ORM create table statement")
+                        <#struct_name #ty_generics as ::kite_sql::orm::Model>::columns(),
+                        false,
+                    )
+                        .expect("failed to build ORM create table statement")
                 });
                 &CREATE_TABLE_STATEMENT
             }
 
             fn create_table_if_not_exists_statement() -> &'static ::kite_sql::db::Statement {
                 static CREATE_TABLE_IF_NOT_EXISTS_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
-                    let sql = ::std::format!(
-                        "create table if not exists {} ({})",
+                    ::kite_sql::orm::orm_create_table_statement(
                         #table_name_lit,
-                        vec![#(#ddl_columns),*].join(", ")
-                    );
-                    ::kite_sql::db::prepare(&sql).expect("failed to prepare ORM create table if not exists statement")
+                        <#struct_name #ty_generics as ::kite_sql::orm::Model>::columns(),
+                        true,
+                    )
+                        .expect("failed to build ORM create table if not exists statement")
                 });
                 &CREATE_TABLE_IF_NOT_EXISTS_STATEMENT
             }
@@ -579,10 +505,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             fn create_index_statements() -> &'static [::kite_sql::db::Statement] {
                 static CREATE_INDEX_STATEMENTS: ::std::sync::LazyLock<::std::vec::Vec<::kite_sql::db::Statement>> = ::std::sync::LazyLock::new(|| {
                     vec![
-                        #(
-                            ::kite_sql::db::prepare(#create_index_sqls)
-                                .expect("failed to prepare ORM create index statement")
-                        ),*
+                        #(#create_index_statements),*
                     ]
                 });
                 CREATE_INDEX_STATEMENTS.as_slice()
@@ -591,10 +514,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             fn create_index_if_not_exists_statements() -> &'static [::kite_sql::db::Statement] {
                 static CREATE_INDEX_IF_NOT_EXISTS_STATEMENTS: ::std::sync::LazyLock<::std::vec::Vec<::kite_sql::db::Statement>> = ::std::sync::LazyLock::new(|| {
                     vec![
-                        #(
-                            ::kite_sql::db::prepare(#create_index_if_not_exists_sqls)
-                                .expect("failed to prepare ORM create index if not exists statement")
-                        ),*
+                        #(#create_index_if_not_exists_statements),*
                     ]
                 });
                 CREATE_INDEX_IF_NOT_EXISTS_STATEMENTS.as_slice()
@@ -602,23 +522,21 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 
             fn drop_table_statement() -> &'static ::kite_sql::db::Statement {
                 static DROP_TABLE_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
-                    let sql = ::std::format!("drop table {}", #table_name_lit);
-                    ::kite_sql::db::prepare(&sql).expect("failed to prepare ORM drop table statement")
+                    ::kite_sql::orm::orm_drop_table_statement(#table_name_lit, false)
                 });
                 &DROP_TABLE_STATEMENT
             }
 
             fn drop_table_if_exists_statement() -> &'static ::kite_sql::db::Statement {
                 static DROP_TABLE_IF_EXISTS_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
-                    let sql = ::std::format!("drop table if exists {}", #table_name_lit);
-                    ::kite_sql::db::prepare(&sql).expect("failed to prepare ORM drop table if exists statement")
+                    ::kite_sql::orm::orm_drop_table_statement(#table_name_lit, true)
                 });
                 &DROP_TABLE_IF_EXISTS_STATEMENT
             }
 
             fn analyze_statement() -> &'static ::kite_sql::db::Statement {
                 static ANALYZE_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
-                    ::kite_sql::db::prepare(#analyze_sql).expect("failed to prepare ORM analyze statement")
+                    ::kite_sql::orm::orm_analyze_statement(#table_name_lit)
                 });
                 &ANALYZE_STATEMENT
             }

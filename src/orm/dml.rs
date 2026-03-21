@@ -1,4 +1,5 @@
 use super::*;
+use std::borrow::Borrow;
 
 impl<S: Storage> Database<S> {
     /// Refreshes optimizer statistics for the model table.
@@ -33,17 +34,7 @@ impl<S: Storage> Database<S> {
         orm_insert::<_, M>(self, model)
     }
 
-    /// Updates a model in its backing table using the primary key.
-    pub fn update<M: Model>(&self, model: &M) -> Result<(), DatabaseError> {
-        orm_update::<_, M>(self, model)
-    }
-
-    /// Deletes a model from its backing table by primary key.
-    ///
-    /// The primary-key type is inferred from `M`, so callers do not need a
-    /// separate generic argument for the key type.
-    ///
-    /// # Examples
+    /// Inserts multiple models into their backing table.
     ///
     /// ```rust
     /// use kite_sql::db::DataBaseBuilder;
@@ -59,12 +50,24 @@ impl<S: Storage> Database<S> {
     ///
     /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
     /// database.create_table::<User>().unwrap();
-    /// database.insert(&User { id: 1, name: "Alice".to_string() }).unwrap();
-    /// database.delete_by_id::<User>(&1).unwrap();
-    /// assert!(database.get::<User>(&1).unwrap().is_none());
+    /// database
+    ///     .insert_many([
+    ///         User { id: 1, name: "Alice".to_string() },
+    ///         User { id: 2, name: "Bob".to_string() },
+    ///     ])
+    ///     .unwrap();
+    /// assert_eq!(database.fetch::<User>().unwrap().count(), 2);
     /// ```
-    pub fn delete_by_id<M: Model>(&self, key: &M::PrimaryKey) -> Result<(), DatabaseError> {
-        orm_delete_by_id::<_, M>(self, key)
+    pub fn insert_many<M, I, B>(&self, models: I) -> Result<(), DatabaseError>
+    where
+        M: Model,
+        I: IntoIterator<Item = B>,
+        B: Borrow<M>,
+    {
+        for model in models {
+            orm_insert::<_, M>(self, model.borrow())?;
+        }
+        Ok(())
     }
 }
 
@@ -79,13 +82,16 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
         orm_insert::<_, M>(self, model)
     }
 
-    /// Updates a model inside the current transaction.
-    pub fn update<M: Model>(&mut self, model: &M) -> Result<(), DatabaseError> {
-        orm_update::<_, M>(self, model)
-    }
-
-    /// Deletes a model by primary key inside the current transaction.
-    pub fn delete_by_id<M: Model>(&mut self, key: &M::PrimaryKey) -> Result<(), DatabaseError> {
-        orm_delete_by_id::<_, M>(self, key)
+    /// Inserts multiple models inside the current transaction.
+    pub fn insert_many<M, I, B>(&mut self, models: I) -> Result<(), DatabaseError>
+    where
+        M: Model,
+        I: IntoIterator<Item = B>,
+        B: Borrow<M>,
+    {
+        for model in models {
+            orm_insert::<_, M>(&mut *self, model.borrow())?;
+        }
+        Ok(())
     }
 }
