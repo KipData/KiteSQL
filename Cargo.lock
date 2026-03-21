@@ -1337,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "kite_sql"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "ahash 0.8.12",
  "async-trait",
@@ -1389,7 +1389,7 @@ dependencies = [
 
 [[package]]
 name = "kite_sql_serde_macros"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "darling",
  "proc-macro2",

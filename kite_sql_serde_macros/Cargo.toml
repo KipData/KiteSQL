@@ -1,9 +1,11 @@
 [package]
-name = "kite_sql_serde_macros"
-version     = "0.1.1"
+name        = "kite_sql_serde_macros"
+version     = "0.1.2"
 edition     = "2021"
-description = "SerdeMacros for KiteSQL"
+description = "Derive macros for KiteSQL"
+documentation = "https://docs.rs/kite_sql_serde_macros/latest/kite_sql_serde_macros/"
 license     = "Apache-2.0"
+repository  = "https://github.com/KipData/KiteSQL"
 
 [dependencies]
 darling = "0.20"
