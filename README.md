@@ -43,7 +43,7 @@ KiteSQL supports direct SQL execution, typed ORM models, schema migration, and b
 #### 👉[check more](docs/features.md)
 
 ## ORM
-KiteSQL includes a built-in ORM behind the `orm` feature flag. With `#[derive(Model)]`, you can define typed models and get tuple mapping, schema creation, migration support, and builder-style single-table queries and mutations.
+KiteSQL includes a built-in ORM behind the `orm` feature flag. With `#[derive(Model)]`, you can define typed models and get tuple mapping, schema creation, migration support, projections, set queries, and builder-style query/mutation workflows.
 
 ### Schema Migration
 Model changes are part of the normal workflow. KiteSQL ORM can help evolve tables for common schema updates, including adding, dropping, renaming, and changing columns, so many migrations can stay close to the Rust model definition instead of being managed as hand-written SQL.
@@ -55,7 +55,7 @@ For the full ORM guide, see [`src/orm/README.md`](src/orm/README.md).
 ```rust
 use kite_sql::db::DataBaseBuilder;
 use kite_sql::errors::DatabaseError;
-use kite_sql::Model;
+use kite_sql::{Model, Projection};
 
 #[derive(Default, Debug, PartialEq, Model)]
 #[model(table = "users")]
@@ -71,23 +71,32 @@ struct User {
     age: Option<i32>,
 }
 
+#[derive(Default, Debug, PartialEq, Projection)]
+struct UserSummary {
+    id: i32,
+    #[projection(rename = "user_name")]
+    display_name: String,
+}
+
 fn main() -> Result<(), DatabaseError> {
     let database = DataBaseBuilder::path("./data").build()?;
 
     database.migrate::<User>()?;
 
-    database.insert(&User {
-        id: 1,
-        email: "alice@example.com".to_string(),
-        name: "Alice".to_string(),
-        age: Some(18),
-    })?;
-    database.insert(&User {
-        id: 2,
-        email: "bob@example.com".to_string(),
-        name: "Bob".to_string(),
-        age: Some(24),
-    })?;
+    database.insert_many([
+        User {
+            id: 1,
+            email: "alice@example.com".to_string(),
+            name: "Alice".to_string(),
+            age: Some(18),
+        },
+        User {
+            id: 2,
+            email: "bob@example.com".to_string(),
+            name: "Bob".to_string(),
+            age: Some(24),
+        },
+    ])?;
 
     database
         .from::<User>()
@@ -103,7 +112,8 @@ fn main() -> Result<(), DatabaseError> {
 
     let users = database
         .from::<User>()
-        .and(User::email().like("%@example.com"), User::age().gte(18))
+        .gte(User::age(), 18)
+        .project::<UserSummary>()
         .asc(User::name())
         .limit(10)
         .fetch()?;
@@ -112,23 +122,7 @@ fn main() -> Result<(), DatabaseError> {
         println!("{:?}", user?);
     }
 
-    // ORM covers common typed table workflows, while `run(...)` remains available
-    // for more advanced SQL that is easier to express directly.
-    let top_users = database.run(
-        r#"
-        select user_name, count(*) as total
-        from users
-        where age >= 18
-        group by user_name
-        having count(*) > 0
-        order by total desc, user_name asc
-        limit 5
-        "#,
-    )?;
-
-    for row in top_users {
-        println!("aggregated row: {:?}", row?);
-    }
+    // For ad-hoc or more SQL-shaped workloads, `run(...)` is still available.
 
     Ok(())
 }
