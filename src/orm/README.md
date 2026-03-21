@@ -133,6 +133,9 @@ The following ORM helpers are available on `Database`.
 
 - `get::<M>(&key) -> Result<Option<M>, DatabaseError>`
 - `fetch::<M>() -> Result<OrmIter<...>, DatabaseError>`
+- `show_tables() -> Result<ProjectValueIter<..., String>, DatabaseError>`
+- `show_views() -> Result<ProjectValueIter<..., String>, DatabaseError>`
+- `describe::<M>() -> Result<OrmIter<..., DescribeColumn>, DatabaseError>`
 - `from::<M>() -> FromBuilder<...>`
 
 ## Transaction ORM APIs
@@ -158,6 +161,9 @@ The following ORM helpers are available on `DBTransaction`.
 
 - `get::<M>(&key) -> Result<Option<M>, DatabaseError>`
 - `fetch::<M>() -> Result<OrmIter<...>, DatabaseError>`
+- `show_tables() -> Result<ProjectValueIter<..., String>, DatabaseError>`
+- `show_views() -> Result<ProjectValueIter<..., String>, DatabaseError>`
+- `describe::<M>() -> Result<OrmIter<..., DescribeColumn>, DatabaseError>`
 - `from::<M>() -> FromBuilder<...>`
 
 `DBTransaction` does not currently expose the ORM DDL convenience methods.
@@ -242,7 +248,7 @@ semantics instead of the default distinct result.
 
 After a set query is formed, you can still apply result-level methods such as
 `asc(...)`, `desc(...)`, `nulls_first()`, `nulls_last()`, `limit(...)`,
-`offset(...)`, `fetch()`, `get()`, `exists()`, and `count()`.
+`offset(...)`, `fetch()`, `get()`, `exists()`, `count()`, and `explain()`.
 
 ```rust
 let user_ids = database

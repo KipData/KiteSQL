@@ -1791,6 +1791,70 @@ mod test {
     }
 
     #[test]
+    fn test_orm_introspection_helpers() -> Result<(), DatabaseError> {
+        let database = DataBaseBuilder::path(".").build_in_memory()?;
+        database.create_table::<User>()?;
+        database.create_table::<Wallet>()?;
+        database.create_view(
+            "user_names",
+            database
+                .from::<User>()
+                .project_tuple((User::id(), User::name())),
+        )?;
+
+        let tables = database.show_tables()?.collect::<Result<Vec<_>, _>>()?;
+        assert!(tables.iter().any(|name| name == "users"));
+        assert!(tables.iter().any(|name| name == "wallets"));
+
+        let views = database.show_views()?.collect::<Result<Vec<_>, _>>()?;
+        assert!(views.iter().any(|name| name == "user_names"));
+
+        let describe_rows = database
+            .describe::<User>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(describe_rows.iter().any(|column| column.field == "id"));
+        assert!(describe_rows
+            .iter()
+            .any(|column| column.field == "user_name"));
+        assert!(
+            describe_rows
+                .iter()
+                .find(|column| column.field == "id")
+                .map(|column| column.key.as_str())
+                == Some("PRIMARY")
+        );
+
+        let plan = database
+            .from::<User>()
+            .eq(User::id(), 1)
+            .project_value(User::name())
+            .explain()?;
+        assert_eq!(
+            plan,
+            "Projection [users.user_name] [Project => (Sort Option: Follow)]\n  Filter (users.id = 1), Is Having: false [Filter => (Sort Option: Follow)]\n    TableScan users -> [id, user_name] [SeqScan => (Sort Option: None)]"
+        );
+
+        let set_plan = database
+            .from::<User>()
+            .project_value(User::id())
+            .union(database.from::<Wallet>().project_value(Wallet::id()))
+            .explain()?;
+        assert_eq!(
+            set_plan,
+            "Aggregate [] -> Group By [users.id] [HashAggregate => (Sort Option: None)]\n  Union: [id]\n    Projection [users.id] [Project => (Sort Option: Follow)]\n      TableScan users -> [id] [SeqScan => (Sort Option: None)]\n    Projection [wallets.id] [Project => (Sort Option: Follow)]\n      TableScan wallets -> [id] [SeqScan => (Sort Option: None)]"
+        );
+
+        let mut tx = database.new_transaction()?;
+        let tx_tables = tx.show_tables()?.collect::<Result<Vec<_>, _>>()?;
+        assert!(tx_tables.iter().any(|name| name == "users"));
+        let tx_describe = tx.describe::<Wallet>()?.collect::<Result<Vec<_>, _>>()?;
+        assert!(tx_describe.iter().any(|column| column.field == "balance"));
+        tx.commit()?;
+
+        Ok(())
+    }
+
+    #[test]
     fn test_orm_drop_index() -> Result<(), DatabaseError> {
         let database = DataBaseBuilder::path(".").build_in_memory()?;
 

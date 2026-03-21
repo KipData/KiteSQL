@@ -17,13 +17,14 @@ use sqlparser::ast::{
     AlterColumnOperation, AlterTable, AlterTableOperation, Analyze, Assignment, AssignmentTarget,
     BinaryOperator as SqlBinaryOperator, CaseWhen, CastKind, CharLengthUnits, ColumnDef,
     ColumnOption, ColumnOptionDef, CreateIndex, CreateTable, CreateTableOptions, CreateView,
-    DataType, Delete, Distinct, Expr, FromTable, Function, FunctionArg, FunctionArgExpr,
-    FunctionArgumentList, FunctionArguments, GroupByExpr, HiveDistributionStyle, Ident,
-    IndexColumn, Insert, Join, JoinConstraint, JoinOperator, KeyOrIndexDisplay, LimitClause,
+    DataType, Delete, DescribeAlias, Distinct, Expr, FromTable, Function, FunctionArg,
+    FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr, HiveDistributionStyle,
+    Ident, IndexColumn, Insert, Join, JoinConstraint, JoinOperator, KeyOrIndexDisplay, LimitClause,
     NullsDistinctOption, ObjectName, ObjectType, Offset, OffsetRows, OrderBy, OrderByExpr,
     OrderByKind, OrderByOptions, PrimaryKeyConstraint, Query, Select, SelectFlavor, SelectItem,
-    SetExpr, SetOperator, SetQuantifier, TableAlias, TableFactor, TableObject, TableWithJoins,
-    TimezoneInfo, Truncate, UniqueConstraint, Update, Value, Values, ViewColumnDef,
+    SetExpr, SetOperator, SetQuantifier, ShowStatementOptions, TableAlias, TableFactor,
+    TableObject, TableWithJoins, TimezoneInfo, Truncate, UniqueConstraint, Update, Value, Values,
+    ViewColumnDef,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -59,6 +60,42 @@ pub struct OrmColumn {
     pub primary_key: bool,
     pub unique: bool,
     pub default_expr: Option<&'static str>,
+}
+
+/// One row returned by [`Database::describe`] or [`DBTransaction::describe`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DescribeColumn {
+    pub field: String,
+    pub data_type: String,
+    pub len: String,
+    pub nullable: bool,
+    pub key: String,
+    pub default: String,
+}
+
+impl From<(&SchemaRef, Tuple)> for DescribeColumn {
+    fn from((_, tuple): (&SchemaRef, Tuple)) -> Self {
+        let mut values = tuple.values.into_iter();
+
+        let field = describe_text_value(values.next());
+        let data_type = describe_text_value(values.next());
+        let len = describe_text_value(values.next());
+        let nullable = matches!(
+            values.next(),
+            Some(DataValue::Utf8 { value, .. }) if value == "true"
+        );
+        let key = describe_text_value(values.next());
+        let default = describe_text_value(values.next());
+
+        Self {
+            field,
+            data_type,
+            len,
+            nullable,
+            key,
+            default,
+        }
+    }
 }
 
 impl OrmColumn {
@@ -2007,6 +2044,11 @@ impl<Q: StatementSource, M: Model, P> SetQueryBuilder<Q, M, P> {
         execute_query(self.source, self.query)
     }
 
+    /// Returns the logical plan text for the current set query.
+    pub fn explain(self) -> Result<String, DatabaseError> {
+        query_explain(self.source, self.query)
+    }
+
     /// Returns whether the set query produces at least one row.
     ///
     /// ```rust,ignore
@@ -2885,6 +2927,11 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> FromBuilder<Q, M, P> {
         self.inner.raw()
     }
 
+    /// Returns the logical plan text for the current query.
+    pub fn explain(self) -> Result<String, DatabaseError> {
+        self.inner.explain()
+    }
+
     /// Returns whether the query produces at least one row.
     ///
     /// ```rust,ignore
@@ -3481,6 +3528,11 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
         }
     }
 
+    fn explain(self) -> Result<String, DatabaseError> {
+        let (source, query) = self.into_query_parts();
+        query_explain(source, query)
+    }
+
     fn exists(self) -> Result<bool, DatabaseError> {
         let mut iter = self.limit(1).raw()?;
         Ok(iter.next().transpose()?.is_some())
@@ -3679,6 +3731,14 @@ fn number_expr(value: impl ToString) -> Expr {
 
 fn string_expr(value: impl Into<String>) -> Expr {
     Expr::Value(Value::SingleQuotedString(value.into()).with_empty_span())
+}
+
+fn describe_text_value(value: Option<DataValue>) -> String {
+    match value {
+        Some(DataValue::Utf8 { value, .. }) => value,
+        Some(other) => other.to_string(),
+        None => String::new(),
+    }
 }
 
 fn placeholder_expr(value: &str) -> Expr {
@@ -4000,6 +4060,20 @@ fn execute_insert_query<Q: StatementSource>(
     source.execute_statement(&statement, &[])?.done()
 }
 
+fn query_explain<Q: StatementSource>(source: Q, query: Query) -> Result<String, DatabaseError> {
+    let mut iter = source.execute_statement(&orm_explain_query_statement(query), &[])?;
+    let plan = match iter.next().transpose()? {
+        Some(tuple) => extract_value_from_tuple::<String>(tuple)?,
+        None => {
+            return Err(DatabaseError::InvalidValue(
+                "EXPLAIN returned no plan rows".to_string(),
+            ))
+        }
+    };
+    iter.done()?;
+    Ok(plan)
+}
+
 fn orm_update_builder_statement(
     source: &QuerySource,
     filter: Option<QueryExpr>,
@@ -4047,6 +4121,57 @@ fn orm_insert_query_statement(
         settings: None,
         format_clause: None,
     })
+}
+
+fn empty_show_options() -> ShowStatementOptions {
+    ShowStatementOptions {
+        show_in: None,
+        starts_with: None,
+        limit: None,
+        limit_from: None,
+        filter_position: None,
+    }
+}
+
+fn orm_show_tables_statement() -> Statement {
+    Statement::ShowTables {
+        terse: false,
+        history: false,
+        extended: false,
+        full: false,
+        external: false,
+        show_options: empty_show_options(),
+    }
+}
+
+fn orm_show_views_statement() -> Statement {
+    Statement::ShowViews {
+        terse: false,
+        materialized: false,
+        show_options: empty_show_options(),
+    }
+}
+
+fn orm_describe_statement(table_name: &str) -> Statement {
+    Statement::ExplainTable {
+        describe_alias: DescribeAlias::Describe,
+        hive_format: None,
+        has_table_keyword: false,
+        table_name: object_name(table_name),
+    }
+}
+
+fn orm_explain_query_statement(query: Query) -> Statement {
+    Statement::Explain {
+        describe_alias: DescribeAlias::Explain,
+        analyze: false,
+        verbose: false,
+        query_plan: false,
+        estimate: false,
+        statement: Box::new(Statement::Query(Box::new(query))),
+        format: None,
+        options: None,
+    }
 }
 
 fn orm_delete_builder_statement(source: &QuerySource, filter: Option<QueryExpr>) -> Statement {

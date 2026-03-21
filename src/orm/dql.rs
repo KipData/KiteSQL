@@ -62,6 +62,33 @@ impl<S: Storage> Database<S> {
     pub fn from<M: Model>(&self) -> FromBuilder<&Database<S>, M> {
         FromBuilder::from_inner(QueryBuilder::new(self))
     }
+
+    /// Lists all table names.
+    pub fn show_tables(
+        &self,
+    ) -> Result<ProjectValueIter<DatabaseIter<'_, S>, String>, DatabaseError> {
+        Ok(ProjectValueIter::new(
+            self.execute(&orm_show_tables_statement(), &[])?,
+        ))
+    }
+
+    /// Lists all view names.
+    pub fn show_views(
+        &self,
+    ) -> Result<ProjectValueIter<DatabaseIter<'_, S>, String>, DatabaseError> {
+        Ok(ProjectValueIter::new(
+            self.execute(&orm_show_views_statement(), &[])?,
+        ))
+    }
+
+    /// Describes the schema of the model table.
+    pub fn describe<M: Model>(
+        &self,
+    ) -> Result<OrmIter<DatabaseIter<'_, S>, DescribeColumn>, DatabaseError> {
+        Ok(self
+            .execute(&orm_describe_statement(M::table_name()), &[])?
+            .orm::<DescribeColumn>())
+    }
 }
 
 impl<'a, S: Storage> DBTransaction<'a, S> {
@@ -78,5 +105,32 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
     /// Starts a typed single-table query builder inside the current transaction.
     pub fn from<M: Model>(&mut self) -> FromBuilder<&mut DBTransaction<'a, S>, M> {
         FromBuilder::from_inner(QueryBuilder::new(self))
+    }
+
+    /// Lists all table names inside the current transaction.
+    pub fn show_tables(
+        &mut self,
+    ) -> Result<ProjectValueIter<TransactionIter<'_>, String>, DatabaseError> {
+        Ok(ProjectValueIter::new(
+            self.execute(&orm_show_tables_statement(), &[])?,
+        ))
+    }
+
+    /// Lists all view names inside the current transaction.
+    pub fn show_views(
+        &mut self,
+    ) -> Result<ProjectValueIter<TransactionIter<'_>, String>, DatabaseError> {
+        Ok(ProjectValueIter::new(
+            self.execute(&orm_show_views_statement(), &[])?,
+        ))
+    }
+
+    /// Describes the schema of the model table inside the current transaction.
+    pub fn describe<M: Model>(
+        &mut self,
+    ) -> Result<OrmIter<TransactionIter<'_>, DescribeColumn>, DatabaseError> {
+        Ok(self
+            .execute(&orm_describe_statement(M::table_name()), &[])?
+            .orm::<DescribeColumn>())
     }
 }
