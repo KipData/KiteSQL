@@ -16,6 +16,7 @@ use crate::binder::{attach_span_if_absent, lower_case_name, Binder};
 use crate::errors::DatabaseError;
 use crate::expression::simplify::ConstantCalculator;
 use crate::expression::visitor_mut::VisitorMut;
+use crate::expression::AliasType;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::insert::InsertOperator;
 use crate::planner::operator::values::ValuesOperator;
@@ -24,7 +25,7 @@ use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::tuple::SchemaRef;
 use crate::types::value::DataValue;
-use sqlparser::ast::{Expr, Ident, ObjectName};
+use sqlparser::ast::{Expr, Ident, ObjectName, Query};
 use std::slice;
 use std::sync::Arc;
 
@@ -132,6 +133,74 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 is_mapping_by_name,
             }),
             Childrens::Only(Box::new(values_plan)),
+        ))
+    }
+
+    pub(crate) fn bind_insert_query(
+        &mut self,
+        name: &ObjectName,
+        idents: &[Ident],
+        query: &Query,
+        is_overwrite: bool,
+    ) -> Result<LogicalPlan, DatabaseError> {
+        let table_name: Arc<str> = lower_case_name(name)?.into();
+        let source = self
+            .context
+            .source_and_bind(table_name.clone(), None, None, false)?
+            .ok_or(DatabaseError::TableNotFound)?;
+        let mut schema_buf = None;
+        let table_schema = source.schema_ref(&mut schema_buf);
+
+        let mut input_plan = self.bind_query(query)?;
+        let input_schema = input_plan.output_schema().clone();
+        let input_len = input_schema.len();
+
+        let target_columns = if idents.is_empty() {
+            if input_len > table_schema.len() {
+                return Err(DatabaseError::ValuesLenMismatch(
+                    table_schema.len(),
+                    input_len,
+                ));
+            }
+            table_schema
+                .iter()
+                .take(input_len)
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            let mut columns = Vec::with_capacity(idents.len());
+            for ident in idents {
+                match self.bind_column_ref_from_identifiers(
+                    slice::from_ref(ident),
+                    Some(table_name.to_string()),
+                )? {
+                    ScalarExpression::ColumnRef { column, .. } => columns.push(column),
+                    _ => return Err(DatabaseError::UnsupportedStmt(ident.to_string())),
+                }
+            }
+            if input_len != columns.len() {
+                return Err(DatabaseError::ValuesLenMismatch(columns.len(), input_len));
+            }
+            columns
+        };
+
+        let projection = input_schema
+            .iter()
+            .zip(target_columns.iter())
+            .map(|(input_column, target_column)| ScalarExpression::Alias {
+                expr: Box::new(ScalarExpression::column_expr(input_column.clone())),
+                alias: AliasType::Name(target_column.name().to_string()),
+            })
+            .collect::<Vec<_>>();
+        input_plan = self.bind_project(input_plan, projection)?;
+
+        Ok(LogicalPlan::new(
+            Operator::Insert(InsertOperator {
+                table_name,
+                is_overwrite,
+                is_mapping_by_name: true,
+            }),
+            Childrens::Only(Box::new(input_plan)),
         ))
     }
 

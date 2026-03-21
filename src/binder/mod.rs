@@ -497,20 +497,20 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
                         "insert without source is not supported".to_string(),
                     )
                 })?;
-                // TODO: support body on Insert
-                if let SetExpr::Values(values) = source.body.as_ref() {
-                    self.bind_insert(
+                match source.body.as_ref() {
+                    SetExpr::Values(values) => self.bind_insert(
                         table_name,
                         &insert.columns,
                         &values.rows,
                         insert.overwrite,
                         false,
-                    )?
-                } else {
-                    return Err(DatabaseError::UnsupportedStmt(format!(
-                        "insert body: {:#?}",
-                        source.body
-                    )));
+                    )?,
+                    _ => self.bind_insert_query(
+                        table_name,
+                        &insert.columns,
+                        source,
+                        insert.overwrite,
+                    )?,
                 }
             }
             Statement::Update(update) => {
