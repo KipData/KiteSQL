@@ -15,6 +15,7 @@
 use crate::catalog::view::View;
 use crate::catalog::{ColumnRef, ColumnRelation, TableMeta};
 use crate::errors::DatabaseError;
+use crate::optimizer::core::cm_sketch::{CountMinSketchMeta, CountMinSketchPage};
 use crate::optimizer::core::histogram::Bucket;
 use crate::optimizer::core::statistics_meta::StatisticsMetaRoot;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
@@ -64,6 +65,37 @@ enum CodecType {
     Tuple,
     Root,
     Hash,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StatisticsCodecType {
+    Root,
+    SketchMeta,
+    SketchPage,
+    Bucket,
+}
+
+impl StatisticsCodecType {
+    fn tag(self) -> u8 {
+        match self {
+            StatisticsCodecType::Root => b'0',
+            StatisticsCodecType::SketchMeta => b'1',
+            StatisticsCodecType::SketchPage => b'2',
+            StatisticsCodecType::Bucket => b'3',
+        }
+    }
+
+    fn from_tag(tag: u8) -> Result<Self, DatabaseError> {
+        match tag {
+            b'0' => Ok(StatisticsCodecType::Root),
+            b'1' => Ok(StatisticsCodecType::SketchMeta),
+            b'2' => Ok(StatisticsCodecType::SketchPage),
+            b'3' => Ok(StatisticsCodecType::Bucket),
+            _ => Err(DatabaseError::InvalidValue(format!(
+                "invalid statistics codec tag: {tag}"
+            ))),
+        }
+    }
 }
 
 impl TableCodec {
@@ -133,11 +165,11 @@ impl TableCodec {
             CodecType::IndexMeta => {
                 table_bytes.push(b'1');
             }
-            CodecType::Index => {
+            CodecType::Statistics => {
                 table_bytes.push(b'3');
             }
-            CodecType::Statistics => {
-                table_bytes.push(b'4');
+            CodecType::Index => {
+                table_bytes.push(b'7');
             }
             CodecType::Tuple => {
                 table_bytes.push(b'8');
@@ -483,18 +515,105 @@ impl TableCodec {
         Ok((key, value))
     }
 
-    pub fn encode_statistics_meta_key(&self, table_name: &str, index_id: IndexId) -> BumpBytes<'_> {
-        let mut key_prefix = self.key_prefix(CodecType::Statistics, table_name);
+    fn encode_statistics_index_prefix(&self, table_name: &str, index_id: IndexId) -> BumpBytes<'_> {
+        let mut key = self.key_prefix(CodecType::Statistics, table_name);
 
-        key_prefix.push(BOUND_MIN_TAG);
-        key_prefix.extend(index_id.to_le_bytes());
-        key_prefix
+        key.push(BOUND_MIN_TAG);
+        key.extend(index_id.to_le_bytes());
+        key
+    }
+
+    fn encode_statistics_key_prefix(
+        &self,
+        table_name: &str,
+        index_id: IndexId,
+        ty: StatisticsCodecType,
+    ) -> BumpBytes<'_> {
+        let mut key = self.encode_statistics_index_prefix(table_name, index_id);
+        key.push(ty.tag());
+        key
+    }
+
+    pub fn encode_statistics_meta_key(&self, table_name: &str, index_id: IndexId) -> BumpBytes<'_> {
+        self.encode_statistics_key_prefix(table_name, index_id, StatisticsCodecType::Root)
     }
 
     pub fn decode_statistics_meta<T: Transaction>(
         bytes: &[u8],
     ) -> Result<StatisticsMetaRoot, DatabaseError> {
         StatisticsMetaRoot::decode::<T, _>(&mut Cursor::new(bytes), None, &ReferenceTables::new())
+    }
+
+    /// Key: {TableName}{STATISTICS_TAG}{BOUND_MIN_TAG}{INDEX_ID}{SKETCH_META_TAG}
+    /// Value: CountMinSketchMeta
+    pub fn encode_statistics_sketch_meta(
+        &self,
+        table_name: &str,
+        index_id: IndexId,
+        sketch_meta: &CountMinSketchMeta,
+    ) -> Result<(BumpBytes<'_>, BumpBytes<'_>), DatabaseError> {
+        let key = self.encode_statistics_sketch_meta_key(table_name, index_id);
+        let mut value = BumpBytes::new_in(&self.arena);
+
+        sketch_meta.encode(&mut value, true, &mut ReferenceTables::new())?;
+
+        Ok((key, value))
+    }
+
+    pub fn encode_statistics_sketch_meta_key(
+        &self,
+        table_name: &str,
+        index_id: IndexId,
+    ) -> BumpBytes<'_> {
+        self.encode_statistics_key_prefix(table_name, index_id, StatisticsCodecType::SketchMeta)
+    }
+
+    pub fn decode_statistics_sketch_meta<T: Transaction>(
+        bytes: &[u8],
+    ) -> Result<CountMinSketchMeta, DatabaseError> {
+        CountMinSketchMeta::decode::<T, _>(&mut Cursor::new(bytes), None, &ReferenceTables::new())
+    }
+
+    /// Key: {TableName}{STATISTICS_TAG}{BOUND_MIN_TAG}{INDEX_ID}{SKETCH_PAGE_TAG}{BOUND_MIN_TAG}{ROW_ID}{BOUND_MIN_TAG}{PAGE_ID}
+    /// Value: CountMinSketchPage
+    pub fn encode_statistics_sketch_page(
+        &self,
+        table_name: &str,
+        index_id: IndexId,
+        sketch_page: &CountMinSketchPage,
+    ) -> Result<(BumpBytes<'_>, BumpBytes<'_>), DatabaseError> {
+        let key = self.encode_statistics_sketch_page_key(table_name, index_id, sketch_page)?;
+        let mut value = BumpBytes::new_in(&self.arena);
+
+        sketch_page.encode(&mut value, true, &mut ReferenceTables::new())?;
+
+        Ok((key, value))
+    }
+
+    pub fn encode_statistics_sketch_page_key(
+        &self,
+        table_name: &str,
+        index_id: IndexId,
+        sketch_page: &CountMinSketchPage,
+    ) -> Result<BumpBytes<'_>, DatabaseError> {
+        let mut key = self.encode_statistics_key_prefix(
+            table_name,
+            index_id,
+            StatisticsCodecType::SketchPage,
+        );
+
+        key.write_all(&[BOUND_MIN_TAG])?;
+        key.write_all(&(sketch_page.row_idx() as u32).to_be_bytes())?;
+        key.write_all(&[BOUND_MIN_TAG])?;
+        key.write_all(&(sketch_page.page_idx() as u32).to_be_bytes())?;
+
+        Ok(key)
+    }
+
+    pub fn decode_statistics_sketch_page<T: Transaction>(
+        bytes: &[u8],
+    ) -> Result<CountMinSketchPage, DatabaseError> {
+        CountMinSketchPage::decode::<T, _>(&mut Cursor::new(bytes), None, &ReferenceTables::new())
     }
 
     pub fn encode_statistics_bucket(
@@ -518,11 +637,30 @@ impl TableCodec {
         index_id: IndexId,
         ordinal: u32,
     ) -> BumpBytes<'_> {
-        let mut key = self.encode_statistics_meta_key(table_name, index_id);
+        let mut key =
+            self.encode_statistics_key_prefix(table_name, index_id, StatisticsCodecType::Bucket);
 
         key.push(BOUND_MIN_TAG);
         key.extend_from_slice(&ordinal.to_be_bytes());
         key
+    }
+
+    pub(crate) fn decode_statistics_codec_type(
+        &self,
+        table_name: &str,
+        index_id: IndexId,
+        key: &[u8],
+    ) -> Result<StatisticsCodecType, DatabaseError> {
+        let prefix_len = self
+            .encode_statistics_index_prefix(table_name, index_id)
+            .len();
+        let Some(tag) = key.get(prefix_len).copied() else {
+            return Err(DatabaseError::InvalidValue(
+                "statistics key is too short".to_string(),
+            ));
+        };
+
+        StatisticsCodecType::from_tag(tag)
     }
 
     pub fn decode_statistics_bucket<T: Transaction>(bytes: &[u8]) -> Result<Bucket, DatabaseError> {
@@ -545,7 +683,7 @@ impl TableCodec {
         table_name: &str,
         index_id: IndexId,
     ) -> (BumpBytes<'_>, BumpBytes<'_>) {
-        let min = self.encode_statistics_meta_key(table_name, index_id);
+        let min = self.encode_statistics_index_prefix(table_name, index_id);
         let mut max = min.clone();
         max.push(BOUND_MAX_TAG);
 
@@ -743,7 +881,7 @@ mod tests {
             builder.append(&DataValue::Int32(value))?;
         }
         let (histogram, sketch) = builder.build(2)?;
-        let (root, buckets) = StatisticsMeta::new(histogram, sketch).into_parts();
+        let (root, buckets) = StatisticsMeta::new(histogram).into_parts();
 
         let (_, root_bytes) = table_codec.encode_statistics_meta("t1", &root)?;
         let decoded_root = TableCodec::decode_statistics_meta::<RocksTransaction>(&root_bytes)?;
@@ -756,10 +894,21 @@ mod tests {
             decoded_root.histogram_meta().buckets_len(),
             root.histogram_meta().buckets_len()
         );
-        assert_eq!(
-            decoded_root.cm_sketch().estimate(&DataValue::Null),
-            root.cm_sketch().estimate(&DataValue::Null)
-        );
+
+        let (sketch_meta, mut sketch_pages) = sketch.clone().into_storage_parts(1);
+        let (_, sketch_meta_bytes) =
+            table_codec.encode_statistics_sketch_meta("t1", 0, &sketch_meta)?;
+        let decoded_sketch_meta =
+            TableCodec::decode_statistics_sketch_meta::<RocksTransaction>(&sketch_meta_bytes)?;
+        assert_eq!(decoded_sketch_meta.width(), sketch_meta.width());
+        assert_eq!(decoded_sketch_meta.k_num(), sketch_meta.k_num());
+
+        let first_sketch_page = sketch_pages.next().unwrap();
+        let (_, sketch_page_bytes) =
+            table_codec.encode_statistics_sketch_page("t1", 0, &first_sketch_page)?;
+        let decoded_sketch_page =
+            TableCodec::decode_statistics_sketch_page::<RocksTransaction>(&sketch_page_bytes)?;
+        assert_eq!(decoded_sketch_page.counters(), first_sketch_page.counters());
 
         let bucket0_key = table_codec.encode_statistics_bucket_key("t1", 0, 0);
         let bucket1_key = table_codec.encode_statistics_bucket_key("t1", 0, 1);

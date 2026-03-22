@@ -17,6 +17,7 @@ use crate::expression::range_detacher::Range;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use crate::storage::{TableCache, Transaction};
 use crate::types::value::DataValue;
+use kite_sql_serde_macros::ReferenceSerialization;
 use siphasher::sip::SipHasher13;
 use std::borrow::Borrow;
 use std::hash::{Hash, Hasher};
@@ -25,6 +26,51 @@ use std::marker::PhantomData;
 use std::{cmp, mem};
 
 pub(crate) type FastHasher = SipHasher13;
+pub(crate) const COUNT_MIN_SKETCH_STORAGE_PAGE_LEN: usize = 16 * 1024;
+
+#[derive(Debug, Clone, ReferenceSerialization)]
+pub struct CountMinSketchMeta {
+    width: usize,
+    k_num: usize,
+    page_len: usize,
+    hasher_0: FastHasher,
+    hasher_1: FastHasher,
+}
+
+impl CountMinSketchMeta {
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    pub fn k_num(&self) -> usize {
+        self.k_num
+    }
+
+    pub fn page_len(&self) -> usize {
+        self.page_len
+    }
+}
+
+impl CountMinSketchPage {
+    pub fn row_idx(&self) -> usize {
+        self.row_idx
+    }
+
+    pub fn page_idx(&self) -> usize {
+        self.page_idx
+    }
+
+    pub fn counters(&self) -> &[usize] {
+        &self.counters
+    }
+}
+
+#[derive(Debug, Clone, ReferenceSerialization)]
+pub struct CountMinSketchPage {
+    row_idx: usize,
+    page_idx: usize,
+    counters: Vec<usize>,
+}
 
 // https://github.com/jedisct1/rust-count-min-sketch
 #[derive(Debug, Clone)]
@@ -35,6 +81,122 @@ pub struct CountMinSketch<K> {
     mask: usize,
     k_num: usize,
     phantom_k: PhantomData<K>,
+}
+
+impl<K> CountMinSketch<K> {
+    pub fn storage_page_count(&self, page_len: usize) -> usize {
+        self.counters
+            .iter()
+            .map(|row| row.len().div_ceil(page_len))
+            .sum()
+    }
+
+    pub fn into_storage_parts(
+        self,
+        page_len: usize,
+    ) -> (CountMinSketchMeta, impl Iterator<Item = CountMinSketchPage>) {
+        let CountMinSketch {
+            counters,
+            hashers,
+            mask,
+            k_num,
+            ..
+        } = self;
+        let width = mask + 1;
+        let meta = CountMinSketchMeta {
+            width,
+            k_num,
+            page_len,
+            hasher_0: hashers[0].clone(),
+            hasher_1: hashers[1].clone(),
+        };
+        let pages = counters
+            .into_iter()
+            .enumerate()
+            .flat_map(move |(row_idx, counters)| {
+                let page_count = counters.len().div_ceil(page_len);
+                (0..page_count).map(move |page_idx| {
+                    let start = page_idx * page_len;
+                    let end = ((page_idx + 1) * page_len).min(counters.len());
+
+                    CountMinSketchPage {
+                        row_idx,
+                        page_idx,
+                        counters: counters[start..end].to_vec(),
+                    }
+                })
+            });
+
+        (meta, pages)
+    }
+
+    pub fn from_storage_parts(
+        meta: CountMinSketchMeta,
+        mut pages: Vec<CountMinSketchPage>,
+    ) -> Result<Self, DatabaseError> {
+        let width = meta.width;
+        let k_num = meta.k_num;
+        let page_len = meta.page_len;
+        if width == 0 || k_num == 0 || page_len == 0 {
+            return Err(DatabaseError::InvalidValue(
+                "count-min sketch storage meta is invalid".to_string(),
+            ));
+        }
+        if !width.is_power_of_two() {
+            return Err(DatabaseError::InvalidValue(
+                "count-min sketch width must be a power of two".to_string(),
+            ));
+        }
+
+        pages.sort_by_key(|page| (page.row_idx, page.page_idx));
+        let mut counters = vec![Vec::with_capacity(width); k_num];
+        let mut expected_page_idx = vec![0usize; k_num];
+
+        for CountMinSketchPage {
+            row_idx,
+            page_idx,
+            counters: page_counters,
+        } in pages
+        {
+            if row_idx >= k_num {
+                return Err(DatabaseError::InvalidValue(format!(
+                    "count-min sketch row index out of bounds: {row_idx}"
+                )));
+            }
+            if page_idx != expected_page_idx[row_idx] {
+                return Err(DatabaseError::InvalidValue(format!(
+                    "count-min sketch page sequence is invalid: row={row_idx}, page={page_idx}, expected={}",
+                    expected_page_idx[row_idx]
+                )));
+            }
+            if page_counters.len() > page_len {
+                return Err(DatabaseError::InvalidValue(format!(
+                    "count-min sketch page is too large: row={row_idx}, page={page_idx}"
+                )));
+            }
+
+            counters[row_idx].extend(page_counters);
+            expected_page_idx[row_idx] += 1;
+        }
+
+        for (row_idx, row) in counters.iter().enumerate() {
+            if row.len() != width {
+                return Err(DatabaseError::InvalidValue(format!(
+                    "count-min sketch row width mismatch: row={row_idx}, expected={width}, actual={}",
+                    row.len()
+                )));
+            }
+        }
+
+        Ok(CountMinSketch {
+            counters,
+            offsets: vec![0; k_num],
+            hashers: [meta.hasher_0, meta.hasher_1],
+            mask: width - 1,
+            k_num,
+            phantom_k: Default::default(),
+        })
+    }
 }
 
 impl CountMinSketch<DataValue> {
@@ -254,6 +416,27 @@ mod tests {
                 }
             ]),
             300
+        );
+    }
+
+    #[test]
+    fn test_storage_parts_roundtrip() {
+        let mut cms = CountMinSketch::<DataValue>::new(128, 0.95, 10.0);
+        for i in 0..256 {
+            cms.increment(&DataValue::Int32(i % 17));
+        }
+
+        let (meta, pages) = cms.clone().into_storage_parts(8);
+        let rebuilt =
+            CountMinSketch::<DataValue>::from_storage_parts(meta, pages.collect()).unwrap();
+
+        assert_eq!(
+            cms.estimate(&DataValue::Int32(3)),
+            rebuilt.estimate(&DataValue::Int32(3))
+        );
+        assert_eq!(
+            cms.estimate(&DataValue::Int32(9)),
+            rebuilt.estimate(&DataValue::Int32(9))
         );
     }
 }
