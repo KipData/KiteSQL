@@ -47,8 +47,10 @@ impl<'a, T: Transaction> StatisticMetaLoader<'a, T> {
             self.cache.put(key, None);
             return Ok(None);
         };
-        self.cache
-            .put(key.clone(), Some(StatisticsMetaCacheValue::new(statistics_meta)));
+        self.cache.put(
+            key.clone(),
+            Some(StatisticsMetaCacheValue::new(statistics_meta)),
+        );
 
         Ok(self
             .cache
@@ -207,10 +209,7 @@ pub struct StatisticsMetaCacheValue {
 
 impl StatisticsMetaCacheValue {
     pub fn new(meta: StatisticsMeta) -> Self {
-        Self {
-            meta,
-            sketch: None,
-        }
+        Self { meta, sketch: None }
     }
 
     pub fn with_sketch(mut self, sketch: CountMinSketch<DataValue>) -> Self {
