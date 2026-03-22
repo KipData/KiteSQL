@@ -132,7 +132,7 @@ impl<K> CountMinSketch<K> {
 
     pub fn from_storage_parts(
         meta: CountMinSketchMeta,
-        mut pages: Vec<CountMinSketchPage>,
+        pages: Vec<CountMinSketchPage>,
     ) -> Result<Self, DatabaseError> {
         let width = meta.width;
         let k_num = meta.k_num;
@@ -148,7 +148,6 @@ impl<K> CountMinSketch<K> {
             ));
         }
 
-        pages.sort_by_key(|page| (page.row_idx, page.page_idx));
         let mut counters = vec![Vec::with_capacity(width); k_num];
         let mut expected_page_idx = vec![0usize; k_num];
 

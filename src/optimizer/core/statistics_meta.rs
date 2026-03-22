@@ -39,8 +39,10 @@ impl<'a, T: Transaction> StatisticMetaLoader<'a, T> {
         index_id: IndexId,
     ) -> Result<Option<&StatisticsMeta>, DatabaseError> {
         let key = (table_name.clone(), index_id);
-        if let Some(entry) = self.cache.get(&key) {
-            return Ok(entry.as_ref().map(|entry| entry.meta()));
+        match self.cache.get(&key) {
+            Some(Some(entry)) => return Ok(Some(entry.meta())),
+            Some(None) => return Ok(None),
+            None => {}
         }
 
         let Some(statistics_meta) = self.tx.statistics_meta(table_name.as_ref(), index_id)? else {
@@ -97,43 +99,40 @@ impl<'a, T: Transaction> StatisticMetaLoader<'a, T> {
         index_id: IndexId,
     ) -> Result<Option<&CountMinSketch<DataValue>>, DatabaseError> {
         let key = (table_name.clone(), index_id);
-        if let Some(entry) = self.cache.get(&key) {
-            if let Some(entry) = entry.as_ref() {
+        match self.cache.get(&key) {
+            Some(Some(entry)) => {
                 if let Some(sketch) = entry.sketch() {
                     return Ok(Some(sketch));
                 }
-            } else {
-                return Ok(None);
             }
+            Some(None) => return Ok(None),
+            None => {}
         }
 
         let Some(sketch) = self.tx.statistics_sketch(table_name.as_ref(), index_id)? else {
             return Ok(None);
         };
-        let meta = if let Some(entry) = self.cache.get(&key) {
-            if let Some(entry) = entry.as_ref() {
-                entry.meta().clone()
-            } else {
+        let meta = match self.cache.get(&key) {
+            Some(Some(entry)) => entry.meta().clone(),
+            Some(None) | None => {
                 let Some(meta) = self.tx.statistics_meta(table_name.as_ref(), index_id)? else {
+                    self.cache.put(key, None);
                     return Ok(None);
                 };
                 meta
             }
-        } else {
-            let Some(meta) = self.tx.statistics_meta(table_name.as_ref(), index_id)? else {
-                return Ok(None);
-            };
-            meta
         };
         self.cache.put(
             key.clone(),
             Some(StatisticsMetaCacheValue::new(meta).with_sketch(sketch)),
         );
 
-        Ok(self
-            .cache
-            .get(&key)
-            .and_then(|entry| entry.as_ref().and_then(|entry| entry.sketch())))
+        Ok(match self.cache.get(&key) {
+            Some(Some(entry)) => entry.sketch(),
+            Some(None) | None => {
+                return Ok(None);
+            }
+        })
     }
 }
 
