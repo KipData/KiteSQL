@@ -1337,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "kite_sql"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "ahash 0.8.12",
  "async-trait",

@@ -87,10 +87,9 @@ impl<T: Transaction> ImplementationRule<T> for IndexScanImplementation {
                 let mut cost = None;
 
                 if let Some(range) = &index_info.range {
-                    if let Some(statistics_meta) =
-                        loader.load(&scan_op.table_name, index_info.meta.id)?
+                    if let Some(mut row_count) =
+                        loader.collect_count(&scan_op.table_name, index_info.meta.id, range)?
                     {
-                        let mut row_count = statistics_meta.collect_count(range)?;
                         if index_info.covered_deserializers.is_none()
                             && !matches!(index_info.meta.ty, IndexType::PrimaryKey { .. })
                         {

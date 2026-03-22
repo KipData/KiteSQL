@@ -16,7 +16,7 @@ use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::Range;
 use crate::optimizer::core::cm_sketch::CountMinSketch;
-use crate::optimizer::core::histogram::{Histogram, HistogramMeta};
+use crate::optimizer::core::histogram::{Bucket, Histogram, HistogramMeta};
 use crate::storage::{StatisticsMetaCache, Transaction};
 use crate::types::index::IndexId;
 use crate::types::value::DataValue;
@@ -39,16 +39,100 @@ impl<'a, T: Transaction> StatisticMetaLoader<'a, T> {
         index_id: IndexId,
     ) -> Result<Option<&StatisticsMeta>, DatabaseError> {
         let key = (table_name.clone(), index_id);
-        if let Some(statistics_meta) = self.cache.get(&key) {
-            return Ok(Some(statistics_meta));
+        match self.cache.get(&key) {
+            Some(Some(entry)) => return Ok(Some(entry.meta())),
+            Some(None) => return Ok(None),
+            None => {}
         }
 
         let Some(statistics_meta) = self.tx.statistics_meta(table_name.as_ref(), index_id)? else {
+            self.cache.put(key, None);
             return Ok(None);
         };
-        self.cache.put(key.clone(), statistics_meta);
+        self.cache.put(
+            key.clone(),
+            Some(StatisticsMetaCacheValue::new(statistics_meta)),
+        );
 
-        Ok(self.cache.get(&key))
+        Ok(self
+            .cache
+            .get(&key)
+            .and_then(|entry| entry.as_ref().map(|entry| entry.meta())))
+    }
+
+    pub fn collect_count(
+        &self,
+        table_name: &TableName,
+        index_id: IndexId,
+        range: &Range,
+    ) -> Result<Option<usize>, DatabaseError> {
+        let Some(statistics_meta) = self.load(table_name, index_id)? else {
+            return Ok(None);
+        };
+        let ranges = if let Range::SortedRanges(ranges) = range {
+            ranges.as_slice()
+        } else {
+            slice::from_ref(range)
+        };
+        let mut sketch = None;
+        let mut estimate = |value: &DataValue| -> Result<usize, DatabaseError> {
+            if sketch.is_none() {
+                sketch = self.load_sketch(table_name, index_id)?;
+            }
+            sketch
+                .as_ref()
+                .ok_or_else(|| {
+                    DatabaseError::InvalidValue("statistics sketch is incomplete".to_string())
+                })
+                .map(|sketch| sketch.estimate(value))
+        };
+
+        statistics_meta
+            .histogram()
+            .collect_count(ranges, &mut estimate)
+            .map(Some)
+    }
+
+    fn load_sketch(
+        &self,
+        table_name: &TableName,
+        index_id: IndexId,
+    ) -> Result<Option<&CountMinSketch<DataValue>>, DatabaseError> {
+        let key = (table_name.clone(), index_id);
+        match self.cache.get(&key) {
+            Some(Some(entry)) => {
+                if let Some(sketch) = entry.sketch() {
+                    return Ok(Some(sketch));
+                }
+            }
+            Some(None) => return Ok(None),
+            None => {}
+        }
+
+        let Some(sketch) = self.tx.statistics_sketch(table_name.as_ref(), index_id)? else {
+            return Ok(None);
+        };
+        let meta = match self.cache.get(&key) {
+            Some(Some(entry)) => entry.meta().clone(),
+            Some(None) | None => {
+                let Some(meta) = self.tx.statistics_meta(table_name.as_ref(), index_id)? else {
+                    self.cache.put(key, None);
+                    return Ok(None);
+                };
+                meta
+            }
+        };
+        self.cache.put(
+            key.clone(),
+            Some(StatisticsMetaCacheValue::new(meta).with_sketch(sketch)),
+        );
+
+        Ok(match self.cache.get(&key) {
+            Some(Some(entry)) => entry.sketch(),
+            Some(None) | None => {
+                return Ok(None);
+            }
+        })
     }
 }
 
@@ -56,15 +140,13 @@ impl<'a, T: Transaction> StatisticMetaLoader<'a, T> {
 pub struct StatisticsMetaRoot {
     index_id: IndexId,
     histogram_meta: HistogramMeta,
-    cm_sketch: CountMinSketch<DataValue>,
 }
 
 impl StatisticsMetaRoot {
-    pub fn new(histogram_meta: HistogramMeta, cm_sketch: CountMinSketch<DataValue>) -> Self {
+    pub fn new(histogram_meta: HistogramMeta) -> Self {
         Self {
             index_id: histogram_meta.index_id(),
             histogram_meta,
-            cm_sketch,
         }
     }
 
@@ -76,12 +158,8 @@ impl StatisticsMetaRoot {
         &self.histogram_meta
     }
 
-    pub fn cm_sketch(&self) -> &CountMinSketch<DataValue> {
-        &self.cm_sketch
-    }
-
-    pub fn into_parts(self) -> (HistogramMeta, CountMinSketch<DataValue>) {
-        (self.histogram_meta, self.cm_sketch)
+    pub fn into_histogram_meta(self) -> HistogramMeta {
+        self.histogram_meta
     }
 }
 
@@ -89,39 +167,28 @@ impl StatisticsMetaRoot {
 pub struct StatisticsMeta {
     index_id: IndexId,
     histogram: Histogram,
-    cm_sketch: CountMinSketch<DataValue>,
 }
 
 impl StatisticsMeta {
-    pub fn new(histogram: Histogram, cm_sketch: CountMinSketch<DataValue>) -> Self {
+    pub fn new(histogram: Histogram) -> Self {
         StatisticsMeta {
             index_id: histogram.index_id(),
             histogram,
-            cm_sketch,
         }
     }
 
     pub fn from_parts(
         root: StatisticsMetaRoot,
-        buckets: Vec<crate::optimizer::core::histogram::Bucket>,
+        buckets: Vec<Bucket>,
     ) -> Result<Self, DatabaseError> {
-        let (histogram_meta, cm_sketch) = root.into_parts();
-        let histogram = Histogram::from_parts(histogram_meta, buckets)?;
+        let histogram = Histogram::from_parts(root.into_histogram_meta(), buckets)?;
 
-        Ok(Self::new(histogram, cm_sketch))
+        Ok(Self::new(histogram))
     }
 
-    pub fn into_parts(
-        self,
-    ) -> (
-        StatisticsMetaRoot,
-        Vec<crate::optimizer::core::histogram::Bucket>,
-    ) {
+    pub fn into_parts(self) -> (StatisticsMetaRoot, Vec<Bucket>) {
         let (histogram_meta, buckets) = self.histogram.into_parts();
-        (
-            StatisticsMetaRoot::new(histogram_meta, self.cm_sketch),
-            buckets,
-        )
+        (StatisticsMetaRoot::new(histogram_meta), buckets)
     }
 
     pub fn index_id(&self) -> IndexId {
@@ -131,17 +198,30 @@ impl StatisticsMeta {
     pub fn histogram(&self) -> &Histogram {
         &self.histogram
     }
+}
 
-    pub fn collect_count(&self, range: &Range) -> Result<usize, DatabaseError> {
-        let mut count = 0;
+#[derive(Debug, Clone)]
+pub struct StatisticsMetaCacheValue {
+    meta: StatisticsMeta,
+    sketch: Option<CountMinSketch<DataValue>>,
+}
 
-        let ranges = if let Range::SortedRanges(ranges) = range {
-            ranges.as_slice()
-        } else {
-            slice::from_ref(range)
-        };
-        count += self.histogram.collect_count(ranges, &self.cm_sketch)?;
-        Ok(count)
+impl StatisticsMetaCacheValue {
+    pub fn new(meta: StatisticsMeta) -> Self {
+        Self { meta, sketch: None }
+    }
+
+    pub fn with_sketch(mut self, sketch: CountMinSketch<DataValue>) -> Self {
+        self.sketch = Some(sketch);
+        self
+    }
+
+    pub fn meta(&self) -> &StatisticsMeta {
+        &self.meta
+    }
+
+    pub fn sketch(&self) -> Option<&CountMinSketch<DataValue>> {
+        self.sketch.as_ref()
     }
 }
 
@@ -188,16 +268,12 @@ mod tests {
         builder.append(&Arc::new(DataValue::Null))?;
         builder.append(&Arc::new(DataValue::Null))?;
 
-        let (histogram, sketch) = builder.build(4)?;
-        let meta = StatisticsMeta::new(histogram.clone(), sketch.clone());
+        let (histogram, _) = builder.build(4)?;
+        let meta = StatisticsMeta::new(histogram.clone());
         let (root, buckets) = meta.into_parts();
         let statistics_meta = StatisticsMeta::from_parts(root, buckets)?;
 
         assert_eq!(histogram, statistics_meta.histogram);
-        assert_eq!(
-            sketch.estimate(&DataValue::Null),
-            statistics_meta.cm_sketch.estimate(&DataValue::Null)
-        );
 
         Ok(())
     }

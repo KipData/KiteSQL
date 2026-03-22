@@ -167,9 +167,9 @@ impl Analyze {
         {
             let (histogram, sketch) =
                 builder.build(histogram_buckets.unwrap_or(DEFAULT_NUM_OF_BUCKETS))?;
-            let meta = StatisticsMeta::new(histogram, sketch);
+            let meta = StatisticsMeta::new(histogram);
 
-            unsafe { &mut (*transaction) }.save_statistics_meta(cache, table_name, meta)?;
+            unsafe { &mut (*transaction) }.save_statistics_meta(cache, table_name, meta, sketch)?;
             values.push(DataValue::Utf8 {
                 value: format!("{table_name}/{index_id}"),
                 ty: Utf8Type::Variable(None),
@@ -196,7 +196,10 @@ mod test {
     use crate::db::{DataBaseBuilder, ResultIter};
     use crate::errors::DatabaseError;
     use crate::execution::dml::analyze::DEFAULT_NUM_OF_BUCKETS;
+    use crate::expression::range_detacher::Range;
+    use crate::optimizer::core::cm_sketch::COUNT_MIN_SKETCH_STORAGE_PAGE_LEN;
     use crate::storage::{InnerIter, Storage, Transaction};
+    use crate::types::value::DataValue;
     use std::ops::Bound;
     use tempfile::TempDir;
 
@@ -204,6 +207,7 @@ mod test {
     fn test_analyze() -> Result<(), DatabaseError> {
         test_statistics_meta_roundtrip()?;
         test_meta_loader_uses_cache()?;
+        test_meta_loader_negative_cache()?;
         test_clean_expired_index()?;
 
         Ok(())
@@ -268,12 +272,16 @@ mod test {
         kite_sql.run("analyze table t1")?.done()?;
 
         let table_name = "t1".to_string().into();
-        let mut transaction = kite_sql.storage.transaction()?;
-        assert!(transaction
-            .meta_loader(kite_sql.state.meta_cache())
-            .load(&table_name, 1)?
-            .is_some());
+        let transaction = kite_sql.storage.transaction()?;
+        let loader = transaction.meta_loader(kite_sql.state.meta_cache());
+        assert!(loader.load(&table_name, 1)?.is_some());
+        assert_eq!(
+            loader.collect_count(&table_name, 1, &Range::Eq(DataValue::Int32(7)))?,
+            Some(1)
+        );
+        drop(transaction);
 
+        let mut transaction = kite_sql.storage.transaction()?;
         let (min, max) = unsafe { &*transaction.table_codec() }.statistics_index_bound("t1", 1);
         let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
         let mut keys: Vec<Vec<u8>> = Vec::new();
@@ -285,10 +293,37 @@ mod test {
             transaction.remove(&key)?;
         }
 
-        assert!(transaction
-            .meta_loader(kite_sql.state.meta_cache())
-            .load(&table_name, 1)?
-            .is_some());
+        let transaction = kite_sql.storage.transaction()?;
+        let loader = transaction.meta_loader(kite_sql.state.meta_cache());
+        assert!(loader.load(&table_name, 1)?.is_some());
+        assert_eq!(
+            loader.collect_count(&table_name, 1, &Range::Eq(DataValue::Int32(7)))?,
+            Some(1)
+        );
+
+        Ok(())
+    }
+
+    fn test_meta_loader_negative_cache() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+
+        kite_sql
+            .run("create table t1 (a int primary key, b int)")?
+            .done()?;
+        kite_sql.run("create index b_index on t1 (b)")?.done()?;
+
+        let table_name = "t1".to_string().into();
+        let transaction = kite_sql.storage.transaction()?;
+        let loader = transaction.meta_loader(kite_sql.state.meta_cache());
+        assert!(loader.load(&table_name, 1)?.is_none());
+
+        let entry = kite_sql
+            .state
+            .meta_cache()
+            .get(&(table_name.clone(), 1))
+            .expect("missing statistics cache entry");
+        assert!(entry.is_none());
 
         Ok(())
     }
@@ -330,7 +365,17 @@ mod test {
         while iter.try_next()?.is_some() {
             keys += 1;
         }
-        assert_eq!(keys, 1 + DEFAULT_NUM_OF_BUCKETS.min(DEFAULT_NUM_OF_BUCKETS));
+        let table_name = "t1".to_string().into();
+        let loader = transaction.meta_loader(kite_sql.state.meta_cache());
+        let statistics_meta = loader.load(&table_name, 0)?.unwrap();
+        let statistics_sketch = transaction
+            .statistics_sketch(table_name.as_ref(), 0)?
+            .unwrap();
+        let expected_keys = 1
+            + 1
+            + statistics_sketch.storage_page_count(COUNT_MIN_SKETCH_STORAGE_PAGE_LEN)
+            + statistics_meta.histogram().buckets_len();
+        assert_eq!(keys, expected_keys);
 
         Ok(())
     }

@@ -22,10 +22,15 @@ use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog, TableMeta, TableNam
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::Range;
 use crate::expression::ScalarExpression;
-use crate::optimizer::core::statistics_meta::{StatisticMetaLoader, StatisticsMeta};
+use crate::optimizer::core::cm_sketch::{
+    CountMinSketch, CountMinSketchPage, COUNT_MIN_SKETCH_STORAGE_PAGE_LEN,
+};
+use crate::optimizer::core::statistics_meta::{
+    StatisticMetaLoader, StatisticsMeta, StatisticsMetaCacheValue,
+};
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
 use crate::serdes::ReferenceTables;
-use crate::storage::table_codec::{BumpBytes, Bytes, TableCodec};
+use crate::storage::table_codec::{BumpBytes, Bytes, StatisticsCodecType, TableCodec};
 use crate::types::index::{Index, IndexId, IndexMeta, IndexMetaRef, IndexType};
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::{Tuple, TupleId};
@@ -42,7 +47,8 @@ use std::sync::Arc;
 use std::vec::IntoIter;
 use ulid::Generator;
 
-pub(crate) type StatisticsMetaCache = SharedLruCache<(TableName, IndexId), StatisticsMeta>;
+pub(crate) type StatisticsMetaCache =
+    SharedLruCache<(TableName, IndexId), Option<StatisticsMetaCacheValue>>;
 pub(crate) type TableCache = SharedLruCache<TableName, TableCatalog>;
 pub(crate) type ViewCache = SharedLruCache<TableName, View>;
 
@@ -767,12 +773,30 @@ pub trait Transaction: Sized {
         meta_cache: &StatisticsMetaCache,
         table_name: &TableName,
         statistics_meta: StatisticsMeta,
+        cm_sketch: CountMinSketch<DataValue>,
     ) -> Result<(), DatabaseError> {
         let index_id = statistics_meta.index_id();
         let (root, buckets) = statistics_meta.clone().into_parts();
         let (key, value) =
             unsafe { &*self.table_codec() }.encode_statistics_meta(table_name.as_ref(), &root)?;
         self.set(key, value)?;
+        let cached_sketch = cm_sketch.clone();
+        let (sketch_meta, sketch_pages) =
+            cm_sketch.into_storage_parts(COUNT_MIN_SKETCH_STORAGE_PAGE_LEN);
+        let (key, value) = unsafe { &*self.table_codec() }.encode_statistics_sketch_meta(
+            table_name.as_ref(),
+            index_id,
+            &sketch_meta,
+        )?;
+        self.set(key, value)?;
+        for sketch_page in sketch_pages {
+            let (key, value) = unsafe { &*self.table_codec() }.encode_statistics_sketch_page(
+                table_name.as_ref(),
+                index_id,
+                &sketch_page,
+            )?;
+            self.set(key, value)?;
+        }
 
         for (ordinal, bucket) in buckets.iter().enumerate() {
             let (key, value) = unsafe { &*self.table_codec() }.encode_statistics_bucket(
@@ -784,7 +808,10 @@ pub trait Transaction: Sized {
             self.set(key, value)?;
         }
 
-        meta_cache.put((table_name.clone(), index_id), statistics_meta);
+        meta_cache.put(
+            (table_name.clone(), index_id),
+            Some(StatisticsMetaCacheValue::new(statistics_meta).with_sketch(cached_sketch)),
+        );
 
         Ok(())
     }
@@ -799,21 +826,70 @@ pub trait Transaction: Sized {
         let mut iter = self.range(Bound::Included(min), Bound::Included(max))?;
         let mut root = None;
         let mut buckets = Vec::new();
+        let mut has_extra = false;
 
         while let Some((key, value)) = iter.try_next()? {
-            if key.len()
-                == unsafe { &*self.table_codec() }
-                    .encode_statistics_meta_key(table_name, index_id)
-                    .len()
+            match unsafe { &*self.table_codec() }
+                .decode_statistics_codec_type(table_name, index_id, &key)?
             {
-                root = Some(TableCodec::decode_statistics_meta::<Self>(&value)?);
-            } else {
-                buckets.push(TableCodec::decode_statistics_bucket::<Self>(&value)?);
+                StatisticsCodecType::Root => {
+                    root = Some(TableCodec::decode_statistics_meta::<Self>(&value)?);
+                }
+                StatisticsCodecType::SketchMeta | StatisticsCodecType::SketchPage => {
+                    has_extra = true
+                }
+                StatisticsCodecType::Bucket => {
+                    buckets.push(TableCodec::decode_statistics_bucket::<Self>(&value)?);
+                }
             }
         }
 
-        root.map(|root| StatisticsMeta::from_parts(root, buckets))
-            .transpose()
+        match root {
+            Some(root) => StatisticsMeta::from_parts(root, buckets).map(Some),
+            None if !has_extra && buckets.is_empty() => Ok(None),
+            _ => Err(DatabaseError::InvalidValue(
+                "statistics meta is incomplete".to_string(),
+            )),
+        }
+    }
+
+    fn statistics_sketch(
+        &self,
+        table_name: &str,
+        index_id: IndexId,
+    ) -> Result<Option<CountMinSketch<DataValue>>, DatabaseError> {
+        let (min, max) =
+            unsafe { &*self.table_codec() }.statistics_index_bound(table_name, index_id);
+        let mut iter = self.range(Bound::Included(min), Bound::Included(max))?;
+        let mut sketch_meta = None;
+        let mut sketch_pages = Vec::<CountMinSketchPage>::new();
+        let mut has_root_or_bucket = false;
+
+        while let Some((key, value)) = iter.try_next()? {
+            match unsafe { &*self.table_codec() }
+                .decode_statistics_codec_type(table_name, index_id, &key)?
+            {
+                StatisticsCodecType::Root | StatisticsCodecType::Bucket => {
+                    has_root_or_bucket = true
+                }
+                StatisticsCodecType::SketchMeta => {
+                    sketch_meta = Some(TableCodec::decode_statistics_sketch_meta::<Self>(&value)?);
+                }
+                StatisticsCodecType::SketchPage => {
+                    sketch_pages.push(TableCodec::decode_statistics_sketch_page::<Self>(&value)?);
+                }
+            }
+        }
+
+        match sketch_meta {
+            Some(sketch_meta) => {
+                CountMinSketch::from_storage_parts(sketch_meta, sketch_pages).map(Some)
+            }
+            None if !has_root_or_bucket && sketch_pages.is_empty() => Ok(None),
+            _ => Err(DatabaseError::InvalidValue(
+                "statistics sketch is incomplete".to_string(),
+            )),
+        }
     }
 
     fn remove_statistics_meta(
@@ -1547,8 +1623,6 @@ mod test {
     use crate::db::test::build_table;
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
-    use crate::expression::ScalarExpression;
-    use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
     use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
     use crate::storage::table_codec::TableCodec;
     use crate::storage::{

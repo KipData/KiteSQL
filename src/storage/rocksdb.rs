@@ -35,6 +35,12 @@ const ROCKSDB_MEMTABLE_PREFIX_BLOOM_RATIO: f64 = 0.10;
 pub struct RocksDbMetrics {
     pub block_cache_hit: Option<u64>,
     pub block_cache_miss: Option<u64>,
+    pub block_cache_data_hit: Option<u64>,
+    pub block_cache_data_miss: Option<u64>,
+    pub block_cache_index_hit: Option<u64>,
+    pub block_cache_index_miss: Option<u64>,
+    pub block_cache_filter_hit: Option<u64>,
+    pub block_cache_filter_miss: Option<u64>,
     pub stall_micros: Option<u64>,
     pub compaction_pending_bytes: Option<u64>,
     pub write_amp: Option<f64>,
@@ -57,6 +63,60 @@ impl RocksDbMetrics {
 
         Some(hit as f64 / total as f64)
     }
+
+    #[inline]
+    pub fn delta_since(&self, base: &Self) -> Self {
+        Self {
+            block_cache_hit: subtract_optional_u64(self.block_cache_hit, base.block_cache_hit),
+            block_cache_miss: subtract_optional_u64(self.block_cache_miss, base.block_cache_miss),
+            block_cache_data_hit: subtract_optional_u64(
+                self.block_cache_data_hit,
+                base.block_cache_data_hit,
+            ),
+            block_cache_data_miss: subtract_optional_u64(
+                self.block_cache_data_miss,
+                base.block_cache_data_miss,
+            ),
+            block_cache_index_hit: subtract_optional_u64(
+                self.block_cache_index_hit,
+                base.block_cache_index_hit,
+            ),
+            block_cache_index_miss: subtract_optional_u64(
+                self.block_cache_index_miss,
+                base.block_cache_index_miss,
+            ),
+            block_cache_filter_hit: subtract_optional_u64(
+                self.block_cache_filter_hit,
+                base.block_cache_filter_hit,
+            ),
+            block_cache_filter_miss: subtract_optional_u64(
+                self.block_cache_filter_miss,
+                base.block_cache_filter_miss,
+            ),
+            stall_micros: subtract_optional_u64(self.stall_micros, base.stall_micros),
+            compaction_pending_bytes: self.compaction_pending_bytes,
+            write_amp: self.write_amp,
+        }
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        [
+            self.block_cache_hit,
+            self.block_cache_miss,
+            self.block_cache_data_hit,
+            self.block_cache_data_miss,
+            self.block_cache_index_hit,
+            self.block_cache_index_miss,
+            self.block_cache_filter_hit,
+            self.block_cache_filter_miss,
+            self.stall_micros,
+            self.compaction_pending_bytes,
+        ]
+        .into_iter()
+        .flatten()
+        .all(|value| value == 0)
+    }
 }
 
 impl Display for RocksDbMetrics {
@@ -68,6 +128,16 @@ impl Display for RocksDbMetrics {
             format_optional_u64(self.block_cache_hit),
             format_optional_u64(self.block_cache_miss),
             format_optional_pct(self.block_cache_hit_rate()),
+        )?;
+        writeln!(
+            f,
+            "block_cache_data_hit={} block_cache_data_miss={} block_cache_index_hit={} block_cache_index_miss={} block_cache_filter_hit={} block_cache_filter_miss={}",
+            format_optional_u64(self.block_cache_data_hit),
+            format_optional_u64(self.block_cache_data_miss),
+            format_optional_u64(self.block_cache_index_hit),
+            format_optional_u64(self.block_cache_index_miss),
+            format_optional_u64(self.block_cache_filter_hit),
+            format_optional_u64(self.block_cache_filter_miss),
         )?;
         write!(
             f,
@@ -144,6 +214,12 @@ fn collect_metrics(
 ) -> RocksDbMetrics {
     let block_cache_hit = Some(options.get_ticker_count(Ticker::BlockCacheHit));
     let block_cache_miss = Some(options.get_ticker_count(Ticker::BlockCacheMiss));
+    let block_cache_data_hit = Some(options.get_ticker_count(Ticker::BlockCacheDataHit));
+    let block_cache_data_miss = Some(options.get_ticker_count(Ticker::BlockCacheDataMiss));
+    let block_cache_index_hit = Some(options.get_ticker_count(Ticker::BlockCacheIndexHit));
+    let block_cache_index_miss = Some(options.get_ticker_count(Ticker::BlockCacheIndexMiss));
+    let block_cache_filter_hit = Some(options.get_ticker_count(Ticker::BlockCacheFilterHit));
+    let block_cache_filter_miss = Some(options.get_ticker_count(Ticker::BlockCacheFilterMiss));
     let stall_micros = Some(options.get_ticker_count(Ticker::StallMicros));
     let compaction_pending_bytes = int_property("rocksdb.estimate-pending-compaction-bytes")
         .ok()
@@ -153,6 +229,12 @@ fn collect_metrics(
     RocksDbMetrics {
         block_cache_hit,
         block_cache_miss,
+        block_cache_data_hit,
+        block_cache_data_miss,
+        block_cache_index_hit,
+        block_cache_index_miss,
+        block_cache_filter_hit,
+        block_cache_filter_miss,
         stall_micros,
         compaction_pending_bytes,
         write_amp,
@@ -197,6 +279,14 @@ fn format_optional_pct(value: Option<f64>) -> String {
     value
         .map(|v| format!("{:.2}%", v * 100.0))
         .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn subtract_optional_u64(lhs: Option<u64>, rhs: Option<u64>) -> Option<u64> {
+    match (lhs, rhs) {
+        (Some(lhs), Some(rhs)) => Some(lhs.saturating_sub(rhs)),
+        (Some(lhs), None) => Some(lhs),
+        _ => None,
+    }
 }
 
 fn default_opts(config: StorageConfig) -> Options {

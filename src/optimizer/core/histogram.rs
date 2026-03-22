@@ -316,11 +316,14 @@ impl Histogram {
         self.meta.buckets_len
     }
 
-    pub fn collect_count(
+    pub fn collect_count<F>(
         &self,
         ranges: &[Range],
-        sketch: &CountMinSketch<DataValue>,
-    ) -> Result<usize, DatabaseError> {
+        estimate: &mut F,
+    ) -> Result<usize, DatabaseError>
+    where
+        F: FnMut(&DataValue) -> Result<usize, DatabaseError>,
+    {
         if self.buckets.is_empty() || ranges.is_empty() {
             return Ok(0);
         }
@@ -337,7 +340,7 @@ impl Histogram {
                 &mut bucket_i,
                 &mut bucket_idxs,
                 &mut count,
-                sketch,
+                estimate,
             )?;
             if is_dummy {
                 return Ok(0);
@@ -351,15 +354,18 @@ impl Histogram {
             + count)
     }
 
-    fn _collect_count(
+    fn _collect_count<F>(
         &self,
         ranges: &[Range],
         binary_i: &mut usize,
         bucket_i: &mut usize,
         bucket_idxs: &mut Vec<usize>,
         count: &mut usize,
-        sketch: &CountMinSketch<DataValue>,
-    ) -> Result<bool, DatabaseError> {
+        estimate: &mut F,
+    ) -> Result<bool, DatabaseError>
+    where
+        F: FnMut(&DataValue) -> Result<usize, DatabaseError>,
+    {
         let float_value = |value: &DataValue, prefix_len: usize| {
             let value = match value.logical_type() {
                 LogicalType::Varchar(..) | LogicalType::Char(..) => match value {
@@ -481,7 +487,7 @@ impl Histogram {
                         }
                         Bound::Excluded(val) => (
                             calc_fraction(&bucket.lower, &bucket.upper, val)?,
-                            Some(sketch.estimate(val)),
+                            Some(estimate(val)?),
                         ),
                         Bound::Unbounded => unreachable!(),
                     };
@@ -498,7 +504,7 @@ impl Histogram {
                         }
                         Bound::Excluded(val) => (
                             calc_fraction(&bucket.lower, &bucket.upper, val)?,
-                            Some(sketch.estimate(val)),
+                            Some(estimate(val)?),
                         ),
                         Bound::Unbounded => unreachable!(),
                     };
@@ -515,7 +521,7 @@ impl Histogram {
                         }
                         Bound::Excluded(val) => (
                             calc_fraction(&bucket.lower, &bucket.upper, val)?,
-                            Some(sketch.estimate(val)),
+                            Some(estimate(val)?),
                         ),
                         Bound::Unbounded => unreachable!(),
                     };
@@ -525,7 +531,7 @@ impl Histogram {
                         }
                         Bound::Excluded(val) => (
                             calc_fraction(&bucket.lower, &bucket.upper, val)?,
-                            Some(sketch.estimate(val)),
+                            Some(estimate(val)?),
                         ),
                         Bound::Unbounded => unreachable!(),
                     };
@@ -543,7 +549,7 @@ impl Histogram {
                 *count += cmp::max(temp_count, 0);
             }
             Range::Eq(value) => {
-                *count += sketch.estimate(value);
+                *count += estimate(value)?;
                 *binary_i += 1
             }
             Range::Dummy => return Ok(true),
@@ -817,6 +823,7 @@ mod tests {
         builder.append(&DataValue::Null)?;
 
         let (histogram, sketch) = builder.build(4)?;
+        let mut estimate = |value: &DataValue| Ok(sketch.estimate(value));
 
         let count_1 = histogram.collect_count(
             &[
@@ -826,7 +833,7 @@ mod tests {
                     max: Bound::Excluded(DataValue::Int32(12)),
                 },
             ],
-            &sketch,
+            &mut estimate,
         )?;
 
         assert_eq!(count_1, 9);
@@ -836,7 +843,7 @@ mod tests {
                 min: Bound::Included(DataValue::Int32(4)),
                 max: Bound::Unbounded,
             }],
-            &sketch,
+            &mut estimate,
         )?;
 
         assert_eq!(count_2, 11);
@@ -846,7 +853,7 @@ mod tests {
                 min: Bound::Excluded(DataValue::Int32(7)),
                 max: Bound::Unbounded,
             }],
-            &sketch,
+            &mut estimate,
         )?;
 
         assert_eq!(count_3, 7);
@@ -856,7 +863,7 @@ mod tests {
                 min: Bound::Unbounded,
                 max: Bound::Included(DataValue::Int32(11)),
             }],
-            &sketch,
+            &mut estimate,
         )?;
 
         assert_eq!(count_4, 12);
@@ -866,7 +873,7 @@ mod tests {
                 min: Bound::Unbounded,
                 max: Bound::Excluded(DataValue::Int32(8)),
             }],
-            &sketch,
+            &mut estimate,
         )?;
 
         assert_eq!(count_5, 8);
@@ -876,7 +883,7 @@ mod tests {
                 min: Bound::Included(DataValue::Int32(2)),
                 max: Bound::Unbounded,
             }],
-            &sketch,
+            &mut estimate,
         )?;
 
         assert_eq!(count_6, 13);
@@ -886,7 +893,7 @@ mod tests {
                 min: Bound::Excluded(DataValue::Int32(1)),
                 max: Bound::Unbounded,
             }],
-            &sketch,
+            &mut estimate,
         )?;
 
         assert_eq!(count_7, 13);
@@ -896,7 +903,7 @@ mod tests {
                 min: Bound::Unbounded,
                 max: Bound::Included(DataValue::Int32(12)),
             }],
-            &sketch,
+            &mut estimate,
         )?;
 
         assert_eq!(count_8, 13);
@@ -906,7 +913,7 @@ mod tests {
                 min: Bound::Unbounded,
                 max: Bound::Excluded(DataValue::Int32(13)),
             }],
-            &sketch,
+            &mut estimate,
         )?;
 
         assert_eq!(count_9, 13);
@@ -916,7 +923,7 @@ mod tests {
                 min: Bound::Excluded(DataValue::Int32(0)),
                 max: Bound::Excluded(DataValue::Int32(3)),
             }],
-            &sketch,
+            &mut estimate,
         )?;
 
         assert_eq!(count_10, 2);
@@ -926,7 +933,7 @@ mod tests {
                 min: Bound::Included(DataValue::Int32(1)),
                 max: Bound::Included(DataValue::Int32(2)),
             }],
-            &sketch,
+            &mut estimate,
         )?;
 
         assert_eq!(count_11, 2);
