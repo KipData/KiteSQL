@@ -47,7 +47,7 @@ mod pushdown_limit;
 mod pushdown_predicates;
 mod simplification;
 mod top_k;
-pub use agg_elimination::{annotate_sort_preserving_indexes, annotate_stream_distinct_indexes};
+pub(crate) use agg_elimination::{apply_scan_order_hint, distinct_sort_fields, OrderHintKind};
 pub(crate) use compilation_in_advance::evaluator_bind_current;
 pub(crate) use simplification::constant_calculation_current;
 

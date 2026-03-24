@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::optimizer::core::pattern::PatternMatcher;
 use crate::optimizer::core::rule::{
     BestPhysicalOption, ImplementationRule, MatchPattern, NormalizationRule,
 };
@@ -21,34 +20,36 @@ use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::heuristic::batch::{
     HepBatch, HepBatchStep, HepBatchStrategy, HepWholeTreePass,
 };
-use crate::optimizer::heuristic::matcher::PlanMatcher;
-use crate::optimizer::rule::implementation::ImplementationRuleImpl;
+use crate::optimizer::rule::implementation::{ImplementationRuleImpl, ImplementationRuleRootTag};
 use crate::optimizer::rule::normalization::{
-    annotate_sort_preserving_indexes, annotate_stream_distinct_indexes,
-    constant_calculation_current, evaluator_bind_current, NormalizationRuleImpl, WholeTreePassKind,
+    apply_scan_order_hint, constant_calculation_current, distinct_sort_fields,
+    evaluator_bind_current, NormalizationRuleImpl, OrderHintKind, WholeTreePassKind,
 };
+use crate::planner::operator::sort::SortField;
+use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
+use std::array;
 use std::ops::Not;
 
 pub struct HepOptimizer<'a> {
     before_batches: &'a [HepBatch],
     after_batches: &'a [HepBatch],
-    implementations: &'a [ImplementationRuleImpl],
+    implementation_index: &'a ImplementationRuleIndex,
     plan: LogicalPlan,
 }
 
 impl<'a> HepOptimizer<'a> {
-    pub fn new(
+    fn new(
         plan: LogicalPlan,
         before_batches: &'a [HepBatch],
         after_batches: &'a [HepBatch],
-        implementations: &'a [ImplementationRuleImpl],
+        implementation_index: &'a ImplementationRuleIndex,
     ) -> Self {
         Self {
             before_batches,
             after_batches,
-            implementations,
+            implementation_index,
             plan,
         }
     }
@@ -58,12 +59,20 @@ impl<'a> HepOptimizer<'a> {
         loader: Option<&StatisticMetaLoader<'_, T>>,
     ) -> Result<LogicalPlan, DatabaseError> {
         Self::apply_batches(&mut self.plan, self.before_batches)?;
-        annotate_sort_preserving_indexes(&mut self.plan);
-        annotate_stream_distinct_indexes(&mut self.plan);
 
         if let Some(loader) = loader {
-            if self.implementations.is_empty().not() {
-                Self::annotate_physical_options(&mut self.plan, loader, self.implementations)?;
+            if self.implementation_index.is_empty().not() {
+                let mut inherited_sort_hints = Vec::new();
+                let mut inherited_stream_distinct_hints = Vec::new();
+                Self::annotate_hints_and_physical_options(
+                    &mut self.plan,
+                    loader,
+                    self.implementation_index,
+                    &mut inherited_sort_hints,
+                    &mut inherited_stream_distinct_hints,
+                    0,
+                    0,
+                )?;
             }
         }
         Self::apply_batches(&mut self.plan, self.after_batches)?;
@@ -191,30 +200,105 @@ impl<'a> HepOptimizer<'a> {
         Ok(())
     }
 
-    fn annotate_physical_options<T: Transaction>(
-        plan: &mut LogicalPlan,
+    fn annotate_hints_and_physical_options<'plan, T: Transaction>(
+        plan: &'plan mut LogicalPlan,
         loader: &StatisticMetaLoader<'_, T>,
-        implementations: &[ImplementationRuleImpl],
+        implementation_index: &ImplementationRuleIndex,
+        inherited_sort_hints: &mut Vec<SortHint<'plan>>,
+        inherited_stream_distinct_hints: &mut Vec<SortHint<'plan>>,
+        sort_hint_start: usize,
+        stream_distinct_hint_start: usize,
     ) -> Result<(), DatabaseError> {
-        let mut best_physical_option: BestPhysicalOption = None;
-        for rule in implementations {
-            if PlanMatcher::new(rule.pattern(), plan).match_opt_expr() {
-                rule.update_best_option(&plan.operator, loader, &mut best_physical_option)?;
+        if let Operator::TableScan(scan_op) = &mut plan.operator {
+            for required in inherited_sort_hints[sort_hint_start..].iter() {
+                apply_scan_order_hint(scan_op, required.as_slice(), OrderHintKind::SortElimination);
             }
+            for required in inherited_stream_distinct_hints[stream_distinct_hint_start..].iter() {
+                apply_scan_order_hint(scan_op, required.as_slice(), OrderHintKind::StreamDistinct);
+            }
+        }
+
+        let mut best_physical_option: BestPhysicalOption = None;
+        for rule in implementation_index.for_matching_operator(&plan.operator) {
+            rule.update_best_option(&plan.operator, loader, &mut best_physical_option)?;
         }
         if let Some((option, _)) = best_physical_option {
             plan.physical_option = Some(option);
         }
 
-        match plan.childrens.as_mut() {
-            Childrens::Only(child) => {
-                Self::annotate_physical_options(child, loader, implementations)?
+        match (&plan.operator, plan.childrens.as_mut()) {
+            (operator, Childrens::Only(child)) => {
+                let propagate_hints = matches!(
+                    operator,
+                    Operator::Filter(_)
+                        | Operator::Project(_)
+                        | Operator::Limit(_)
+                        | Operator::TopK(_)
+                        | Operator::Sort(_)
+                );
+
+                let child_sort_hint_start = if propagate_hints {
+                    sort_hint_start
+                } else {
+                    inherited_sort_hints.len()
+                };
+                let old_sort_hint_len = inherited_sort_hints.len();
+                if let Operator::Sort(op) = operator {
+                    inherited_sort_hints.push(SortHint::Borrowed(&op.sort_fields));
+                }
+
+                let child_stream_distinct_hint_start = if propagate_hints {
+                    stream_distinct_hint_start
+                } else {
+                    inherited_stream_distinct_hints.len()
+                };
+                let old_stream_distinct_hint_len = inherited_stream_distinct_hints.len();
+
+                if let Operator::Aggregate(op) = operator {
+                    if op.is_distinct && op.agg_calls.is_empty() && !op.groupby_exprs.is_empty() {
+                        inherited_stream_distinct_hints
+                            .push(SortHint::Owned(distinct_sort_fields(&op.groupby_exprs)));
+                    }
+                }
+
+                Self::annotate_hints_and_physical_options(
+                    child,
+                    loader,
+                    implementation_index,
+                    inherited_sort_hints,
+                    inherited_stream_distinct_hints,
+                    child_sort_hint_start,
+                    child_stream_distinct_hint_start,
+                )?;
+
+                inherited_sort_hints.truncate(old_sort_hint_len);
+                inherited_stream_distinct_hints.truncate(old_stream_distinct_hint_len);
             }
-            Childrens::Twins { left, right } => {
-                Self::annotate_physical_options(left, loader, implementations)?;
-                Self::annotate_physical_options(right, loader, implementations)?;
+            (_, Childrens::Twins { left, right }) => {
+                let left_sort_hint_start = inherited_sort_hints.len();
+                let left_stream_distinct_hint_start = inherited_stream_distinct_hints.len();
+                Self::annotate_hints_and_physical_options(
+                    left,
+                    loader,
+                    implementation_index,
+                    inherited_sort_hints,
+                    inherited_stream_distinct_hints,
+                    left_sort_hint_start,
+                    left_stream_distinct_hint_start,
+                )?;
+                let right_sort_hint_start = inherited_sort_hints.len();
+                let right_stream_distinct_hint_start = inherited_stream_distinct_hints.len();
+                Self::annotate_hints_and_physical_options(
+                    right,
+                    loader,
+                    implementation_index,
+                    inherited_sort_hints,
+                    inherited_stream_distinct_hints,
+                    right_sort_hint_start,
+                    right_stream_distinct_hint_start,
+                )?;
             }
-            Childrens::None => {}
+            (_, Childrens::None) => {}
         }
 
         Ok(())
@@ -264,6 +348,49 @@ impl<'a> HepOptimizer<'a> {
         }
 
         Ok(applied)
+    }
+}
+
+enum SortHint<'a> {
+    Borrowed(&'a [SortField]),
+    Owned(Vec<SortField>),
+}
+
+impl SortHint<'_> {
+    fn as_slice(&self) -> &[SortField] {
+        match self {
+            SortHint::Borrowed(fields) => fields,
+            SortHint::Owned(fields) => fields.as_slice(),
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct ImplementationRuleIndex {
+    groups: [Vec<ImplementationRuleImpl>; ImplementationRuleRootTag::COUNT],
+}
+
+impl ImplementationRuleIndex {
+    fn new(implementations: Vec<ImplementationRuleImpl>) -> Self {
+        let mut groups = array::from_fn(|_| Vec::new());
+        for implementation in implementations {
+            groups[implementation.root_tag() as usize].push(implementation);
+        }
+        Self { groups }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.groups.iter().all(Vec::is_empty)
+    }
+
+    fn for_matching_operator<'b>(
+        &'b self,
+        operator: &'b Operator,
+    ) -> impl Iterator<Item = &'b ImplementationRuleImpl> + 'b {
+        ImplementationRuleRootTag::from_operator(operator)
+            .into_iter()
+            .flat_map(move |tag| self.groups[tag as usize].iter())
+            .filter(move |rule| (rule.pattern().predicate)(operator))
     }
 }
 
@@ -416,7 +543,7 @@ mod tests {
 pub struct HepOptimizerPipeline {
     before_batches: Vec<HepBatch>,
     after_batches: Vec<HepBatch>,
-    implementations: Vec<ImplementationRuleImpl>,
+    implementation_index: ImplementationRuleIndex,
 }
 
 impl HepOptimizerPipeline {
@@ -436,7 +563,7 @@ impl HepOptimizerPipeline {
         Self {
             before_batches,
             after_batches,
-            implementations,
+            implementation_index: ImplementationRuleIndex::new(implementations),
         }
     }
 
@@ -445,7 +572,7 @@ impl HepOptimizerPipeline {
             plan,
             &self.before_batches,
             &self.after_batches,
-            &self.implementations,
+            &self.implementation_index,
         )
     }
 }

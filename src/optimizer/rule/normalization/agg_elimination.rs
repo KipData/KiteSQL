@@ -19,6 +19,7 @@ use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child};
 use crate::planner::operator::limit::LimitOperator;
 use crate::planner::operator::sort::SortField;
+use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
 use crate::planner::{Childrens, LogicalPlan};
 
@@ -59,53 +60,12 @@ impl NormalizationRule for EliminateRedundantSort {
     }
 }
 
-pub fn annotate_sort_preserving_indexes(plan: &mut LogicalPlan) {
-    fn visit(plan: &mut LogicalPlan) {
-        if let Operator::Sort(sort_op) = &plan.operator {
-            let sort_fields = sort_op.sort_fields.clone();
-            mark_sort_preserving_indexes(plan, &sort_fields);
-        }
-        match plan.childrens.as_mut() {
-            Childrens::Only(child) => visit(child),
-            Childrens::Twins { left, right } => {
-                visit(left);
-                visit(right);
-            }
-            Childrens::None => {}
-        }
-    }
-    visit(plan);
-}
-
 fn mark_sort_preserving_indexes(plan: &mut LogicalPlan, required: &[SortField]) {
     mark_order_hint(plan, required, OrderHintKind::SortElimination);
 }
 
-pub fn annotate_stream_distinct_indexes(plan: &mut LogicalPlan) {
-    fn visit(plan: &mut LogicalPlan) {
-        if let Operator::Aggregate(op) = &plan.operator {
-            if op.is_distinct && op.agg_calls.is_empty() && !op.groupby_exprs.is_empty() {
-                if let Childrens::Only(child) = plan.childrens.as_mut() {
-                    let required = distinct_sort_fields(&op.groupby_exprs);
-                    mark_order_hint(child, &required, OrderHintKind::StreamDistinct);
-                }
-            }
-        }
-
-        match plan.childrens.as_mut() {
-            Childrens::Only(child) => visit(child),
-            Childrens::Twins { left, right } => {
-                visit(left);
-                visit(right);
-            }
-            Childrens::None => {}
-        }
-    }
-    visit(plan);
-}
-
 #[derive(Copy, Clone)]
-enum OrderHintKind {
+pub(crate) enum OrderHintKind {
     SortElimination,
     StreamDistinct,
 }
@@ -126,42 +86,50 @@ fn mark_order_hint(plan: &mut LogicalPlan, required: &[SortField], hint: OrderHi
             }
         }
         Operator::TableScan(scan_op) => {
-            let table_columns: Vec<ColumnRef> = scan_op.columns.values().cloned().collect();
-            let required_from_table = required.iter().all(|field| {
-                field
-                    .expr
-                    .all_referenced_columns(true, |column| table_columns.contains(column))
-            });
-            if !required_from_table {
-                return;
-            }
-            for index_info in scan_op.index_infos.iter_mut() {
-                if covers(required, &index_info.sort_option) {
-                    let covered = required.len();
-                    match hint {
-                        OrderHintKind::SortElimination => {
-                            index_info.sort_elimination_hint = Some(
-                                index_info
-                                    .sort_elimination_hint
-                                    .map_or(covered, |old| old.max(covered)),
-                            );
-                        }
-                        OrderHintKind::StreamDistinct => {
-                            index_info.stream_distinct_hint = Some(
-                                index_info
-                                    .stream_distinct_hint
-                                    .map_or(covered, |old| old.max(covered)),
-                            );
-                        }
-                    }
-                }
-            }
+            apply_scan_order_hint(scan_op, required, hint);
         }
         _ => {}
     }
 }
 
-fn distinct_sort_fields(groupby_exprs: &[ScalarExpression]) -> Vec<SortField> {
+pub(crate) fn apply_scan_order_hint(
+    scan_op: &mut TableScanOperator,
+    required: &[SortField],
+    hint: OrderHintKind,
+) {
+    let table_columns: Vec<ColumnRef> = scan_op.columns.values().cloned().collect();
+    let required_from_table = required.iter().all(|field| {
+        field
+            .expr
+            .all_referenced_columns(true, |column| table_columns.contains(column))
+    });
+    if !required_from_table {
+        return;
+    }
+    for index_info in scan_op.index_infos.iter_mut() {
+        if covers(required, &index_info.sort_option) {
+            let covered = required.len();
+            match hint {
+                OrderHintKind::SortElimination => {
+                    index_info.sort_elimination_hint = Some(
+                        index_info
+                            .sort_elimination_hint
+                            .map_or(covered, |old| old.max(covered)),
+                    );
+                }
+                OrderHintKind::StreamDistinct => {
+                    index_info.stream_distinct_hint = Some(
+                        index_info
+                            .stream_distinct_hint
+                            .map_or(covered, |old| old.max(covered)),
+                    );
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn distinct_sort_fields(groupby_exprs: &[ScalarExpression]) -> Vec<SortField> {
     groupby_exprs
         .iter()
         .cloned()
@@ -261,7 +229,7 @@ fn ensure_index_order(plan: &mut LogicalPlan, required: &[SortField]) -> bool {
     false
 }
 
-fn covers(required: &[SortField], provided: &SortOption) -> bool {
+pub(crate) fn covers(required: &[SortField], provided: &SortOption) -> bool {
     if required.is_empty() {
         return true;
     }
@@ -482,8 +450,8 @@ mod tests {
     fn remove_sort_when_prefix_can_be_ignored() -> Result<(), DatabaseError> {
         let c1 = make_sort_field("c1");
         let c2 = make_sort_field("c2");
-        let mut plan = build_plan(vec![c2.clone()], vec![c1, c2], 1);
-        super::annotate_sort_preserving_indexes(&mut plan);
+        let mut plan = build_plan(vec![c2.clone()], vec![c1, c2.clone()], 1);
+        super::mark_sort_preserving_indexes(&mut plan, &[c2]);
         let rule = EliminateRedundantSort;
 
         assert!(rule.apply(&mut plan)?);
@@ -523,7 +491,11 @@ mod tests {
             Childrens::Only(Box::new(table_scan)),
         );
 
-        super::annotate_sort_preserving_indexes(&mut plan);
+        let sort_fields = match &plan.operator {
+            Operator::Sort(sort_op) => sort_op.sort_fields.clone(),
+            _ => unreachable!("expected sort operator"),
+        };
+        super::mark_sort_preserving_indexes(&mut plan, &sort_fields);
 
         let table_plan = plan.childrens.pop_only();
         match table_plan.operator {
@@ -542,8 +514,14 @@ mod tests {
     #[test]
     fn annotate_sets_stream_distinct_hint_on_table_scan() -> Result<(), DatabaseError> {
         let (mut plan, _) = build_distinct_scan_plan();
+        let required = match &plan.operator {
+            Operator::Aggregate(op) => super::distinct_sort_fields(&op.groupby_exprs),
+            _ => unreachable!("expected aggregate operator"),
+        };
+        if let Childrens::Only(child) = plan.childrens.as_mut() {
+            super::mark_order_hint(child, &required, super::OrderHintKind::StreamDistinct);
+        }
 
-        super::annotate_stream_distinct_indexes(&mut plan);
         let child = plan.childrens.pop_only();
         let Operator::TableScan(scan_op) = child.operator else {
             unreachable!()
@@ -587,8 +565,8 @@ mod tests {
     fn keep_sort_when_order_not_covered() -> Result<(), DatabaseError> {
         let c1 = make_sort_field("c1");
         let c2 = make_sort_field("c2");
-        let mut plan = build_plan(vec![c2.clone()], vec![c1.clone(), c2], 0);
-        super::annotate_sort_preserving_indexes(&mut plan);
+        let mut plan = build_plan(vec![c2.clone()], vec![c1.clone(), c2.clone()], 0);
+        super::mark_sort_preserving_indexes(&mut plan, &[c2]);
         let rule = EliminateRedundantSort;
 
         assert!(!rule.apply(&mut plan)?);
@@ -650,7 +628,11 @@ mod tests {
             Childrens::Only(Box::new(filter)),
         );
 
-        super::annotate_sort_preserving_indexes(&mut plan);
+        let sort_fields = match &plan.operator {
+            Operator::Sort(sort_op) => sort_op.sort_fields.clone(),
+            _ => unreachable!("expected sort operator"),
+        };
+        super::mark_sort_preserving_indexes(&mut plan, &sort_fields);
         let rule = EliminateRedundantSort;
         assert!(rule.apply(&mut plan)?);
         assert!(matches!(plan.operator, Operator::Filter(_)));

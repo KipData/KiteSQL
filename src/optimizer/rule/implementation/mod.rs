@@ -52,6 +52,78 @@ use crate::optimizer::rule::implementation::dql::values::ValuesImplementation;
 use crate::planner::operator::Operator;
 use crate::storage::Transaction;
 
+#[repr(usize)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum ImplementationRuleRootTag {
+    Aggregate = 0,
+    Dummy,
+    Filter,
+    Join,
+    Limit,
+    Project,
+    ScalarSubquery,
+    TableScan,
+    FunctionScan,
+    Sort,
+    TopK,
+    Values,
+    Analyze,
+    CopyFromFile,
+    CopyToFile,
+    Delete,
+    Insert,
+    Update,
+    AddColumn,
+    ChangeColumn,
+    CreateTable,
+    DropColumn,
+    DropTable,
+    Truncate,
+}
+
+impl ImplementationRuleRootTag {
+    pub const COUNT: usize = Self::Truncate as usize + 1;
+
+    pub fn from_operator(operator: &Operator) -> Option<Self> {
+        match operator {
+            Operator::Aggregate(_) => Some(Self::Aggregate),
+            Operator::Dummy => Some(Self::Dummy),
+            Operator::Filter(_) => Some(Self::Filter),
+            Operator::Join(_) => Some(Self::Join),
+            Operator::Limit(_) => Some(Self::Limit),
+            Operator::Project(_) => Some(Self::Project),
+            Operator::ScalarSubquery(_) => Some(Self::ScalarSubquery),
+            Operator::TableScan(_) => Some(Self::TableScan),
+            Operator::FunctionScan(_) => Some(Self::FunctionScan),
+            Operator::Sort(_) => Some(Self::Sort),
+            Operator::TopK(_) => Some(Self::TopK),
+            Operator::Values(_) => Some(Self::Values),
+            Operator::Analyze(_) => Some(Self::Analyze),
+            Operator::CopyFromFile(_) => Some(Self::CopyFromFile),
+            Operator::CopyToFile(_) => Some(Self::CopyToFile),
+            Operator::Delete(_) => Some(Self::Delete),
+            Operator::Insert(_) => Some(Self::Insert),
+            Operator::Update(_) => Some(Self::Update),
+            Operator::AddColumn(_) => Some(Self::AddColumn),
+            Operator::ChangeColumn(_) => Some(Self::ChangeColumn),
+            Operator::CreateTable(_) => Some(Self::CreateTable),
+            Operator::DropColumn(_) => Some(Self::DropColumn),
+            Operator::DropTable(_) => Some(Self::DropTable),
+            Operator::Truncate(_) => Some(Self::Truncate),
+            Operator::ShowTable
+            | Operator::ShowView
+            | Operator::Explain
+            | Operator::Describe(_)
+            | Operator::Except(_)
+            | Operator::Union(_)
+            | Operator::CreateIndex(_)
+            | Operator::CreateView(_)
+            | Operator::DropView(_)
+            | Operator::DropIndex(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone)]
 pub enum ImplementationRuleImpl {
     // DQL
@@ -114,6 +186,41 @@ impl MatchPattern for ImplementationRuleImpl {
             ImplementationRuleImpl::DropTable => DropTableImplementation.pattern(),
             ImplementationRuleImpl::Truncate => TruncateImplementation.pattern(),
             ImplementationRuleImpl::Analyze => AnalyzeImplementation.pattern(),
+        }
+    }
+}
+
+impl ImplementationRuleImpl {
+    pub fn root_tag(&self) -> ImplementationRuleRootTag {
+        match self {
+            ImplementationRuleImpl::GroupByAggregate | ImplementationRuleImpl::SimpleAggregate => {
+                ImplementationRuleRootTag::Aggregate
+            }
+            ImplementationRuleImpl::Dummy => ImplementationRuleRootTag::Dummy,
+            ImplementationRuleImpl::Filter => ImplementationRuleRootTag::Filter,
+            ImplementationRuleImpl::HashJoin => ImplementationRuleRootTag::Join,
+            ImplementationRuleImpl::Limit => ImplementationRuleRootTag::Limit,
+            ImplementationRuleImpl::Projection => ImplementationRuleRootTag::Project,
+            ImplementationRuleImpl::ScalarSubquery => ImplementationRuleRootTag::ScalarSubquery,
+            ImplementationRuleImpl::SeqScan | ImplementationRuleImpl::IndexScan => {
+                ImplementationRuleRootTag::TableScan
+            }
+            ImplementationRuleImpl::FunctionScan => ImplementationRuleRootTag::FunctionScan,
+            ImplementationRuleImpl::Sort => ImplementationRuleRootTag::Sort,
+            ImplementationRuleImpl::TopK => ImplementationRuleRootTag::TopK,
+            ImplementationRuleImpl::Values => ImplementationRuleRootTag::Values,
+            ImplementationRuleImpl::Analyze => ImplementationRuleRootTag::Analyze,
+            ImplementationRuleImpl::CopyFromFile => ImplementationRuleRootTag::CopyFromFile,
+            ImplementationRuleImpl::CopyToFile => ImplementationRuleRootTag::CopyToFile,
+            ImplementationRuleImpl::Delete => ImplementationRuleRootTag::Delete,
+            ImplementationRuleImpl::Insert => ImplementationRuleRootTag::Insert,
+            ImplementationRuleImpl::Update => ImplementationRuleRootTag::Update,
+            ImplementationRuleImpl::AddColumn => ImplementationRuleRootTag::AddColumn,
+            ImplementationRuleImpl::ChangeColumn => ImplementationRuleRootTag::ChangeColumn,
+            ImplementationRuleImpl::CreateTable => ImplementationRuleRootTag::CreateTable,
+            ImplementationRuleImpl::DropColumn => ImplementationRuleRootTag::DropColumn,
+            ImplementationRuleImpl::DropTable => ImplementationRuleRootTag::DropTable,
+            ImplementationRuleImpl::Truncate => ImplementationRuleRootTag::Truncate,
         }
     }
 }

@@ -298,7 +298,12 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             right_schema.as_ref(),
         )?;
 
-        Ok(LJoinOperator::build(children, plan, join_condition, join_ty))
+        Ok(LJoinOperator::build(
+            children,
+            plan,
+            join_condition,
+            join_ty,
+        ))
     }
 
     pub(crate) fn bind_query(&mut self, query: &Query) -> Result<LogicalPlan, DatabaseError> {
@@ -2195,8 +2200,10 @@ mod tests {
     #[test]
     fn test_multiple_scalar_subqueries_in_where_rebind_positions() -> Result<(), DatabaseError> {
         let table_states = build_t1_table()?;
-        let plan = table_states.plan("select * from t1 where c1 <= (select 4) and c1 > (select 1)")?;
-        let outer_join = find_top_join(&plan).expect("expected scalar subqueries to introduce a join");
+        let plan =
+            table_states.plan("select * from t1 where c1 <= (select 4) and c1 > (select 1)")?;
+        let outer_join =
+            find_top_join(&plan).expect("expected scalar subqueries to introduce a join");
         let Operator::Join(op) = &outer_join.operator else {
             panic!("expected join plan")
         };
@@ -2204,7 +2211,8 @@ mod tests {
             panic!("expected binary join")
         };
         let JoinCondition::On {
-            filter: Some(filter), ..
+            filter: Some(filter),
+            ..
         } = &op.on
         else {
             panic!("expected join filter")
