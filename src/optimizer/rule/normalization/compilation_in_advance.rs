@@ -21,6 +21,15 @@ use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use std::borrow::Cow;
 
+fn collect_output_columns(
+    output_exprs: &[ScalarExpression],
+    output_columns: &mut Vec<crate::catalog::ColumnRef>,
+) {
+    output_columns.clear();
+    output_columns.reserve(output_exprs.len());
+    output_columns.extend(output_exprs.iter().map(ScalarExpression::output_column));
+}
+
 #[derive(Clone)]
 pub struct BindExpressionPosition;
 
@@ -29,33 +38,21 @@ pub(crate) fn bind_expression_position_current(
     plan: &mut LogicalPlan,
     left_len: usize,
 ) -> Result<(), DatabaseError> {
-    let mut bind_position = BindPosition::new(
-        || {
-            output_exprs
-                .iter()
-                .map(|expr| Cow::Owned(expr.output_column()))
-        },
-        |a, b| a == b,
-    );
+    let mut output_columns = Vec::with_capacity(output_exprs.len());
+    collect_output_columns(output_exprs, &mut output_columns);
+    let mut bind_position =
+        BindPosition::new(|| output_columns.iter().map(Cow::Borrowed), |a, b| a == b);
     let operator = &mut plan.operator;
     match operator {
         Operator::Join(op) => {
             match &mut op.on {
                 JoinCondition::On { on, filter } => {
                     let mut left_bind_position = BindPosition::new(
-                        || {
-                            output_exprs[0..left_len]
-                                .iter()
-                                .map(|expr| Cow::Owned(expr.output_column()))
-                        },
+                        || output_columns[0..left_len].iter().map(Cow::Borrowed),
                         |a, b| a == b,
                     );
                     let mut right_bind_position = BindPosition::new(
-                        || {
-                            output_exprs[left_len..]
-                                .iter()
-                                .map(|expr| Cow::Owned(expr.output_column()))
-                        },
+                        || output_columns[left_len..].iter().map(Cow::Borrowed),
                         |a, b| a == b,
                     );
                     for (left_expr, right_expr) in on {
@@ -130,9 +127,7 @@ pub(crate) fn bind_expression_position_current(
         | Operator::Union(_)
         | Operator::Except(_) => (),
     }
-    if let Some(exprs) = operator.output_exprs() {
-        *output_exprs = exprs;
-    }
+    operator.output_exprs(output_exprs);
 
     Ok(())
 }

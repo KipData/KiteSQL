@@ -179,25 +179,30 @@ pub enum PlanImpl {
 }
 
 impl Operator {
-    pub fn output_exprs(&self) -> Option<Vec<ScalarExpression>> {
+    pub fn output_exprs(&self, output_exprs: &mut Vec<ScalarExpression>) -> bool {
         match self {
-            Operator::Dummy => None,
-            Operator::Aggregate(op) => Some(
-                op.agg_calls
-                    .iter()
-                    .chain(op.groupby_exprs.iter())
-                    .cloned()
-                    .collect_vec(),
-            ),
-            Operator::Filter(_) | Operator::Join(_) => None,
-            Operator::Project(op) => Some(op.exprs.clone()),
-            Operator::TableScan(op) => Some(
-                op.columns
-                    .values()
-                    .map(|column| ScalarExpression::column_expr(column.clone()))
-                    .collect_vec(),
-            ),
-            Operator::Sort(_) | Operator::Limit(_) | Operator::TopK(_) => None,
+            Operator::Dummy => false,
+            Operator::Aggregate(op) => {
+                output_exprs.clear();
+                output_exprs.extend(op.agg_calls.iter().chain(op.groupby_exprs.iter()).cloned());
+                true
+            }
+            Operator::Filter(_) | Operator::Join(_) => false,
+            Operator::Project(op) => {
+                output_exprs.clear();
+                output_exprs.extend(op.exprs.iter().cloned());
+                true
+            }
+            Operator::TableScan(op) => {
+                output_exprs.clear();
+                output_exprs.extend(
+                    op.columns
+                        .values()
+                        .map(|column| ScalarExpression::column_expr(column.clone())),
+                );
+                true
+            }
+            Operator::Sort(_) | Operator::Limit(_) | Operator::TopK(_) => false,
             Operator::Values(ValuesOperator { schema_ref, .. })
             | Operator::Union(UnionOperator {
                 left_schema_ref: schema_ref,
@@ -206,21 +211,27 @@ impl Operator {
             | Operator::Except(ExceptOperator {
                 left_schema_ref: schema_ref,
                 ..
-            }) => Some(
-                schema_ref
-                    .iter()
-                    .cloned()
-                    .map(ScalarExpression::column_expr)
-                    .collect_vec(),
-            ),
-            Operator::FunctionScan(op) => Some(
-                op.table_function
-                    .inner
-                    .output_schema()
-                    .iter()
-                    .map(|column| ScalarExpression::column_expr(column.clone()))
-                    .collect_vec(),
-            ),
+            }) => {
+                output_exprs.clear();
+                output_exprs.extend(
+                    schema_ref
+                        .iter()
+                        .cloned()
+                        .map(ScalarExpression::column_expr),
+                );
+                true
+            }
+            Operator::FunctionScan(op) => {
+                output_exprs.clear();
+                output_exprs.extend(
+                    op.table_function
+                        .inner
+                        .output_schema()
+                        .iter()
+                        .map(|column| ScalarExpression::column_expr(column.clone())),
+                );
+                true
+            }
             Operator::ShowTable
             | Operator::ShowView
             | Operator::Explain
@@ -240,7 +251,7 @@ impl Operator {
             | Operator::DropIndex(_)
             | Operator::Truncate(_)
             | Operator::CopyFromFile(_)
-            | Operator::CopyToFile(_) => None,
+            | Operator::CopyToFile(_) => false,
         }
     }
 

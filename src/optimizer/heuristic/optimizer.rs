@@ -213,8 +213,8 @@ impl<'a> HepOptimizer<'a> {
         }
         if has_bind_expression_position {
             bind_expression_position_current(output_exprs, plan, left_len)?;
-        } else if let Some(exprs) = plan.operator.output_exprs() {
-            *output_exprs = exprs;
+        } else {
+            plan.operator.output_exprs(output_exprs);
         }
         if has_evaluator_bind {
             evaluator_bind_current(plan)?;
