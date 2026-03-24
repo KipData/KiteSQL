@@ -262,16 +262,15 @@ mod test {
         drop(transaction);
 
         let mut transaction = kite_sql.storage.transaction()?;
-        let (min, max) = unsafe { &*transaction.table_codec() }.statistics_index_bound("t1", 1);
-        let mut iter = transaction.range(
-            Bound::Included(min.as_slice()),
-            Bound::Included(max.as_slice()),
-        )?;
-        let mut keys: Vec<Vec<u8>> = Vec::new();
-        while let Some((key, _)) = iter.try_next()? {
-            keys.push(key.to_vec());
-        }
-        drop(iter);
+        let keys: Vec<Vec<u8>> = unsafe { &*transaction.table_codec() }
+            .with_statistics_index_bound("t1", 1, |min, max| {
+                let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+                let mut keys = Vec::new();
+                while let Some((key, _)) = iter.try_next()? {
+                    keys.push(key.to_vec());
+                }
+                Ok(keys)
+            })?;
         for key in keys {
             transaction.remove(&key)?;
         }
@@ -329,31 +328,30 @@ mod test {
         kite_sql.run("analyze table t1")?.done()?;
 
         let transaction = kite_sql.storage.transaction()?;
-        let (min, max) = unsafe { &*transaction.table_codec() }.statistics_bound("t1");
-        let mut iter = transaction.range(
-            Bound::Included(min.as_slice()),
-            Bound::Included(max.as_slice()),
-        )?;
-        let mut count = 0;
-        while iter.try_next()?.is_some() {
-            count += 1;
-        }
+        let count =
+            unsafe { &*transaction.table_codec() }.with_statistics_bound("t1", |min, max| {
+                let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+                let mut count = 0;
+                while iter.try_next()?.is_some() {
+                    count += 1;
+                }
+                Ok(count)
+            })?;
         assert!(count > 3);
-        drop(iter);
 
         kite_sql.run("alter table t1 drop column b")?.done()?;
         kite_sql.run("analyze table t1")?.done()?;
 
         let transaction = kite_sql.storage.transaction()?;
-        let (min, max) = unsafe { &*transaction.table_codec() }.statistics_bound("t1");
-        let mut iter = transaction.range(
-            Bound::Included(min.as_slice()),
-            Bound::Included(max.as_slice()),
-        )?;
-        let mut keys = 0;
-        while iter.try_next()?.is_some() {
-            keys += 1;
-        }
+        let keys =
+            unsafe { &*transaction.table_codec() }.with_statistics_bound("t1", |min, max| {
+                let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+                let mut keys = 0;
+                while iter.try_next()?.is_some() {
+                    keys += 1;
+                }
+                Ok(keys)
+            })?;
         let table_name = "t1".to_string().into();
         let loader = transaction.meta_loader(kite_sql.state.meta_cache());
         let statistics_meta = loader.load(&table_name, 0)?.unwrap();

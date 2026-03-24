@@ -52,6 +52,50 @@ pub const ONE_DAY_TO_SEC: u32 = 86_400;
 const ENCODE_GROUP_SIZE: usize = 8;
 const ENCODE_MARKER: u8 = 0xFF;
 
+pub trait MemComparableBuffer: Write {
+    fn push_byte(&mut self, byte: u8);
+    fn extend_bytes(&mut self, bytes: &[u8]);
+    fn reserve_bytes(&mut self, size: usize);
+}
+
+impl MemComparableBuffer for BumpBytes<'_> {
+    #[inline]
+    fn push_byte(&mut self, byte: u8) {
+        self.push(byte);
+    }
+
+    #[inline]
+    fn extend_bytes(&mut self, bytes: &[u8]) {
+        self.extend_from_slice(bytes);
+    }
+
+    #[inline]
+    fn reserve_bytes(&mut self, size: usize) {
+        if size > 0 {
+            self.reserve(size);
+        }
+    }
+}
+
+impl MemComparableBuffer for Vec<u8> {
+    #[inline]
+    fn push_byte(&mut self, byte: u8) {
+        self.push(byte);
+    }
+
+    #[inline]
+    fn extend_bytes(&mut self, bytes: &[u8]) {
+        self.extend_from_slice(bytes);
+    }
+
+    #[inline]
+    fn reserve_bytes(&mut self, size: usize) {
+        if size > 0 {
+            self.reserve(size);
+        }
+    }
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum Utf8Type {
     Variable(Option<u32>),
@@ -679,7 +723,7 @@ impl DataValue {
     // Refer: https://github.com/facebook/mysql-5.6/wiki/MyRocks-record-format#memcomparable-format
     #[inline]
     // FIXME
-    fn encode_string(b: &mut BumpBytes, data: &[u8]) {
+    fn encode_string<B: MemComparableBuffer>(b: &mut B, data: &[u8]) {
         let d_len = data.len();
         let needed_groups = d_len / ENCODE_GROUP_SIZE + 1;
         Self::realloc_bytes(b, needed_groups * (ENCODE_GROUP_SIZE + 1));
@@ -690,8 +734,8 @@ impl DataValue {
             let remain = d_len.saturating_sub(idx);
 
             if remain >= ENCODE_GROUP_SIZE {
-                b.extend_from_slice(&data[idx..idx + ENCODE_GROUP_SIZE]);
-                b.push(ENCODE_MARKER);
+                b.extend_bytes(&data[idx..idx + ENCODE_GROUP_SIZE]);
+                b.push_byte(ENCODE_MARKER);
                 idx += ENCODE_GROUP_SIZE;
                 continue;
             }
@@ -699,14 +743,14 @@ impl DataValue {
             let pad_count = ENCODE_GROUP_SIZE - remain;
 
             if remain > 0 {
-                b.extend_from_slice(&data[idx..]);
+                b.extend_bytes(&data[idx..]);
             }
 
             for _ in 0..pad_count {
-                b.push(0);
+                b.push_byte(0);
             }
 
-            b.push(ENCODE_MARKER - pad_count as u8);
+            b.push_byte(ENCODE_MARKER - pad_count as u8);
             break;
         }
     }
@@ -744,16 +788,14 @@ impl DataValue {
     }
 
     #[inline]
-    fn realloc_bytes(b: &mut BumpBytes, size: usize) {
-        if size > 0 {
-            b.reserve(size);
-        }
+    fn realloc_bytes<B: MemComparableBuffer>(b: &mut B, size: usize) {
+        b.reserve_bytes(size);
     }
 
     #[inline(always)]
-    pub fn memcomparable_encode_with_null_order(
+    pub fn memcomparable_encode_with_null_order<B: MemComparableBuffer>(
         &self,
-        b: &mut BumpBytes,
+        b: &mut B,
         nulls_first: bool,
     ) -> Result<(), DatabaseError> {
         let (null_tag, not_null_tag) = if nulls_first {
@@ -762,10 +804,10 @@ impl DataValue {
             (NULL_TAG, NOTNULL_TAG)
         };
         if let DataValue::Null = self {
-            b.push(null_tag);
+            b.push_byte(null_tag);
             return Ok(());
         }
-        b.push(not_null_tag);
+        b.push_byte(not_null_tag);
 
         match self {
             DataValue::Null => (),
@@ -782,7 +824,7 @@ impl DataValue {
             DataValue::UInt32(v) | DataValue::Time32(v, ..) => encode_u!(b, v),
             DataValue::UInt64(v) => encode_u!(b, v),
             DataValue::Utf8 { value: v, .. } => Self::encode_string(b, v.as_bytes()),
-            DataValue::Boolean(v) => b.push(if *v { b'1' } else { b'0' }),
+            DataValue::Boolean(v) => b.push_byte(if *v { b'1' } else { b'0' }),
             DataValue::Float32(f) => {
                 let mut u = f.to_bits();
 
@@ -812,7 +854,7 @@ impl DataValue {
                 for (i, v) in values.iter().enumerate() {
                     v.memcomparable_encode(b)?;
                     if i == last && *is_upper {
-                        b.push(BOUND_MAX_TAG);
+                        b.push_byte(BOUND_MAX_TAG);
                     }
                 }
             }
@@ -822,7 +864,10 @@ impl DataValue {
     }
 
     #[inline]
-    pub fn memcomparable_encode(&self, b: &mut BumpBytes) -> Result<(), DatabaseError> {
+    pub fn memcomparable_encode<B: MemComparableBuffer>(
+        &self,
+        b: &mut B,
+    ) -> Result<(), DatabaseError> {
         self.memcomparable_encode_with_null_order(b, false)
     }
 
@@ -917,43 +962,46 @@ impl DataValue {
     }
 
     // https://github.com/risingwavelabs/memcomparable/blob/main/src/ser.rs#L468
-    pub fn serialize_decimal(decimal: Decimal, bytes: &mut BumpBytes) -> Result<(), DatabaseError> {
+    pub fn serialize_decimal<B: MemComparableBuffer>(
+        decimal: Decimal,
+        bytes: &mut B,
+    ) -> Result<(), DatabaseError> {
         if decimal.is_zero() {
-            bytes.push(0x15);
+            bytes.push_byte(0x15);
             return Ok(());
         }
         let (exponent, significand) = Self::decimal_e_m(decimal);
         if decimal.is_sign_positive() {
             match exponent {
                 11.. => {
-                    bytes.push(0x22);
-                    bytes.push(exponent as u8);
+                    bytes.push_byte(0x22);
+                    bytes.push_byte(exponent as u8);
                 }
                 0..=10 => {
-                    bytes.push(0x17 + exponent as u8);
+                    bytes.push_byte(0x17 + exponent as u8);
                 }
                 _ => {
-                    bytes.push(0x16);
-                    bytes.push(!(-exponent) as u8);
+                    bytes.push_byte(0x16);
+                    bytes.push_byte(!(-exponent) as u8);
                 }
             }
-            bytes.extend_from_slice(&significand)
+            bytes.extend_bytes(&significand)
         } else {
             match exponent {
                 11.. => {
-                    bytes.push(0x8);
-                    bytes.push(!exponent as u8);
+                    bytes.push_byte(0x8);
+                    bytes.push_byte(!exponent as u8);
                 }
                 0..=10 => {
-                    bytes.push(0x13 - exponent as u8);
+                    bytes.push_byte(0x13 - exponent as u8);
                 }
                 _ => {
-                    bytes.push(0x14);
-                    bytes.push(-exponent as u8);
+                    bytes.push_byte(0x14);
+                    bytes.push_byte(-exponent as u8);
                 }
             }
             for b in significand {
-                bytes.push(!b);
+                bytes.push_byte(!b);
             }
         }
         Ok(())

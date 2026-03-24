@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::storage::table_codec::{BumpBytes, Bytes, TableCodec};
+use crate::storage::table_codec::{Bytes, TableCodec};
 use crate::storage::{InnerIter, Storage, Transaction};
 use rocksdb::{
     statistics::{StatsLevel, Ticker},
@@ -399,7 +399,7 @@ macro_rules! impl_transaction {
             }
 
             #[inline]
-            fn set(&mut self, key: BumpBytes, value: BumpBytes) -> Result<(), DatabaseError> {
+            fn set(&mut self, key: &[u8], value: &[u8]) -> Result<(), DatabaseError> {
                 self.tx.put(key, value)?;
 
                 Ok(())
@@ -746,6 +746,8 @@ mod test {
             .into_iter(),
             state: IndexIterState::Init,
             inner: IndexImplEnum::PrimaryKey(PrimaryKeyIndexImpl),
+            encode_min_buffer: Vec::new(),
+            encode_max_buffer: Vec::new(),
         };
         let mut result = Vec::new();
 

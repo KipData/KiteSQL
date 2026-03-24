@@ -47,37 +47,38 @@ fn read_tuple_batch<T: Transaction>(
 ) -> Result<(), DatabaseError> {
     let table_codec = unsafe { &*transaction.table_codec() };
     let lower = if let Some(last_pk) = start_after {
-        Bound::Excluded(table_codec.encode_tuple_key(table_name.as_ref(), last_pk)?)
+        table_codec.with_tuple_key(table_name.as_ref(), last_pk, |key| {
+            Ok::<_, DatabaseError>(Bound::Excluded(key.to_vec()))
+        })?
     } else {
-        let (min, _) = table_codec.tuple_bound(table_name.as_ref());
-        Bound::Included(min)
+        Bound::Unbounded
     };
-    let (_, max) = table_codec.tuple_bound(table_name.as_ref());
-    let mut iter = transaction.range(
-        match &lower {
+
+    table_codec.with_tuple_bound(table_name.as_ref(), |min, max| {
+        let lower = match &lower {
             Bound::Included(bytes) => Bound::Included(bytes.as_slice()),
             Bound::Excluded(bytes) => Bound::Excluded(bytes.as_slice()),
-            Bound::Unbounded => Bound::Unbounded,
-        },
-        Bound::Included(max.as_slice()),
-    )?;
-    batch.clear();
-
-    while batch.len() < batch_size {
-        let Some((key, value)) = iter.try_next()? else {
-            break;
+            Bound::Unbounded => Bound::Included(min),
         };
-        let tuple_id = TableCodec::decode_tuple_key(&key, pk_ty)?;
-        batch.push(TableCodec::decode_tuple(
-            old_deserializers,
-            Some(tuple_id),
-            &value,
-            old_values_len,
-            old_total_len,
-        )?);
-    }
+        let mut iter = transaction.range(lower, Bound::Included(max))?;
+        batch.clear();
 
-    Ok(())
+        while batch.len() < batch_size {
+            let Some((key, value)) = iter.try_next()? else {
+                break;
+            };
+            let tuple_id = TableCodec::decode_tuple_key(&key, pk_ty)?;
+            batch.push(TableCodec::decode_tuple(
+                old_deserializers,
+                Some(tuple_id),
+                &value,
+                old_values_len,
+                old_total_len,
+            )?);
+        }
+
+        Ok(())
+    })
 }
 
 pub(crate) fn visit_table_in_batches<T, F>(

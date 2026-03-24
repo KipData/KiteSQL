@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::storage::table_codec::{BumpBytes, Bytes, TableCodec};
+use crate::storage::table_codec::{Bytes, TableCodec};
 use crate::storage::{reuse_bound_as_excluded, InnerIter, Storage, Transaction};
 use lmdb::{
     Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, RoCursor, RwTransaction,
@@ -225,14 +225,9 @@ impl Transaction for LmdbTransaction<'_> {
         }
     }
 
-    fn set(&mut self, key: BumpBytes, value: BumpBytes) -> Result<(), DatabaseError> {
+    fn set(&mut self, key: &[u8], value: &[u8]) -> Result<(), DatabaseError> {
         self.tx
-            .put(
-                self.db,
-                &key.as_slice(),
-                &value.as_slice(),
-                lmdb::WriteFlags::empty(),
-            )
+            .put(self.db, &key, &value, lmdb::WriteFlags::empty())
             .map_err(map_lmdb_err)?;
         Ok(())
     }

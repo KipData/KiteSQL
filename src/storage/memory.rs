@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::storage::table_codec::{BumpBytes, Bytes, TableCodec};
+use crate::storage::table_codec::{Bytes, TableCodec};
 use crate::storage::{EmptyStorageMetrics, InnerIter, Storage, Transaction};
 use std::cell::{Ref, RefCell};
 use std::collections::{BTreeMap, Bound, VecDeque};
@@ -104,7 +104,7 @@ impl Transaction for MemoryTransaction {
         Ok(Some(MemoryValue { value }))
     }
 
-    fn set(&mut self, key: BumpBytes, value: BumpBytes) -> Result<(), DatabaseError> {
+    fn set(&mut self, key: &[u8], value: &[u8]) -> Result<(), DatabaseError> {
         self.inner.borrow_mut().insert(key.to_vec(), value.to_vec());
         Ok(())
     }
