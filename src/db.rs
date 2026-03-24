@@ -1149,7 +1149,11 @@ pub(crate) mod test {
         let Some(filter) = filter else {
             unreachable!("expected join filter");
         };
-        let referenced_columns = filter.referenced_columns(true);
+        let mut referenced_columns = Vec::new();
+        filter.visit_referenced_columns(true, &mut |column| {
+            referenced_columns.push(column);
+            true
+        });
         assert_eq!(referenced_columns.len(), 1);
         assert_eq!(referenced_columns[0].name(), "y");
 

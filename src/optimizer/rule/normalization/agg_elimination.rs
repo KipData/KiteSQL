@@ -128,10 +128,9 @@ fn mark_order_hint(plan: &mut LogicalPlan, required: &[SortField], hint: OrderHi
         Operator::TableScan(scan_op) => {
             let table_columns: Vec<ColumnRef> = scan_op.columns.values().cloned().collect();
             let required_from_table = required.iter().all(|field| {
-                let referenced = field.expr.referenced_columns(true);
-                referenced
-                    .iter()
-                    .all(|column| table_columns.contains(column))
+                field
+                    .expr
+                    .all_referenced_columns(true, |column| table_columns.contains(column))
             });
             if !required_from_table {
                 return;

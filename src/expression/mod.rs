@@ -322,30 +322,88 @@ impl ScalarExpression {
         }
     }
 
-    pub fn referenced_columns(&self, only_column_ref: bool) -> Vec<ColumnRef> {
-        struct ColumnRefCollector(Vec<ColumnRef>);
-        impl Visitor<'_> for ColumnRefCollector {
+    pub fn visit_referenced_columns(
+        &self,
+        only_column_ref: bool,
+        f: &mut impl FnMut(ColumnRef) -> bool,
+    ) -> bool {
+        struct ColumnRefVisitor<'a, F> {
+            f: &'a mut F,
+            keep_going: bool,
+        }
+        impl<F: FnMut(ColumnRef) -> bool> Visitor<'_> for ColumnRefVisitor<'_, F> {
+            fn visit(&mut self, expr: &ScalarExpression) -> Result<(), DatabaseError> {
+                if self.keep_going {
+                    walk_expr(self, expr)?;
+                }
+                Ok(())
+            }
+
             fn visit_column_ref(&mut self, col: &ColumnRef) -> Result<(), DatabaseError> {
-                self.0.push(col.clone());
+                self.keep_going = (self.f)(col.clone());
                 Ok(())
             }
         }
-        struct OutputColumnCollector(Vec<ColumnRef>);
-        impl Visitor<'_> for OutputColumnCollector {
+        struct OutputColumnVisitor<'a, F> {
+            f: &'a mut F,
+            keep_going: bool,
+        }
+        impl<F: FnMut(ColumnRef) -> bool> Visitor<'_> for OutputColumnVisitor<'_, F> {
             fn visit(&mut self, expr: &ScalarExpression) -> Result<(), DatabaseError> {
-                self.0.push(expr.output_column());
-                walk_expr(self, expr)
+                if !self.keep_going {
+                    return Ok(());
+                }
+
+                let output = expr.output_column();
+                self.keep_going = (self.f)(output);
+                if self.keep_going {
+                    walk_expr(self, expr)?;
+                }
+                Ok(())
             }
         }
+
         if only_column_ref {
-            let mut collector = ColumnRefCollector(Vec::new());
-            collector.visit(self).unwrap();
-            collector.0
+            let mut visitor = ColumnRefVisitor {
+                f,
+                keep_going: true,
+            };
+            visitor.visit(self).unwrap();
+            visitor.keep_going
         } else {
-            let mut collector = OutputColumnCollector(Vec::new());
-            collector.visit(self).unwrap();
-            collector.0
+            let mut visitor = OutputColumnVisitor {
+                f,
+                keep_going: true,
+            };
+            visitor.visit(self).unwrap();
+            visitor.keep_going
         }
+    }
+
+    pub fn any_referenced_column(
+        &self,
+        only_column_ref: bool,
+        mut predicate: impl FnMut(&ColumnRef) -> bool,
+    ) -> bool {
+        let mut found = false;
+        self.visit_referenced_columns(only_column_ref, &mut |column| {
+            found = predicate(&column);
+            !found
+        });
+        found
+    }
+
+    pub fn all_referenced_columns(
+        &self,
+        only_column_ref: bool,
+        mut predicate: impl FnMut(&ColumnRef) -> bool,
+    ) -> bool {
+        let mut all = true;
+        self.visit_referenced_columns(only_column_ref, &mut |column| {
+            all = predicate(&column);
+            all
+        });
+        all
     }
 
     pub fn has_table_ref_column(&self) -> bool {

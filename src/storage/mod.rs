@@ -877,8 +877,7 @@ pub trait Transaction: Sized {
                 let mut has_extra = false;
 
                 while let Some((key, value)) = iter.try_next()? {
-                    match unsafe { &*self.table_codec() }.decode_statistics_codec_type(&key)?
-                    {
+                    match unsafe { &*self.table_codec() }.decode_statistics_codec_type(&key)? {
                         StatisticsCodecType::Root => {
                             root = Some(TableCodec::decode_statistics_meta::<Self>(&value)?);
                         }
@@ -917,8 +916,7 @@ pub trait Transaction: Sized {
                 let mut has_root_or_bucket = false;
 
                 while let Some((key, value)) = iter.try_next()? {
-                    match unsafe { &*self.table_codec() }.decode_statistics_codec_type(&key)?
-                    {
+                    match unsafe { &*self.table_codec() }.decode_statistics_codec_type(&key)? {
                         StatisticsCodecType::Root | StatisticsCodecType::Bucket => {
                             has_root_or_bucket = true
                         }
@@ -1147,11 +1145,7 @@ fn fill_default_bound<'a>(bound: Bound<&'a [u8]>, default: &'a [u8]) -> Bound<&'
 }
 
 #[inline]
-fn encode_bound_key(
-    buffer: &mut Bytes,
-    key: &[u8],
-    is_upper: bool,
-) {
+fn encode_bound_key(buffer: &mut Bytes, key: &[u8], is_upper: bool) {
     buffer.clear();
     buffer.extend_from_slice(key);
     if is_upper {
@@ -1752,7 +1746,11 @@ impl<T: Transaction> Iter for IndexIter<'_, T> {
                             let iter = if matches!(index_meta.ty, IndexType::PrimaryKey { .. }) {
                                 table_codec.with_tuple_bound(table_name, open_iter)?
                             } else {
-                                table_codec.with_index_bound(table_name, index_meta.id, open_iter)?
+                                table_codec.with_index_bound(
+                                    table_name,
+                                    index_meta.id,
+                                    open_iter,
+                                )?
                             };
                             self.state = IndexIterState::Range(iter);
                         }

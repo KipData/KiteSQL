@@ -1395,7 +1395,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
     fn plan_has_correlated_refs(plan: &LogicalPlan, left_schema: &Schema) -> bool {
         let contains = |column: &ColumnRef| left_schema.contains(column);
 
-        if plan.operator.referenced_columns(true).iter().any(contains) {
+        if plan.operator.any_referenced_column(true, contains) {
             return true;
         }
 
@@ -1410,9 +1410,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
     }
 
     fn expr_has_correlated_refs(expr: &ScalarExpression, left_schema: &Schema) -> bool {
-        expr.referenced_columns(true)
-            .iter()
-            .any(|column| left_schema.contains(column))
+        expr.any_referenced_column(true, |column| left_schema.contains(column))
     }
 
     fn split_conjuncts(expr: ScalarExpression, exprs: &mut Vec<ScalarExpression>) {
@@ -1921,9 +1919,9 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                             }
                             _other => {
                                 // example: baz > 1
-                                if left_expr.referenced_columns(true).iter().all(|column| {
+                                if left_expr.all_referenced_columns(true, |column| {
                                     fn_or_contains(left_schema, right_schema, column.summary())
-                                }) && right_expr.referenced_columns(true).iter().all(|column| {
+                                }) && right_expr.all_referenced_columns(true, |column| {
                                     fn_or_contains(left_schema, right_schema, column.summary())
                                 }) {
                                     accum_filter.push(ScalarExpression::Binary {
@@ -1964,9 +1962,9 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         });
                     }
                     _ => {
-                        if left_expr.referenced_columns(true).iter().all(|column| {
+                        if left_expr.all_referenced_columns(true, |column| {
                             fn_or_contains(left_schema, right_schema, column.summary())
-                        }) && right_expr.referenced_columns(true).iter().all(|column| {
+                        }) && right_expr.all_referenced_columns(true, |column| {
                             fn_or_contains(left_schema, right_schema, column.summary())
                         }) {
                             accum_filter.push(ScalarExpression::Binary {
@@ -1981,11 +1979,9 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 }
             }
             expr => {
-                if expr
-                    .referenced_columns(true)
-                    .iter()
-                    .all(|column| fn_or_contains(left_schema, right_schema, column.summary()))
-                {
+                if expr.all_referenced_columns(true, |column| {
+                    fn_or_contains(left_schema, right_schema, column.summary())
+                }) {
                     // example: baz > 1
                     accum_filter.push(expr);
                 }

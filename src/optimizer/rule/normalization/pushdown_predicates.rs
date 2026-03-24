@@ -66,13 +66,6 @@ fn reduce_filters(filters: Vec<ScalarExpression>, having: bool) -> Option<Filter
         })
 }
 
-/// Return true when left is subset of right, only compare table_id and column_id, so it's safe to
-/// used for join output cols with nullable columns.
-/// If left equals right, return true.
-pub fn is_subset_cols(left: &[ColumnRef], right: &[ColumnRef]) -> bool {
-    left.iter().all(|l| right.contains(l))
-}
-
 fn plan_output_columns(plan: &LogicalPlan) -> Vec<ColumnRef> {
     match plan.output_schema_direct() {
         SchemaOutput::Schema(schema) => schema,
@@ -134,12 +127,13 @@ impl NormalizationRule for PushPredicateThroughJoin {
                 .unwrap_or_default();
 
             let filter_exprs = split_conjunctive_predicates(&filter_op.predicate);
-            let (left_filters, rest): (Vec<_>, Vec<_>) = filter_exprs
-                .into_iter()
-                .partition(|f| is_subset_cols(&f.referenced_columns(true), &left_columns));
-            let (right_filters, common_filters): (Vec<_>, Vec<_>) = rest
-                .into_iter()
-                .partition(|f| is_subset_cols(&f.referenced_columns(true), &right_columns));
+            let (left_filters, rest): (Vec<_>, Vec<_>) = filter_exprs.into_iter().partition(|f| {
+                f.all_referenced_columns(true, |column| left_columns.contains(column))
+            });
+            let (right_filters, common_filters): (Vec<_>, Vec<_>) =
+                rest.into_iter().partition(|f| {
+                    f.all_referenced_columns(true, |column| right_columns.contains(column))
+                });
 
             let mut new_ops = (None, None, None);
             let replace_filters = match join_op.join_type {
@@ -393,12 +387,13 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
             .unwrap_or_default();
 
         let filter_exprs = split_conjunctive_predicates(&filter_expr);
-        let (left_filters, rest): (Vec<_>, Vec<_>) = filter_exprs
-            .into_iter()
-            .partition(|expr| is_subset_cols(&expr.referenced_columns(true), &left_columns));
-        let (right_filters, common_filters): (Vec<_>, Vec<_>) = rest
-            .into_iter()
-            .partition(|expr| is_subset_cols(&expr.referenced_columns(true), &right_columns));
+        let (left_filters, rest): (Vec<_>, Vec<_>) = filter_exprs.into_iter().partition(|expr| {
+            expr.all_referenced_columns(true, |column| left_columns.contains(column))
+        });
+        let (right_filters, common_filters): (Vec<_>, Vec<_>) =
+            rest.into_iter().partition(|expr| {
+                expr.all_referenced_columns(true, |column| right_columns.contains(column))
+            });
 
         let (push_left, push_right) = match join_type {
             JoinType::Inner => (true, true),

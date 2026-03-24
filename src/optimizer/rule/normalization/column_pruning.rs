@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::ColumnSummary;
+use crate::catalog::{ColumnRef, ColumnSummary};
 use crate::errors::DatabaseError;
 use crate::expression::agg::AggKind;
-use crate::expression::visitor::Visitor;
+use crate::expression::visitor::{walk_expr, Visitor};
 use crate::expression::{HasCountStar, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::rule::normalization::{
@@ -44,15 +44,68 @@ macro_rules! trans_references {
 }
 
 impl ColumnPruning {
-    fn clear_exprs(column_references: &HashSet<&ColumnSummary>, exprs: &mut Vec<ScalarExpression>) {
-        exprs.retain(|expr| {
-            if column_references.contains(expr.output_column().summary()) {
-                return true;
+    fn collect_operator_referenced_columns(
+        operator: &Operator,
+        referenced_columns: &mut Vec<ColumnRef>,
+    ) {
+        referenced_columns.clear();
+        operator.visit_referenced_columns(false, &mut |column| {
+            referenced_columns.push(column);
+            true
+        });
+    }
+
+    fn collect_expr_referenced_columns<'a>(
+        exprs: impl IntoIterator<Item = &'a ScalarExpression>,
+        referenced_columns: &mut Vec<ColumnRef>,
+    ) {
+        referenced_columns.clear();
+        for expr in exprs {
+            if !expr.visit_referenced_columns(false, &mut |column| {
+                referenced_columns.push(column);
+                true
+            }) {
+                break;
             }
-            expr.referenced_columns(false)
-                .iter()
-                .any(|column| column_references.contains(column.summary()))
-        })
+        }
+    }
+
+    fn references_any_column(
+        expr: &ScalarExpression,
+        column_references: &HashSet<&ColumnSummary>,
+    ) -> bool {
+        struct ReferenceChecker<'a, 'b> {
+            column_references: &'a HashSet<&'b ColumnSummary>,
+            found: bool,
+        }
+
+        impl<'a, 'b> Visitor<'_> for ReferenceChecker<'a, 'b> {
+            fn visit(&mut self, expr: &ScalarExpression) -> Result<(), DatabaseError> {
+                if self.found {
+                    return Ok(());
+                }
+                if self
+                    .column_references
+                    .contains(expr.output_column().summary())
+                {
+                    self.found = true;
+                    return Ok(());
+                }
+
+                walk_expr(self, expr)
+            }
+        }
+
+        let mut checker = ReferenceChecker {
+            column_references,
+            found: false,
+        };
+        checker.visit(expr).unwrap();
+        checker.found
+    }
+
+    fn clear_exprs(column_references: &HashSet<&ColumnSummary>, exprs: &mut Vec<ScalarExpression>) {
+        exprs.retain(|expr| Self::references_any_column(expr, column_references))
     }
 
     fn remap_operator_after_child_change(
@@ -274,6 +327,7 @@ impl ColumnPruning {
         let mut right_retained_positions = Vec::new();
         let mut left_removed_positions = Vec::new();
         let mut right_removed_positions = Vec::new();
+        let mut current_referenced_columns = Vec::new();
         let operator = &mut plan.operator;
 
         match operator {
@@ -302,9 +356,12 @@ impl ColumnPruning {
                         changed = true;
                     }
                 }
+                Self::collect_expr_referenced_columns(
+                    op.agg_calls.iter().chain(op.groupby_exprs.iter()),
+                    &mut current_referenced_columns,
+                );
                 let is_distinct = op.is_distinct;
-                let referenced_columns = operator.referenced_columns(false);
-                let mut new_column_references = trans_references!(&referenced_columns);
+                let mut new_column_references = trans_references!(&current_referenced_columns);
                 // on distinct
                 if is_distinct {
                     for summary in column_references {
@@ -333,8 +390,11 @@ impl ColumnPruning {
                             changed = true;
                         }
                     }
-                    let referenced_columns = operator.referenced_columns(false);
-                    let new_column_references = trans_references!(&referenced_columns);
+                    Self::collect_expr_referenced_columns(
+                        op.exprs.iter(),
+                        &mut current_referenced_columns,
+                    );
+                    let new_column_references = trans_references!(&current_referenced_columns);
 
                     changed |= Self::recollect_apply_only_child(
                         new_column_references,
@@ -363,10 +423,13 @@ impl ColumnPruning {
             | Operator::Union(_)
             | Operator::Except(_)
             | Operator::TopK(_) => {
-                let temp_columns = operator.referenced_columns(false);
+                Self::collect_operator_referenced_columns(
+                    operator,
+                    &mut current_referenced_columns,
+                );
                 // this is magic!!! do not delete!!!
                 let mut column_references = column_references;
-                for column in temp_columns.iter() {
+                for column in &current_referenced_columns {
                     column_references.insert(column.summary());
                 }
                 if matches!(operator, Operator::Join(_)) {
@@ -408,8 +471,11 @@ impl ColumnPruning {
             | Operator::Update(_)
             | Operator::Delete(_)
             | Operator::Analyze(_) => {
-                let referenced_columns = operator.referenced_columns(false);
-                let new_column_references = trans_references!(&referenced_columns);
+                Self::collect_operator_referenced_columns(
+                    operator,
+                    &mut current_referenced_columns,
+                );
+                let new_column_references = trans_references!(&current_referenced_columns);
 
                 changed |= Self::recollect_apply_only_child(
                     new_column_references,
