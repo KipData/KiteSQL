@@ -189,7 +189,7 @@ mod tests {
             .get_column_by_name("c1")
             .unwrap();
         let sort_fields = vec![SortField::new(
-            ScalarExpression::column_expr(c1_column.clone()),
+            ScalarExpression::column_expr(c1_column.clone(), 0),
             true,
             false,
         )];

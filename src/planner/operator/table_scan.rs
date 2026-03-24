@@ -68,7 +68,7 @@ impl TableScanOperator {
                     DatabaseError::column_not_found(format!("index column id: {col_id} not found"))
                 })?;
                 sort_fields.push(SortField {
-                    expr: ScalarExpression::column_expr(column.clone()),
+                    expr: ScalarExpression::column_expr(column.clone(), sort_fields.len()),
                     asc: true,
                     nulls_first: false,
                 })

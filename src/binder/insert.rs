@@ -186,11 +186,17 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
 
         let projection = input_schema
             .iter()
+            .enumerate()
             .zip(target_columns.iter())
-            .map(|(input_column, target_column)| ScalarExpression::Alias {
-                expr: Box::new(ScalarExpression::column_expr(input_column.clone())),
-                alias: AliasType::Name(target_column.name().to_string()),
-            })
+            .map(
+                |((position, input_column), target_column)| ScalarExpression::Alias {
+                    expr: Box::new(ScalarExpression::column_expr(
+                        input_column.clone(),
+                        position,
+                    )),
+                    alias: AliasType::Name(target_column.name().to_string()),
+                },
+            )
             .collect::<Vec<_>>();
         input_plan = self.bind_project(input_plan, projection)?;
 

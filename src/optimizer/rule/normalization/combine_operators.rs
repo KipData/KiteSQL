@@ -164,12 +164,14 @@ mod tests {
             unreachable!("Should be a project operator")
         }
 
-        let scan_op = best_plan.childrens.pop_only();
-        if let Operator::TableScan(_) = &scan_op.operator {
-            assert!(matches!(scan_op.childrens.as_ref(), Childrens::None));
-        } else {
-            unreachable!("Should be a scan operator")
-        }
+        let alias_project = best_plan.childrens.pop_only();
+        assert!(
+            matches!(alias_project.operator, Operator::Project(_)),
+            "Derived-table alias projection should be preserved"
+        );
+        let scan_op = alias_project.childrens.pop_only();
+        assert!(matches!(scan_op.operator, Operator::TableScan(_)));
+        assert!(matches!(scan_op.childrens.as_ref(), Childrens::None));
 
         Ok(())
     }

@@ -167,6 +167,37 @@ pub enum SubQueryType {
 pub enum Source<'a> {
     Table(&'a TableCatalog),
     View(&'a View),
+    Schema(SchemaRef),
+}
+
+#[derive(Debug, Clone)]
+pub struct BoundSource<'a> {
+    pub(crate) table_name: TableName,
+    pub(crate) alias: Option<TableName>,
+    pub(crate) join_type: Option<JoinType>,
+    pub(crate) source: Source<'a>,
+}
+
+impl BoundSource<'_> {
+    pub(crate) fn matches_name(&self, table_name: &str) -> bool {
+        self.table_name.as_ref() == table_name
+            || matches!(self.alias.as_ref(), Some(alias) if alias.as_ref() == table_name)
+    }
+
+    pub(crate) fn same_binding(
+        &self,
+        table_name: &TableName,
+        alias: Option<&TableName>,
+        join_type: Option<JoinType>,
+    ) -> bool {
+        self.table_name == *table_name
+            && self.alias.as_ref() == alias
+            && self.join_type == join_type
+    }
+
+    pub(crate) fn visible_name(&self) -> &TableName {
+        self.alias.as_ref().unwrap_or(&self.table_name)
+    }
 }
 
 #[derive(Clone)]
@@ -176,8 +207,9 @@ pub struct BinderContext<'a, T: Transaction> {
     pub(crate) table_cache: &'a TableCache,
     pub(crate) view_cache: &'a ViewCache,
     pub(crate) transaction: &'a T,
-    // Tips: When there are multiple tables and Wildcard, use BTreeMap to ensure that the order of the output tables is certain.
-    pub(crate) bind_table: BTreeMap<(TableName, Option<TableName>, Option<JoinType>), Source<'a>>,
+    // Tips: retain binding order so wildcard expansion and position derivation
+    // follow FROM/JOIN order directly.
+    pub(crate) bind_table: Vec<BoundSource<'a>>,
     // alias
     expr_aliases: BTreeMap<(Option<String>, String), ScalarExpression>,
     table_aliases: HashMap<TableName, TableName>,
@@ -207,22 +239,9 @@ impl Source<'_> {
                 .get_or_insert_with(|| view.plan.output_schema_direct())
                 .columns()
                 .find(|column| column.name() == name),
+            Source::Schema(schema_ref) => schema_ref.iter().find(|column| column.name() == name),
         }
         .cloned()
-    }
-
-    pub(crate) fn columns<'a>(
-        &'a self,
-        schema_buf: &'a mut Option<SchemaOutput>,
-    ) -> Box<dyn Iterator<Item = &'a ColumnRef> + 'a> {
-        match self {
-            Source::Table(table) => Box::new(table.columns()),
-            Source::View(view) => Box::new(
-                schema_buf
-                    .get_or_insert_with(|| view.plan.output_schema_direct())
-                    .columns(),
-            ),
-        }
     }
 
     pub(crate) fn schema_ref(&self, schema_buf: &mut Option<SchemaOutput>) -> SchemaRef {
@@ -234,6 +253,7 @@ impl Source<'_> {
                     SchemaOutput::SchemaRef(schema_ref) => schema_ref.clone(),
                 }
             }
+            Source::Schema(schema_ref) => schema_ref.clone(),
         }
     }
 }
@@ -352,23 +372,37 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
             .map(Source::View);
         }
         if let Some(source) = &source {
-            self.bind_table.insert(
-                (table_name.clone(), alias.cloned(), join_type),
+            self.add_bound_source(
+                table_name.clone(),
+                alias.cloned(),
+                join_type,
                 source.clone(),
             );
         }
         Ok(source)
     }
 
-    pub fn bind_source<'b: 'a>(&self, table_name: &str) -> Result<&Source<'_>, DatabaseError> {
-        if let Some(source) = self.bind_table.iter().find(|((t, alias, _), _)| {
-            t.as_ref() == table_name
-                || matches!(alias.as_ref().map(|a| a.as_ref() == table_name), Some(true))
-        }) {
-            Ok(source.1)
-        } else {
-            Err(DatabaseError::invalid_table(table_name))
+    pub fn add_bound_source(
+        &mut self,
+        table_name: TableName,
+        alias: Option<TableName>,
+        join_type: Option<JoinType>,
+        source: Source<'a>,
+    ) {
+        if let Some(bound_source) = self
+            .bind_table
+            .iter_mut()
+            .find(|bound_source| bound_source.same_binding(&table_name, alias.as_ref(), join_type))
+        {
+            bound_source.source = source;
+            return;
         }
+        self.bind_table.push(BoundSource {
+            table_name,
+            alias,
+            join_type,
+            source,
+        });
     }
 
     // Tips: The order of this index is based on Aggregate being bound first.
@@ -608,8 +642,13 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
     }
 
     fn extend(&mut self, context: BinderContext<'a, T>) {
-        for (key, table) in context.bind_table {
-            self.context.bind_table.insert(key, table);
+        for bound_source in context.bind_table {
+            self.context.add_bound_source(
+                bound_source.table_name,
+                bound_source.alias,
+                bound_source.join_type,
+                bound_source.source,
+            );
         }
         for (key, expr) in context.expr_aliases {
             self.context.expr_aliases.insert(key, expr);

@@ -15,7 +15,7 @@
 use crate::execution::dql::projection::Projection;
 use crate::execution::DatabaseError;
 use crate::execution::{build_read, spawn_executor, Executor, WriteExecutor};
-use crate::expression::{BindPosition, ScalarExpression};
+use crate::expression::ScalarExpression;
 use crate::planner::operator::create_index::CreateIndexOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
@@ -25,8 +25,6 @@ use crate::types::tuple::Tuple;
 use crate::types::tuple_builder::TupleBuilder;
 use crate::types::value::DataValue;
 use crate::types::ColumnId;
-use std::borrow::Cow;
-
 pub struct CreateIndex {
     op: CreateIndexOperator,
     input: LogicalPlan,
@@ -53,23 +51,18 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateIndex {
                 ty,
             } = self.op;
 
-            let (column_ids, mut column_exprs): (Vec<ColumnId>, Vec<ScalarExpression>) = columns
+            let schema = self.input.output_schema().clone();
+            let (column_ids, column_exprs): (Vec<ColumnId>, Vec<ScalarExpression>) = columns
                 .into_iter()
                 .filter_map(|column| {
-                    column
-                        .id()
-                        .map(|id| (id, ScalarExpression::column_expr(column)))
+                    column.id().and_then(|id| {
+                        schema
+                            .iter()
+                            .position(|schema_column| schema_column == &column)
+                            .map(|position| (id, ScalarExpression::column_expr(column, position)))
+                    })
                 })
                 .unzip();
-            let schema = self.input.output_schema().clone();
-            throw!(
-                co,
-                BindPosition::bind_exprs(
-                    column_exprs.iter_mut(),
-                    || schema.iter().map(Cow::Borrowed),
-                    |a, b| a == b
-                )
-            );
             let index_id = match unsafe { &mut (*transaction) }.add_index_meta(
                 cache.0,
                 &table_name,

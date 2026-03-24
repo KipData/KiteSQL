@@ -16,7 +16,7 @@ use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
 use crate::execution::{build_read, spawn_executor, Executor, WriteExecutor};
-use crate::expression::{BindPosition, ScalarExpression};
+use crate::expression::ScalarExpression;
 use crate::optimizer::core::histogram::HistogramBuilder;
 use crate::optimizer::core::statistics_meta::StatisticsMeta;
 use crate::planner::operator::analyze::AnalyzeOperator;
@@ -28,7 +28,6 @@ use crate::types::tuple::Tuple;
 use crate::types::value::{DataValue, Utf8Type};
 use itertools::Itertools;
 use sqlparser::ast::CharLengthUnits;
-use std::borrow::Cow;
 use std::fmt::{self, Formatter};
 use std::sync::Arc;
 
@@ -87,7 +86,6 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze {
 
             for index in table.indexes() {
                 builders.push(State {
-                    is_bound_position: false,
                     index_id: index.id,
                     exprs: throw!(co, index.column_exprs(&table)),
                     builder: HistogramBuilder::new(index, None),
@@ -100,24 +98,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze {
             for tuple in coroutine.by_ref() {
                 let tuple = throw!(co, tuple);
 
-                for State {
-                    is_bound_position,
-                    exprs,
-                    builder,
-                    ..
-                } in builders.iter_mut()
-                {
-                    if !*is_bound_position {
-                        throw!(
-                            co,
-                            BindPosition::bind_exprs(
-                                exprs.iter_mut(),
-                                || schema.iter().map(Cow::Borrowed),
-                                |a, b| a == b
-                            )
-                        );
-                        *is_bound_position = true;
-                    }
+                for State { exprs, builder, .. } in builders.iter_mut() {
                     let values = throw!(co, Projection::projection(&tuple, exprs, &schema));
 
                     if values.len() == 1 {
@@ -142,7 +123,6 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze {
 }
 
 struct State {
-    is_bound_position: bool,
     index_id: IndexId,
     exprs: Vec<ScalarExpression>,
     builder: HistogramBuilder,

@@ -20,6 +20,7 @@ use std::collections::HashSet;
 use super::{Binder, QueryBindStep};
 use crate::errors::DatabaseError;
 use crate::expression::function::scala::ScalarFunction;
+use crate::expression::visitor_mut::{walk_mut_expr, VisitorMut};
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
@@ -34,10 +35,14 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         children: LogicalPlan,
         agg_calls: Vec<ScalarExpression>,
         groupby_exprs: Vec<ScalarExpression>,
-    ) -> LogicalPlan {
+    ) -> Result<LogicalPlan, DatabaseError> {
         self.context.step(QueryBindStep::Agg);
-
-        AggregateOperator::build(children, agg_calls, groupby_exprs, false)
+        Ok(AggregateOperator::build(
+            children,
+            agg_calls,
+            groupby_exprs,
+            false,
+        ))
     }
 
     pub fn extract_select_aggregate(
@@ -102,6 +107,18 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             None
         };
         Ok((return_having, return_orderby))
+    }
+
+    pub fn bind_aggregate_output_exprs<'c>(
+        &self,
+        exprs: impl IntoIterator<Item = &'c mut ScalarExpression>,
+    ) -> Result<(), DatabaseError> {
+        let mut binder =
+            AggregateOutputBinder::new(&self.context.agg_calls, &self.context.group_by_exprs);
+        for expr in exprs {
+            binder.visit(expr)?;
+        }
+        Ok(())
     }
 
     fn visit_column_agg_expr(&mut self, expr: &mut ScalarExpression) -> Result<(), DatabaseError> {
@@ -450,5 +467,152 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             }
             ScalarExpression::TableFunction(_) => unreachable!(),
         }
+    }
+}
+
+struct AggregateOutputBinder<'a> {
+    agg_calls: &'a [ScalarExpression],
+    group_by_exprs: &'a [ScalarExpression],
+}
+
+impl<'a> AggregateOutputBinder<'a> {
+    fn new(agg_calls: &'a [ScalarExpression], group_by_exprs: &'a [ScalarExpression]) -> Self {
+        Self {
+            agg_calls,
+            group_by_exprs,
+        }
+    }
+
+    fn output_ref(&self, expr: &ScalarExpression) -> Option<ScalarExpression> {
+        self.agg_calls
+            .iter()
+            .chain(self.group_by_exprs.iter())
+            .position(|candidate| {
+                candidate == expr || candidate.unpack_alias_ref() == expr.unpack_alias_ref()
+            })
+            .map(|position| {
+                let output_expr = self
+                    .agg_calls
+                    .iter()
+                    .chain(self.group_by_exprs.iter())
+                    .nth(position)
+                    .unwrap();
+                ScalarExpression::column_expr(output_expr.output_column(), position)
+            })
+    }
+}
+
+impl<'a> VisitorMut<'a> for AggregateOutputBinder<'_> {
+    fn visit(&mut self, expr: &'a mut ScalarExpression) -> Result<(), DatabaseError> {
+        if let ScalarExpression::Alias {
+            expr: inner_expr,
+            alias: crate::expression::AliasType::Name(_),
+        } = expr
+        {
+            return self.visit(inner_expr);
+        }
+
+        if let Some(output_ref) = self.output_ref(expr) {
+            *expr = output_ref;
+            return Ok(());
+        }
+        walk_mut_expr(self, expr)
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::AggregateOutputBinder;
+    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
+    use crate::errors::DatabaseError;
+    use crate::expression::agg::AggKind;
+    use crate::expression::visitor_mut::VisitorMut;
+    use crate::expression::{AliasType, ScalarExpression};
+    use crate::types::LogicalType;
+
+    fn test_column(name: &str, ty: LogicalType) -> ColumnRef {
+        ColumnRef::from(ColumnCatalog::new(
+            name.to_string(),
+            true,
+            ColumnDesc::new(ty, None, false, None).unwrap(),
+        ))
+    }
+
+    fn test_count(expr: ScalarExpression) -> ScalarExpression {
+        ScalarExpression::AggCall {
+            distinct: false,
+            kind: AggKind::Count,
+            args: vec![expr],
+            ty: LogicalType::Bigint,
+        }
+    }
+
+    #[test]
+    fn test_aggregate_output_binder_rewrites_agg_and_group_slots() -> Result<(), DatabaseError> {
+        let group_column = test_column("c1", LogicalType::Integer);
+        let agg_column = test_column("c2", LogicalType::Integer);
+
+        let group_expr = ScalarExpression::column_expr(group_column, 0);
+        let agg_expr = test_count(ScalarExpression::column_expr(agg_column, 1));
+
+        let agg_output = ScalarExpression::Alias {
+            expr: Box::new(agg_expr.clone()),
+            alias: AliasType::Name("cnt".to_string()),
+        };
+        let group_output = ScalarExpression::Alias {
+            expr: Box::new(group_expr.clone()),
+            alias: AliasType::Name("g".to_string()),
+        };
+
+        let mut binder = AggregateOutputBinder::new(
+            std::slice::from_ref(&agg_output),
+            std::slice::from_ref(&group_output),
+        );
+
+        let mut order_by_agg = ScalarExpression::Alias {
+            expr: Box::new(agg_expr),
+            alias: AliasType::Name("cnt".to_string()),
+        };
+        binder.visit(&mut order_by_agg)?;
+        assert_eq!(
+            order_by_agg,
+            ScalarExpression::Alias {
+                expr: Box::new(ScalarExpression::column_expr(agg_output.output_column(), 0)),
+                alias: AliasType::Name("cnt".to_string()),
+            }
+        );
+
+        let mut order_by_group = group_expr;
+        binder.visit(&mut order_by_group)?;
+        assert_eq!(
+            order_by_group,
+            ScalarExpression::column_expr(group_output.output_column(), 1)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_aggregate_output_binder_matches_alias_expr_reference() -> Result<(), DatabaseError> {
+        let group_column = test_column("c1", LogicalType::Integer);
+        let group_expr = ScalarExpression::column_expr(group_column, 0);
+        let group_output = ScalarExpression::Alias {
+            expr: Box::new(group_expr.clone()),
+            alias: AliasType::Name("g".to_string()),
+        };
+
+        let mut binder = AggregateOutputBinder::new(&[], std::slice::from_ref(&group_output));
+        let mut target = ScalarExpression::Alias {
+            expr: Box::new(ScalarExpression::Constant(1_i32.into())),
+            alias: AliasType::Expr(Box::new(group_expr)),
+        };
+
+        binder.visit(&mut target)?;
+        assert_eq!(
+            target,
+            ScalarExpression::column_expr(group_output.output_column(), 0)
+        );
+
+        Ok(())
     }
 }

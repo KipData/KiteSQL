@@ -195,11 +195,9 @@ impl Operator {
             }
             Operator::TableScan(op) => {
                 output_exprs.clear();
-                output_exprs.extend(
-                    op.columns
-                        .values()
-                        .map(|column| ScalarExpression::column_expr(column.clone())),
-                );
+                output_exprs.extend(op.columns.values().enumerate().map(|(position, column)| {
+                    ScalarExpression::column_expr(column.clone(), position)
+                }));
                 true
             }
             Operator::Sort(_) | Operator::Limit(_) | Operator::TopK(_) => false,
@@ -217,7 +215,8 @@ impl Operator {
                     schema_ref
                         .iter()
                         .cloned()
-                        .map(ScalarExpression::column_expr),
+                        .enumerate()
+                        .map(|(position, column)| ScalarExpression::column_expr(column, position)),
                 );
                 true
             }
@@ -228,7 +227,10 @@ impl Operator {
                         .inner
                         .output_schema()
                         .iter()
-                        .map(|column| ScalarExpression::column_expr(column.clone())),
+                        .enumerate()
+                        .map(|(position, column)| {
+                            ScalarExpression::column_expr(column.clone(), position)
+                        }),
                 );
                 true
             }

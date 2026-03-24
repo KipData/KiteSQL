@@ -208,11 +208,17 @@ impl<'a> RangeDetacher<'a> {
                 }
                 (None, None) => {
                     if let (Some(col), Some(val)) =
-                        (left_expr.unpack_col(false), right_expr.unpack_val())
+                        (
+                            left_expr.unpack_bound_col(false).map(|(column, _)| column),
+                            right_expr.unpack_val(),
+                        )
                     {
                         return self.new_range(*op, col, val, false);
                     } else if let (Some(val), Some(col)) =
-                        (left_expr.unpack_val(), right_expr.unpack_col(false))
+                        (
+                            left_expr.unpack_val(),
+                            right_expr.unpack_bound_col(false).map(|(column, _)| column),
+                        )
                     {
                         return self.new_range(*op, col, val, true);
                     }

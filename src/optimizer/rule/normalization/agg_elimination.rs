@@ -320,7 +320,7 @@ mod tests {
 
     fn make_sort_field(name: &str) -> SortField {
         let column = ColumnRef::from(ColumnCatalog::new_dummy(name.to_string()));
-        SortField::new(ScalarExpression::column_expr(column), true, false)
+        SortField::new(ScalarExpression::column_expr(column, 0), true, false)
     }
 
     fn build_plan(
@@ -396,7 +396,7 @@ mod tests {
         columns.insert(0, c1.clone());
 
         let sort_fields = vec![SortField::new(
-            ScalarExpression::column_expr(c1.clone()),
+            ScalarExpression::column_expr(c1.clone(), 0),
             true,
             false,
         )];
@@ -436,7 +436,7 @@ mod tests {
 
         let plan = LogicalPlan::new(
             Operator::Aggregate(AggregateOperator {
-                groupby_exprs: vec![ScalarExpression::column_expr(c1)],
+                groupby_exprs: vec![ScalarExpression::column_expr(c1, 0)],
                 agg_calls: vec![],
                 is_distinct: true,
             }),
@@ -494,7 +494,11 @@ mod tests {
     #[test]
     fn annotate_sets_sort_hint_on_table_scan() -> Result<(), DatabaseError> {
         let column = ColumnRef::from(ColumnCatalog::new_dummy("c1".to_string()));
-        let sort_field = SortField::new(ScalarExpression::column_expr(column.clone()), true, false);
+        let sort_field = SortField::new(
+            ScalarExpression::column_expr(column.clone(), 0),
+            true,
+            false,
+        );
         let (index_info, _) = build_index_info(vec![sort_field.clone()], 0);
 
         let mut columns = BTreeMap::new();
@@ -596,7 +600,11 @@ mod tests {
     #[test]
     fn promote_index_to_remove_sort() -> Result<(), DatabaseError> {
         let column = ColumnRef::from(ColumnCatalog::new_dummy("c_first".to_string()));
-        let sort_field = SortField::new(ScalarExpression::column_expr(column.clone()), true, false);
+        let sort_field = SortField::new(
+            ScalarExpression::column_expr(column.clone(), 0),
+            true,
+            false,
+        );
         let (mut index_info, _) = build_index_info(vec![sort_field.clone()], 0);
         index_info.range = Some(Range::Scope {
             min: Bound::Unbounded,

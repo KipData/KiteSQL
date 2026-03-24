@@ -33,6 +33,8 @@ alter table t1 drop column if exists v1
 statement error
 alter table t1 drop column id
 
+# Regression: after dropping a non-key column, the remaining logical output
+# order must still read v2/v3 rather than leaking the removed v1 slot.
 query IIII rowsort
 select * from t1
 ----

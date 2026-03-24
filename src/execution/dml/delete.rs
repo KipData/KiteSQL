@@ -16,7 +16,7 @@ use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
 use crate::execution::{build_read, spawn_executor, Executor, WriteExecutor};
-use crate::expression::{BindPosition, ScalarExpression};
+use crate::expression::ScalarExpression;
 use crate::planner::operator::delete::DeleteOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
@@ -25,7 +25,6 @@ use crate::types::index::{Index, IndexId, IndexType};
 use crate::types::tuple::Tuple;
 use crate::types::tuple_builder::TupleBuilder;
 use crate::types::value::DataValue;
-use std::borrow::Cow;
 use std::collections::HashMap;
 
 pub struct Delete {
@@ -79,15 +78,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Delete {
                         values.push(data_value);
                     } else {
                         let mut values = Vec::with_capacity(table.indexes().len());
-                        let mut exprs = throw!(co, index_meta.column_exprs(table));
-                        throw!(
-                            co,
-                            BindPosition::bind_exprs(
-                                exprs.iter_mut(),
-                                || schema.iter().map(Cow::Borrowed),
-                                |a, b| a == b
-                            )
-                        );
+                        let exprs = throw!(co, index_meta.column_exprs(table));
                         let Some(data_value) = DataValue::values_to_tuple(throw!(
                             co,
                             Projection::projection(&tuple, &exprs, &schema)

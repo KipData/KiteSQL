@@ -15,6 +15,7 @@
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::{Range, RangeDetacher};
+use crate::expression::visitor_mut::{PositionShift, VisitorMut};
 use crate::expression::{BinaryOperator, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{
@@ -406,11 +407,19 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
             remaining_filters.extend(left_remain);
         }
 
-        let (right_push, right_remain) = if push_right {
+        let (mut right_push, right_remain) = if push_right {
             (right_filters, Vec::new())
         } else {
             (Vec::new(), right_filters)
         };
+        if !right_push.is_empty() {
+            let mut localizer = PositionShift {
+                delta: -(left_columns.len() as isize),
+            };
+            for expr in &mut right_push {
+                localizer.visit(expr)?;
+            }
+        }
         if let Some(filter_op) = reduce_filters(right_push, false) {
             new_ops.1 = Some(Operator::Filter(filter_op));
         } else {
@@ -636,14 +645,14 @@ mod tests {
 
         let c1_gt = ScalarExpression::Binary {
             op: BinaryOperator::Gt,
-            left_expr: Box::new(ScalarExpression::column_expr(c1_ref.clone())),
+            left_expr: Box::new(ScalarExpression::column_expr(c1_ref.clone(), 0)),
             right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(0))),
             evaluator: None,
             ty: LogicalType::Boolean,
         };
         let c2_gt = ScalarExpression::Binary {
             op: BinaryOperator::Gt,
-            left_expr: Box::new(ScalarExpression::column_expr(c2_ref.clone())),
+            left_expr: Box::new(ScalarExpression::column_expr(c2_ref.clone(), 1)),
             right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(0))),
             evaluator: None,
             ty: LogicalType::Boolean,

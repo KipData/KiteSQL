@@ -6,6 +6,8 @@ CREATE TABLE TABLE_F131_03_01_011 ( ID INT PRIMARY KEY, A INTEGER, B INTEGER );
 statement ok
 CREATE VIEW VIEW_F131_03_01_01 AS SELECT A, MIN ( B ) AS C FROM TABLE_F131_03_01_011 GROUP BY A;
 
+# Regression: grouped-view aggregate aliases must survive view expansion so
+# outer aggregates can still resolve C correctly.
 query I
 SELECT SUM ( C ) FROM VIEW_F131_03_01_01
 ----

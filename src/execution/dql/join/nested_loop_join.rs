@@ -153,6 +153,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
                 ..
             } = self;
 
+            let left_schema_len = eq_cond.left_schema.len();
             let right_schema_len = eq_cond.right_schema.len();
             let mut left_coroutine = build_read(left_input, cache, transaction);
             let mut bitmap: Option<FixedBitSet> = None;
@@ -260,7 +261,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
                 for (idx, right_tuple) in right_coroutine.by_ref().enumerate() {
                     if !bitmap.as_ref().unwrap().contains(idx) {
                         let mut right_tuple: Tuple = throw!(co, right_tuple);
-                        let mut values = vec![DataValue::Null; right_schema_len];
+                        let mut values = vec![DataValue::Null; left_schema_len];
                         values.append(&mut right_tuple.values);
 
                         co.yield_(Ok(Tuple::new(right_tuple.pk, values))).await;
@@ -410,10 +411,7 @@ mod test {
             .before_batch(
                 "Expression Remapper".to_string(),
                 HepBatchStrategy::once_topdown(),
-                vec![
-                    NormalizationRuleImpl::BindExpressionPosition,
-                    NormalizationRuleImpl::EvaluatorBind,
-                ],
+                vec![NormalizationRuleImpl::EvaluatorBind],
             )
             .build()
             .instantiate(plan)
@@ -456,8 +454,8 @@ mod test {
 
         let on_keys = if eq {
             vec![(
-                ScalarExpression::column_expr(t1_columns[1].clone()),
-                ScalarExpression::column_expr(t2_columns[1].clone()),
+                ScalarExpression::column_expr(t1_columns[1].clone(), 1),
+                ScalarExpression::column_expr(t2_columns[1].clone(), 1),
             )]
         } else {
             vec![]
@@ -527,12 +525,14 @@ mod test {
 
         let filter = ScalarExpression::Binary {
             op: crate::expression::BinaryOperator::Gt,
-            left_expr: Box::new(ScalarExpression::column_expr(ColumnRef::from(
-                ColumnCatalog::new("c1".to_owned(), true, desc.clone()),
-            ))),
-            right_expr: Box::new(ScalarExpression::column_expr(ColumnRef::from(
-                ColumnCatalog::new("c4".to_owned(), true, desc.clone()),
-            ))),
+            left_expr: Box::new(ScalarExpression::column_expr(
+                ColumnRef::from(ColumnCatalog::new("c1".to_owned(), true, desc.clone())),
+                0,
+            )),
+            right_expr: Box::new(ScalarExpression::column_expr(
+                ColumnRef::from(ColumnCatalog::new("c4".to_owned(), true, desc.clone())),
+                3,
+            )),
             evaluator: Some(BinaryEvaluatorBox(Arc::new(Int32GtBinaryEvaluator))),
             ty: LogicalType::Boolean,
         };
@@ -901,6 +901,96 @@ mod test {
     }
 
     #[test]
+    fn test_nested_right_join_filter_only_left_columns() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let storage = RocksStorage::new(temp_dir.path())?;
+        let mut transaction = storage.transaction()?;
+        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+
+        let desc = ColumnDesc::new(LogicalType::Integer, None, false, None)?;
+        let left_columns = vec![
+            ColumnRef::from(ColumnCatalog::new("k".to_string(), true, desc.clone())),
+            ColumnRef::from(ColumnCatalog::new("v".to_string(), true, desc.clone())),
+        ];
+        let right_columns = vec![ColumnRef::from(ColumnCatalog::new(
+            "rk".to_string(),
+            true,
+            desc.clone(),
+        ))];
+
+        let on_keys = vec![(
+            ScalarExpression::column_expr(left_columns[0].clone(), 0),
+            ScalarExpression::column_expr(right_columns[0].clone(), 0),
+        )];
+        let filter_expr = ScalarExpression::Binary {
+            op: crate::expression::BinaryOperator::Gt,
+            left_expr: Box::new(ScalarExpression::column_expr(left_columns[1].clone(), 1)),
+            right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(1))),
+            evaluator: None,
+            ty: LogicalType::Boolean,
+        };
+
+        let left = LogicalPlan {
+            operator: Operator::Values(ValuesOperator {
+                rows: vec![
+                    vec![DataValue::Int32(2), DataValue::Int32(0)],
+                    vec![DataValue::Int32(2), DataValue::Int32(5)],
+                ],
+                schema_ref: Arc::new(left_columns),
+            }),
+            childrens: Box::new(Childrens::None),
+            physical_option: None,
+            _output_schema_ref: None,
+        };
+        let right = LogicalPlan {
+            operator: Operator::Values(ValuesOperator {
+                rows: vec![vec![DataValue::Int32(2)]],
+                schema_ref: Arc::new(right_columns),
+            }),
+            childrens: Box::new(Childrens::None),
+            physical_option: None,
+            _output_schema_ref: None,
+        };
+
+        let plan = LogicalPlan::new(
+            Operator::Join(JoinOperator {
+                on: JoinCondition::On {
+                    on: on_keys,
+                    filter: Some(filter_expr),
+                },
+                join_type: JoinType::RightOuter,
+            }),
+            Childrens::Twins {
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        );
+        let plan = optimize_exprs(plan)?;
+
+        let Operator::Join(op) = plan.operator else {
+            unreachable!()
+        };
+        let (left, right) = plan.childrens.pop_twins();
+        let executor = NestedLoopJoin::from((op, left, right))
+            .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
+        let tuples = try_collect(executor)?;
+
+        assert_eq!(tuples.len(), 1);
+        assert_eq!(
+            tuples[0].values,
+            vec![
+                DataValue::Int32(2),
+                DataValue::Int32(5),
+                DataValue::Int32(2)
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_nested_full_join() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
@@ -959,7 +1049,7 @@ mod test {
     }
 
     #[test]
-    fn test_right_join_using_preserves_right_side_values() -> Result<(), DatabaseError> {
+    fn test_right_join_using_keeps_left_visible_column_binding() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let db = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
 

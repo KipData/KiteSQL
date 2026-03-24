@@ -152,19 +152,22 @@ impl VisitorMut<'_> for Simplify {
                 self.fix_expr(right_expr, left_expr, op)?;
 
                 if Self::is_arithmetic(op) {
-                    match (left_expr.unpack_col(false), right_expr.unpack_col(false)) {
-                        (Some(col), None) => {
+                    match (
+                        left_expr.unpack_bound_col(false),
+                        right_expr.unpack_bound_col(false),
+                    ) {
+                        (Some((col, position)), None) => {
                             self.replaces.push(Replace::Binary(ReplaceBinary {
-                                column_expr: ScalarExpression::column_expr(col),
+                                column_expr: ScalarExpression::column_expr(col, position),
                                 val_expr: mem::replace(right_expr, ScalarExpression::Empty),
                                 op: *op,
                                 ty: ty.clone(),
                                 is_column_left: true,
                             }));
                         }
-                        (None, Some(col)) => {
+                        (None, Some((col, position))) => {
                             self.replaces.push(Replace::Binary(ReplaceBinary {
-                                column_expr: ScalarExpression::column_expr(col),
+                                column_expr: ScalarExpression::column_expr(col, position),
                                 val_expr: mem::replace(left_expr, ScalarExpression::Empty),
                                 op: *op,
                                 ty: ty.clone(),
@@ -176,19 +179,22 @@ impl VisitorMut<'_> for Simplify {
                                 return Ok(());
                             }
 
-                            match (left_expr.unpack_col(true), right_expr.unpack_col(true)) {
-                                (Some(col), None) => {
+                            match (
+                                left_expr.unpack_bound_col(true),
+                                right_expr.unpack_bound_col(true),
+                            ) {
+                                (Some((col, position)), None) => {
                                     self.replaces.push(Replace::Binary(ReplaceBinary {
-                                        column_expr: ScalarExpression::column_expr(col),
+                                        column_expr: ScalarExpression::column_expr(col, position),
                                         val_expr: mem::replace(right_expr, ScalarExpression::Empty),
                                         op: *op,
                                         ty: ty.clone(),
                                         is_column_left: true,
                                     }));
                                 }
-                                (None, Some(col)) => {
+                                (None, Some((col, position))) => {
                                     self.replaces.push(Replace::Binary(ReplaceBinary {
-                                        column_expr: ScalarExpression::column_expr(col),
+                                        column_expr: ScalarExpression::column_expr(col, position),
                                         val_expr: mem::replace(left_expr, ScalarExpression::Empty),
                                         op: *op,
                                         ty: ty.clone(),
@@ -503,11 +509,11 @@ impl ScalarExpression {
         }
     }
 
-    pub(crate) fn unpack_col(&self, is_deep: bool) -> Option<ColumnRef> {
+    pub(crate) fn unpack_bound_col(&self, is_deep: bool) -> Option<(ColumnRef, usize)> {
         match self {
-            ScalarExpression::ColumnRef { column, .. } => Some(column.clone()),
-            ScalarExpression::Alias { expr, .. } => expr.unpack_col(is_deep),
-            ScalarExpression::Unary { expr, .. } => expr.unpack_col(is_deep),
+            ScalarExpression::ColumnRef { column, position } => Some((column.clone(), *position)),
+            ScalarExpression::Alias { expr, .. } => expr.unpack_bound_col(is_deep),
+            ScalarExpression::Unary { expr, .. } => expr.unpack_bound_col(is_deep),
             ScalarExpression::Binary {
                 left_expr,
                 right_expr,
@@ -518,8 +524,8 @@ impl ScalarExpression {
                 }
 
                 left_expr
-                    .unpack_col(true)
-                    .or_else(|| right_expr.unpack_col(true))
+                    .unpack_bound_col(true)
+                    .or_else(|| right_expr.unpack_bound_col(true))
             }
             _ => None,
         }

@@ -331,10 +331,7 @@ fn default_optimizer_pipeline() -> HepOptimizerPipeline {
         .after_batch(
             "Expression Remapper".to_string(),
             HepBatchStrategy::once_topdown(),
-            vec![
-                NormalizationRuleImpl::BindExpressionPosition,
-                NormalizationRuleImpl::EvaluatorBind,
-            ],
+            vec![NormalizationRuleImpl::EvaluatorBind],
         )
         .implementations(vec![
             // DQL
@@ -818,13 +815,18 @@ impl ResultIter for TransactionIter<'_> {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod test {
+    use crate::binder::{Binder, BinderContext};
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
     use crate::db::{DataBaseBuilder, DatabaseError, ResultIter};
+    use crate::expression::ScalarExpression;
+    use crate::planner::operator::join::JoinCondition;
+    use crate::planner::operator::Operator;
     use crate::storage::{Storage, TableCache, Transaction};
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use chrono::{Datelike, Local};
+    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -922,6 +924,298 @@ pub(crate) mod test {
             iter.next().unwrap()?,
             Tuple::new(None, vec![DataValue::Int32(4)])
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_join_on_alias_right_key_is_localized() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+
+        kite_sql
+            .run("CREATE TABLE onecolumn (id INT PRIMARY KEY, x INT NULL)")?
+            .done()?;
+        kite_sql
+            .run("CREATE TABLE empty (e_id INT PRIMARY KEY, x INT)")?
+            .done()?;
+
+        let stmt = crate::db::prepare(
+            "SELECT * FROM onecolumn AS a(aid, x) JOIN empty AS b(bid, y) ON a.x = b.y",
+        )?;
+        let transaction = kite_sql.storage.transaction()?;
+        let mut binder = Binder::new(
+            BinderContext::new(
+                kite_sql.state.table_cache(),
+                kite_sql.state.view_cache(),
+                &transaction,
+                kite_sql.state.scala_functions(),
+                kite_sql.state.table_functions(),
+                Arc::new(AtomicUsize::new(0)),
+            ),
+            &[],
+            None,
+        );
+        let source_plan = binder.bind(&stmt)?;
+        let best_plan = kite_sql.state.build_plan(
+            &stmt,
+            [],
+            kite_sql.state.table_cache(),
+            kite_sql.state.view_cache(),
+            kite_sql.state.meta_cache(),
+            &transaction,
+            kite_sql.state.scala_functions(),
+            kite_sql.state.table_functions(),
+        )?;
+
+        let join_plan = match source_plan.operator {
+            Operator::Project(_) => source_plan.childrens.pop_only(),
+            Operator::Join(_) => source_plan,
+            _ => unreachable!("expected a join plan"),
+        };
+        let Operator::Join(join_op) = join_plan.operator else {
+            unreachable!("expected join operator");
+        };
+        let JoinCondition::On { on, filter } = join_op.on else {
+            unreachable!("expected join condition");
+        };
+        assert!(filter.is_none());
+        assert_eq!(on.len(), 1);
+        let ScalarExpression::ColumnRef {
+            position: left_position,
+            ..
+        } = on[0].0.unpack_alias_ref()
+        else {
+            unreachable!("expected left join key column ref");
+        };
+        let ScalarExpression::ColumnRef {
+            position: right_position,
+            ..
+        } = on[0].1.unpack_alias_ref()
+        else {
+            unreachable!("expected right join key column ref");
+        };
+        assert_eq!(*left_position, 1);
+        assert_eq!(*right_position, 1);
+
+        let join_plan = match best_plan.operator {
+            Operator::Project(_) => best_plan.childrens.pop_only(),
+            Operator::Join(_) => best_plan,
+            _ => unreachable!("expected a join plan"),
+        };
+        let Operator::Join(join_op) = join_plan.operator else {
+            unreachable!("expected join operator");
+        };
+        let JoinCondition::On { on, .. } = join_op.on else {
+            unreachable!("expected join condition");
+        };
+        let ScalarExpression::ColumnRef {
+            position: right_position,
+            ..
+        } = on[0].1.unpack_alias_ref()
+        else {
+            unreachable!("expected right join key column ref");
+        };
+        assert_eq!(*right_position, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_join_on_with_right_filter_keeps_localized_key() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+
+        kite_sql
+            .run("CREATE TABLE onecolumn (id INT PRIMARY KEY, x INT NULL)")?
+            .done()?;
+        kite_sql
+            .run("CREATE TABLE twocolumn (t_id INT PRIMARY KEY, x INT NULL, y INT NULL)")?
+            .done()?;
+
+        let stmt = crate::db::prepare(
+            "SELECT o.x, t.y FROM onecolumn o INNER JOIN twocolumn t ON (o.x=t.x AND t.y=53)",
+        )?;
+        let transaction = kite_sql.storage.transaction()?;
+        let mut binder = Binder::new(
+            BinderContext::new(
+                kite_sql.state.table_cache(),
+                kite_sql.state.view_cache(),
+                &transaction,
+                kite_sql.state.scala_functions(),
+                kite_sql.state.table_functions(),
+                Arc::new(AtomicUsize::new(0)),
+            ),
+            &[],
+            None,
+        );
+        let source_plan = binder.bind(&stmt)?;
+        let best_plan = kite_sql.state.build_plan(
+            &stmt,
+            [],
+            kite_sql.state.table_cache(),
+            kite_sql.state.view_cache(),
+            kite_sql.state.meta_cache(),
+            &transaction,
+            kite_sql.state.scala_functions(),
+            kite_sql.state.table_functions(),
+        )?;
+
+        let join_plan = match source_plan.operator {
+            Operator::Project(_) => source_plan.childrens.pop_only(),
+            Operator::Join(_) => source_plan,
+            _ => unreachable!("expected a join plan"),
+        };
+        let Operator::Join(join_op) = join_plan.operator else {
+            unreachable!("expected join operator");
+        };
+        let JoinCondition::On { on, filter } = join_op.on else {
+            unreachable!("expected join condition");
+        };
+        assert_eq!(on.len(), 1);
+        let ScalarExpression::ColumnRef {
+            position: left_position,
+            ..
+        } = on[0].0.unpack_alias_ref()
+        else {
+            unreachable!("expected left join key column ref");
+        };
+        let ScalarExpression::ColumnRef {
+            position: right_position,
+            ..
+        } = on[0].1.unpack_alias_ref()
+        else {
+            unreachable!("expected right join key column ref");
+        };
+        assert_eq!(*left_position, 1);
+        assert_eq!(*right_position, 1);
+        let Some(filter) = filter else {
+            unreachable!("expected join filter");
+        };
+        let referenced_columns = filter.referenced_columns(true);
+        assert_eq!(referenced_columns.len(), 1);
+        assert_eq!(referenced_columns[0].name(), "y");
+
+        let join_plan = match best_plan.operator {
+            Operator::Project(_) => best_plan.childrens.pop_only(),
+            Operator::Join(_) => best_plan,
+            _ => unreachable!("expected a join plan"),
+        };
+        let Operator::Join(join_op) = join_plan.operator else {
+            unreachable!("expected join operator");
+        };
+        let JoinCondition::On { on, filter } = join_op.on else {
+            unreachable!("expected join condition");
+        };
+        assert_eq!(on.len(), 1);
+        assert!(filter.is_none());
+        let ScalarExpression::ColumnRef {
+            position: left_position,
+            ..
+        } = on[0].0.unpack_alias_ref()
+        else {
+            unreachable!("expected left join key column ref");
+        };
+        let ScalarExpression::ColumnRef {
+            position: right_position,
+            ..
+        } = on[0].1.unpack_alias_ref()
+        else {
+            unreachable!("expected right join key column ref");
+        };
+        assert_eq!(*left_position, 0);
+        assert_eq!(*right_position, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_join_on_with_right_filter_keeps_localized_key_with_data() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+
+        kite_sql
+            .run("CREATE TABLE onecolumn (id INT PRIMARY KEY, x INT NULL)")?
+            .done()?;
+        kite_sql
+            .run("CREATE TABLE twocolumn (t_id INT PRIMARY KEY, x INT NULL, y INT NULL)")?
+            .done()?;
+        kite_sql
+            .run("INSERT INTO onecolumn(id, x) VALUES (0, 44), (1, NULL), (2, 42)")?
+            .done()?;
+        kite_sql
+            .run(
+                "INSERT INTO twocolumn(t_id, x, y) VALUES (0,44,51), (1,NULL,52), (2,42,53), (3,45,45)",
+            )?
+            .done()?;
+
+        let stmt = crate::db::prepare(
+            "SELECT o.x, t.y FROM onecolumn o INNER JOIN twocolumn t ON (o.x=t.x AND t.y=53)",
+        )?;
+        let transaction = kite_sql.storage.transaction()?;
+        let best_plan = kite_sql.state.build_plan(
+            &stmt,
+            [],
+            kite_sql.state.table_cache(),
+            kite_sql.state.view_cache(),
+            kite_sql.state.meta_cache(),
+            &transaction,
+            kite_sql.state.scala_functions(),
+            kite_sql.state.table_functions(),
+        )?;
+        let join_plan = match best_plan.operator {
+            Operator::Project(_) => best_plan.childrens.pop_only(),
+            Operator::Join(_) => best_plan,
+            _ => unreachable!("expected a join plan"),
+        };
+        let Operator::Join(join_op) = join_plan.operator else {
+            unreachable!("expected join operator");
+        };
+        let JoinCondition::On { on, filter } = join_op.on else {
+            unreachable!("expected join condition");
+        };
+        assert_eq!(on.len(), 1);
+        assert!(filter.is_none());
+        let ScalarExpression::ColumnRef {
+            position: left_position,
+            ..
+        } = on[0].0.unpack_alias_ref()
+        else {
+            unreachable!("expected left join key column ref");
+        };
+        let ScalarExpression::ColumnRef {
+            position: right_position,
+            ..
+        } = on[0].1.unpack_alias_ref()
+        else {
+            unreachable!("expected right join key column ref");
+        };
+        assert_eq!(*left_position, 0);
+        assert_eq!(*right_position, 0);
+        let (_, right_child) = join_plan.childrens.pop_twins();
+        let Operator::Filter(filter_op) = right_child.operator else {
+            unreachable!("expected pushed-down filter on right child");
+        };
+        let ScalarExpression::Binary {
+            left_expr,
+            right_expr,
+            ..
+        } = filter_op.predicate
+        else {
+            unreachable!("expected binary filter predicate");
+        };
+        let ScalarExpression::ColumnRef {
+            position: filter_position,
+            ..
+        } = left_expr.unpack_alias_ref()
+        else {
+            unreachable!("expected filter column ref");
+        };
+        assert_eq!(*filter_position, 1);
+        assert!(matches!(
+            *right_expr,
+            ScalarExpression::Constant(DataValue::Int32(53))
+        ));
+
         Ok(())
     }
 

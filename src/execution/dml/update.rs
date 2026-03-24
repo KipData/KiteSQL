@@ -16,7 +16,7 @@ use crate::catalog::{ColumnRef, TableName};
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
 use crate::execution::{build_read, spawn_executor, Executor, WriteExecutor};
-use crate::expression::{BindPosition, ScalarExpression};
+use crate::expression::ScalarExpression;
 use crate::planner::operator::update::UpdateOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
@@ -26,7 +26,6 @@ use crate::types::tuple::Tuple;
 use crate::types::tuple_builder::TupleBuilder;
 use crate::types::value::DataValue;
 use itertools::Itertools;
-use std::borrow::Cow;
 use std::collections::HashMap;
 
 pub struct Update {
@@ -85,15 +84,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Update {
                     .collect_vec();
                 let mut index_metas = Vec::new();
                 for index_meta in table_catalog.indexes() {
-                    let mut exprs = throw!(co, index_meta.column_exprs(&table_catalog));
-                    throw!(
-                        co,
-                        BindPosition::bind_exprs(
-                            exprs.iter_mut(),
-                            || input_schema.iter().map(Cow::Borrowed),
-                            |a, b| a == b
-                        )
-                    );
+                    let exprs = throw!(co, index_meta.column_exprs(&table_catalog));
                     index_metas.push((index_meta, exprs));
                 }
 

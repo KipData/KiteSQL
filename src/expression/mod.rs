@@ -13,12 +13,12 @@
 // limitations under the License.
 
 use self::agg::AggKind;
-use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, ColumnSummary};
+use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
 use crate::errors::DatabaseError;
 use crate::expression::function::scala::ScalarFunction;
 use crate::expression::function::table::TableFunction;
 use crate::expression::visitor::{walk_expr, Visitor};
-use crate::expression::visitor_mut::{walk_mut_expr, VisitorMut};
+use crate::expression::visitor_mut::VisitorMut;
 use crate::types::evaluator::{BinaryEvaluatorBox, EvaluatorFactory, UnaryEvaluatorBox};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
@@ -28,10 +28,8 @@ use sqlparser::ast::TrimWhereField;
 use sqlparser::ast::{
     BinaryOperator as SqlBinaryOperator, CharLengthUnits, UnaryOperator as SqlUnaryOperator,
 };
-use std::borrow::Cow;
 use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
-use std::slice::IterMut;
 use std::{fmt, mem};
 
 pub mod agg;
@@ -57,7 +55,7 @@ pub enum ScalarExpression {
     Constant(DataValue),
     ColumnRef {
         column: ColumnRef,
-        position: Option<usize>,
+        position: usize,
     },
     Alias {
         expr: Box<ScalarExpression>,
@@ -146,79 +144,6 @@ pub enum ScalarExpression {
         else_expr: Option<Box<ScalarExpression>>,
         ty: LogicalType,
     },
-}
-
-#[derive(Clone)]
-pub struct BindPosition<
-    T: Clone,
-    F: Clone + Fn() -> T,
-    E: Fn(&ColumnSummary, &ColumnSummary) -> bool,
-> {
-    fn_output_columns: F,
-    fn_eq: E,
-}
-
-impl<
-        'a,
-        'b,
-        T: Iterator<Item = Cow<'b, ColumnRef>> + Clone,
-        F: Clone + Fn() -> T,
-        E: Clone + Fn(&ColumnSummary, &ColumnSummary) -> bool,
-    > VisitorMut<'a> for BindPosition<T, F, E>
-{
-    fn visit(&mut self, expr: &'a mut ScalarExpression) -> Result<(), DatabaseError> {
-        walk_mut_expr(&mut self.clone(), expr)?;
-
-        let column = expr.output_column();
-
-        if let Some((pos, _)) = (self.fn_output_columns)()
-            .find_position(|c| (self.fn_eq)(c.summary(), column.summary()))
-        {
-            *expr = ScalarExpression::ColumnRef {
-                column,
-                position: Some(pos),
-            };
-        }
-        Ok(())
-    }
-
-    fn visit_alias(
-        &mut self,
-        expr: &'a mut ScalarExpression,
-        ty: &'a mut AliasType,
-    ) -> Result<(), DatabaseError> {
-        if let AliasType::Expr(inner_expr) = ty {
-            self.visit(inner_expr)?;
-        }
-        self.visit(expr)?;
-        Ok(())
-    }
-}
-
-impl<'b, T, F, E> BindPosition<T, F, E>
-where
-    T: Iterator<Item = Cow<'b, ColumnRef>> + Clone,
-    F: Clone + Fn() -> T,
-    E: Clone + Fn(&ColumnSummary, &ColumnSummary) -> bool,
-{
-    pub fn new(output_columns: F, fn_eq: E) -> BindPosition<T, F, E> {
-        BindPosition {
-            fn_output_columns: output_columns,
-            fn_eq,
-        }
-    }
-
-    pub fn bind_exprs(
-        exprs: IterMut<ScalarExpression>,
-        fn_schema: F,
-        fn_eq: E,
-    ) -> Result<(), DatabaseError> {
-        let mut bind_schema_position = BindPosition::new(fn_schema, fn_eq);
-        for expr in exprs {
-            bind_schema_position.visit(expr)?;
-        }
-        Ok(())
-    }
 }
 
 pub struct BindEvaluator;
@@ -311,11 +236,8 @@ impl Visitor<'_> for HasCountStar {
 }
 
 impl ScalarExpression {
-    pub fn column_expr(column: ColumnRef) -> ScalarExpression {
-        ScalarExpression::ColumnRef {
-            column,
-            position: None,
-        }
+    pub fn column_expr(column: ColumnRef, position: usize) -> ScalarExpression {
+        ScalarExpression::ColumnRef { column, position }
     }
 
     pub fn unpack_alias(self) -> ScalarExpression {
@@ -406,17 +328,6 @@ impl ScalarExpression {
             fn visit_column_ref(&mut self, col: &ColumnRef) -> Result<(), DatabaseError> {
                 self.0.push(col.clone());
                 Ok(())
-            }
-
-            fn visit_alias(
-                &mut self,
-                expr: &ScalarExpression,
-                ty: &AliasType,
-            ) -> Result<(), DatabaseError> {
-                if let AliasType::Expr(alias_expr) = ty {
-                    self.0.push(alias_expr.output_column());
-                }
-                self.visit(expr)
             }
         }
         struct OutputColumnCollector(Vec<ColumnRef>);
@@ -900,33 +811,39 @@ mod test {
         )?;
         fn_assert(
             &mut cursor,
-            ScalarExpression::column_expr(ColumnRef::from(ColumnCatalog::direct_new(
-                ColumnSummary {
-                    name: "c3".to_string(),
-                    relation: ColumnRelation::Table {
-                        column_id: c3_column_id,
-                        table_name: "t1".to_string().into(),
-                        is_temp: false,
+            ScalarExpression::column_expr(
+                ColumnRef::from(ColumnCatalog::direct_new(
+                    ColumnSummary {
+                        name: "c3".to_string(),
+                        relation: ColumnRelation::Table {
+                            column_id: c3_column_id,
+                            table_name: "t1".to_string().into(),
+                            is_temp: false,
+                        },
                     },
-                },
-                false,
-                ColumnDesc::new(LogicalType::Integer, None, false, None)?,
-                false,
-            ))),
+                    false,
+                    ColumnDesc::new(LogicalType::Integer, None, false, None)?,
+                    false,
+                )),
+                0,
+            ),
             Some((&transaction, &table_cache)),
             &mut reference_tables,
         )?;
         fn_assert(
             &mut cursor,
-            ScalarExpression::column_expr(ColumnRef::from(ColumnCatalog::direct_new(
-                ColumnSummary {
-                    name: "c4".to_string(),
-                    relation: ColumnRelation::None,
-                },
-                false,
-                ColumnDesc::new(LogicalType::Boolean, None, false, None)?,
-                false,
-            ))),
+            ScalarExpression::column_expr(
+                ColumnRef::from(ColumnCatalog::direct_new(
+                    ColumnSummary {
+                        name: "c4".to_string(),
+                        relation: ColumnRelation::None,
+                    },
+                    false,
+                    ColumnDesc::new(LogicalType::Boolean, None, false, None)?,
+                    false,
+                )),
+                1,
+            ),
             Some((&transaction, &table_cache)),
             &mut reference_tables,
         )?;

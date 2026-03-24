@@ -6,6 +6,8 @@ CREATE TABLE TABLE_F471_01_01 ( ID INT PRIMARY KEY, A INTEGER );
 statement ok
 INSERT INTO TABLE_F471_01_01 ( ID, A ) VALUES ( 0, 1 );
 
+# Regression: scalar subqueries in the SELECT list should execute directly
+# instead of falling through the temporary projection/subquery path.
 query I
 SELECT ( SELECT A FROM TABLE_F471_01_01 ) FROM TABLE_F471_01_01
 ----

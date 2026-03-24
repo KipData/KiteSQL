@@ -121,10 +121,7 @@ mod tests {
             .before_batch(
                 "Expression Remapper".to_string(),
                 HepBatchStrategy::once_topdown(),
-                vec![
-                    NormalizationRuleImpl::BindExpressionPosition,
-                    NormalizationRuleImpl::EvaluatorBind,
-                ],
+                vec![NormalizationRuleImpl::EvaluatorBind],
             )
             .build()
             .instantiate(plan)
@@ -154,7 +151,7 @@ mod tests {
             Childrens::None,
         );
         let agg = AggregateOperator {
-            groupby_exprs: vec![ScalarExpression::column_expr(schema_ref[0].clone())],
+            groupby_exprs: vec![ScalarExpression::column_expr(schema_ref[0].clone(), 0)],
             agg_calls: vec![],
             is_distinct: true,
         };
@@ -204,8 +201,8 @@ mod tests {
         );
         let agg = AggregateOperator {
             groupby_exprs: vec![
-                ScalarExpression::column_expr(schema_ref[0].clone()),
-                ScalarExpression::column_expr(schema_ref[1].clone()),
+                ScalarExpression::column_expr(schema_ref[0].clone(), 0),
+                ScalarExpression::column_expr(schema_ref[1].clone(), 1),
             ],
             agg_calls: vec![],
             is_distinct: true,

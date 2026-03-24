@@ -297,10 +297,7 @@ mod test {
             .before_batch(
                 "Expression Remapper".to_string(),
                 HepBatchStrategy::once_topdown(),
-                vec![
-                    NormalizationRuleImpl::BindExpressionPosition,
-                    NormalizationRuleImpl::EvaluatorBind,
-                ],
+                vec![NormalizationRuleImpl::EvaluatorBind],
             )
             .build()
             .instantiate(plan)
@@ -327,8 +324,8 @@ mod test {
         ];
 
         let on_keys = vec![(
-            ScalarExpression::column_expr(t1_columns[0].clone()),
-            ScalarExpression::column_expr(t2_columns[0].clone()),
+            ScalarExpression::column_expr(t1_columns[0].clone(), 0),
+            ScalarExpression::column_expr(t2_columns[0].clone(), 0),
         )];
 
         let values_t1 = LogicalPlan {
@@ -616,12 +613,12 @@ mod test {
         ))];
 
         let on_keys = vec![(
-            ScalarExpression::column_expr(left_columns[0].clone()),
-            ScalarExpression::column_expr(right_columns[0].clone()),
+            ScalarExpression::column_expr(left_columns[0].clone(), 0),
+            ScalarExpression::column_expr(right_columns[0].clone(), 0),
         )];
         let filter_expr = ScalarExpression::Binary {
             op: BinaryOperator::Gt,
-            left_expr: Box::new(ScalarExpression::column_expr(left_columns[1].clone())),
+            left_expr: Box::new(ScalarExpression::column_expr(left_columns[1].clone(), 1)),
             right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(1))),
             evaluator: None,
             ty: LogicalType::Boolean,

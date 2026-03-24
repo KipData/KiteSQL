@@ -13,15 +13,14 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+use crate::expression::visitor_mut::{walk_mut_expr, VisitorMut};
 use crate::expression::{AliasType, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::rule::normalization::column_pruning::ColumnPruning;
 use crate::optimizer::rule::normalization::combine_operators::{
     CollapseGroupByAgg, CollapseProject, CombineFilter,
 };
-use crate::optimizer::rule::normalization::compilation_in_advance::{
-    BindExpressionPosition, EvaluatorBind,
-};
+use crate::optimizer::rule::normalization::compilation_in_advance::EvaluatorBind;
 use crate::planner::operator::Operator;
 
 use crate::optimizer::rule::normalization::agg_elimination::{
@@ -38,6 +37,7 @@ use crate::optimizer::rule::normalization::simplification::ConstantCalculation;
 use crate::optimizer::rule::normalization::simplification::SimplifyFilter;
 use crate::optimizer::rule::normalization::top_k::TopK;
 use crate::planner::LogicalPlan;
+use crate::types::tuple::SchemaRef;
 mod agg_elimination;
 mod column_pruning;
 mod combine_operators;
@@ -48,7 +48,7 @@ mod pushdown_predicates;
 mod simplification;
 mod top_k;
 pub use agg_elimination::{annotate_sort_preserving_indexes, annotate_stream_distinct_indexes};
-pub(crate) use compilation_in_advance::{bind_expression_position_current, evaluator_bind_current};
+pub(crate) use compilation_in_advance::evaluator_bind_current;
 pub(crate) use simplification::constant_calculation_current;
 
 #[derive(Debug, Copy, Clone)]
@@ -71,7 +71,6 @@ pub enum NormalizationRuleImpl {
     SimplifyFilter,
     ConstantCalculation,
     // CompilationInAdvance
-    BindExpressionPosition,
     EvaluatorBind,
     MinMaxToTopK,
     TopK,
@@ -124,9 +123,7 @@ impl NormalizationRuleImpl {
             NormalizationRuleImpl::ColumnPruning => {
                 NormalizationPassKind::WholeTreePass(WholeTreePassKind::ColumnPruning)
             }
-            NormalizationRuleImpl::ConstantCalculation
-            | NormalizationRuleImpl::BindExpressionPosition
-            | NormalizationRuleImpl::EvaluatorBind => {
+            NormalizationRuleImpl::ConstantCalculation | NormalizationRuleImpl::EvaluatorBind => {
                 NormalizationPassKind::WholeTreePass(WholeTreePassKind::ExpressionRewrite)
             }
             _ => NormalizationPassKind::LocalRewrite,
@@ -148,7 +145,6 @@ impl NormalizationRuleImpl {
             | NormalizationRuleImpl::SimplifyFilter => NormalizationRuleRootTag::Filter,
             NormalizationRuleImpl::PushJoinPredicateIntoScan => NormalizationRuleRootTag::Join,
             NormalizationRuleImpl::ConstantCalculation => NormalizationRuleRootTag::Any,
-            NormalizationRuleImpl::BindExpressionPosition => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::EvaluatorBind => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::MinMaxToTopK | NormalizationRuleImpl::UseStreamDistinct => {
                 NormalizationRuleRootTag::Aggregate
@@ -175,7 +171,6 @@ impl NormalizationRule for NormalizationRuleImpl {
             NormalizationRuleImpl::SimplifyFilter => SimplifyFilter.apply(plan),
             NormalizationRuleImpl::PushPredicateIntoScan => PushPredicateIntoScan.apply(plan),
             NormalizationRuleImpl::ConstantCalculation => ConstantCalculation.apply(plan),
-            NormalizationRuleImpl::BindExpressionPosition => BindExpressionPosition.apply(plan),
             NormalizationRuleImpl::EvaluatorBind => EvaluatorBind.apply(plan),
             NormalizationRuleImpl::MinMaxToTopK => MinMaxToTopK.apply(plan),
             NormalizationRuleImpl::TopK => TopK.apply(plan),
@@ -221,4 +216,104 @@ pub fn is_subset_exprs(left: &[ScalarExpression], right: &[ScalarExpression]) ->
             false
         })
     })
+}
+
+pub(crate) fn derive_retained_positions_into(
+    old_outputs: &SchemaRef,
+    new_outputs: &SchemaRef,
+    retained_positions: &mut Vec<usize>,
+) {
+    retained_positions.clear();
+    let mut search_from = 0;
+
+    for new_column in new_outputs.iter() {
+        let Some(relative_position) = old_outputs[search_from..]
+            .iter()
+            .position(|old_column| old_column == new_column)
+        else {
+            debug_assert!(
+                false,
+                "new outputs should be a left-to-right subsequence of old outputs"
+            );
+            return;
+        };
+        let old_position = search_from + relative_position;
+        retained_positions.push(old_position);
+        search_from = old_position + 1;
+    }
+}
+
+pub(crate) fn derive_position_remap_into(
+    old_len: usize,
+    retained_positions: &[usize],
+    removed_positions: &mut Vec<usize>,
+) {
+    removed_positions.clear();
+    let mut retained_iter = retained_positions.iter().copied();
+    let mut current_retained = retained_iter.next();
+
+    for position in 0..old_len {
+        if current_retained == Some(position) {
+            current_retained = retained_iter.next();
+        } else {
+            removed_positions.push(position);
+        }
+    }
+
+    debug_assert!(
+        current_retained.is_none(),
+        "retained positions should be ordered old output slots"
+    );
+}
+
+pub(crate) fn remap_position(position: &mut usize, removed_positions: &[usize]) {
+    match removed_positions.binary_search(position) {
+        Ok(_) => {
+            debug_assert!(
+                false,
+                "encountered a reference to pruned output slot {position}"
+            );
+        }
+        Err(shift) => {
+            *position -= shift;
+        }
+    }
+}
+
+struct PositionRemapper<'a> {
+    removed_positions: &'a [usize],
+}
+
+impl<'a> VisitorMut<'a> for PositionRemapper<'_> {
+    fn visit(&mut self, expr: &'a mut ScalarExpression) -> Result<(), DatabaseError> {
+        match expr {
+            ScalarExpression::ColumnRef { position, .. } => {
+                remap_position(position, self.removed_positions);
+                Ok(())
+            }
+            ScalarExpression::Alias { expr, alias } => match alias {
+                AliasType::Expr(alias_expr) => self.visit(alias_expr),
+                AliasType::Name(_) => self.visit(expr),
+            },
+            _ => walk_mut_expr(self, expr),
+        }
+    }
+}
+
+pub(crate) fn remap_expr_positions(
+    expr: &mut ScalarExpression,
+    removed_positions: &[usize],
+) -> Result<(), DatabaseError> {
+    PositionRemapper { removed_positions }.visit(expr)
+}
+
+pub(crate) fn remap_exprs_positions<'a>(
+    exprs: impl IntoIterator<Item = &'a mut ScalarExpression>,
+    removed_positions: &[usize],
+) -> Result<(), DatabaseError> {
+    let mut remapper = PositionRemapper { removed_positions };
+    for expr in exprs {
+        remapper.visit(expr)?;
+    }
+    Ok(())
 }

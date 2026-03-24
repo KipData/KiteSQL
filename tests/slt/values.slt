@@ -36,6 +36,8 @@ CREATE TABLE t (x INT PRIMARY KEY);
 statement ok
 INSERT INTO t VALUES (1), (2), (3);
 
+# Regression: wildcard expansion over a joined VALUES source should keep the
+# visible output shape instead of duplicating the join key column.
 query I rowsort
 SELECT * FROM t JOIN (VALUES (2), (3)) AS v(x) ON t.x = v.x;
 ----

@@ -196,11 +196,11 @@ mod test {
         };
         let plan = LogicalPlan::new(
             Operator::Aggregate(AggregateOperator {
-                groupby_exprs: vec![ScalarExpression::column_expr(t1_schema[0].clone())],
+                groupby_exprs: vec![ScalarExpression::column_expr(t1_schema[0].clone(), 0)],
                 agg_calls: vec![ScalarExpression::AggCall {
                     distinct: false,
                     kind: AggKind::Sum,
-                    args: vec![ScalarExpression::column_expr(t1_schema[1].clone())],
+                    args: vec![ScalarExpression::column_expr(t1_schema[1].clone(), 1)],
                     ty: LogicalType::Integer,
                 }],
                 is_distinct: false,
@@ -212,11 +212,7 @@ mod test {
             .before_batch(
                 "Expression Remapper".to_string(),
                 HepBatchStrategy::once_topdown(),
-                vec![
-                    NormalizationRuleImpl::BindExpressionPosition,
-                    // TIPS: This rule is necessary
-                    NormalizationRuleImpl::EvaluatorBind,
-                ],
+                vec![NormalizationRuleImpl::EvaluatorBind],
             )
             .build();
         let plan = pipeline

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::expression::ScalarExpression;
 use crate::optimizer::core::memo::Memo;
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
@@ -23,10 +22,8 @@ use crate::optimizer::heuristic::batch::{
 use crate::optimizer::rule::implementation::ImplementationRuleImpl;
 use crate::optimizer::rule::normalization::{
     annotate_sort_preserving_indexes, annotate_stream_distinct_indexes,
-    bind_expression_position_current, constant_calculation_current, evaluator_bind_current,
-    NormalizationRuleImpl, WholeTreePassKind,
+    constant_calculation_current, evaluator_bind_current, NormalizationRuleImpl, WholeTreePassKind,
 };
-use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use std::ops::Not;
@@ -127,10 +124,6 @@ impl<'a> HepOptimizer<'a> {
                     .rules
                     .iter()
                     .any(|rule| matches!(rule, NormalizationRuleImpl::ConstantCalculation));
-                let has_bind_expression_position = pass
-                    .rules
-                    .iter()
-                    .any(|rule| matches!(rule, NormalizationRuleImpl::BindExpressionPosition));
                 let has_evaluator_bind = pass
                     .rules
                     .iter()
@@ -139,7 +132,6 @@ impl<'a> HepOptimizer<'a> {
                 Self::apply_expression_rewrite_pass(
                     plan,
                     has_constant_calculation,
-                    has_bind_expression_position,
                     has_evaluator_bind,
                 )?;
                 Ok(true)
@@ -150,71 +142,45 @@ impl<'a> HepOptimizer<'a> {
     fn apply_expression_rewrite_pass(
         plan: &mut LogicalPlan,
         has_constant_calculation: bool,
-        has_bind_expression_position: bool,
         has_evaluator_bind: bool,
     ) -> Result<(), DatabaseError> {
-        let mut output_exprs = Vec::new();
         Self::apply_expression_rewrite_pass_inner(
             plan,
-            &mut output_exprs,
             has_constant_calculation,
-            has_bind_expression_position,
             has_evaluator_bind,
         )
     }
 
     fn apply_expression_rewrite_pass_inner(
         plan: &mut LogicalPlan,
-        output_exprs: &mut Vec<ScalarExpression>,
         has_constant_calculation: bool,
-        has_bind_expression_position: bool,
         has_evaluator_bind: bool,
     ) -> Result<(), DatabaseError> {
-        let mut left_len = 0;
         match plan.childrens.as_mut() {
             Childrens::Only(child) => {
                 Self::apply_expression_rewrite_pass_inner(
                     child,
-                    output_exprs,
                     has_constant_calculation,
-                    has_bind_expression_position,
                     has_evaluator_bind,
                 )?;
             }
             Childrens::Twins { left, right } => {
                 Self::apply_expression_rewrite_pass_inner(
                     left,
-                    output_exprs,
                     has_constant_calculation,
-                    has_bind_expression_position,
                     has_evaluator_bind,
                 )?;
-                if matches!(
-                    plan.operator,
-                    Operator::Join(_) | Operator::Union(_) | Operator::Except(_)
-                ) {
-                    let mut second_output_exprs = Vec::new();
-                    Self::apply_expression_rewrite_pass_inner(
-                        right,
-                        &mut second_output_exprs,
-                        has_constant_calculation,
-                        has_bind_expression_position,
-                        has_evaluator_bind,
-                    )?;
-                    left_len = output_exprs.len();
-                    output_exprs.append(&mut second_output_exprs);
-                }
+                Self::apply_expression_rewrite_pass_inner(
+                    right,
+                    has_constant_calculation,
+                    has_evaluator_bind,
+                )?;
             }
             Childrens::None => {}
         }
 
         if has_constant_calculation {
             constant_calculation_current(plan)?;
-        }
-        if has_bind_expression_position {
-            bind_expression_position_current(output_exprs, plan, left_len)?;
-        } else {
-            plan.operator.output_exprs(output_exprs);
         }
         if has_evaluator_bind {
             evaluator_bind_current(plan)?;
