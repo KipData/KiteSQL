@@ -1151,7 +1151,7 @@ pub(crate) mod test {
         };
         let mut referenced_columns = Vec::new();
         filter.visit_referenced_columns(true, &mut |column| {
-            referenced_columns.push(column);
+            referenced_columns.push(column.clone());
             true
         });
         assert_eq!(referenced_columns.len(), 1);

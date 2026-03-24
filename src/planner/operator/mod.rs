@@ -262,7 +262,7 @@ impl Operator {
     pub fn visit_referenced_columns(
         &self,
         only_column_ref: bool,
-        f: &mut impl FnMut(ColumnRef) -> bool,
+        f: &mut impl FnMut(&ColumnRef) -> bool,
     ) -> bool {
         match self {
             Operator::Aggregate(op) => op
@@ -292,7 +292,7 @@ impl Operator {
                 .iter()
                 .all(|expr| expr.visit_referenced_columns(only_column_ref, f)),
             Operator::ScalarSubquery(_) => true,
-            Operator::TableScan(op) => op.columns.values().cloned().all(f),
+            Operator::TableScan(op) => op.columns.values().all(f),
             Operator::FunctionScan(op) => op
                 .table_function
                 .args
@@ -308,9 +308,7 @@ impl Operator {
                 .iter()
                 .map(|field| &field.expr)
                 .all(|expr| expr.visit_referenced_columns(only_column_ref, f)),
-            Operator::Values(ValuesOperator { schema_ref, .. }) => {
-                schema_ref.iter().cloned().all(f)
-            }
+            Operator::Values(ValuesOperator { schema_ref, .. }) => schema_ref.iter().all(f),
             Operator::Union(UnionOperator {
                 left_schema_ref,
                 _right_schema_ref,
@@ -321,10 +319,9 @@ impl Operator {
             }) => left_schema_ref
                 .iter()
                 .chain(_right_schema_ref.iter())
-                .cloned()
                 .all(f),
             Operator::Analyze(_) => true,
-            Operator::Delete(op) => op.primary_keys.iter().cloned().all(f),
+            Operator::Delete(op) => op.primary_keys.iter().all(f),
             Operator::Dummy
             | Operator::Limit(_)
             | Operator::ShowTable
@@ -355,7 +352,7 @@ impl Operator {
     ) -> bool {
         let mut found = false;
         self.visit_referenced_columns(only_column_ref, &mut |column| {
-            found = predicate(&column);
+            found = predicate(column);
             !found
         });
         found
@@ -368,7 +365,7 @@ impl Operator {
     ) -> bool {
         let mut all = true;
         self.visit_referenced_columns(only_column_ref, &mut |column| {
-            all = predicate(&column);
+            all = predicate(column);
             all
         });
         all

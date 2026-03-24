@@ -325,13 +325,13 @@ impl ScalarExpression {
     pub fn visit_referenced_columns(
         &self,
         only_column_ref: bool,
-        f: &mut impl FnMut(ColumnRef) -> bool,
+        f: &mut impl FnMut(&ColumnRef) -> bool,
     ) -> bool {
         struct ColumnRefVisitor<'a, F> {
             f: &'a mut F,
             keep_going: bool,
         }
-        impl<F: FnMut(ColumnRef) -> bool> Visitor<'_> for ColumnRefVisitor<'_, F> {
+        impl<F: FnMut(&ColumnRef) -> bool> Visitor<'_> for ColumnRefVisitor<'_, F> {
             fn visit(&mut self, expr: &ScalarExpression) -> Result<(), DatabaseError> {
                 if self.keep_going {
                     walk_expr(self, expr)?;
@@ -340,7 +340,7 @@ impl ScalarExpression {
             }
 
             fn visit_column_ref(&mut self, col: &ColumnRef) -> Result<(), DatabaseError> {
-                self.keep_going = (self.f)(col.clone());
+                self.keep_going = (self.f)(col);
                 Ok(())
             }
         }
@@ -348,14 +348,14 @@ impl ScalarExpression {
             f: &'a mut F,
             keep_going: bool,
         }
-        impl<F: FnMut(ColumnRef) -> bool> Visitor<'_> for OutputColumnVisitor<'_, F> {
+        impl<F: FnMut(&ColumnRef) -> bool> Visitor<'_> for OutputColumnVisitor<'_, F> {
             fn visit(&mut self, expr: &ScalarExpression) -> Result<(), DatabaseError> {
                 if !self.keep_going {
                     return Ok(());
                 }
 
                 let output = expr.output_column();
-                self.keep_going = (self.f)(output);
+                self.keep_going = (self.f)(&output);
                 if self.keep_going {
                     walk_expr(self, expr)?;
                 }
@@ -387,7 +387,7 @@ impl ScalarExpression {
     ) -> bool {
         let mut found = false;
         self.visit_referenced_columns(only_column_ref, &mut |column| {
-            found = predicate(&column);
+            found = predicate(column);
             !found
         });
         found
@@ -400,7 +400,7 @@ impl ScalarExpression {
     ) -> bool {
         let mut all = true;
         self.visit_referenced_columns(only_column_ref, &mut |column| {
-            all = predicate(&column);
+            all = predicate(column);
             all
         });
         all

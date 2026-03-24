@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::{ColumnRef, ColumnSummary};
+use crate::catalog::ColumnSummary;
 use crate::errors::DatabaseError;
 use crate::expression::agg::AggKind;
 use crate::expression::visitor::{walk_expr, Visitor};
@@ -33,40 +33,126 @@ use std::collections::HashSet;
 #[derive(Clone)]
 pub struct ColumnPruning;
 
-macro_rules! trans_references {
-    ($columns:expr) => {{
-        let mut column_references = HashSet::with_capacity($columns.len());
-        for column in $columns {
-            column_references.insert(column.summary());
-        }
-        column_references
-    }};
-}
-
 impl ColumnPruning {
-    fn collect_operator_referenced_columns(
-        operator: &Operator,
-        referenced_columns: &mut Vec<ColumnRef>,
+    fn extend_operator_referenced_columns<'a>(
+        operator: &'a Operator,
+        referenced_columns: &mut HashSet<&'a ColumnSummary>,
     ) {
-        referenced_columns.clear();
-        operator.visit_referenced_columns(false, &mut |column| {
-            referenced_columns.push(column);
-            true
-        });
+        match operator {
+            Operator::Aggregate(op) => {
+                Self::extend_expr_referenced_columns(
+                    op.agg_calls.iter().chain(op.groupby_exprs.iter()),
+                    referenced_columns,
+                );
+            }
+            Operator::Filter(op) => {
+                Self::extend_expr_referenced_columns([&op.predicate], referenced_columns);
+            }
+            Operator::Join(op) => {
+                if let JoinCondition::On { on, filter } = &op.on {
+                    for (left_expr, right_expr) in on {
+                        Self::extend_expr_referenced_columns(
+                            [left_expr, right_expr],
+                            referenced_columns,
+                        );
+                    }
+                    if let Some(filter_expr) = filter {
+                        Self::extend_expr_referenced_columns([filter_expr], referenced_columns);
+                    }
+                }
+            }
+            Operator::Project(op) => {
+                Self::extend_expr_referenced_columns(op.exprs.iter(), referenced_columns);
+            }
+            Operator::TableScan(op) => {
+                referenced_columns.extend(op.columns.values().map(|column| column.summary()));
+            }
+            Operator::FunctionScan(op) => {
+                Self::extend_expr_referenced_columns(
+                    op.table_function.args.iter(),
+                    referenced_columns,
+                );
+            }
+            Operator::Sort(op) => {
+                Self::extend_expr_referenced_columns(
+                    op.sort_fields.iter().map(|field| &field.expr),
+                    referenced_columns,
+                );
+            }
+            Operator::TopK(op) => {
+                Self::extend_expr_referenced_columns(
+                    op.sort_fields.iter().map(|field| &field.expr),
+                    referenced_columns,
+                );
+            }
+            Operator::Values(op) => {
+                referenced_columns.extend(op.schema_ref.iter().map(|column| column.summary()));
+            }
+            Operator::Union(op) => {
+                referenced_columns.extend(
+                    op.left_schema_ref
+                        .iter()
+                        .chain(op._right_schema_ref.iter())
+                        .map(|column| column.summary()),
+                );
+            }
+            Operator::Except(op) => {
+                referenced_columns.extend(
+                    op.left_schema_ref
+                        .iter()
+                        .chain(op._right_schema_ref.iter())
+                        .map(|column| column.summary()),
+                );
+            }
+            Operator::Delete(op) => {
+                referenced_columns.extend(op.primary_keys.iter().map(|column| column.summary()));
+            }
+            Operator::Dummy
+            | Operator::Limit(_)
+            | Operator::ScalarSubquery(_)
+            | Operator::Analyze(_)
+            | Operator::ShowTable
+            | Operator::ShowView
+            | Operator::Explain
+            | Operator::Describe(_)
+            | Operator::Insert(_)
+            | Operator::Update(_)
+            | Operator::AddColumn(_)
+            | Operator::ChangeColumn(_)
+            | Operator::DropColumn(_)
+            | Operator::CreateTable(_)
+            | Operator::CreateIndex(_)
+            | Operator::CreateView(_)
+            | Operator::DropTable(_)
+            | Operator::DropView(_)
+            | Operator::DropIndex(_)
+            | Operator::Truncate(_)
+            | Operator::CopyFromFile(_)
+            | Operator::CopyToFile(_) => {}
+        }
     }
 
-    fn collect_expr_referenced_columns<'a>(
+    fn extend_expr_referenced_columns<'a>(
         exprs: impl IntoIterator<Item = &'a ScalarExpression>,
-        referenced_columns: &mut Vec<ColumnRef>,
+        referenced_columns: &mut HashSet<&'a ColumnSummary>,
     ) {
-        referenced_columns.clear();
-        for expr in exprs {
-            if !expr.visit_referenced_columns(false, &mut |column| {
-                referenced_columns.push(column);
-                true
-            }) {
-                break;
+        struct ColumnSummaryCollector<'a, 'b> {
+            referenced_columns: &'b mut HashSet<&'a ColumnSummary>,
+        }
+
+        impl<'a> Visitor<'a> for ColumnSummaryCollector<'a, '_> {
+            fn visit_column_ref(
+                &mut self,
+                column: &'a crate::catalog::ColumnRef,
+            ) -> Result<(), DatabaseError> {
+                self.referenced_columns.insert(column.summary());
+                Ok(())
             }
+        }
+
+        let mut collector = ColumnSummaryCollector { referenced_columns };
+        for expr in exprs {
+            collector.visit(expr).unwrap();
         }
     }
 
@@ -74,12 +160,12 @@ impl ColumnPruning {
         expr: &ScalarExpression,
         column_references: &HashSet<&ColumnSummary>,
     ) -> bool {
-        struct ReferenceChecker<'a, 'b> {
-            column_references: &'a HashSet<&'b ColumnSummary>,
+        struct ReferenceChecker<'a> {
+            column_references: &'a HashSet<&'a ColumnSummary>,
             found: bool,
         }
 
-        impl<'a, 'b> Visitor<'_> for ReferenceChecker<'a, 'b> {
+        impl Visitor<'_> for ReferenceChecker<'_> {
             fn visit(&mut self, expr: &ScalarExpression) -> Result<(), DatabaseError> {
                 if self.found {
                     return Ok(());
@@ -186,14 +272,14 @@ impl ColumnPruning {
         remap_exprs_positions(exprs, removed_positions)
     }
 
-    fn recollect_apply_only_child(
-        referenced_columns: HashSet<&ColumnSummary>,
+    fn apply_only_child<'a>(
+        referenced_columns: HashSet<&'a ColumnSummary>,
         all_referenced: bool,
-        plan: &mut LogicalPlan,
+        childrens: &mut Childrens,
         retained_positions: &mut Vec<usize>,
         removed_positions: &mut Vec<usize>,
     ) -> Result<bool, DatabaseError> {
-        let Childrens::Only(child) = plan.childrens.as_mut() else {
+        let Childrens::Only(child) = childrens else {
             return Ok(false);
         };
         let child = child.as_mut();
@@ -207,21 +293,20 @@ impl ColumnPruning {
         let new_outputs = child.output_schema().clone();
         derive_retained_positions_into(&old_outputs, &new_outputs, retained_positions);
         derive_position_remap_into(old_outputs.len(), retained_positions, removed_positions);
-        Self::remap_operator_after_child_change(&mut plan.operator, removed_positions)?;
 
         Ok(true)
     }
 
-    fn recollect_apply_join(
-        referenced_columns: HashSet<&ColumnSummary>,
+    fn apply_join_children<'a>(
+        referenced_columns: HashSet<&'a ColumnSummary>,
         all_referenced: bool,
-        plan: &mut LogicalPlan,
+        childrens: &mut Childrens,
         left_retained_positions: &mut Vec<usize>,
         right_retained_positions: &mut Vec<usize>,
         left_removed_positions: &mut Vec<usize>,
         right_removed_positions: &mut Vec<usize>,
     ) -> Result<bool, DatabaseError> {
-        let Childrens::Twins { left, right } = plan.childrens.as_mut() else {
+        let Childrens::Twins { left, right } = childrens else {
             return Ok(false);
         };
         let left = left.as_mut();
@@ -272,42 +357,15 @@ impl ColumnPruning {
             right_removed_positions.clear();
         }
 
-        if let Operator::Join(op) = &mut plan.operator {
-            match &mut op.on {
-                JoinCondition::On { on, filter } => {
-                    for (left_expr, right_expr) in on {
-                        remap_expr_positions(left_expr, left_removed_positions)?;
-                        remap_expr_positions(right_expr, right_removed_positions)?;
-                    }
-                    if let Some(filter) = filter {
-                        if !left_removed_positions.is_empty() || !right_removed_positions.is_empty()
-                        {
-                            let mut removed_positions = Vec::with_capacity(
-                                left_removed_positions.len() + right_removed_positions.len(),
-                            );
-                            removed_positions.extend_from_slice(left_removed_positions);
-                            removed_positions.extend(
-                                right_removed_positions
-                                    .iter()
-                                    .map(|position| position + old_left_outputs.len()),
-                            );
-                            remap_expr_positions(filter, &removed_positions)?;
-                        }
-                    }
-                }
-                JoinCondition::None => {}
-            }
-        }
-
         Ok(true)
     }
 
-    fn recollect_apply_twins(
-        referenced_columns: HashSet<&ColumnSummary>,
+    fn apply_twins<'a>(
+        referenced_columns: HashSet<&'a ColumnSummary>,
         all_referenced: bool,
-        plan: &mut LogicalPlan,
+        childrens: &mut Childrens,
     ) -> Result<bool, DatabaseError> {
-        let Childrens::Twins { left, right } = plan.childrens.as_mut() else {
+        let Childrens::Twins { left, right } = childrens else {
             return Ok(false);
         };
 
@@ -317,8 +375,8 @@ impl ColumnPruning {
         Ok(left_changed || right_changed)
     }
 
-    fn _apply(
-        column_references: HashSet<&ColumnSummary>,
+    fn _apply<'a>(
+        required_columns: HashSet<&'a ColumnSummary>,
         all_referenced: bool,
         plan: &mut LogicalPlan,
     ) -> Result<bool, DatabaseError> {
@@ -327,14 +385,14 @@ impl ColumnPruning {
         let mut right_retained_positions = Vec::new();
         let mut left_removed_positions = Vec::new();
         let mut right_removed_positions = Vec::new();
-        let mut current_referenced_columns = Vec::new();
-        let operator = &mut plan.operator;
+        let (operator, childrens) = (&mut plan.operator, plan.childrens.as_mut());
 
         match operator {
             Operator::Aggregate(op) => {
+                let required_columns = required_columns;
                 if !all_referenced {
                     let before = op.agg_calls.len();
-                    Self::clear_exprs(&column_references, &mut op.agg_calls);
+                    Self::clear_exprs(&required_columns, &mut op.agg_calls);
                     if op.agg_calls.len() != before {
                         changed = true;
                     }
@@ -356,28 +414,32 @@ impl ColumnPruning {
                         changed = true;
                     }
                 }
-                Self::collect_expr_referenced_columns(
-                    op.agg_calls.iter().chain(op.groupby_exprs.iter()),
-                    &mut current_referenced_columns,
-                );
-                let is_distinct = op.is_distinct;
-                let mut new_column_references = trans_references!(&current_referenced_columns);
-                // on distinct
-                if is_distinct {
-                    for summary in column_references {
-                        new_column_references.insert(summary);
-                    }
-                }
+                let child_changed = {
+                    let mut child_required = if op.is_distinct {
+                        required_columns
+                    } else {
+                        HashSet::new()
+                    };
+                    Self::extend_expr_referenced_columns(
+                        op.agg_calls.iter().chain(op.groupby_exprs.iter()),
+                        &mut child_required,
+                    );
 
-                changed |= Self::recollect_apply_only_child(
-                    new_column_references,
-                    false,
-                    plan,
-                    &mut left_retained_positions,
-                    &mut left_removed_positions,
-                )?;
+                    Self::apply_only_child(
+                        child_required,
+                        false,
+                        childrens,
+                        &mut left_retained_positions,
+                        &mut left_removed_positions,
+                    )?
+                };
+                if child_changed {
+                    Self::remap_operator_after_child_change(operator, &left_removed_positions)?;
+                    changed = true;
+                }
             }
             Operator::Project(op) => {
+                let required_columns = required_columns;
                 let mut has_count_star = HasCountStar::default();
                 for expr in &op.exprs {
                     has_count_star.visit(expr)?;
@@ -385,31 +447,35 @@ impl ColumnPruning {
                 if !has_count_star.value {
                     if !all_referenced {
                         let before = op.exprs.len();
-                        Self::clear_exprs(&column_references, &mut op.exprs);
+                        Self::clear_exprs(&required_columns, &mut op.exprs);
                         if op.exprs.len() != before {
                             changed = true;
                         }
                     }
-                    Self::collect_expr_referenced_columns(
-                        op.exprs.iter(),
-                        &mut current_referenced_columns,
-                    );
-                    let new_column_references = trans_references!(&current_referenced_columns);
+                    let child_changed = {
+                        let mut child_required = HashSet::new();
+                        Self::extend_expr_referenced_columns(op.exprs.iter(), &mut child_required);
 
-                    changed |= Self::recollect_apply_only_child(
-                        new_column_references,
-                        false,
-                        plan,
-                        &mut left_retained_positions,
-                        &mut left_removed_positions,
-                    )?;
+                        Self::apply_only_child(
+                            child_required,
+                            false,
+                            childrens,
+                            &mut left_retained_positions,
+                            &mut left_removed_positions,
+                        )?
+                    };
+                    if child_changed {
+                        Self::remap_operator_after_child_change(operator, &left_removed_positions)?;
+                        changed = true;
+                    }
                 }
             }
             Operator::TableScan(op) => {
+                let required_columns = required_columns;
                 if !all_referenced {
                     let before = op.columns.len();
                     op.columns
-                        .retain(|_, column| column_references.contains(column.summary()));
+                        .retain(|_, column| required_columns.contains(column.summary()));
                     if op.columns.len() != before {
                         changed = true;
                     }
@@ -423,67 +489,115 @@ impl ColumnPruning {
             | Operator::Union(_)
             | Operator::Except(_)
             | Operator::TopK(_) => {
-                Self::collect_operator_referenced_columns(
-                    operator,
-                    &mut current_referenced_columns,
-                );
-                // this is magic!!! do not delete!!!
-                let mut column_references = column_references;
-                for column in &current_referenced_columns {
-                    column_references.insert(column.summary());
-                }
                 if matches!(operator, Operator::Join(_)) {
-                    changed |= Self::recollect_apply_join(
-                        column_references,
-                        all_referenced,
-                        plan,
-                        &mut left_retained_positions,
-                        &mut right_retained_positions,
-                        &mut left_removed_positions,
-                        &mut right_removed_positions,
-                    )?;
+                    let (child_changed, old_left_outputs_len) = {
+                        let mut child_required = required_columns.clone();
+                        Self::extend_operator_referenced_columns(operator, &mut child_required);
+                        let old_left_outputs_len = match childrens {
+                            Childrens::Twins { left, .. } => left.output_schema().len(),
+                            _ => 0,
+                        };
+                        let child_changed = Self::apply_join_children(
+                            child_required,
+                            all_referenced,
+                            childrens,
+                            &mut left_retained_positions,
+                            &mut right_retained_positions,
+                            &mut left_removed_positions,
+                            &mut right_removed_positions,
+                        )?;
+                        (child_changed, old_left_outputs_len)
+                    };
+                    if child_changed {
+                        if let Operator::Join(op) = operator {
+                            match &mut op.on {
+                                JoinCondition::On { on, filter } => {
+                                    for (left_expr, right_expr) in on {
+                                        remap_expr_positions(left_expr, &left_removed_positions)?;
+                                        remap_expr_positions(right_expr, &right_removed_positions)?;
+                                    }
+                                    if let Some(filter) = filter {
+                                        if !left_removed_positions.is_empty()
+                                            || !right_removed_positions.is_empty()
+                                        {
+                                            let mut removed_positions = Vec::with_capacity(
+                                                left_removed_positions.len()
+                                                    + right_removed_positions.len(),
+                                            );
+                                            removed_positions
+                                                .extend_from_slice(&left_removed_positions);
+                                            removed_positions.extend(
+                                                right_removed_positions.iter().map(|position| {
+                                                    position + old_left_outputs_len
+                                                }),
+                                            );
+                                            remap_expr_positions(filter, &removed_positions)?;
+                                        }
+                                    }
+                                }
+                                JoinCondition::None => {}
+                            }
+                        }
+                        changed = true;
+                    }
                 } else if matches!(operator, Operator::Union(_) | Operator::Except(_)) {
-                    changed |=
-                        Self::recollect_apply_twins(column_references, all_referenced, plan)?;
+                    let mut child_required = required_columns;
+                    Self::extend_operator_referenced_columns(operator, &mut child_required);
+                    changed |= Self::apply_twins(child_required, all_referenced, childrens)?;
                 } else {
-                    changed |= Self::recollect_apply_only_child(
-                        column_references,
-                        all_referenced,
-                        plan,
-                        &mut left_retained_positions,
-                        &mut left_removed_positions,
-                    )?;
+                    let child_changed = {
+                        let mut child_required = required_columns;
+                        Self::extend_operator_referenced_columns(operator, &mut child_required);
+                        Self::apply_only_child(
+                            child_required,
+                            all_referenced,
+                            childrens,
+                            &mut left_retained_positions,
+                            &mut left_removed_positions,
+                        )?
+                    };
+                    if child_changed {
+                        Self::remap_operator_after_child_change(operator, &left_removed_positions)?;
+                        changed = true;
+                    }
                 }
             }
             // Last Operator
             Operator::Dummy | Operator::Values(_) | Operator::FunctionScan(_) => (),
             Operator::Explain => {
-                changed |= Self::recollect_apply_only_child(
-                    column_references,
+                let child_changed = Self::apply_only_child(
+                    required_columns,
                     true,
-                    plan,
+                    childrens,
                     &mut left_retained_positions,
                     &mut left_removed_positions,
                 )?;
+                if child_changed {
+                    Self::remap_operator_after_child_change(operator, &left_removed_positions)?;
+                    changed = true;
+                }
             }
             // DDL Based on Other Plan
             Operator::Insert(_)
             | Operator::Update(_)
             | Operator::Delete(_)
             | Operator::Analyze(_) => {
-                Self::collect_operator_referenced_columns(
-                    operator,
-                    &mut current_referenced_columns,
-                );
-                let new_column_references = trans_references!(&current_referenced_columns);
+                let child_changed = {
+                    let mut child_required = HashSet::new();
+                    Self::extend_operator_referenced_columns(operator, &mut child_required);
 
-                changed |= Self::recollect_apply_only_child(
-                    new_column_references,
-                    true,
-                    plan,
-                    &mut left_retained_positions,
-                    &mut left_removed_positions,
-                )?;
+                    Self::apply_only_child(
+                        child_required,
+                        true,
+                        childrens,
+                        &mut left_retained_positions,
+                        &mut left_removed_positions,
+                    )?
+                };
+                if child_changed {
+                    Self::remap_operator_after_child_change(operator, &left_removed_positions)?;
+                    changed = true;
+                }
             }
             // DDL Single Plan
             Operator::CreateTable(_)
@@ -509,7 +623,7 @@ impl ColumnPruning {
 
 impl NormalizationRule for ColumnPruning {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
-        Self::_apply(HashSet::new(), true, plan)
+        Self::_apply(HashSet::<&ColumnSummary>::new(), true, plan)
     }
 }
 
