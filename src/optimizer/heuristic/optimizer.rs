@@ -13,17 +13,22 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+use crate::expression::ScalarExpression;
 use crate::optimizer::core::memo::Memo;
 use crate::optimizer::core::pattern::PatternMatcher;
 use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::optimizer::heuristic::batch::{HepBatch, HepBatchStrategy};
+use crate::optimizer::heuristic::batch::{
+    HepBatch, HepBatchStep, HepBatchStrategy, HepWholeTreePass,
+};
 use crate::optimizer::heuristic::matcher::PlanMatcher;
 use crate::optimizer::rule::implementation::ImplementationRuleImpl;
-use crate::optimizer::rule::normalization::NormalizationRuleImpl;
 use crate::optimizer::rule::normalization::{
     annotate_sort_preserving_indexes, annotate_stream_distinct_indexes,
+    bind_expression_position_current, constant_calculation_current, evaluator_bind_current,
+    NormalizationRuleImpl, WholeTreePassKind,
 };
+use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use std::ops::Not;
@@ -89,12 +94,137 @@ impl<'a> HepOptimizer<'a> {
     #[inline]
     fn apply_batch(plan: &mut LogicalPlan, batch: &HepBatch) -> Result<bool, DatabaseError> {
         let mut applied = false;
-        for rule in &batch.rules {
-            if Self::apply_rule(plan, rule)? {
-                applied = true;
+        for step in &batch.steps {
+            match step {
+                HepBatchStep::WholeTree(pass) => {
+                    if Self::apply_whole_tree_pass(plan, pass)? {
+                        plan.reset_output_schema_cache_recursive();
+                        applied = true;
+                    }
+                }
+                HepBatchStep::LocalRewrite(rules) => {
+                    for rule in rules {
+                        if Self::apply_rule(plan, rule)? {
+                            applied = true;
+                        }
+                    }
+                }
             }
         }
         Ok(applied)
+    }
+
+    fn apply_whole_tree_pass(
+        plan: &mut LogicalPlan,
+        pass: &HepWholeTreePass,
+    ) -> Result<bool, DatabaseError> {
+        match pass.kind {
+            WholeTreePassKind::ColumnPruning => {
+                let mut applied = false;
+                for rule in &pass.rules {
+                    applied |= rule.apply(plan)?;
+                }
+                Ok(applied)
+            }
+            WholeTreePassKind::ExpressionRewrite => {
+                let has_constant_calculation = pass
+                    .rules
+                    .iter()
+                    .any(|rule| matches!(rule, NormalizationRuleImpl::ConstantCalculation));
+                let has_bind_expression_position = pass
+                    .rules
+                    .iter()
+                    .any(|rule| matches!(rule, NormalizationRuleImpl::BindExpressionPosition));
+                let has_evaluator_bind = pass
+                    .rules
+                    .iter()
+                    .any(|rule| matches!(rule, NormalizationRuleImpl::EvaluatorBind));
+
+                Self::apply_expression_rewrite_pass(
+                    plan,
+                    has_constant_calculation,
+                    has_bind_expression_position,
+                    has_evaluator_bind,
+                )?;
+                Ok(true)
+            }
+        }
+    }
+
+    fn apply_expression_rewrite_pass(
+        plan: &mut LogicalPlan,
+        has_constant_calculation: bool,
+        has_bind_expression_position: bool,
+        has_evaluator_bind: bool,
+    ) -> Result<(), DatabaseError> {
+        let mut output_exprs = Vec::new();
+        Self::apply_expression_rewrite_pass_inner(
+            plan,
+            &mut output_exprs,
+            has_constant_calculation,
+            has_bind_expression_position,
+            has_evaluator_bind,
+        )
+    }
+
+    fn apply_expression_rewrite_pass_inner(
+        plan: &mut LogicalPlan,
+        output_exprs: &mut Vec<ScalarExpression>,
+        has_constant_calculation: bool,
+        has_bind_expression_position: bool,
+        has_evaluator_bind: bool,
+    ) -> Result<(), DatabaseError> {
+        let mut left_len = 0;
+        match plan.childrens.as_mut() {
+            Childrens::Only(child) => {
+                Self::apply_expression_rewrite_pass_inner(
+                    child,
+                    output_exprs,
+                    has_constant_calculation,
+                    has_bind_expression_position,
+                    has_evaluator_bind,
+                )?;
+            }
+            Childrens::Twins { left, right } => {
+                Self::apply_expression_rewrite_pass_inner(
+                    left,
+                    output_exprs,
+                    has_constant_calculation,
+                    has_bind_expression_position,
+                    has_evaluator_bind,
+                )?;
+                if matches!(
+                    plan.operator,
+                    Operator::Join(_) | Operator::Union(_) | Operator::Except(_)
+                ) {
+                    let mut second_output_exprs = Vec::new();
+                    Self::apply_expression_rewrite_pass_inner(
+                        right,
+                        &mut second_output_exprs,
+                        has_constant_calculation,
+                        has_bind_expression_position,
+                        has_evaluator_bind,
+                    )?;
+                    left_len = output_exprs.len();
+                    output_exprs.append(&mut second_output_exprs);
+                }
+            }
+            Childrens::None => {}
+        }
+
+        if has_constant_calculation {
+            constant_calculation_current(plan)?;
+        }
+        if has_bind_expression_position {
+            bind_expression_position_current(output_exprs, plan, left_len)?;
+        } else if let Some(exprs) = plan.operator.output_exprs() {
+            *output_exprs = exprs;
+        }
+        if has_evaluator_bind {
+            evaluator_bind_current(plan)?;
+        }
+
+        Ok(())
     }
 
     fn apply_rule(

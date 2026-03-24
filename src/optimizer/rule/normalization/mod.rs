@@ -48,6 +48,8 @@ mod pushdown_predicates;
 mod simplification;
 mod top_k;
 pub use agg_elimination::{annotate_sort_preserving_indexes, annotate_stream_distinct_indexes};
+pub(crate) use compilation_in_advance::{bind_expression_position_current, evaluator_bind_current};
+pub(crate) use simplification::constant_calculation_current;
 
 #[derive(Debug, Copy, Clone)]
 pub enum NormalizationRuleImpl {
@@ -75,6 +77,34 @@ pub enum NormalizationRuleImpl {
     TopK,
     EliminateRedundantSort,
     UseStreamDistinct,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum WholeTreePassKind {
+    ColumnPruning,
+    ExpressionRewrite,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum NormalizationPassKind {
+    WholeTreePass(WholeTreePassKind),
+    LocalRewrite,
+}
+
+impl NormalizationRuleImpl {
+    pub fn pass_kind(&self) -> NormalizationPassKind {
+        match self {
+            NormalizationRuleImpl::ColumnPruning => {
+                NormalizationPassKind::WholeTreePass(WholeTreePassKind::ColumnPruning)
+            }
+            NormalizationRuleImpl::ConstantCalculation
+            | NormalizationRuleImpl::BindExpressionPosition
+            | NormalizationRuleImpl::EvaluatorBind => {
+                NormalizationPassKind::WholeTreePass(WholeTreePassKind::ExpressionRewrite)
+            }
+            _ => NormalizationPassKind::LocalRewrite,
+        }
+    }
 }
 
 impl MatchPattern for NormalizationRuleImpl {

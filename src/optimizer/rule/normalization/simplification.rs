@@ -38,42 +38,48 @@ static SIMPLIFY_FILTER_RULE: LazyLock<Pattern> = LazyLock::new(|| Pattern {
 #[derive(Copy, Clone)]
 pub struct ConstantCalculation;
 
+pub(crate) fn constant_calculation_current(plan: &mut LogicalPlan) -> Result<(), DatabaseError> {
+    let operator = &mut plan.operator;
+
+    match operator {
+        Operator::Aggregate(op) => {
+            for expr in op.agg_calls.iter_mut().chain(op.groupby_exprs.iter_mut()) {
+                ConstantCalculator.visit(expr)?;
+            }
+        }
+        Operator::Filter(op) => {
+            ConstantCalculator.visit(&mut op.predicate)?;
+        }
+        Operator::Join(op) => {
+            if let JoinCondition::On { on, filter } = &mut op.on {
+                for (left_expr, right_expr) in on {
+                    ConstantCalculator.visit(left_expr)?;
+                    ConstantCalculator.visit(right_expr)?;
+                }
+                if let Some(expr) = filter {
+                    ConstantCalculator.visit(expr)?;
+                }
+            }
+        }
+        Operator::Project(op) => {
+            for expr in &mut op.exprs {
+                ConstantCalculator.visit(expr)?;
+            }
+        }
+        Operator::Sort(op) => {
+            for field in &mut op.sort_fields {
+                ConstantCalculator.visit(&mut field.expr)?;
+            }
+        }
+        _ => (),
+    }
+
+    Ok(())
+}
+
 impl ConstantCalculation {
     fn _apply(plan: &mut LogicalPlan) -> Result<(), DatabaseError> {
-        let operator = &mut plan.operator;
-
-        match operator {
-            Operator::Aggregate(op) => {
-                for expr in op.agg_calls.iter_mut().chain(op.groupby_exprs.iter_mut()) {
-                    ConstantCalculator.visit(expr)?;
-                }
-            }
-            Operator::Filter(op) => {
-                ConstantCalculator.visit(&mut op.predicate)?;
-            }
-            Operator::Join(op) => {
-                if let JoinCondition::On { on, filter } = &mut op.on {
-                    for (left_expr, right_expr) in on {
-                        ConstantCalculator.visit(left_expr)?;
-                        ConstantCalculator.visit(right_expr)?;
-                    }
-                    if let Some(expr) = filter {
-                        ConstantCalculator.visit(expr)?;
-                    }
-                }
-            }
-            Operator::Project(op) => {
-                for expr in &mut op.exprs {
-                    ConstantCalculator.visit(expr)?;
-                }
-            }
-            Operator::Sort(op) => {
-                for field in &mut op.sort_fields {
-                    ConstantCalculator.visit(&mut field.expr)?;
-                }
-            }
-            _ => (),
-        }
+        constant_calculation_current(plan)?;
         match plan.childrens.as_mut() {
             Childrens::Only(child) => Self::_apply(child.as_mut())?,
             Childrens::Twins { left, right } => {

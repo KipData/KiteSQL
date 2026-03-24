@@ -36,6 +36,119 @@ static EVALUATOR_BIND_RULE: LazyLock<Pattern> = LazyLock::new(|| Pattern {
 #[derive(Clone)]
 pub struct BindExpressionPosition;
 
+pub(crate) fn bind_expression_position_current(
+    output_exprs: &mut Vec<ScalarExpression>,
+    plan: &mut LogicalPlan,
+    left_len: usize,
+) -> Result<(), DatabaseError> {
+    let mut bind_position = BindPosition::new(
+        || {
+            output_exprs
+                .iter()
+                .map(|expr| Cow::Owned(expr.output_column()))
+        },
+        |a, b| a == b,
+    );
+    let operator = &mut plan.operator;
+    match operator {
+        Operator::Join(op) => {
+            match &mut op.on {
+                JoinCondition::On { on, filter } => {
+                    let mut left_bind_position = BindPosition::new(
+                        || {
+                            output_exprs[0..left_len]
+                                .iter()
+                                .map(|expr| Cow::Owned(expr.output_column()))
+                        },
+                        |a, b| a == b,
+                    );
+                    let mut right_bind_position = BindPosition::new(
+                        || {
+                            output_exprs[left_len..]
+                                .iter()
+                                .map(|expr| Cow::Owned(expr.output_column()))
+                        },
+                        |a, b| a == b,
+                    );
+                    for (left_expr, right_expr) in on {
+                        left_bind_position.visit(left_expr)?;
+                        right_bind_position.visit(right_expr)?;
+                    }
+                    if let Some(expr) = filter {
+                        bind_position.visit(expr)?;
+                    }
+                }
+                JoinCondition::None => {}
+            }
+
+            return Ok(());
+        }
+        Operator::Aggregate(op) => {
+            for expr in op.agg_calls.iter_mut().chain(op.groupby_exprs.iter_mut()) {
+                bind_position.visit(expr)?;
+            }
+        }
+        Operator::Filter(op) => {
+            bind_position.visit(&mut op.predicate)?;
+        }
+        Operator::Project(op) => {
+            for expr in op.exprs.iter_mut() {
+                bind_position.visit(expr)?;
+            }
+        }
+        Operator::Sort(op) => {
+            for sort_field in op.sort_fields.iter_mut() {
+                bind_position.visit(&mut sort_field.expr)?;
+            }
+        }
+        Operator::TopK(op) => {
+            for sort_field in op.sort_fields.iter_mut() {
+                bind_position.visit(&mut sort_field.expr)?;
+            }
+        }
+        Operator::FunctionScan(op) => {
+            for expr in op.table_function.args.iter_mut() {
+                bind_position.visit(expr)?;
+            }
+        }
+        Operator::Update(op) => {
+            for (_, expr) in op.value_exprs.iter_mut() {
+                bind_position.visit(expr)?;
+            }
+        }
+        Operator::Dummy
+        | Operator::TableScan(_)
+        | Operator::Limit(_)
+        | Operator::Values(_)
+        | Operator::ShowTable
+        | Operator::ShowView
+        | Operator::Explain
+        | Operator::Describe(_)
+        | Operator::Insert(_)
+        | Operator::Delete(_)
+        | Operator::Analyze(_)
+        | Operator::AddColumn(_)
+        | Operator::ChangeColumn(_)
+        | Operator::DropColumn(_)
+        | Operator::CreateTable(_)
+        | Operator::CreateIndex(_)
+        | Operator::CreateView(_)
+        | Operator::DropTable(_)
+        | Operator::DropView(_)
+        | Operator::DropIndex(_)
+        | Operator::Truncate(_)
+        | Operator::CopyFromFile(_)
+        | Operator::CopyToFile(_)
+        | Operator::Union(_)
+        | Operator::Except(_) => (),
+    }
+    if let Some(exprs) = operator.output_exprs() {
+        *output_exprs = exprs;
+    }
+
+    Ok(())
+}
+
 impl BindExpressionPosition {
     fn _apply(
         output_exprs: &mut Vec<ScalarExpression>,
@@ -60,112 +173,7 @@ impl BindExpressionPosition {
             }
             Childrens::None => {}
         }
-        let mut bind_position = BindPosition::new(
-            || {
-                output_exprs
-                    .iter()
-                    .map(|expr| Cow::Owned(expr.output_column()))
-            },
-            |a, b| a == b,
-        );
-        let operator = &mut plan.operator;
-        match operator {
-            Operator::Join(op) => {
-                match &mut op.on {
-                    JoinCondition::On { on, filter } => {
-                        let mut left_bind_position = BindPosition::new(
-                            || {
-                                output_exprs[0..left_len]
-                                    .iter()
-                                    .map(|expr| Cow::Owned(expr.output_column()))
-                            },
-                            |a, b| a == b,
-                        );
-                        let mut right_bind_position = BindPosition::new(
-                            || {
-                                output_exprs[left_len..]
-                                    .iter()
-                                    .map(|expr| Cow::Owned(expr.output_column()))
-                            },
-                            |a, b| a == b,
-                        );
-                        for (left_expr, right_expr) in on {
-                            left_bind_position.visit(left_expr)?;
-                            right_bind_position.visit(right_expr)?;
-                        }
-                        if let Some(expr) = filter {
-                            bind_position.visit(expr)?;
-                        }
-                    }
-                    JoinCondition::None => {}
-                }
-
-                return Ok(());
-            }
-            Operator::Aggregate(op) => {
-                for expr in op.agg_calls.iter_mut().chain(op.groupby_exprs.iter_mut()) {
-                    bind_position.visit(expr)?;
-                }
-            }
-            Operator::Filter(op) => {
-                bind_position.visit(&mut op.predicate)?;
-            }
-            Operator::Project(op) => {
-                for expr in op.exprs.iter_mut() {
-                    bind_position.visit(expr)?;
-                }
-            }
-            Operator::Sort(op) => {
-                for sort_field in op.sort_fields.iter_mut() {
-                    bind_position.visit(&mut sort_field.expr)?;
-                }
-            }
-            Operator::TopK(op) => {
-                for sort_field in op.sort_fields.iter_mut() {
-                    bind_position.visit(&mut sort_field.expr)?;
-                }
-            }
-            Operator::FunctionScan(op) => {
-                for expr in op.table_function.args.iter_mut() {
-                    bind_position.visit(expr)?;
-                }
-            }
-            Operator::Update(op) => {
-                for (_, expr) in op.value_exprs.iter_mut() {
-                    bind_position.visit(expr)?;
-                }
-            }
-            Operator::Dummy
-            | Operator::TableScan(_)
-            | Operator::Limit(_)
-            | Operator::Values(_)
-            | Operator::ShowTable
-            | Operator::ShowView
-            | Operator::Explain
-            | Operator::Describe(_)
-            | Operator::Insert(_)
-            | Operator::Delete(_)
-            | Operator::Analyze(_)
-            | Operator::AddColumn(_)
-            | Operator::ChangeColumn(_)
-            | Operator::DropColumn(_)
-            | Operator::CreateTable(_)
-            | Operator::CreateIndex(_)
-            | Operator::CreateView(_)
-            | Operator::DropTable(_)
-            | Operator::DropView(_)
-            | Operator::DropIndex(_)
-            | Operator::Truncate(_)
-            | Operator::CopyFromFile(_)
-            | Operator::CopyToFile(_)
-            | Operator::Union(_)
-            | Operator::Except(_) => (),
-        }
-        if let Some(exprs) = operator.output_exprs() {
-            *output_exprs = exprs;
-        }
-
-        Ok(())
+        bind_expression_position_current(output_exprs, plan, left_len)
     }
 }
 
@@ -185,6 +193,89 @@ impl NormalizationRule for BindExpressionPosition {
 #[derive(Clone)]
 pub struct EvaluatorBind;
 
+pub(crate) fn evaluator_bind_current(plan: &mut LogicalPlan) -> Result<(), DatabaseError> {
+    let operator = &mut plan.operator;
+
+    match operator {
+        Operator::Join(op) => {
+            match &mut op.on {
+                JoinCondition::On { on, filter } => {
+                    for (left_expr, right_expr) in on {
+                        BindEvaluator.visit(left_expr)?;
+                        BindEvaluator.visit(right_expr)?;
+                    }
+                    if let Some(expr) = filter {
+                        BindEvaluator.visit(expr)?;
+                    }
+                }
+                JoinCondition::None => {}
+            }
+
+            return Ok(());
+        }
+        Operator::Aggregate(op) => {
+            for expr in op.agg_calls.iter_mut().chain(op.groupby_exprs.iter_mut()) {
+                BindEvaluator.visit(expr)?;
+            }
+        }
+        Operator::Filter(op) => {
+            BindEvaluator.visit(&mut op.predicate)?;
+        }
+        Operator::Project(op) => {
+            for expr in op.exprs.iter_mut() {
+                BindEvaluator.visit(expr)?;
+            }
+        }
+        Operator::Sort(op) => {
+            for sort_field in op.sort_fields.iter_mut() {
+                BindEvaluator.visit(&mut sort_field.expr)?;
+            }
+        }
+        Operator::TopK(op) => {
+            for sort_field in op.sort_fields.iter_mut() {
+                BindEvaluator.visit(&mut sort_field.expr)?;
+            }
+        }
+        Operator::FunctionScan(op) => {
+            for expr in op.table_function.args.iter_mut() {
+                BindEvaluator.visit(expr)?;
+            }
+        }
+        Operator::Update(op) => {
+            for (_, expr) in op.value_exprs.iter_mut() {
+                BindEvaluator.visit(expr)?;
+            }
+        }
+        Operator::Dummy
+        | Operator::TableScan(_)
+        | Operator::Limit(_)
+        | Operator::Values(_)
+        | Operator::ShowTable
+        | Operator::ShowView
+        | Operator::Explain
+        | Operator::Describe(_)
+        | Operator::Insert(_)
+        | Operator::Delete(_)
+        | Operator::Analyze(_)
+        | Operator::AddColumn(_)
+        | Operator::ChangeColumn(_)
+        | Operator::DropColumn(_)
+        | Operator::CreateTable(_)
+        | Operator::CreateIndex(_)
+        | Operator::CreateView(_)
+        | Operator::DropTable(_)
+        | Operator::DropView(_)
+        | Operator::DropIndex(_)
+        | Operator::Truncate(_)
+        | Operator::CopyFromFile(_)
+        | Operator::CopyToFile(_)
+        | Operator::Union(_)
+        | Operator::Except(_) => (),
+    }
+
+    Ok(())
+}
+
 impl EvaluatorBind {
     fn _apply(plan: &mut LogicalPlan) -> Result<(), DatabaseError> {
         match plan.childrens.as_mut() {
@@ -201,86 +292,7 @@ impl EvaluatorBind {
             Childrens::None => {}
         }
 
-        let operator = &mut plan.operator;
-
-        match operator {
-            Operator::Join(op) => {
-                match &mut op.on {
-                    JoinCondition::On { on, filter } => {
-                        for (left_expr, right_expr) in on {
-                            BindEvaluator.visit(left_expr)?;
-                            BindEvaluator.visit(right_expr)?;
-                        }
-                        if let Some(expr) = filter {
-                            BindEvaluator.visit(expr)?;
-                        }
-                    }
-                    JoinCondition::None => {}
-                }
-
-                return Ok(());
-            }
-            Operator::Aggregate(op) => {
-                for expr in op.agg_calls.iter_mut().chain(op.groupby_exprs.iter_mut()) {
-                    BindEvaluator.visit(expr)?;
-                }
-            }
-            Operator::Filter(op) => {
-                BindEvaluator.visit(&mut op.predicate)?;
-            }
-            Operator::Project(op) => {
-                for expr in op.exprs.iter_mut() {
-                    BindEvaluator.visit(expr)?;
-                }
-            }
-            Operator::Sort(op) => {
-                for sort_field in op.sort_fields.iter_mut() {
-                    BindEvaluator.visit(&mut sort_field.expr)?;
-                }
-            }
-            Operator::TopK(op) => {
-                for sort_field in op.sort_fields.iter_mut() {
-                    BindEvaluator.visit(&mut sort_field.expr)?;
-                }
-            }
-            Operator::FunctionScan(op) => {
-                for expr in op.table_function.args.iter_mut() {
-                    BindEvaluator.visit(expr)?;
-                }
-            }
-            Operator::Update(op) => {
-                for (_, expr) in op.value_exprs.iter_mut() {
-                    BindEvaluator.visit(expr)?;
-                }
-            }
-            Operator::Dummy
-            | Operator::TableScan(_)
-            | Operator::Limit(_)
-            | Operator::Values(_)
-            | Operator::ShowTable
-            | Operator::ShowView
-            | Operator::Explain
-            | Operator::Describe(_)
-            | Operator::Insert(_)
-            | Operator::Delete(_)
-            | Operator::Analyze(_)
-            | Operator::AddColumn(_)
-            | Operator::ChangeColumn(_)
-            | Operator::DropColumn(_)
-            | Operator::CreateTable(_)
-            | Operator::CreateIndex(_)
-            | Operator::CreateView(_)
-            | Operator::DropTable(_)
-            | Operator::DropView(_)
-            | Operator::DropIndex(_)
-            | Operator::Truncate(_)
-            | Operator::CopyFromFile(_)
-            | Operator::CopyToFile(_)
-            | Operator::Union(_)
-            | Operator::Except(_) => (),
-        }
-
-        Ok(())
+        evaluator_bind_current(plan)
     }
 }
 

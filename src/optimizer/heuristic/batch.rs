@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::optimizer::rule::normalization::NormalizationRuleImpl;
+use crate::optimizer::rule::normalization::{
+    NormalizationPassKind, NormalizationRuleImpl, WholeTreePassKind,
+};
 
 /// A batch of rules.
 #[derive(Clone)]
@@ -20,6 +22,18 @@ pub struct HepBatch {
     #[allow(dead_code)]
     pub name: String,
     pub strategy: HepBatchStrategy,
+    pub steps: Vec<HepBatchStep>,
+}
+
+#[derive(Clone)]
+pub enum HepBatchStep {
+    WholeTree(HepWholeTreePass),
+    LocalRewrite(Vec<NormalizationRuleImpl>),
+}
+
+#[derive(Clone)]
+pub struct HepWholeTreePass {
+    pub kind: WholeTreePassKind,
     pub rules: Vec<NormalizationRuleImpl>,
 }
 
@@ -29,10 +43,30 @@ impl HepBatch {
         strategy: HepBatchStrategy,
         rules: Vec<NormalizationRuleImpl>,
     ) -> Self {
+        let mut steps = Vec::new();
+
+        for rule in rules {
+            match rule.pass_kind() {
+                NormalizationPassKind::WholeTreePass(kind) => match steps.last_mut() {
+                    Some(HepBatchStep::WholeTree(pass)) if pass.kind == kind => {
+                        pass.rules.push(rule);
+                    }
+                    _ => steps.push(HepBatchStep::WholeTree(HepWholeTreePass {
+                        kind,
+                        rules: vec![rule],
+                    })),
+                },
+                NormalizationPassKind::LocalRewrite => match steps.last_mut() {
+                    Some(HepBatchStep::LocalRewrite(local_rules)) => local_rules.push(rule),
+                    _ => steps.push(HepBatchStep::LocalRewrite(vec![rule])),
+                },
+            }
+        }
+
         Self {
             name,
             strategy,
-            rules,
+            steps,
         }
     }
 }
