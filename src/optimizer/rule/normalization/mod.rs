@@ -34,7 +34,6 @@ use crate::optimizer::rule::normalization::simplification::ConstantCalculation;
 use crate::optimizer::rule::normalization::simplification::SimplifyFilter;
 use crate::optimizer::rule::normalization::top_k::TopK;
 use crate::planner::LogicalPlan;
-use crate::types::tuple::SchemaRef;
 mod agg_elimination;
 mod column_pruning;
 mod combine_operators;
@@ -235,54 +234,6 @@ pub fn is_subset_exprs(left: &[ScalarExpression], right: &[ScalarExpression]) ->
             false
         })
     })
-}
-
-pub(crate) fn derive_retained_positions_into(
-    old_outputs: &SchemaRef,
-    new_outputs: &SchemaRef,
-    retained_positions: &mut Vec<usize>,
-) {
-    retained_positions.clear();
-    let mut search_from = 0;
-
-    for new_column in new_outputs.iter() {
-        let Some(relative_position) = old_outputs[search_from..]
-            .iter()
-            .position(|old_column| old_column == new_column)
-        else {
-            debug_assert!(
-                false,
-                "new outputs should be a left-to-right subsequence of old outputs"
-            );
-            return;
-        };
-        let old_position = search_from + relative_position;
-        retained_positions.push(old_position);
-        search_from = old_position + 1;
-    }
-}
-
-pub(crate) fn derive_position_remap_into(
-    old_len: usize,
-    retained_positions: &[usize],
-    removed_positions: &mut Vec<usize>,
-) {
-    removed_positions.clear();
-    let mut retained_iter = retained_positions.iter().copied();
-    let mut current_retained = retained_iter.next();
-
-    for position in 0..old_len {
-        if current_retained == Some(position) {
-            current_retained = retained_iter.next();
-        } else {
-            removed_positions.push(position);
-        }
-    }
-
-    debug_assert!(
-        current_retained.is_none(),
-        "retained positions should be ordered old output slots"
-    );
 }
 
 pub(crate) fn remap_position(position: &mut usize, removed_positions: &[usize]) {

@@ -18,22 +18,62 @@ use crate::expression::agg::AggKind;
 use crate::expression::visitor::{walk_expr, Visitor};
 use crate::expression::{HasCountStar, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
-use crate::optimizer::rule::normalization::{
-    derive_position_remap_into, derive_retained_positions_into, remap_expr_positions,
-    remap_exprs_positions,
-};
+use crate::optimizer::rule::normalization::{remap_expr_positions, remap_exprs_positions};
 use crate::planner::operator::join::JoinCondition;
+use crate::planner::operator::join::JoinType;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::LogicalType;
+use bumpalo::Bump;
 use sqlparser::ast::CharLengthUnits;
 use std::collections::HashSet;
 
 #[derive(Clone)]
 pub struct ColumnPruning;
 
+type BumpUsizeVec<'bump> = bumpalo::collections::Vec<'bump, usize>;
+
+struct ApplyOutcome<'bump> {
+    changed: bool,
+    removed_positions: BumpUsizeVec<'bump>,
+}
+
+impl<'bump> ApplyOutcome<'bump> {
+    fn new(arena: &'bump Bump) -> Self {
+        Self {
+            changed: false,
+            removed_positions: BumpUsizeVec::new_in(arena),
+        }
+    }
+}
+
+struct JoinChildrenOutcome<'bump> {
+    changed: bool,
+    left_removed_positions: BumpUsizeVec<'bump>,
+    right_removed_positions: BumpUsizeVec<'bump>,
+}
+
+impl<'bump> JoinChildrenOutcome<'bump> {
+    fn new(arena: &'bump Bump) -> Self {
+        Self {
+            changed: false,
+            left_removed_positions: BumpUsizeVec::new_in(arena),
+            right_removed_positions: BumpUsizeVec::new_in(arena),
+        }
+    }
+}
+
 impl ColumnPruning {
+    fn copy_removed_positions<'bump>(
+        removed_positions: &[usize],
+        arena: &'bump Bump,
+    ) -> BumpUsizeVec<'bump> {
+        let mut copied = BumpUsizeVec::with_capacity_in(removed_positions.len(), arena);
+        copied.extend_from_slice(removed_positions);
+        copied
+    }
+
     fn extend_operator_referenced_columns<'a>(
         operator: &'a Operator,
         referenced_columns: &mut HashSet<&'a ColumnSummary>,
@@ -190,8 +230,21 @@ impl ColumnPruning {
         checker.found
     }
 
-    fn clear_exprs(column_references: &HashSet<&ColumnSummary>, exprs: &mut Vec<ScalarExpression>) {
-        exprs.retain(|expr| Self::references_any_column(expr, column_references))
+    fn clear_exprs(
+        column_references: &HashSet<&ColumnSummary>,
+        exprs: &mut Vec<ScalarExpression>,
+        removed_positions: &mut BumpUsizeVec<'_>,
+    ) {
+        removed_positions.clear();
+        let mut position = 0;
+        exprs.retain(|expr| {
+            let keep = Self::references_any_column(expr, column_references);
+            if !keep {
+                removed_positions.push(position);
+            }
+            position += 1;
+            keep
+        });
     }
 
     fn remap_operator_after_child_change(
@@ -272,128 +325,105 @@ impl ColumnPruning {
         remap_exprs_positions(exprs, removed_positions)
     }
 
-    fn apply_only_child<'a>(
+    fn apply_only_child<'a, 'bump>(
         referenced_columns: HashSet<&'a ColumnSummary>,
         all_referenced: bool,
         childrens: &mut Childrens,
-        retained_positions: &mut Vec<usize>,
-        removed_positions: &mut Vec<usize>,
-    ) -> Result<bool, DatabaseError> {
+        arena: &'bump Bump,
+    ) -> Result<ApplyOutcome<'bump>, DatabaseError> {
         let Childrens::Only(child) = childrens else {
-            return Ok(false);
+            return Ok(ApplyOutcome::new(arena));
         };
-        let child = child.as_mut();
-        let old_outputs = child.output_schema().clone();
-        let changed = Self::_apply(referenced_columns, all_referenced, child)?;
-        if !changed {
-            return Ok(false);
-        }
-
-        child.reset_output_schema_cache_recursive();
-        let new_outputs = child.output_schema().clone();
-        derive_retained_positions_into(&old_outputs, &new_outputs, retained_positions);
-        derive_position_remap_into(old_outputs.len(), retained_positions, removed_positions);
-
-        Ok(true)
+        Self::_apply(referenced_columns, all_referenced, child.as_mut(), arena)
     }
 
-    fn apply_join_children<'a>(
+    fn apply_join_children<'a, 'bump>(
         referenced_columns: HashSet<&'a ColumnSummary>,
         all_referenced: bool,
         childrens: &mut Childrens,
-        left_retained_positions: &mut Vec<usize>,
-        right_retained_positions: &mut Vec<usize>,
-        left_removed_positions: &mut Vec<usize>,
-        right_removed_positions: &mut Vec<usize>,
-    ) -> Result<bool, DatabaseError> {
+        arena: &'bump Bump,
+    ) -> Result<JoinChildrenOutcome<'bump>, DatabaseError> {
         let Childrens::Twins { left, right } = childrens else {
-            return Ok(false);
+            return Ok(JoinChildrenOutcome::new(arena));
         };
-        let left = left.as_mut();
-        let right = right.as_mut();
+        let left_outcome = Self::_apply(
+            referenced_columns.clone(),
+            all_referenced,
+            left.as_mut(),
+            arena,
+        )?;
+        let right_outcome =
+            Self::_apply(referenced_columns, all_referenced, right.as_mut(), arena)?;
 
-        let old_left_outputs = left.output_schema().clone();
-        let old_right_outputs = right.output_schema().clone();
-
-        let left_changed = Self::_apply(referenced_columns.clone(), all_referenced, left)?;
-        let right_changed = Self::_apply(referenced_columns, all_referenced, right)?;
-        if !left_changed && !right_changed {
-            return Ok(false);
-        }
-
-        if left_changed {
-            left.reset_output_schema_cache_recursive();
-            let new_left_outputs = left.output_schema().clone();
-            derive_retained_positions_into(
-                &old_left_outputs,
-                &new_left_outputs,
-                left_retained_positions,
-            );
-            derive_position_remap_into(
-                old_left_outputs.len(),
-                left_retained_positions,
-                left_removed_positions,
-            );
-        } else {
-            left_retained_positions.clear();
-            left_removed_positions.clear();
-        }
-
-        if right_changed {
-            right.reset_output_schema_cache_recursive();
-            let new_right_outputs = right.output_schema().clone();
-            derive_retained_positions_into(
-                &old_right_outputs,
-                &new_right_outputs,
-                right_retained_positions,
-            );
-            derive_position_remap_into(
-                old_right_outputs.len(),
-                right_retained_positions,
-                right_removed_positions,
-            );
-        } else {
-            right_retained_positions.clear();
-            right_removed_positions.clear();
-        }
-
-        Ok(true)
+        Ok(JoinChildrenOutcome {
+            changed: left_outcome.changed || right_outcome.changed,
+            left_removed_positions: left_outcome.removed_positions,
+            right_removed_positions: right_outcome.removed_positions,
+        })
     }
 
-    fn apply_twins<'a>(
+    fn apply_twins<'a, 'bump>(
         referenced_columns: HashSet<&'a ColumnSummary>,
         all_referenced: bool,
         childrens: &mut Childrens,
+        arena: &'bump Bump,
     ) -> Result<bool, DatabaseError> {
         let Childrens::Twins { left, right } = childrens else {
             return Ok(false);
         };
 
-        let left_changed = Self::_apply(referenced_columns.clone(), all_referenced, left.as_mut())?;
-        let right_changed = Self::_apply(referenced_columns, all_referenced, right.as_mut())?;
+        let left_changed = Self::_apply(
+            referenced_columns.clone(),
+            all_referenced,
+            left.as_mut(),
+            arena,
+        )?
+        .changed;
+        let right_changed =
+            Self::_apply(referenced_columns, all_referenced, right.as_mut(), arena)?.changed;
 
         Ok(left_changed || right_changed)
     }
 
-    fn _apply<'a>(
+    fn merge_removed_positions<'bump>(
+        left_removed_positions: &[usize],
+        right_removed_positions: &[usize],
+        right_offset: usize,
+        arena: &'bump Bump,
+    ) -> BumpUsizeVec<'bump> {
+        let mut removed_positions = BumpUsizeVec::with_capacity_in(
+            left_removed_positions.len() + right_removed_positions.len(),
+            arena,
+        );
+        removed_positions.extend_from_slice(left_removed_positions);
+        removed_positions.extend(
+            right_removed_positions
+                .iter()
+                .map(|position| position + right_offset),
+        );
+        removed_positions
+    }
+
+    fn _apply<'a, 'bump>(
         required_columns: HashSet<&'a ColumnSummary>,
         all_referenced: bool,
         plan: &mut LogicalPlan,
-    ) -> Result<bool, DatabaseError> {
+        arena: &'bump Bump,
+    ) -> Result<ApplyOutcome<'bump>, DatabaseError> {
         let mut changed = false;
-        let mut left_retained_positions = Vec::new();
-        let mut right_retained_positions = Vec::new();
-        let mut left_removed_positions = Vec::new();
-        let mut right_removed_positions = Vec::new();
+        let mut output_removed_positions = BumpUsizeVec::new_in(arena);
         let (operator, childrens) = (&mut plan.operator, plan.childrens.as_mut());
 
         match operator {
             Operator::Aggregate(op) => {
                 let required_columns = required_columns;
                 if !all_referenced {
-                    let before = op.agg_calls.len();
-                    Self::clear_exprs(&required_columns, &mut op.agg_calls);
-                    if op.agg_calls.len() != before {
+                    Self::clear_exprs(
+                        &required_columns,
+                        &mut op.agg_calls,
+                        &mut output_removed_positions,
+                    );
+                    if !output_removed_positions.is_empty() {
                         changed = true;
                     }
 
@@ -414,7 +444,7 @@ impl ColumnPruning {
                         changed = true;
                     }
                 }
-                let child_changed = {
+                let child_outcome = {
                     let mut child_required = if op.is_distinct {
                         required_columns
                     } else {
@@ -425,16 +455,13 @@ impl ColumnPruning {
                         &mut child_required,
                     );
 
-                    Self::apply_only_child(
-                        child_required,
-                        false,
-                        childrens,
-                        &mut left_retained_positions,
-                        &mut left_removed_positions,
-                    )?
+                    Self::apply_only_child(child_required, false, childrens, arena)?
                 };
-                if child_changed {
-                    Self::remap_operator_after_child_change(operator, &left_removed_positions)?;
+                if child_outcome.changed {
+                    Self::remap_operator_after_child_change(
+                        operator,
+                        &child_outcome.removed_positions,
+                    )?;
                     changed = true;
                 }
             }
@@ -446,26 +473,26 @@ impl ColumnPruning {
                 }
                 if !has_count_star.value {
                     if !all_referenced {
-                        let before = op.exprs.len();
-                        Self::clear_exprs(&required_columns, &mut op.exprs);
-                        if op.exprs.len() != before {
+                        Self::clear_exprs(
+                            &required_columns,
+                            &mut op.exprs,
+                            &mut output_removed_positions,
+                        );
+                        if !output_removed_positions.is_empty() {
                             changed = true;
                         }
                     }
-                    let child_changed = {
+                    let child_outcome = {
                         let mut child_required = HashSet::new();
                         Self::extend_expr_referenced_columns(op.exprs.iter(), &mut child_required);
 
-                        Self::apply_only_child(
-                            child_required,
-                            false,
-                            childrens,
-                            &mut left_retained_positions,
-                            &mut left_removed_positions,
-                        )?
+                        Self::apply_only_child(child_required, false, childrens, arena)?
                     };
-                    if child_changed {
-                        Self::remap_operator_after_child_change(operator, &left_removed_positions)?;
+                    if child_outcome.changed {
+                        Self::remap_operator_after_child_change(
+                            operator,
+                            &child_outcome.removed_positions,
+                        )?;
                         changed = true;
                     }
                 }
@@ -473,10 +500,15 @@ impl ColumnPruning {
             Operator::TableScan(op) => {
                 let required_columns = required_columns;
                 if !all_referenced {
-                    let before = op.columns.len();
-                    op.columns
-                        .retain(|_, column| required_columns.contains(column.summary()));
-                    if op.columns.len() != before {
+                    output_removed_positions.clear();
+                    op.columns.retain(|position, column| {
+                        let keep = required_columns.contains(column.summary());
+                        if !keep {
+                            output_removed_positions.push(*position);
+                        }
+                        keep
+                    });
+                    if !output_removed_positions.is_empty() {
                         changed = true;
                     }
                 }
@@ -490,25 +522,27 @@ impl ColumnPruning {
             | Operator::Except(_)
             | Operator::TopK(_) => {
                 if matches!(operator, Operator::Join(_)) {
-                    let (child_changed, old_left_outputs_len) = {
+                    let (child_outcome, old_left_outputs_len) = {
                         let mut child_required = required_columns.clone();
                         Self::extend_operator_referenced_columns(operator, &mut child_required);
                         let old_left_outputs_len = match childrens {
                             Childrens::Twins { left, .. } => left.output_schema().len(),
                             _ => 0,
                         };
-                        let child_changed = Self::apply_join_children(
+                        let child_outcome = Self::apply_join_children(
                             child_required,
                             all_referenced,
                             childrens,
-                            &mut left_retained_positions,
-                            &mut right_retained_positions,
-                            &mut left_removed_positions,
-                            &mut right_removed_positions,
+                            arena,
                         )?;
-                        (child_changed, old_left_outputs_len)
+                        (child_outcome, old_left_outputs_len)
                     };
-                    if child_changed {
+                    if child_outcome.changed {
+                        let JoinChildrenOutcome {
+                            changed: _,
+                            left_removed_positions,
+                            right_removed_positions,
+                        } = child_outcome;
                         if let Operator::Join(op) = operator {
                             match &mut op.on {
                                 JoinCondition::On { on, filter } => {
@@ -520,16 +554,11 @@ impl ColumnPruning {
                                         if !left_removed_positions.is_empty()
                                             || !right_removed_positions.is_empty()
                                         {
-                                            let mut removed_positions = Vec::with_capacity(
-                                                left_removed_positions.len()
-                                                    + right_removed_positions.len(),
-                                            );
-                                            removed_positions
-                                                .extend_from_slice(&left_removed_positions);
-                                            removed_positions.extend(
-                                                right_removed_positions.iter().map(|position| {
-                                                    position + old_left_outputs_len
-                                                }),
+                                            let removed_positions = Self::merge_removed_positions(
+                                                &left_removed_positions,
+                                                &right_removed_positions,
+                                                old_left_outputs_len,
+                                                arena,
                                             );
                                             remap_expr_positions(filter, &removed_positions)?;
                                         }
@@ -537,27 +566,34 @@ impl ColumnPruning {
                                 }
                                 JoinCondition::None => {}
                             }
+                            if !matches!(op.join_type, JoinType::LeftSemi | JoinType::LeftAnti) {
+                                output_removed_positions = Self::merge_removed_positions(
+                                    &left_removed_positions,
+                                    &right_removed_positions,
+                                    old_left_outputs_len,
+                                    arena,
+                                );
+                            } else {
+                                output_removed_positions =
+                                    Self::copy_removed_positions(&left_removed_positions, arena);
+                            }
                         }
                         changed = true;
                     }
                 } else if matches!(operator, Operator::Union(_) | Operator::Except(_)) {
                     let mut child_required = required_columns;
                     Self::extend_operator_referenced_columns(operator, &mut child_required);
-                    changed |= Self::apply_twins(child_required, all_referenced, childrens)?;
+                    changed |= Self::apply_twins(child_required, all_referenced, childrens, arena)?;
                 } else {
-                    let child_changed = {
+                    let child_outcome = {
                         let mut child_required = required_columns;
                         Self::extend_operator_referenced_columns(operator, &mut child_required);
-                        Self::apply_only_child(
-                            child_required,
-                            all_referenced,
-                            childrens,
-                            &mut left_retained_positions,
-                            &mut left_removed_positions,
-                        )?
+                        Self::apply_only_child(child_required, all_referenced, childrens, arena)?
                     };
-                    if child_changed {
-                        Self::remap_operator_after_child_change(operator, &left_removed_positions)?;
+                    if child_outcome.changed {
+                        let removed_positions = child_outcome.removed_positions;
+                        Self::remap_operator_after_child_change(operator, &removed_positions)?;
+                        output_removed_positions = removed_positions;
                         changed = true;
                     }
                 }
@@ -565,15 +601,13 @@ impl ColumnPruning {
             // Last Operator
             Operator::Dummy | Operator::Values(_) | Operator::FunctionScan(_) => (),
             Operator::Explain => {
-                let child_changed = Self::apply_only_child(
-                    required_columns,
-                    true,
-                    childrens,
-                    &mut left_retained_positions,
-                    &mut left_removed_positions,
-                )?;
-                if child_changed {
-                    Self::remap_operator_after_child_change(operator, &left_removed_positions)?;
+                let child_outcome =
+                    Self::apply_only_child(required_columns, true, childrens, arena)?;
+                if child_outcome.changed {
+                    Self::remap_operator_after_child_change(
+                        operator,
+                        &child_outcome.removed_positions,
+                    )?;
                     changed = true;
                 }
             }
@@ -582,20 +616,17 @@ impl ColumnPruning {
             | Operator::Update(_)
             | Operator::Delete(_)
             | Operator::Analyze(_) => {
-                let child_changed = {
+                let child_outcome = {
                     let mut child_required = HashSet::new();
                     Self::extend_operator_referenced_columns(operator, &mut child_required);
 
-                    Self::apply_only_child(
-                        child_required,
-                        true,
-                        childrens,
-                        &mut left_retained_positions,
-                        &mut left_removed_positions,
-                    )?
+                    Self::apply_only_child(child_required, true, childrens, arena)?
                 };
-                if child_changed {
-                    Self::remap_operator_after_child_change(operator, &left_removed_positions)?;
+                if child_outcome.changed {
+                    Self::remap_operator_after_child_change(
+                        operator,
+                        &child_outcome.removed_positions,
+                    )?;
                     changed = true;
                 }
             }
@@ -617,13 +648,18 @@ impl ColumnPruning {
             | Operator::Describe(_) => (),
         }
 
-        Ok(changed)
+        Ok(ApplyOutcome {
+            changed,
+            removed_positions: output_removed_positions,
+        })
     }
 }
 
 impl NormalizationRule for ColumnPruning {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
-        Self::_apply(HashSet::<&ColumnSummary>::new(), true, plan)
+        let arena = Bump::new();
+        let outcome = Self::_apply(HashSet::<&ColumnSummary>::new(), true, plan, &arena)?;
+        Ok(outcome.changed)
     }
 }
 
@@ -636,8 +672,128 @@ mod tests {
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::join::JoinCondition;
     use crate::planner::operator::Operator;
-    use crate::planner::Childrens;
+    use crate::planner::{Childrens, LogicalPlan};
     use crate::storage::rocksdb::RocksTransaction;
+
+    fn optimize_column_pruning(sql: &str) -> Result<LogicalPlan, DatabaseError> {
+        let table_state = build_t1_table()?;
+        let plan = table_state.plan(sql)?;
+
+        HepOptimizerPipeline::builder()
+            .before_batch(
+                format!("column_pruning::{sql}"),
+                HepBatchStrategy::once_topdown(),
+                vec![NormalizationRuleImpl::ColumnPruning],
+            )
+            .build()
+            .instantiate(plan)
+            .find_best::<RocksTransaction>(None)
+    }
+
+    fn contains_operator(plan: &LogicalPlan, predicate: impl Fn(&Operator) -> bool + Copy) -> bool {
+        predicate(&plan.operator)
+            || plan
+                .childrens
+                .iter()
+                .any(|child| contains_operator(child, predicate))
+    }
+
+    fn collect_scan_columns(plan: &LogicalPlan, table_name: &str, scans: &mut Vec<Vec<String>>) {
+        if let Operator::TableScan(op) = &plan.operator {
+            if op.table_name.to_string() == table_name {
+                scans.push(
+                    op.columns
+                        .values()
+                        .map(|column| column.name().to_string())
+                        .collect(),
+                );
+            }
+        }
+
+        for child in plan.childrens.iter() {
+            collect_scan_columns(child, table_name, scans);
+        }
+    }
+
+    fn assert_single_scan_columns(plan: &LogicalPlan, table_name: &str, expected: &[&str]) {
+        let mut scans = Vec::new();
+        collect_scan_columns(plan, table_name, &mut scans);
+        assert_eq!(
+            scans.len(),
+            1,
+            "expected exactly one scan for table {table_name}"
+        );
+        let expected = expected
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(scans.pop().unwrap(), expected);
+    }
+
+    #[test]
+    fn test_column_pruning_project_single_side() -> Result<(), DatabaseError> {
+        let best_plan = optimize_column_pruning("select c1 from t1")?;
+
+        assert!(contains_operator(&best_plan, |op| matches!(
+            op,
+            Operator::Project(_)
+        )));
+        assert_single_scan_columns(&best_plan, "t1", &["c1"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_column_pruning_filter_single_side() -> Result<(), DatabaseError> {
+        let best_plan = optimize_column_pruning("select c1 from t1 where c2 > 1")?;
+
+        assert!(contains_operator(&best_plan, |op| matches!(
+            op,
+            Operator::Filter(_)
+        )));
+        assert_single_scan_columns(&best_plan, "t1", &["c1", "c2"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_column_pruning_aggregate_single_side() -> Result<(), DatabaseError> {
+        let best_plan = optimize_column_pruning("select sum(c1) from t1")?;
+
+        assert!(contains_operator(&best_plan, |op| matches!(
+            op,
+            Operator::Aggregate(_)
+        )));
+        assert_single_scan_columns(&best_plan, "t1", &["c1"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_column_pruning_sort_single_side() -> Result<(), DatabaseError> {
+        let best_plan = optimize_column_pruning("select c1 from t1 order by c2")?;
+
+        assert!(contains_operator(&best_plan, |op| matches!(
+            op,
+            Operator::Sort(_)
+        )));
+        assert_single_scan_columns(&best_plan, "t1", &["c1", "c2"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_column_pruning_limit_single_side() -> Result<(), DatabaseError> {
+        let best_plan = optimize_column_pruning("select c1 from t1 limit 1")?;
+
+        assert!(contains_operator(&best_plan, |op| matches!(
+            op,
+            Operator::Limit(_)
+        )));
+        assert_single_scan_columns(&best_plan, "t1", &["c1"]);
+
+        Ok(())
+    }
 
     #[test]
     fn test_column_pruning() -> Result<(), DatabaseError> {
