@@ -18,7 +18,7 @@ use crate::expression::range_detacher::Range;
 use crate::expression::BinaryOperator;
 use crate::optimizer::core::cm_sketch::CountMinSketch;
 use crate::storage::table_codec::BumpBytes;
-use crate::types::evaluator::EvaluatorFactory;
+use crate::types::evaluator::{BinaryEvaluatorBox, EvaluatorFactory};
 use crate::types::index::{IndexId, IndexMeta};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
@@ -39,6 +39,13 @@ pub struct HistogramBuilder {
     sort_keys: Option<NullableVec<'static, (usize, BumpBytes<'static>)>>,
 
     value_index: usize,
+}
+
+struct BoundComparator {
+    lt: BinaryEvaluatorBox,
+    lte: BinaryEvaluatorBox,
+    gt: BinaryEvaluatorBox,
+    gte: BinaryEvaluatorBox,
 }
 
 #[derive(Debug, Clone, PartialEq, ReferenceSerialization)]
@@ -222,22 +229,57 @@ impl HistogramBuilder {
     }
 }
 
+impl BoundComparator {
+    fn new(ty: LogicalType) -> Result<Self, DatabaseError> {
+        Ok(Self {
+            lt: EvaluatorFactory::binary_create(ty.clone(), BinaryOperator::Lt)?,
+            lte: EvaluatorFactory::binary_create(ty.clone(), BinaryOperator::LtEq)?,
+            gt: EvaluatorFactory::binary_create(ty.clone(), BinaryOperator::Gt)?,
+            gte: EvaluatorFactory::binary_create(ty, BinaryOperator::GtEq)?,
+        })
+    }
+
+    fn lt(&self, value: &DataValue, target: &DataValue) -> Result<bool, DatabaseError> {
+        Ok(matches!(
+            self.lt.binary_eval(value, target)?,
+            DataValue::Boolean(true)
+        ))
+    }
+
+    fn lte(&self, value: &DataValue, target: &DataValue) -> Result<bool, DatabaseError> {
+        Ok(matches!(
+            self.lte.binary_eval(value, target)?,
+            DataValue::Boolean(true)
+        ))
+    }
+
+    fn gt(&self, value: &DataValue, target: &DataValue) -> Result<bool, DatabaseError> {
+        Ok(matches!(
+            self.gt.binary_eval(value, target)?,
+            DataValue::Boolean(true)
+        ))
+    }
+
+    fn gte(&self, value: &DataValue, target: &DataValue) -> Result<bool, DatabaseError> {
+        Ok(matches!(
+            self.gte.binary_eval(value, target)?,
+            DataValue::Boolean(true)
+        ))
+    }
+}
+
 fn is_under(
+    comparator: &BoundComparator,
     value: &DataValue,
     target: &Bound<DataValue>,
     is_min: bool,
 ) -> Result<bool, DatabaseError> {
     let _is_under = |value: &DataValue, target: &DataValue, is_min: bool| {
-        let evaluator = EvaluatorFactory::binary_create(
-            value.logical_type(),
-            if is_min {
-                BinaryOperator::Lt
-            } else {
-                BinaryOperator::LtEq
-            },
-        )?;
-        let value = evaluator.0.binary_eval(value, target)?;
-        Ok::<bool, DatabaseError>(matches!(value, DataValue::Boolean(true)))
+        if is_min {
+            comparator.lt(value, target)
+        } else {
+            comparator.lte(value, target)
+        }
     };
 
     Ok(match target {
@@ -248,21 +290,17 @@ fn is_under(
 }
 
 fn is_above(
+    comparator: &BoundComparator,
     value: &DataValue,
     target: &Bound<DataValue>,
     is_min: bool,
 ) -> Result<bool, DatabaseError> {
     let _is_above = |value: &DataValue, target: &DataValue, is_min: bool| {
-        let evaluator = EvaluatorFactory::binary_create(
-            value.logical_type(),
-            if is_min {
-                BinaryOperator::GtEq
-            } else {
-                BinaryOperator::Gt
-            },
-        )?;
-        let value = evaluator.0.binary_eval(value, target)?;
-        Ok::<bool, DatabaseError>(matches!(value, DataValue::Boolean(true)))
+        if is_min {
+            comparator.gte(value, target)
+        } else {
+            comparator.gt(value, target)
+        }
     };
     Ok(match target {
         Bound::Included(target) => _is_above(value, target, is_min)?,
@@ -327,6 +365,7 @@ impl Histogram {
         if self.buckets.is_empty() || ranges.is_empty() {
             return Ok(0);
         }
+        let comparator = BoundComparator::new(self.buckets[0].upper.logical_type())?;
 
         let mut count = 0;
         let mut binary_i = 0;
@@ -341,6 +380,7 @@ impl Histogram {
                 &mut bucket_idxs,
                 &mut count,
                 estimate,
+                &comparator,
             )?;
             if is_dummy {
                 return Ok(0);
@@ -362,6 +402,7 @@ impl Histogram {
         bucket_idxs: &mut Vec<usize>,
         count: &mut usize,
         estimate: &mut F,
+        comparator: &BoundComparator,
     ) -> Result<bool, DatabaseError>
     where
         F: FnMut(&DataValue) -> Result<usize, DatabaseError>,
@@ -472,15 +513,16 @@ impl Histogram {
                     _ => false,
                 };
 
-                if (is_above(&bucket.lower, min, true)? || is_eq(&bucket.lower, min))
-                    && (is_under(&bucket.upper, max, false)? || is_eq(&bucket.upper, max))
+                if (is_above(comparator, &bucket.lower, min, true)? || is_eq(&bucket.lower, min))
+                    && (is_under(comparator, &bucket.upper, max, false)?
+                        || is_eq(&bucket.upper, max))
                 {
                     bucket_idxs.push(mem::replace(bucket_i, *bucket_i + 1));
-                } else if is_above(&bucket.lower, max, false)? {
+                } else if is_above(comparator, &bucket.lower, max, false)? {
                     *binary_i += 1;
-                } else if is_under(&bucket.upper, min, true)? {
+                } else if is_under(comparator, &bucket.upper, min, true)? {
                     *bucket_i += 1;
-                } else if is_above(&bucket.lower, min, true)? {
+                } else if is_above(comparator, &bucket.lower, min, true)? {
                     let (temp_ratio, option) = match max {
                         Bound::Included(val) => {
                             (calc_fraction(&bucket.lower, &bucket.upper, val)?, None)
@@ -497,7 +539,7 @@ impl Histogram {
                         temp_count = temp_count.saturating_sub(count);
                     }
                     *bucket_i += 1;
-                } else if is_under(&bucket.upper, max, false)? {
+                } else if is_under(comparator, &bucket.upper, max, false)? {
                     let (temp_ratio, option) = match min {
                         Bound::Included(val) => {
                             (calc_fraction(&bucket.lower, &bucket.upper, val)?, None)
