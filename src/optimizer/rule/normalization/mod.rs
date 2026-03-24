@@ -23,9 +23,6 @@ use crate::optimizer::rule::normalization::combine_operators::{
 use crate::optimizer::rule::normalization::compilation_in_advance::EvaluatorBind;
 use crate::planner::operator::Operator;
 
-use crate::optimizer::rule::normalization::agg_elimination::{
-    EliminateRedundantSort, UseStreamDistinct,
-};
 use crate::optimizer::rule::normalization::min_max_top_k::MinMaxToTopK;
 use crate::optimizer::rule::normalization::pushdown_limit::{
     LimitProjectTranspose, PushLimitIntoScan, PushLimitThroughJoin,
@@ -47,7 +44,9 @@ mod pushdown_limit;
 mod pushdown_predicates;
 mod simplification;
 mod top_k;
-pub(crate) use agg_elimination::{apply_scan_order_hint, distinct_sort_fields, OrderHintKind};
+pub(crate) use agg_elimination::{
+    apply_annotated_post_rules, apply_scan_order_hint, OrderHintKind, ScanOrderHint,
+};
 pub(crate) use compilation_in_advance::evaluator_bind_current;
 pub(crate) use simplification::constant_calculation_current;
 
@@ -74,8 +73,6 @@ pub enum NormalizationRuleImpl {
     EvaluatorBind,
     MinMaxToTopK,
     TopK,
-    EliminateRedundantSort,
-    UseStreamDistinct,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -84,9 +81,10 @@ pub enum WholeTreePassKind {
     ExpressionRewrite,
 }
 
+#[repr(usize)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum NormalizationRuleRootTag {
-    Any,
+    Any = 0,
     Aggregate,
     Filter,
     Join,
@@ -96,17 +94,43 @@ pub enum NormalizationRuleRootTag {
 }
 
 impl NormalizationRuleRootTag {
-    pub fn matches(self, operator: &Operator) -> bool {
-        match self {
-            NormalizationRuleRootTag::Any => true,
-            NormalizationRuleRootTag::Aggregate => matches!(operator, Operator::Aggregate(_)),
-            NormalizationRuleRootTag::Filter => matches!(operator, Operator::Filter(_)),
-            NormalizationRuleRootTag::Join => matches!(operator, Operator::Join(_)),
-            NormalizationRuleRootTag::Limit => matches!(operator, Operator::Limit(_)),
-            NormalizationRuleRootTag::Project => matches!(operator, Operator::Project(_)),
-            NormalizationRuleRootTag::SortLike => {
-                matches!(operator, Operator::Sort(_) | Operator::TopK(_))
-            }
+    pub const COUNT: usize = Self::SortLike as usize + 1;
+
+    pub fn from_operator(operator: &Operator) -> Option<Self> {
+        match operator {
+            Operator::Aggregate(_) => Some(Self::Aggregate),
+            Operator::Filter(_) => Some(Self::Filter),
+            Operator::Join(_) => Some(Self::Join),
+            Operator::Limit(_) => Some(Self::Limit),
+            Operator::Project(_) => Some(Self::Project),
+            Operator::Sort(_) | Operator::TopK(_) => Some(Self::SortLike),
+            Operator::Dummy
+            | Operator::TableScan(_)
+            | Operator::ScalarSubquery(_)
+            | Operator::Values(_)
+            | Operator::ShowTable
+            | Operator::ShowView
+            | Operator::Explain
+            | Operator::Describe(_)
+            | Operator::Insert(_)
+            | Operator::Delete(_)
+            | Operator::Analyze(_)
+            | Operator::AddColumn(_)
+            | Operator::ChangeColumn(_)
+            | Operator::DropColumn(_)
+            | Operator::CreateTable(_)
+            | Operator::CreateIndex(_)
+            | Operator::CreateView(_)
+            | Operator::DropTable(_)
+            | Operator::DropView(_)
+            | Operator::DropIndex(_)
+            | Operator::Truncate(_)
+            | Operator::CopyFromFile(_)
+            | Operator::CopyToFile(_)
+            | Operator::FunctionScan(_)
+            | Operator::Update(_)
+            | Operator::Union(_)
+            | Operator::Except(_) => None,
         }
     }
 }
@@ -146,10 +170,7 @@ impl NormalizationRuleImpl {
             NormalizationRuleImpl::PushJoinPredicateIntoScan => NormalizationRuleRootTag::Join,
             NormalizationRuleImpl::ConstantCalculation => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::EvaluatorBind => NormalizationRuleRootTag::Any,
-            NormalizationRuleImpl::MinMaxToTopK | NormalizationRuleImpl::UseStreamDistinct => {
-                NormalizationRuleRootTag::Aggregate
-            }
-            NormalizationRuleImpl::EliminateRedundantSort => NormalizationRuleRootTag::SortLike,
+            NormalizationRuleImpl::MinMaxToTopK => NormalizationRuleRootTag::Aggregate,
         }
     }
 }
@@ -174,8 +195,6 @@ impl NormalizationRule for NormalizationRuleImpl {
             NormalizationRuleImpl::EvaluatorBind => EvaluatorBind.apply(plan),
             NormalizationRuleImpl::MinMaxToTopK => MinMaxToTopK.apply(plan),
             NormalizationRuleImpl::TopK => TopK.apply(plan),
-            NormalizationRuleImpl::EliminateRedundantSort => EliminateRedundantSort.apply(plan),
-            NormalizationRuleImpl::UseStreamDistinct => UseStreamDistinct.apply(plan),
         }
     }
 }

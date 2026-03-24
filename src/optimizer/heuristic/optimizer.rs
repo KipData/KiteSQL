@@ -18,19 +18,22 @@ use crate::optimizer::core::rule::{
 };
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::heuristic::batch::{
-    HepBatch, HepBatchStep, HepBatchStrategy, HepWholeTreePass,
+    HepBatch, HepBatchStep, HepBatchStrategy, HepLocalRewriteBatch, HepWholeTreePass,
 };
 use crate::optimizer::rule::implementation::{ImplementationRuleImpl, ImplementationRuleRootTag};
 use crate::optimizer::rule::normalization::{
-    apply_scan_order_hint, constant_calculation_current, distinct_sort_fields,
-    evaluator_bind_current, NormalizationRuleImpl, OrderHintKind, WholeTreePassKind,
+    apply_annotated_post_rules, apply_scan_order_hint, constant_calculation_current,
+    evaluator_bind_current, NormalizationRuleImpl, OrderHintKind, ScanOrderHint, WholeTreePassKind,
 };
-use crate::planner::operator::sort::SortField;
-use crate::planner::operator::Operator;
+use crate::planner::operator::join::JoinCondition;
+use crate::planner::operator::table_scan::TableScanOperator;
+use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
 use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use std::array;
 use std::ops::Not;
+
+type ScanHintApplier<'a> = dyn Fn(&mut TableScanOperator) + 'a;
 
 pub struct HepOptimizer<'a> {
     before_batches: &'a [HepBatch],
@@ -62,16 +65,14 @@ impl<'a> HepOptimizer<'a> {
 
         if let Some(loader) = loader {
             if self.implementation_index.is_empty().not() {
-                let mut inherited_sort_hints = Vec::new();
-                let mut inherited_stream_distinct_hints = Vec::new();
+                let apply_no_sort_hints = |_scan_op: &mut TableScanOperator| {};
+                let apply_no_stream_distinct_hints = |_scan_op: &mut TableScanOperator| {};
                 Self::annotate_hints_and_physical_options(
                     &mut self.plan,
                     loader,
                     self.implementation_index,
-                    &mut inherited_sort_hints,
-                    &mut inherited_stream_distinct_hints,
-                    0,
-                    0,
+                    &apply_no_sort_hints,
+                    &apply_no_stream_distinct_hints,
                 )?;
             }
         }
@@ -204,109 +205,150 @@ impl<'a> HepOptimizer<'a> {
         plan: &'plan mut LogicalPlan,
         loader: &StatisticMetaLoader<'_, T>,
         implementation_index: &ImplementationRuleIndex,
-        inherited_sort_hints: &mut Vec<SortHint<'plan>>,
-        inherited_stream_distinct_hints: &mut Vec<SortHint<'plan>>,
-        sort_hint_start: usize,
-        stream_distinct_hint_start: usize,
+        inherited_sort_hints: &'plan ScanHintApplier<'plan>,
+        inherited_stream_distinct_hints: &'plan ScanHintApplier<'plan>,
     ) -> Result<(), DatabaseError> {
         if let Operator::TableScan(scan_op) = &mut plan.operator {
-            for required in inherited_sort_hints[sort_hint_start..].iter() {
-                apply_scan_order_hint(scan_op, required.as_slice(), OrderHintKind::SortElimination);
-            }
-            for required in inherited_stream_distinct_hints[stream_distinct_hint_start..].iter() {
-                apply_scan_order_hint(scan_op, required.as_slice(), OrderHintKind::StreamDistinct);
+            inherited_sort_hints(scan_op);
+            inherited_stream_distinct_hints(scan_op);
+        }
+
+        {
+            let LogicalPlan {
+                operator,
+                physical_option,
+                ..
+            } = plan;
+            if let Some(option) = implementation_index.direct_physical_option(operator) {
+                *physical_option = Some(option);
+            } else {
+                let mut best_physical_option: BestPhysicalOption = None;
+                for rule in implementation_index.for_matching_operator(operator) {
+                    rule.update_best_option(operator, loader, &mut best_physical_option)?;
+                }
+                if let Some((option, _)) = best_physical_option {
+                    *physical_option = Some(option);
+                }
             }
         }
 
-        let mut best_physical_option: BestPhysicalOption = None;
-        for rule in implementation_index.for_matching_operator(&plan.operator) {
-            rule.update_best_option(&plan.operator, loader, &mut best_physical_option)?;
-        }
-        if let Some((option, _)) = best_physical_option {
-            plan.physical_option = Some(option);
-        }
-
-        match (&plan.operator, plan.childrens.as_mut()) {
-            (operator, Childrens::Only(child)) => {
-                let propagate_hints = matches!(
+        {
+            let LogicalPlan {
+                operator,
+                childrens,
+                ..
+            } = plan;
+            Self::with_child_sort_hints(operator, inherited_sort_hints, |child_sort_hints| {
+                Self::with_child_stream_distinct_hints(
                     operator,
-                    Operator::Filter(_)
-                        | Operator::Project(_)
-                        | Operator::Limit(_)
-                        | Operator::TopK(_)
-                        | Operator::Sort(_)
-                );
-
-                let child_sort_hint_start = if propagate_hints {
-                    sort_hint_start
-                } else {
-                    inherited_sort_hints.len()
-                };
-                let old_sort_hint_len = inherited_sort_hints.len();
-                if let Operator::Sort(op) = operator {
-                    inherited_sort_hints.push(SortHint::Borrowed(&op.sort_fields));
-                }
-
-                let child_stream_distinct_hint_start = if propagate_hints {
-                    stream_distinct_hint_start
-                } else {
-                    inherited_stream_distinct_hints.len()
-                };
-                let old_stream_distinct_hint_len = inherited_stream_distinct_hints.len();
-
-                if let Operator::Aggregate(op) = operator {
-                    if op.is_distinct && op.agg_calls.is_empty() && !op.groupby_exprs.is_empty() {
-                        inherited_stream_distinct_hints
-                            .push(SortHint::Owned(distinct_sort_fields(&op.groupby_exprs)));
-                    }
-                }
-
-                Self::annotate_hints_and_physical_options(
-                    child,
-                    loader,
-                    implementation_index,
-                    inherited_sort_hints,
                     inherited_stream_distinct_hints,
-                    child_sort_hint_start,
-                    child_stream_distinct_hint_start,
-                )?;
-
-                inherited_sort_hints.truncate(old_sort_hint_len);
-                inherited_stream_distinct_hints.truncate(old_stream_distinct_hint_len);
-            }
-            (_, Childrens::Twins { left, right }) => {
-                let left_sort_hint_start = inherited_sort_hints.len();
-                let left_stream_distinct_hint_start = inherited_stream_distinct_hints.len();
-                Self::annotate_hints_and_physical_options(
-                    left,
-                    loader,
-                    implementation_index,
-                    inherited_sort_hints,
-                    inherited_stream_distinct_hints,
-                    left_sort_hint_start,
-                    left_stream_distinct_hint_start,
-                )?;
-                let right_sort_hint_start = inherited_sort_hints.len();
-                let right_stream_distinct_hint_start = inherited_stream_distinct_hints.len();
-                Self::annotate_hints_and_physical_options(
-                    right,
-                    loader,
-                    implementation_index,
-                    inherited_sort_hints,
-                    inherited_stream_distinct_hints,
-                    right_sort_hint_start,
-                    right_stream_distinct_hint_start,
-                )?;
-            }
-            (_, Childrens::None) => {}
+                    |child_stream_distinct_hints| match &mut **childrens {
+                        Childrens::Only(child) => Self::annotate_hints_and_physical_options(
+                            child,
+                            loader,
+                            implementation_index,
+                            child_sort_hints,
+                            child_stream_distinct_hints,
+                        ),
+                        Childrens::Twins { left, right } => {
+                            Self::annotate_hints_and_physical_options(
+                                left,
+                                loader,
+                                implementation_index,
+                                child_sort_hints,
+                                child_stream_distinct_hints,
+                            )?;
+                            Self::annotate_hints_and_physical_options(
+                                right,
+                                loader,
+                                implementation_index,
+                                child_sort_hints,
+                                child_stream_distinct_hints,
+                            )
+                        }
+                        Childrens::None => Ok(()),
+                    },
+                )
+            })?;
         }
+
+        apply_annotated_post_rules(plan)?;
 
         Ok(())
     }
 
+    fn with_child_sort_hints<'plan, R>(
+        operator: &'plan Operator,
+        inherited_sort_hints: &'plan ScanHintApplier<'plan>,
+        f: impl for<'b> FnOnce(&'b ScanHintApplier<'plan>) -> R,
+    ) -> R {
+        let propagate_hints = matches!(
+            operator,
+            Operator::Filter(_)
+                | Operator::Project(_)
+                | Operator::Limit(_)
+                | Operator::TopK(_)
+                | Operator::Sort(_)
+        );
+
+        match operator {
+            Operator::Sort(op) => {
+                let child_sort_hints = |scan_op: &mut TableScanOperator| {
+                    inherited_sort_hints(scan_op);
+                    apply_scan_order_hint(
+                        scan_op,
+                        ScanOrderHint::sort_fields(&op.sort_fields),
+                        OrderHintKind::SortElimination,
+                    );
+                };
+                f(&child_sort_hints)
+            }
+            _ if propagate_hints => f(inherited_sort_hints),
+            _ => {
+                let no_sort_hints = |_scan_op: &mut TableScanOperator| {};
+                f(&no_sort_hints)
+            }
+        }
+    }
+
+    fn with_child_stream_distinct_hints<'plan, R>(
+        operator: &'plan Operator,
+        inherited_stream_distinct_hints: &'plan ScanHintApplier<'plan>,
+        f: impl for<'b> FnOnce(&'b ScanHintApplier<'plan>) -> R,
+    ) -> R {
+        let propagate_hints = matches!(
+            operator,
+            Operator::Filter(_)
+                | Operator::Project(_)
+                | Operator::Limit(_)
+                | Operator::TopK(_)
+                | Operator::Sort(_)
+        );
+
+        match operator {
+            Operator::Aggregate(op)
+                if op.is_distinct && op.agg_calls.is_empty() && !op.groupby_exprs.is_empty() =>
+            {
+                let child_stream_distinct_hints = |scan_op: &mut TableScanOperator| {
+                    apply_scan_order_hint(
+                        scan_op,
+                        ScanOrderHint::distinct_groupby(&op.groupby_exprs),
+                        OrderHintKind::StreamDistinct,
+                    );
+                };
+                f(&child_stream_distinct_hints)
+            }
+            _ if propagate_hints => f(inherited_stream_distinct_hints),
+            _ => {
+                let no_stream_distinct_hints = |_scan_op: &mut TableScanOperator| {};
+                f(&no_stream_distinct_hints)
+            }
+        }
+    }
+
     fn apply_local_rules(
         plan: &mut LogicalPlan,
-        rules: &[NormalizationRuleImpl],
+        rules: &HepLocalRewriteBatch,
     ) -> Result<bool, DatabaseError> {
         let mut applied_rules = vec![false; rules.len()];
         Self::apply_local_rules_inner(plan, rules, &mut applied_rules)
@@ -314,13 +356,16 @@ impl<'a> HepOptimizer<'a> {
 
     fn apply_local_rules_inner(
         plan: &mut LogicalPlan,
-        rules: &[NormalizationRuleImpl],
+        rules: &HepLocalRewriteBatch,
         applied_rules: &mut [bool],
     ) -> Result<bool, DatabaseError> {
         let mut applied = false;
+        let mut next_rule_idx = 0;
 
-        for (idx, rule) in rules.iter().enumerate() {
-            if applied_rules[idx] || !rule.root_tag().matches(&plan.operator) {
+        while let Some(idx) = rules.next_matching_rule_index_from(&plan.operator, next_rule_idx) {
+            let rule = rules.rules[idx];
+            next_rule_idx = idx + 1;
+            if applied_rules[idx] {
                 continue;
             }
             if rule.apply(plan)? {
@@ -351,20 +396,6 @@ impl<'a> HepOptimizer<'a> {
     }
 }
 
-enum SortHint<'a> {
-    Borrowed(&'a [SortField]),
-    Owned(Vec<SortField>),
-}
-
-impl SortHint<'_> {
-    fn as_slice(&self) -> &[SortField] {
-        match self {
-            SortHint::Borrowed(fields) => fields,
-            SortHint::Owned(fields) => fields.as_slice(),
-        }
-    }
-}
-
 #[derive(Clone, Default)]
 struct ImplementationRuleIndex {
     groups: [Vec<ImplementationRuleImpl>; ImplementationRuleRootTag::COUNT],
@@ -381,6 +412,130 @@ impl ImplementationRuleIndex {
 
     fn is_empty(&self) -> bool {
         self.groups.iter().all(Vec::is_empty)
+    }
+
+    fn contains(&self, implementation: ImplementationRuleImpl) -> bool {
+        self.groups[implementation.root_tag() as usize].contains(&implementation)
+    }
+
+    fn direct_physical_option(&self, operator: &Operator) -> Option<PhysicalOption> {
+        match operator {
+            Operator::Aggregate(op)
+                if !op.groupby_exprs.is_empty()
+                    && self.contains(ImplementationRuleImpl::GroupByAggregate) =>
+            {
+                Some(PhysicalOption::new(
+                    PlanImpl::HashAggregate,
+                    SortOption::None,
+                ))
+            }
+            Operator::Aggregate(op)
+                if op.groupby_exprs.is_empty()
+                    && self.contains(ImplementationRuleImpl::SimpleAggregate) =>
+            {
+                Some(PhysicalOption::new(
+                    PlanImpl::SimpleAggregate,
+                    SortOption::None,
+                ))
+            }
+            Operator::Dummy if self.contains(ImplementationRuleImpl::Dummy) => {
+                Some(PhysicalOption::new(PlanImpl::Dummy, SortOption::None))
+            }
+            Operator::Filter(_) if self.contains(ImplementationRuleImpl::Filter) => {
+                Some(PhysicalOption::new(PlanImpl::Filter, SortOption::Follow))
+            }
+            Operator::Join(join_op) if self.contains(ImplementationRuleImpl::HashJoin) => {
+                let plan = match &join_op.on {
+                    JoinCondition::On { on, .. } if !on.is_empty() => PlanImpl::HashJoin,
+                    _ => PlanImpl::NestLoopJoin,
+                };
+                Some(PhysicalOption::new(plan, SortOption::None))
+            }
+            Operator::Limit(_) if self.contains(ImplementationRuleImpl::Limit) => {
+                Some(PhysicalOption::new(PlanImpl::Limit, SortOption::Follow))
+            }
+            Operator::Project(_) if self.contains(ImplementationRuleImpl::Projection) => {
+                Some(PhysicalOption::new(PlanImpl::Project, SortOption::Follow))
+            }
+            Operator::ScalarSubquery(_)
+                if self.contains(ImplementationRuleImpl::ScalarSubquery) =>
+            {
+                Some(PhysicalOption::new(
+                    PlanImpl::ScalarSubquery,
+                    SortOption::Follow,
+                ))
+            }
+            Operator::FunctionScan(_) if self.contains(ImplementationRuleImpl::FunctionScan) => {
+                Some(PhysicalOption::new(
+                    PlanImpl::FunctionScan,
+                    SortOption::None,
+                ))
+            }
+            Operator::Sort(op) if self.contains(ImplementationRuleImpl::Sort) => {
+                Some(PhysicalOption::new(
+                    PlanImpl::Sort,
+                    SortOption::OrderBy {
+                        fields: op.sort_fields.clone(),
+                        ignore_prefix_len: 0,
+                    },
+                ))
+            }
+            Operator::TopK(op) if self.contains(ImplementationRuleImpl::TopK) => {
+                Some(PhysicalOption::new(
+                    PlanImpl::TopK,
+                    SortOption::OrderBy {
+                        fields: op.sort_fields.clone(),
+                        ignore_prefix_len: 0,
+                    },
+                ))
+            }
+            Operator::Values(_) if self.contains(ImplementationRuleImpl::Values) => {
+                Some(PhysicalOption::new(PlanImpl::Values, SortOption::None))
+            }
+            Operator::Analyze(_) if self.contains(ImplementationRuleImpl::Analyze) => {
+                Some(PhysicalOption::new(PlanImpl::Analyze, SortOption::None))
+            }
+            Operator::CopyFromFile(_) if self.contains(ImplementationRuleImpl::CopyFromFile) => {
+                Some(PhysicalOption::new(
+                    PlanImpl::CopyFromFile,
+                    SortOption::None,
+                ))
+            }
+            Operator::CopyToFile(_) if self.contains(ImplementationRuleImpl::CopyToFile) => {
+                Some(PhysicalOption::new(PlanImpl::CopyToFile, SortOption::None))
+            }
+            Operator::Delete(_) if self.contains(ImplementationRuleImpl::Delete) => {
+                Some(PhysicalOption::new(PlanImpl::Delete, SortOption::None))
+            }
+            Operator::Insert(_) if self.contains(ImplementationRuleImpl::Insert) => {
+                Some(PhysicalOption::new(PlanImpl::Insert, SortOption::None))
+            }
+            Operator::Update(_) if self.contains(ImplementationRuleImpl::Update) => {
+                Some(PhysicalOption::new(PlanImpl::Update, SortOption::None))
+            }
+            Operator::AddColumn(_) if self.contains(ImplementationRuleImpl::AddColumn) => {
+                Some(PhysicalOption::new(PlanImpl::AddColumn, SortOption::None))
+            }
+            Operator::ChangeColumn(_) if self.contains(ImplementationRuleImpl::ChangeColumn) => {
+                Some(PhysicalOption::new(
+                    PlanImpl::ChangeColumn,
+                    SortOption::None,
+                ))
+            }
+            Operator::CreateTable(_) if self.contains(ImplementationRuleImpl::CreateTable) => {
+                Some(PhysicalOption::new(PlanImpl::CreateTable, SortOption::None))
+            }
+            Operator::DropColumn(_) if self.contains(ImplementationRuleImpl::DropColumn) => {
+                Some(PhysicalOption::new(PlanImpl::DropColumn, SortOption::None))
+            }
+            Operator::DropTable(_) if self.contains(ImplementationRuleImpl::DropTable) => {
+                Some(PhysicalOption::new(PlanImpl::DropTable, SortOption::None))
+            }
+            Operator::Truncate(_) if self.contains(ImplementationRuleImpl::Truncate) => {
+                Some(PhysicalOption::new(PlanImpl::Truncate, SortOption::None))
+            }
+            _ => None,
+        }
     }
 
     fn for_matching_operator<'b>(

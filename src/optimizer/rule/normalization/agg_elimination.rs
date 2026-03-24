@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::optimizer::core::rule::NormalizationRule;
@@ -70,6 +69,22 @@ pub(crate) enum OrderHintKind {
     StreamDistinct,
 }
 
+#[derive(Copy, Clone)]
+pub(crate) enum ScanOrderHint<'a> {
+    SortFields(&'a [SortField]),
+    DistinctGroupBy(&'a [ScalarExpression]),
+}
+
+impl<'a> ScanOrderHint<'a> {
+    pub(crate) fn sort_fields(fields: &'a [SortField]) -> Self {
+        Self::SortFields(fields)
+    }
+
+    pub(crate) fn distinct_groupby(groupby_exprs: &'a [ScalarExpression]) -> Self {
+        Self::DistinctGroupBy(groupby_exprs)
+    }
+}
+
 fn mark_order_hint(plan: &mut LogicalPlan, required: &[SortField], hint: OrderHintKind) {
     if required.is_empty() {
         return;
@@ -86,7 +101,7 @@ fn mark_order_hint(plan: &mut LogicalPlan, required: &[SortField], hint: OrderHi
             }
         }
         Operator::TableScan(scan_op) => {
-            apply_scan_order_hint(scan_op, required, hint);
+            apply_scan_order_hint(scan_op, ScanOrderHint::sort_fields(required), hint);
         }
         _ => {}
     }
@@ -94,21 +109,33 @@ fn mark_order_hint(plan: &mut LogicalPlan, required: &[SortField], hint: OrderHi
 
 pub(crate) fn apply_scan_order_hint(
     scan_op: &mut TableScanOperator,
-    required: &[SortField],
+    required: ScanOrderHint<'_>,
     hint: OrderHintKind,
 ) {
-    let table_columns: Vec<ColumnRef> = scan_op.columns.values().cloned().collect();
-    let required_from_table = required.iter().all(|field| {
-        field
-            .expr
-            .all_referenced_columns(true, |column| table_columns.contains(column))
-    });
+    let required_from_table = match required {
+        ScanOrderHint::SortFields(fields) => fields.iter().all(|field| {
+            field.expr.all_referenced_columns(true, |column| {
+                scan_op
+                    .columns
+                    .values()
+                    .any(|table_column| table_column == column)
+            })
+        }),
+        ScanOrderHint::DistinctGroupBy(groupby_exprs) => groupby_exprs.iter().all(|expr| {
+            expr.all_referenced_columns(true, |column| {
+                scan_op
+                    .columns
+                    .values()
+                    .any(|table_column| table_column == column)
+            })
+        }),
+    };
     if !required_from_table {
         return;
     }
     for index_info in scan_op.index_infos.iter_mut() {
-        if covers(required, &index_info.sort_option) {
-            let covered = required.len();
+        if hint_covers(required, &index_info.sort_option) {
+            let covered = hint_len(required);
             match hint {
                 OrderHintKind::SortElimination => {
                     index_info.sort_elimination_hint = Some(
@@ -125,6 +152,24 @@ pub(crate) fn apply_scan_order_hint(
                     );
                 }
             }
+        }
+    }
+}
+
+fn hint_len(required: ScanOrderHint<'_>) -> usize {
+    match required {
+        ScanOrderHint::SortFields(fields) => fields.len(),
+        ScanOrderHint::DistinctGroupBy(groupby_exprs) => groupby_exprs.len(),
+    }
+}
+
+fn hint_covers(required: ScanOrderHint<'_>, provided: &SortOption) -> bool {
+    match required {
+        ScanOrderHint::SortFields(fields) => covers(fields, provided, |lhs, rhs| lhs == rhs),
+        ScanOrderHint::DistinctGroupBy(groupby_exprs) => {
+            covers(groupby_exprs, provided, |expr, field| {
+                field.asc && !field.nulls_first && field.expr == *expr
+            })
         }
     }
 }
@@ -174,20 +219,38 @@ impl NormalizationRule for UseStreamDistinct {
     }
 }
 
+pub(crate) fn apply_annotated_post_rules(plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    let mut changed = false;
+
+    if EliminateRedundantSort.apply(plan)? {
+        plan.reset_output_schema_cache_recursive();
+        changed = true;
+    }
+    if UseStreamDistinct.apply(plan)? {
+        changed = true;
+    }
+
+    Ok(changed)
+}
+
 fn ensure_stream_distinct_order(plan: &mut LogicalPlan, required: &[SortField]) -> bool {
     if let Some(PhysicalOption {
         plan: PlanImpl::IndexScan(index_info),
         ..
     }) = plan.physical_option.as_ref()
     {
-        if covers(required, &index_info.sort_option) {
+        if covers(required, &index_info.sort_option, |lhs, rhs| lhs == rhs) {
             return true;
         }
     }
 
     if let Some(physical_option) = plan.physical_option.as_ref() {
         match physical_option.sort_option() {
-            SortOption::OrderBy { .. } if covers(required, physical_option.sort_option()) => {
+            SortOption::OrderBy { .. }
+                if covers(required, physical_option.sort_option(), |lhs, rhs| {
+                    lhs == rhs
+                }) =>
+            {
                 return true
             }
             SortOption::OrderBy { .. } => {}
@@ -211,7 +274,7 @@ fn ensure_index_order(plan: &mut LogicalPlan, required: &[SortField]) -> bool {
         ..
     }) = plan.physical_option.as_ref()
     {
-        if covers(required, &index_info.sort_option) {
+        if covers(required, &index_info.sort_option, |lhs, rhs| lhs == rhs) {
             return true;
         }
     }
@@ -229,7 +292,11 @@ fn ensure_index_order(plan: &mut LogicalPlan, required: &[SortField]) -> bool {
     false
 }
 
-pub(crate) fn covers(required: &[SortField], provided: &SortOption) -> bool {
+pub(crate) fn covers<T>(
+    required: &[T],
+    provided: &SortOption,
+    mut matches: impl FnMut(&T, &SortField) -> bool,
+) -> bool {
     if required.is_empty() {
         return true;
     }
@@ -251,7 +318,7 @@ pub(crate) fn covers(required: &[SortField], provided: &SortOption) -> bool {
                 if required
                     .iter()
                     .zip(fields.iter().skip(skip))
-                    .all(|(lhs, rhs)| lhs == rhs)
+                    .all(|(lhs, rhs)| matches(lhs, rhs))
                 {
                     return true;
                 }

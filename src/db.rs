@@ -337,10 +337,12 @@ fn default_optimizer_pipeline() -> HepOptimizerPipeline {
         .before_batch(
             "Simplify Filter".to_string(),
             HepBatchStrategy::fix_point_topdown(10),
-            vec![
-                NormalizationRuleImpl::SimplifyFilter,
-                NormalizationRuleImpl::ConstantCalculation,
-            ],
+            vec![NormalizationRuleImpl::SimplifyFilter],
+        )
+        .before_batch(
+            "Constant Calculation".to_string(),
+            HepBatchStrategy::once_topdown(),
+            vec![NormalizationRuleImpl::ConstantCalculation],
         )
         .before_batch(
             "Predicate Pushdown".to_string(),
@@ -375,14 +377,6 @@ fn default_optimizer_pipeline() -> HepOptimizerPipeline {
                 NormalizationRuleImpl::CollapseProject,
                 NormalizationRuleImpl::CollapseGroupByAgg,
                 NormalizationRuleImpl::CombineFilter,
-            ],
-        )
-        .after_batch(
-            "Eliminate Aggregate".to_string(),
-            HepBatchStrategy::once_topdown(),
-            vec![
-                NormalizationRuleImpl::EliminateRedundantSort,
-                NormalizationRuleImpl::UseStreamDistinct,
             ],
         )
         .after_batch(

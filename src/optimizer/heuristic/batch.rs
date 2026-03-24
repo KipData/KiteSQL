@@ -13,8 +13,10 @@
 // limitations under the License.
 
 use crate::optimizer::rule::normalization::{
-    NormalizationPassKind, NormalizationRuleImpl, WholeTreePassKind,
+    NormalizationPassKind, NormalizationRuleImpl, NormalizationRuleRootTag, WholeTreePassKind,
 };
+use crate::planner::operator::Operator;
+use std::array;
 
 /// A batch of rules.
 #[derive(Clone)]
@@ -28,13 +30,62 @@ pub struct HepBatch {
 #[derive(Clone)]
 pub enum HepBatchStep {
     WholeTree(HepWholeTreePass),
-    LocalRewrite(Vec<NormalizationRuleImpl>),
+    LocalRewrite(HepLocalRewriteBatch),
 }
 
 #[derive(Clone)]
 pub struct HepWholeTreePass {
     pub kind: WholeTreePassKind,
     pub rules: Vec<NormalizationRuleImpl>,
+}
+
+#[derive(Clone)]
+pub struct HepLocalRewriteBatch {
+    pub rules: Vec<NormalizationRuleImpl>,
+    groups: [Vec<usize>; NormalizationRuleRootTag::COUNT],
+}
+
+impl HepLocalRewriteBatch {
+    fn new(rules: Vec<NormalizationRuleImpl>) -> Self {
+        let mut groups = array::from_fn(|_| Vec::new());
+        for (idx, rule) in rules.iter().enumerate() {
+            groups[rule.root_tag() as usize].push(idx);
+        }
+        Self { rules, groups }
+    }
+
+    fn push(&mut self, rule: NormalizationRuleImpl) {
+        let idx = self.rules.len();
+        self.groups[rule.root_tag() as usize].push(idx);
+        self.rules.push(rule);
+    }
+
+    pub fn len(&self) -> usize {
+        self.rules.len()
+    }
+
+    pub fn next_matching_rule_index_from(
+        &self,
+        operator: &Operator,
+        start_idx: usize,
+    ) -> Option<usize> {
+        let any_group = &self.groups[NormalizationRuleRootTag::Any as usize];
+        let any_idx = any_group.iter().copied().find(|idx| *idx >= start_idx);
+
+        let specific_idx = NormalizationRuleRootTag::from_operator(operator).and_then(|tag| {
+            self.groups[tag as usize]
+                .iter()
+                .copied()
+                .find(|idx| *idx >= start_idx)
+        });
+
+        match (any_idx, specific_idx) {
+            (Some(any_idx), Some(specific_idx)) => Some(any_idx.min(specific_idx)),
+            (Some(any_idx), None) => Some(any_idx),
+            (None, Some(specific_idx)) => Some(specific_idx),
+            (None, None) => None,
+        }
+    }
 }
 
 impl HepBatch {
@@ -58,7 +109,9 @@ impl HepBatch {
                 },
                 NormalizationPassKind::LocalRewrite => match steps.last_mut() {
                     Some(HepBatchStep::LocalRewrite(local_rules)) => local_rules.push(rule),
-                    _ => steps.push(HepBatchStep::LocalRewrite(vec![rule])),
+                    _ => steps.push(HepBatchStep::LocalRewrite(HepLocalRewriteBatch::new(vec![
+                        rule,
+                    ]))),
                 },
             }
         }
