@@ -198,7 +198,7 @@ mod test {
         let buckets = 10;
         let kite_sql = DataBaseBuilder::path(temp_dir.path())
             .histogram_buckets(buckets)
-            .build()?;
+            .build_rocksdb()?;
 
         kite_sql
             .run("create table t1 (a int primary key, b int)")?
@@ -237,7 +237,7 @@ mod test {
 
     fn test_meta_loader_uses_cache() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql
             .run("create table t1 (a int primary key, b int)")?
@@ -286,7 +286,7 @@ mod test {
 
     fn test_meta_loader_negative_cache() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql
             .run("create table t1 (a int primary key, b int)")?
@@ -310,7 +310,7 @@ mod test {
 
     fn test_clean_expired_index() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql
             .run("create table t1 (a int primary key, b int)")?

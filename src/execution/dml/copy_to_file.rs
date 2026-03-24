@@ -180,7 +180,7 @@ mod tests {
         };
 
         let temp_dir = TempDir::new().unwrap();
-        let db = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let db = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
         db.run("create table t1 (a int primary key, b float, c varchar(10))")?
             .done()?;
         db.run("insert into t1 values (1, 1.1, 'foo')")?.done()?;

@@ -207,19 +207,15 @@ impl<'a> RangeDetacher<'a> {
                     Self::merge_binary(*op, left_binary, right_binary)
                 }
                 (None, None) => {
-                    if let (Some(col), Some(val)) =
-                        (
-                            left_expr.unpack_bound_col(false).map(|(column, _)| column),
-                            right_expr.unpack_val(),
-                        )
-                    {
+                    if let (Some(col), Some(val)) = (
+                        left_expr.unpack_bound_col(false).map(|(column, _)| column),
+                        right_expr.unpack_val(),
+                    ) {
                         return self.new_range(*op, col, val, false);
-                    } else if let (Some(val), Some(col)) =
-                        (
-                            left_expr.unpack_val(),
-                            right_expr.unpack_bound_col(false).map(|(column, _)| column),
-                        )
-                    {
+                    } else if let (Some(val), Some(col)) = (
+                        left_expr.unpack_val(),
+                        right_expr.unpack_bound_col(false).map(|(column, _)| column),
+                    ) {
                         return self.new_range(*op, col, val, true);
                     }
 

@@ -43,6 +43,7 @@ use crate::optimizer::rule::implementation::dql::function_scan::FunctionScanImpl
 use crate::optimizer::rule::implementation::dql::join::JoinImplementation;
 use crate::optimizer::rule::implementation::dql::limit::LimitImplementation;
 use crate::optimizer::rule::implementation::dql::projection::ProjectionImplementation;
+use crate::optimizer::rule::implementation::dql::scalar_subquery::ScalarSubqueryImplementation;
 use crate::optimizer::rule::implementation::dql::sort::SortImplementation;
 use crate::optimizer::rule::implementation::dql::table_scan::{
     IndexScanImplementation, SeqScanImplementation,
@@ -62,6 +63,7 @@ pub enum ImplementationRuleImpl {
     HashJoin,
     Limit,
     Projection,
+    ScalarSubquery,
     SeqScan,
     FunctionScan,
     IndexScan,
@@ -94,6 +96,7 @@ impl MatchPattern for ImplementationRuleImpl {
             ImplementationRuleImpl::HashJoin => JoinImplementation.pattern(),
             ImplementationRuleImpl::Limit => LimitImplementation.pattern(),
             ImplementationRuleImpl::Projection => ProjectionImplementation.pattern(),
+            ImplementationRuleImpl::ScalarSubquery => ScalarSubqueryImplementation.pattern(),
             ImplementationRuleImpl::SeqScan => SeqScanImplementation.pattern(),
             ImplementationRuleImpl::IndexScan => IndexScanImplementation.pattern(),
             ImplementationRuleImpl::FunctionScan => FunctionScanImplementation.pattern(),
@@ -144,6 +147,9 @@ impl<T: Transaction> ImplementationRule<T> for ImplementationRuleImpl {
             }
             ImplementationRuleImpl::Projection => {
                 ProjectionImplementation.to_expression(operator, loader, group_expr)?
+            }
+            ImplementationRuleImpl::ScalarSubquery => {
+                ScalarSubqueryImplementation.to_expression(operator, loader, group_expr)?
             }
             ImplementationRuleImpl::SeqScan => {
                 SeqScanImplementation.to_expression(operator, loader, group_expr)?

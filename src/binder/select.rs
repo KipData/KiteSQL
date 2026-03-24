@@ -1146,34 +1146,23 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
     ) -> Result<LogicalPlan, DatabaseError> {
         self.context.step(QueryBindStep::Where);
 
-        let mut predicate = self.bind_expr(predicate)?;
+        let predicate = self.bind_expr(predicate)?;
 
         if let Some(sub_queries) = self.context.sub_queries_at_now() {
-            let mut remaining_sub_queries = Vec::new();
-
             for sub_query in sub_queries {
-                match sub_query {
-                    SubQueryType::SubQuery { plan, correlated } => {
-                        children = Self::bind_scalar_subquery_in_where(
-                            children,
-                            &mut predicate,
-                            plan,
-                            correlated,
-                        )?;
-                    }
-                    other => remaining_sub_queries.push(other),
-                }
-            }
-
-            if remaining_sub_queries.is_empty() {
-                return Ok(FilterOperator::build(predicate, children, false));
-            }
-
-            for sub_query in remaining_sub_queries {
                 let mut on_keys: Vec<(ScalarExpression, ScalarExpression)> = vec![];
                 let mut filter = vec![];
 
                 let (mut plan, join_ty) = match sub_query {
+                    SubQueryType::SubQuery { plan, correlated } => {
+                        if correlated {
+                            return Err(DatabaseError::UnsupportedStmt(
+                                "correlated scalar subqueries in WHERE are not supported"
+                                    .to_string(),
+                            ));
+                        }
+                        (plan, JoinType::Inner)
+                    }
                     SubQueryType::ExistsSubQuery {
                         negated,
                         plan,
@@ -1207,7 +1196,6 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         };
                         (plan, join_ty)
                     }
-                    SubQueryType::SubQuery { .. } => unreachable!(),
                 };
 
                 Self::extract_join_keys(
@@ -1235,37 +1223,6 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             return Ok(children);
         }
         Ok(FilterOperator::build(predicate, children, false))
-    }
-
-    fn bind_scalar_subquery_in_where(
-        mut children: LogicalPlan,
-        predicate: &mut ScalarExpression,
-        mut plan: LogicalPlan,
-        correlated: bool,
-    ) -> Result<LogicalPlan, DatabaseError> {
-        if correlated {
-            return Err(DatabaseError::UnsupportedStmt(
-                "correlated scalar subqueries in WHERE are not supported".to_string(),
-            ));
-        }
-
-        // Scalar subqueries in WHERE behave like value producers for the outer
-        // predicate. We first append the subquery output into the visible scope,
-        // then keep evaluating the original predicate as a normal filter.
-        let left_len = children.output_schema().len();
-        let right_schema = plan.output_schema().clone();
-        RightSidePositionGlobalizer {
-            right_schema: right_schema.as_ref(),
-            left_len,
-        }
-        .visit(predicate)?;
-
-        Ok(LJoinOperator::build(
-            children,
-            plan,
-            JoinCondition::None,
-            JoinType::Cross,
-        ))
     }
 
     fn bind_correlated_exists(
@@ -2047,6 +2004,9 @@ mod tests {
     use crate::errors::DatabaseError;
     use crate::expression::visitor_mut::VisitorMut;
     use crate::expression::{AliasType, ScalarExpression};
+    use crate::planner::operator::join::{JoinCondition, JoinType};
+    use crate::planner::operator::Operator;
+    use crate::planner::{Childrens, LogicalPlan};
     use crate::types::LogicalType;
 
     fn test_column(name: &str, position: usize) -> ScalarExpression {
@@ -2091,7 +2051,8 @@ mod tests {
     }
 
     #[test]
-    fn test_right_side_position_globalizer_only_shifts_right_columns() -> Result<(), DatabaseError> {
+    fn test_right_side_position_globalizer_only_shifts_right_columns() -> Result<(), DatabaseError>
+    {
         let left_column = ColumnRef::from(ColumnCatalog::new(
             "left".to_string(),
             true,
@@ -2157,7 +2118,36 @@ mod tests {
 
         ProjectionOutputBinder::new(std::slice::from_ref(&project_output)).visit(&mut expr)?;
 
-        assert_eq!(expr, ScalarExpression::column_expr(project_output.output_column(), 0));
+        assert_eq!(
+            expr,
+            ScalarExpression::column_expr(project_output.output_column(), 0)
+        );
+        Ok(())
+    }
+
+    fn find_join(plan: &LogicalPlan) -> Option<(&JoinType, &JoinCondition)> {
+        if let Operator::Join(op) = &plan.operator {
+            return Some((&op.join_type, &op.on));
+        }
+
+        match plan.childrens.as_ref() {
+            Childrens::Only(child) => find_join(child),
+            Childrens::Twins { left, right } => find_join(left).or_else(|| find_join(right)),
+            Childrens::None => None,
+        }
+    }
+
+    #[test]
+    fn test_scalar_subquery_in_where_binds_as_inner_join() -> Result<(), DatabaseError> {
+        let table_states = build_t1_table()?;
+        let plan = table_states.plan("select * from t1 where c1 = (select max(c3) from t2)")?;
+        let Some((join_type, join_condition)) = find_join(&plan) else {
+            panic!("expected scalar subquery to introduce a join")
+        };
+
+        assert_eq!(*join_type, JoinType::Inner);
+        assert!(matches!(join_condition, JoinCondition::On { .. }));
+
         Ok(())
     }
 }

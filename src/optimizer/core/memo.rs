@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn test_build_memo() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let database = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let database = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
         database
             .run("create table t1 (c1 int primary key, c2 int)")?
             .done()?;

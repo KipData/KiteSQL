@@ -20,19 +20,27 @@ mod app {
     use kite_sql::types::value::DataValue;
     use std::fs;
     use std::io::ErrorKind;
+    use std::path::Path;
 
     const EXAMPLE_DB_PATH: &str = "./example_data/transaction";
 
     fn reset_example_dir() -> Result<(), DatabaseError> {
-        match fs::remove_dir_all(EXAMPLE_DB_PATH) {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err.into()),
+        if let Err(err) = fs::remove_dir_all(EXAMPLE_DB_PATH) {
+            if err.kind() != ErrorKind::NotFound {
+                return Err(err.into());
+            }
         }
+
+        if let Some(parent) = Path::new(EXAMPLE_DB_PATH).parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        Ok(())
     }
 
     pub fn run() -> Result<(), DatabaseError> {
         reset_example_dir()?;
+        // Optimistic transactions are currently backed by RocksDB.
         let database = DataBaseBuilder::path(EXAMPLE_DB_PATH).build_optimistic()?;
         database
             .run("create table if not exists t1 (c1 int primary key, c2 int)")?

@@ -219,6 +219,48 @@ select * from kv where (k, v) in (select * from kv) order by k;
 statement ok
 drop table kv;
 
+statement ok
+create table scalar_outer(id int primary key);
+
+statement ok
+create table scalar_inner(v int primary key);
+
+statement ok
+insert into scalar_outer values (1), (2);
+
+query IT
+select id, (select v from scalar_inner where v = -1) from scalar_outer order by id;
+----
+1 null
+2 null
+
+statement ok
+drop table scalar_outer;
+
+statement ok
+drop table scalar_inner;
+
+statement ok
+create table scalar_outer_err(id int primary key);
+
+statement ok
+create table scalar_inner_err(v int primary key);
+
+statement ok
+insert into scalar_outer_err values (1);
+
+statement ok
+insert into scalar_inner_err values (1), (2);
+
+statement error
+select * from scalar_outer_err where id = (select v from scalar_inner_err);
+
+statement ok
+drop table scalar_outer_err;
+
+statement ok
+drop table scalar_inner_err;
+
 statement error
 select count(*) from users
 where exists (

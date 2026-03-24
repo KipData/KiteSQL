@@ -79,6 +79,7 @@ pub(crate) fn evaluator_bind_current(plan: &mut LogicalPlan) -> Result<(), Datab
         Operator::Dummy
         | Operator::TableScan(_)
         | Operator::Limit(_)
+        | Operator::ScalarSubquery(_)
         | Operator::Values(_)
         | Operator::ShowTable
         | Operator::ShowView

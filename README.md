@@ -28,7 +28,7 @@
 ## Introduction
 **KiteSQL** is a lightweight embedded relational database for Rust, inspired by **MyRocks** and **SQLite** and fully written in Rust. It is designed to work not only as a SQL engine, but also as a Rust-native data API that can be embedded directly into applications without relying on external services or heavyweight infrastructure.
 
-KiteSQL supports direct SQL execution, typed ORM models, schema migration, and builder-style queries, so you can combine relational power with an API surface that feels natural in Rust.
+KiteSQL supports direct SQL execution, typed ORM models, schema migration, and builder-style queries, so you can combine relational power with an API surface that feels natural in Rust. On native targets, KiteSQL ships with both RocksDB-backed and LMDB-backed persistent storage builders, plus an in-memory builder for tests and temporary workloads.
 
 ## Key Features
 - A lightweight embedded SQL database fully rewritten in Rust
@@ -79,7 +79,8 @@ struct UserSummary {
 }
 
 fn main() -> Result<(), DatabaseError> {
-    let database = DataBaseBuilder::path("./data").build()?;
+    let database = DataBaseBuilder::path("./data").build_rocksdb()?;
+    // Or: let database = DataBaseBuilder::path("./data").build_lmdb()?;
 
     database.migrate::<User>()?;
 
@@ -128,8 +129,16 @@ fn main() -> Result<(), DatabaseError> {
 }
 ```
 
+## Storage Backends
+- `build_rocksdb()` opens a persistent RocksDB-backed database.
+- `build_lmdb()` opens a persistent LMDB-backed database.
+- `build_in_memory()` opens an in-memory database for tests, examples, and temporary workloads.
+- `build_optimistic()` is available on native targets when you specifically want optimistic transactions on top of RocksDB.
+
+On native targets, `LMDB` shines when reads dominate, while `RocksDB` is usually the stronger choice when writes do.
+
 👉**more examples**
-- [hello_word](examples/hello_world.rs)
+- [hello_world](examples/hello_world.rs)
 - [transaction](examples/transaction.rs)
 
 
@@ -149,7 +158,7 @@ console.log(rows.map((r) => r.values.map((v) => v.Int32 ?? v)));
 
 ## Python (PyO3)
 - Enable bindings with Cargo feature `python`.
-- Constructor is explicit: `Database(path)`; in-memory usage is `Database.in_memory()`.
+- Constructor is explicit: `Database(path, backend="rocksdb")`; use `backend="lmdb"` to open LMDB. In-memory usage is `Database.in_memory()`.
 - Minimal usage:
 ```python
 import kite_sql
@@ -162,7 +171,7 @@ for row in db.run("select * from demo"):
 ```
 
 ## TPC-C
-Run `make tpcc` (or `cargo run -p tpcc --release`) to execute the benchmark against the default KiteSQL storage.  
+Run `make tpcc` (or `cargo run -p tpcc --release`) to execute the benchmark against the default KiteSQL storage. Use `--backend rocksdb` or `--backend lmdb` to compare the two persistent backends directly.  
 Run `make tpcc-dual` to mirror every TPCC statement to an in-memory SQLite database alongside KiteSQL and assert the two engines return identical results; this target runs for 60 seconds (`--measure-time 60`). Use `cargo run -p tpcc --release -- --backend dual --measure-time <secs>` for a custom duration.
 
 - i9-13900HX

@@ -32,6 +32,8 @@ use crate::optimizer::rule::normalization::NormalizationRuleImpl;
 use crate::parser::parse_sql;
 use crate::planner::operator::Operator;
 use crate::planner::LogicalPlan;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::storage::lmdb::{LmdbConfig, LmdbStorage};
 use crate::storage::memory::MemoryStorage;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::storage::rocksdb::{OptimisticRocksStorage, RocksStorage, StorageConfig};
@@ -117,6 +119,8 @@ pub struct DataBaseBuilder {
     histogram_buckets: Option<usize>,
     #[cfg(not(target_arch = "wasm32"))]
     storage_config: StorageConfig,
+    #[cfg(not(target_arch = "wasm32"))]
+    lmdb_config: LmdbConfig,
 }
 
 impl DataBaseBuilder {
@@ -132,6 +136,8 @@ impl DataBaseBuilder {
             histogram_buckets: None,
             #[cfg(not(target_arch = "wasm32"))]
             storage_config: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            lmdb_config: Default::default(),
         };
         builder = builder.register_scala_function(CharLength::new("char_length".to_lowercase()));
         builder =
@@ -171,6 +177,44 @@ impl DataBaseBuilder {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn storage_statistics(mut self, enable: bool) -> Self {
         self.storage_config.enable_statistics = enable;
+        self.lmdb_config.enable_statistics = enable;
+        self
+    }
+
+    /// Sets the LMDB map size in bytes.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn lmdb_map_size(mut self, map_size: usize) -> Self {
+        self.lmdb_config.map_size = map_size;
+        self
+    }
+
+    /// Sets the LMDB environment flags.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn lmdb_flags(mut self, flags: lmdb::EnvironmentFlags) -> Self {
+        self.lmdb_config.flags = flags;
+        self
+    }
+
+    /// Enables or disables LMDB `NO_SYNC`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn lmdb_no_sync(mut self, enable: bool) -> Self {
+        self.lmdb_config
+            .flags
+            .set(lmdb::EnvironmentFlags::NO_SYNC, enable);
+        self
+    }
+
+    /// Sets the maximum number of LMDB readers.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn lmdb_max_readers(mut self, max_readers: u32) -> Self {
+        self.lmdb_config.max_readers = Some(max_readers);
+        self
+    }
+
+    /// Sets the maximum number of LMDB named databases.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn lmdb_max_dbs(mut self, max_dbs: u32) -> Self {
+        self.lmdb_config.max_dbs = Some(max_dbs);
         self
     }
 
@@ -199,7 +243,7 @@ impl DataBaseBuilder {
 
     /// Builds a RocksDB-backed database.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn build(self) -> Result<Database<RocksStorage>, DatabaseError> {
+    pub fn build_rocksdb(self) -> Result<Database<RocksStorage>, DatabaseError> {
         let storage = RocksStorage::with_config(self.path, self.storage_config)?;
 
         Self::_build::<RocksStorage>(
@@ -217,6 +261,19 @@ impl DataBaseBuilder {
         let storage = MemoryStorage::new();
 
         Self::_build::<MemoryStorage>(
+            storage,
+            self.scala_functions,
+            self.table_functions,
+            self.histogram_buckets,
+        )
+    }
+
+    /// Builds a LMDB-backed database.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn build_lmdb(self) -> Result<Database<LmdbStorage>, DatabaseError> {
+        let storage = LmdbStorage::with_config(self.path, self.lmdb_config)?;
+
+        Self::_build::<LmdbStorage>(
             storage,
             self.scala_functions,
             self.table_functions,
@@ -342,6 +399,7 @@ fn default_optimizer_pipeline() -> HepOptimizerPipeline {
             ImplementationRuleImpl::HashJoin,
             ImplementationRuleImpl::Limit,
             ImplementationRuleImpl::Projection,
+            ImplementationRuleImpl::ScalarSubquery,
             ImplementationRuleImpl::SeqScan,
             ImplementationRuleImpl::IndexScan,
             ImplementationRuleImpl::FunctionScan,
@@ -859,7 +917,7 @@ pub(crate) mod test {
     #[test]
     fn test_run_sql() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let database = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let database = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
         let mut transaction = database.storage.transaction()?;
 
         build_table(database.state.table_cache(), &mut transaction)?;
@@ -875,7 +933,7 @@ pub(crate) mod test {
     #[test]
     fn test_udf() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
         let mut iter = kite_sql.run("select current_date()")?;
 
         assert_eq!(
@@ -902,7 +960,7 @@ pub(crate) mod test {
     #[test]
     fn test_udtf() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
         let mut iter = kite_sql.run(
             "SELECT * FROM (select * from table(numbers(10)) a ORDER BY number LIMIT 5) OFFSET 3",
         )?;
@@ -930,7 +988,7 @@ pub(crate) mod test {
     #[test]
     fn test_join_on_alias_right_key_is_localized() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql
             .run("CREATE TABLE onecolumn (id INT PRIMARY KEY, x INT NULL)")?
@@ -1023,7 +1081,7 @@ pub(crate) mod test {
     #[test]
     fn test_join_on_with_right_filter_keeps_localized_key() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql
             .run("CREATE TABLE onecolumn (id INT PRIMARY KEY, x INT NULL)")?
@@ -1131,7 +1189,7 @@ pub(crate) mod test {
     #[test]
     fn test_join_on_with_right_filter_keeps_localized_key_with_data() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql
             .run("CREATE TABLE onecolumn (id INT PRIMARY KEY, x INT NULL)")?
@@ -1222,7 +1280,7 @@ pub(crate) mod test {
     #[test]
     fn test_prepare_statment() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql
             .run("create table t1 (a int primary key, b int)")?
@@ -1298,7 +1356,7 @@ pub(crate) mod test {
     #[test]
     fn test_run_multi_statement() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql
             .run("create table t_multi (a int primary key, b int)")?
@@ -1324,7 +1382,7 @@ pub(crate) mod test {
     #[test]
     fn test_run_multi_statement_disallow_ddl() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         let err = match kite_sql.run("create table t_multi_ddl (a int primary key); select 1") {
             Ok(_) => panic!("multi-statement execution with DDL should be rejected"),
@@ -1343,7 +1401,7 @@ pub(crate) mod test {
     #[test]
     fn test_bind_error_with_span() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql
             .run("create table t_bind_span(id int primary key)")?
@@ -1376,7 +1434,7 @@ pub(crate) mod test {
     #[test]
     fn test_bind_function_error_with_span() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql
             .run("create table t_bind_fn_span(id int primary key)")?
@@ -1408,7 +1466,7 @@ pub(crate) mod test {
     #[test]
     fn test_transaction_sql() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql
             .run("create table t1 (a int primary key, b int)")?
@@ -1455,7 +1513,7 @@ pub(crate) mod test {
     #[test]
     fn test_transaction_run_multi_statement() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql
             .run("create table t_multi_tx (a int primary key, b int)")?
@@ -1592,11 +1650,12 @@ pub(crate) mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let result = DataBaseBuilder::path(temp_dir.path())
             .histogram_buckets(0)
-            .build();
+            .build_rocksdb();
 
         assert!(matches!(
             result,
             Err(DatabaseError::InvalidValue(message)) if message == "histogram buckets must be >= 1"
         ));
     }
+
 }

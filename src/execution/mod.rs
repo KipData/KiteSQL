@@ -48,6 +48,7 @@ use crate::execution::dql::index_scan::IndexScan;
 use crate::execution::dql::join::hash_join::HashJoin;
 use crate::execution::dql::limit::Limit;
 use crate::execution::dql::projection::Projection;
+use crate::execution::dql::scalar_subquery::ScalarSubquery;
 use crate::execution::dql::seq_scan::SeqScan;
 use crate::execution::dql::show_table::ShowTables;
 use crate::execution::dql::show_view::ShowViews;
@@ -154,6 +155,11 @@ pub fn build_read<'a, T: Transaction + 'a>(
             let input = childrens.pop_only();
 
             Projection::from((op, input)).execute(cache, transaction)
+        }
+        Operator::ScalarSubquery(op) => {
+            let input = childrens.pop_only();
+
+            ScalarSubquery::from((op, input)).execute(cache, transaction)
         }
         Operator::TableScan(op) => {
             if let Some(PhysicalOption {

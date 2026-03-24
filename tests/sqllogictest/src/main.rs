@@ -52,7 +52,7 @@ fn main() {
         );
 
         let db = DataBaseBuilder::path(temp_dir.path())
-            .build()
+            .build_rocksdb()
             .expect("init db error");
         let mut tester = Runner::new(SQLBase { db });
 

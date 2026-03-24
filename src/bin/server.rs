@@ -85,7 +85,7 @@ pub struct KiteSQLBackend {
 
 impl KiteSQLBackend {
     pub fn new(path: impl Into<PathBuf> + Send) -> Result<KiteSQLBackend, DatabaseError> {
-        let database = DataBaseBuilder::path(path).build()?;
+        let database = DataBaseBuilder::path(path).build_rocksdb()?;
 
         Ok(KiteSQLBackend {
             inner: Arc::new(database),

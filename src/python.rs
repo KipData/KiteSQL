@@ -16,6 +16,7 @@
 
 use crate::db::{DataBaseBuilder, Database, DatabaseIter, ResultIter};
 use crate::errors::DatabaseError;
+use crate::storage::lmdb::LmdbStorage;
 use crate::storage::memory::MemoryStorage;
 use crate::storage::rocksdb::RocksStorage;
 use crate::types::tuple::{SchemaRef, Tuple};
@@ -93,6 +94,7 @@ fn schema_to_python(py: Python<'_>, schema: &SchemaRef) -> PyResult<Vec<PyObject
 }
 
 enum PythonDatabaseInner {
+    Lmdb(Database<LmdbStorage>),
     Memory(Database<MemoryStorage>),
     Rocks(Database<RocksStorage>),
 }
@@ -100,6 +102,13 @@ enum PythonDatabaseInner {
 impl PythonDatabaseInner {
     fn run(&self, sql: &str) -> Result<PythonResultIterInner, DatabaseError> {
         match self {
+            PythonDatabaseInner::Lmdb(db) => {
+                let iter = db.run(sql)?;
+                // DatabaseIter owns state internally; only the type carries the lifetime.
+                let iter_static: DatabaseIter<'static, LmdbStorage> =
+                    unsafe { std::mem::transmute(iter) };
+                Ok(PythonResultIterInner::Lmdb(iter_static))
+            }
             PythonDatabaseInner::Memory(db) => {
                 let iter = db.run(sql)?;
                 // DatabaseIter owns state internally; only the type carries the lifetime.
@@ -119,6 +128,7 @@ impl PythonDatabaseInner {
 }
 
 enum PythonResultIterInner {
+    Lmdb(DatabaseIter<'static, LmdbStorage>),
     Memory(DatabaseIter<'static, MemoryStorage>),
     Rocks(DatabaseIter<'static, RocksStorage>),
 }
@@ -126,6 +136,7 @@ enum PythonResultIterInner {
 impl PythonResultIterInner {
     fn next_tuple(&mut self) -> Option<Result<Tuple, DatabaseError>> {
         match self {
+            PythonResultIterInner::Lmdb(iter) => iter.next(),
             PythonResultIterInner::Memory(iter) => iter.next(),
             PythonResultIterInner::Rocks(iter) => iter.next(),
         }
@@ -133,6 +144,7 @@ impl PythonResultIterInner {
 
     fn schema(&self) -> &SchemaRef {
         match self {
+            PythonResultIterInner::Lmdb(iter) => iter.schema(),
             PythonResultIterInner::Memory(iter) => iter.schema(),
             PythonResultIterInner::Rocks(iter) => iter.schema(),
         }
@@ -140,6 +152,7 @@ impl PythonResultIterInner {
 
     fn done(self) -> Result<(), DatabaseError> {
         match self {
+            PythonResultIterInner::Lmdb(iter) => iter.done(),
             PythonResultIterInner::Memory(iter) => iter.done(),
             PythonResultIterInner::Rocks(iter) => iter.done(),
         }
@@ -154,9 +167,26 @@ pub struct PythonDatabase {
 #[pymethods]
 impl PythonDatabase {
     #[new]
-    pub fn new(path: String) -> PyResult<Self> {
-        let inner =
-            PythonDatabaseInner::Rocks(DataBaseBuilder::path(path).build().map_err(to_py_err)?);
+    #[pyo3(signature = (path, backend=None))]
+    pub fn new(path: String, backend: Option<&str>) -> PyResult<Self> {
+        let backend = backend.unwrap_or("rocksdb").to_ascii_lowercase();
+        let inner = match backend.as_str() {
+            "rocksdb" => PythonDatabaseInner::Rocks(
+                DataBaseBuilder::path(path)
+                    .build_rocksdb()
+                    .map_err(to_py_err)?,
+            ),
+            "lmdb" => PythonDatabaseInner::Lmdb(
+                DataBaseBuilder::path(path)
+                    .build_lmdb()
+                    .map_err(to_py_err)?,
+            ),
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unsupported backend '{other}', expected 'rocksdb' or 'lmdb'"
+                )));
+            }
+        };
 
         Ok(PythonDatabase { inner })
     }
@@ -281,12 +311,12 @@ mod tests {
         py: Python<'_>,
         module: &Bound<'_, PyModule>,
         script: &'static CStr,
-        use_memory: bool,
+        backend: &str,
         db_path: &str,
     ) -> PyResult<()> {
         let locals = PyDict::new(py);
         locals.set_item("kite_sql", module)?;
-        locals.set_item("use_memory", use_memory)?;
+        locals.set_item("backend", backend)?;
         locals.set_item("db_path", db_path)?;
         py.run(script, None, Some(&locals))
     }
@@ -296,12 +326,18 @@ mod tests {
         module: &Bound<'_, PyModule>,
         script: &'static CStr,
     ) -> PyResult<()> {
-        run_script(py, module, script, true, "")?;
+        run_script(py, module, script, "memory", "")?;
 
         let temp_dir =
             TempDir::new().map_err(|e| PyRuntimeError::new_err(format!("create tempdir: {e}")))?;
         let path = temp_dir.path().to_string_lossy().to_string();
-        run_script(py, module, script, false, &path)?;
+
+        run_script(py, module, script, "rocksdb", &path)?;
+
+        let temp_dir =
+            TempDir::new().map_err(|e| PyRuntimeError::new_err(format!("create tempdir: {e}")))?;
+        let path = temp_dir.path().to_string_lossy().to_string();
+        run_script(py, module, script, "lmdb", &path)?;
 
         Ok(())
     }
@@ -315,7 +351,7 @@ mod tests {
                 &module,
                 c_str!(
                     r#"
-db = kite_sql.Database.in_memory() if use_memory else kite_sql.Database(db_path)
+db = kite_sql.Database.in_memory() if backend == "memory" else kite_sql.Database(db_path, backend)
 db.execute("drop table if exists my_struct")
 db.execute("create table my_struct (c1 int primary key, c2 int)")
 db.execute("insert into my_struct values(0, 0), (1, 1)")
@@ -361,7 +397,7 @@ db.execute("drop table my_struct")
                 &module,
                 c_str!(
                     r#"
-db = kite_sql.Database.in_memory() if use_memory else kite_sql.Database(db_path)
+db = kite_sql.Database.in_memory() if backend == "memory" else kite_sql.Database(db_path, backend)
 db.execute("drop table if exists t1")
 db.execute("create table t1(id int primary key, c1 int, c2 int)")
 
@@ -417,6 +453,28 @@ db.execute("drop table t1")
                 ),
             )?;
             Ok(())
+        })
+    }
+
+    #[test]
+    fn test_python_rejects_unknown_backend() -> PyResult<()> {
+        Python::with_gil(|py| {
+            let module = register_module(py)?;
+            let locals = PyDict::new(py);
+            locals.set_item("kite_sql", module)?;
+            py.run(
+                c_str!(
+                    r#"
+try:
+    kite_sql.Database("/tmp/kitesql-python-invalid", "unknown")
+    raise AssertionError("expected constructor to reject unknown backend")
+except ValueError as exc:
+    assert "unsupported backend" in str(exc)
+"#
+                ),
+                None,
+                Some(&locals),
+            )
         })
     }
 }

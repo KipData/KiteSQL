@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! KiteSQL is a high-performance SQL database
-//! that can be embedded in Rust code (based on RocksDB by default),
+//! that can be embedded in Rust code with RocksDB, LMDB, or in-memory storage,
 //! making it possible to call SQL just like calling a function.
 //! It supports most of the syntax of SQL 2016.
 //!
@@ -65,7 +65,8 @@
 //!
 //! #[cfg(feature = "orm")]
 //! fn main() -> Result<(), DatabaseError> {
-//!     let database = DataBaseBuilder::path("./hello_world").build()?;
+//!     let database = DataBaseBuilder::path("./hello_world").build_rocksdb()?;
+//!     // Or: let database = DataBaseBuilder::path("./hello_world").build_lmdb()?;
 //!
 //!     database.create_table_if_not_exists::<MyStruct>()?;
 //!     database.insert(&MyStruct {

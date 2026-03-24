@@ -32,6 +32,7 @@ pub mod insert;
 pub mod join;
 pub mod limit;
 pub mod project;
+pub mod scalar_subquery;
 pub mod sort;
 pub mod table_scan;
 pub mod top_k;
@@ -43,8 +44,8 @@ pub mod values;
 use self::{
     aggregate::AggregateOperator, alter_table::add_column::AddColumnOperator,
     alter_table::change_column::ChangeColumnOperator, filter::FilterOperator, join::JoinOperator,
-    limit::LimitOperator, project::ProjectOperator, sort::SortOperator,
-    table_scan::TableScanOperator,
+    limit::LimitOperator, project::ProjectOperator, scalar_subquery::ScalarSubqueryOperator,
+    sort::SortOperator, table_scan::TableScanOperator,
 };
 use crate::catalog::ColumnRef;
 use crate::expression::ScalarExpression;
@@ -84,6 +85,7 @@ pub enum Operator {
     Filter(FilterOperator),
     Join(JoinOperator),
     Project(ProjectOperator),
+    ScalarSubquery(ScalarSubqueryOperator),
     TableScan(TableScanOperator),
     FunctionScan(FunctionScanOperator),
     Sort(SortOperator),
@@ -156,6 +158,7 @@ pub enum PlanImpl {
     HashJoin,
     NestLoopJoin,
     Project,
+    ScalarSubquery,
     SeqScan,
     FunctionScan,
     IndexScan(Box<IndexInfo>),
@@ -187,7 +190,7 @@ impl Operator {
                 output_exprs.extend(op.agg_calls.iter().chain(op.groupby_exprs.iter()).cloned());
                 true
             }
-            Operator::Filter(_) | Operator::Join(_) => false,
+            Operator::Filter(_) | Operator::Join(_) | Operator::ScalarSubquery(_) => false,
             Operator::Project(op) => {
                 output_exprs.clear();
                 output_exprs.extend(op.exprs.iter().cloned());
@@ -286,6 +289,7 @@ impl Operator {
                 .iter()
                 .flat_map(|expr| expr.referenced_columns(only_column_ref))
                 .collect_vec(),
+            Operator::ScalarSubquery(_) => vec![],
             Operator::TableScan(op) => op.columns.values().cloned().collect_vec(),
             Operator::FunctionScan(op) => op
                 .table_function
@@ -352,6 +356,7 @@ impl fmt::Display for Operator {
             Operator::Filter(op) => write!(f, "{op}"),
             Operator::Join(op) => write!(f, "{op}"),
             Operator::Project(op) => write!(f, "{op}"),
+            Operator::ScalarSubquery(op) => write!(f, "{op}"),
             Operator::TableScan(op) => write!(f, "{op}"),
             Operator::FunctionScan(op) => write!(f, "{op}"),
             Operator::Sort(op) => write!(f, "{op}"),
@@ -424,6 +429,7 @@ impl fmt::Display for PlanImpl {
             PlanImpl::HashJoin => write!(f, "HashJoin"),
             PlanImpl::NestLoopJoin => write!(f, "NestLoopJoin"),
             PlanImpl::Project => write!(f, "Project"),
+            PlanImpl::ScalarSubquery => write!(f, "ScalarSubquery"),
             PlanImpl::SeqScan => write!(f, "SeqScan"),
             PlanImpl::FunctionScan => write!(f, "FunctionScan"),
             PlanImpl::IndexScan(index) => write!(f, "IndexScan By {index}"),

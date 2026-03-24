@@ -32,6 +32,7 @@ use crate::expression::function::scala::{ArcScalarFunctionImpl, ScalarFunction};
 use crate::expression::function::table::{ArcTableFunctionImpl, TableFunction};
 use crate::expression::function::FunctionSummary;
 use crate::expression::{AliasType, ScalarExpression};
+use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
 use crate::planner::{LogicalPlan, SchemaOutput};
 use crate::storage::Transaction;
 use crate::types::value::{DataValue, Utf8Type};
@@ -212,6 +213,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             }
             Expr::Subquery(subquery) => {
                 let (sub_query, column, correlated) = self.bind_subquery(None, subquery)?;
+                let sub_query = ScalarSubqueryOperator::build(sub_query);
                 let (expr, sub_query) = if !self.context.is_step(&QueryBindStep::Where) {
                     self.bind_temp_table(column, sub_query)?
                 } else {

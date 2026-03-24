@@ -85,6 +85,8 @@ sqlite                = { version = "0.34" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rocksdb = { version = "0.23" }
+lmdb = { version = "0.8.0" }
+lmdb-sys = { version = "0.8.0" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen        = { version = "0.2.106" }

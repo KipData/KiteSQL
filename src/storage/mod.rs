@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod lmdb;
 pub mod memory;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod rocksdb;

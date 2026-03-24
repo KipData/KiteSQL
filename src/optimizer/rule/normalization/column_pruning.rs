@@ -72,6 +72,7 @@ impl ColumnPruning {
             Operator::Project(op) => {
                 remap_exprs_positions(op.exprs.iter_mut(), removed_positions)?;
             }
+            Operator::ScalarSubquery(_) => {}
             Operator::Sort(op) => {
                 Self::remap_exprs_after_child_change(
                     op.sort_fields.iter_mut().map(|field| &mut field.expr),
@@ -356,6 +357,7 @@ impl ColumnPruning {
             }
             Operator::Sort(_)
             | Operator::Limit(_)
+            | Operator::ScalarSubquery(_)
             | Operator::Join(_)
             | Operator::Filter(_)
             | Operator::Union(_)

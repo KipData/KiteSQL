@@ -542,7 +542,7 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let kite_sql = DataBaseBuilder::path(temp_dir.path())
             .storage_statistics(true)
-            .build()?;
+            .build_rocksdb()?;
         kite_sql
             .run("create table t_metrics (a int primary key, b int)")?
             .done()?;
@@ -641,7 +641,7 @@ mod test {
     #[test]
     fn test_index_iter_pk() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql
             .run("create table t1 (a int primary key)")?
@@ -714,7 +714,7 @@ mod test {
     #[test]
     fn test_read_by_index() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
         kite_sql
             .run("create table t1 (a int primary key, b int unique)")?
             .done()?;
@@ -784,7 +784,7 @@ mod test {
     #[test]
     fn test_read_by_index_cover() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
         kite_sql
             .run("create table t1 (a int primary key, b int unique)")?
             .done()?;

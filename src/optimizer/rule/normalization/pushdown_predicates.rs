@@ -274,10 +274,11 @@ impl NormalizationRule for PushPredicateIntoScan {
             let mut deserializers = Vec::with_capacity(meta.column_ids.len());
 
             for (idx, column_id) in meta.column_ids.iter().enumerate() {
-                if let Some((scan_idx, column)) =
-                    scan_op.columns.values().enumerate().find(|(_, column)| {
-                        column.id().map(|id| id == *column_id).unwrap_or(false)
-                    })
+                if let Some((scan_idx, column)) = scan_op
+                    .columns
+                    .values()
+                    .enumerate()
+                    .find(|(_, column)| column.id().map(|id| id == *column_id).unwrap_or(false))
                 {
                     mapping_slots[scan_idx] = idx;
                     needs_mapping |= scan_idx != idx;
