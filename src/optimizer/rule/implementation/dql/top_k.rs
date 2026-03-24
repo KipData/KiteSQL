@@ -13,9 +13,8 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::optimizer::core::memo::{Expression, GroupExpression};
 use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
-use crate::optimizer::core::rule::{ImplementationRule, MatchPattern};
+use crate::optimizer::core::rule::{BestPhysicalOption, ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
 use crate::storage::Transaction;
@@ -36,23 +35,24 @@ impl MatchPattern for TopKImplementation {
 }
 
 impl<T: Transaction> ImplementationRule<T> for TopKImplementation {
-    fn to_expression(
+    fn update_best_option(
         &self,
         op: &Operator,
         _: &StatisticMetaLoader<'_, T>,
-        group_expr: &mut GroupExpression,
+        best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
         if let Operator::TopK(op) = op {
-            group_expr.append_expr(Expression {
-                op: PhysicalOption::new(
+            crate::optimizer::core::rule::keep_best_physical_option(
+                best_physical_option,
+                PhysicalOption::new(
                     PlanImpl::TopK,
                     SortOption::OrderBy {
                         fields: op.sort_fields.clone(),
                         ignore_prefix_len: 0,
                     },
                 ),
-                cost: None,
-            });
+                None,
+            );
         }
 
         Ok(())

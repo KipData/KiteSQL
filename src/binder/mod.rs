@@ -382,6 +382,28 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
         Ok(source)
     }
 
+    pub fn source(&self, table_name: &TableName) -> Result<Option<Source<'_>>, DatabaseError> {
+        let mut source = if let Some(real_name) = self.table_aliases.get(table_name.as_ref()) {
+            self.transaction.table(self.table_cache, real_name.clone())
+        } else {
+            self.transaction.table(self.table_cache, table_name.clone())
+        }?
+        .map(Source::Table);
+
+        if source.is_none() {
+            source = if let Some(real_name) = self.table_aliases.get(table_name.as_ref()) {
+                self.transaction
+                    .view(self.table_cache, self.view_cache, real_name.clone())
+            } else {
+                self.transaction
+                    .view(self.table_cache, self.view_cache, table_name.clone())
+            }?
+            .map(Source::View);
+        }
+
+        Ok(source)
+    }
+
     pub fn add_bound_source(
         &mut self,
         table_name: TableName,

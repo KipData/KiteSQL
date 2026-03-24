@@ -13,12 +13,15 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::optimizer::core::memo::Memo;
-use crate::optimizer::core::rule::NormalizationRule;
+use crate::optimizer::core::pattern::PatternMatcher;
+use crate::optimizer::core::rule::{
+    BestPhysicalOption, ImplementationRule, MatchPattern, NormalizationRule,
+};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::heuristic::batch::{
     HepBatch, HepBatchStep, HepBatchStrategy, HepWholeTreePass,
 };
+use crate::optimizer::heuristic::matcher::PlanMatcher;
 use crate::optimizer::rule::implementation::ImplementationRuleImpl;
 use crate::optimizer::rule::normalization::{
     annotate_sort_preserving_indexes, annotate_stream_distinct_indexes,
@@ -60,8 +63,7 @@ impl<'a> HepOptimizer<'a> {
 
         if let Some(loader) = loader {
             if self.implementations.is_empty().not() {
-                let memo = Memo::new(&self.plan, loader, self.implementations)?;
-                Memo::annotate_plan(&memo, &mut self.plan);
+                Self::annotate_physical_options(&mut self.plan, loader, self.implementations)?;
             }
         }
         Self::apply_batches(&mut self.plan, self.after_batches)?;
@@ -189,6 +191,35 @@ impl<'a> HepOptimizer<'a> {
         Ok(())
     }
 
+    fn annotate_physical_options<T: Transaction>(
+        plan: &mut LogicalPlan,
+        loader: &StatisticMetaLoader<'_, T>,
+        implementations: &[ImplementationRuleImpl],
+    ) -> Result<(), DatabaseError> {
+        let mut best_physical_option: BestPhysicalOption = None;
+        for rule in implementations {
+            if PlanMatcher::new(rule.pattern(), plan).match_opt_expr() {
+                rule.update_best_option(&plan.operator, loader, &mut best_physical_option)?;
+            }
+        }
+        if let Some((option, _)) = best_physical_option {
+            plan.physical_option = Some(option);
+        }
+
+        match plan.childrens.as_mut() {
+            Childrens::Only(child) => {
+                Self::annotate_physical_options(child, loader, implementations)?
+            }
+            Childrens::Twins { left, right } => {
+                Self::annotate_physical_options(left, loader, implementations)?;
+                Self::annotate_physical_options(right, loader, implementations)?;
+            }
+            Childrens::None => {}
+        }
+
+        Ok(())
+    }
+
     fn apply_local_rules(
         plan: &mut LogicalPlan,
         rules: &[NormalizationRuleImpl],
@@ -233,6 +264,151 @@ impl<'a> HepOptimizer<'a> {
         }
 
         Ok(applied)
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use crate::binder::{Binder, BinderContext};
+    use crate::db::{DataBaseBuilder, ResultIter};
+    use crate::errors::DatabaseError;
+    use crate::expression::range_detacher::Range;
+    use crate::expression::ScalarExpression;
+    use crate::optimizer::heuristic::batch::HepBatchStrategy;
+    use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
+    use crate::optimizer::rule::implementation::ImplementationRuleImpl;
+    use crate::optimizer::rule::normalization::NormalizationRuleImpl;
+    use crate::planner::operator::sort::SortField;
+    use crate::planner::operator::{PhysicalOption, PlanImpl, SortOption};
+    use crate::storage::{Storage, Transaction};
+    use crate::types::index::{IndexInfo, IndexMeta, IndexType};
+    use crate::types::value::DataValue;
+    use crate::types::LogicalType;
+    use std::ops::Bound;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_find_best_selects_cheapest_scan() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let database = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        database
+            .run("create table t1 (c1 int primary key, c2 int)")?
+            .done()?;
+        database
+            .run("create table t2 (c3 int primary key, c4 int)")?
+            .done()?;
+
+        for i in 0..1000 {
+            database
+                .run(format!("insert into t1 values({}, {})", i, i + 1).as_str())?
+                .done()?;
+        }
+        database.run("analyze table t1")?.done()?;
+
+        let transaction = database.storage.transaction()?;
+        let c1_column = transaction
+            .table(database.state.table_cache(), "t1".to_string().into())?
+            .unwrap()
+            .get_column_by_name("c1")
+            .unwrap();
+        let sort_fields = vec![SortField::new(
+            ScalarExpression::column_expr(c1_column.clone(), 0),
+            true,
+            false,
+        )];
+        let scala_functions = Default::default();
+        let table_functions = Default::default();
+        let mut binder = Binder::new(
+            BinderContext::new(
+                database.state.table_cache(),
+                database.state.view_cache(),
+                &transaction,
+                &scala_functions,
+                &table_functions,
+                Arc::new(AtomicUsize::new(0)),
+            ),
+            &[],
+            None,
+        );
+        let stmt = crate::parser::parse_sql(
+            "select c1, c3 from t1 inner join t2 on c1 = c3 where (c1 > 40 or c1 = 2) and c3 > 22",
+        )?;
+        let plan = binder.bind(&stmt[0])?;
+        let pipeline = HepOptimizerPipeline::builder()
+            .before_batch(
+                "Simplify Filter".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![NormalizationRuleImpl::SimplifyFilter],
+            )
+            .before_batch(
+                "Predicate Pushdown".to_string(),
+                HepBatchStrategy::fix_point_topdown(10),
+                vec![
+                    NormalizationRuleImpl::PushPredicateThroughJoin,
+                    NormalizationRuleImpl::PushJoinPredicateIntoScan,
+                    NormalizationRuleImpl::PushPredicateIntoScan,
+                ],
+            )
+            .implementations(vec![
+                ImplementationRuleImpl::Projection,
+                ImplementationRuleImpl::Filter,
+                ImplementationRuleImpl::HashJoin,
+                ImplementationRuleImpl::SeqScan,
+                ImplementationRuleImpl::IndexScan,
+            ])
+            .build();
+
+        let best_plan = pipeline
+            .instantiate(plan)
+            .find_best(Some(&transaction.meta_loader(database.state.meta_cache())))?;
+
+        assert_eq!(
+            best_plan
+                .childrens
+                .pop_only()
+                .childrens
+                .pop_twins()
+                .0
+                .childrens
+                .pop_only()
+                .physical_option,
+            Some(PhysicalOption::new(
+                PlanImpl::IndexScan(Box::new(IndexInfo {
+                    meta: Arc::new(IndexMeta {
+                        id: 0,
+                        column_ids: vec![c1_column.id().unwrap()],
+                        table_name: "t1".to_string().into(),
+                        pk_ty: LogicalType::Integer,
+                        value_ty: LogicalType::Integer,
+                        name: "pk_index".to_string(),
+                        ty: IndexType::PrimaryKey { is_multiple: false },
+                    }),
+                    sort_option: SortOption::OrderBy {
+                        fields: sort_fields.clone(),
+                        ignore_prefix_len: 0,
+                    },
+                    range: Some(Range::SortedRanges(vec![
+                        Range::Eq(DataValue::Int32(2)),
+                        Range::Scope {
+                            min: Bound::Excluded(DataValue::Int32(40)),
+                            max: Bound::Unbounded,
+                        }
+                    ])),
+                    covered_deserializers: None,
+                    cover_mapping: None,
+                    sort_elimination_hint: None,
+                    stream_distinct_hint: None,
+                })),
+                SortOption::OrderBy {
+                    fields: sort_fields,
+                    ignore_prefix_len: 0,
+                }
+            ))
+        );
+
+        Ok(())
     }
 }
 

@@ -22,17 +22,18 @@ macro_rules! single_mapping {
         }
 
         impl<T: Transaction> ImplementationRule<T> for $ty {
-            fn to_expression(
+            fn update_best_option(
                 &self,
                 _: &Operator,
                 _: &StatisticMetaLoader<'_, T>,
-                group_expr: &mut GroupExpression,
+                best_physical_option: &mut BestPhysicalOption,
             ) -> Result<(), DatabaseError> {
                 //TODO: CostModel
-                group_expr.append_expr(Expression {
-                    op: $option,
-                    cost: None,
-                });
+                crate::optimizer::core::rule::keep_best_physical_option(
+                    best_physical_option,
+                    $option,
+                    None,
+                );
 
                 Ok(())
             }

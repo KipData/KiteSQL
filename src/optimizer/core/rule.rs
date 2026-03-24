@@ -13,12 +13,14 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::optimizer::core::memo::GroupExpression;
 use crate::optimizer::core::pattern::Pattern;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::planner::operator::Operator;
+use crate::planner::operator::{Operator, PhysicalOption};
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
+use std::cmp::Ordering;
+
+pub type BestPhysicalOption = Option<(PhysicalOption, Option<usize>)>;
 
 // TODO: Use indexing and other methods for matching optimization to avoid traversal
 pub trait MatchPattern {
@@ -30,11 +32,35 @@ pub trait NormalizationRule {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError>;
 }
 
+fn compare_costs(candidate_cost: Option<usize>, best_cost: Option<usize>) -> Ordering {
+    match (candidate_cost, best_cost) {
+        (Some(candidate_cost), Some(best_cost)) => candidate_cost.cmp(&best_cost),
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+pub fn keep_best_physical_option(
+    best_physical_option: &mut BestPhysicalOption,
+    option: PhysicalOption,
+    cost: Option<usize>,
+) {
+    let should_replace = match best_physical_option.as_ref() {
+        Some((_, best_cost)) => compare_costs(cost, *best_cost).is_lt(),
+        None => true,
+    };
+
+    if should_replace {
+        *best_physical_option = Some((option, cost));
+    }
+}
+
 pub trait ImplementationRule<T: Transaction>: MatchPattern {
-    fn to_expression(
+    fn update_best_option(
         &self,
         op: &Operator,
         loader: &StatisticMetaLoader<T>,
-        group_expr: &mut GroupExpression,
+        best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError>;
 }

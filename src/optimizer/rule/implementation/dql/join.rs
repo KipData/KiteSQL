@@ -13,9 +13,8 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::optimizer::core::memo::{Expression, GroupExpression};
 use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
-use crate::optimizer::core::rule::{ImplementationRule, MatchPattern};
+use crate::optimizer::core::rule::{BestPhysicalOption, ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::planner::operator::join::{JoinCondition, JoinOperator};
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
@@ -37,11 +36,11 @@ impl MatchPattern for JoinImplementation {
 }
 
 impl<T: Transaction> ImplementationRule<T> for JoinImplementation {
-    fn to_expression(
+    fn update_best_option(
         &self,
         op: &Operator,
         _: &StatisticMetaLoader<'_, T>,
-        group_expr: &mut GroupExpression,
+        best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
         let mut physical_option = PhysicalOption::new(PlanImpl::NestLoopJoin, SortOption::None);
 
@@ -54,10 +53,11 @@ impl<T: Transaction> ImplementationRule<T> for JoinImplementation {
                 physical_option.plan = PlanImpl::HashJoin;
             }
         }
-        group_expr.append_expr(Expression {
-            op: physical_option,
-            cost: None,
-        });
+        crate::optimizer::core::rule::keep_best_physical_option(
+            best_physical_option,
+            physical_option,
+            None,
+        );
         Ok(())
     }
 }

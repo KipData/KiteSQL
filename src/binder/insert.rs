@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::binder::{attach_span_if_absent, lower_case_name, Binder};
+use crate::binder::{
+    attach_span_from_sqlparser_span_if_absent, attach_span_if_absent, lower_case_name, lower_ident,
+    Binder,
+};
 use crate::errors::DatabaseError;
 use crate::expression::simplify::ConstantCalculator;
 use crate::expression::visitor_mut::VisitorMut;
@@ -146,16 +149,40 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         let table_name: Arc<str> = lower_case_name(name)?.into();
         let source = self
             .context
-            .source_and_bind(table_name.clone(), None, None, false)?
+            .source(&table_name)?
             .ok_or(DatabaseError::TableNotFound)?;
         let mut schema_buf = None;
         let table_schema = source.schema_ref(&mut schema_buf);
+
+        let target_columns = if idents.is_empty() {
+            None
+        } else {
+            let mut columns = Vec::with_capacity(idents.len());
+            for ident in idents {
+                let column_name = lower_ident(ident);
+                let column = source
+                    .column(&column_name, &mut schema_buf)
+                    .ok_or_else(|| {
+                        attach_span_from_sqlparser_span_if_absent(
+                            DatabaseError::column_not_found(column_name),
+                            ident.span,
+                        )
+                    })?;
+                columns.push(column);
+            }
+            Some(columns)
+        };
 
         let mut input_plan = self.bind_query(query)?;
         let input_schema = input_plan.output_schema().clone();
         let input_len = input_schema.len();
 
-        let target_columns = if idents.is_empty() {
+        let target_columns = if let Some(columns) = target_columns {
+            if input_len != columns.len() {
+                return Err(DatabaseError::ValuesLenMismatch(columns.len(), input_len));
+            }
+            columns
+        } else {
             if input_len > table_schema.len() {
                 return Err(DatabaseError::ValuesLenMismatch(
                     table_schema.len(),
@@ -167,21 +194,6 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 .take(input_len)
                 .cloned()
                 .collect::<Vec<_>>()
-        } else {
-            let mut columns = Vec::with_capacity(idents.len());
-            for ident in idents {
-                match self.bind_column_ref_from_identifiers(
-                    slice::from_ref(ident),
-                    Some(table_name.to_string()),
-                )? {
-                    ScalarExpression::ColumnRef { column, .. } => columns.push(column),
-                    _ => return Err(DatabaseError::UnsupportedStmt(ident.to_string())),
-                }
-            }
-            if input_len != columns.len() {
-                return Err(DatabaseError::ValuesLenMismatch(columns.len(), input_len));
-            }
-            columns
         };
 
         let projection = input_schema

@@ -79,6 +79,34 @@ impl<'a> VisitorMut<'a> for RightSidePositionGlobalizer<'_> {
     }
 }
 
+struct SplitScopePositionRebinder<'a> {
+    left_schema: &'a Schema,
+    right_schema: &'a Schema,
+}
+
+impl VisitorMut<'_> for SplitScopePositionRebinder<'_> {
+    fn visit_column_ref(
+        &mut self,
+        column: &mut ColumnRef,
+        position: &mut usize,
+    ) -> Result<(), DatabaseError> {
+        if let Some(left_position) = self
+            .left_schema
+            .iter()
+            .position(|candidate| candidate.summary() == column.summary())
+        {
+            *position = left_position;
+        } else if let Some(right_position) = self
+            .right_schema
+            .iter()
+            .position(|candidate| candidate.summary() == column.summary())
+        {
+            *position = right_position;
+        }
+        Ok(())
+    }
+}
+
 struct ProjectionOutputBinder<'a> {
     project_exprs: &'a [ScalarExpression],
 }
@@ -217,6 +245,60 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         }
 
         Ok(())
+    }
+
+    fn rebind_split_scope_positions(
+        expr: &mut ScalarExpression,
+        left_schema: &Schema,
+        right_schema: &Schema,
+    ) -> Result<(), DatabaseError> {
+        SplitScopePositionRebinder {
+            left_schema,
+            right_schema,
+        }
+        .visit(expr)
+    }
+
+    fn build_join_from_split_scope_predicates(
+        mut children: LogicalPlan,
+        mut plan: LogicalPlan,
+        join_ty: JoinType,
+        predicates: Vec<ScalarExpression>,
+        rebind_positions: bool,
+    ) -> Result<LogicalPlan, DatabaseError> {
+        let left_schema = children.output_schema().clone();
+        let right_schema = plan.output_schema().clone();
+        let mut on_keys = Vec::new();
+        let mut filter = Vec::new();
+
+        for mut predicate in predicates {
+            if rebind_positions {
+                Self::rebind_split_scope_positions(
+                    &mut predicate,
+                    left_schema.as_ref(),
+                    right_schema.as_ref(),
+                )?;
+            }
+            Self::extract_join_keys(
+                predicate,
+                &mut on_keys,
+                &mut filter,
+                left_schema.as_ref(),
+                right_schema.as_ref(),
+            )?;
+        }
+
+        let mut join_condition = JoinCondition::On {
+            on: on_keys,
+            filter: Self::combine_conjuncts(filter),
+        };
+        Self::globalize_join_filter_from_split_scope(
+            &mut join_condition,
+            left_schema.len(),
+            right_schema.as_ref(),
+        )?;
+
+        Ok(LJoinOperator::build(children, plan, join_condition, join_ty))
     }
 
     pub(crate) fn bind_query(&mut self, query: &Query) -> Result<LogicalPlan, DatabaseError> {
@@ -1150,10 +1232,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
         if let Some(sub_queries) = self.context.sub_queries_at_now() {
             for sub_query in sub_queries {
-                let mut on_keys: Vec<(ScalarExpression, ScalarExpression)> = vec![];
-                let mut filter = vec![];
-
-                let (mut plan, join_ty) = match sub_query {
+                let (plan, join_ty) = match sub_query {
                     SubQueryType::SubQuery { plan, correlated } => {
                         if correlated {
                             return Err(DatabaseError::UnsupportedStmt(
@@ -1198,27 +1277,13 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     }
                 };
 
-                Self::extract_join_keys(
-                    predicate.clone(),
-                    &mut on_keys,
-                    &mut filter,
-                    children.output_schema(),
-                    plan.output_schema(),
+                children = Self::build_join_from_split_scope_predicates(
+                    children,
+                    plan,
+                    join_ty,
+                    vec![predicate.clone()],
+                    true,
                 )?;
-
-                // combine multiple filter exprs into one BinaryExpr
-                let join_filter = Self::combine_conjuncts(filter);
-                let mut join_condition = JoinCondition::On {
-                    on: on_keys,
-                    filter: join_filter,
-                };
-                Self::globalize_join_filter_from_split_scope(
-                    &mut join_condition,
-                    children.output_schema().len(),
-                    plan.output_schema(),
-                )?;
-
-                children = LJoinOperator::build(children, plan, join_condition, join_ty);
             }
             return Ok(children);
         }
@@ -1231,38 +1296,20 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         plan: LogicalPlan,
         negated: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let mut on_keys: Vec<(ScalarExpression, ScalarExpression)> = vec![];
-        let mut filter = vec![];
         let join_ty = if negated {
             JoinType::LeftAnti
         } else {
             JoinType::LeftSemi
         };
-        let (mut plan, correlated_filters) =
+        let (plan, correlated_filters) =
             Self::prepare_correlated_subquery_plan(plan, children.output_schema(), false)?;
-
-        for expr in correlated_filters {
-            Self::extract_join_keys(
-                expr,
-                &mut on_keys,
-                &mut filter,
-                children.output_schema(),
-                plan.output_schema(),
-            )?;
-        }
-
-        let mut join_condition = JoinCondition::On {
-            on: on_keys,
-            filter: Self::combine_conjuncts(filter),
-        };
-        Self::globalize_join_filter_from_split_scope(
-            &mut join_condition,
-            children.output_schema().len(),
-            plan.output_schema(),
-        )?;
-
-        children = LJoinOperator::build(children, plan, join_condition, join_ty);
-        Ok(children)
+        Self::build_join_from_split_scope_predicates(
+            children,
+            plan,
+            join_ty,
+            correlated_filters,
+            false,
+        )
     }
 
     fn bind_uncorrelated_exists(
@@ -1322,47 +1369,19 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         negated: bool,
         predicate: ScalarExpression,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let mut on_keys: Vec<(ScalarExpression, ScalarExpression)> = vec![];
-        let mut filter = vec![];
         let join_ty = if negated {
             JoinType::LeftAnti
         } else {
             JoinType::LeftSemi
         };
-        let (mut plan, correlated_filters) =
+        let (plan, correlated_filters) =
             Self::prepare_correlated_subquery_plan(plan, children.output_schema(), true)?;
         let predicate = Self::rewrite_correlated_in_predicate(predicate);
+        let predicates = std::iter::once(predicate)
+            .chain(correlated_filters)
+            .collect();
 
-        Self::extract_join_keys(
-            predicate,
-            &mut on_keys,
-            &mut filter,
-            children.output_schema(),
-            plan.output_schema(),
-        )?;
-
-        for expr in correlated_filters {
-            Self::extract_join_keys(
-                expr,
-                &mut on_keys,
-                &mut filter,
-                children.output_schema(),
-                plan.output_schema(),
-            )?;
-        }
-
-        let mut join_condition = JoinCondition::On {
-            on: on_keys,
-            filter: Self::combine_conjuncts(filter),
-        };
-        Self::globalize_join_filter_from_split_scope(
-            &mut join_condition,
-            children.output_schema().len(),
-            plan.output_schema(),
-        )?;
-
-        children = LJoinOperator::build(children, plan, join_condition, join_ty);
-        Ok(children)
+        Self::build_join_from_split_scope_predicates(children, plan, join_ty, predicates, false)
     }
 
     fn rewrite_correlated_in_predicate(predicate: ScalarExpression) -> ScalarExpression {
@@ -2143,6 +2162,59 @@ mod tests {
 
         assert_eq!(*join_type, JoinType::Inner);
         assert!(matches!(join_condition, JoinCondition::On { .. }));
+
+        Ok(())
+    }
+
+    fn find_top_join(plan: &LogicalPlan) -> Option<&LogicalPlan> {
+        if matches!(plan.operator, Operator::Join(_)) {
+            return Some(plan);
+        }
+
+        match plan.childrens.as_ref() {
+            Childrens::Only(child) => find_top_join(child),
+            Childrens::Twins { .. } | Childrens::None => None,
+        }
+    }
+
+    fn collect_column_positions(expr: &ScalarExpression, positions: &mut Vec<usize>) {
+        match expr.unpack_alias_ref() {
+            ScalarExpression::ColumnRef { position, .. } => positions.push(*position),
+            ScalarExpression::Binary {
+                left_expr,
+                right_expr,
+                ..
+            } => {
+                collect_column_positions(left_expr, positions);
+                collect_column_positions(right_expr, positions);
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn test_multiple_scalar_subqueries_in_where_rebind_positions() -> Result<(), DatabaseError> {
+        let table_states = build_t1_table()?;
+        let plan = table_states.plan("select * from t1 where c1 <= (select 4) and c1 > (select 1)")?;
+        let outer_join = find_top_join(&plan).expect("expected scalar subqueries to introduce a join");
+        let Operator::Join(op) = &outer_join.operator else {
+            panic!("expected join plan")
+        };
+        let Childrens::Twins { left, .. } = outer_join.childrens.as_ref() else {
+            panic!("expected binary join")
+        };
+        let JoinCondition::On {
+            filter: Some(filter), ..
+        } = &op.on
+        else {
+            panic!("expected join filter")
+        };
+        let left_len = left.output_schema_direct().columns().count();
+
+        let mut positions = Vec::new();
+        collect_column_positions(filter, &mut positions);
+
+        assert_eq!(positions, vec![0, left_len - 1, 0, left_len]);
 
         Ok(())
     }
