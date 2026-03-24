@@ -17,20 +17,13 @@ use crate::errors::DatabaseError;
 use crate::expression::agg::AggKind;
 use crate::expression::visitor::Visitor;
 use crate::expression::{HasCountStar, ScalarExpression};
-use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
-use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
+use crate::optimizer::core::rule::NormalizationRule;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::LogicalType;
 use sqlparser::ast::CharLengthUnits;
 use std::collections::HashSet;
-use std::sync::LazyLock;
-
-static COLUMN_PRUNING_RULE: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |_| true,
-    children: PatternChildrenPredicate::None,
-});
 
 #[derive(Clone)]
 pub struct ColumnPruning;
@@ -209,12 +202,6 @@ impl ColumnPruning {
             Childrens::None => (),
         }
         Ok(changed)
-    }
-}
-
-impl MatchPattern for ColumnPruning {
-    fn pattern(&self) -> &Pattern {
-        &COLUMN_PRUNING_RULE
     }
 }
 

@@ -13,30 +13,13 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::optimizer::core::pattern::Pattern;
-use crate::optimizer::core::pattern::PatternChildrenPredicate;
-use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
+use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child};
 use crate::planner::operator::top_k::TopKOperator;
 use crate::planner::operator::Operator;
 use crate::planner::LogicalPlan;
-use std::sync::LazyLock;
-
-static TOP_K_RULE: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |op| matches!(op, Operator::Limit(_)),
-    children: PatternChildrenPredicate::Predicate(vec![Pattern {
-        predicate: |op| matches!(op, Operator::Sort(_)),
-        children: PatternChildrenPredicate::None,
-    }]),
-});
 
 pub struct TopK;
-
-impl MatchPattern for TopK {
-    fn pattern(&self) -> &Pattern {
-        &TOP_K_RULE
-    }
-}
 
 impl NormalizationRule for TopK {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {

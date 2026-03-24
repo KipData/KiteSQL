@@ -25,7 +25,7 @@ pub trait MatchPattern {
     fn pattern(&self) -> &Pattern;
 }
 
-pub trait NormalizationRule: MatchPattern {
+pub trait NormalizationRule {
     /// Returns true when the plan tree is modified.
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError>;
 }

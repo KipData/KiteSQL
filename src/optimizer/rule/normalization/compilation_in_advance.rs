@@ -15,23 +15,11 @@
 use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::VisitorMut;
 use crate::expression::{BindEvaluator, BindPosition, ScalarExpression};
-use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
-use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
+use crate::optimizer::core::rule::NormalizationRule;
 use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use std::borrow::Cow;
-use std::sync::LazyLock;
-
-static BIND_EXPRESSION_POSITION: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |_| true,
-    children: PatternChildrenPredicate::None,
-});
-
-static EVALUATOR_BIND_RULE: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |_| true,
-    children: PatternChildrenPredicate::None,
-});
 
 #[derive(Clone)]
 pub struct BindExpressionPosition;
@@ -177,12 +165,6 @@ impl BindExpressionPosition {
     }
 }
 
-impl MatchPattern for BindExpressionPosition {
-    fn pattern(&self) -> &Pattern {
-        &BIND_EXPRESSION_POSITION
-    }
-}
-
 impl NormalizationRule for BindExpressionPosition {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
         Self::_apply(&mut Vec::new(), plan)?;
@@ -293,12 +275,6 @@ impl EvaluatorBind {
         }
 
         evaluator_bind_current(plan)
-    }
-}
-
-impl MatchPattern for EvaluatorBind {
-    fn pattern(&self) -> &Pattern {
-        &EVALUATOR_BIND_RULE
     }
 }
 

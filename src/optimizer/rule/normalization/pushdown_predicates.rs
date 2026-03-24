@@ -16,9 +16,7 @@ use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::{Range, RangeDetacher};
 use crate::expression::{BinaryOperator, ScalarExpression};
-use crate::optimizer::core::pattern::Pattern;
-use crate::optimizer::core::pattern::PatternChildrenPredicate;
-use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
+use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{
     left_child, only_child_mut, replace_with_only_child, right_child, wrap_child_with,
 };
@@ -31,38 +29,7 @@ use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use itertools::Itertools;
 use std::ops::Bound;
-use std::sync::LazyLock;
 use std::{mem, slice};
-
-static PUSH_PREDICATE_THROUGH_JOIN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |op| matches!(op, Operator::Filter(_)),
-    children: PatternChildrenPredicate::Predicate(vec![Pattern {
-        predicate: |op| matches!(op, Operator::Join(_)),
-        children: PatternChildrenPredicate::None,
-    }]),
-});
-
-static PUSH_PREDICATE_INTO_SCAN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |op| matches!(op, Operator::Filter(_)),
-    children: PatternChildrenPredicate::Predicate(vec![Pattern {
-        predicate: |op| matches!(op, Operator::TableScan(_)),
-        children: PatternChildrenPredicate::None,
-    }]),
-});
-
-static JOIN_WITH_FILTER_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |op| matches!(op, Operator::Join(_)),
-    children: PatternChildrenPredicate::None,
-});
-
-#[allow(dead_code)]
-static PUSH_PREDICATE_THROUGH_NON_JOIN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |op| matches!(op, Operator::Filter(_)),
-    children: PatternChildrenPredicate::Predicate(vec![Pattern {
-        predicate: |op| matches!(op, Operator::Project(_)),
-        children: PatternChildrenPredicate::None,
-    }]),
-});
 
 fn split_conjunctive_predicates(expr: &ScalarExpression) -> Vec<ScalarExpression> {
     match expr {
@@ -121,12 +88,6 @@ fn plan_output_columns(plan: &LogicalPlan) -> Vec<ColumnRef> {
 /// And also pushes down the join filter, where the `condition` can be evaluated using only the
 /// attributes of the left or right side of sub query when applicable.
 pub struct PushPredicateThroughJoin;
-
-impl MatchPattern for PushPredicateThroughJoin {
-    fn pattern(&self) -> &Pattern {
-        &PUSH_PREDICATE_THROUGH_JOIN
-    }
-}
 
 impl NormalizationRule for PushPredicateThroughJoin {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
@@ -238,12 +199,6 @@ impl NormalizationRule for PushPredicateThroughJoin {
 }
 
 pub struct PushPredicateIntoScan;
-
-impl MatchPattern for PushPredicateIntoScan {
-    fn pattern(&self) -> &Pattern {
-        &PUSH_PREDICATE_INTO_SCAN
-    }
-}
 
 impl NormalizationRule for PushPredicateIntoScan {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
@@ -387,12 +342,6 @@ impl PushPredicateIntoScan {
 }
 
 pub struct PushJoinPredicateIntoScan;
-
-impl MatchPattern for PushJoinPredicateIntoScan {
-    fn pattern(&self) -> &Pattern {
-        &JOIN_WITH_FILTER_PATTERN
-    }
-}
 
 impl NormalizationRule for PushJoinPredicateIntoScan {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {

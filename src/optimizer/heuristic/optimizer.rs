@@ -15,13 +15,11 @@
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::optimizer::core::memo::Memo;
-use crate::optimizer::core::pattern::PatternMatcher;
-use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
+use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::heuristic::batch::{
     HepBatch, HepBatchStep, HepBatchStrategy, HepWholeTreePass,
 };
-use crate::optimizer::heuristic::matcher::PlanMatcher;
 use crate::optimizer::rule::implementation::ImplementationRuleImpl;
 use crate::optimizer::rule::normalization::{
     annotate_sort_preserving_indexes, annotate_stream_distinct_indexes,
@@ -103,10 +101,8 @@ impl<'a> HepOptimizer<'a> {
                     }
                 }
                 HepBatchStep::LocalRewrite(rules) => {
-                    for rule in rules {
-                        if Self::apply_rule(plan, rule)? {
-                            applied = true;
-                        }
+                    if Self::apply_local_rules(plan, rules)? {
+                        applied = true;
                     }
                 }
             }
@@ -227,36 +223,50 @@ impl<'a> HepOptimizer<'a> {
         Ok(())
     }
 
-    fn apply_rule(
+    fn apply_local_rules(
         plan: &mut LogicalPlan,
-        rule: &NormalizationRuleImpl,
+        rules: &[NormalizationRuleImpl],
     ) -> Result<bool, DatabaseError> {
-        if PlanMatcher::new(rule.pattern(), plan).match_opt_expr() && rule.apply(plan)? {
-            plan.reset_output_schema_cache_recursive();
-            return Ok(true);
+        let mut applied_rules = vec![false; rules.len()];
+        Self::apply_local_rules_inner(plan, rules, &mut applied_rules)
+    }
+
+    fn apply_local_rules_inner(
+        plan: &mut LogicalPlan,
+        rules: &[NormalizationRuleImpl],
+        applied_rules: &mut [bool],
+    ) -> Result<bool, DatabaseError> {
+        let mut applied = false;
+
+        for (idx, rule) in rules.iter().enumerate() {
+            if applied_rules[idx] || !rule.root_tag().matches(&plan.operator) {
+                continue;
+            }
+            if rule.apply(plan)? {
+                plan.reset_output_schema_cache_recursive();
+                applied_rules[idx] = true;
+                applied = true;
+            }
         }
 
         match plan.childrens.as_mut() {
             Childrens::Only(child) => {
-                if Self::apply_rule(child, rule)? {
-                    plan.reset_output_schema_cache();
-                    return Ok(true);
-                }
-                Ok(false)
+                let child_applied = Self::apply_local_rules_inner(child, rules, applied_rules)?;
+                applied |= child_applied;
             }
             Childrens::Twins { left, right } => {
-                if Self::apply_rule(left, rule)? {
-                    plan.reset_output_schema_cache();
-                    return Ok(true);
-                }
-                if Self::apply_rule(right, rule)? {
-                    plan.reset_output_schema_cache();
-                    return Ok(true);
-                }
-                Ok(false)
+                let left_applied = Self::apply_local_rules_inner(left, rules, applied_rules)?;
+                let right_applied = Self::apply_local_rules_inner(right, rules, applied_rules)?;
+                applied |= left_applied || right_applied;
             }
-            Childrens::None => Ok(false),
+            Childrens::None => {}
         }
+
+        if applied {
+            plan.reset_output_schema_cache();
+        }
+
+        Ok(applied)
     }
 }
 

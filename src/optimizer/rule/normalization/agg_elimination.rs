@@ -15,27 +15,14 @@
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
-use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
-use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
+use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child};
 use crate::planner::operator::limit::LimitOperator;
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
 use crate::planner::{Childrens, LogicalPlan};
-use std::sync::LazyLock;
-
-static REDUNDANT_SORT_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |op| matches!(op, Operator::Sort(_) | Operator::TopK(_)),
-    children: PatternChildrenPredicate::None,
-});
 
 pub struct EliminateRedundantSort;
-
-impl MatchPattern for EliminateRedundantSort {
-    fn pattern(&self) -> &Pattern {
-        &REDUNDANT_SORT_PATTERN
-    }
-}
 
 impl NormalizationRule for EliminateRedundantSort {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
@@ -183,23 +170,7 @@ fn distinct_sort_fields(groupby_exprs: &[ScalarExpression]) -> Vec<SortField> {
         .collect()
 }
 
-static STREAM_DISTINCT_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |op| match op {
-        Operator::Aggregate(op) => {
-            op.is_distinct && op.agg_calls.is_empty() && !op.groupby_exprs.is_empty()
-        }
-        _ => false,
-    },
-    children: PatternChildrenPredicate::None,
-});
-
 pub struct UseStreamDistinct;
-
-impl MatchPattern for UseStreamDistinct {
-    fn pattern(&self) -> &Pattern {
-        &STREAM_DISTINCT_PATTERN
-    }
-}
 
 impl NormalizationRule for UseStreamDistinct {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {

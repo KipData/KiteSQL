@@ -14,8 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::expression::{AliasType, ScalarExpression};
-use crate::optimizer::core::pattern::Pattern;
-use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
+use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::rule::normalization::column_pruning::ColumnPruning;
 use crate::optimizer::rule::normalization::combine_operators::{
     CollapseGroupByAgg, CollapseProject, CombineFilter,
@@ -23,6 +22,7 @@ use crate::optimizer::rule::normalization::combine_operators::{
 use crate::optimizer::rule::normalization::compilation_in_advance::{
     BindExpressionPosition, EvaluatorBind,
 };
+use crate::planner::operator::Operator;
 
 use crate::optimizer::rule::normalization::agg_elimination::{
     EliminateRedundantSort, UseStreamDistinct,
@@ -86,6 +86,33 @@ pub enum WholeTreePassKind {
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum NormalizationRuleRootTag {
+    Any,
+    Aggregate,
+    Filter,
+    Join,
+    Limit,
+    Project,
+    SortLike,
+}
+
+impl NormalizationRuleRootTag {
+    pub fn matches(self, operator: &Operator) -> bool {
+        match self {
+            NormalizationRuleRootTag::Any => true,
+            NormalizationRuleRootTag::Aggregate => matches!(operator, Operator::Aggregate(_)),
+            NormalizationRuleRootTag::Filter => matches!(operator, Operator::Filter(_)),
+            NormalizationRuleRootTag::Join => matches!(operator, Operator::Join(_)),
+            NormalizationRuleRootTag::Limit => matches!(operator, Operator::Limit(_)),
+            NormalizationRuleRootTag::Project => matches!(operator, Operator::Project(_)),
+            NormalizationRuleRootTag::SortLike => {
+                matches!(operator, Operator::Sort(_) | Operator::TopK(_))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum NormalizationPassKind {
     WholeTreePass(WholeTreePassKind),
     LocalRewrite,
@@ -105,29 +132,28 @@ impl NormalizationRuleImpl {
             _ => NormalizationPassKind::LocalRewrite,
         }
     }
-}
 
-impl MatchPattern for NormalizationRuleImpl {
-    fn pattern(&self) -> &Pattern {
+    pub fn root_tag(&self) -> NormalizationRuleRootTag {
         match self {
-            NormalizationRuleImpl::ColumnPruning => ColumnPruning.pattern(),
-            NormalizationRuleImpl::CollapseProject => CollapseProject.pattern(),
-            NormalizationRuleImpl::CollapseGroupByAgg => CollapseGroupByAgg.pattern(),
-            NormalizationRuleImpl::CombineFilter => CombineFilter.pattern(),
-            NormalizationRuleImpl::LimitProjectTranspose => LimitProjectTranspose.pattern(),
-            NormalizationRuleImpl::PushLimitThroughJoin => PushLimitThroughJoin.pattern(),
-            NormalizationRuleImpl::PushLimitIntoTableScan => PushLimitIntoScan.pattern(),
-            NormalizationRuleImpl::PushPredicateThroughJoin => PushPredicateThroughJoin.pattern(),
-            NormalizationRuleImpl::PushJoinPredicateIntoScan => PushJoinPredicateIntoScan.pattern(),
-            NormalizationRuleImpl::PushPredicateIntoScan => PushPredicateIntoScan.pattern(),
-            NormalizationRuleImpl::SimplifyFilter => SimplifyFilter.pattern(),
-            NormalizationRuleImpl::ConstantCalculation => ConstantCalculation.pattern(),
-            NormalizationRuleImpl::BindExpressionPosition => BindExpressionPosition.pattern(),
-            NormalizationRuleImpl::EvaluatorBind => EvaluatorBind.pattern(),
-            NormalizationRuleImpl::MinMaxToTopK => MinMaxToTopK.pattern(),
-            NormalizationRuleImpl::TopK => TopK.pattern(),
-            NormalizationRuleImpl::EliminateRedundantSort => EliminateRedundantSort.pattern(),
-            NormalizationRuleImpl::UseStreamDistinct => UseStreamDistinct.pattern(),
+            NormalizationRuleImpl::ColumnPruning => NormalizationRuleRootTag::Any,
+            NormalizationRuleImpl::CollapseProject => NormalizationRuleRootTag::Project,
+            NormalizationRuleImpl::CollapseGroupByAgg => NormalizationRuleRootTag::Aggregate,
+            NormalizationRuleImpl::CombineFilter => NormalizationRuleRootTag::Filter,
+            NormalizationRuleImpl::LimitProjectTranspose
+            | NormalizationRuleImpl::PushLimitThroughJoin
+            | NormalizationRuleImpl::PushLimitIntoTableScan
+            | NormalizationRuleImpl::TopK => NormalizationRuleRootTag::Limit,
+            NormalizationRuleImpl::PushPredicateThroughJoin
+            | NormalizationRuleImpl::PushPredicateIntoScan
+            | NormalizationRuleImpl::SimplifyFilter => NormalizationRuleRootTag::Filter,
+            NormalizationRuleImpl::PushJoinPredicateIntoScan => NormalizationRuleRootTag::Join,
+            NormalizationRuleImpl::ConstantCalculation => NormalizationRuleRootTag::Any,
+            NormalizationRuleImpl::BindExpressionPosition => NormalizationRuleRootTag::Any,
+            NormalizationRuleImpl::EvaluatorBind => NormalizationRuleRootTag::Any,
+            NormalizationRuleImpl::MinMaxToTopK | NormalizationRuleImpl::UseStreamDistinct => {
+                NormalizationRuleRootTag::Aggregate
+            }
+            NormalizationRuleImpl::EliminateRedundantSort => NormalizationRuleRootTag::SortLike,
         }
     }
 }

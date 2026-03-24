@@ -14,8 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::expression::{BinaryOperator, ScalarExpression};
-use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
-use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
+use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child};
 use crate::optimizer::rule::normalization::{is_subset_exprs, strip_alias};
 use crate::planner::operator::project::ProjectOperator;
@@ -23,37 +22,6 @@ use crate::planner::operator::Operator;
 use crate::planner::LogicalPlan;
 use crate::types::LogicalType;
 use std::collections::HashSet;
-use std::sync::LazyLock;
-
-static COLLAPSE_PROJECT_RULE: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |op| matches!(op, Operator::Project(_)),
-    children: PatternChildrenPredicate::Predicate(vec![Pattern {
-        predicate: |op| matches!(op, Operator::Project(_)),
-        children: PatternChildrenPredicate::None,
-    }]),
-});
-
-static COMBINE_FILTERS_RULE: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |op| matches!(op, Operator::Filter(_)),
-    children: PatternChildrenPredicate::Predicate(vec![Pattern {
-        predicate: |op| matches!(op, Operator::Filter(_)) || is_passthrough_project_operator(op),
-        children: PatternChildrenPredicate::None,
-    }]),
-});
-
-static COLLAPSE_GROUP_BY_AGG: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |op| match op {
-        Operator::Aggregate(agg_op) => !agg_op.groupby_exprs.is_empty(),
-        _ => false,
-    },
-    children: PatternChildrenPredicate::Predicate(vec![Pattern {
-        predicate: |op| match op {
-            Operator::Aggregate(agg_op) => !agg_op.groupby_exprs.is_empty(),
-            _ => false,
-        },
-        children: PatternChildrenPredicate::None,
-    }]),
-});
 
 fn is_passthrough_project(op: &ProjectOperator) -> bool {
     op.exprs
@@ -61,18 +29,8 @@ fn is_passthrough_project(op: &ProjectOperator) -> bool {
         .all(|expr| matches!(strip_alias(expr), ScalarExpression::ColumnRef { .. }))
 }
 
-fn is_passthrough_project_operator(op: &Operator) -> bool {
-    matches!(op, Operator::Project(project_op) if is_passthrough_project(project_op))
-}
-
 /// Combine two adjacent project operators into one.
 pub struct CollapseProject;
-
-impl MatchPattern for CollapseProject {
-    fn pattern(&self) -> &Pattern {
-        &COLLAPSE_PROJECT_RULE
-    }
-}
 
 impl NormalizationRule for CollapseProject {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
@@ -100,12 +58,6 @@ impl NormalizationRule for CollapseProject {
 
 /// Combine two adjacent filter operators into one.
 pub struct CombineFilter;
-
-impl MatchPattern for CombineFilter {
-    fn pattern(&self) -> &Pattern {
-        &COMBINE_FILTERS_RULE
-    }
-}
 
 impl NormalizationRule for CombineFilter {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
@@ -146,12 +98,6 @@ impl NormalizationRule for CombineFilter {
 }
 
 pub struct CollapseGroupByAgg;
-
-impl MatchPattern for CollapseGroupByAgg {
-    fn pattern(&self) -> &Pattern {
-        &COLLAPSE_GROUP_BY_AGG
-    }
-}
 
 impl NormalizationRule for CollapseGroupByAgg {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
