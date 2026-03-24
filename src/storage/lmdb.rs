@@ -14,10 +14,10 @@
 
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::{BumpBytes, Bytes, TableCodec};
-use crate::storage::{InnerIter, Storage, Transaction};
+use crate::storage::{reuse_bound_as_excluded, InnerIter, Storage, Transaction};
 use lmdb::{
     Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, RoCursor, RwTransaction,
-    Transaction as _,
+    Transaction as _, WriteFlags,
 };
 use std::cmp::Ordering;
 use std::collections::Bound;
@@ -162,15 +162,15 @@ pub struct LmdbTransaction<'env> {
 pub struct LmdbIter<'txn> {
     _cursor: RoCursor<'txn>,
     iter: lmdb::Iter<'txn>,
-    pending: Option<(Bytes, Bytes)>,
+    pending: Option<(&'txn [u8], &'txn [u8])>,
     max: Bound<Bytes>,
     done: bool,
 }
 
 impl LmdbIter<'_> {
-    fn next_visible(&mut self) -> Option<(Bytes, Bytes)> {
+    fn next_visible(&mut self) -> Option<(&[u8], &[u8])> {
         if let Some(entry) = self.pending.take() {
-            if within_upper_bound(entry.0.as_slice(), &self.max) {
+            if within_upper_bound(entry.0, &self.max) {
                 return Some(entry);
             }
             self.done = true;
@@ -182,7 +182,7 @@ impl LmdbIter<'_> {
                 self.done = true;
                 return None;
             }
-            return Some((key.to_vec(), value.to_vec()));
+            return Some((key, value));
         }
 
         self.done = true;
@@ -191,7 +191,7 @@ impl LmdbIter<'_> {
 }
 
 impl InnerIter for LmdbIter<'_> {
-    fn try_next(&mut self) -> Result<Option<(Bytes, Bytes)>, DatabaseError> {
+    fn try_next(&mut self) -> Result<Option<(&[u8], &[u8])>, DatabaseError> {
         if self.done {
             return Ok(None);
         }
@@ -200,6 +200,11 @@ impl InnerIter for LmdbIter<'_> {
 }
 
 impl Transaction for LmdbTransaction<'_> {
+    type BorrowedBytes<'a>
+        = &'a [u8]
+    where
+        Self: 'a;
+
     type IterType<'a>
         = LmdbIter<'a>
     where
@@ -209,9 +214,12 @@ impl Transaction for LmdbTransaction<'_> {
         &self.table_codec
     }
 
-    fn get(&self, key: &[u8]) -> Result<Option<Bytes>, DatabaseError> {
+    fn get_borrowed<'a>(
+        &'a self,
+        key: &[u8],
+    ) -> Result<Option<Self::BorrowedBytes<'a>>, DatabaseError> {
         match self.tx.get(self.db, &key) {
-            Ok(value) => Ok(Some(value.to_vec())),
+            Ok(value) => Ok(Some(value)),
             Err(lmdb::Error::NotFound) => Ok(None),
             Err(err) => Err(map_lmdb_err(err)),
         }
@@ -236,11 +244,11 @@ impl Transaction for LmdbTransaction<'_> {
         }
     }
 
-    fn range<'a>(
-        &'a self,
-        min: Bound<BumpBytes<'a>>,
-        max: Bound<BumpBytes<'a>>,
-    ) -> Result<Self::IterType<'a>, DatabaseError> {
+    fn range<'txn, 'key>(
+        &'txn self,
+        min: Bound<&'key [u8]>,
+        max: Bound<&'key [u8]>,
+    ) -> Result<Self::IterType<'txn>, DatabaseError> {
         let mut cursor = self.tx.open_ro_cursor(self.db).map_err(map_lmdb_err)?;
         let (pending, done) = initial_entry(&mut cursor, &min).map_err(map_lmdb_err)?;
         let iter = cursor.iter();
@@ -254,49 +262,93 @@ impl Transaction for LmdbTransaction<'_> {
         })
     }
 
+    fn remove_range(&mut self, min: Bound<&[u8]>, max: Bound<&[u8]>) -> Result<(), DatabaseError> {
+        let mut cursor = self.tx.open_rw_cursor(self.db).map_err(map_lmdb_err)?;
+        let upper = owned_bound(max);
+        let mut lower = owned_bound(min);
+        let mut seek_key = Bytes::new();
+
+        loop {
+            let entry = cursor_seek(&mut cursor, &lower, &mut seek_key).map_err(map_lmdb_err)?;
+            let Some((key, _)) = entry else {
+                return Ok(());
+            };
+            if !within_upper_bound(key, &upper) {
+                return Ok(());
+            }
+
+            reuse_bound_as_excluded(&mut lower, key);
+            cursor.del(WriteFlags::empty()).map_err(map_lmdb_err)?;
+        }
+    }
+
     fn commit(self) -> Result<(), DatabaseError> {
         self.tx.commit().map_err(map_lmdb_err)?;
         Ok(())
     }
 }
 
-fn initial_entry(
-    cursor: &mut RoCursor<'_>,
-    min: &Bound<BumpBytes<'_>>,
-) -> Result<(Option<(Bytes, Bytes)>, bool), lmdb::Error> {
+fn initial_entry<'txn>(
+    cursor: &mut RoCursor<'txn>,
+    min: &Bound<&[u8]>,
+) -> Result<(Option<(&'txn [u8], &'txn [u8])>, bool), lmdb::Error> {
     match min {
         Bound::Unbounded => Ok((None, false)),
+        Bound::Included(min) => match cursor.get(Some(*min), None, lmdb_sys::MDB_SET_RANGE) {
+            Ok((key, value)) => Ok((Some((key.unwrap_or_default(), value)), false)),
+            Err(lmdb::Error::NotFound) => Ok((None, true)),
+            Err(err) => Err(err),
+        },
+        Bound::Excluded(min) => match cursor.get(Some(*min), None, lmdb_sys::MDB_SET_RANGE) {
+            Ok((key, value)) => {
+                let key = key.unwrap_or_default();
+                if key == *min {
+                    Ok((None, false))
+                } else {
+                    Ok((Some((key, value)), false))
+                }
+            }
+            Err(lmdb::Error::NotFound) => Ok((None, true)),
+            Err(err) => Err(err),
+        },
+    }
+}
+
+fn cursor_seek<'txn>(
+    cursor: &mut lmdb::RwCursor<'txn>,
+    lower: &Bound<Bytes>,
+    seek_key: &mut Bytes,
+) -> Result<Option<(&'txn [u8], &'txn [u8])>, lmdb::Error> {
+    match lower {
+        Bound::Unbounded => match cursor.get(None, None, lmdb_sys::MDB_FIRST) {
+            Ok((key, value)) => Ok(Some((key.unwrap_or_default(), value))),
+            Err(lmdb::Error::NotFound) => Ok(None),
+            Err(err) => Err(err),
+        },
         Bound::Included(min) => {
             match cursor.get(Some(min.as_slice()), None, lmdb_sys::MDB_SET_RANGE) {
-                Ok((key, value)) => Ok((
-                    Some((key.unwrap_or_default().to_vec(), value.to_vec())),
-                    false,
-                )),
-                Err(lmdb::Error::NotFound) => Ok((None, true)),
+                Ok((key, value)) => Ok(Some((key.unwrap_or_default(), value))),
+                Err(lmdb::Error::NotFound) => Ok(None),
                 Err(err) => Err(err),
             }
         }
         Bound::Excluded(min) => {
-            match cursor.get(Some(min.as_slice()), None, lmdb_sys::MDB_SET_RANGE) {
-                Ok((key, value)) => {
-                    let key = key.unwrap_or_default();
-                    if key == min.as_slice() {
-                        Ok((None, false))
-                    } else {
-                        Ok((Some((key.to_vec(), value.to_vec())), false))
-                    }
-                }
-                Err(lmdb::Error::NotFound) => Ok((None, true)),
+            seek_key.clear();
+            seek_key.extend_from_slice(min.as_slice());
+            seek_key.push(0);
+            match cursor.get(Some(seek_key.as_slice()), None, lmdb_sys::MDB_SET_RANGE) {
+                Ok((key, value)) => Ok(Some((key.unwrap_or_default(), value))),
+                Err(lmdb::Error::NotFound) => Ok(None),
                 Err(err) => Err(err),
             }
         }
     }
 }
 
-fn owned_bound(bound: Bound<BumpBytes<'_>>) -> Bound<Bytes> {
+fn owned_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
     match bound {
-        Bound::Included(bytes) => Bound::Included(bytes.as_slice().to_vec()),
-        Bound::Excluded(bytes) => Bound::Excluded(bytes.as_slice().to_vec()),
+        Bound::Included(bytes) => Bound::Included(bytes.to_vec()),
+        Bound::Excluded(bytes) => Bound::Excluded(bytes.to_vec()),
         Bound::Unbounded => Bound::Unbounded,
     }
 }

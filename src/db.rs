@@ -1657,5 +1657,4 @@ pub(crate) mod test {
             Err(DatabaseError::InvalidValue(message)) if message == "histogram buckets must be >= 1"
         ));
     }
-
 }

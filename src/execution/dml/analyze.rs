@@ -263,10 +263,13 @@ mod test {
 
         let mut transaction = kite_sql.storage.transaction()?;
         let (min, max) = unsafe { &*transaction.table_codec() }.statistics_index_bound("t1", 1);
-        let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+        let mut iter = transaction.range(
+            Bound::Included(min.as_slice()),
+            Bound::Included(max.as_slice()),
+        )?;
         let mut keys: Vec<Vec<u8>> = Vec::new();
         while let Some((key, _)) = iter.try_next()? {
-            keys.push(key);
+            keys.push(key.to_vec());
         }
         drop(iter);
         for key in keys {
@@ -327,7 +330,10 @@ mod test {
 
         let transaction = kite_sql.storage.transaction()?;
         let (min, max) = unsafe { &*transaction.table_codec() }.statistics_bound("t1");
-        let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+        let mut iter = transaction.range(
+            Bound::Included(min.as_slice()),
+            Bound::Included(max.as_slice()),
+        )?;
         let mut count = 0;
         while iter.try_next()?.is_some() {
             count += 1;
@@ -340,7 +346,10 @@ mod test {
 
         let transaction = kite_sql.storage.transaction()?;
         let (min, max) = unsafe { &*transaction.table_codec() }.statistics_bound("t1");
-        let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+        let mut iter = transaction.range(
+            Bound::Included(min.as_slice()),
+            Bound::Included(max.as_slice()),
+        )?;
         let mut keys = 0;
         while iter.try_next()?.is_some() {
             keys += 1;

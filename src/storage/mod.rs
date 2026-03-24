@@ -102,6 +102,10 @@ pub trait Storage: Clone {
 pub(crate) type Bounds = (Option<usize>, Option<usize>);
 
 pub trait Transaction: Sized {
+    type BorrowedBytes<'a>: AsRef<[u8]>
+    where
+        Self: 'a;
+
     type IterType<'a>: InnerIter
     where
         Self: 'a;
@@ -133,7 +137,10 @@ pub trait Transaction: Sized {
         let pk_ty = with_pk.then(|| table.primary_keys_type().clone());
 
         let (min, max) = unsafe { &*self.table_codec() }.tuple_bound(&table_name);
-        let iter = self.range(Bound::Included(min), Bound::Included(max))?;
+        let iter = self.range(
+            Bound::Included(min.as_slice()),
+            Bound::Included(max.as_slice()),
+        )?;
 
         Ok(TupleIter {
             offset: bounds.0.unwrap_or(0),
@@ -274,8 +281,8 @@ pub trait Transaction: Sized {
             unsafe { &*self.table_codec() }.encode_index(table_name, &index, tuple_id)?;
 
         if matches!(index.ty, IndexType::Unique) {
-            if let Some(bytes) = self.get(&key)? {
-                return if bytes != value.as_slice() {
+            if let Some(bytes) = self.get_borrowed(&key)? {
+                return if bytes.as_ref() != value.as_slice() {
                     Err(DatabaseError::DuplicateUniqueValue)
                 } else {
                     Ok(())
@@ -315,7 +322,7 @@ pub trait Transaction: Sized {
         let (key, value) =
             unsafe { &*self.table_codec() }.encode_tuple(table_name, &mut tuple, serializers)?;
 
-        if !is_overwrite && self.get(&key)?.is_some() {
+        if !is_overwrite && self.exists(&key)? {
             return Err(DatabaseError::DuplicatePrimaryKey);
         }
         self.set(key, value)?;
@@ -535,7 +542,7 @@ pub trait Transaction: Sized {
     ) -> Result<(), DatabaseError> {
         let (view_key, value) = unsafe { &*self.table_codec() }.encode_view(&view)?;
 
-        let already_exists = self.get(&view_key)?.is_some();
+        let already_exists = self.exists(&view_key)?;
         if !or_replace && already_exists {
             return Err(DatabaseError::ViewExists);
         }
@@ -563,7 +570,7 @@ pub trait Transaction: Sized {
 
         let (table_key, value) = unsafe { &*self.table_codec() }
             .encode_root_table(&TableMeta::empty(table_name.clone()))?;
-        if self.get(&table_key)?.is_some() {
+        if self.exists(&table_key)? {
             if if_not_exists {
                 return Ok(table_name);
             }
@@ -587,7 +594,7 @@ pub trait Transaction: Sized {
 
     fn check_name_hash(&mut self, table_name: &TableName) -> Result<(), DatabaseError> {
         let (hash_key, value) = unsafe { &*self.table_codec() }.encode_table_hash(table_name);
-        if self.get(&hash_key)?.is_some() {
+        if self.exists(&hash_key)? {
             return Err(DatabaseError::DuplicateSourceHash(table_name.to_string()));
         }
         self.set(hash_key, value)
@@ -714,19 +721,23 @@ pub trait Transaction: Sized {
         if let Some(view) = view_cache.get(&view_name) {
             return Ok(Some(view));
         }
-        let Some(bytes) = self.get(&unsafe { &*self.table_codec() }.encode_view_key(&view_name))?
+        let Some(bytes) =
+            self.get_borrowed(&unsafe { &*self.table_codec() }.encode_view_key(&view_name))?
         else {
             return Ok(None);
         };
         Ok(Some(view_cache.get_or_insert(view_name.clone(), |_| {
-            TableCodec::decode_view(&bytes, (self, table_cache))
+            TableCodec::decode_view(bytes.as_ref(), (self, table_cache))
         })?))
     }
 
     fn views(&self, table_cache: &TableCache) -> Result<Vec<View>, DatabaseError> {
         let mut metas = vec![];
         let (min, max) = unsafe { &*self.table_codec() }.view_bound();
-        let mut iter = self.range(Bound::Included(min), Bound::Included(max))?;
+        let mut iter = self.range(
+            Bound::Included(min.as_slice()),
+            Bound::Included(max.as_slice()),
+        )?;
 
         while let Some((_, value)) = iter.try_next().ok().flatten() {
             let meta = TableCodec::decode_view(&value, (self, table_cache))?;
@@ -759,7 +770,10 @@ pub trait Transaction: Sized {
     fn table_metas(&self) -> Result<Vec<TableMeta>, DatabaseError> {
         let mut metas = vec![];
         let (min, max) = unsafe { &*self.table_codec() }.root_table_bound();
-        let mut iter = self.range(Bound::Included(min), Bound::Included(max))?;
+        let mut iter = self.range(
+            Bound::Included(min.as_slice()),
+            Bound::Included(max.as_slice()),
+        )?;
 
         while let Some((_, value)) = iter.try_next().ok().flatten() {
             let meta = TableCodec::decode_root_table::<Self>(&value)?;
@@ -825,7 +839,10 @@ pub trait Transaction: Sized {
     ) -> Result<Option<StatisticsMeta>, DatabaseError> {
         let (min, max) =
             unsafe { &*self.table_codec() }.statistics_index_bound(table_name, index_id);
-        let mut iter = self.range(Bound::Included(min), Bound::Included(max))?;
+        let mut iter = self.range(
+            Bound::Included(min.as_slice()),
+            Bound::Included(max.as_slice()),
+        )?;
         let mut root = None;
         let mut buckets = Vec::new();
         let mut has_extra = false;
@@ -862,7 +879,10 @@ pub trait Transaction: Sized {
     ) -> Result<Option<CountMinSketch<DataValue>>, DatabaseError> {
         let (min, max) =
             unsafe { &*self.table_codec() }.statistics_index_bound(table_name, index_id);
-        let mut iter = self.range(Bound::Included(min), Bound::Included(max))?;
+        let mut iter = self.range(
+            Bound::Included(min.as_slice()),
+            Bound::Included(max.as_slice()),
+        )?;
         let mut sketch_meta = None;
         let mut sketch_pages = Vec::<CountMinSketchPage>::new();
         let mut has_root_or_bucket = false;
@@ -926,8 +946,8 @@ pub trait Transaction: Sized {
     ) -> Result<Option<(Vec<ColumnRef>, Vec<IndexMetaRef>)>, DatabaseError> {
         let (table_min, table_max) = unsafe { &*self.table_codec() }.table_bound(table_name);
         let mut column_iter = self.range(
-            Bound::Included(table_min.clone()),
-            Bound::Included(table_max),
+            Bound::Included(table_min.as_slice()),
+            Bound::Included(table_max.as_slice()),
         )?;
 
         let mut columns = Vec::new();
@@ -952,19 +972,10 @@ pub trait Transaction: Sized {
     }
 
     fn _drop_data(&mut self, min: BumpBytes, max: BumpBytes) -> Result<(), DatabaseError> {
-        let mut iter = self.range(Bound::Included(min), Bound::Included(max))?;
-        let mut data_keys = vec![];
-
-        while let Some((key, _)) = iter.try_next()? {
-            data_keys.push(key);
-        }
-        drop(iter);
-
-        for key in data_keys {
-            self.remove(&key)?
-        }
-
-        Ok(())
+        self.remove_range(
+            Bound::Included(min.as_slice()),
+            Bound::Included(max.as_slice()),
+        )
     }
 
     fn create_index_meta_from_column(
@@ -1007,26 +1018,108 @@ pub trait Transaction: Sized {
         Ok(())
     }
 
-    fn get(&self, key: &[u8]) -> Result<Option<Bytes>, DatabaseError>;
+    fn get_borrowed<'a>(
+        &'a self,
+        key: &[u8],
+    ) -> Result<Option<Self::BorrowedBytes<'a>>, DatabaseError>;
+
+    fn get(&self, key: &[u8]) -> Result<Option<Bytes>, DatabaseError> {
+        Ok(self.get_borrowed(key)?.map(|bytes| bytes.as_ref().to_vec()))
+    }
+
+    fn exists(&self, key: &[u8]) -> Result<bool, DatabaseError> {
+        Ok(self.get_borrowed(key)?.is_some())
+    }
 
     fn set(&mut self, key: BumpBytes, value: BumpBytes) -> Result<(), DatabaseError>;
 
     fn remove(&mut self, key: &[u8]) -> Result<(), DatabaseError>;
 
-    fn range<'a>(
-        &'a self,
-        min: Bound<BumpBytes<'a>>,
-        max: Bound<BumpBytes<'a>>,
-    ) -> Result<Self::IterType<'a>, DatabaseError>;
+    fn range<'txn, 'key>(
+        &'txn self,
+        min: Bound<&'key [u8]>,
+        max: Bound<&'key [u8]>,
+    ) -> Result<Self::IterType<'txn>, DatabaseError>;
+
+    fn remove_range(&mut self, min: Bound<&[u8]>, max: Bound<&[u8]>) -> Result<(), DatabaseError> {
+        const DELETE_BATCH_SIZE: usize = 1024;
+
+        let mut lower = owned_bound(min);
+        let upper = owned_bound(max);
+        let mut data_keys = Vec::with_capacity(DELETE_BATCH_SIZE);
+
+        loop {
+            data_keys.clear();
+            let mut iter =
+                self.range(bytes_bound_as_slice(&lower), bytes_bound_as_slice(&upper))?;
+
+            while data_keys.len() < DELETE_BATCH_SIZE {
+                let Some((key, _)) = iter.try_next()? else {
+                    break;
+                };
+                data_keys.push(key.to_vec());
+            }
+            drop(iter);
+
+            let Some(last_key) = data_keys.pop() else {
+                return Ok(());
+            };
+            let batch_full = data_keys.len() + 1 == DELETE_BATCH_SIZE;
+
+            for key in data_keys.drain(..) {
+                self.remove(&key)?;
+            }
+            self.remove(&last_key)?;
+
+            if !batch_full {
+                return Ok(());
+            }
+            reuse_bound_as_excluded(&mut lower, &last_key);
+        }
+    }
 
     fn commit(self) -> Result<(), DatabaseError>;
+}
+
+fn owned_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
+    match bound {
+        Bound::Included(bytes) => Bound::Included(bytes.to_vec()),
+        Bound::Excluded(bytes) => Bound::Excluded(bytes.to_vec()),
+        Bound::Unbounded => Bound::Unbounded,
+    }
+}
+
+pub(crate) fn reuse_bound_as_excluded(bound: &mut Bound<Bytes>, key: &[u8]) {
+    let mut bytes = match mem::replace(bound, Bound::Unbounded) {
+        Bound::Included(bytes) | Bound::Excluded(bytes) => bytes,
+        Bound::Unbounded => Vec::new(),
+    };
+    bytes.clear();
+    bytes.extend_from_slice(key);
+    *bound = Bound::Excluded(bytes);
+}
+
+fn bytes_bound_as_slice(bound: &Bound<Bytes>) -> Bound<&[u8]> {
+    match bound {
+        Bound::Included(bytes) => Bound::Included(bytes.as_slice()),
+        Bound::Excluded(bytes) => Bound::Excluded(bytes.as_slice()),
+        Bound::Unbounded => Bound::Unbounded,
+    }
+}
+
+fn bump_bound_as_slice<'a>(bound: &'a Bound<BumpBytes<'a>>) -> Bound<&'a [u8]> {
+    match bound {
+        Bound::Included(bytes) => Bound::Included(bytes.as_slice()),
+        Bound::Excluded(bytes) => Bound::Excluded(bytes.as_slice()),
+        Bound::Unbounded => Bound::Unbounded,
+    }
 }
 
 trait IndexImpl<'bytes, T: Transaction + 'bytes> {
     fn index_lookup(
         &self,
-        key: &Bytes,
-        value: &Bytes,
+        key: &[u8],
+        value: &[u8],
         params: &IndexImplParams<T>,
     ) -> Result<Tuple, DatabaseError>;
 
@@ -1127,12 +1220,12 @@ impl<T: Transaction> IndexImplParams<'_, T> {
         let key = unsafe { &*self.table_codec() }.encode_tuple_key(self.table_name, tuple_id)?;
 
         self.tx
-            .get(&key)?
+            .get_borrowed(&key)?
             .map(|bytes| {
                 TableCodec::decode_tuple(
                     &self.deserializers,
                     Some(tuple_id.clone()),
-                    &bytes,
+                    bytes.as_ref(),
                     self.values_len,
                     self.total_len,
                 )
@@ -1149,8 +1242,8 @@ enum IndexResult<'a, T: Transaction + 'a> {
 impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for IndexImplEnum {
     fn index_lookup(
         &self,
-        key: &Bytes,
-        value: &Bytes,
+        key: &[u8],
+        value: &[u8],
         params: &IndexImplParams<T>,
     ) -> Result<Tuple, DatabaseError> {
         match self {
@@ -1195,8 +1288,8 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for IndexImplEnum {
 impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for PrimaryKeyIndexImpl {
     fn index_lookup(
         &self,
-        key: &Bytes,
-        value: &Bytes,
+        key: &[u8],
+        value: &[u8],
         params: &IndexImplParams<T>,
     ) -> Result<Tuple, DatabaseError> {
         let tuple_id = TableCodec::decode_tuple_key(key, &params.index_meta.pk_ty)?;
@@ -1217,12 +1310,14 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for PrimaryKeyIndexIm
         let tuple_id = value.clone();
         let tuple = params
             .tx
-            .get(&unsafe { &*params.table_codec() }.encode_tuple_key(params.table_name, value)?)?
+            .get_borrowed(
+                &unsafe { &*params.table_codec() }.encode_tuple_key(params.table_name, value)?,
+            )?
             .map(|bytes| {
                 TableCodec::decode_tuple(
                     &params.deserializers,
                     Some(tuple_id.clone()),
-                    &bytes,
+                    bytes.as_ref(),
                     params.values_len,
                     params.total_len,
                 )
@@ -1243,7 +1338,7 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for PrimaryKeyIndexIm
 
 #[inline(always)]
 fn secondary_index_lookup<T: Transaction>(
-    bytes: &Bytes,
+    bytes: &[u8],
     params: &IndexImplParams<T>,
 ) -> Result<Tuple, DatabaseError> {
     let tuple_id = TableCodec::decode_index(bytes)?;
@@ -1255,8 +1350,8 @@ fn secondary_index_lookup<T: Transaction>(
 impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for UniqueIndexImpl {
     fn index_lookup(
         &self,
-        _: &Bytes,
-        value: &Bytes,
+        _: &[u8],
+        value: &[u8],
         params: &IndexImplParams<T>,
     ) -> Result<Tuple, DatabaseError> {
         secondary_index_lookup(value, params)
@@ -1267,10 +1362,13 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for UniqueIndexImpl {
         value: &DataValue,
         params: &IndexImplParams<'a, T>,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
-        let Some(bytes) = params.tx.get(&self.bound_key(params, value, false)?)? else {
+        let Some(bytes) = params
+            .tx
+            .get_borrowed(&self.bound_key(params, value, false)?)?
+        else {
             return Ok(IndexResult::Tuple(None));
         };
-        let tuple_id = TableCodec::decode_index(&bytes)?;
+        let tuple_id = TableCodec::decode_index(bytes.as_ref())?;
         let tuple = params
             .get_tuple_by_id(&tuple_id)?
             .ok_or(DatabaseError::TupleIdNotFound(tuple_id))?;
@@ -1292,8 +1390,8 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for UniqueIndexImpl {
 impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for NormalIndexImpl {
     fn index_lookup(
         &self,
-        _: &Bytes,
-        value: &Bytes,
+        _: &[u8],
+        value: &[u8],
         params: &IndexImplParams<T>,
     ) -> Result<Tuple, DatabaseError> {
         secondary_index_lookup(value, params)
@@ -1326,8 +1424,8 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for NormalIndexImpl {
 impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for CompositeIndexImpl {
     fn index_lookup(
         &self,
-        _: &Bytes,
-        value: &Bytes,
+        _: &[u8],
+        value: &[u8],
         params: &IndexImplParams<T>,
     ) -> Result<Tuple, DatabaseError> {
         secondary_index_lookup(value, params)
@@ -1360,8 +1458,8 @@ impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for CompositeIndexImp
 impl<'bytes, T: Transaction + 'bytes> IndexImpl<'bytes, T> for CoveredIndexImpl {
     fn index_lookup(
         &self,
-        key: &Bytes,
-        value: &Bytes,
+        key: &[u8],
+        value: &[u8],
         params: &IndexImplParams<T>,
     ) -> Result<Tuple, DatabaseError> {
         let mapping = params
@@ -1417,9 +1515,10 @@ fn eq_to_res_scope<'a, T: Transaction + 'a>(
     let min = index_impl.bound_key(params, value, false)?;
     let max = index_impl.bound_key(params, value, true)?;
 
-    let iter = params
-        .tx
-        .range(Bound::Included(min), Bound::Included(max))?;
+    let iter = params.tx.range(
+        Bound::Included(min.as_slice()),
+        Bound::Included(max.as_slice()),
+    )?;
     Ok(IndexResult::Scope(iter))
 }
 
@@ -1567,7 +1666,10 @@ impl<T: Transaction> Iter for IndexIter<'_, T> {
 
                             let mut encode_max = bound_encode(max, true)?;
                             check_bound(&mut encode_max, bound_max);
-                            let iter = self.params.tx.range(encode_min, encode_max)?;
+                            let iter = self.params.tx.range(
+                                bump_bound_as_slice(&encode_min),
+                                bump_bound_as_slice(&encode_max),
+                            )?;
                             self.state = IndexIterState::Range(iter);
                         }
                         Range::Eq(mut val) => {
@@ -1608,7 +1710,7 @@ impl<T: Transaction> Iter for IndexIter<'_, T> {
 }
 
 pub trait InnerIter {
-    fn try_next(&mut self) -> Result<Option<(Bytes, Bytes)>, DatabaseError>;
+    fn try_next(&mut self) -> Result<Option<(&[u8], &[u8])>, DatabaseError>;
 }
 
 pub trait Iter {
@@ -1834,7 +1936,10 @@ mod test {
             assert_eq!(tuple_iter.next_tuple()?.unwrap(), tuples[2]);
 
             let (min, max) = table_codec.tuple_bound("t1");
-            let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+            let mut iter = transaction.range(
+                Bound::Included(min.as_slice()),
+                Bound::Included(max.as_slice()),
+            )?;
 
             let (_, value) = iter.try_next()?.unwrap();
             dbg!(value);
@@ -1859,7 +1964,10 @@ mod test {
             assert_eq!(tuple_iter.next_tuple()?.unwrap(), tuples[2]);
 
             let (min, max) = table_codec.tuple_bound("t1");
-            let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+            let mut iter = transaction.range(
+                Bound::Included(min.as_slice()),
+                Bound::Included(max.as_slice()),
+            )?;
 
             let (_, value) = iter.try_next()?.unwrap();
             dbg!(value);
@@ -1938,7 +2046,10 @@ mod test {
         )?;
         {
             let (min, max) = table_codec.index_meta_bound("t1");
-            let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+            let mut iter = transaction.range(
+                Bound::Included(min.as_slice()),
+                Bound::Included(max.as_slice()),
+            )?;
 
             let (_, value) = iter.try_next()?.unwrap();
             dbg!(value);
@@ -1979,7 +2090,10 @@ mod test {
             assert_eq!(i2_meta.ty, IndexType::Composite);
 
             let (min, max) = table_codec.index_meta_bound("t1");
-            let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+            let mut iter = transaction.range(
+                Bound::Included(min.as_slice()),
+                Bound::Included(max.as_slice()),
+            )?;
 
             let (_, value) = iter.try_next()?.unwrap();
             dbg!(value);
@@ -2080,7 +2194,10 @@ mod test {
             assert_eq!(index_iter.next_tuple()?.unwrap(), tuples[1]);
 
             let (min, max) = table_codec.index_bound("t1", 1)?;
-            let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+            let mut iter = transaction.range(
+                Bound::Included(min.as_slice()),
+                Bound::Included(max.as_slice()),
+            )?;
 
             let (_, value) = iter.try_next()?.unwrap();
             dbg!(value);
@@ -2098,7 +2215,10 @@ mod test {
         assert_eq!(index_iter.next_tuple()?.unwrap(), tuples[1]);
 
         let (min, max) = table_codec.index_bound("t1", 1)?;
-        let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+        let mut iter = transaction.range(
+            Bound::Included(min.as_slice()),
+            Bound::Included(max.as_slice()),
+        )?;
 
         let (_, value) = iter.try_next()?.unwrap();
         dbg!(value);

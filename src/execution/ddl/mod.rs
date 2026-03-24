@@ -53,7 +53,14 @@ fn read_tuple_batch<T: Transaction>(
         Bound::Included(min)
     };
     let (_, max) = table_codec.tuple_bound(table_name.as_ref());
-    let mut iter = transaction.range(lower, Bound::Included(max))?;
+    let mut iter = transaction.range(
+        match &lower {
+            Bound::Included(bytes) => Bound::Included(bytes.as_slice()),
+            Bound::Excluded(bytes) => Bound::Excluded(bytes.as_slice()),
+            Bound::Unbounded => Bound::Unbounded,
+        },
+        Bound::Included(max.as_slice()),
+    )?;
     batch.clear();
 
     while batch.len() < batch_size {

@@ -17,7 +17,7 @@ use crate::storage::table_codec::{BumpBytes, Bytes, TableCodec};
 use crate::storage::{InnerIter, Storage, Transaction};
 use rocksdb::{
     statistics::{StatsLevel, Ticker},
-    DBIteratorWithThreadMode, Direction, IteratorMode, OptimisticTransactionDB, Options,
+    DBPinnableSlice, DBRawIteratorWithThreadMode, OptimisticTransactionDB, Options, ReadOptions,
     SliceTransform, TransactionDB,
 };
 use std::collections::Bound;
@@ -374,9 +374,14 @@ pub struct RocksTransaction<'db> {
 #[macro_export]
 macro_rules! impl_transaction {
     ($tx:ident, $iter:ident) => {
-        impl<'txn> Transaction for $tx<'txn> {
+        impl<'storage> Transaction for $tx<'storage> {
+            type BorrowedBytes<'a>
+                = DBPinnableSlice<'a>
+            where
+                Self: 'a;
+
             type IterType<'iter>
-                = $iter<'txn, 'iter>
+                = $iter<'storage, 'iter>
             where
                 Self: 'iter;
 
@@ -386,8 +391,11 @@ macro_rules! impl_transaction {
             }
 
             #[inline]
-            fn get(&self, key: &[u8]) -> Result<Option<Bytes>, DatabaseError> {
-                Ok(self.tx.get(key)?)
+            fn get_borrowed<'a>(
+                &'a self,
+                key: &[u8],
+            ) -> Result<Option<Self::BorrowedBytes<'a>>, DatabaseError> {
+                Ok(self.tx.get_pinned(key)?)
             }
 
             #[inline]
@@ -406,44 +414,45 @@ macro_rules! impl_transaction {
 
             // Tips: rocksdb has weak support for `Include` and `Exclude`, so precision will be lost
             #[inline]
-            fn range<'a>(
+            fn range<'a, 'key>(
                 &'a self,
-                min: Bound<BumpBytes<'a>>,
-                max: Bound<BumpBytes<'a>>,
+                min: Bound<&'key [u8]>,
+                max: Bound<&'key [u8]>,
             ) -> Result<Self::IterType<'a>, DatabaseError> {
-                let min = match min {
-                    Bound::Included(bytes) => Some(bytes),
-                    Bound::Excluded(mut bytes) => {
-                        // the prefix is the same, but the length is larger
-                        bytes.push(0u8);
-                        Some(bytes)
-                    }
-                    Bound::Unbounded => None,
-                };
-                let lower = min
-                    .as_ref()
-                    .map(|bytes| IteratorMode::From(bytes, Direction::Forward))
-                    .unwrap_or(IteratorMode::Start);
-
-                if let (Some(min_bytes), Bound::Included(max_bytes) | Bound::Excluded(max_bytes)) =
-                    (&min, &max)
+                let mut read_opts = ReadOptions::default();
+                if let (
+                    Bound::Included(min_bytes) | Bound::Excluded(min_bytes),
+                    Bound::Included(max_bytes) | Bound::Excluded(max_bytes),
+                ) = (&min, &max)
                 {
                     let len = min_bytes
                         .iter()
                         .zip(max_bytes.iter())
                         .take_while(|(x, y)| x == y)
                         .count();
-
                     if len >= ROCKSDB_FIXED_PREFIX_LEN {
-                        let mut iter = self.tx.prefix_iterator(&min_bytes[..len]);
-                        iter.set_mode(lower);
-
-                        return Ok($iter { upper: max, iter });
+                        read_opts.set_prefix_same_as_start(true);
                     }
                 }
-                let iter = self.tx.iterator(lower);
 
-                Ok($iter { upper: max, iter })
+                let mut iter = self.tx.raw_iterator_opt(read_opts);
+                match &min {
+                    Bound::Included(bytes) => iter.seek(*bytes),
+                    Bound::Excluded(bytes) => {
+                        iter.seek(*bytes);
+                        if iter.key() == Some(*bytes) {
+                            iter.next();
+                        }
+                    }
+                    Bound::Unbounded => iter.seek_to_first(),
+                }
+
+                Ok($iter {
+                    upper: owned_bound(max),
+                    iter,
+                    advanced: false,
+                    done: false,
+                })
             }
 
             fn commit(self) -> Result<(), DatabaseError> {
@@ -458,52 +467,90 @@ impl_transaction!(RocksTransaction, RocksIter);
 impl_transaction!(OptimisticRocksTransaction, OptimisticRocksIter);
 
 pub struct OptimisticRocksIter<'txn, 'iter> {
-    upper: Bound<BumpBytes<'iter>>,
-    iter: DBIteratorWithThreadMode<'iter, rocksdb::Transaction<'txn, OptimisticTransactionDB>>,
+    upper: Bound<Bytes>,
+    iter: DBRawIteratorWithThreadMode<'iter, rocksdb::Transaction<'txn, OptimisticTransactionDB>>,
+    advanced: bool,
+    done: bool,
 }
 
 impl InnerIter for OptimisticRocksIter<'_, '_> {
     #[inline]
-    fn try_next(&mut self) -> Result<Option<(Bytes, Bytes)>, DatabaseError> {
-        if let Some(result) = self.iter.by_ref().next() {
-            return next(self.upper.as_ref(), result?);
-        }
-        Ok(None)
+    fn try_next(&mut self) -> Result<Option<(&[u8], &[u8])>, DatabaseError> {
+        next(
+            &mut self.iter,
+            &self.upper,
+            &mut self.advanced,
+            &mut self.done,
+        )
     }
 }
 
 pub struct RocksIter<'txn, 'iter> {
-    upper: Bound<BumpBytes<'iter>>,
-    iter: DBIteratorWithThreadMode<
+    upper: Bound<Bytes>,
+    iter: DBRawIteratorWithThreadMode<
         'iter,
         rocksdb::Transaction<'txn, TransactionDB<rocksdb::MultiThreaded>>,
     >,
+    advanced: bool,
+    done: bool,
 }
 
 impl InnerIter for RocksIter<'_, '_> {
     #[inline]
-    fn try_next(&mut self) -> Result<Option<(Bytes, Bytes)>, DatabaseError> {
-        if let Some(result) = self.iter.by_ref().next() {
-            return next(self.upper.as_ref(), result?);
-        }
-        Ok(None)
+    fn try_next(&mut self) -> Result<Option<(&[u8], &[u8])>, DatabaseError> {
+        next(
+            &mut self.iter,
+            &self.upper,
+            &mut self.advanced,
+            &mut self.done,
+        )
     }
 }
 
 #[inline]
-fn next(
-    upper: Bound<&BumpBytes<'_>>,
-    (key, value): (Box<[u8]>, Box<[u8]>),
-) -> Result<Option<(Bytes, Bytes)>, DatabaseError> {
+fn next<'a, D: rocksdb::DBAccess>(
+    iter: &'a mut DBRawIteratorWithThreadMode<'_, D>,
+    upper: &Bound<Bytes>,
+    advanced: &mut bool,
+    done: &mut bool,
+) -> Result<Option<(&'a [u8], &'a [u8])>, DatabaseError> {
+    if *done {
+        return Ok(None);
+    }
+    if *advanced {
+        iter.next();
+    }
+    if !iter.valid() {
+        *done = true;
+        iter.status()?;
+        return Ok(None);
+    }
+
+    let Some((key, value)) = iter.item() else {
+        *done = true;
+        iter.status()?;
+        return Ok(None);
+    };
     let upper_bound_check = match upper {
-        Bound::Included(upper) => key.as_ref() <= upper.as_slice(),
-        Bound::Excluded(upper) => key.as_ref() < upper.as_slice(),
+        Bound::Included(upper) => key <= upper.as_slice(),
+        Bound::Excluded(upper) => key < upper.as_slice(),
         Bound::Unbounded => true,
     };
     if !upper_bound_check {
+        *done = true;
         return Ok(None);
     }
-    Ok(Some((Vec::from(key), Vec::from(value))))
+
+    *advanced = true;
+    Ok(Some((key, value)))
+}
+
+fn owned_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
+    match bound {
+        Bound::Included(bytes) => Bound::Included(bytes.to_vec()),
+        Bound::Excluded(bytes) => Bound::Excluded(bytes.to_vec()),
+        Bound::Unbounded => Bound::Unbounded,
+    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
