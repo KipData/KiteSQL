@@ -19,12 +19,12 @@ use crate::expression::visitor_mut::{PositionShift, VisitorMut};
 use crate::expression::{BinaryOperator, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{
-    left_child, only_child_mut, replace_with_only_child, right_child, wrap_child_with,
+    left_child, replace_with_only_child, right_child, wrap_child_with,
 };
 use crate::planner::operator::filter::FilterOperator;
 use crate::planner::operator::join::{JoinCondition, JoinType};
 use crate::planner::operator::{Operator, SortOption};
-use crate::planner::{LogicalPlan, SchemaOutput};
+use crate::planner::{Childrens, LogicalPlan, SchemaOutput};
 use crate::types::index::{IndexInfo, IndexMetaRef, IndexType};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
@@ -92,18 +92,23 @@ pub struct PushPredicateThroughJoin;
 
 impl NormalizationRule for PushPredicateThroughJoin {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
-        let filter_op = match &plan.operator {
-            Operator::Filter(op) => op.clone(),
-            _ => return Ok(false),
-        };
-
         let mut applied = false;
 
         let parent_replacement = {
-            let join_plan = match only_child_mut(plan) {
-                Some(child) => child,
-                None => return Ok(false),
+            let LogicalPlan {
+                operator,
+                childrens,
+                ..
+            } = plan;
+            let filter_op = match operator {
+                Operator::Filter(op) => op,
+                _ => return Ok(false),
             };
+
+            let Childrens::Only(join_plan) = childrens.as_mut() else {
+                return Ok(false);
+            };
+            let join_plan = join_plan.as_mut();
 
             let join_op = match &join_plan.operator {
                 Operator::Join(op) => op,
@@ -203,84 +208,94 @@ pub struct PushPredicateIntoScan;
 
 impl NormalizationRule for PushPredicateIntoScan {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
-        if let Operator::Filter(op) = plan.operator.clone() {
-            if let Some(child) = only_child_mut(plan) {
-                if let Operator::TableScan(scan_op) = &mut child.operator {
-                    let mut changed = false;
-                    for IndexInfo {
-                        meta,
-                        range,
-                        covered_deserializers,
-                        cover_mapping,
-                        sort_option,
-                        sort_elimination_hint: _,
-                        stream_distinct_hint: _,
-                    } in &mut scan_op.index_infos
-                    {
-                        if range.is_some() {
-                            continue;
-                        }
-                        let SortOption::OrderBy {
-                            ignore_prefix_len, ..
-                        } = sort_option
-                        else {
-                            return Err(DatabaseError::InvalidIndex);
-                        };
-                        *range = match meta.ty {
-                            IndexType::PrimaryKey { is_multiple: false }
-                            | IndexType::Unique
-                            | IndexType::Normal => {
-                                RangeDetacher::new(meta.table_name.as_ref(), &meta.column_ids[0])
-                                    .detach(&op.predicate)?
-                            }
-                            IndexType::PrimaryKey { is_multiple: true } | IndexType::Composite => {
-                                Self::composite_range(&op, meta, ignore_prefix_len)?
-                            }
-                        };
-                        if range.is_none() {
-                            continue;
-                        }
-                        changed = true;
+        let LogicalPlan {
+            operator,
+            childrens,
+            ..
+        } = plan;
+        let filter_op = match operator {
+            Operator::Filter(op) => op,
+            _ => return Ok(false),
+        };
+        let Childrens::Only(child) = childrens.as_mut() else {
+            return Ok(false);
+        };
+        let child = child.as_mut();
+        let Operator::TableScan(scan_op) = &mut child.operator else {
+            return Ok(false);
+        };
 
-                        *covered_deserializers = None;
-                        *cover_mapping = None;
+        let mut changed = false;
+        for IndexInfo {
+            meta,
+            range,
+            covered_deserializers,
+            cover_mapping,
+            sort_option,
+            sort_elimination_hint: _,
+            stream_distinct_hint: _,
+        } in &mut scan_op.index_infos
+        {
+            if range.is_some() {
+                continue;
+            }
+            let SortOption::OrderBy {
+                ignore_prefix_len, ..
+            } = sort_option
+            else {
+                return Err(DatabaseError::InvalidIndex);
+            };
+            *range = match meta.ty {
+                IndexType::PrimaryKey { is_multiple: false }
+                | IndexType::Unique
+                | IndexType::Normal => {
+                    RangeDetacher::new(meta.table_name.as_ref(), &meta.column_ids[0])
+                        .detach(&filter_op.predicate)?
+                }
+                IndexType::PrimaryKey { is_multiple: true } | IndexType::Composite => {
+                    Self::composite_range(filter_op, meta, ignore_prefix_len)?
+                }
+            };
+            if range.is_none() {
+                continue;
+            }
+            changed = true;
 
-                        // try index covered
-                        let mut mapping_slots = vec![usize::MAX; scan_op.columns.len()];
-                        let mut needs_mapping = false;
-                        let index_column_types = match &meta.value_ty {
-                            LogicalType::Tuple(tys) => tys,
-                            ty => slice::from_ref(ty),
-                        };
-                        let mut deserializers = Vec::with_capacity(meta.column_ids.len());
+            *covered_deserializers = None;
+            *cover_mapping = None;
 
-                        for (idx, column_id) in meta.column_ids.iter().enumerate() {
-                            if let Some((scan_idx, column)) =
-                                scan_op.columns.values().enumerate().find(|(_, column)| {
-                                    column.id().map(|id| id == *column_id).unwrap_or(false)
-                                })
-                            {
-                                mapping_slots[scan_idx] = idx;
-                                needs_mapping |= scan_idx != idx;
-                                deserializers.push(column.datatype().serializable());
-                            } else {
-                                deserializers.push(index_column_types[idx].skip_serializable());
-                            }
-                        }
+            // try index covered
+            let mut mapping_slots = vec![usize::MAX; scan_op.columns.len()];
+            let mut needs_mapping = false;
+            let index_column_types = match &meta.value_ty {
+                LogicalType::Tuple(tys) => tys,
+                ty => slice::from_ref(ty),
+            };
+            let mut deserializers = Vec::with_capacity(meta.column_ids.len());
 
-                        if mapping_slots.iter().all(|slot| *slot != usize::MAX) {
-                            *covered_deserializers = Some(deserializers);
-                            if needs_mapping {
-                                *cover_mapping = Some(mapping_slots);
-                            }
-                        }
-                    }
-                    return Ok(changed);
+            for (idx, column_id) in meta.column_ids.iter().enumerate() {
+                if let Some((scan_idx, column)) =
+                    scan_op.columns.values().enumerate().find(|(_, column)| {
+                        column.id().map(|id| id == *column_id).unwrap_or(false)
+                    })
+                {
+                    mapping_slots[scan_idx] = idx;
+                    needs_mapping |= scan_idx != idx;
+                    deserializers.push(column.datatype().serializable());
+                } else {
+                    deserializers.push(index_column_types[idx].skip_serializable());
+                }
+            }
+
+            if mapping_slots.iter().all(|slot| *slot != usize::MAX) {
+                *covered_deserializers = Some(deserializers);
+                if needs_mapping {
+                    *cover_mapping = Some(mapping_slots);
                 }
             }
         }
 
-        Ok(false)
+        Ok(changed)
     }
 }
 

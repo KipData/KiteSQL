@@ -17,11 +17,14 @@ use crate::expression::{BinaryOperator, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child};
 use crate::optimizer::rule::normalization::{is_subset_exprs, strip_alias};
+use crate::planner::operator::filter::FilterOperator;
 use crate::planner::operator::project::ProjectOperator;
 use crate::planner::operator::Operator;
-use crate::planner::LogicalPlan;
+use crate::planner::{Childrens, LogicalPlan};
+use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use std::collections::HashSet;
+use std::mem;
 
 fn is_passthrough_project(op: &ProjectOperator) -> bool {
     op.exprs
@@ -34,19 +37,27 @@ pub struct CollapseProject;
 
 impl NormalizationRule for CollapseProject {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
-        let parent_exprs = match &plan.operator {
-            Operator::Project(op) => op.exprs.clone(),
+        let LogicalPlan {
+            operator,
+            childrens,
+            ..
+        } = plan;
+        let parent_exprs = match operator {
+            Operator::Project(op) => &op.exprs,
             _ => return Ok(false),
         };
 
         let mut removed = false;
-        while let Some(child) = only_child_mut(plan) {
+        loop {
+            let Childrens::Only(child) = childrens.as_mut() else {
+                break;
+            };
             match &child.operator {
                 Operator::Project(child_op)
                     if is_passthrough_project(child_op)
-                        && is_subset_exprs(&parent_exprs, &child_op.exprs) =>
+                        && is_subset_exprs(parent_exprs, &child_op.exprs) =>
                 {
-                    removed |= replace_with_only_child(child);
+                    removed |= replace_with_only_child(child.as_mut());
                 }
                 _ => break,
             }
@@ -61,27 +72,43 @@ pub struct CombineFilter;
 
 impl NormalizationRule for CombineFilter {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
-        let (parent_predicate, parent_having) = match &plan.operator {
-            Operator::Filter(op) => (op.predicate.clone(), op.having),
-            _ => return Ok(false),
+        let parent_filter = match mem::replace(&mut plan.operator, Operator::Dummy) {
+            Operator::Filter(op) => op,
+            operator => {
+                plan.operator = operator;
+                return Ok(false);
+            }
         };
+        let mut parent_filter = Some(parent_filter);
 
         let cursor = match only_child_mut(plan) {
             Some(child) => child,
-            None => return Ok(false),
+            None => {
+                plan.operator = Operator::Filter(parent_filter.take().unwrap());
+                return Ok(false);
+            }
         };
 
         loop {
             match &mut cursor.operator {
                 Operator::Filter(child_op) => {
+                    let FilterOperator {
+                        predicate,
+                        having,
+                        is_optimized: _,
+                    } = parent_filter.take().unwrap();
+                    let child_predicate = mem::replace(
+                        &mut child_op.predicate,
+                        ScalarExpression::Constant(DataValue::Boolean(true)),
+                    );
                     child_op.predicate = ScalarExpression::Binary {
                         op: BinaryOperator::And,
-                        left_expr: Box::new(parent_predicate),
-                        right_expr: Box::new(child_op.predicate.clone()),
+                        left_expr: Box::new(predicate),
+                        right_expr: Box::new(child_predicate),
                         evaluator: None,
                         ty: LogicalType::Boolean,
                     };
-                    child_op.having = parent_having || child_op.having;
+                    child_op.having = having || child_op.having;
 
                     return Ok(replace_with_only_child(plan));
                 }
@@ -89,9 +116,13 @@ impl NormalizationRule for CombineFilter {
                     if replace_with_only_child(cursor) {
                         continue;
                     }
+                    plan.operator = Operator::Filter(parent_filter.take().unwrap());
                     return Ok(false);
                 }
-                _ => return Ok(false),
+                _ => {
+                    plan.operator = Operator::Filter(parent_filter.take().unwrap());
+                    return Ok(false);
+                }
             }
         }
     }
@@ -101,29 +132,41 @@ pub struct CollapseGroupByAgg;
 
 impl NormalizationRule for CollapseGroupByAgg {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
-        if let Operator::Aggregate(op) = plan.operator.clone() {
+        let can_collapse = {
+            let LogicalPlan {
+                operator,
+                childrens,
+                ..
+            } = plan;
+            let Operator::Aggregate(op) = operator else {
+                return Ok(false);
+            };
             if !op.agg_calls.is_empty() {
                 return Ok(false);
             }
 
-            if let Some(child) = only_child_mut(plan) {
-                if let Operator::Aggregate(child_op) = child.operator.clone() {
-                    if op.groupby_exprs.len() != child_op.groupby_exprs.len() {
-                        return Ok(false);
-                    }
-                    let mut expr_set = HashSet::new();
-
-                    for expr in op.groupby_exprs.iter() {
-                        expr_set.insert(expr);
-                    }
-                    for expr in child_op.groupby_exprs.iter() {
-                        expr_set.remove(expr);
-                    }
-                    if expr_set.is_empty() {
-                        return Ok(replace_with_only_child(plan));
-                    }
-                }
+            let Childrens::Only(child) = childrens.as_ref() else {
+                return Ok(false);
+            };
+            let Operator::Aggregate(child_op) = &child.operator else {
+                return Ok(false);
+            };
+            if op.groupby_exprs.len() != child_op.groupby_exprs.len() {
+                return Ok(false);
             }
+            let mut expr_set = HashSet::new();
+
+            for expr in &op.groupby_exprs {
+                expr_set.insert(expr);
+            }
+            for expr in &child_op.groupby_exprs {
+                expr_set.remove(expr);
+            }
+            expr_set.is_empty()
+        };
+
+        if can_collapse {
+            return Ok(replace_with_only_child(plan));
         }
 
         Ok(false)
