@@ -15,7 +15,7 @@
 use crate::catalog::ColumnSummary;
 use crate::errors::DatabaseError;
 use crate::expression::agg::AggKind;
-use crate::expression::visitor::{walk_expr, Visitor};
+use crate::expression::visitor::Visitor;
 use crate::expression::{HasCountStar, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::rule::normalization::{remap_expr_positions, remap_exprs_positions};
@@ -196,38 +196,11 @@ impl ColumnPruning {
         }
     }
 
-    fn references_any_column(
+    fn output_column_is_required(
         expr: &ScalarExpression,
         column_references: &HashSet<&ColumnSummary>,
     ) -> bool {
-        struct ReferenceChecker<'a> {
-            column_references: &'a HashSet<&'a ColumnSummary>,
-            found: bool,
-        }
-
-        impl Visitor<'_> for ReferenceChecker<'_> {
-            fn visit(&mut self, expr: &ScalarExpression) -> Result<(), DatabaseError> {
-                if self.found {
-                    return Ok(());
-                }
-                if self
-                    .column_references
-                    .contains(expr.output_column().summary())
-                {
-                    self.found = true;
-                    return Ok(());
-                }
-
-                walk_expr(self, expr)
-            }
-        }
-
-        let mut checker = ReferenceChecker {
-            column_references,
-            found: false,
-        };
-        checker.visit(expr).unwrap();
-        checker.found
+        column_references.contains(expr.output_column().summary())
     }
 
     fn clear_exprs(
@@ -238,7 +211,7 @@ impl ColumnPruning {
         removed_positions.clear();
         let mut position = 0;
         exprs.retain(|expr| {
-            let keep = Self::references_any_column(expr, column_references);
+            let keep = Self::output_column_is_required(expr, column_references);
             if !keep {
                 removed_positions.push(position);
             }
