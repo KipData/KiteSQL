@@ -152,7 +152,9 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
     }
 
     /// Fetches all rows for a model inside the current transaction.
-    pub fn fetch<M: Model>(&mut self) -> Result<OrmIter<TransactionIter<'_>, M>, DatabaseError> {
+    pub fn fetch<M: Model>(
+        &mut self,
+    ) -> Result<OrmIter<TransactionIter<'_, S::TransactionType<'a>>, M>, DatabaseError> {
         orm_list::<_, M>(self)
     }
 
@@ -164,7 +166,8 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
     /// Lists all table names inside the current transaction.
     pub fn show_tables(
         &mut self,
-    ) -> Result<ProjectValueIter<TransactionIter<'_>, String>, DatabaseError> {
+    ) -> Result<ProjectValueIter<TransactionIter<'_, S::TransactionType<'a>>, String>, DatabaseError>
+    {
         Ok(ProjectValueIter::new(
             self.execute(&orm_show_tables_statement(), &[])?,
         ))
@@ -173,7 +176,8 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
     /// Lists all view names inside the current transaction.
     pub fn show_views(
         &mut self,
-    ) -> Result<ProjectValueIter<TransactionIter<'_>, String>, DatabaseError> {
+    ) -> Result<ProjectValueIter<TransactionIter<'_, S::TransactionType<'a>>, String>, DatabaseError>
+    {
         Ok(ProjectValueIter::new(
             self.execute(&orm_show_views_statement(), &[])?,
         ))
@@ -182,7 +186,8 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
     /// Describes the schema of the model table inside the current transaction.
     pub fn describe<M: Model>(
         &mut self,
-    ) -> Result<OrmIter<TransactionIter<'_>, DescribeColumn>, DatabaseError> {
+    ) -> Result<OrmIter<TransactionIter<'_, S::TransactionType<'a>>, DescribeColumn>, DatabaseError>
+    {
         Ok(self
             .execute(&orm_describe_statement(M::table_name()), &[])?
             .orm::<DescribeColumn>())

@@ -1365,7 +1365,7 @@ impl<'a, S: Storage> StatementSource for &'a Database<S> {
 }
 
 impl<'a, 'tx, S: Storage> StatementSource for &'a mut DBTransaction<'tx, S> {
-    type Iter = TransactionIter<'a>;
+    type Iter = TransactionIter<'a, S::TransactionType<'tx>>;
 
     fn execute_statement<A: AsRef<[(&'static str, DataValue)]>>(
         self,

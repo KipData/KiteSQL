@@ -89,6 +89,7 @@ fn top_sort<'a>(
 }
 
 pub struct TopK {
+    output: Option<std::iter::Skip<BTreeSetIntoIter<CmpItem<'static>>>>,
     arena: Box<Bump>,
     sort_fields: Vec<SortField>,
     limit: usize,
@@ -96,7 +97,6 @@ pub struct TopK {
     input_schema: SchemaRef,
     input_plan: Option<LogicalPlan>,
     input: ExecId,
-    output: Option<std::iter::Skip<BTreeSetIntoIter<CmpItem<'static>>>>,
 }
 
 impl From<(TopKOperator, LogicalPlan)> for TopK {
@@ -111,6 +111,7 @@ impl From<(TopKOperator, LogicalPlan)> for TopK {
         ): (TopKOperator, LogicalPlan),
     ) -> Self {
         TopK {
+            output: None,
             arena: Box::<Bump>::default(),
             sort_fields,
             limit,
@@ -118,7 +119,6 @@ impl From<(TopKOperator, LogicalPlan)> for TopK {
             input_schema: input.output_schema().clone(),
             input_plan: Some(input),
             input: 0,
-            output: None,
         }
     }
 }

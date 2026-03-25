@@ -39,6 +39,7 @@ use std::mem::transmute;
 use std::sync::Arc;
 
 pub struct HashJoin {
+    state: HashJoinState,
     ty: JoinType,
     on_left_keys: Vec<ScalarExpression>,
     on_right_keys: Vec<ScalarExpression>,
@@ -51,7 +52,6 @@ pub struct HashJoin {
     left_input: ExecId,
     right_input: ExecId,
     bump: Box<Bump>,
-    state: HashJoinState,
     init_error: Option<DatabaseError>,
 }
 
@@ -109,6 +109,7 @@ impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for HashJoin {
         let right_schema_len = full_schema_ref.len() - left_schema_len;
 
         HashJoin {
+            state: HashJoinState::Build,
             ty: join_type,
             on_left_keys,
             on_right_keys,
@@ -124,7 +125,6 @@ impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for HashJoin {
             left_input: 0,
             right_input: 0,
             bump: Box::<Bump>::default(),
-            state: HashJoinState::Build,
             init_error,
         }
     }
