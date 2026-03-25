@@ -12,44 +12,57 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::execution::{spawn_executor, Executor, ReadExecutor};
+use crate::errors::DatabaseError;
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
 use crate::planner::operator::values::ValuesOperator;
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::throw;
+use crate::storage::Transaction;
+use crate::types::tuple::SchemaRef;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use std::mem;
 
 pub struct Values {
-    op: ValuesOperator,
+    rows: std::vec::IntoIter<Vec<DataValue>>,
+    schema_ref: SchemaRef,
 }
 
 impl From<ValuesOperator> for Values {
-    fn from(op: ValuesOperator) -> Self {
-        Values { op }
+    fn from(ValuesOperator { rows, schema_ref }: ValuesOperator) -> Self {
+        Values {
+            rows: rows.into_iter(),
+            schema_ref,
+        }
     }
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Values {
-    fn execute(
+    fn into_executor(
         self,
-        _: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
+        arena: &mut ExecArena<'a, T>,
+        _: ExecutionCaches<'a>,
         _: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let ValuesOperator { rows, schema_ref } = self.op;
+    ) -> ExecId {
+        arena.push(ExecNode::Values(self))
+    }
+}
 
-            for mut values in rows {
-                for (i, value) in values.iter_mut().enumerate() {
-                    let ty = schema_ref[i].datatype().clone();
+impl Values {
+    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+        &mut self,
+        _: &mut ExecArena<'a, T>,
+    ) -> Result<Option<Tuple>, DatabaseError> {
+        let Some(mut values) = self.rows.next() else {
+            return Ok(None);
+        };
 
-                    if value.logical_type() != ty {
-                        *value = throw!(co, mem::replace(value, DataValue::Null).cast(&ty));
-                    }
-                }
+        for (i, value) in values.iter_mut().enumerate() {
+            let ty = self.schema_ref[i].datatype().clone();
 
-                co.yield_(Ok(Tuple::new(None, values))).await;
+            if value.logical_type() != ty {
+                *value = mem::replace(value, DataValue::Null).cast(&ty)?;
             }
-        })
+        }
+
+        Ok(Some(Tuple::new(None, values)))
     }
 }

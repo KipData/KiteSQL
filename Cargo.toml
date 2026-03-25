@@ -61,7 +61,6 @@ sqlparser             = { version = "0.61", features = ["serde"] }
 thiserror             = { version = "1" }
 typetag               = { version = "0.2" }
 ulid                  = { version = "1", features = ["serde"] }
-genawaiter            = { version = "0.99" }
 
 # Feature: net
 async-trait           = { version = "0.1", optional = true }

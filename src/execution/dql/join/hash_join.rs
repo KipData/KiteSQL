@@ -21,55 +21,144 @@ use crate::execution::dql::join::hash::left_join::LeftJoinState;
 use crate::execution::dql::join::hash::left_semi_join::LeftSemiJoinState;
 use crate::execution::dql::join::hash::right_join::RightJoinState;
 use crate::execution::dql::join::hash::{
-    FilterArgs, JoinProbeState, JoinProbeStateImpl, ProbeArgs,
+    FilterArgs, JoinProbeState, JoinProbeStateImpl, LeftDropState, ProbeState,
 };
 use crate::execution::dql::join::joins_nullable;
 use crate::execution::dql::sort::BumpVec;
-use crate::execution::{build_read, spawn_executor, Executor, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::LogicalPlan;
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::throw;
-use crate::types::tuple::Tuple;
+use crate::storage::Transaction;
+use crate::types::tuple::{SchemaRef, Tuple};
 use crate::types::value::DataValue;
 use ahash::{HashMap, HashMapExt};
 use bumpalo::Bump;
 use fixedbitset::FixedBitSet;
+use std::mem::transmute;
 use std::sync::Arc;
 
 pub struct HashJoin {
-    on: JoinCondition,
     ty: JoinType,
-    left_input: LogicalPlan,
-    right_input: LogicalPlan,
-    bump: Bump,
+    on_left_keys: Vec<ScalarExpression>,
+    on_right_keys: Vec<ScalarExpression>,
+    full_schema: SchemaRef,
+    filter: Option<FilterArgs>,
+    left_schema_len: usize,
+    right_schema_len: usize,
+    left_input_plan: Option<LogicalPlan>,
+    right_input_plan: Option<LogicalPlan>,
+    left_input: ExecId,
+    right_input: ExecId,
+    bump: Box<Bump>,
+    state: HashJoinState,
+    init_error: Option<DatabaseError>,
+}
+
+enum HashJoinState {
+    Build,
+    Probe {
+        build_map: HashMap<BumpVec<'static, DataValue>, BuildState>,
+        join_impl: JoinProbeStateImpl,
+        probe_buf: BumpVec<'static, DataValue>,
+        probe_state: Option<ProbeState>,
+    },
+    LeftDrop {
+        join_impl: JoinProbeStateImpl,
+        left_drop: LeftDropState,
+    },
+    End,
 }
 
 impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for HashJoin {
     fn from(
-        (JoinOperator { on, join_type, .. }, left_input, right_input): (
+        (JoinOperator { on, join_type, .. }, mut left_input, mut right_input): (
             JoinOperator,
             LogicalPlan,
             LogicalPlan,
         ),
     ) -> Self {
+        let ((on_left_keys, on_right_keys), filter_expr) = match on {
+            JoinCondition::On { on, filter } => (on.into_iter().unzip(), filter),
+            JoinCondition::None => ((vec![], vec![]), None),
+        };
+
+        let init_error = if join_type == JoinType::Cross {
+            Some(DatabaseError::UnsupportedStmt(
+                "Cross join should not be executed by HashJoin".to_string(),
+            ))
+        } else if on_left_keys.is_empty() || on_right_keys.is_empty() {
+            Some(DatabaseError::UnsupportedStmt(
+                "`NestLoopJoin` should be used when there is no equivalent condition".to_string(),
+            ))
+        } else {
+            None
+        };
+
+        let (left_force_nullable, right_force_nullable) = joins_nullable(&join_type);
+
+        let mut full_schema_ref = Vec::clone(left_input.output_schema());
+        let left_schema_len = full_schema_ref.len();
+
+        force_nullable(&mut full_schema_ref, left_force_nullable);
+        full_schema_ref.extend_from_slice(right_input.output_schema());
+        force_nullable(
+            &mut full_schema_ref[left_schema_len..],
+            right_force_nullable,
+        );
+        let right_schema_len = full_schema_ref.len() - left_schema_len;
+
         HashJoin {
-            on,
             ty: join_type,
-            left_input,
-            right_input,
-            bump: Default::default(),
+            on_left_keys,
+            on_right_keys,
+            full_schema: Arc::new(full_schema_ref.clone()),
+            filter: filter_expr.map(|filter_expr| FilterArgs {
+                full_schema: Arc::new(full_schema_ref),
+                filter_expr,
+            }),
+            left_schema_len,
+            right_schema_len,
+            left_input_plan: Some(left_input),
+            right_input_plan: Some(right_input),
+            left_input: 0,
+            right_input: 0,
+            bump: Box::<Bump>::default(),
+            state: HashJoinState::Build,
+            init_error,
+        }
+    }
+}
+
+fn force_nullable(schema: &mut [ColumnRef], force_nullable: bool) {
+    for column in schema.iter_mut() {
+        if let Some(new_column) = column.nullable_for_join(force_nullable) {
+            *column = new_column;
         }
     }
 }
 
 impl HashJoin {
+    fn own_bump_vec(buf: BumpVec<'_, DataValue>) -> BumpVec<'static, DataValue> {
+        unsafe { transmute::<BumpVec<'_, DataValue>, BumpVec<'static, DataValue>>(buf) }
+    }
+
+    fn own_build_map(
+        build_map: HashMap<BumpVec<'_, DataValue>, BuildState>,
+    ) -> HashMap<BumpVec<'static, DataValue>, BuildState> {
+        unsafe {
+            transmute::<
+                HashMap<BumpVec<'_, DataValue>, BuildState>,
+                HashMap<BumpVec<'static, DataValue>, BuildState>,
+            >(build_map)
+        }
+    }
+
     fn eval_keys(
         on_keys: &[ScalarExpression],
         tuple: &Tuple,
         schema: &[ColumnRef],
-        build_buf: &mut BumpVec<DataValue>,
+        build_buf: &mut BumpVec<'_, DataValue>,
     ) -> Result<(), DatabaseError> {
         build_buf.clear();
         for expr in on_keys {
@@ -77,162 +166,62 @@ impl HashJoin {
         }
         Ok(())
     }
-}
 
-#[derive(Default, Debug)]
-pub(crate) struct BuildState {
-    pub(crate) tuples: Vec<(usize, Tuple)>,
-    pub(crate) is_used: bool,
-    pub(crate) has_filted: bool,
-}
+    fn initialize_build<'a, T: Transaction + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> Result<(), DatabaseError> {
+        if !matches!(self.state, HashJoinState::Build) {
+            return Ok(());
+        }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
-    #[allow(clippy::mutable_key_type)]
-    fn execute(
-        self,
-        cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
-        transaction: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let HashJoin {
-                on,
-                ty,
-                mut left_input,
-                mut right_input,
-                mut bump,
-            } = self;
+        // build phase:
+        // 1.construct hashtable, one hash key may contains multiple rows indices.
+        // 2.merged all left tuples.
+        let mut build_map = HashMap::new();
+        let mut build_buf = BumpVec::with_capacity_in(self.on_left_keys.len(), &self.bump);
+        let mut build_count = 0usize;
 
-            if ty == JoinType::Cross {
-                unreachable!("Cross join should not be in HashJoinExecutor");
-            }
-            let ((on_left_keys, on_right_keys), filter): (
-                (Vec<ScalarExpression>, Vec<ScalarExpression>),
-                _,
-            ) = match on {
-                JoinCondition::On { on, filter } => (on.into_iter().unzip(), filter),
-                JoinCondition::None => unreachable!("HashJoin must has on condition"),
-            };
-            if on_left_keys.is_empty() || on_right_keys.is_empty() {
-                throw!(
-                    co,
-                    Err(DatabaseError::UnsupportedStmt(
-                        "`NestLoopJoin` should be used when there is no equivalent condition"
-                            .to_string()
-                    ))
-                )
-            }
-            debug_assert!(!on_left_keys.is_empty());
-            debug_assert!(!on_right_keys.is_empty());
+        while let Some(tuple) = arena.next_tuple(self.left_input)? {
+            Self::eval_keys(
+                &self.on_left_keys,
+                &tuple,
+                &self.full_schema[0..self.left_schema_len],
+                &mut build_buf,
+            )?;
 
-            let fn_process = |schema: &mut [ColumnRef], force_nullable| {
-                for column in schema.iter_mut() {
-                    if let Some(new_column) = column.nullable_for_join(force_nullable) {
-                        *column = new_column;
-                    }
+            match build_map.get_mut(&build_buf) {
+                None => {
+                    build_map.insert(
+                        Self::own_bump_vec(build_buf.clone()),
+                        BuildState {
+                            tuples: vec![(build_count, tuple)],
+                            ..Default::default()
+                        },
+                    );
                 }
-            };
-
-            let (left_force_nullable, right_force_nullable) = joins_nullable(&ty);
-
-            let mut full_schema_ref = Vec::clone(left_input.output_schema());
-            let left_schema_len = full_schema_ref.len();
-
-            fn_process(&mut full_schema_ref, left_force_nullable);
-            full_schema_ref.extend_from_slice(right_input.output_schema());
-            fn_process(
-                &mut full_schema_ref[left_schema_len..],
-                right_force_nullable,
-            );
-            let right_schema_len = full_schema_ref.len() - left_schema_len;
-            let full_schema_ref = Arc::new(full_schema_ref);
-
-            // build phase:
-            // 1.construct hashtable, one hash key may contains multiple rows indices.
-            // 2.merged all left tuples.
-            let mut coroutine = build_read(left_input, cache, transaction);
-            let mut build_map = HashMap::new();
-            let bump_ptr: *mut Bump = &mut bump;
-            let build_map_ptr: *mut HashMap<BumpVec<DataValue>, BuildState> = &mut build_map;
-
-            let mut buf_row =
-                BumpVec::with_capacity_in(on_left_keys.len(), unsafe { &mut (*bump_ptr) });
-
-            let mut build_count = 0;
-            for tuple in coroutine.by_ref() {
-                let tuple: Tuple = throw!(co, tuple);
-                throw!(
-                    co,
-                    Self::eval_keys(
-                        &on_left_keys,
-                        &tuple,
-                        &full_schema_ref[0..left_schema_len],
-                        &mut buf_row,
-                    )
-                );
-
-                let build_map_ref = unsafe { &mut (*build_map_ptr) };
-                match build_map_ref.get_mut(&buf_row) {
-                    None => {
-                        build_map_ref.insert(
-                            buf_row.clone(),
-                            BuildState {
-                                tuples: vec![(build_count, tuple)],
-                                ..Default::default()
-                            },
-                        );
-                    }
-                    Some(BuildState { tuples, .. }) => tuples.push((build_count, tuple)),
-                }
-                build_count += 1;
+                Some(BuildState { tuples, .. }) => tuples.push((build_count, tuple)),
             }
-            let mut join_impl =
-                Self::create_join_impl(self.ty, left_schema_len, right_schema_len, build_count);
-            let mut filter_arg = filter.map(|expr| FilterArgs {
-                full_schema: full_schema_ref.clone(),
-                filter_expr: expr,
-            });
-            let filter_arg_ptr: *mut Option<FilterArgs> = &mut filter_arg;
+            build_count += 1;
+        }
 
-            // probe phase
-            let mut coroutine = build_read(right_input, cache, transaction);
-
-            for tuple in coroutine.by_ref() {
-                let tuple: Tuple = throw!(co, tuple);
-
-                throw!(
-                    co,
-                    Self::eval_keys(
-                        &on_right_keys,
-                        &tuple,
-                        &full_schema_ref[left_schema_len..],
-                        &mut buf_row
-                    )
-                );
-                let build_value = unsafe { (*build_map_ptr).get_mut(&buf_row) };
-
-                let probe_args = ProbeArgs {
-                    is_keys_has_null: buf_row.iter().any(|value| value.is_null()),
-                    probe_tuple: tuple,
-                    build_state: build_value,
-                };
-                let executor =
-                    join_impl.probe(probe_args, unsafe { &mut (*filter_arg_ptr) }.as_ref());
-                for tuple in executor {
-                    co.yield_(tuple).await;
-                }
-            }
-            if let Some(executor) =
-                join_impl.left_drop(build_map, unsafe { &mut (*filter_arg_ptr) }.as_ref())
-            {
-                for tuple in executor {
-                    co.yield_(tuple).await;
-                }
-            }
-        })
+        self.state = HashJoinState::Probe {
+            join_impl: Self::create_join_impl(
+                self.ty,
+                self.left_schema_len,
+                self.right_schema_len,
+                build_count,
+            ),
+            probe_buf: Self::own_bump_vec(BumpVec::with_capacity_in(
+                self.on_right_keys.len(),
+                &self.bump,
+            )),
+            build_map: Self::own_build_map(build_map),
+            probe_state: None,
+        };
+        Ok(())
     }
-}
 
-impl HashJoin {
     fn create_join_impl(
         ty: JoinType,
         left_schema_len: usize,
@@ -262,6 +251,145 @@ impl HashJoin {
                 bits: FixedBitSet::with_capacity(build_count),
             }),
             JoinType::Cross => unreachable!(),
+        }
+    }
+}
+
+#[derive(Default, Debug)]
+pub(crate) struct BuildState {
+    pub(crate) tuples: Vec<(usize, Tuple)>,
+    pub(crate) is_used: bool,
+    pub(crate) has_filted: bool,
+}
+
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
+    fn into_executor(
+        mut self,
+        arena: &mut ExecArena<'a, T>,
+        cache: ExecutionCaches<'a>,
+        transaction: *mut T,
+    ) -> ExecId {
+        self.left_input = build_read(
+            arena,
+            self.left_input_plan
+                .take()
+                .expect("hash join left input plan initialized"),
+            cache,
+            transaction,
+        );
+        self.right_input = build_read(
+            arena,
+            self.right_input_plan
+                .take()
+                .expect("hash join right input plan initialized"),
+            cache,
+            transaction,
+        );
+        arena.push(ExecNode::HashJoin(self))
+    }
+}
+
+impl HashJoin {
+    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> Result<Option<Tuple>, DatabaseError> {
+        if let Some(err) = self.init_error.take() {
+            return Err(err);
+        }
+
+        self.initialize_build(arena)?;
+        let mut state = std::mem::replace(&mut self.state, HashJoinState::End);
+
+        loop {
+            match state {
+                HashJoinState::Build => unreachable!("hash join must be initialized before probe"),
+                HashJoinState::Probe {
+                    mut build_map,
+                    mut join_impl,
+                    mut probe_buf,
+                    mut probe_state,
+                } => {
+                    let probe_finished = loop {
+                        if probe_state.is_none() {
+                            let Some(tuple) = arena.next_tuple(self.right_input)? else {
+                                break true;
+                            };
+                            Self::eval_keys(
+                                &self.on_right_keys,
+                                &tuple,
+                                &self.full_schema[self.left_schema_len..],
+                                &mut probe_buf,
+                            )?;
+                            probe_state = Some(ProbeState {
+                                is_keys_has_null: probe_buf.iter().any(DataValue::is_null),
+                                probe_tuple: tuple,
+                                index: 0,
+                                has_filtered: false,
+                                produced: false,
+                                finished: false,
+                                emitted_unmatched: false,
+                            });
+                        }
+
+                        let Some(probe) = probe_state.as_mut() else {
+                            continue;
+                        };
+                        let build_state = if probe.is_keys_has_null {
+                            None
+                        } else {
+                            build_map.get_mut(&probe_buf)
+                        };
+
+                        if let Some(tuple) =
+                            join_impl.probe_next(probe, build_state, self.filter.as_ref())?
+                        {
+                            if probe.finished {
+                                probe_state = None;
+                            }
+                            self.state = HashJoinState::Probe {
+                                build_map,
+                                join_impl,
+                                probe_buf,
+                                probe_state,
+                            };
+                            return Ok(Some(tuple));
+                        }
+
+                        if probe.finished {
+                            probe_state = None;
+                        }
+                    };
+
+                    debug_assert!(probe_finished);
+                    state = HashJoinState::LeftDrop {
+                        join_impl,
+                        left_drop: LeftDropState {
+                            states: build_map.into_iter(),
+                            current: None,
+                        },
+                    };
+                }
+                HashJoinState::LeftDrop {
+                    mut join_impl,
+                    mut left_drop,
+                } => {
+                    if let Some(tuple) =
+                        join_impl.left_drop_next(&mut left_drop, self.filter.as_ref())?
+                    {
+                        self.state = HashJoinState::LeftDrop {
+                            join_impl,
+                            left_drop,
+                        };
+                        return Ok(Some(tuple));
+                    }
+                    state = HashJoinState::End;
+                }
+                HashJoinState::End => {
+                    self.state = HashJoinState::End;
+                    return Ok(None);
+                }
+            }
         }
     }
 }
@@ -468,7 +596,6 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        //Outer
         {
             let executor = HashJoin::from((op.clone(), left.clone(), right.clone()));
             let tuples = try_collect(
@@ -494,7 +621,6 @@ mod test {
                 build_integers(vec![Some(3), Some(5), Some(7), None, None, None])
             );
         }
-        // Semi
         {
             let mut executor = HashJoin::from((op.clone(), left.clone(), right.clone()));
             executor.ty = JoinType::LeftSemi;
@@ -519,7 +645,6 @@ mod test {
                 build_integers(vec![Some(1), Some(3), Some(5)])
             );
         }
-        // Anti
         {
             let mut executor = HashJoin::from((op, left, right));
             executor.ty = JoinType::LeftAnti;

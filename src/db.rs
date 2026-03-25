@@ -14,7 +14,7 @@
 
 use crate::binder::{command_type, Binder, BinderContext, CommandType};
 use crate::errors::DatabaseError;
-use crate::execution::{build_write, Executor};
+use crate::execution::{build_write, ExecArena, Executor};
 use crate::expression::function::scala::ScalarFunctionImpl;
 use crate::expression::function::table::TableFunctionImpl;
 use crate::expression::function::FunctionSummary;
@@ -492,12 +492,15 @@ impl<S: Storage> State<S> {
         Ok(best_plan)
     }
 
-    fn execute<'a, A: AsRef<[(&'static str, DataValue)]>>(
+    fn execute<'a, 'txn, A: AsRef<[(&'static str, DataValue)]>>(
         &'a self,
-        transaction: &'a mut S::TransactionType<'_>,
+        transaction: &'a mut S::TransactionType<'txn>,
         stmt: &Statement,
         params: A,
-    ) -> Result<(SchemaRef, Executor<'a>), DatabaseError> {
+    ) -> Result<(SchemaRef, Executor<'a, S::TransactionType<'txn>>), DatabaseError>
+    where
+        S: 'txn,
+    {
         let mut plan = self.build_plan(
             stmt,
             params,
@@ -509,11 +512,14 @@ impl<S: Storage> State<S> {
             self.table_functions(),
         )?;
         let schema = plan.output_schema().clone();
-        let executor = build_write(
+        let mut arena = ExecArena::default();
+        let root = build_write(
+            &mut arena,
             plan,
             (&self.table_cache, &self.view_cache, &self.meta_cache),
             transaction,
         );
+        let executor = Executor::new(arena, root);
 
         Ok((schema, executor))
     }
@@ -739,7 +745,7 @@ where
 /// Raw result iterator returned by [`Database::run`] and [`Database::execute`].
 pub struct DatabaseIter<'a, S: Storage + 'a> {
     transaction: *mut S::TransactionType<'a>,
-    inner: *mut TransactionIter<'a>,
+    inner: *mut TransactionIter<'a, S::TransactionType<'a>>,
     _guard: Option<MetaDataLock>,
 }
 
@@ -789,9 +795,12 @@ pub struct DBTransaction<'a, S: Storage + 'a> {
     state: Arc<State<S>>,
 }
 
-impl<S: Storage> DBTransaction<'_, S> {
+impl<'txn, S: Storage> DBTransaction<'txn, S> {
     /// Runs SQL inside the current transaction and returns the final result iterator.
-    pub fn run<T: AsRef<str>>(&mut self, sql: T) -> Result<TransactionIter<'_>, DatabaseError> {
+    pub fn run<'a, T: AsRef<str>>(
+        &'a mut self,
+        sql: T,
+    ) -> Result<TransactionIter<'a, S::TransactionType<'txn>>, DatabaseError> {
         let sql = sql.as_ref();
         let mut statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
         let last_statement = statements
@@ -810,11 +819,11 @@ impl<S: Storage> DBTransaction<'_, S> {
     }
 
     /// Executes a prepared [`Statement`] inside the current transaction.
-    pub fn execute<A: AsRef<[(&'static str, DataValue)]>>(
-        &mut self,
+    pub fn execute<'a, A: AsRef<[(&'static str, DataValue)]>>(
+        &'a mut self,
         statement: &Statement,
         params: A,
-    ) -> Result<TransactionIter<'_>, DatabaseError> {
+    ) -> Result<TransactionIter<'a, S::TransactionType<'txn>>, DatabaseError> {
         if matches!(command_type(statement)?, CommandType::DDL) {
             return Err(DatabaseError::UnsupportedStmt(
                 "`DDL` is not allowed to execute within a transaction".to_string(),
@@ -833,18 +842,18 @@ impl<S: Storage> DBTransaction<'_, S> {
 }
 
 /// Raw result iterator returned by [`DBTransaction::run`] and [`DBTransaction::execute`].
-pub struct TransactionIter<'a> {
-    executor: Executor<'a>,
+pub struct TransactionIter<'a, T: Transaction + 'a> {
+    executor: Executor<'a, T>,
     schema: SchemaRef,
 }
 
-impl<'a> TransactionIter<'a> {
-    fn new(schema: SchemaRef, executor: Executor<'a>) -> Self {
+impl<'a, T: Transaction + 'a> TransactionIter<'a, T> {
+    fn new(schema: SchemaRef, executor: Executor<'a, T>) -> Self {
         Self { executor, schema }
     }
 }
 
-impl Iterator for TransactionIter<'_> {
+impl<T: Transaction> Iterator for TransactionIter<'_, T> {
     type Item = Result<Tuple, DatabaseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -852,7 +861,7 @@ impl Iterator for TransactionIter<'_> {
     }
 }
 
-impl ResultIter for TransactionIter<'_> {
+impl<T: Transaction> ResultIter for TransactionIter<'_, T> {
     fn schema(&self) -> &SchemaRef {
         &self.schema
     }

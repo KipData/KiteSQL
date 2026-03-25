@@ -14,17 +14,17 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::sort::BumpVec;
-use crate::execution::{build_read, spawn_executor, Executor, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::top_k::TopKOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::table_codec::BumpBytes;
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::throw;
-use crate::types::tuple::{Schema, Tuple};
+use crate::storage::Transaction;
+use crate::types::tuple::{Schema, SchemaRef, Tuple};
 use bumpalo::Bump;
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use std::collections::{btree_set::IntoIter as BTreeSetIntoIter, BTreeSet};
+use std::mem::transmute;
 
 #[derive(Eq, PartialEq, Debug)]
 struct CmpItem<'a> {
@@ -89,11 +89,14 @@ fn top_sort<'a>(
 }
 
 pub struct TopK {
-    arena: Bump,
+    arena: Box<Bump>,
     sort_fields: Vec<SortField>,
     limit: usize,
     offset: Option<usize>,
-    input: LogicalPlan,
+    input_schema: SchemaRef,
+    input_plan: Option<LogicalPlan>,
+    input: ExecId,
+    output: Option<std::iter::Skip<BTreeSetIntoIter<CmpItem<'static>>>>,
 }
 
 impl From<(TopKOperator, LogicalPlan)> for TopK {
@@ -104,66 +107,79 @@ impl From<(TopKOperator, LogicalPlan)> for TopK {
                 limit,
                 offset,
             },
-            input,
+            mut input,
         ): (TopKOperator, LogicalPlan),
     ) -> Self {
         TopK {
-            arena: Default::default(),
+            arena: Box::<Bump>::default(),
             sort_fields,
             limit,
             offset,
-            input,
+            input_schema: input.output_schema().clone(),
+            input_plan: Some(input),
+            input: 0,
+            output: None,
         }
     }
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for TopK {
-    #[allow(clippy::mutable_key_type)]
-    fn execute(
-        self,
-        cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
+    fn into_executor(
+        mut self,
+        arena: &mut ExecArena<'a, T>,
+        cache: ExecutionCaches<'a>,
         transaction: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let TopK {
-                arena,
-                sort_fields,
-                limit,
-                offset,
-                mut input,
-            } = self;
+    ) -> ExecId {
+        self.input = build_read(
+            arena,
+            self.input_plan
+                .take()
+                .expect("top-k input plan initialized"),
+            cache,
+            transaction,
+        );
+        arena.push(ExecNode::TopK(self))
+    }
+}
 
-            let arena: *const Bump = &arena;
-
-            let schema = input.output_schema().clone();
-            let keep_count = offset.unwrap_or(0) + limit;
+impl TopK {
+    #[allow(clippy::mutable_key_type)]
+    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> Result<Option<Tuple>, DatabaseError> {
+        if self.output.is_none() {
+            let keep_count = self.offset.unwrap_or(0) + self.limit;
             let mut set = BTreeSet::new();
-            let coroutine = build_read(input, cache, transaction);
 
-            for tuple in coroutine {
-                throw!(
-                    co,
-                    top_sort(
-                        unsafe { &*arena },
-                        &schema,
-                        &sort_fields,
-                        &mut set,
-                        throw!(co, tuple),
-                        keep_count,
-                    )
-                );
+            while let Some(tuple) = arena.next_tuple(self.input)? {
+                top_sort(
+                    &self.arena,
+                    &self.input_schema,
+                    &self.sort_fields,
+                    &mut set,
+                    tuple,
+                    keep_count,
+                )?;
             }
 
-            let mut i: usize = 0;
+            let offset = self.offset.unwrap_or(0);
+            let rows = set.into_iter().skip(offset);
+            // The arena lives at a stable boxed address, so we can keep the old set/key shape
+            // and resume iteration across executor polls.
+            self.output = Some(unsafe {
+                transmute::<
+                    std::iter::Skip<BTreeSetIntoIter<CmpItem<'_>>>,
+                    std::iter::Skip<BTreeSetIntoIter<CmpItem<'static>>>,
+                >(rows)
+            });
+        }
 
-            while let Some(item) = set.pop_first() {
-                i += 1;
-                if i - 1 < offset.unwrap_or(0) {
-                    continue;
-                }
-                co.yield_(Ok(item.tuple)).await;
-            }
-        })
+        Ok(self
+            .output
+            .as_mut()
+            .and_then(std::iter::Iterator::next)
+            .map(|item| item.tuple))
     }
 }
 

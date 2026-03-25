@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::execution::dql::join::hash::{filter, FilterArgs, JoinProbeState, ProbeArgs};
+use crate::errors::DatabaseError;
+use crate::execution::dql::join::hash::{
+    filter, FilterArgs, JoinProbeState, LeftDropState, LeftDropTuples, ProbeState,
+};
 use crate::execution::dql::join::hash_join::BuildState;
-use crate::execution::dql::sort::BumpVec;
-use crate::execution::{spawn_executor, Executor};
-use crate::throw;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
-use ahash::HashMap;
 use fixedbitset::FixedBitSet;
 
 pub(crate) struct FullJoinState {
@@ -28,79 +27,104 @@ pub(crate) struct FullJoinState {
     pub(crate) bits: FixedBitSet,
 }
 
-impl<'a> JoinProbeState<'a> for FullJoinState {
-    fn probe(
+impl JoinProbeState for FullJoinState {
+    fn probe_next(
         &mut self,
-        probe_args: ProbeArgs<'a>,
-        filter_args: Option<&'a FilterArgs>,
-    ) -> Executor<'a> {
-        let left_schema_len = self.left_schema_len;
-        let bits_ptr: *mut FixedBitSet = &mut self.bits;
-
-        spawn_executor(move |co| async move {
-            let ProbeArgs { probe_tuple, .. } = probe_args;
-
-            if let ProbeArgs {
-                is_keys_has_null: false,
-                build_state: Some(build_state),
-                ..
-            } = probe_args
-            {
-                let mut has_filtered = false;
-                for (i, Tuple { values, pk }) in build_state.tuples.iter() {
-                    let full_values =
-                        Vec::from_iter(values.iter().chain(probe_tuple.values.iter()).cloned());
-
-                    match &filter_args {
-                        None => (),
-                        Some(filter_args) => {
-                            if !throw!(co, filter(&full_values, filter_args)) {
-                                has_filtered = true;
-                                unsafe {
-                                    (*bits_ptr).set(*i, true);
-                                }
-                                co.yield_(Ok(Self::full_right_row(left_schema_len, &probe_tuple)))
-                                    .await;
-                                continue;
-                            }
-                        }
-                    }
-                    co.yield_(Ok(Tuple::new(pk.clone(), full_values))).await;
-                }
-                build_state.is_used = !has_filtered;
-                build_state.has_filted = has_filtered;
-                return;
+        probe_state: &mut ProbeState,
+        build_state: Option<&mut BuildState>,
+        filter_args: Option<&FilterArgs>,
+    ) -> Result<Option<Tuple>, DatabaseError> {
+        if probe_state.is_keys_has_null {
+            if probe_state.emitted_unmatched {
+                probe_state.finished = true;
+                return Ok(None);
             }
+            probe_state.emitted_unmatched = true;
+            probe_state.finished = true;
+            return Ok(Some(Self::full_right_row(
+                self.left_schema_len,
+                &probe_state.probe_tuple,
+            )));
+        }
 
-            co.yield_(Ok(Self::full_right_row(left_schema_len, &probe_tuple)))
-                .await;
-        })
+        let Some(build_state) = build_state else {
+            if probe_state.emitted_unmatched {
+                probe_state.finished = true;
+                return Ok(None);
+            }
+            probe_state.emitted_unmatched = true;
+            probe_state.finished = true;
+            return Ok(Some(Self::full_right_row(
+                self.left_schema_len,
+                &probe_state.probe_tuple,
+            )));
+        };
+
+        while probe_state.index < build_state.tuples.len() {
+            let (i, Tuple { values, pk }) = &build_state.tuples[probe_state.index];
+            probe_state.index += 1;
+            let full_values = Vec::from_iter(
+                values
+                    .iter()
+                    .chain(probe_state.probe_tuple.values.iter())
+                    .cloned(),
+            );
+
+            if let Some(filter_args) = filter_args {
+                if !filter(&full_values, filter_args)? {
+                    probe_state.has_filtered = true;
+                    self.bits.set(*i, true);
+                    return Ok(Some(Self::full_right_row(
+                        self.left_schema_len,
+                        &probe_state.probe_tuple,
+                    )));
+                }
+            }
+            build_state.is_used = true;
+            build_state.has_filted = probe_state.has_filtered;
+            return Ok(Some(Tuple::new(pk.clone(), full_values)));
+        }
+
+        build_state.is_used = !probe_state.has_filtered;
+        build_state.has_filted = probe_state.has_filtered;
+        probe_state.finished = true;
+        Ok(None)
     }
 
-    fn left_drop(
+    fn left_drop_next(
         &mut self,
-        _build_map: HashMap<BumpVec<'a, DataValue>, BuildState>,
-        _filter_args: Option<&'a FilterArgs>,
-    ) -> Option<Executor<'a>> {
+        left_drop_state: &mut LeftDropState,
+        _filter_args: Option<&FilterArgs>,
+    ) -> Result<Option<Tuple>, DatabaseError> {
         let full_schema_len = self.right_schema_len + self.left_schema_len;
-        let bits_ptr: *mut FixedBitSet = &mut self.bits;
 
-        Some(spawn_executor(move |co| async move {
-            for (_, state) in _build_map {
-                if state.is_used {
-                    continue;
-                }
-                for (i, mut left_tuple) in state.tuples {
-                    unsafe {
-                        if !(*bits_ptr).contains(i) && state.has_filted {
-                            continue;
-                        }
+        loop {
+            if let Some(LeftDropTuples {
+                tuples, has_filted, ..
+            }) = left_drop_state.current.as_mut()
+            {
+                while let Some((i, mut left_tuple)) = tuples.next() {
+                    if !self.bits.contains(i) && *has_filted {
+                        continue;
                     }
                     left_tuple.values.resize(full_schema_len, DataValue::Null);
-                    co.yield_(Ok(left_tuple)).await;
+                    return Ok(Some(left_tuple));
                 }
+                left_drop_state.current = None;
             }
-        }))
+
+            let Some((_, state)) = left_drop_state.states.next() else {
+                return Ok(None);
+            };
+
+            if state.is_used {
+                continue;
+            }
+            left_drop_state.current = Some(LeftDropTuples {
+                tuples: state.tuples.into_iter(),
+                has_filted: state.has_filted,
+            });
+        }
     }
 }
 

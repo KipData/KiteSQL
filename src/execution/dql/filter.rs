@@ -12,49 +12,69 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::execution::{build_read, spawn_executor, Executor, ReadExecutor};
+use crate::errors::DatabaseError;
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::filter::FilterOperator;
 use crate::planner::LogicalPlan;
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::throw;
+use crate::storage::Transaction;
+use crate::types::tuple::SchemaRef;
+use crate::types::tuple::Tuple;
 pub struct Filter {
     predicate: ScalarExpression,
-    input: LogicalPlan,
+    input_schema: SchemaRef,
+    input_plan: Option<LogicalPlan>,
+    input: ExecId,
 }
 
 impl From<(FilterOperator, LogicalPlan)> for Filter {
-    fn from((FilterOperator { predicate, .. }, input): (FilterOperator, LogicalPlan)) -> Self {
-        Filter { predicate, input }
+    fn from((FilterOperator { predicate, .. }, mut input): (FilterOperator, LogicalPlan)) -> Self {
+        let input_schema = input.output_schema().clone();
+        Filter {
+            predicate,
+            input_schema,
+            input_plan: Some(input),
+            input: 0,
+        }
     }
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Filter {
-    fn execute(
-        self,
-        cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
+    fn into_executor(
+        mut self,
+        arena: &mut ExecArena<'a, T>,
+        cache: ExecutionCaches<'a>,
         transaction: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let Filter {
-                predicate,
-                mut input,
-            } = self;
+    ) -> ExecId {
+        self.input = build_read(
+            arena,
+            self.input_plan
+                .take()
+                .expect("filter input plan initialized"),
+            cache,
+            transaction,
+        );
+        arena.push(ExecNode::Filter(self))
+    }
+}
 
-            let schema = input.output_schema().clone();
+impl Filter {
+    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> Result<Option<Tuple>, DatabaseError> {
+        loop {
+            let Some(tuple) = arena.next_tuple(self.input)? else {
+                return Ok(None);
+            };
 
-            let executor = build_read(input, cache, transaction);
-
-            for tuple in executor {
-                let tuple = throw!(co, tuple);
-
-                if throw!(
-                    co,
-                    throw!(co, predicate.eval(Some((&tuple, &schema)))).is_true()
-                ) {
-                    co.yield_(Ok(tuple)).await;
-                }
+            if self
+                .predicate
+                .eval(Some((&tuple, &self.input_schema)))?
+                .is_true()?
+            {
+                return Ok(Some(tuple));
             }
-        })
+        }
     }
 }

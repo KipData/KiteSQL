@@ -12,68 +12,84 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::errors::DatabaseError;
 use crate::execution::dql::join::hash::full_join::FullJoinState;
-use crate::execution::dql::join::hash::{filter, FilterArgs, JoinProbeState, ProbeArgs};
-use crate::execution::{spawn_executor, Executor};
-use crate::throw;
+use crate::execution::dql::join::hash::{filter, FilterArgs, JoinProbeState, ProbeState};
+use crate::execution::dql::join::hash_join::BuildState;
 use crate::types::tuple::Tuple;
 
 pub(crate) struct RightJoinState {
     pub(crate) left_schema_len: usize,
 }
 
-impl<'a> JoinProbeState<'a> for RightJoinState {
-    fn probe(
+impl JoinProbeState for RightJoinState {
+    fn probe_next(
         &mut self,
-        probe_args: ProbeArgs<'a>,
-        filter_args: Option<&'a FilterArgs>,
-    ) -> Executor<'a> {
-        let left_schema_len = self.left_schema_len;
-
-        spawn_executor(move |co| async move {
-            let ProbeArgs { probe_tuple, .. } = probe_args;
-
-            if let ProbeArgs {
-                is_keys_has_null: false,
-                build_state: Some(build_state),
-                ..
-            } = probe_args
-            {
-                let mut has_filtered = false;
-                let mut produced = false;
-                for (_, Tuple { values, pk }) in build_state.tuples.iter() {
-                    let full_values =
-                        Vec::from_iter(values.iter().chain(probe_tuple.values.iter()).cloned());
-
-                    match &filter_args {
-                        None => (),
-                        Some(filter_args) => {
-                            if !throw!(co, filter(&full_values, filter_args)) {
-                                has_filtered = true;
-                                continue;
-                            }
-                        }
-                    }
-                    produced = true;
-                    co.yield_(Ok(Tuple::new(pk.clone(), full_values))).await;
-                }
-                if !produced {
-                    co.yield_(Ok(FullJoinState::full_right_row(
-                        left_schema_len,
-                        &probe_tuple,
-                    )))
-                    .await;
-                }
-                build_state.is_used = produced;
-                build_state.has_filted = has_filtered;
-                return;
+        probe_state: &mut ProbeState,
+        build_state: Option<&mut BuildState>,
+        filter_args: Option<&FilterArgs>,
+    ) -> Result<Option<Tuple>, DatabaseError> {
+        if probe_state.is_keys_has_null {
+            if probe_state.emitted_unmatched {
+                probe_state.finished = true;
+                return Ok(None);
             }
+            probe_state.emitted_unmatched = true;
+            probe_state.finished = true;
+            return Ok(Some(FullJoinState::full_right_row(
+                self.left_schema_len,
+                &probe_state.probe_tuple,
+            )));
+        }
 
-            co.yield_(Ok(FullJoinState::full_right_row(
-                left_schema_len,
-                &probe_tuple,
-            )))
-            .await;
-        })
+        let Some(build_state) = build_state else {
+            if probe_state.emitted_unmatched {
+                probe_state.finished = true;
+                return Ok(None);
+            }
+            probe_state.emitted_unmatched = true;
+            probe_state.finished = true;
+            return Ok(Some(FullJoinState::full_right_row(
+                self.left_schema_len,
+                &probe_state.probe_tuple,
+            )));
+        };
+
+        while probe_state.index < build_state.tuples.len() {
+            let (_, Tuple { values, pk }) = &build_state.tuples[probe_state.index];
+            probe_state.index += 1;
+            let full_values = Vec::from_iter(
+                values
+                    .iter()
+                    .chain(probe_state.probe_tuple.values.iter())
+                    .cloned(),
+            );
+
+            if let Some(filter_args) = filter_args {
+                if !filter(&full_values, filter_args)? {
+                    probe_state.has_filtered = true;
+                    continue;
+                }
+            }
+            probe_state.produced = true;
+            build_state.is_used = true;
+            build_state.has_filted = probe_state.has_filtered;
+            return Ok(Some(Tuple::new(pk.clone(), full_values)));
+        }
+
+        build_state.is_used = probe_state.produced;
+        build_state.has_filted = probe_state.has_filtered;
+
+        if !probe_state.produced && !probe_state.emitted_unmatched {
+            probe_state.emitted_unmatched = true;
+            probe_state.finished = true;
+            return Ok(Some(FullJoinState::full_right_row(
+                self.left_schema_len,
+                &probe_state.probe_tuple,
+            )));
+        }
+
+        probe_state.finished = true;
+        Ok(None)
     }
 }

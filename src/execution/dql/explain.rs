@@ -12,37 +12,50 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::execution::{spawn_executor, Executor, ReadExecutor};
+use crate::errors::DatabaseError;
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
 use crate::planner::LogicalPlan;
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
+use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use crate::types::value::{DataValue, Utf8Type};
 use sqlparser::ast::CharLengthUnits;
 
 pub struct Explain {
-    plan: LogicalPlan,
+    plan: Option<LogicalPlan>,
 }
 
 impl From<LogicalPlan> for Explain {
     fn from(plan: LogicalPlan) -> Self {
-        Explain { plan }
+        Explain { plan: Some(plan) }
     }
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Explain {
-    fn execute(
+    fn into_executor(
         self,
-        _: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
+        arena: &mut ExecArena<'a, T>,
+        _: ExecutionCaches<'a>,
         _: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let values = vec![DataValue::Utf8 {
-                value: self.plan.explain(0),
-                ty: Utf8Type::Variable(None),
-                unit: CharLengthUnits::Characters,
-            }];
+    ) -> ExecId {
+        arena.push(ExecNode::Explain(self))
+    }
+}
 
-            co.yield_(Ok(Tuple::new(None, values))).await;
-        })
+impl Explain {
+    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+        &mut self,
+        _: &mut ExecArena<'a, T>,
+    ) -> Result<Option<Tuple>, DatabaseError> {
+        let Some(plan) = self.plan.take() else {
+            return Ok(None);
+        };
+
+        let values = vec![DataValue::Utf8 {
+            value: plan.explain(0),
+            ty: Utf8Type::Variable(None),
+            unit: CharLengthUnits::Characters,
+        }];
+
+        Ok(Some(Tuple::new(None, values)))
     }
 }

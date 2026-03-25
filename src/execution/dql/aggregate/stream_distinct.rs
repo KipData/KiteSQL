@@ -12,62 +12,75 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::execution::{build_read, spawn_executor, Executor, ReadExecutor};
+use crate::errors::DatabaseError;
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::LogicalPlan;
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::throw;
-use crate::types::tuple::Tuple;
+use crate::storage::Transaction;
+use crate::types::tuple::{SchemaRef, Tuple};
 use crate::types::value::DataValue;
 use itertools::Itertools;
 
 pub struct StreamDistinctExecutor {
     groupby_exprs: Vec<ScalarExpression>,
-    input: LogicalPlan,
+    input_schema: SchemaRef,
+    input_plan: Option<LogicalPlan>,
+    input: ExecId,
+    last_keys: Option<Vec<DataValue>>,
 }
 
 impl From<(AggregateOperator, LogicalPlan)> for StreamDistinctExecutor {
-    fn from((op, input): (AggregateOperator, LogicalPlan)) -> Self {
+    fn from((op, mut input): (AggregateOperator, LogicalPlan)) -> Self {
         StreamDistinctExecutor {
             groupby_exprs: op.groupby_exprs,
-            input,
+            input_schema: input.output_schema().clone(),
+            input_plan: Some(input),
+            input: 0,
+            last_keys: None,
         }
     }
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor {
-    fn execute(
-        self,
-        cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
+    fn into_executor(
+        mut self,
+        arena: &mut ExecArena<'a, T>,
+        cache: ExecutionCaches<'a>,
         transaction: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let StreamDistinctExecutor {
-                groupby_exprs,
-                mut input,
-            } = self;
+    ) -> ExecId {
+        self.input = build_read(
+            arena,
+            self.input_plan
+                .take()
+                .expect("stream distinct input plan initialized"),
+            cache,
+            transaction,
+        );
+        arena.push(ExecNode::StreamDistinct(self))
+    }
+}
 
-            let schema_ref = input.output_schema().clone();
-            let mut executor = build_read(input, cache, transaction);
-            let mut last_keys: Option<Vec<DataValue>> = None;
+impl StreamDistinctExecutor {
+    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> Result<Option<Tuple>, DatabaseError> {
+        loop {
+            let Some(tuple) = arena.next_tuple(self.input)? else {
+                return Ok(None);
+            };
+            let group_keys = self
+                .groupby_exprs
+                .iter()
+                .map(|expr| expr.eval(Some((&tuple, &self.input_schema))))
+                .try_collect()?;
 
-            for result in executor.by_ref() {
-                let tuple = throw!(co, result);
-                let group_keys: Vec<DataValue> = throw!(
-                    co,
-                    groupby_exprs
-                        .iter()
-                        .map(|expr| expr.eval(Some((&tuple, &schema_ref))))
-                        .try_collect()
-                );
-
-                if last_keys.as_ref() != Some(&group_keys) {
-                    last_keys = Some(group_keys.clone());
-                    co.yield_(Ok(Tuple::new(tuple.pk, group_keys))).await;
-                }
+            if self.last_keys.as_ref() != Some(&group_keys) {
+                self.last_keys = Some(group_keys.clone());
+                return Ok(Some(Tuple::new(tuple.pk, group_keys)));
             }
-        })
+        }
     }
 }
 
@@ -220,17 +233,15 @@ mod tests {
                 .execute((&table_cache, &view_cache, &meta_cache), &mut transaction),
         )?;
 
-        let actual = tuples
-            .into_iter()
-            .map(|tuple| {
-                tuple
-                    .values
-                    .into_iter()
-                    .flat_map(|value| value.i32())
-                    .collect_vec()
-            })
-            .collect_vec();
-        assert_eq!(actual, vec![vec![1, 1], vec![1, 2], vec![2, 1]]);
+        let actual = tuples.into_iter().map(|tuple| tuple.values).collect_vec();
+        assert_eq!(
+            actual,
+            vec![
+                vec![DataValue::Int32(1), DataValue::Int32(1)],
+                vec![DataValue::Int32(1), DataValue::Int32(2)],
+                vec![DataValue::Int32(2), DataValue::Int32(1)],
+            ]
+        );
 
         Ok(())
     }

@@ -19,12 +19,11 @@ use super::joins_nullable;
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
-use crate::execution::{build_read, spawn_executor, Executor, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::LogicalPlan;
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::throw;
+use crate::storage::Transaction;
 use crate::types::tuple::{Schema, SchemaRef, Tuple};
 use crate::types::value::DataValue;
 use fixedbitset::FixedBitSet;
@@ -86,12 +85,38 @@ impl EqualCondition {
 /// |--------------------------------|----------------|----------------|
 /// | Full                           |    left        |      right     |
 pub struct NestedLoopJoin {
-    left_input: LogicalPlan,
-    right_input: LogicalPlan,
+    left_input_plan: Option<LogicalPlan>,
+    right_input_plan: LogicalPlan,
     output_schema_ref: SchemaRef,
     ty: JoinType,
     filter: Option<ScalarExpression>,
     eq_cond: EqualCondition,
+    left_input: ExecId,
+    state: NestedLoopJoinState,
+}
+
+enum NestedLoopJoinState {
+    PullLeft {
+        right_bitmap: Option<FixedBitSet>,
+    },
+    ScanRight {
+        active_left: ActiveLeftState,
+        right_bitmap: Option<FixedBitSet>,
+    },
+    EmitRightUnmatched {
+        right_input: ExecId,
+        right_bitmap: FixedBitSet,
+        right_emit_index: usize,
+    },
+    End,
+}
+
+struct ActiveLeftState {
+    left_tuple: Tuple,
+    right_input: ExecId,
+    right_index: usize,
+    has_matched: bool,
+    first_matches: Vec<usize>,
 }
 
 impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for NestedLoopJoin {
@@ -126,153 +151,251 @@ impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for NestedLoopJoin {
         );
 
         NestedLoopJoin {
-            ty: join_type,
-            left_input,
-            right_input,
+            left_input_plan: Some(left_input),
+            right_input_plan: right_input,
             output_schema_ref,
+            ty: join_type,
             filter,
             eq_cond,
+            left_input: 0,
+            state: NestedLoopJoinState::PullLeft { right_bitmap: None },
         }
     }
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
-    fn execute(
-        self,
-        cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
+    fn into_executor(
+        mut self,
+        arena: &mut ExecArena<'a, T>,
+        cache: ExecutionCaches<'a>,
         transaction: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let NestedLoopJoin {
-                ty,
-                left_input,
-                right_input,
-                output_schema_ref,
-                filter,
-                eq_cond,
-                ..
-            } = self;
+    ) -> ExecId {
+        self.left_input = build_read(
+            arena,
+            self.left_input_plan
+                .take()
+                .expect("nested loop join left input plan initialized"),
+            cache,
+            transaction,
+        );
+        arena.push(ExecNode::NestedLoopJoin(self))
+    }
+}
 
-            let left_schema_len = eq_cond.left_schema.len();
-            let right_schema_len = eq_cond.right_schema.len();
-            let mut left_coroutine = build_read(left_input, cache, transaction);
-            let mut bitmap: Option<FixedBitSet> = None;
-            let mut first_matches = Vec::new();
+impl NestedLoopJoin {
+    fn build_right_input<'a, T: Transaction + 'a>(&self, arena: &mut ExecArena<'a, T>) -> ExecId {
+        let cache = (arena.table_cache(), arena.view_cache(), arena.meta_cache());
+        let transaction = arena.transaction_mut() as *mut T;
+        build_read(arena, self.right_input_plan.clone(), cache, transaction)
+    }
 
-            for left_tuple in left_coroutine.by_ref() {
-                let left_tuple: Tuple = throw!(co, left_tuple);
-                let mut has_matched = false;
+    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> Result<Option<Tuple>, DatabaseError> {
+        let mut state = std::mem::replace(&mut self.state, NestedLoopJoinState::End);
 
-                let mut right_coroutine = build_read(right_input.clone(), cache, transaction);
-                let mut right_idx = 0;
-
-                for right_tuple in right_coroutine.by_ref() {
-                    let right_tuple: Tuple = throw!(co, right_tuple);
-
-                    let tuple = match (
-                        filter.as_ref(),
-                        throw!(co, eq_cond.equals(&left_tuple, &right_tuple)),
-                    ) {
-                        (None, true) if matches!(ty, JoinType::RightOuter) => {
-                            has_matched = true;
-                            Self::emit_tuple(&right_tuple, &left_tuple, ty, true)
+        loop {
+            match state {
+                NestedLoopJoinState::PullLeft { right_bitmap } => {
+                    let Some(left_tuple) = arena.next_tuple(self.left_input)? else {
+                        if matches!(self.ty, JoinType::Full) {
+                            state = NestedLoopJoinState::EmitRightUnmatched {
+                                right_input: self.build_right_input(arena),
+                                right_bitmap: right_bitmap.unwrap_or_default(),
+                                right_emit_index: 0,
+                            };
+                            continue;
                         }
-                        (None, true) => {
-                            has_matched = true;
-                            Self::emit_tuple(&left_tuple, &right_tuple, ty, true)
+                        self.state = NestedLoopJoinState::End;
+                        return Ok(None);
+                    };
+
+                    state = NestedLoopJoinState::ScanRight {
+                        active_left: ActiveLeftState {
+                            left_tuple,
+                            right_input: self.build_right_input(arena),
+                            right_index: 0,
+                            has_matched: false,
+                            first_matches: Vec::new(),
+                        },
+                        right_bitmap,
+                    };
+                }
+                NestedLoopJoinState::ScanRight {
+                    mut active_left,
+                    mut right_bitmap,
+                } => {
+                    while let Some(right_tuple) = arena.next_tuple(active_left.right_input)? {
+                        let idx = active_left.right_index;
+                        active_left.right_index += 1;
+
+                        let tuple = match (
+                            self.filter.as_ref(),
+                            self.eq_cond.equals(&active_left.left_tuple, &right_tuple)?,
+                        ) {
+                            (None, true) if matches!(self.ty, JoinType::RightOuter) => {
+                                active_left.has_matched = true;
+                                Self::emit_tuple(
+                                    &right_tuple,
+                                    &active_left.left_tuple,
+                                    self.ty,
+                                    true,
+                                )
+                            }
+                            (None, true) => {
+                                active_left.has_matched = true;
+                                Self::emit_tuple(
+                                    &active_left.left_tuple,
+                                    &right_tuple,
+                                    self.ty,
+                                    true,
+                                )
+                            }
+                            (Some(filter), true) => {
+                                let new_tuple = Self::merge_tuple(
+                                    &active_left.left_tuple,
+                                    &right_tuple,
+                                    &self.ty,
+                                );
+                                let value =
+                                    filter.eval(Some((&new_tuple, &self.output_schema_ref)))?;
+                                match &value {
+                                    DataValue::Boolean(true) => {
+                                        let tuple = match self.ty {
+                                            JoinType::LeftAnti => None,
+                                            JoinType::LeftSemi if active_left.has_matched => None,
+                                            JoinType::RightOuter => Self::emit_tuple(
+                                                &right_tuple,
+                                                &active_left.left_tuple,
+                                                self.ty,
+                                                true,
+                                            ),
+                                            _ => Self::emit_tuple(
+                                                &active_left.left_tuple,
+                                                &right_tuple,
+                                                self.ty,
+                                                true,
+                                            ),
+                                        };
+                                        active_left.has_matched = true;
+                                        tuple
+                                    }
+                                    DataValue::Boolean(false) | DataValue::Null => None,
+                                    _ => return Err(DatabaseError::InvalidType),
+                                }
+                            }
+                            _ => None,
+                        };
+
+                        if let Some(tuple) = tuple {
+                            if matches!(self.ty, JoinType::Full) {
+                                if let Some(bits) = right_bitmap.as_mut() {
+                                    bits.insert(idx);
+                                } else {
+                                    active_left.first_matches.push(idx);
+                                }
+                            }
+
+                            self.state = if matches!(self.ty, JoinType::LeftSemi) {
+                                NestedLoopJoinState::PullLeft { right_bitmap }
+                            } else {
+                                NestedLoopJoinState::ScanRight {
+                                    active_left,
+                                    right_bitmap,
+                                }
+                            };
+                            return Ok(Some(tuple));
                         }
-                        (Some(filter), true) => {
-                            let new_tuple = Self::merge_tuple(&left_tuple, &right_tuple, &ty);
-                            let value =
-                                throw!(co, filter.eval(Some((&new_tuple, &output_schema_ref))));
-                            match &value {
-                                DataValue::Boolean(true) => {
-                                    let tuple = match ty {
-                                        JoinType::LeftAnti => None,
-                                        JoinType::LeftSemi if has_matched => None,
-                                        JoinType::RightOuter => {
-                                            Self::emit_tuple(&right_tuple, &left_tuple, ty, true)
-                                        }
-                                        _ => Self::emit_tuple(&left_tuple, &right_tuple, ty, true),
-                                    };
-                                    has_matched = true;
-                                    tuple
-                                }
-                                DataValue::Boolean(false) | DataValue::Null => None,
-                                _ => {
-                                    co.yield_(Err(DatabaseError::InvalidType)).await;
-                                    return;
-                                }
+
+                        if matches!(self.ty, JoinType::LeftAnti) && active_left.has_matched {
+                            break;
+                        }
+                    }
+
+                    if matches!(self.ty, JoinType::Full) {
+                        if let Some(bits) = right_bitmap.as_mut() {
+                            for idx in active_left.first_matches {
+                                bits.insert(idx);
+                            }
+                        } else {
+                            let mut bits = FixedBitSet::with_capacity(active_left.right_index);
+                            for idx in active_left.first_matches {
+                                bits.insert(idx);
+                            }
+                            right_bitmap = Some(bits);
+                        }
+                    }
+                    let right_schema_len = self.eq_cond.right_schema.len();
+                    let tuple = match self.ty {
+                        JoinType::LeftAnti if !active_left.has_matched => {
+                            Some(active_left.left_tuple)
+                        }
+                        JoinType::LeftOuter
+                        | JoinType::LeftSemi
+                        | JoinType::RightOuter
+                        | JoinType::Full
+                            if !active_left.has_matched =>
+                        {
+                            let right_tuple =
+                                Tuple::new(None, vec![DataValue::Null; right_schema_len]);
+                            if matches!(self.ty, JoinType::RightOuter) {
+                                Self::emit_tuple(
+                                    &right_tuple,
+                                    &active_left.left_tuple,
+                                    self.ty,
+                                    false,
+                                )
+                            } else {
+                                Self::emit_tuple(
+                                    &active_left.left_tuple,
+                                    &right_tuple,
+                                    self.ty,
+                                    false,
+                                )
                             }
                         }
                         _ => None,
                     };
 
+                    self.state = NestedLoopJoinState::PullLeft { right_bitmap };
                     if let Some(tuple) = tuple {
-                        co.yield_(Ok(tuple)).await;
-                        if matches!(ty, JoinType::LeftSemi) {
-                            break;
-                        }
-                        if let Some(bits) = bitmap.as_mut() {
-                            bits.insert(right_idx);
-                        } else if matches!(ty, JoinType::Full) {
-                            first_matches.push(right_idx);
-                        }
+                        return Ok(Some(tuple));
                     }
-                    if matches!(ty, JoinType::LeftAnti) && has_matched {
-                        break;
-                    }
-                    right_idx += 1;
+                    state = std::mem::replace(&mut self.state, NestedLoopJoinState::End);
                 }
+                NestedLoopJoinState::EmitRightUnmatched {
+                    right_input,
+                    right_bitmap,
+                    mut right_emit_index,
+                } => {
+                    while let Some(mut right_tuple) = arena.next_tuple(right_input)? {
+                        let idx = right_emit_index;
+                        right_emit_index += 1;
 
-                if matches!(ty, JoinType::Full) && bitmap.is_none() {
-                    bitmap = Some(FixedBitSet::with_capacity(right_idx));
-                }
-
-                // handle no matched tuple case
-                let tuple = match ty {
-                    JoinType::LeftAnti if !has_matched => Some(left_tuple.clone()),
-                    JoinType::LeftOuter
-                    | JoinType::LeftSemi
-                    | JoinType::RightOuter
-                    | JoinType::Full
-                        if !has_matched =>
-                    {
-                        let right_tuple = Tuple::new(None, vec![DataValue::Null; right_schema_len]);
-                        if matches!(ty, JoinType::RightOuter) {
-                            Self::emit_tuple(&right_tuple, &left_tuple, ty, false)
-                        } else {
-                            Self::emit_tuple(&left_tuple, &right_tuple, ty, false)
+                        if !right_bitmap.contains(idx) {
+                            let mut values = vec![DataValue::Null; self.eq_cond.left_schema.len()];
+                            values.append(&mut right_tuple.values);
+                            self.state = NestedLoopJoinState::EmitRightUnmatched {
+                                right_input,
+                                right_bitmap,
+                                right_emit_index,
+                            };
+                            return Ok(Some(Tuple::new(right_tuple.pk, values)));
                         }
                     }
-                    _ => None,
-                };
-                if let Some(tuple) = tuple {
-                    co.yield_(Ok(tuple)).await;
+
+                    self.state = NestedLoopJoinState::End;
+                    return Ok(None);
+                }
+                NestedLoopJoinState::End => {
+                    self.state = NestedLoopJoinState::End;
+                    return Ok(None);
                 }
             }
-
-            if matches!(ty, JoinType::Full) {
-                for idx in first_matches.into_iter() {
-                    bitmap.as_mut().unwrap().insert(idx);
-                }
-
-                let mut right_coroutine = build_read(right_input.clone(), cache, transaction);
-                for (idx, right_tuple) in right_coroutine.by_ref().enumerate() {
-                    if !bitmap.as_ref().unwrap().contains(idx) {
-                        let mut right_tuple: Tuple = throw!(co, right_tuple);
-                        let mut values = vec![DataValue::Null; left_schema_len];
-                        values.append(&mut right_tuple.values);
-
-                        co.yield_(Ok(Tuple::new(right_tuple.pk, values))).await;
-                    }
-                }
-            }
-        })
+        }
     }
-}
 
-impl NestedLoopJoin {
     /// Emit a tuple according to the join type.
     ///
     /// `left_tuple`: left tuple to be included.
@@ -381,13 +504,11 @@ impl NestedLoopJoin {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
-
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::db::{DataBaseBuilder, ResultIter};
     use crate::execution::dql::test::build_integers;
     use crate::execution::{try_collect, ReadExecutor};
-    use crate::expression::ScalarExpression;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
     use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
@@ -398,12 +519,10 @@ mod test {
     use crate::storage::Storage;
     use crate::types::evaluator::int32::Int32GtBinaryEvaluator;
     use crate::types::evaluator::BinaryEvaluatorBox;
-    use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use crate::utils::lru::SharedLruCache;
     use std::collections::HashSet;
     use std::hash::RandomState;
-    use std::sync::Arc;
     use tempfile::TempDir;
 
     fn optimize_exprs(plan: LogicalPlan) -> Result<LogicalPlan, DatabaseError> {
@@ -593,8 +712,14 @@ mod test {
         let tuples = try_collect(executor)?;
 
         let mut expected_set = HashSet::with_capacity(1);
-        let tuple = build_integers(vec![Some(1), Some(2), Some(5), Some(0), Some(2), Some(4)]);
-        expected_set.insert(tuple);
+        expected_set.insert(build_integers(vec![
+            Some(1),
+            Some(2),
+            Some(5),
+            Some(0),
+            Some(2),
+            Some(4),
+        ]));
 
         valid_result(&mut expected_set, &tuples);
 
@@ -638,15 +763,38 @@ mod test {
         );
 
         let mut expected_set = HashSet::with_capacity(4);
-        let tuple = build_integers(vec![Some(0), Some(2), Some(4), None, None, None]);
-        expected_set.insert(tuple);
-        let tuple = build_integers(vec![Some(1), Some(2), Some(5), Some(0), Some(2), Some(4)]);
-        expected_set.insert(tuple);
-
-        let tuple = build_integers(vec![Some(1), Some(3), Some(5), None, None, None]);
-        expected_set.insert(tuple);
-        let tuple = build_integers(vec![Some(3), Some(5), Some(7), None, None, None]);
-        expected_set.insert(tuple);
+        expected_set.insert(build_integers(vec![
+            Some(0),
+            Some(2),
+            Some(4),
+            None,
+            None,
+            None,
+        ]));
+        expected_set.insert(build_integers(vec![
+            Some(1),
+            Some(2),
+            Some(5),
+            Some(0),
+            Some(2),
+            Some(4),
+        ]));
+        expected_set.insert(build_integers(vec![
+            Some(1),
+            Some(3),
+            Some(5),
+            None,
+            None,
+            None,
+        ]));
+        expected_set.insert(build_integers(vec![
+            Some(3),
+            Some(5),
+            Some(7),
+            None,
+            None,
+            None,
+        ]));
 
         valid_result(&mut expected_set, &tuples);
 
@@ -685,9 +833,14 @@ mod test {
         let tuples = try_collect(executor)?;
 
         let mut expected_set = HashSet::with_capacity(1);
-
-        let tuple = build_integers(vec![Some(1), Some(2), Some(5), Some(0), Some(2), Some(4)]);
-        expected_set.insert(tuple);
+        expected_set.insert(build_integers(vec![
+            Some(1),
+            Some(2),
+            Some(5),
+            Some(0),
+            Some(2),
+            Some(4),
+        ]));
 
         valid_result(&mut expected_set, &tuples);
 
@@ -726,13 +879,30 @@ mod test {
         let tuples = try_collect(executor)?;
 
         let mut expected_set = HashSet::with_capacity(3);
-
-        let tuple = build_integers(vec![Some(0), Some(2), Some(4), Some(0), Some(2), Some(4)]);
-        expected_set.insert(tuple);
-        let tuple = build_integers(vec![Some(1), Some(2), Some(5), Some(0), Some(2), Some(4)]);
-        expected_set.insert(tuple);
-        let tuple = build_integers(vec![Some(1), Some(3), Some(5), Some(1), Some(3), Some(5)]);
-        expected_set.insert(tuple);
+        expected_set.insert(build_integers(vec![
+            Some(0),
+            Some(2),
+            Some(4),
+            Some(0),
+            Some(2),
+            Some(4),
+        ]));
+        expected_set.insert(build_integers(vec![
+            Some(1),
+            Some(2),
+            Some(5),
+            Some(0),
+            Some(2),
+            Some(4),
+        ]));
+        expected_set.insert(build_integers(vec![
+            Some(1),
+            Some(3),
+            Some(5),
+            Some(1),
+            Some(3),
+            Some(5),
+        ]));
 
         valid_result(&mut expected_set, &tuples);
         Ok(())
@@ -886,14 +1056,137 @@ mod test {
         let tuples = try_collect(executor)?;
 
         let mut expected_set = HashSet::with_capacity(4);
-        let tuple = build_integers(vec![Some(1), Some(2), Some(5), Some(0), Some(2), Some(4)]);
-        expected_set.insert(tuple);
-        let tuple = build_integers(vec![None, None, None, Some(1), Some(3), Some(5)]);
-        expected_set.insert(tuple);
-        let tuple = build_integers(vec![None, None, None, Some(1), Some(1), Some(1)]);
-        expected_set.insert(tuple);
-        let tuple = build_integers(vec![None, None, None, Some(4), Some(6), Some(8)]);
-        expected_set.insert(tuple);
+        expected_set.insert(build_integers(vec![
+            Some(1),
+            Some(2),
+            Some(5),
+            Some(0),
+            Some(2),
+            Some(4),
+        ]));
+        expected_set.insert(build_integers(vec![
+            None,
+            None,
+            None,
+            Some(1),
+            Some(3),
+            Some(5),
+        ]));
+        expected_set.insert(build_integers(vec![
+            None,
+            None,
+            None,
+            Some(1),
+            Some(1),
+            Some(1),
+        ]));
+        expected_set.insert(build_integers(vec![
+            None,
+            None,
+            None,
+            Some(4),
+            Some(6),
+            Some(8),
+        ]));
+
+        valid_result(&mut expected_set, &tuples);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_nested_full_join() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let storage = RocksStorage::new(temp_dir.path())?;
+        let mut transaction = storage.transaction()?;
+        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let (keys, left, right, filter) = build_join_values(true);
+        let plan = LogicalPlan::new(
+            Operator::Join(JoinOperator {
+                on: JoinCondition::On {
+                    on: keys,
+                    filter: Some(filter),
+                },
+                join_type: JoinType::Full,
+            }),
+            Childrens::Twins {
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        );
+        let plan = optimize_exprs(plan)?;
+        let Operator::Join(op) = plan.operator else {
+            unreachable!()
+        };
+        let (left, right) = plan.childrens.pop_twins();
+        let executor = NestedLoopJoin::from((op, left, right))
+            .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
+        let tuples = try_collect(executor)?;
+
+        assert_eq!(
+            tuples[0].values,
+            build_integers(vec![Some(0), Some(2), Some(4), None, None, None])
+        );
+
+        let mut expected_set = HashSet::with_capacity(7);
+        expected_set.insert(build_integers(vec![
+            Some(0),
+            Some(2),
+            Some(4),
+            None,
+            None,
+            None,
+        ]));
+        expected_set.insert(build_integers(vec![
+            Some(1),
+            Some(2),
+            Some(5),
+            Some(0),
+            Some(2),
+            Some(4),
+        ]));
+        expected_set.insert(build_integers(vec![
+            Some(1),
+            Some(3),
+            Some(5),
+            None,
+            None,
+            None,
+        ]));
+        expected_set.insert(build_integers(vec![
+            Some(3),
+            Some(5),
+            Some(7),
+            None,
+            None,
+            None,
+        ]));
+        expected_set.insert(build_integers(vec![
+            None,
+            None,
+            None,
+            Some(1),
+            Some(3),
+            Some(5),
+        ]));
+        expected_set.insert(build_integers(vec![
+            None,
+            None,
+            None,
+            Some(4),
+            Some(6),
+            Some(8),
+        ]));
+        expected_set.insert(build_integers(vec![
+            None,
+            None,
+            None,
+            Some(1),
+            Some(1),
+            Some(1),
+        ]));
 
         valid_result(&mut expected_set, &tuples);
 
@@ -986,64 +1279,6 @@ mod test {
                 DataValue::Int32(2)
             ]
         );
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_nested_full_join() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let (keys, left, right, filter) = build_join_values(true);
-        let plan = LogicalPlan::new(
-            Operator::Join(JoinOperator {
-                on: JoinCondition::On {
-                    on: keys,
-                    filter: Some(filter),
-                },
-                join_type: JoinType::Full,
-            }),
-            Childrens::Twins {
-                left: Box::new(left),
-                right: Box::new(right),
-            },
-        );
-        let plan = optimize_exprs(plan)?;
-        let Operator::Join(op) = plan.operator else {
-            unreachable!()
-        };
-        let (left, right) = plan.childrens.pop_twins();
-        let executor = NestedLoopJoin::from((op, left, right))
-            .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
-        let tuples = try_collect(executor)?;
-
-        assert_eq!(
-            tuples[0].values,
-            build_integers(vec![Some(0), Some(2), Some(4), None, None, None])
-        );
-
-        let mut expected_set = HashSet::with_capacity(7);
-        let tuple = build_integers(vec![Some(0), Some(2), Some(4), None, None, None]);
-        expected_set.insert(tuple);
-        let tuple = build_integers(vec![Some(1), Some(2), Some(5), Some(0), Some(2), Some(4)]);
-        expected_set.insert(tuple);
-
-        let tuple = build_integers(vec![Some(1), Some(3), Some(5), None, None, None]);
-        expected_set.insert(tuple);
-        let tuple = build_integers(vec![Some(3), Some(5), Some(7), None, None, None]);
-        expected_set.insert(tuple);
-        let tuple = build_integers(vec![None, None, None, Some(1), Some(3), Some(5)]);
-        expected_set.insert(tuple);
-        let tuple = build_integers(vec![None, None, None, Some(4), Some(6), Some(8)]);
-        expected_set.insert(tuple);
-        let tuple = build_integers(vec![None, None, None, Some(1), Some(1), Some(1)]);
-        expected_set.insert(tuple);
-
-        valid_result(&mut expected_set, &tuples);
 
         Ok(())
     }

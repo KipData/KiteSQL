@@ -12,46 +12,52 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::execution::{spawn_executor, Executor, WriteExecutor};
+use crate::errors::DatabaseError;
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
 use crate::planner::operator::drop_view::DropViewOperator;
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::throw;
+use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
 
 pub struct DropView {
-    op: DropViewOperator,
+    op: Option<DropViewOperator>,
 }
 
 impl From<DropViewOperator> for DropView {
     fn from(op: DropViewOperator) -> Self {
-        DropView { op }
+        DropView { op: Some(op) }
     }
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropView {
-    fn execute_mut(
+    fn into_executor(
         self,
-        (table_cache, view_cache, _): (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
-        transaction: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let DropViewOperator {
-                view_name,
-                if_exists,
-            } = self.op;
+        arena: &mut ExecArena<'a, T>,
+        _: ExecutionCaches<'a>,
+        _: *mut T,
+    ) -> ExecId {
+        arena.push(ExecNode::DropView(self))
+    }
+}
 
-            throw!(
-                co,
-                unsafe { &mut (*transaction) }.drop_view(
-                    view_cache,
-                    table_cache,
-                    view_name.clone(),
-                    if_exists
-                )
-            );
+impl DropView {
+    pub(crate) fn next_tuple<'a, T: Transaction>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> Result<Option<crate::types::tuple::Tuple>, DatabaseError> {
+        let Some(DropViewOperator {
+            view_name,
+            if_exists,
+        }) = self.op.take()
+        else {
+            return Ok(None);
+        };
 
-            co.yield_(Ok(TupleBuilder::build_result(format!("{view_name}"))))
-                .await;
-        })
+        let table_cache = arena.table_cache();
+        let view_cache = arena.view_cache();
+        arena
+            .transaction_mut()
+            .drop_view(view_cache, table_cache, view_name.clone(), if_exists)?;
+
+        Ok(Some(TupleBuilder::build_result(format!("{view_name}"))))
     }
 }

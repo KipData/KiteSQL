@@ -15,91 +15,58 @@
 use crate::binder::copy::FileFormat;
 use crate::catalog::PrimaryKeyIndices;
 use crate::errors::DatabaseError;
-use crate::execution::{spawn_executor, Executor, WriteExecutor};
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
 use crate::planner::operator::copy_from_file::CopyFromFileOperator;
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::throw;
+use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use crate::types::tuple_builder::TupleBuilder;
 use itertools::Itertools;
 use std::fs::File;
 use std::io::BufReader;
-use std::sync::mpsc;
-use std::sync::mpsc::Sender;
-use std::thread;
 
 pub struct CopyFromFile {
-    op: CopyFromFileOperator,
-    size: usize,
+    op: Option<CopyFromFileOperator>,
 }
 
 impl From<CopyFromFileOperator> for CopyFromFile {
     fn from(op: CopyFromFileOperator) -> Self {
-        CopyFromFile { op, size: 0 }
+        CopyFromFile { op: Some(op) }
     }
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CopyFromFile {
-    fn execute_mut(
+    fn into_executor(
         self,
-        (table_cache, _, _): (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
-        transaction: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let serializers = self
-                .op
-                .schema_ref
-                .iter()
-                .map(|column| column.datatype().serializable())
-                .collect_vec();
-            let (tx, rx) = mpsc::channel();
-            let (tx1, rx1) = mpsc::channel();
-            let table = throw!(
-                co,
-                throw!(
-                    co,
-                    unsafe { &mut (*transaction) }.table(table_cache, self.op.table.clone())
-                )
-                .ok_or(DatabaseError::TableNotFound)
-            );
-            let primary_keys_indices = table.primary_keys_indices().clone();
-            let handle = thread::spawn(|| self.read_file_blocking(tx, primary_keys_indices));
-            let mut size = 0_usize;
-            while let Ok(chunk) = rx.recv() {
-                throw!(
-                    co,
-                    unsafe { &mut (*transaction) }.append_tuple(
-                        table.name(),
-                        chunk,
-                        &serializers,
-                        false
-                    )
-                );
-                size += 1;
-            }
-            throw!(co, handle.join().unwrap());
-
-            let handle = thread::spawn(move || return_result(size, tx1));
-            while let Ok(chunk) = rx1.recv() {
-                co.yield_(Ok(chunk)).await;
-            }
-            throw!(co, handle.join().unwrap())
-        })
+        arena: &mut ExecArena<'a, T>,
+        _: ExecutionCaches<'a>,
+        _: *mut T,
+    ) -> ExecId {
+        arena.push(ExecNode::CopyFromFile(self))
     }
 }
 
 impl CopyFromFile {
-    /// Read records from file using blocking IO.
-    ///
-    /// The read data chunks will be sent through `tx`.
-    fn read_file_blocking(
-        mut self,
-        tx: Sender<Tuple>,
-        pk_indices: PrimaryKeyIndices,
-    ) -> Result<(), DatabaseError> {
-        let file = File::open(self.op.source.path)?;
+    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> Result<Option<Tuple>, DatabaseError> {
+        let Some(op) = self.op.take() else {
+            return Ok(None);
+        };
+        let serializers = op
+            .schema_ref
+            .iter()
+            .map(|column| column.datatype().serializable())
+            .collect_vec();
+        let table = arena
+            .transaction_mut()
+            .table(arena.table_cache(), op.table.clone())?
+            .ok_or(DatabaseError::TableNotFound)?;
+        let primary_keys_indices = table.primary_keys_indices().clone();
+
+        let file = File::open(op.source.path)?;
         let mut buf_reader = BufReader::new(file);
-        let mut reader = match self.op.source.format {
+        let mut reader = match op.source.format {
             FileFormat::Csv {
                 delimiter,
                 quote,
@@ -113,11 +80,11 @@ impl CopyFromFile {
                 .from_reader(&mut buf_reader),
         };
 
-        let column_count = self.op.schema_ref.len();
-        let tuple_builder = TupleBuilder::new(&self.op.schema_ref, Some(&pk_indices));
+        let column_count = op.schema_ref.len();
+        let tuple_builder = TupleBuilder::new(&op.schema_ref, Some(&primary_keys_indices));
+        let mut size = 0_usize;
 
         for record in reader.records() {
-            // read records and push raw str rows into data chunk builder
             let record = record?;
 
             if !(record.len() == column_count
@@ -126,19 +93,58 @@ impl CopyFromFile {
                 return Err(DatabaseError::MisMatch("columns", "values"));
             }
 
-            self.size += 1;
+            let chunk = tuple_builder.build_with_row(record.iter())?;
+            arena
+                .transaction_mut()
+                .append_tuple(table.name(), chunk, &serializers, false)?;
+            size += 1;
+        }
+
+        Ok(Some(TupleBuilder::build_result(size.to_string())))
+    }
+
+    #[allow(dead_code)]
+    fn read_file_blocking(
+        mut self,
+        tx: std::sync::mpsc::Sender<Tuple>,
+        pk_indices: PrimaryKeyIndices,
+    ) -> Result<(), DatabaseError> {
+        let Some(op) = self.op.take() else {
+            return Ok(());
+        };
+        let file = File::open(op.source.path)?;
+        let mut buf_reader = BufReader::new(file);
+        let mut reader = match op.source.format {
+            FileFormat::Csv {
+                delimiter,
+                quote,
+                escape,
+                header,
+            } => csv::ReaderBuilder::new()
+                .delimiter(delimiter as u8)
+                .quote(quote as u8)
+                .escape(escape.map(|c| c as u8))
+                .has_headers(header)
+                .from_reader(&mut buf_reader),
+        };
+
+        let column_count = op.schema_ref.len();
+        let tuple_builder = TupleBuilder::new(&op.schema_ref, Some(&pk_indices));
+
+        for record in reader.records() {
+            let record = record?;
+
+            if !(record.len() == column_count
+                || record.len() == column_count + 1 && record.get(column_count) == Some(""))
+            {
+                return Err(DatabaseError::MisMatch("columns", "values"));
+            }
+
             tx.send(tuple_builder.build_with_row(record.iter())?)
                 .map_err(|_| DatabaseError::ChannelClose)?;
         }
         Ok(())
     }
-}
-
-fn return_result(size: usize, tx: Sender<Tuple>) -> Result<(), DatabaseError> {
-    let tuple = TupleBuilder::build_result(size.to_string());
-
-    tx.send(tuple).map_err(|_| DatabaseError::ChannelClose)?;
-    Ok(())
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -223,19 +229,15 @@ mod tests {
             },
             schema_ref: Arc::new(columns),
         };
-        let executor = CopyFromFile {
-            op: op.clone(),
-            size: 0,
-        };
 
-        let temp_dir = TempDir::new().unwrap();
-        let db = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        let tmp_dir = TempDir::new()?;
+        let db = DataBaseBuilder::path(tmp_dir.path()).build_rocksdb()?;
         db.run("create table test_copy (a int primary key, b float, c varchar(10))")?
             .done()?;
+
         let storage = db.storage;
         let mut transaction = storage.transaction()?;
-
-        let mut executor_iter = executor.execute_mut(
+        let mut executor = CopyFromFile::from(op).execute_mut(
             (
                 db.state.table_cache(),
                 db.state.view_cache(),
@@ -243,11 +245,9 @@ mod tests {
             ),
             &mut transaction,
         );
-        let tuple = executor_iter
-            .next()
-            .expect("executor should yield once")
-            .unwrap();
-        assert_eq!(tuple, TupleBuilder::build_result(2.to_string()));
+
+        let result = executor.next().expect("copy from file should yield once")?;
+        assert_eq!(result.values[0].to_string(), "2");
 
         Ok(())
     }

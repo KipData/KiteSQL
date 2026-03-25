@@ -12,14 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::execution::{build_read, spawn_executor, Executor, ReadExecutor};
+use crate::errors::DatabaseError;
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
 use crate::planner::operator::limit::LimitOperator;
 use crate::planner::LogicalPlan;
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
+use crate::storage::Transaction;
 pub struct Limit {
     offset: Option<usize>,
     limit: Option<usize>,
-    input: LogicalPlan,
+    input_plan: Option<LogicalPlan>,
+    input: ExecId,
+    skipped: usize,
+    emitted: usize,
 }
 
 impl From<(LimitOperator, LogicalPlan)> for Limit {
@@ -27,44 +31,57 @@ impl From<(LimitOperator, LogicalPlan)> for Limit {
         Limit {
             offset,
             limit,
-            input,
+            input_plan: Some(input),
+            input: 0,
+            skipped: 0,
+            emitted: 0,
         }
     }
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Limit {
-    fn execute(
-        self,
-        cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
+    fn into_executor(
+        mut self,
+        arena: &mut ExecArena<'a, T>,
+        cache: ExecutionCaches<'a>,
         transaction: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let Limit {
-                offset,
-                limit,
-                input,
-            } = self;
+    ) -> ExecId {
+        self.input = build_read(
+            arena,
+            self.input_plan
+                .take()
+                .expect("limit input plan initialized"),
+            cache,
+            transaction,
+        );
+        arena.push(ExecNode::Limit(self))
+    }
+}
 
-            if limit.is_some() && limit.unwrap() == 0 {
-                return;
+impl Limit {
+    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> Result<Option<crate::types::tuple::Tuple>, DatabaseError> {
+        let offset = self.offset.unwrap_or(0);
+        let limit = self.limit.unwrap_or(usize::MAX);
+
+        if limit == 0 || self.emitted >= limit {
+            return Ok(None);
+        }
+
+        loop {
+            let Some(tuple) = arena.next_tuple(self.input)? else {
+                return Ok(None);
+            };
+
+            if self.skipped < offset {
+                self.skipped += 1;
+                continue;
             }
 
-            let offset_val = offset.unwrap_or(0);
-            let offset_limit = offset_val.saturating_add(limit.unwrap_or(usize::MAX)) - 1;
-
-            let mut i = 0;
-            let executor = build_read(input, cache, transaction);
-
-            for tuple in executor {
-                i += 1;
-                if i - 1 < offset_val {
-                    continue;
-                } else if i - 1 > offset_limit {
-                    break;
-                }
-
-                co.yield_(tuple).await;
-            }
-        })
+            self.emitted += 1;
+            return Ok(Some(tuple));
+        }
     }
 }

@@ -12,30 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::execution::{spawn_executor, Executor, ReadExecutor};
+use crate::errors::DatabaseError;
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
 use crate::expression::range_detacher::Range;
 use crate::planner::operator::table_scan::TableScanOperator;
-use crate::storage::{Iter, StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::throw;
+use crate::storage::{IndexIter, Iter, Transaction};
 use crate::types::index::IndexMetaRef;
 use crate::types::serialize::TupleValueSerializableImpl;
 
-pub(crate) struct IndexScan {
-    op: TableScanOperator,
+pub(crate) struct IndexScan<'a, T: Transaction + 'a> {
+    op: Option<TableScanOperator>,
     index_by: IndexMetaRef,
     ranges: Vec<Range>,
     covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
     cover_mapping: Option<Vec<usize>>,
+    iter: Option<IndexIter<'a, T>>,
 }
 
-impl
+impl<'a, T: Transaction + 'a>
     From<(
         TableScanOperator,
         IndexMetaRef,
         Range,
         Option<Vec<TupleValueSerializableImpl>>,
         Option<Vec<usize>>,
-    )> for IndexScan
+    )> for IndexScan<'a, T>
 {
     fn from(
         (op, index_by, range, covered_deserializers, cover_mapping): (
@@ -52,48 +53,59 @@ impl
         };
 
         IndexScan {
-            op,
+            op: Some(op),
             index_by,
             ranges,
             covered_deserializers,
             cover_mapping,
+            iter: None,
         }
     }
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for IndexScan {
-    fn execute(
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for IndexScan<'a, T> {
+    fn into_executor(
         self,
-        (table_cache, _, _): (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
-        transaction: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let TableScanOperator {
+        arena: &mut ExecArena<'a, T>,
+        _: ExecutionCaches<'a>,
+        _: *mut T,
+    ) -> ExecId {
+        arena.push(ExecNode::IndexScan(self))
+    }
+}
+
+impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
+    pub(crate) fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> Result<Option<crate::types::tuple::Tuple>, DatabaseError> {
+        if self.iter.is_none() {
+            let Some(TableScanOperator {
                 table_name,
                 columns,
                 limit,
                 with_pk,
                 ..
-            } = self.op;
+            }) = self.op.take()
+            else {
+                return Ok(None);
+            };
+            self.iter = Some(arena.transaction().read_by_index(
+                arena.table_cache(),
+                table_name,
+                limit,
+                columns,
+                self.index_by.clone(),
+                std::mem::take(&mut self.ranges),
+                with_pk,
+                self.covered_deserializers.take(),
+                self.cover_mapping.take(),
+            )?);
+        }
 
-            let mut iter = throw!(
-                co,
-                unsafe { &(*transaction) }.read_by_index(
-                    table_cache,
-                    table_name,
-                    limit,
-                    columns,
-                    self.index_by,
-                    self.ranges,
-                    with_pk,
-                    self.covered_deserializers,
-                    self.cover_mapping,
-                )
-            );
-
-            while let Some(tuple) = throw!(co, iter.next_tuple()) {
-                co.yield_(Ok(tuple)).await;
-            }
-        })
+        self.iter
+            .as_mut()
+            .expect("index scan iterator initialized")
+            .next_tuple()
     }
 }

@@ -13,33 +13,41 @@
 // limitations under the License.
 
 use crate::catalog::view::View;
-use crate::execution::{spawn_executor, Executor, ReadExecutor};
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::throw;
+use crate::errors::DatabaseError;
+use crate::execution::ExecArena;
+use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use crate::types::value::{DataValue, Utf8Type};
 use sqlparser::ast::CharLengthUnits;
 
-pub struct ShowViews;
+pub struct ShowViews {
+    pub(crate) metas: Option<std::vec::IntoIter<View>>,
+}
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ShowViews {
-    fn execute(
-        self,
-        (table_cache, _, _): (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
-        transaction: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let metas = throw!(co, unsafe { &mut (*transaction) }.views(table_cache));
+impl ShowViews {
+    pub(crate) fn next_tuple<'a, T: Transaction>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> Result<Option<Tuple>, DatabaseError> {
+        if self.metas.is_none() {
+            self.metas = Some(
+                arena
+                    .transaction_mut()
+                    .views(arena.table_cache())?
+                    .into_iter(),
+            );
+        }
 
-            for View { name, .. } in metas {
-                let values = vec![DataValue::Utf8 {
-                    value: name.to_string(),
-                    ty: Utf8Type::Variable(None),
-                    unit: CharLengthUnits::Characters,
-                }];
+        let Some(View { name, .. }) = self.metas.as_mut().and_then(|metas| metas.next()) else {
+            return Ok(None);
+        };
 
-                co.yield_(Ok(Tuple::new(None, values))).await;
-            }
-        })
+        let values = vec![DataValue::Utf8 {
+            value: name.to_string(),
+            ty: Utf8Type::Variable(None),
+            unit: CharLengthUnits::Characters,
+        }];
+
+        Ok(Some(Tuple::new(None, values)))
     }
 }
