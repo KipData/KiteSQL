@@ -14,7 +14,7 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 mod app {
-    use kite_sql::db::{DataBaseBuilder, ResultIter};
+    use kite_sql::db::DataBaseBuilder;
     use kite_sql::errors::DatabaseError;
     use kite_sql::types::tuple::Tuple;
     use kite_sql::types::value::DataValue;

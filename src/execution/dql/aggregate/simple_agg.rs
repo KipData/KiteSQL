@@ -19,7 +19,7 @@ use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
-use crate::types::tuple::{SchemaRef, Tuple};
+use crate::types::tuple::SchemaRef;
 use crate::types::value::DataValue;
 use itertools::Itertools;
 
@@ -66,20 +66,24 @@ impl SimpleAggExecutor {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<Tuple>, DatabaseError> {
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
         let Some(input) = self.input.take() else {
-            return Ok(None);
+            arena.finish();
+            return Ok(());
         };
 
         let mut accs = create_accumulators(&self.agg_calls)?;
 
-        while let Some(tuple) = arena.next_tuple(input)? {
+        while arena.next_tuple(input)? {
+            let tuple = arena.result_tuple();
             let values: Vec<DataValue> = self
                 .agg_calls
                 .iter()
                 .map(|expr| match expr {
                     ScalarExpression::AggCall { args, .. } => {
-                        args[0].eval(Some((&tuple, &self.input_schema)))
+                        args[0].eval(Some((tuple, &self.input_schema)))
                     }
                     _ => unreachable!(),
                 })
@@ -90,7 +94,10 @@ impl SimpleAggExecutor {
             }
         }
 
-        let values = accs.into_iter().map(|acc| acc.evaluate()).try_collect()?;
-        Ok(Some(Tuple::new(None, values)))
+        let output = arena.result_tuple_mut();
+        output.pk = None;
+        output.values = accs.into_iter().map(|acc| acc.evaluate()).try_collect()?;
+        arena.resume();
+        Ok(())
     }
 }

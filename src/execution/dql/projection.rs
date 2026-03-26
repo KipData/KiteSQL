@@ -27,6 +27,7 @@ pub struct Projection {
     input_schema: SchemaRef,
     input_plan: Option<LogicalPlan>,
     input: ExecId,
+    scratch: Tuple,
 }
 
 impl From<(ProjectOperator, LogicalPlan)> for Projection {
@@ -36,6 +37,7 @@ impl From<(ProjectOperator, LogicalPlan)> for Projection {
             input_schema: input.output_schema().clone(),
             input_plan: Some(input),
             input: 0,
+            scratch: Tuple::default(),
         }
     }
 }
@@ -63,12 +65,27 @@ impl Projection {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<Tuple>, DatabaseError> {
-        let Some(tuple) = arena.next_tuple(self.input)? else {
-            return Ok(None);
-        };
-        let values = Self::projection(&tuple, &self.exprs, &self.input_schema)?;
-        Ok(Some(Tuple::new(tuple.pk, values)))
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
+        if !arena.next_tuple(self.input)? {
+            arena.finish();
+            return Ok(());
+        }
+
+        std::mem::swap(&mut self.scratch, arena.result_tuple_mut());
+        let tuple = &self.scratch;
+        let output = arena.result_tuple_mut();
+        output.pk.clone_from(&tuple.pk);
+        output.values.clear();
+        output.values.reserve(self.exprs.len());
+        for expr in self.exprs.iter() {
+            output
+                .values
+                .push(expr.eval(Some((tuple, &self.input_schema)))?);
+        }
+        arena.resume();
+        Ok(())
     }
 
     pub fn projection(

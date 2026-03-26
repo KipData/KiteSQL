@@ -151,7 +151,7 @@ impl Transaction for MemoryTransaction {
 mod wasm_tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
-    use crate::db::{DataBaseBuilder, ResultIter};
+    use crate::db::DataBaseBuilder;
     use crate::expression::range_detacher::Range;
     use crate::storage::Iter;
     use crate::types::tuple::Tuple;
@@ -285,7 +285,7 @@ mod wasm_tests {
 mod native_tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
-    use crate::db::{DataBaseBuilder, ResultIter};
+    use crate::db::DataBaseBuilder;
     use crate::expression::range_detacher::Range;
     use crate::storage::Iter;
     use crate::types::tuple::Tuple;

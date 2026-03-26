@@ -47,13 +47,21 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for FunctionScan {
 impl FunctionScan {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
-        _: &mut ExecArena<'a, T>,
-    ) -> Result<Option<Tuple>, DatabaseError> {
+        arena: &mut ExecArena<'a, T>,
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
         if self.iter.is_none() {
             let TableFunction { args, inner } = &self.table_function;
             self.iter = Some(inner.eval(args)?);
         }
 
-        self.iter.as_mut().and_then(Iterator::next).transpose()
+        let tuple = self.iter.as_mut().and_then(Iterator::next).transpose()?;
+        let Some(tuple) = tuple else {
+            arena.finish();
+            return Ok(());
+        };
+        arena.produce_tuple(tuple);
+        Ok(())
     }
 }

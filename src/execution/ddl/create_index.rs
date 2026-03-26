@@ -21,7 +21,6 @@ use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::index::Index;
 use crate::types::tuple::SchemaRef;
-use crate::types::tuple::Tuple;
 use crate::types::tuple_builder::TupleBuilder;
 use crate::types::value::DataValue;
 use crate::types::ColumnId;
@@ -67,7 +66,9 @@ impl CreateIndex {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<Tuple>, DatabaseError> {
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
         let table_cache = arena.table_cache();
 
         let Some(CreateIndexOperator {
@@ -78,7 +79,8 @@ impl CreateIndex {
             ty,
         }) = self.op.take()
         else {
-            return Ok(None);
+            arena.finish();
+            return Ok(());
         };
 
         let (column_ids, column_exprs): (Vec<ColumnId>, Vec<ScalarExpression>) = columns
@@ -102,7 +104,8 @@ impl CreateIndex {
             Ok(index_id) => index_id,
             Err(DatabaseError::DuplicateIndex(index_name)) => {
                 if if_not_exists {
-                    return Ok(None);
+                    arena.finish();
+                    return Ok(());
                 } else {
                     return Err(DatabaseError::DuplicateIndex(index_name));
                 }
@@ -110,25 +113,29 @@ impl CreateIndex {
             Err(err) => return Err(err),
         };
 
-        while let Some(tuple) = arena.next_tuple(self.input)? {
-            let Some(value) = DataValue::values_to_tuple(Projection::projection(
-                &tuple,
-                &column_exprs,
-                &self.input_schema,
-            )?) else {
-                continue;
-            };
-            let tuple_id = if let Some(tuple_id) = tuple.pk.as_ref() {
-                tuple_id
-            } else {
-                continue;
+        while arena.next_tuple(self.input)? {
+            let (value, tuple_pk) = {
+                let tuple = arena.result_tuple();
+                let Some(value) = DataValue::values_to_tuple(Projection::projection(
+                    tuple,
+                    &column_exprs,
+                    &self.input_schema,
+                )?) else {
+                    continue;
+                };
+                let Some(tuple_pk) = tuple.pk.clone() else {
+                    continue;
+                };
+                (value, tuple_pk)
             };
             let index = Index::new(index_id, &value, ty);
             arena
                 .transaction_mut()
-                .add_index(table_name.as_ref(), index, tuple_id)?;
+                .add_index(table_name.as_ref(), index, &tuple_pk)?;
         }
 
-        Ok(Some(TupleBuilder::build_result("1".to_string())))
+        TupleBuilder::build_result_into(arena.result_tuple_mut(), "1".to_string());
+        arena.resume();
+        Ok(())
     }
 }

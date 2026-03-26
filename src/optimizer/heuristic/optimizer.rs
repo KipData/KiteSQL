@@ -552,7 +552,7 @@ impl ImplementationRuleIndex {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::binder::{Binder, BinderContext};
-    use crate::db::{DataBaseBuilder, ResultIter};
+    use crate::db::DataBaseBuilder;
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
     use crate::expression::ScalarExpression;

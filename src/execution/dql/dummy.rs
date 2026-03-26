@@ -43,8 +43,15 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Dummy {
 impl Dummy {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
-        _: &mut ExecArena<'a, T>,
-    ) -> Result<Option<Tuple>, DatabaseError> {
-        Ok(self.row.take())
+        arena: &mut ExecArena<'a, T>,
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
+        let Some(row) = self.row.take() else {
+            arena.finish();
+            return Ok(());
+        };
+        arena.produce_tuple(row);
+        Ok(())
     }
 }

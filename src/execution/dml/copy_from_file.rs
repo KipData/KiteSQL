@@ -49,9 +49,12 @@ impl CopyFromFile {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<Tuple>, DatabaseError> {
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
         let Some(op) = self.op.take() else {
-            return Ok(None);
+            arena.finish();
+            return Ok(());
         };
         let serializers = op
             .schema_ref
@@ -100,7 +103,9 @@ impl CopyFromFile {
             size += 1;
         }
 
-        Ok(Some(TupleBuilder::build_result(size.to_string())))
+        TupleBuilder::build_result_into(arena.result_tuple_mut(), size.to_string());
+        arena.resume();
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -152,7 +157,7 @@ mod tests {
     use super::*;
     use crate::binder::copy::ExtSource;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation, ColumnSummary};
-    use crate::db::{DataBaseBuilder, ResultIter};
+    use crate::db::DataBaseBuilder;
     use crate::errors::DatabaseError;
     use crate::storage::Storage;
     use crate::types::LogicalType;

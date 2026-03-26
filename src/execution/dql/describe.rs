@@ -12,12 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::{ColumnCatalog, TableName};
+use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
 use crate::errors::DatabaseError;
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
 use crate::planner::operator::describe::DescribeOperator;
 use crate::storage::Transaction;
-use crate::types::tuple::Tuple;
 use crate::types::value::{DataValue, Utf8Type};
 use sqlparser::ast::CharLengthUnits;
 use std::sync::LazyLock;
@@ -42,14 +41,16 @@ static EMPTY_KEY_TYPE: LazyLock<DataValue> = LazyLock::new(|| DataValue::Utf8 {
 
 pub struct Describe {
     table_name: TableName,
-    rows: Option<std::vec::IntoIter<Tuple>>,
+    columns: Option<Vec<ColumnRef>>,
+    cursor: usize,
 }
 
 impl From<DescribeOperator> for Describe {
     fn from(op: DescribeOperator) -> Self {
         Describe {
             table_name: op.table_name,
-            rows: None,
+            columns: None,
+            cursor: 0,
         }
     }
 }
@@ -69,69 +70,85 @@ impl Describe {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<Tuple>, DatabaseError> {
-        if self.rows.is_none() {
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
+        if self.columns.is_none() {
             let table = arena
                 .transaction_mut()
                 .table(arena.table_cache(), self.table_name.clone())?
                 .ok_or(DatabaseError::TableNotFound)?;
-            let key_fn = |column: &ColumnCatalog| {
-                if column.desc().is_primary() {
-                    PRIMARY_KEY_TYPE.clone()
-                } else if column.desc().is_unique() {
-                    UNIQUE_KEY_TYPE.clone()
-                } else {
-                    EMPTY_KEY_TYPE.clone()
-                }
-            };
-
-            let rows = table
-                .columns()
-                .map(|column| {
-                    let datatype = column.datatype();
-                    let default = column
-                        .desc()
-                        .default
-                        .as_ref()
-                        .map(|expr| format!("{expr}"))
-                        .unwrap_or_else(|| "null".to_string());
-                    let values = vec![
-                        DataValue::Utf8 {
-                            value: column.name().to_string(),
-                            ty: Utf8Type::Variable(None),
-                            unit: CharLengthUnits::Characters,
-                        },
-                        DataValue::Utf8 {
-                            value: datatype.to_string(),
-                            ty: Utf8Type::Variable(None),
-                            unit: CharLengthUnits::Characters,
-                        },
-                        DataValue::Utf8 {
-                            value: datatype
-                                .raw_len()
-                                .map(|len| len.to_string())
-                                .unwrap_or_else(|| "variable".to_string()),
-                            ty: Utf8Type::Variable(None),
-                            unit: CharLengthUnits::Characters,
-                        },
-                        DataValue::Utf8 {
-                            value: column.nullable().to_string(),
-                            ty: Utf8Type::Variable(None),
-                            unit: CharLengthUnits::Characters,
-                        },
-                        key_fn(column),
-                        DataValue::Utf8 {
-                            value: default,
-                            ty: Utf8Type::Variable(None),
-                            unit: CharLengthUnits::Characters,
-                        },
-                    ];
-                    Tuple::new(None, values)
-                })
-                .collect::<Vec<_>>();
-            self.rows = Some(rows.into_iter());
+            self.columns = Some(table.columns().cloned().collect());
         }
 
-        Ok(self.rows.as_mut().and_then(std::iter::Iterator::next))
+        let Some(column) = self
+            .columns
+            .as_ref()
+            .and_then(|columns| columns.get(self.cursor))
+            .cloned()
+        else {
+            arena.finish();
+            return Ok(());
+        };
+
+        self.cursor += 1;
+
+        let output = arena.result_tuple_mut();
+        output.pk = None;
+        output.values.clear();
+        fill_describe_row(&mut output.values, &column);
+
+        arena.resume();
+        Ok(())
+    }
+}
+
+fn fill_describe_row(values: &mut Vec<DataValue>, column: &ColumnCatalog) {
+    let datatype = column.datatype();
+    let default = column
+        .desc()
+        .default
+        .as_ref()
+        .map(|expr| format!("{expr}"))
+        .unwrap_or_else(|| "null".to_string());
+
+    values.push(DataValue::Utf8 {
+        value: column.name().to_string(),
+        ty: Utf8Type::Variable(None),
+        unit: CharLengthUnits::Characters,
+    });
+    values.push(DataValue::Utf8 {
+        value: datatype.to_string(),
+        ty: Utf8Type::Variable(None),
+        unit: CharLengthUnits::Characters,
+    });
+    values.push(DataValue::Utf8 {
+        value: datatype
+            .raw_len()
+            .map(|len| len.to_string())
+            .unwrap_or_else(|| "variable".to_string()),
+        ty: Utf8Type::Variable(None),
+        unit: CharLengthUnits::Characters,
+    });
+    values.push(DataValue::Utf8 {
+        value: column.nullable().to_string(),
+        ty: Utf8Type::Variable(None),
+        unit: CharLengthUnits::Characters,
+    });
+    values.push(key_value(column));
+    values.push(DataValue::Utf8 {
+        value: default,
+        ty: Utf8Type::Variable(None),
+        unit: CharLengthUnits::Characters,
+    });
+}
+
+fn key_value(column: &ColumnCatalog) -> DataValue {
+    if column.desc().is_primary() {
+        PRIMARY_KEY_TYPE.clone()
+    } else if column.desc().is_unique() {
+        UNIQUE_KEY_TYPE.clone()
+    } else {
+        EMPTY_KEY_TYPE.clone()
     }
 }

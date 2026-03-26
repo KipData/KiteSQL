@@ -192,13 +192,13 @@ impl NestedLoopJoin {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<Tuple>, DatabaseError> {
+    ) -> Result<(), DatabaseError> {
         let mut state = std::mem::replace(&mut self.state, NestedLoopJoinState::End);
 
         loop {
             match state {
                 NestedLoopJoinState::PullLeft { right_bitmap } => {
-                    let Some(left_tuple) = arena.next_tuple(self.left_input)? else {
+                    if !arena.next_tuple(self.left_input)? {
                         if matches!(self.ty, JoinType::Full) {
                             state = NestedLoopJoinState::EmitRightUnmatched {
                                 right_input: self.build_right_input(arena),
@@ -208,8 +208,10 @@ impl NestedLoopJoin {
                             continue;
                         }
                         self.state = NestedLoopJoinState::End;
-                        return Ok(None);
-                    };
+                        arena.finish();
+                        return Ok(());
+                    }
+                    let left_tuple = arena.result_tuple().clone();
 
                     state = NestedLoopJoinState::ScanRight {
                         active_left: ActiveLeftState {
@@ -226,7 +228,8 @@ impl NestedLoopJoin {
                     mut active_left,
                     mut right_bitmap,
                 } => {
-                    while let Some(right_tuple) = arena.next_tuple(active_left.right_input)? {
+                    while arena.next_tuple(active_left.right_input)? {
+                        let right_tuple = arena.result_tuple().clone();
                         let idx = active_left.right_index;
                         active_left.right_index += 1;
 
@@ -305,7 +308,8 @@ impl NestedLoopJoin {
                                     right_bitmap,
                                 }
                             };
-                            return Ok(Some(tuple));
+                            arena.produce_tuple(tuple);
+                            return Ok(());
                         }
 
                         if matches!(self.ty, JoinType::LeftAnti) && active_left.has_matched {
@@ -360,7 +364,8 @@ impl NestedLoopJoin {
 
                     self.state = NestedLoopJoinState::PullLeft { right_bitmap };
                     if let Some(tuple) = tuple {
-                        return Ok(Some(tuple));
+                        arena.produce_tuple(tuple);
+                        return Ok(());
                     }
                     state = std::mem::replace(&mut self.state, NestedLoopJoinState::End);
                 }
@@ -369,7 +374,8 @@ impl NestedLoopJoin {
                     right_bitmap,
                     mut right_emit_index,
                 } => {
-                    while let Some(mut right_tuple) = arena.next_tuple(right_input)? {
+                    while arena.next_tuple(right_input)? {
+                        let mut right_tuple = arena.result_tuple().clone();
                         let idx = right_emit_index;
                         right_emit_index += 1;
 
@@ -381,16 +387,19 @@ impl NestedLoopJoin {
                                 right_bitmap,
                                 right_emit_index,
                             };
-                            return Ok(Some(Tuple::new(right_tuple.pk, values)));
+                            arena.produce_tuple(Tuple::new(right_tuple.pk, values));
+                            return Ok(());
                         }
                     }
 
                     self.state = NestedLoopJoinState::End;
-                    return Ok(None);
+                    arena.finish();
+                    return Ok(());
                 }
                 NestedLoopJoinState::End => {
                     self.state = NestedLoopJoinState::End;
-                    return Ok(None);
+                    arena.finish();
+                    return Ok(());
                 }
             }
         }
@@ -506,7 +515,7 @@ impl NestedLoopJoin {
 mod test {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
-    use crate::db::{DataBaseBuilder, ResultIter};
+    use crate::db::DataBaseBuilder;
     use crate::execution::dql::test::build_integers;
     use crate::execution::{try_collect, ReadExecutor};
     use crate::optimizer::heuristic::batch::HepBatchStrategy;

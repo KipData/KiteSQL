@@ -62,18 +62,21 @@ impl Limit {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<crate::types::tuple::Tuple>, DatabaseError> {
+        _: ExecId,
+    ) -> Result<(), DatabaseError> {
         let offset = self.offset.unwrap_or(0);
         let limit = self.limit.unwrap_or(usize::MAX);
 
         if limit == 0 || self.emitted >= limit {
-            return Ok(None);
+            arena.finish();
+            return Ok(());
         }
 
         loop {
-            let Some(tuple) = arena.next_tuple(self.input)? else {
-                return Ok(None);
-            };
+            if !arena.next_tuple(self.input)? {
+                arena.finish();
+                return Ok(());
+            }
 
             if self.skipped < offset {
                 self.skipped += 1;
@@ -81,7 +84,8 @@ impl Limit {
             }
 
             self.emitted += 1;
-            return Ok(Some(tuple));
+            arena.resume();
+            return Ok(());
         }
     }
 }

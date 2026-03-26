@@ -147,18 +147,18 @@ impl TopK {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<Tuple>, DatabaseError> {
+    ) -> Result<(), DatabaseError> {
         if self.output.is_none() {
             let keep_count = self.offset.unwrap_or(0) + self.limit;
             let mut set = BTreeSet::new();
 
-            while let Some(tuple) = arena.next_tuple(self.input)? {
+            while arena.next_tuple(self.input)? {
                 top_sort(
                     &self.arena,
                     &self.input_schema,
                     &self.sort_fields,
                     &mut set,
-                    tuple,
+                    arena.result_tuple().clone(),
                     keep_count,
                 )?;
             }
@@ -175,11 +175,12 @@ impl TopK {
             });
         }
 
-        Ok(self
-            .output
-            .as_mut()
-            .and_then(std::iter::Iterator::next)
-            .map(|item| item.tuple))
+        if let Some(item) = self.output.as_mut().and_then(std::iter::Iterator::next) {
+            arena.produce_tuple(item.tuple);
+        } else {
+            arena.finish();
+        }
+        Ok(())
     }
 }
 

@@ -363,7 +363,7 @@ fn map_lmdb_err(err: impl std::fmt::Display) -> DatabaseError {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::{LmdbConfig, LmdbStorage};
-    use crate::db::{DataBaseBuilder, ResultIter};
+    use crate::db::DataBaseBuilder;
     use lmdb::EnvironmentFlags;
     use tempfile::TempDir;
 

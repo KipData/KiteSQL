@@ -24,7 +24,6 @@ use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, Transaction};
 use crate::types::index::IndexId;
 use crate::types::tuple::SchemaRef;
-use crate::types::tuple::Tuple;
 use crate::types::value::{DataValue, Utf8Type};
 use itertools::Itertools;
 use sqlparser::ast::CharLengthUnits;
@@ -86,9 +85,12 @@ impl Analyze {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<Tuple>, DatabaseError> {
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
         let Some(input) = self.input.take() else {
-            return Ok(None);
+            arena.finish();
+            return Ok(());
         };
 
         let mut builders = Vec::new();
@@ -107,9 +109,10 @@ impl Analyze {
             });
         }
 
-        while let Some(tuple) = arena.next_tuple(input)? {
+        while arena.next_tuple(input)? {
+            let tuple = arena.result_tuple();
             for State { exprs, builder, .. } in builders.iter_mut() {
-                let values = Projection::projection(&tuple, exprs, &self.input_schema)?;
+                let values = Projection::projection(tuple, exprs, &self.input_schema)?;
 
                 if values.len() == 1 {
                     builder.append(&values[0])?;
@@ -125,7 +128,11 @@ impl Analyze {
             arena.transaction_mut(),
         )?;
 
-        Ok(Some(Tuple::new(None, values)))
+        let output = arena.result_tuple_mut();
+        output.pk = None;
+        output.values = values;
+        arena.resume();
+        Ok(())
     }
 }
 
@@ -180,7 +187,7 @@ impl fmt::Display for AnalyzeOperator {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
-    use crate::db::{DataBaseBuilder, ResultIter};
+    use crate::db::DataBaseBuilder;
     use crate::errors::DatabaseError;
     use crate::execution::dml::analyze::DEFAULT_NUM_OF_BUCKETS;
     use crate::expression::range_detacher::Range;

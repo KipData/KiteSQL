@@ -666,14 +666,38 @@ impl<S: Storage> Database<S> {
     }
 }
 
-/// Common interface for result iterators returned by database execution APIs.
-///
-/// A result iterator streams [`Tuple`] values and exposes the output schema of
-/// the current statement.
-pub trait ResultIter: Iterator<Item = Result<Tuple, DatabaseError>> {
+/// Borrowing interface for result iterators returned by database execution APIs.
+pub trait BorrowResultIter {
     /// Returns the output schema for the current result set.
     fn schema(&self) -> &SchemaRef;
 
+    /// Returns the next row as a borrowed tuple.
+    fn next_borrowed_tuple(&mut self) -> Result<Option<&Tuple>, DatabaseError>;
+
+    /// Creates a mapped iterator that transforms borrowed tuples into owned output values.
+    fn map_result<F, O>(self, mapper: F) -> MappedResultIter<Self, F, O>
+    where
+        Self: Sized,
+        F: for<'a> FnMut(&'a SchemaRef, &'a Tuple) -> Result<O, DatabaseError>,
+    {
+        let schema = self.schema().clone();
+        MappedResultIter {
+            inner: self,
+            mapper,
+            schema,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Finishes consuming the iterator and flushes any remaining work.
+    fn done(self) -> Result<(), DatabaseError>;
+}
+
+/// Common interface for owned-tuple result iterators.
+///
+/// This remains for compatibility with existing callers that expect
+/// `Iterator<Item = Result<Tuple, DatabaseError>>`.
+pub trait ResultIter: BorrowResultIter + Iterator<Item = Result<Tuple, DatabaseError>> {
     #[cfg(feature = "orm")]
     /// Converts this iterator into a typed ORM iterator.
     ///
@@ -687,9 +711,46 @@ pub trait ResultIter: Iterator<Item = Result<Tuple, DatabaseError>> {
     {
         OrmIter::new(self)
     }
+}
 
-    /// Finishes consuming the iterator and flushes any remaining work.
-    fn done(self) -> Result<(), DatabaseError>;
+impl<I> ResultIter for I where I: BorrowResultIter + Iterator<Item = Result<Tuple, DatabaseError>> {}
+
+/// Typed adapter over a borrowing result iterator.
+pub struct MappedResultIter<I, F, O> {
+    inner: I,
+    mapper: F,
+    schema: SchemaRef,
+    _marker: PhantomData<O>,
+}
+
+impl<I, F, O> MappedResultIter<I, F, O>
+where
+    I: BorrowResultIter,
+    F: for<'a> FnMut(&'a SchemaRef, &'a Tuple) -> Result<O, DatabaseError>,
+{
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    pub fn done(self) -> Result<(), DatabaseError> {
+        self.inner.done()
+    }
+}
+
+impl<I, F, O> Iterator for MappedResultIter<I, F, O>
+where
+    I: BorrowResultIter,
+    F: for<'a> FnMut(&'a SchemaRef, &'a Tuple) -> Result<O, DatabaseError>,
+{
+    type Item = Result<O, DatabaseError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.inner.next_borrowed_tuple() {
+            Ok(Some(tuple)) => Some((self.mapper)(&self.schema, tuple)),
+            Ok(None) => None,
+            Err(err) => Some(Err(err)),
+        }
+    }
 }
 
 #[cfg(feature = "orm")]
@@ -760,6 +821,33 @@ impl<S: Storage> Drop for DatabaseIter<'_, S> {
     }
 }
 
+impl<S: Storage> DatabaseIter<'_, S> {
+    #[inline]
+    pub fn schema(&self) -> &SchemaRef {
+        unsafe { (*self.inner).schema() }
+    }
+
+    #[inline]
+    pub fn next_borrowed_tuple(&mut self) -> Result<Option<&Tuple>, DatabaseError> {
+        let result = unsafe { (*self.inner).next_borrowed_tuple() };
+        if result.as_ref().is_ok_and(Option::is_none) {
+            self._guard = None;
+        }
+        result
+    }
+
+    #[inline]
+    pub fn done(mut self) -> Result<(), DatabaseError> {
+        unsafe {
+            Box::from_raw(mem::replace(&mut self.inner, std::ptr::null_mut())).done()?;
+        }
+        unsafe {
+            Box::from_raw(mem::replace(&mut self.transaction, std::ptr::null_mut())).commit()?;
+        }
+        Ok(())
+    }
+}
+
 impl<S: Storage> Iterator for DatabaseIter<'_, S> {
     type Item = Result<Tuple, DatabaseError>;
 
@@ -772,19 +860,17 @@ impl<S: Storage> Iterator for DatabaseIter<'_, S> {
     }
 }
 
-impl<S: Storage> ResultIter for DatabaseIter<'_, S> {
+impl<S: Storage> BorrowResultIter for DatabaseIter<'_, S> {
     fn schema(&self) -> &SchemaRef {
-        unsafe { (*self.inner).schema() }
+        DatabaseIter::schema(self)
     }
 
-    fn done(mut self) -> Result<(), DatabaseError> {
-        unsafe {
-            Box::from_raw(mem::replace(&mut self.inner, std::ptr::null_mut())).done()?;
-        }
-        unsafe {
-            Box::from_raw(mem::replace(&mut self.transaction, std::ptr::null_mut())).commit()?;
-        }
-        Ok(())
+    fn next_borrowed_tuple(&mut self) -> Result<Option<&Tuple>, DatabaseError> {
+        DatabaseIter::next_borrowed_tuple(self)
+    }
+
+    fn done(self) -> Result<(), DatabaseError> {
+        DatabaseIter::done(self)
     }
 }
 
@@ -851,26 +937,47 @@ impl<'a, T: Transaction + 'a> TransactionIter<'a, T> {
     fn new(schema: SchemaRef, executor: Executor<'a, T>) -> Self {
         Self { executor, schema }
     }
+
+    #[inline]
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    #[inline]
+    pub fn next_borrowed_tuple(&mut self) -> Result<Option<&Tuple>, DatabaseError> {
+        self.executor.next_tuple()
+    }
+
+    #[inline]
+    pub fn done(mut self) -> Result<(), DatabaseError> {
+        while self.next_borrowed_tuple()?.is_some() {}
+        Ok(())
+    }
 }
 
 impl<T: Transaction> Iterator for TransactionIter<'_, T> {
     type Item = Result<Tuple, DatabaseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.executor.next()
+        match self.executor.next_tuple() {
+            Ok(Some(tuple)) => Some(Ok(tuple.clone())),
+            Ok(None) => None,
+            Err(err) => Some(Err(err)),
+        }
     }
 }
 
-impl<T: Transaction> ResultIter for TransactionIter<'_, T> {
+impl<T: Transaction> BorrowResultIter for TransactionIter<'_, T> {
     fn schema(&self) -> &SchemaRef {
-        &self.schema
+        TransactionIter::schema(self)
     }
 
-    fn done(mut self) -> Result<(), DatabaseError> {
-        for result in self.by_ref() {
-            let _ = result?;
-        }
-        Ok(())
+    fn next_borrowed_tuple(&mut self) -> Result<Option<&Tuple>, DatabaseError> {
+        TransactionIter::next_borrowed_tuple(self)
+    }
+
+    fn done(self) -> Result<(), DatabaseError> {
+        TransactionIter::done(self)
     }
 }
 
@@ -878,7 +985,7 @@ impl<T: Transaction> ResultIter for TransactionIter<'_, T> {
 pub(crate) mod test {
     use crate::binder::{Binder, BinderContext};
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
-    use crate::db::{DataBaseBuilder, DatabaseError, ResultIter};
+    use crate::db::{DataBaseBuilder, DatabaseError};
     use crate::expression::ScalarExpression;
     use crate::planner::operator::join::JoinCondition;
     use crate::planner::operator::Operator;

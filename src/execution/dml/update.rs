@@ -79,9 +79,12 @@ impl Update {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<Tuple>, DatabaseError> {
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
         let Some(input) = self.input.take() else {
-            return Ok(None);
+            arena.finish();
+            return Ok(());
         };
 
         let mut exprs_map = HashMap::with_capacity(self.value_exprs.len());
@@ -107,7 +110,8 @@ impl Update {
 
             let mut updated_count = 0;
 
-            while let Some(mut tuple) = arena.next_tuple(input)? {
+            while arena.next_tuple(input)? {
+                let mut tuple = arena.result_tuple().clone();
                 let mut is_overwrite = true;
 
                 let old_pk = tuple.pk.clone().ok_or(DatabaseError::PrimaryKeyNotFound)?;
@@ -160,9 +164,13 @@ impl Update {
                 updated_count += 1;
             }
 
-            Ok(Some(TupleBuilder::build_result(updated_count.to_string())))
+            TupleBuilder::build_result_into(arena.result_tuple_mut(), updated_count.to_string());
+            arena.resume();
+            Ok(())
         } else {
-            Ok(Some(TupleBuilder::build_result("0".to_string())))
+            TupleBuilder::build_result_into(arena.result_tuple_mut(), "0".to_string());
+            arena.resume();
+            Ok(())
         }
     }
 }

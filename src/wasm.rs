@@ -14,7 +14,7 @@
 
 #![cfg(target_arch = "wasm32")]
 
-use crate::db::{DataBaseBuilder, Database, DatabaseIter, ResultIter};
+use crate::db::{DataBaseBuilder, Database, DatabaseIter};
 use crate::storage::memory::MemoryStorage;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
@@ -38,10 +38,10 @@ fn to_js_err(err: impl ToString) -> JsValue {
     js_sys::Error::new(&err.to_string()).into()
 }
 
-fn tuple_to_wasm_row(tuple: Tuple) -> WasmRow {
+fn tuple_to_wasm_row(tuple: &Tuple) -> WasmRow {
     WasmRow {
-        pk: tuple.pk,
-        values: tuple.values,
+        pk: tuple.pk.clone(),
+        values: tuple.values.clone(),
     }
 }
 
@@ -85,9 +85,8 @@ impl WasmDatabase {
     }
 
     pub fn execute(&self, sql: &str) -> Result<(), JsValue> {
-        let iter = self.inner.run(sql).map_err(to_js_err)?;
-        for tuple in iter {
-            tuple.map_err(to_js_err)?;
+        let mut iter = self.inner.run(sql).map_err(to_js_err)?;
+        while iter.next_borrowed_tuple().map_err(to_js_err)?.is_some() {
         }
         Ok(())
     }
@@ -102,10 +101,9 @@ impl WasmResultIter {
             .inner
             .as_mut()
             .ok_or_else(|| to_js_err("iterator already consumed"))?;
-        match iter.next() {
-            Some(Ok(tuple)) => serde_wasm_bindgen::to_value(&tuple_to_wasm_row(tuple))
+        match iter.next_borrowed_tuple().map_err(to_js_err)? {
+            Some(tuple) => serde_wasm_bindgen::to_value(&tuple_to_wasm_row(tuple))
                 .map_err(|e| to_js_err(format!("serialize row: {e}"))),
-            Some(Err(err)) => Err(to_js_err(err.to_string())),
             None => Ok(JsValue::undefined()),
         }
     }
@@ -138,8 +136,7 @@ impl WasmResultIter {
             .take()
             .ok_or_else(|| to_js_err("iterator already consumed"))?;
         let mut rows = Vec::new();
-        for tuple in &mut iter {
-            let tuple = tuple.map_err(to_js_err)?;
+        while let Some(tuple) = iter.next_borrowed_tuple().map_err(to_js_err)? {
             rows.push(tuple_to_wasm_row(tuple));
         }
         iter.done().map_err(to_js_err)?;

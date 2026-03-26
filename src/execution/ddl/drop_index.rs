@@ -43,14 +43,17 @@ impl DropIndex {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<crate::types::tuple::Tuple>, DatabaseError> {
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
         let Some(DropIndexOperator {
             table_name,
             index_name,
             if_exists,
         }) = self.op.take()
         else {
-            return Ok(None);
+            arena.finish();
+            return Ok(());
         };
 
         arena.transaction_mut().drop_index(
@@ -61,6 +64,8 @@ impl DropIndex {
             if_exists,
         )?;
 
-        Ok(Some(TupleBuilder::build_result(index_name.to_string())))
+        TupleBuilder::build_result_into(arena.result_tuple_mut(), index_name.to_string());
+        arena.resume();
+        Ok(())
     }
 }

@@ -43,13 +43,16 @@ impl DropView {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<crate::types::tuple::Tuple>, DatabaseError> {
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
         let Some(DropViewOperator {
             view_name,
             if_exists,
         }) = self.op.take()
         else {
-            return Ok(None);
+            arena.finish();
+            return Ok(());
         };
 
         let table_cache = arena.table_cache();
@@ -58,6 +61,8 @@ impl DropView {
             .transaction_mut()
             .drop_view(view_cache, table_cache, view_name.clone(), if_exists)?;
 
-        Ok(Some(TupleBuilder::build_result(format!("{view_name}"))))
+        TupleBuilder::build_result_into(arena.result_tuple_mut(), format!("{view_name}"));
+        arena.resume();
+        Ok(())
     }
 }

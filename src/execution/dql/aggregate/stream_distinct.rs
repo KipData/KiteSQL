@@ -28,6 +28,7 @@ pub struct StreamDistinctExecutor {
     input_plan: Option<LogicalPlan>,
     input: ExecId,
     last_keys: Option<Vec<DataValue>>,
+    scratch: Tuple,
 }
 
 impl From<(AggregateOperator, LogicalPlan)> for StreamDistinctExecutor {
@@ -38,6 +39,7 @@ impl From<(AggregateOperator, LogicalPlan)> for StreamDistinctExecutor {
             input_plan: Some(input),
             input: 0,
             last_keys: None,
+            scratch: Tuple::default(),
         }
     }
 }
@@ -65,20 +67,29 @@ impl StreamDistinctExecutor {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<Tuple>, DatabaseError> {
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
         loop {
-            let Some(tuple) = arena.next_tuple(self.input)? else {
-                return Ok(None);
-            };
+            if !arena.next_tuple(self.input)? {
+                arena.finish();
+                return Ok(());
+            }
+            std::mem::swap(&mut self.scratch, arena.result_tuple_mut());
+            let tuple = &self.scratch;
             let group_keys = self
                 .groupby_exprs
                 .iter()
-                .map(|expr| expr.eval(Some((&tuple, &self.input_schema))))
+                .map(|expr| expr.eval(Some((tuple, &self.input_schema))))
                 .try_collect()?;
 
             if self.last_keys.as_ref() != Some(&group_keys) {
                 self.last_keys = Some(group_keys.clone());
-                return Ok(Some(Tuple::new(tuple.pk, group_keys)));
+                let output = arena.result_tuple_mut();
+                output.pk.clone_from(&tuple.pk);
+                output.values = group_keys;
+                arena.resume();
+                return Ok(());
             }
         }
     }

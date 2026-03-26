@@ -47,7 +47,9 @@ impl AddColumn {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<crate::types::tuple::Tuple>, DatabaseError> {
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
         let table_cache = arena.table_cache();
         let Some(AddColumnOperator {
             table_name,
@@ -55,7 +57,8 @@ impl AddColumn {
             if_not_exists,
         }) = self.op.take()
         else {
-            return Ok(None);
+            arena.finish();
+            return Ok(());
         };
 
         let table_catalog = arena
@@ -65,7 +68,9 @@ impl AddColumn {
             .ok_or(DatabaseError::TableNotFound)?;
         if table_catalog.get_column_by_name(column.name()).is_some() {
             if if_not_exists {
-                return Ok(Some(TupleBuilder::build_result("1".to_string())));
+                TupleBuilder::build_result_into(arena.result_tuple_mut(), "1".to_string());
+                arena.resume();
+                return Ok(());
             }
             return Err(DatabaseError::DuplicateColumn(column.name().to_string()));
         }
@@ -106,13 +111,13 @@ impl AddColumn {
             schema.len(),
             schema.len(),
             &serializers,
-            |mut tuple| {
+            |tuple| {
                 if let Some(value) = &default_value {
                     tuple.values.push(value.clone());
                 } else {
                     tuple.values.push(DataValue::Null);
                 }
-                Ok(tuple)
+                Ok(())
             },
             |transaction, tuple| {
                 if let (Some(unique_meta), Some(value), Some(tuple_id)) = (
@@ -127,6 +132,8 @@ impl AddColumn {
             },
         )?;
 
-        Ok(Some(TupleBuilder::build_result("1".to_string())))
+        TupleBuilder::build_result_into(arena.result_tuple_mut(), "1".to_string());
+        arena.resume();
+        Ok(())
     }
 }

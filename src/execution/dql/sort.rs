@@ -319,13 +319,13 @@ impl Sort {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<Tuple>, DatabaseError> {
+    ) -> Result<(), DatabaseError> {
         if self.output.is_none() {
             let mut tuples = NullableVec::new(&self.arena);
 
-            while let Some(tuple) = arena.next_tuple(self.input)? {
+            while arena.next_tuple(self.input)? {
                 let offset = tuples.len();
-                tuples.put((offset, tuple));
+                tuples.put((offset, arena.result_tuple().clone()));
             }
 
             let sort_by = if tuples.len() > 256 {
@@ -350,7 +350,12 @@ impl Sort {
             });
         }
 
-        Ok(self.output.as_mut().and_then(std::iter::Iterator::next))
+        if let Some(tuple) = self.output.as_mut().and_then(std::iter::Iterator::next) {
+            arena.produce_tuple(tuple);
+        } else {
+            arena.finish();
+        }
+        Ok(())
     }
 }
 

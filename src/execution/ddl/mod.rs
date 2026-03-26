@@ -44,10 +44,10 @@ fn read_tuple_batch<T: Transaction>(
     start_after: Option<&TupleId>,
     batch: &mut Vec<Tuple>,
     batch_size: usize,
-) -> Result<(), DatabaseError> {
+) -> Result<usize, DatabaseError> {
     let table_codec = unsafe { &*transaction.table_codec() };
     let lower = if let Some(last_pk) = start_after {
-        table_codec.with_tuple_key(table_name.as_ref(), last_pk, |key| {
+        table_codec.with_tuple_key_unchecked(table_name.as_ref(), last_pk, |key| {
             Ok::<_, DatabaseError>(Bound::Excluded(key.to_vec()))
         })?
     } else {
@@ -61,23 +61,35 @@ fn read_tuple_batch<T: Transaction>(
             Bound::Unbounded => Bound::Included(min),
         };
         let mut iter = transaction.range(lower, Bound::Included(max))?;
-        batch.clear();
+        let mut len = 0;
 
-        while batch.len() < batch_size {
+        while len < batch_size {
             let Some((key, value)) = iter.try_next()? else {
                 break;
             };
             let tuple_id = TableCodec::decode_tuple_key(&key, pk_ty)?;
-            batch.push(TableCodec::decode_tuple(
+            let tuple = if len < batch.len() {
+                &mut batch[len]
+            } else {
+                batch.push(Tuple {
+                    pk: None,
+                    values: Vec::with_capacity(old_values_len),
+                });
+                batch
+                    .last_mut()
+                    .expect("batch contains the tuple that was just pushed")
+            };
+            TableCodec::decode_tuple_into(
+                tuple,
                 old_deserializers,
                 Some(tuple_id),
                 &value,
-                old_values_len,
                 old_total_len,
-            )?);
+            )?;
+            len += 1;
         }
 
-        Ok(())
+        Ok(len)
     })
 }
 
@@ -92,13 +104,13 @@ pub(crate) fn visit_table_in_batches<T, F>(
 ) -> Result<(), DatabaseError>
 where
     T: Transaction,
-    F: FnMut(Tuple) -> Result<(), DatabaseError>,
+    F: FnMut(&Tuple) -> Result<(), DatabaseError>,
 {
     let mut last_pk = None;
     let mut batch = Vec::with_capacity(REWRITE_BATCH_SIZE);
 
     loop {
-        read_tuple_batch(
+        let batch_len = read_tuple_batch(
             transaction,
             table_name,
             pk_ty,
@@ -109,13 +121,14 @@ where
             &mut batch,
             REWRITE_BATCH_SIZE,
         )?;
-        let batch_len = batch.len();
         if batch_len == 0 {
             break;
         }
-        last_pk = batch.last().and_then(|tuple| tuple.pk.clone());
+        last_pk = batch
+            .get(batch_len - 1)
+            .and_then(|tuple| tuple.pk.clone());
 
-        for tuple in batch.drain(..) {
+        for tuple in batch.iter().take(batch_len) {
             visit(tuple)?;
         }
 
@@ -140,14 +153,14 @@ pub(crate) fn rewrite_table_in_batches<T, F, G>(
 ) -> Result<(), DatabaseError>
 where
     T: Transaction,
-    F: FnMut(Tuple) -> Result<Tuple, DatabaseError>,
+    F: FnMut(&mut Tuple) -> Result<(), DatabaseError>,
     G: FnMut(&mut T, &Tuple) -> Result<(), DatabaseError>,
 {
     let mut last_pk = None;
     let mut batch = Vec::with_capacity(REWRITE_BATCH_SIZE);
 
     loop {
-        read_tuple_batch(
+        let batch_len = read_tuple_batch(
             transaction,
             table_name,
             pk_ty,
@@ -158,16 +171,17 @@ where
             &mut batch,
             REWRITE_BATCH_SIZE,
         )?;
-        let batch_len = batch.len();
         if batch_len == 0 {
             break;
         }
-        last_pk = batch.last().and_then(|tuple| tuple.pk.clone());
+        last_pk = batch
+            .get(batch_len - 1)
+            .and_then(|tuple| tuple.pk.clone());
 
-        for tuple in batch.drain(..) {
-            let tuple = rewrite(tuple)?;
+        for tuple in batch.iter_mut().take(batch_len) {
+            rewrite(tuple)?;
             transaction.append_tuple(table_name.as_ref(), tuple.clone(), new_serializers, true)?;
-            after_write(transaction, &tuple)?;
+            after_write(transaction, tuple)?;
         }
 
         if batch_len < REWRITE_BATCH_SIZE {

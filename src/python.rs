@@ -14,7 +14,7 @@
 
 #![cfg(all(not(target_arch = "wasm32"), feature = "python"))]
 
-use crate::db::{DataBaseBuilder, Database, DatabaseIter, ResultIter};
+use crate::db::{DataBaseBuilder, Database, DatabaseIter};
 use crate::errors::DatabaseError;
 use crate::storage::lmdb::LmdbStorage;
 use crate::storage::memory::MemoryStorage;
@@ -62,7 +62,7 @@ fn data_value_to_py(py: Python<'_>, value: &DataValue) -> PyResult<PyObject> {
     Ok(object)
 }
 
-fn tuple_to_python_row(py: Python<'_>, tuple: Tuple) -> PyResult<PyObject> {
+fn tuple_to_python_row(py: Python<'_>, tuple: &Tuple) -> PyResult<PyObject> {
     let row = PyDict::new(py);
 
     match tuple.pk.as_ref() {
@@ -134,11 +134,11 @@ enum PythonResultIterInner {
 }
 
 impl PythonResultIterInner {
-    fn next_tuple(&mut self) -> Option<Result<Tuple, DatabaseError>> {
+    fn next_tuple(&mut self) -> Result<Option<&Tuple>, DatabaseError> {
         match self {
-            PythonResultIterInner::Lmdb(iter) => iter.next(),
-            PythonResultIterInner::Memory(iter) => iter.next(),
-            PythonResultIterInner::Rocks(iter) => iter.next(),
+            PythonResultIterInner::Lmdb(iter) => iter.next_borrowed_tuple(),
+            PythonResultIterInner::Memory(iter) => iter.next_borrowed_tuple(),
+            PythonResultIterInner::Rocks(iter) => iter.next_borrowed_tuple(),
         }
     }
 
@@ -208,8 +208,7 @@ impl PythonDatabase {
 
     pub fn execute(&self, sql: &str) -> PyResult<()> {
         let mut iter = self.inner.run(sql).map_err(to_py_err)?;
-        while let Some(tuple) = iter.next_tuple() {
-            tuple.map_err(to_py_err)?;
+        while iter.next_tuple().map_err(to_py_err)?.is_some() {
         }
         iter.done().map_err(to_py_err)?;
 
@@ -241,9 +240,8 @@ impl PythonResultIter {
     pub fn next(&mut self, py: Python<'_>) -> PyResult<Option<PyObject>> {
         let iter = self.inner_mut()?;
 
-        match iter.next_tuple() {
-            Some(Ok(tuple)) => tuple_to_python_row(py, tuple).map(Some),
-            Some(Err(err)) => Err(to_py_err(err)),
+        match iter.next_tuple().map_err(to_py_err)? {
+            Some(tuple) => tuple_to_python_row(py, tuple).map(Some),
             None => Ok(None),
         }
     }
@@ -260,8 +258,8 @@ impl PythonResultIter {
             .ok_or_else(|| PyValueError::new_err("iterator already consumed"))?;
 
         let mut rows = Vec::new();
-        while let Some(tuple) = iter.next_tuple() {
-            rows.push(tuple_to_python_row(py, tuple.map_err(to_py_err)?)?);
+        while let Some(tuple) = iter.next_tuple().map_err(to_py_err)? {
+            rows.push(tuple_to_python_row(py, tuple)?);
         }
         iter.done().map_err(to_py_err)?;
 

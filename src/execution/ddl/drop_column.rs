@@ -45,7 +45,9 @@ impl DropColumn {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<crate::types::tuple::Tuple>, DatabaseError> {
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
         let table_cache = arena.table_cache();
         let meta_cache = arena.meta_cache();
         let Some(DropColumnOperator {
@@ -54,7 +56,8 @@ impl DropColumn {
             if_exists,
         }) = self.op.take()
         else {
-            return Ok(None);
+            arena.finish();
+            return Ok(());
         };
 
         let table_catalog = arena
@@ -93,9 +96,9 @@ impl DropColumn {
                 tuple_columns.len(),
                 tuple_columns.len(),
                 &serializers,
-                |mut tuple| {
+                |tuple| {
                     let _ = tuple.values.remove(column_index);
-                    Ok(tuple)
+                    Ok(())
                 },
                 |_, _| Ok(()),
             )?;
@@ -106,11 +109,14 @@ impl DropColumn {
                 &column_name,
             )?;
 
-            Ok(Some(TupleBuilder::build_result("1".to_string())))
+            TupleBuilder::build_result_into(arena.result_tuple_mut(), "1".to_string());
+            arena.resume();
+            Ok(())
         } else if !if_exists {
             Err(DatabaseError::column_not_found(column_name))
         } else {
-            Ok(None)
+            arena.finish();
+            Ok(())
         }
     }
 }

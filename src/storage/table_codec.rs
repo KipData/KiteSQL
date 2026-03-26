@@ -239,7 +239,16 @@ impl TableCodec {
         f: impl FnOnce(&[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         Self::check_primary_key(tuple_id, 0)?;
+        self.with_tuple_key_unchecked(table_name, tuple_id, f)
+    }
 
+    #[inline]
+    pub(crate) fn with_tuple_key_unchecked<R>(
+        &self,
+        table_name: &str,
+        tuple_id: &TupleId,
+        f: impl FnOnce(&[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
         self.with_table_hash(table_name, |key_buffer, table_hash| {
             let lower = &mut key_buffer.lower;
             Self::write_key_prefix(lower, CodecType::Tuple, table_hash);
@@ -650,14 +659,15 @@ impl TableCodec {
     }
 
     #[inline]
-    pub fn decode_tuple(
+    pub fn decode_tuple_into(
+        tuple: &mut Tuple,
         deserializers: &[TupleValueSerializableImpl],
         tuple_id: Option<TupleId>,
         bytes: &[u8],
-        values_len: usize,
         total_len: usize,
-    ) -> Result<Tuple, DatabaseError> {
-        Tuple::deserialize_from(deserializers, tuple_id, bytes, values_len, total_len)
+    ) -> Result<(), DatabaseError> {
+        tuple.pk = tuple_id;
+        tuple.deserialize_from_into(deserializers, bytes, total_len)
     }
 
     pub fn encode_index_meta_value(
@@ -884,11 +894,11 @@ mod tests {
         let table_codec = TableCodec::default();
         let table_catalog = build_table_codec();
 
-        let mut tuple = Tuple::new(
+        let expected = Tuple::new(
             Some(DataValue::Int32(0)),
             vec![DataValue::Int32(0), DataValue::Decimal(Decimal::new(1, 0))],
         );
-        let bytes = tuple.serialize_to(
+        let bytes = expected.serialize_to(
             &[
                 LogicalType::Integer.serializable(),
                 LogicalType::Decimal(None, None).serializable(),
@@ -900,10 +910,14 @@ mod tests {
             .map(|column| column.datatype().serializable())
             .collect_vec();
 
-        tuple.pk = None;
+        let mut tuple = Tuple::default();
+        TableCodec::decode_tuple_into(&mut tuple, &deserializers, None, &bytes, 2)?;
         assert_eq!(
-            TableCodec::decode_tuple(&deserializers, None, &bytes, deserializers.len(), 2,)?,
-            tuple
+            tuple,
+            Tuple::new(
+                None,
+                vec![DataValue::Int32(0), DataValue::Decimal(Decimal::new(1, 0))]
+            )
         );
 
         Ok(())

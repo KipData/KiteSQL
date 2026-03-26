@@ -19,7 +19,7 @@ use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
-use crate::types::tuple::{SchemaRef, Tuple};
+use crate::types::tuple::SchemaRef;
 use crate::types::value::DataValue;
 use ahash::{HashMap, HashMapExt};
 use itertools::Itertools;
@@ -79,12 +79,15 @@ impl HashAggExecutor {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<Tuple>, DatabaseError> {
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
         if self.output.is_none() {
             let mut group_hash_accs: HashMap<Vec<DataValue>, Vec<Box<dyn Accumulator>>> =
                 HashMap::new();
 
-            while let Some(tuple) = arena.next_tuple(self.input)? {
+            while arena.next_tuple(self.input)? {
+                let tuple = arena.result_tuple();
                 let mut values = Vec::with_capacity(self.agg_calls.len());
 
                 for expr in &self.agg_calls {
@@ -95,7 +98,7 @@ impl HashAggExecutor {
                                     .to_string(),
                             ));
                         }
-                        values.push(args[0].eval(Some((&tuple, &self.input_schema)))?);
+                        values.push(args[0].eval(Some((tuple, &self.input_schema)))?);
                     } else {
                         unreachable!()
                     }
@@ -104,7 +107,7 @@ impl HashAggExecutor {
                 let group_keys = self
                     .groupby_exprs
                     .iter()
-                    .map(|expr| expr.eval(Some((&tuple, &self.input_schema))))
+                    .map(|expr| expr.eval(Some((tuple, &self.input_schema))))
                     .try_collect()?;
 
                 let entry = match group_hash_accs.entry(group_keys) {
@@ -120,15 +123,19 @@ impl HashAggExecutor {
         }
 
         let Some((group_keys, accs)) = self.output.as_mut().and_then(Iterator::next) else {
-            return Ok(None);
+            arena.finish();
+            return Ok(());
         };
 
-        let values = accs
+        let output = arena.result_tuple_mut();
+        output.pk = None;
+        output.values = accs
             .iter()
             .map(|acc| acc.evaluate())
             .chain(group_keys.into_iter().map(Ok))
             .try_collect()?;
-        Ok(Some(Tuple::new(None, values)))
+        arena.resume();
+        Ok(())
     }
 }
 

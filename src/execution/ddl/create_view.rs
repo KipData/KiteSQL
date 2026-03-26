@@ -43,15 +43,20 @@ impl CreateView {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<crate::types::tuple::Tuple>, DatabaseError> {
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
         let Some(CreateViewOperator { view, or_replace }) = self.op.take() else {
-            return Ok(None);
+            arena.finish();
+            return Ok(());
         };
-        let result_tuple = TupleBuilder::build_result(format!("{}", view.name));
+        let view_name = view.name.to_string();
         arena
             .transaction_mut()
             .create_view(arena.view_cache(), view, or_replace)?;
 
-        Ok(Some(result_tuple))
+        TupleBuilder::build_result_into(arena.result_tuple_mut(), view_name);
+        arena.resume();
+        Ok(())
     }
 }

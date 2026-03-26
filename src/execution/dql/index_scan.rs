@@ -78,7 +78,9 @@ impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
     pub(crate) fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<crate::types::tuple::Tuple>, DatabaseError> {
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
         if self.iter.is_none() {
             let Some(TableScanOperator {
                 table_name,
@@ -88,7 +90,8 @@ impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
                 ..
             }) = self.op.take()
             else {
-                return Ok(None);
+                arena.finish();
+                return Ok(());
             };
             self.iter = Some(arena.transaction().read_by_index(
                 arena.table_cache(),
@@ -103,9 +106,16 @@ impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
             )?);
         }
 
-        self.iter
+        if self
+            .iter
             .as_mut()
             .expect("index scan iterator initialized")
-            .next_tuple()
+            .next_tuple_into(arena.result_tuple_mut())?
+        {
+            arena.resume();
+        } else {
+            arena.finish();
+        }
+        Ok(())
     }
 }

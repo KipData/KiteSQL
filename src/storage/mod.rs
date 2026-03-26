@@ -146,7 +146,6 @@ pub trait Transaction: Sized {
                 limit: bounds.1,
                 pk_ty,
                 deserializers,
-                values_len: columns.len(),
                 total_len: table.columns_len(),
                 iter,
             })
@@ -167,8 +166,6 @@ pub trait Transaction: Sized {
         cover_mapping_indices: Option<Vec<usize>>,
     ) -> Result<IndexIter<'a, Self>, DatabaseError> {
         debug_assert!(columns.keys().all_unique());
-        let values_len = columns.len();
-
         let table = self
             .table(table_cache, table_name.clone())?
             .ok_or(DatabaseError::TableNotFound)?;
@@ -212,7 +209,6 @@ pub trait Transaction: Sized {
                 index_meta,
                 table_name,
                 deserializers,
-                values_len,
                 total_len: table.columns_len(),
                 tx: self,
                 cover_mapping,
@@ -1177,15 +1173,17 @@ fn encode_bound<'a>(
 }
 
 trait IndexImpl<T: Transaction> {
-    fn index_lookup(
+    fn index_lookup_into(
         &self,
+        tuple: &mut Tuple,
         key: &[u8],
         value: &[u8],
         params: &IndexImplParams<T>,
-    ) -> Result<Tuple, DatabaseError>;
+    ) -> Result<(), DatabaseError>;
 
     fn eq_to_res<'a>(
         &self,
+        tuple: &mut Tuple,
         value: &DataValue,
         params: &IndexImplParams<'a, T>,
         encode_min: &mut Bytes,
@@ -1253,7 +1251,6 @@ struct IndexImplParams<'a, T: Transaction> {
     index_meta: IndexMetaRef,
     table_name: &'a str,
     deserializers: Vec<TupleValueSerializableImpl>,
-    values_len: usize,
     total_len: usize,
     tx: &'a T,
     cover_mapping: Option<TupleMapping>,
@@ -1280,47 +1277,53 @@ impl<T: Transaction> IndexImplParams<'_, T> {
         Ok(val)
     }
 
-    fn get_tuple_by_id(&self, tuple_id: &TupleId) -> Result<Option<Tuple>, DatabaseError> {
-        unsafe { &*self.table_codec() }.with_tuple_key(self.table_name, tuple_id, |key| {
-            self.tx
-                .get_borrowed(key)?
-                .map(|bytes| {
-                    TableCodec::decode_tuple(
-                        &self.deserializers,
-                        Some(tuple_id.clone()),
-                        bytes.as_ref(),
-                        self.values_len,
-                        self.total_len,
-                    )
-                })
-                .transpose()
+    fn get_tuple_by_id_into(
+        &self,
+        tuple_id: &TupleId,
+        tuple: &mut Tuple,
+    ) -> Result<bool, DatabaseError> {
+        unsafe { &*self.table_codec() }.with_tuple_key_unchecked(self.table_name, tuple_id, |key| {
+            let Some(bytes) = self.tx.get_borrowed(key)? else {
+                return Ok(false);
+            };
+            TableCodec::decode_tuple_into(
+                tuple,
+                &self.deserializers,
+                Some(tuple_id.clone()),
+                bytes.as_ref(),
+                self.total_len,
+            )?;
+            Ok(true)
         })
     }
 }
 
 enum IndexResult<'a, T: Transaction + 'a> {
-    Tuple(Option<Tuple>),
+    Hit,
+    Miss,
     Scope(T::IterType<'a>),
 }
 
 impl<T: Transaction> IndexImpl<T> for IndexImplEnum {
-    fn index_lookup(
+    fn index_lookup_into(
         &self,
+        tuple: &mut Tuple,
         key: &[u8],
         value: &[u8],
         params: &IndexImplParams<T>,
-    ) -> Result<Tuple, DatabaseError> {
+    ) -> Result<(), DatabaseError> {
         match self {
-            IndexImplEnum::PrimaryKey(inner) => inner.index_lookup(key, value, params),
-            IndexImplEnum::Unique(inner) => inner.index_lookup(key, value, params),
-            IndexImplEnum::Normal(inner) => inner.index_lookup(key, value, params),
-            IndexImplEnum::Composite(inner) => inner.index_lookup(key, value, params),
-            IndexImplEnum::Covered(inner) => inner.index_lookup(key, value, params),
+            IndexImplEnum::PrimaryKey(inner) => inner.index_lookup_into(tuple, key, value, params),
+            IndexImplEnum::Unique(inner) => inner.index_lookup_into(tuple, key, value, params),
+            IndexImplEnum::Normal(inner) => inner.index_lookup_into(tuple, key, value, params),
+            IndexImplEnum::Composite(inner) => inner.index_lookup_into(tuple, key, value, params),
+            IndexImplEnum::Covered(inner) => inner.index_lookup_into(tuple, key, value, params),
         }
     }
 
     fn eq_to_res<'a>(
         &self,
+        tuple: &mut Tuple,
         value: &DataValue,
         params: &IndexImplParams<'a, T>,
         encode_min: &mut Bytes,
@@ -1328,14 +1331,20 @@ impl<T: Transaction> IndexImpl<T> for IndexImplEnum {
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
         match self {
             IndexImplEnum::PrimaryKey(inner) => {
-                inner.eq_to_res(value, params, encode_min, encode_max)
+                inner.eq_to_res(tuple, value, params, encode_min, encode_max)
             }
-            IndexImplEnum::Unique(inner) => inner.eq_to_res(value, params, encode_min, encode_max),
-            IndexImplEnum::Normal(inner) => inner.eq_to_res(value, params, encode_min, encode_max),
+            IndexImplEnum::Unique(inner) => {
+                inner.eq_to_res(tuple, value, params, encode_min, encode_max)
+            }
+            IndexImplEnum::Normal(inner) => {
+                inner.eq_to_res(tuple, value, params, encode_min, encode_max)
+            }
             IndexImplEnum::Composite(inner) => {
-                inner.eq_to_res(value, params, encode_min, encode_max)
+                inner.eq_to_res(tuple, value, params, encode_min, encode_max)
             }
-            IndexImplEnum::Covered(inner) => inner.eq_to_res(value, params, encode_min, encode_max),
+            IndexImplEnum::Covered(inner) => {
+                inner.eq_to_res(tuple, value, params, encode_min, encode_max)
+            }
         }
     }
 
@@ -1357,47 +1366,54 @@ impl<T: Transaction> IndexImpl<T> for IndexImplEnum {
 }
 
 impl<T: Transaction> IndexImpl<T> for PrimaryKeyIndexImpl {
-    fn index_lookup(
+    fn index_lookup_into(
         &self,
+        tuple: &mut Tuple,
         key: &[u8],
         value: &[u8],
         params: &IndexImplParams<T>,
-    ) -> Result<Tuple, DatabaseError> {
+    ) -> Result<(), DatabaseError> {
         let tuple_id = TableCodec::decode_tuple_key(key, &params.index_meta.pk_ty)?;
-        TableCodec::decode_tuple(
+        TableCodec::decode_tuple_into(
+            tuple,
             &params.deserializers,
             Some(tuple_id),
             value,
-            params.values_len,
             params.total_len,
         )
     }
 
     fn eq_to_res<'a>(
         &self,
+        tuple: &mut Tuple,
         value: &DataValue,
         params: &IndexImplParams<'a, T>,
         _: &mut Bytes,
         _: &mut Bytes,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
         let tuple_id = value.clone();
-        let tuple =
-            unsafe { &*params.table_codec() }.with_tuple_key(params.table_name, value, |key| {
-                params
-                    .tx
-                    .get_borrowed(key)?
-                    .map(|bytes| {
-                        TableCodec::decode_tuple(
-                            &params.deserializers,
-                            Some(tuple_id.clone()),
-                            bytes.as_ref(),
-                            params.values_len,
-                            params.total_len,
-                        )
-                    })
-                    .transpose()
-            })?;
-        Ok(IndexResult::Tuple(tuple))
+        let found = unsafe { &*params.table_codec() }.with_tuple_key_unchecked(
+            params.table_name,
+            value,
+            |key| {
+                let Some(bytes) = params.tx.get_borrowed(key)? else {
+                    return Ok(false);
+                };
+                TableCodec::decode_tuple_into(
+                    tuple,
+                    &params.deserializers,
+                    Some(tuple_id.clone()),
+                    bytes.as_ref(),
+                    params.total_len,
+                )?;
+                Ok(true)
+            },
+        )?;
+        Ok(if found {
+            IndexResult::Hit
+        } else {
+            IndexResult::Miss
+        })
     }
 
     fn bound_key(
@@ -1407,7 +1423,7 @@ impl<T: Transaction> IndexImpl<T> for PrimaryKeyIndexImpl {
         _: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
-        unsafe { &*params.table_codec() }.with_tuple_key(params.table_name, value, |key| {
+        unsafe { &*params.table_codec() }.with_tuple_key_unchecked(params.table_name, value, |key| {
             out.clear();
             out.extend_from_slice(key);
             Ok(())
@@ -1417,27 +1433,32 @@ impl<T: Transaction> IndexImpl<T> for PrimaryKeyIndexImpl {
 
 #[inline(always)]
 fn secondary_index_lookup<T: Transaction>(
+    tuple: &mut Tuple,
     bytes: &[u8],
     params: &IndexImplParams<T>,
-) -> Result<Tuple, DatabaseError> {
+) -> Result<(), DatabaseError> {
     let tuple_id = TableCodec::decode_index(bytes)?;
-    params
-        .get_tuple_by_id(&tuple_id)?
-        .ok_or(DatabaseError::TupleIdNotFound(tuple_id))
+    if params.get_tuple_by_id_into(&tuple_id, tuple)? {
+        Ok(())
+    } else {
+        Err(DatabaseError::TupleIdNotFound(tuple_id))
+    }
 }
 
 impl<T: Transaction> IndexImpl<T> for UniqueIndexImpl {
-    fn index_lookup(
+    fn index_lookup_into(
         &self,
+        tuple: &mut Tuple,
         _: &[u8],
         value: &[u8],
         params: &IndexImplParams<T>,
-    ) -> Result<Tuple, DatabaseError> {
-        secondary_index_lookup(value, params)
+    ) -> Result<(), DatabaseError> {
+        secondary_index_lookup(tuple, value, params)
     }
 
     fn eq_to_res<'a>(
         &self,
+        tuple: &mut Tuple,
         value: &DataValue,
         params: &IndexImplParams<'a, T>,
         _: &mut Bytes,
@@ -1451,13 +1472,14 @@ impl<T: Transaction> IndexImpl<T> for UniqueIndexImpl {
             |key| params.tx.get_borrowed(key),
         )?
         else {
-            return Ok(IndexResult::Tuple(None));
+            return Ok(IndexResult::Miss);
         };
         let tuple_id = TableCodec::decode_index(bytes.as_ref())?;
-        let tuple = params
-            .get_tuple_by_id(&tuple_id)?
-            .ok_or(DatabaseError::TupleIdNotFound(tuple_id))?;
-        Ok(IndexResult::Tuple(Some(tuple)))
+        if params.get_tuple_by_id_into(&tuple_id, tuple)? {
+            Ok(IndexResult::Hit)
+        } else {
+            Err(DatabaseError::TupleIdNotFound(tuple_id))
+        }
     }
 
     fn bound_key(
@@ -1478,23 +1500,25 @@ impl<T: Transaction> IndexImpl<T> for UniqueIndexImpl {
 }
 
 impl<T: Transaction> IndexImpl<T> for NormalIndexImpl {
-    fn index_lookup(
+    fn index_lookup_into(
         &self,
+        tuple: &mut Tuple,
         _: &[u8],
         value: &[u8],
         params: &IndexImplParams<T>,
-    ) -> Result<Tuple, DatabaseError> {
-        secondary_index_lookup(value, params)
+    ) -> Result<(), DatabaseError> {
+        secondary_index_lookup(tuple, value, params)
     }
 
     fn eq_to_res<'a>(
         &self,
+        tuple: &mut Tuple,
         value: &DataValue,
         params: &IndexImplParams<'a, T>,
         encode_min: &mut Bytes,
         encode_max: &mut Bytes,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
-        eq_to_res_scope(self, value, params, encode_min, encode_max)
+        eq_to_res_scope(tuple, self, value, params, encode_min, encode_max)
     }
 
     fn bound_key(
@@ -1513,23 +1537,25 @@ impl<T: Transaction> IndexImpl<T> for NormalIndexImpl {
 }
 
 impl<T: Transaction> IndexImpl<T> for CompositeIndexImpl {
-    fn index_lookup(
+    fn index_lookup_into(
         &self,
+        tuple: &mut Tuple,
         _: &[u8],
         value: &[u8],
         params: &IndexImplParams<T>,
-    ) -> Result<Tuple, DatabaseError> {
-        secondary_index_lookup(value, params)
+    ) -> Result<(), DatabaseError> {
+        secondary_index_lookup(tuple, value, params)
     }
 
     fn eq_to_res<'a>(
         &self,
+        tuple: &mut Tuple,
         value: &DataValue,
         params: &IndexImplParams<'a, T>,
         encode_min: &mut Bytes,
         encode_max: &mut Bytes,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
-        eq_to_res_scope(self, value, params, encode_min, encode_max)
+        eq_to_res_scope(tuple, self, value, params, encode_min, encode_max)
     }
 
     fn bound_key(
@@ -1548,12 +1574,13 @@ impl<T: Transaction> IndexImpl<T> for CompositeIndexImpl {
 }
 
 impl<T: Transaction> IndexImpl<T> for CoveredIndexImpl {
-    fn index_lookup(
+    fn index_lookup_into(
         &self,
+        tuple: &mut Tuple,
         key: &[u8],
         value: &[u8],
         params: &IndexImplParams<T>,
-    ) -> Result<Tuple, DatabaseError> {
+    ) -> Result<(), DatabaseError> {
         let mapping = params
             .cover_mapping
             .as_ref()
@@ -1565,23 +1592,23 @@ impl<T: Transaction> IndexImpl<T> for CoveredIndexImpl {
         } else {
             None
         };
-        let values = match key {
+        tuple.pk = tuple_id;
+        tuple.values = match key {
             DataValue::Tuple(vals, _) => vals,
-            v => {
-                vec![v]
-            }
+            v => vec![v],
         };
-        Ok(Tuple::new(tuple_id, values))
+        Ok(())
     }
 
     fn eq_to_res<'a>(
         &self,
+        tuple: &mut Tuple,
         value: &DataValue,
         params: &IndexImplParams<'a, T>,
         encode_min: &mut Bytes,
         encode_max: &mut Bytes,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
-        eq_to_res_scope(self, value, params, encode_min, encode_max)
+        eq_to_res_scope(tuple, self, value, params, encode_min, encode_max)
     }
 
     fn bound_key(
@@ -1601,12 +1628,14 @@ impl<T: Transaction> IndexImpl<T> for CoveredIndexImpl {
 
 #[inline(always)]
 fn eq_to_res_scope<'a, T: Transaction + 'a>(
+    tuple: &mut Tuple,
     index_impl: &impl IndexImpl<T>,
     value: &DataValue,
     params: &IndexImplParams<'a, T>,
     encode_min: &mut Bytes,
     encode_max: &mut Bytes,
 ) -> Result<IndexResult<'a, T>, DatabaseError> {
+    let _ = tuple;
     index_impl.bound_key(params, value, false, encode_min)?;
     index_impl.bound_key(params, value, true, encode_max)?;
 
@@ -1622,16 +1651,15 @@ pub struct TupleIter<'a, T: Transaction + 'a> {
     limit: Option<usize>,
     pk_ty: Option<LogicalType>,
     deserializers: Vec<TupleValueSerializableImpl>,
-    values_len: usize,
     total_len: usize,
     iter: T::IterType<'a>,
 }
 
 impl<'a, T: Transaction + 'a> Iter for TupleIter<'a, T> {
-    fn next_tuple(&mut self) -> Result<Option<Tuple>, DatabaseError> {
+    fn next_tuple_into(&mut self, tuple: &mut Tuple) -> Result<bool, DatabaseError> {
         while self.offset > 0 {
             if self.iter.try_next()?.is_none() {
-                return Ok(None);
+                return Ok(false);
             }
             self.offset -= 1;
         }
@@ -1640,7 +1668,7 @@ impl<'a, T: Transaction + 'a> Iter for TupleIter<'a, T> {
         while let Some((key, value)) = self.iter.try_next()? {
             if let Some(limit) = self.limit.as_mut() {
                 if *limit == 0 {
-                    return Ok(None);
+                    return Ok(false);
                 }
                 *limit -= 1;
             }
@@ -1649,18 +1677,18 @@ impl<'a, T: Transaction + 'a> Iter for TupleIter<'a, T> {
             } else {
                 None
             };
-            let tuple = TableCodec::decode_tuple(
+            TableCodec::decode_tuple_into(
+                tuple,
                 &self.deserializers,
                 tuple_id,
                 &value,
-                self.values_len,
                 self.total_len,
             )?;
 
-            return Ok(Some(tuple));
+            return Ok(true);
         }
 
-        Ok(None)
+        Ok(false)
     }
 }
 
@@ -1702,11 +1730,11 @@ impl<'a, T: Transaction + 'a> IndexIter<'a, T> {
 
 /// expression -> index value -> tuple
 impl<T: Transaction> Iter for IndexIter<'_, T> {
-    fn next_tuple(&mut self) -> Result<Option<Tuple>, DatabaseError> {
+    fn next_tuple_into(&mut self, tuple: &mut Tuple) -> Result<bool, DatabaseError> {
         if matches!(self.limit, Some(0)) {
             self.state = IndexIterState::Over;
 
-            return Ok(None);
+            return Ok(false);
         }
 
         loop {
@@ -1758,18 +1786,20 @@ impl<T: Transaction> Iter for IndexIter<'_, T> {
                             val = self.params.try_cast(val)?;
 
                             match self.inner.eq_to_res(
+                                tuple,
                                 &val,
                                 &self.params,
                                 &mut self.encode_min_buffer,
                                 &mut self.encode_max_buffer,
                             )? {
-                                IndexResult::Tuple(tuple) => {
+                                IndexResult::Hit => {
                                     if Self::offset_move(&mut self.offset) {
                                         continue;
                                     }
                                     Self::limit_sub(&mut self.limit);
-                                    return Ok(tuple);
+                                    return Ok(true);
                                 }
+                                IndexResult::Miss => return Ok(false),
                                 IndexResult::Scope(iter) => {
                                     self.state = IndexIterState::Range(iter);
                                 }
@@ -1784,13 +1814,14 @@ impl<T: Transaction> Iter for IndexIter<'_, T> {
                             continue;
                         }
                         Self::limit_sub(&mut self.limit);
-                        let tuple = self.inner.index_lookup(&key, &value, &self.params)?;
+                        self.inner
+                            .index_lookup_into(tuple, &key, &value, &self.params)?;
 
-                        return Ok(Some(tuple));
+                        return Ok(true);
                     }
                     self.state = IndexIterState::Init;
                 }
-                IndexIterState::Over => return Ok(None),
+                IndexIterState::Over => return Ok(false),
             }
         }
     }
@@ -1801,7 +1832,16 @@ pub trait InnerIter {
 }
 
 pub trait Iter {
-    fn next_tuple(&mut self) -> Result<Option<Tuple>, DatabaseError>;
+    fn next_tuple_into(&mut self, tuple: &mut Tuple) -> Result<bool, DatabaseError>;
+
+    fn next_tuple(&mut self) -> Result<Option<Tuple>, DatabaseError> {
+        let mut tuple = Tuple::default();
+        if self.next_tuple_into(&mut tuple)? {
+            Ok(Some(tuple))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

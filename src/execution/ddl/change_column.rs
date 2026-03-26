@@ -45,7 +45,9 @@ impl ChangeColumn {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<crate::types::tuple::Tuple>, DatabaseError> {
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
         let table_cache = arena.table_cache();
         let Some(ChangeColumnOperator {
             table_name,
@@ -56,7 +58,8 @@ impl ChangeColumn {
             not_null_change,
         }) = self.op.take()
         else {
-            return Ok(None);
+            arena.finish();
+            return Ok(());
         };
 
         let table_catalog = arena
@@ -117,13 +120,13 @@ impl ChangeColumn {
                 schema.len(),
                 schema.len(),
                 &serializers,
-                |mut tuple| {
+                |tuple| {
                     tuple.values[column_index] =
                         tuple.values[column_index].clone().cast(&target_data_type)?;
                     if needs_not_null_validation && tuple.values[column_index].is_null() {
                         return Err(DatabaseError::not_null_column(target_column_name.clone()));
                     }
-                    Ok(tuple)
+                    Ok(())
                 },
                 |_, _| Ok(()),
             )?;
@@ -155,6 +158,8 @@ impl ChangeColumn {
             &not_null_change,
         )?;
 
-        Ok(Some(TupleBuilder::build_result(format!("{table_name}"))))
+        TupleBuilder::build_result_into(arena.result_tuple_mut(), format!("{table_name}"));
+        arena.resume();
+        Ok(())
     }
 }

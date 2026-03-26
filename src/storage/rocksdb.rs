@@ -556,7 +556,7 @@ fn owned_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
-    use crate::db::{DataBaseBuilder, ResultIter};
+    use crate::db::DataBaseBuilder;
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
     use crate::storage::rocksdb::RocksStorage;
@@ -714,7 +714,6 @@ mod test {
             .columns()
             .map(|column| column.datatype().serializable())
             .collect_vec();
-        let values_len = deserializers.len();
         let mut iter = IndexIter {
             offset: 0,
             limit: None,
@@ -730,7 +729,6 @@ mod test {
                 }),
                 table_name: &table.name,
                 deserializers,
-                values_len,
                 total_len: table.columns_len(),
                 tx: &transaction,
                 cover_mapping: None,

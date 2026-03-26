@@ -2,7 +2,8 @@
 
 use crate::catalog::{ColumnRef, TableCatalog};
 use crate::db::{
-    DBTransaction, Database, DatabaseIter, OrmIter, ResultIter, Statement, TransactionIter,
+    BorrowResultIter, DBTransaction, Database, DatabaseIter, OrmIter, ResultIter, Statement,
+    TransactionIter,
 };
 use crate::errors::DatabaseError;
 use crate::storage::{Storage, Transaction};

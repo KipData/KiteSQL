@@ -14,9 +14,8 @@
 
 use crate::catalog::view::View;
 use crate::errors::DatabaseError;
-use crate::execution::ExecArena;
+use crate::execution::{ExecArena, ExecId};
 use crate::storage::Transaction;
-use crate::types::tuple::Tuple;
 use crate::types::value::{DataValue, Utf8Type};
 use sqlparser::ast::CharLengthUnits;
 
@@ -28,7 +27,9 @@ impl ShowViews {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<Tuple>, DatabaseError> {
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
         if self.metas.is_none() {
             self.metas = Some(
                 arena
@@ -39,15 +40,20 @@ impl ShowViews {
         }
 
         let Some(View { name, .. }) = self.metas.as_mut().and_then(|metas| metas.next()) else {
-            return Ok(None);
+            arena.finish();
+            return Ok(());
         };
 
-        let values = vec![DataValue::Utf8 {
+        let output = arena.result_tuple_mut();
+        output.pk = None;
+        output.values.clear();
+        output.values.push(DataValue::Utf8 {
             value: name.to_string(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
-        }];
+        });
 
-        Ok(Some(Tuple::new(None, values)))
+        arena.resume();
+        Ok(())
     }
 }

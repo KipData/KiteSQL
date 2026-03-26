@@ -43,19 +43,24 @@ impl DropTable {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<crate::types::tuple::Tuple>, DatabaseError> {
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
         let Some(DropTableOperator {
             table_name,
             if_exists,
         }) = self.op.take()
         else {
-            return Ok(None);
+            arena.finish();
+            return Ok(());
         };
 
         arena
             .transaction_mut()
             .drop_table(arena.table_cache(), table_name.clone(), if_exists)?;
 
-        Ok(Some(TupleBuilder::build_result(format!("{table_name}"))))
+        TupleBuilder::build_result_into(arena.result_tuple_mut(), format!("{table_name}"));
+        arena.resume();
+        Ok(())
     }
 }

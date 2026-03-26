@@ -71,27 +71,34 @@ impl Except {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<Tuple>, DatabaseError> {
+        _: ExecId,
+    ) -> Result<(), DatabaseError> {
         if !self.built {
-            while let Some(tuple) = arena.next_tuple(self.right_input)? {
-                *self.except_col.entry(tuple).or_insert(0) += 1;
+            while arena.next_tuple(self.right_input)? {
+                *self
+                    .except_col
+                    .entry(arena.result_tuple().clone())
+                    .or_insert(0) += 1;
             }
             self.built = true;
         }
 
         loop {
-            let Some(tuple) = arena.next_tuple(self.left_input)? else {
-                return Ok(None);
-            };
+            if !arena.next_tuple(self.left_input)? {
+                arena.finish();
+                return Ok(());
+            }
+            let tuple = arena.result_tuple();
 
-            if let Some(count) = self.except_col.get_mut(&tuple) {
+            if let Some(count) = self.except_col.get_mut(tuple) {
                 if *count > 0 {
                     *count -= 1;
                     continue;
                 }
             }
 
-            return Ok(Some(tuple));
+            arena.resume();
+            return Ok(());
         }
     }
 }

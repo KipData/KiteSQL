@@ -59,13 +59,17 @@ impl CopyToFile {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<crate::types::tuple::Tuple>, DatabaseError> {
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
         let Some(input) = self.input.take() else {
-            return Ok(None);
+            arena.finish();
+            return Ok(());
         };
 
         let mut writer = self.create_writer()?;
-        while let Some(tuple) = arena.next_tuple(input)? {
+        while arena.next_tuple(input)? {
+            let tuple = arena.result_tuple();
             writer.write_record(
                 tuple
                     .values
@@ -76,7 +80,9 @@ impl CopyToFile {
         }
         writer.flush().map_err(DatabaseError::from)?;
 
-        Ok(Some(TupleBuilder::build_result(format!("{}", self.op))))
+        TupleBuilder::build_result_into(arena.result_tuple_mut(), format!("{}", self.op));
+        arena.resume();
+        Ok(())
     }
 
     fn create_writer(&self) -> Result<csv::Writer<std::fs::File>, DatabaseError> {
@@ -112,7 +118,7 @@ mod tests {
     use super::*;
     use crate::binder::copy::ExtSource;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation, ColumnSummary};
-    use crate::db::{DataBaseBuilder, ResultIter};
+    use crate::db::DataBaseBuilder;
     use crate::errors::DatabaseError;
     use crate::planner::operator::table_scan::TableScanOperator;
     use crate::storage::Storage;

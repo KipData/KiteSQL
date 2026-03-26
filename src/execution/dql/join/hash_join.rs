@@ -182,7 +182,8 @@ impl HashJoin {
         let mut build_buf = BumpVec::with_capacity_in(self.on_left_keys.len(), &self.bump);
         let mut build_count = 0usize;
 
-        while let Some(tuple) = arena.next_tuple(self.left_input)? {
+        while arena.next_tuple(self.left_input)? {
+            let tuple = arena.result_tuple().clone();
             Self::eval_keys(
                 &self.on_left_keys,
                 &tuple,
@@ -293,7 +294,7 @@ impl HashJoin {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<Tuple>, DatabaseError> {
+    ) -> Result<(), DatabaseError> {
         if let Some(err) = self.init_error.take() {
             return Err(err);
         }
@@ -312,9 +313,10 @@ impl HashJoin {
                 } => {
                     let probe_finished = loop {
                         if probe_state.is_none() {
-                            let Some(tuple) = arena.next_tuple(self.right_input)? else {
+                            if !arena.next_tuple(self.right_input)? {
                                 break true;
-                            };
+                            }
+                            let tuple = arena.result_tuple().clone();
                             Self::eval_keys(
                                 &self.on_right_keys,
                                 &tuple,
@@ -353,7 +355,8 @@ impl HashJoin {
                                 probe_buf,
                                 probe_state,
                             };
-                            return Ok(Some(tuple));
+                            arena.produce_tuple(tuple);
+                            return Ok(());
                         }
 
                         if probe.finished {
@@ -381,13 +384,15 @@ impl HashJoin {
                             join_impl,
                             left_drop,
                         };
-                        return Ok(Some(tuple));
+                        arena.produce_tuple(tuple);
+                        return Ok(());
                     }
                     state = HashJoinState::End;
                 }
                 HashJoinState::End => {
                     self.state = HashJoinState::End;
-                    return Ok(None);
+                    arena.finish();
+                    return Ok(());
                 }
             }
         }

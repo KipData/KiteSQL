@@ -22,7 +22,6 @@ use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::index::{Index, IndexId, IndexType};
 use crate::types::tuple::SchemaRef;
-use crate::types::tuple::Tuple;
 use crate::types::tuple_builder::TupleBuilder;
 use crate::types::value::DataValue;
 use std::collections::HashMap;
@@ -68,9 +67,12 @@ impl Delete {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<Tuple>, DatabaseError> {
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
         let Some(input) = self.input.take() else {
-            return Ok(None);
+            arena.finish();
+            return Ok(());
         };
 
         let table = arena
@@ -81,7 +83,8 @@ impl Delete {
 
         let mut deleted_count = 0;
 
-        while let Some(tuple) = arena.next_tuple(input)? {
+        while arena.next_tuple(input)? {
+            let tuple = arena.result_tuple().clone();
             for index_meta in table.indexes() {
                 if let Some(Value { exprs, values, .. }) = indexes.get_mut(&index_meta.id) {
                     let Some(data_value) = DataValue::values_to_tuple(Projection::projection(
@@ -138,7 +141,9 @@ impl Delete {
             }
         }
 
-        Ok(Some(TupleBuilder::build_result(deleted_count.to_string())))
+        TupleBuilder::build_result_into(arena.result_tuple_mut(), deleted_count.to_string());
+        arena.resume();
+        Ok(())
     }
 }
 

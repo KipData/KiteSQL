@@ -67,13 +67,20 @@ impl Union {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<crate::types::tuple::Tuple>, DatabaseError> {
+        _: ExecId,
+    ) -> Result<(), DatabaseError> {
         if self.reading_left {
-            if let Some(tuple) = arena.next_tuple(self.left_input)? {
-                return Ok(Some(tuple));
+            if arena.next_tuple(self.left_input)? {
+                arena.resume();
+                return Ok(());
             }
             self.reading_left = false;
         }
-        arena.next_tuple(self.right_input)
+        if arena.next_tuple(self.right_input)? {
+            arena.resume();
+        } else {
+            arena.finish();
+        }
+        Ok(())
     }
 }

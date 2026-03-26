@@ -19,7 +19,6 @@ use crate::planner::operator::filter::FilterOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::tuple::SchemaRef;
-use crate::types::tuple::Tuple;
 pub struct Filter {
     predicate: ScalarExpression,
     input_schema: SchemaRef,
@@ -62,18 +61,22 @@ impl Filter {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> Result<Option<Tuple>, DatabaseError> {
+        _: ExecId,
+    ) -> Result<(), DatabaseError> {
         loop {
-            let Some(tuple) = arena.next_tuple(self.input)? else {
-                return Ok(None);
+            if !arena.next_tuple(self.input)? {
+                arena.finish();
+                return Ok(());
             };
+            let tuple = arena.result_tuple();
 
             if self
                 .predicate
-                .eval(Some((&tuple, &self.input_schema)))?
+                .eval(Some((tuple, &self.input_schema)))?
                 .is_true()?
             {
-                return Ok(Some(tuple));
+                arena.resume();
+                return Ok(());
             }
         }
     }

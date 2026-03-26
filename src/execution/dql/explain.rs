@@ -16,7 +16,6 @@ use crate::errors::DatabaseError;
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
-use crate::types::tuple::Tuple;
 use crate::types::value::{DataValue, Utf8Type};
 use sqlparser::ast::CharLengthUnits;
 
@@ -44,18 +43,25 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Explain {
 impl Explain {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
-        _: &mut ExecArena<'a, T>,
-    ) -> Result<Option<Tuple>, DatabaseError> {
+        arena: &mut ExecArena<'a, T>,
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
         let Some(plan) = self.plan.take() else {
-            return Ok(None);
+            arena.finish();
+            return Ok(());
         };
 
-        let values = vec![DataValue::Utf8 {
+        let output = arena.result_tuple_mut();
+        output.pk = None;
+        output.values.clear();
+        output.values.push(DataValue::Utf8 {
             value: plan.explain(0),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
-        }];
+        });
 
-        Ok(Some(Tuple::new(None, values)))
+        arena.resume();
+        Ok(())
     }
 }

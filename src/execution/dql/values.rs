@@ -17,7 +17,6 @@ use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecuto
 use crate::planner::operator::values::ValuesOperator;
 use crate::storage::Transaction;
 use crate::types::tuple::SchemaRef;
-use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use std::mem;
 
@@ -49,10 +48,13 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Values {
 impl Values {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
-        _: &mut ExecArena<'a, T>,
-    ) -> Result<Option<Tuple>, DatabaseError> {
+        arena: &mut ExecArena<'a, T>,
+        id: ExecId,
+    ) -> Result<(), DatabaseError> {
+        let _ = id;
         let Some(mut values) = self.rows.next() else {
-            return Ok(None);
+            arena.finish();
+            return Ok(());
         };
 
         for (i, value) in values.iter_mut().enumerate() {
@@ -63,6 +65,10 @@ impl Values {
             }
         }
 
-        Ok(Some(Tuple::new(None, values)))
+        let output = arena.result_tuple_mut();
+        output.pk = None;
+        output.values = values;
+        arena.resume();
+        Ok(())
     }
 }
