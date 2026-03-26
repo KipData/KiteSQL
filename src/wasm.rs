@@ -86,8 +86,7 @@ impl WasmDatabase {
 
     pub fn execute(&self, sql: &str) -> Result<(), JsValue> {
         let mut iter = self.inner.run(sql).map_err(to_js_err)?;
-        while iter.next_borrowed_tuple().map_err(to_js_err)?.is_some() {
-        }
+        while iter.next_borrowed_tuple().map_err(to_js_err)?.is_some() {}
         Ok(())
     }
 }

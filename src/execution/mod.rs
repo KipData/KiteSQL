@@ -261,12 +261,8 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
             ExecNode::DropColumn(mut exec) => {
                 (exec.next_tuple(self, id), ExecNode::DropColumn(exec))
             }
-            ExecNode::DropIndex(mut exec) => {
-                (exec.next_tuple(self, id), ExecNode::DropIndex(exec))
-            }
-            ExecNode::DropTable(mut exec) => {
-                (exec.next_tuple(self, id), ExecNode::DropTable(exec))
-            }
+            ExecNode::DropIndex(mut exec) => (exec.next_tuple(self, id), ExecNode::DropIndex(exec)),
+            ExecNode::DropTable(mut exec) => (exec.next_tuple(self, id), ExecNode::DropTable(exec)),
             ExecNode::DropView(mut exec) => (exec.next_tuple(self, id), ExecNode::DropView(exec)),
             ExecNode::Dummy(mut exec) => (exec.next_tuple(self, id), ExecNode::Dummy(exec)),
             ExecNode::Except(mut exec) => (exec.next_tuple(self, id), ExecNode::Except(exec)),
@@ -293,12 +289,8 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
             ExecNode::ShowTables(mut exec) => {
                 (exec.next_tuple(self, id), ExecNode::ShowTables(exec))
             }
-            ExecNode::ShowViews(mut exec) => {
-                (exec.next_tuple(self, id), ExecNode::ShowViews(exec))
-            }
-            ExecNode::SimpleAgg(mut exec) => {
-                (exec.next_tuple(self, id), ExecNode::SimpleAgg(exec))
-            }
+            ExecNode::ShowViews(mut exec) => (exec.next_tuple(self, id), ExecNode::ShowViews(exec)),
+            ExecNode::SimpleAgg(mut exec) => (exec.next_tuple(self, id), ExecNode::SimpleAgg(exec)),
             ExecNode::Sort(mut exec) => (exec.next_tuple(self), ExecNode::Sort(exec)),
             ExecNode::StreamDistinct(mut exec) => {
                 (exec.next_tuple(self, id), ExecNode::StreamDistinct(exec))

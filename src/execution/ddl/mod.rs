@@ -124,9 +124,7 @@ where
         if batch_len == 0 {
             break;
         }
-        last_pk = batch
-            .get(batch_len - 1)
-            .and_then(|tuple| tuple.pk.clone());
+        last_pk = batch.get(batch_len - 1).and_then(|tuple| tuple.pk.clone());
 
         for tuple in batch.iter().take(batch_len) {
             visit(tuple)?;
@@ -174,9 +172,7 @@ where
         if batch_len == 0 {
             break;
         }
-        last_pk = batch
-            .get(batch_len - 1)
-            .and_then(|tuple| tuple.pk.clone());
+        last_pk = batch.get(batch_len - 1).and_then(|tuple| tuple.pk.clone());
 
         for tuple in batch.iter_mut().take(batch_len) {
             rewrite(tuple)?;

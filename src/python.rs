@@ -208,8 +208,7 @@ impl PythonDatabase {
 
     pub fn execute(&self, sql: &str) -> PyResult<()> {
         let mut iter = self.inner.run(sql).map_err(to_py_err)?;
-        while iter.next_tuple().map_err(to_py_err)?.is_some() {
-        }
+        while iter.next_tuple().map_err(to_py_err)?.is_some() {}
         iter.done().map_err(to_py_err)?;
 
         Ok(())

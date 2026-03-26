@@ -1423,11 +1423,15 @@ impl<T: Transaction> IndexImpl<T> for PrimaryKeyIndexImpl {
         _: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
-        unsafe { &*params.table_codec() }.with_tuple_key_unchecked(params.table_name, value, |key| {
-            out.clear();
-            out.extend_from_slice(key);
-            Ok(())
-        })
+        unsafe { &*params.table_codec() }.with_tuple_key_unchecked(
+            params.table_name,
+            value,
+            |key| {
+                out.clear();
+                out.extend_from_slice(key);
+                Ok(())
+            },
+        )
     }
 }
 
