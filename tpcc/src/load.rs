@@ -27,6 +27,7 @@ pub(crate) const MAX_ITEMS: usize = 100_000;
 pub(crate) const CUST_PER_DIST: usize = 3_000;
 pub(crate) const DIST_PER_WARE: usize = 10;
 pub(crate) const ORD_PER_DIST: usize = 3000;
+const LOAD_BATCH_SIZE: usize = 500;
 
 pub(crate) static MAX_NUM_ITEMS: usize = 15;
 
@@ -45,6 +46,46 @@ fn log_phase(task: &str, current: usize, total: usize, context: &str) {
         println!("[{task} {}/{}]", current, total);
     } else {
         println!("[{task} {}/{}] {}", current, total, context);
+    }
+}
+
+struct SqlBatch<'a, E> {
+    exec: &'a E,
+    sql: String,
+    pending: usize,
+}
+
+impl<'a, E: SimpleExecutor> SqlBatch<'a, E> {
+    fn new(exec: &'a E) -> Self {
+        Self {
+            exec,
+            sql: String::new(),
+            pending: 0,
+        }
+    }
+
+    fn push(&mut self, statement: &str) -> Result<(), TpccError> {
+        if self.pending != 0 {
+            self.sql.push(';');
+        }
+        self.sql.push_str(statement);
+        self.pending += 1;
+
+        if self.pending >= LOAD_BATCH_SIZE {
+            self.flush()?;
+        }
+
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), TpccError> {
+        if self.pending == 0 {
+            return Ok(());
+        }
+
+        let sql = std::mem::take(&mut self.sql);
+        self.pending = 0;
+        self.exec.execute_batch(&sql)
     }
 }
 
@@ -136,6 +177,7 @@ impl Load {
                 .unwrap(),
         );
         let orig = Self::gen_orig(rng);
+        let mut batch = SqlBatch::new(exec);
 
         for i_id in 1..MAX_ITEMS + 1 {
             let i_im_id = rng.gen_range(1..10000);
@@ -152,11 +194,12 @@ impl Load {
                 i_data = format!("{}original{}", prefix, remainder);
             }
 
-            exec.execute_batch(&format!(
+            batch.push(&format!(
                 "insert into item values ({i_id}, {i_im_id}, '{i_name}', {i_price}, '{i_data}')"
             ))?;
             pb.set_position(i_id as u64);
         }
+        batch.flush()?;
         finish_progress(&pb, Some("Items loaded"));
         println!("[Analyze Table: item]");
         exec.execute_batch("analyze table item")?;
@@ -444,6 +487,7 @@ impl Load {
         );
         let s_w_id = w_id;
         let orig = Self::gen_orig(rng);
+        let mut batch = SqlBatch::new(exec);
 
         for s_i_id in 1..MAX_ITEMS + 1 {
             let s_quantity = rng.gen_range(10..100);
@@ -463,7 +507,7 @@ impl Load {
             } else {
                 generate_string(rng, 26, 50)
             };
-            exec.execute_batch(&format!(
+            batch.push(&format!(
                 "insert into stock values({}, {}, {}, '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', {}, {}, {}, '{}')",
                 s_i_id,
                 s_w_id,
@@ -485,6 +529,7 @@ impl Load {
             ))?;
             pb.set_position(s_i_id as u64);
         }
+        batch.flush()?;
         finish_progress(&pb, None);
 
         Ok(())
@@ -540,6 +585,7 @@ impl Load {
         let d_w_id = w_id;
         let d_ytd = Decimal::from_f64_retain(30000.0).unwrap().round_dp(2);
         let d_next_o_id = 3001;
+        let mut batch = SqlBatch::new(exec);
 
         for d_id in 1..DIST_PER_WARE + 1 {
             let d_name = generate_string(rng, 6, 10);
@@ -553,7 +599,7 @@ impl Load {
                 .unwrap()
                 .round_dp(2);
 
-            exec.execute_batch(&format!(
+            batch.push(&format!(
                 "insert into district values({}, {}, '{}', '{}', '{}', '{}', '{}', '{}', {}, {}, {})",
                 d_id,
                 d_w_id,
@@ -569,6 +615,7 @@ impl Load {
             ))?;
             pb.set_position(d_id as u64);
         }
+        batch.flush()?;
         finish_progress(&pb, None);
 
         Ok(())
@@ -626,6 +673,7 @@ impl Load {
                 .unwrap(),
         );
         let date = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let mut batch = SqlBatch::new(exec);
 
         for c_id in 1..CUST_PER_DIST + 1 {
             let c_d_id = d_id;
@@ -661,7 +709,7 @@ impl Load {
 
             let c_data = generate_string(rng, 300, 500);
 
-            exec.execute_batch(&format!(
+            batch.push(&format!(
                 "insert into customer values({}, {}, {}, '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', {}, {}, {}, {}, {}, {}, '{}')",
                 c_id,
                 c_d_id,
@@ -690,12 +738,13 @@ impl Load {
             let h_amount = Decimal::from_f64_retain(10.0).unwrap().round_dp(2);
             let h_data = generate_string(rng, 12, 24);
 
-            exec.execute_batch(&format!(
+            batch.push(&format!(
                 "insert into history values({}, {}, {}, {}, {}, '{}', {}, '{}')",
                 c_id, c_d_id, c_w_id, c_d_id, c_w_id, h_date, h_amount, h_data,
             ))?;
             pb.set_position(c_id as u64);
         }
+        batch.flush()?;
         finish_progress(&pb, None);
 
         Ok(())
@@ -756,6 +805,7 @@ impl Load {
         let o_w_id = w_id;
 
         let nums = init_permutation(rng);
+        let mut batch = SqlBatch::new(exec);
 
         for o_id in 1..ORD_PER_DIST + 1 {
             let o_c_id = nums[o_id - 1];
@@ -765,7 +815,7 @@ impl Load {
             let date = format!("'{}'", Utc::now().format("%Y-%m-%d %H:%M:%S"));
 
             let o_carrier_id = if o_id > 2100 {
-                exec.execute_batch(&format!(
+                batch.push(&format!(
                     "insert into new_orders values({}, {}, {})",
                     o_id, o_d_id, o_w_id,
                 ))?;
@@ -773,7 +823,7 @@ impl Load {
             } else {
                 o_carrier_id.to_string()
             };
-            exec.execute_batch(&format!(
+            batch.push(&format!(
                 "insert into orders values({}, {}, {}, {}, {}, {}, {}, {})",
                 o_id, o_d_id, o_w_id, o_c_id, date, o_carrier_id, o_ol_cnt, "1",
             ))?;
@@ -789,7 +839,7 @@ impl Load {
                 } else {
                     (date.as_str(), format!("{:.2}", rng.gen_range(0.1..100.0)))
                 };
-                exec.execute_batch(&format!(
+                batch.push(&format!(
                     "insert into order_line values({}, {}, {}, {}, {}, {}, {}, {}, {}, '{}')",
                     o_id,
                     o_d_id,
@@ -805,8 +855,60 @@ impl Load {
             }
             pb.set_position((o_id - 1) as u64);
         }
+        batch.flush()?;
         finish_progress(&pb, None);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SqlBatch, LOAD_BATCH_SIZE};
+    use crate::backend::SimpleExecutor;
+    use crate::TpccError;
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct RecordingExecutor {
+        calls: RefCell<Vec<String>>,
+    }
+
+    impl SimpleExecutor for RecordingExecutor {
+        fn execute_batch(&self, sql: &str) -> Result<(), TpccError> {
+            self.calls.borrow_mut().push(sql.to_string());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn sql_batch_groups_statements() {
+        let exec = RecordingExecutor::default();
+        let mut batch = SqlBatch::new(&exec);
+
+        batch.push("insert 1").unwrap();
+        batch.push("insert 2").unwrap();
+        batch.flush().unwrap();
+
+        assert_eq!(
+            exec.calls.into_inner(),
+            vec!["insert 1;insert 2".to_string()]
+        );
+    }
+
+    #[test]
+    fn sql_batch_flushes_at_batch_size() {
+        let exec = RecordingExecutor::default();
+        let mut batch = SqlBatch::new(&exec);
+
+        for i in 0..=LOAD_BATCH_SIZE {
+            batch.push(&format!("insert {i}")).unwrap();
+        }
+        batch.flush().unwrap();
+
+        let calls = exec.calls.into_inner();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].split(';').count(), LOAD_BATCH_SIZE);
+        assert_eq!(calls[1], format!("insert {}", LOAD_BATCH_SIZE));
     }
 }

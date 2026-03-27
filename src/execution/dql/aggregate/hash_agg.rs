@@ -88,22 +88,6 @@ impl HashAggExecutor {
 
             while arena.next_tuple(self.input)? {
                 let tuple = arena.result_tuple();
-                let mut values = Vec::with_capacity(self.agg_calls.len());
-
-                for expr in &self.agg_calls {
-                    if let ScalarExpression::AggCall { args, .. } = expr {
-                        if args.len() > 1 {
-                            return Err(DatabaseError::UnsupportedStmt(
-                                "currently aggregate functions only support a single Column as a parameter"
-                                    .to_string(),
-                            ));
-                        }
-                        values.push(args[0].eval(Some((tuple, &self.input_schema)))?);
-                    } else {
-                        unreachable!()
-                    }
-                }
-
                 let group_keys = self
                     .groupby_exprs
                     .iter()
@@ -114,8 +98,19 @@ impl HashAggExecutor {
                     Entry::Occupied(entry) => entry.into_mut(),
                     Entry::Vacant(entry) => entry.insert(create_accumulators(&self.agg_calls)?),
                 };
-                for (acc, value) in entry.iter_mut().zip_eq(values.iter()) {
-                    acc.update_value(value)?;
+
+                for (acc, expr) in entry.iter_mut().zip_eq(self.agg_calls.iter()) {
+                    let ScalarExpression::AggCall { args, .. } = expr else {
+                        unreachable!()
+                    };
+                    if args.len() > 1 {
+                        return Err(DatabaseError::UnsupportedStmt(
+                            "currently aggregate functions only support a single Column as a parameter"
+                                .to_string(),
+                        ));
+                    }
+                    let value = args[0].eval(Some((tuple, &self.input_schema)))?;
+                    acc.update_value(&value)?;
                 }
             }
 
@@ -128,12 +123,15 @@ impl HashAggExecutor {
         };
 
         let output = arena.result_tuple_mut();
+
         output.pk = None;
-        output.values = accs
-            .iter()
-            .map(|acc| acc.evaluate())
-            .chain(group_keys.into_iter().map(Ok))
-            .try_collect()?;
+        output.values.clear();
+        output.values.reserve(accs.len() + group_keys.len());
+
+        for acc in accs.iter() {
+            output.values.push(acc.evaluate()?);
+        }
+        output.values.extend(group_keys);
         arena.resume();
         Ok(())
     }

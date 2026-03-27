@@ -179,17 +179,14 @@ Run `make tpcc-dual` to mirror every TPCC statement to an in-memory SQLite datab
 - KIOXIA-EXCERIA PLUS G3 SSD
 - Tips: TPC-C currently only supports single thread
 
-All cases have been fully optimized.
-```shell
-<90th Percentile RT (MaxRT)>
-   New-Order : 0.002  (0.005)
-     Payment : 0.001  (0.013)
-Order-Status : 0.002  (0.006)
-    Delivery : 0.010  (0.023)
- Stock-Level : 0.002  (0.017)
-<TpmC>
-27226 Tpmc
-```
+Recent 720-second local comparison on the machine above:
+
+| Backend | TpmC | New-Order p90 | Payment p90 | Order-Status p90 | Delivery p90 | Stock-Level p90 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| SQLite practical | 35516 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
+| KiteSQL LMDB | 29171 | 0.001s | 0.001s | 0.001s | 0.015s | 0.002s |
+
+The detailed raw outputs for both runs are recorded in [tpcc/README.md](tpcc/README.md).
 #### 👉[check more](tpcc/README.md)
 
 ## Roadmap

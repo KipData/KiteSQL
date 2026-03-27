@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::backend::{BackendTransaction, PreparedStatement, TransactionExt};
+use crate::backend::{BackendTransaction, PreparedStatement};
 use crate::load::{last_name, nu_rand, CUST_PER_DIST, DIST_PER_WARE};
 use crate::{other_ware, TpccArgs, TpccError, TpccTest, TpccTransaction, ALLOW_MULTI_WAREHOUSE_TX};
 use chrono::Utc;
@@ -80,16 +80,25 @@ impl TpccTransaction for Payment {
             ],
         )?;
         // "SELECT w_street_1, w_street_2, w_city, w_state, w_zip, w_name FROM warehouse WHERE w_id = ?"
-        let tuple = tx.query_one(
+        let mut w_street_1 = String::new();
+        let mut w_street_2 = String::new();
+        let mut w_city = String::new();
+        let mut w_state = String::new();
+        let mut w_zip = String::new();
+        let mut w_name = String::new();
+        tx.with_query_one(
             &statements[1],
             &[("$1", DataValue::Int16(args.w_id as i16))],
+            &mut |tuple| {
+                w_street_1 = tuple.values[0].utf8().unwrap().to_string();
+                w_street_2 = tuple.values[1].utf8().unwrap().to_string();
+                w_city = tuple.values[2].utf8().unwrap().to_string();
+                w_state = tuple.values[3].utf8().unwrap().to_string();
+                w_zip = tuple.values[4].utf8().unwrap().to_string();
+                w_name = tuple.values[5].utf8().unwrap().to_string();
+                Ok(())
+            },
         )?;
-        let w_street_1 = tuple.values[0].utf8().unwrap();
-        let w_street_2 = tuple.values[1].utf8().unwrap();
-        let w_city = tuple.values[2].utf8().unwrap();
-        let w_state = tuple.values[3].utf8().unwrap();
-        let w_zip = tuple.values[4].utf8().unwrap();
-        let w_name = tuple.values[5].utf8().unwrap();
 
         // "UPDATE district SET d_ytd = d_ytd + ? WHERE d_w_id = ? AND d_id = ?"
         tx.execute_drain(
@@ -102,84 +111,118 @@ impl TpccTransaction for Payment {
         )?;
 
         // "SELECT d_street_1, d_street_2, d_city, d_state, d_zip, d_name FROM district WHERE d_w_id = ? AND d_id = ?"
-        let tuple = tx.query_one(
+        let mut d_street_1 = String::new();
+        let mut d_street_2 = String::new();
+        let mut d_city = String::new();
+        let mut d_state = String::new();
+        let mut d_zip = String::new();
+        let mut d_name = String::new();
+        tx.with_query_one(
             &statements[3],
             &[
                 ("$1", DataValue::Int16(args.w_id as i16)),
                 ("$2", DataValue::Int8(args.d_id as i8)),
             ],
+            &mut |tuple| {
+                d_street_1 = tuple.values[0].utf8().unwrap().to_string();
+                d_street_2 = tuple.values[1].utf8().unwrap().to_string();
+                d_city = tuple.values[2].utf8().unwrap().to_string();
+                d_state = tuple.values[3].utf8().unwrap().to_string();
+                d_zip = tuple.values[4].utf8().unwrap().to_string();
+                d_name = tuple.values[5].utf8().unwrap().to_string();
+                Ok(())
+            },
         )?;
-        let d_street_1 = tuple.values[0].utf8().unwrap();
-        let d_street_2 = tuple.values[1].utf8().unwrap();
-        let d_city = tuple.values[2].utf8().unwrap();
-        let d_state = tuple.values[3].utf8().unwrap();
-        let d_zip = tuple.values[4].utf8().unwrap();
-        let d_name = tuple.values[5].utf8().unwrap();
 
         let mut c_id = args.c_id as i32;
         if args.by_name {
             // "SELECT count(c_id) FROM customer WHERE c_w_id = ? AND c_d_id = ? AND c_last = ?"
-            let tuple = tx.query_one(
+            let mut name_cnt = 0;
+            tx.with_query_one(
                 &statements[4],
                 &[
                     ("$1", DataValue::Int16(args.c_w_id as i16)),
                     ("$2", DataValue::Int8(args.c_d_id as i8)),
                     ("$3", DataValue::from(args.c_last.clone())),
                 ],
+                &mut |tuple| {
+                    name_cnt = tuple.values[0].i32().unwrap();
+                    Ok(())
+                },
             )?;
-            let mut name_cnt = tuple.values[0].i32().unwrap();
             // "SELECT c_id FROM customer WHERE c_w_id = ? AND c_d_id = ? AND c_last = ? ORDER BY c_first"
             let params = [
                 ("$1", DataValue::Int16(args.c_w_id as i16)),
                 ("$2", DataValue::Int8(args.c_d_id as i8)),
                 ("$3", DataValue::from(args.c_last.clone())),
             ];
-            let mut tuple_iter = tx.execute(&statements[5], &params)?;
             if name_cnt % 2 == 1 {
                 name_cnt += 1;
             }
-            for _ in 0..name_cnt / 2 {
-                let result = tuple_iter.next().unwrap()?;
-                c_id = result.values[0].i32().unwrap();
-            }
+            let target = name_cnt as usize / 2 - 1;
+            tx.with_query_nth(&statements[5], &params, target, &mut |tuple| {
+                c_id = tuple.values[0].i32().unwrap();
+                Ok(())
+            })?;
         }
         // "SELECT c_first, c_middle, c_last, c_street_1, c_street_2, c_city, c_state, c_zip, c_phone, c_credit, c_credit_lim, c_discount, c_balance, c_since FROM customer WHERE c_w_id = ? AND c_d_id = ? AND c_id = ? FOR UPDATE"
-        let tuple = tx.query_one(
+        let mut c_first = String::new();
+        let mut c_middle = String::new();
+        let mut c_last = String::new();
+        let mut c_street_1 = String::new();
+        let mut c_street_2 = String::new();
+        let mut c_city = String::new();
+        let mut c_state = String::new();
+        let mut c_zip = String::new();
+        let mut c_phone = String::new();
+        let mut c_credit = None;
+        let mut c_credit_lim = 0;
+        let mut c_discount = Decimal::default();
+        let mut c_balance = Decimal::default();
+        let mut c_since = Default::default();
+        tx.with_query_one(
             &statements[6],
             &[
                 ("$1", DataValue::Int16(args.c_w_id as i16)),
                 ("$2", DataValue::Int8(args.c_d_id as i8)),
                 ("$3", DataValue::Int32(c_id)),
             ],
+            &mut |tuple| {
+                c_first = tuple.values[0].utf8().unwrap().to_string();
+                c_middle = tuple.values[1].utf8().unwrap().to_string();
+                c_last = tuple.values[2].utf8().unwrap().to_string();
+                c_street_1 = tuple.values[3].utf8().unwrap().to_string();
+                c_street_2 = tuple.values[4].utf8().unwrap().to_string();
+                c_city = tuple.values[5].utf8().unwrap().to_string();
+                c_state = tuple.values[6].utf8().unwrap().to_string();
+                c_zip = tuple.values[7].utf8().unwrap().to_string();
+                c_phone = tuple.values[8].utf8().unwrap().to_string();
+                c_credit = tuple.values[9].utf8().map(ToString::to_string);
+                c_credit_lim = tuple.values[10].i64().unwrap();
+                c_discount = tuple.values[11].decimal().unwrap();
+                c_balance = tuple.values[12].decimal().unwrap();
+                c_since = tuple.values[13].datetime().unwrap();
+                Ok(())
+            },
         )?;
-        let c_first = tuple.values[0].utf8().unwrap();
-        let c_middle = tuple.values[1].utf8().unwrap();
-        let c_last = tuple.values[2].utf8().unwrap();
-        let c_street_1 = tuple.values[3].utf8().unwrap();
-        let c_street_2 = tuple.values[4].utf8().unwrap();
-        let c_city = tuple.values[5].utf8().unwrap();
-        let c_state = tuple.values[6].utf8().unwrap();
-        let c_zip = tuple.values[7].utf8().unwrap();
-        let c_phone = tuple.values[8].utf8().unwrap();
-        let c_credit = tuple.values[9].utf8();
-        let c_credit_lim = tuple.values[10].i64().unwrap();
-        let c_discount = tuple.values[11].decimal().unwrap();
-        let mut c_balance = tuple.values[12].decimal().unwrap();
-        let c_since = tuple.values[13].datetime().unwrap();
 
         c_balance += args.h_amount;
         if let Some(c_credit) = c_credit {
             if c_credit.contains("BC") {
                 // "SELECT c_data FROM customer WHERE c_w_id = ? AND c_d_id = ? AND c_id = ?"
-                let tuple = tx.query_one(
+                let mut c_data = String::new();
+                tx.with_query_one(
                     &statements[7],
                     &[
                         ("$1", DataValue::Int16(args.c_w_id as i16)),
                         ("$2", DataValue::Int8(args.c_d_id as i8)),
                         ("$3", DataValue::Int32(c_id)),
                     ],
+                    &mut |tuple| {
+                        c_data = tuple.values[0].utf8().unwrap().to_string();
+                        Ok(())
+                    },
                 )?;
-                let c_data = tuple.values[0].utf8().unwrap();
 
                 // https://github.com/AgilData/tpcc/blob/dfbabe1e35cc93b2bf2e107fc699eb29c2097e24/src/main/java/com/codefutures/tpcc/Payment.java#L284
                 // let c_new_data = format!("| {} {} {} {} {} {} {}", c_id, args.c_d_id, args.c_w_id, args.d_id, args.w_id, args.h_amount, )
@@ -189,7 +232,7 @@ impl TpccTransaction for Payment {
                     &statements[8],
                     &[
                         ("$1", DataValue::Decimal(c_balance)),
-                        ("$2", DataValue::from(c_data.to_string())),
+                        ("$2", DataValue::from(c_data)),
                         ("$3", DataValue::Int16(args.c_w_id as i16)),
                         ("$4", DataValue::Int8(args.c_d_id as i8)),
                         ("$5", DataValue::Int32(c_id)),

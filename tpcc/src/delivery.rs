@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::backend::{BackendTransaction, PreparedStatement, TransactionExt};
+use crate::backend::{BackendTransaction, PreparedStatement};
 use crate::load::DIST_PER_WARE;
 use crate::{TpccArgs, TpccError, TpccTest, TpccTransaction};
 use chrono::Utc;
@@ -47,14 +47,18 @@ impl TpccTransaction for Delivery {
 
         for d_id in 1..DIST_PER_WARE + 1 {
             // "SELECT COALESCE(MIN(no_o_id),0) FROM new_orders WHERE no_d_id = ? AND no_w_id = ?"
-            let tuple = tx.query_one(
+            let mut no_o_id = 0;
+            tx.with_query_one(
                 &statements[0],
                 &[
                     ("$1", DataValue::Int8(d_id as i8)),
                     ("$2", DataValue::Int16(args.w_id as i16)),
                 ],
+                &mut |tuple| {
+                    no_o_id = tuple.values[0].i32().unwrap();
+                    Ok(())
+                },
             )?;
-            let no_o_id = tuple.values[0].i32().unwrap();
 
             if no_o_id == 0 {
                 continue;
@@ -69,15 +73,19 @@ impl TpccTransaction for Delivery {
                 ],
             )?;
             // "SELECT o_c_id FROM orders WHERE o_id = ? AND o_d_id = ? AND o_w_id = ?"
-            let tuple = tx.query_one(
+            let mut c_id = 0;
+            tx.with_query_one(
                 &statements[2],
                 &[
                     ("$1", DataValue::Int32(no_o_id)),
                     ("$2", DataValue::Int8(d_id as i8)),
                     ("$3", DataValue::Int16(args.w_id as i16)),
                 ],
+                &mut |tuple| {
+                    c_id = tuple.values[0].i32().unwrap();
+                    Ok(())
+                },
             )?;
-            let c_id = tuple.values[0].i32().unwrap();
             // "UPDATE orders SET o_carrier_id = ? WHERE o_id = ? AND o_d_id = ? AND o_w_id = ?"
             tx.execute_drain(
                 &statements[3],
@@ -99,15 +107,19 @@ impl TpccTransaction for Delivery {
                 ],
             )?;
             // "SELECT SUM(ol_amount) FROM order_line WHERE ol_o_id = ? AND ol_d_id = ? AND ol_w_id = ?"
-            let tuple = tx.query_one(
+            let mut ol_total = Default::default();
+            tx.with_query_one(
                 &statements[5],
                 &[
                     ("$1", DataValue::Int32(no_o_id)),
                     ("$2", DataValue::Int8(d_id as i8)),
                     ("$3", DataValue::Int16(args.w_id as i16)),
                 ],
+                &mut |tuple| {
+                    ol_total = tuple.values[0].decimal().unwrap();
+                    Ok(())
+                },
             )?;
-            let ol_total = tuple.values[0].decimal().unwrap();
             // "UPDATE customer SET c_balance = c_balance + ? , c_delivery_cnt = c_delivery_cnt + 1 WHERE c_id = ? AND c_d_id = ? AND c_w_id = ?"
             tx.execute_drain(
                 &statements[6],

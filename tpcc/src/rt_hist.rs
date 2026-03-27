@@ -89,6 +89,19 @@ impl RtHist {
     }
 
     // Report histograms
+    pub fn finalize(&mut self) {
+        for transaction in 0..NUM_TRANSACTIONS {
+            for i in 0..(MAX_REC * REC_PER_SEC) {
+                self.total_hist[transaction][i] += self.cur_hist[transaction][i];
+                self.cur_hist[transaction][i] = 0;
+            }
+            self.max_rt[transaction] = *OrderedFloat(self.cur_max_rt[transaction])
+                .max(OrderedFloat(self.max_rt[transaction]));
+            self.cur_max_rt[transaction] = 0.0;
+        }
+    }
+
+    // Report histograms
     pub fn hist_report(&self) {
         let mut total = [0; NUM_TRANSACTIONS];
         let mut tmp = [0; NUM_TRANSACTIONS];

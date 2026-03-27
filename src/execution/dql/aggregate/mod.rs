@@ -63,6 +63,7 @@ fn create_accumulator(expr: &ScalarExpression) -> Result<Box<dyn Accumulator>, D
     }
 }
 
+#[inline]
 pub(crate) fn create_accumulators(
     exprs: &[ScalarExpression],
 ) -> Result<Vec<Box<dyn Accumulator>>, DatabaseError> {

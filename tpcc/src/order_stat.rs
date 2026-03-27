@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::backend::{BackendTransaction, PreparedStatement, TransactionExt};
+use crate::backend::{BackendTransaction, PreparedStatement};
 use crate::load::{last_name, nu_rand, CUST_PER_DIST, DIST_PER_WARE};
 use crate::{TpccArgs, TpccError, TpccTest, TpccTransaction};
 use kite_sql::types::value::DataValue;
 use rand::prelude::ThreadRng;
 use rand::Rng;
-use rust_decimal::Decimal;
 
 #[derive(Debug)]
 pub(crate) struct OrderStatArgs {
@@ -60,54 +59,62 @@ impl TpccTransaction for OrderStat {
     ) -> Result<(), TpccError> {
         let (_c_balance, _c_first, _c_middle, _c_last) = if args.by_name {
             // "SELECT count(c_id) FROM customer WHERE c_w_id = ? AND c_d_id = ? AND c_last = ?"
-            let tuple = tx.query_one(
+            let mut name_cnt = 0usize;
+            tx.with_query_one(
                 &statements[0],
                 &[
                     ("$1", DataValue::Int16(args.w_id as i16)),
                     ("$2", DataValue::Int8(args.d_id as i8)),
                     ("$3", DataValue::from(args.c_last.clone())),
                 ],
+                &mut |tuple| {
+                    name_cnt = tuple.values[0].i32().unwrap() as usize;
+                    Ok(())
+                },
             )?;
-            let mut name_cnt = tuple.values[0].i32().unwrap() as usize;
             // "SELECT c_balance, c_first, c_middle, c_last FROM customer WHERE c_w_id = ? AND c_d_id = ? AND c_last = ? ORDER BY c_first"
             let params = [
                 ("$1", DataValue::Int16(args.w_id as i16)),
                 ("$2", DataValue::Int8(args.d_id as i8)),
                 ("$3", DataValue::from(args.c_last.clone())),
             ];
-            let mut tuple_iter = tx.execute(&statements[1], &params)?;
-
             if name_cnt % 2 == 1 {
                 name_cnt += 1;
             }
-            let mut c_balance = Decimal::default();
+            let target = name_cnt / 2 - 1;
+            let mut c_balance = Default::default();
             let mut c_first = String::new();
             let mut c_middle = String::new();
             let mut c_last = String::new();
-
-            for _ in 0..name_cnt / 2 {
-                let tuple = tuple_iter.next().unwrap()?;
-
+            tx.with_query_nth(&statements[1], &params, target, &mut |tuple| {
                 c_balance = tuple.values[0].decimal().unwrap();
                 c_first = tuple.values[1].utf8().unwrap().to_string();
                 c_middle = tuple.values[2].utf8().unwrap().to_string();
                 c_last = tuple.values[3].utf8().unwrap().to_string();
-            }
+                Ok(())
+            })?;
             (c_balance, c_first, c_middle, c_last)
         } else {
             // "SELECT c_balance, c_first, c_middle, c_last FROM customer WHERE c_w_id = ? AND c_d_id = ? AND c_id = ?"
-            let tuple = tx.query_one(
+            let mut c_balance = Default::default();
+            let mut c_first = String::new();
+            let mut c_middle = String::new();
+            let mut c_last = String::new();
+            tx.with_query_one(
                 &statements[2],
                 &[
                     ("$1", DataValue::Int16(args.w_id as i16)),
                     ("$2", DataValue::Int8(args.d_id as i8)),
                     ("$3", DataValue::Int32(args.c_id as i32)),
                 ],
+                &mut |tuple| {
+                    c_balance = tuple.values[0].decimal().unwrap();
+                    c_first = tuple.values[1].utf8().unwrap().to_string();
+                    c_middle = tuple.values[2].utf8().unwrap().to_string();
+                    c_last = tuple.values[3].utf8().unwrap().to_string();
+                    Ok(())
+                },
             )?;
-            let c_balance = tuple.values[0].decimal().unwrap();
-            let c_first = tuple.values[1].utf8().unwrap().to_string();
-            let c_middle = tuple.values[2].utf8().unwrap().to_string();
-            let c_last = tuple.values[3].utf8().unwrap().to_string();
             (c_balance, c_first, c_middle, c_last)
         };
         // "SELECT o_id, o_entry_d, COALESCE(o_carrier_id,0) FROM orders WHERE o_w_id = ? AND o_d_id = ? AND o_c_id = ? AND o_id = (SELECT MAX(o_id) FROM orders WHERE o_w_id = ? AND o_d_id = ? AND o_c_id = ?)"
@@ -119,15 +126,18 @@ impl TpccTransaction for OrderStat {
             ("$5", DataValue::Int8(args.d_id as i8)),
             ("$6", DataValue::Int32(args.c_id as i32)),
         ];
-        let tuple = tx.query_one(&statements[3], &params)?;
-        let o_id = tuple.values[0].i32().unwrap();
+        let mut o_id = 0;
+        tx.with_query_one(&statements[3], &params, &mut |tuple| {
+            o_id = tuple.values[0].i32().unwrap();
+            Ok(())
+        })?;
         // "SELECT ol_i_id, ol_supply_w_id, ol_quantity, ol_amount, ol_delivery_d FROM order_line WHERE ol_w_id = ? AND ol_d_id = ? AND ol_o_id = ?"
         let params = [
             ("$1", DataValue::Int16(args.w_id as i16)),
             ("$2", DataValue::Int8(args.d_id as i8)),
             ("$3", DataValue::Int32(o_id)),
         ];
-        let _tuple = tx.query_one(&statements[4], &params)?;
+        tx.with_query_one(&statements[4], &params, &mut |_| Ok(()))?;
         // let ol_i_id = tuple.values[0].i32();
         // let ol_supply_w_id = tuple.values[1].i16();
         // let ol_quantity = tuple.values[2].i8();

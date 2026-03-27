@@ -13,12 +13,10 @@
 // limitations under the License.
 
 pub mod dual;
-pub mod kite;
+pub mod kitesql_lmdb;
+pub mod kitesql_rocksdb;
 pub mod sqlite;
 
-use self::dual::DualQueryResult;
-use self::kite::KiteTxnResult;
-use self::sqlite::SqliteResult;
 use crate::TpccError;
 use kite_sql::db::Statement;
 use kite_sql::types::tuple::Tuple;
@@ -47,77 +45,49 @@ pub trait BackendControl: SimpleExecutor {
     }
 }
 
-pub struct QueryResult<'a>(QueryResultKind<'a>);
-
-enum QueryResultKind<'a> {
-    Kite(KiteTxnResult<'a>),
-    Sqlite(SqliteResult<'a>),
-    Dual(DualQueryResult<'a>),
-}
-
-impl<'a> QueryResult<'a> {
-    pub(crate) fn from_kite(iter: KiteTxnResult<'a>) -> Self {
-        Self(QueryResultKind::Kite(iter))
-    }
-
-    pub(crate) fn from_sqlite(iter: SqliteResult<'a>) -> Self {
-        Self(QueryResultKind::Sqlite(iter))
-    }
-
-    pub(crate) fn from_dual(iter: DualQueryResult<'a>) -> Self {
-        Self(QueryResultKind::Dual(iter))
-    }
-}
-
-impl<'a> Iterator for QueryResult<'a> {
-    type Item = Result<Tuple, TpccError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match &mut self.0 {
-            QueryResultKind::Kite(iter) => iter.next(),
-            QueryResultKind::Sqlite(iter) => iter.next(),
-            QueryResultKind::Dual(iter) => iter.next(),
-        }
-    }
-}
-
 pub trait BackendTransaction {
-    fn execute<'a>(
-        &'a mut self,
+    fn query_one(
+        &mut self,
         statement: &PreparedStatement,
         params: &[DbParam],
-    ) -> Result<QueryResult<'a>, TpccError>;
+    ) -> Result<Tuple, TpccError>;
 
-    fn commit(self) -> Result<(), TpccError>;
+    fn query_nth(
+        &mut self,
+        statement: &PreparedStatement,
+        params: &[DbParam],
+        n: usize,
+    ) -> Result<Tuple, TpccError>;
 
     fn execute_drain(
         &mut self,
         statement: &PreparedStatement,
         params: &[DbParam],
-    ) -> Result<(), TpccError> {
-        let mut iter = self.execute(statement, params)?;
-        while let Some(row) = iter.next() {
-            row?;
-        }
-        Ok(())
-    }
-}
+    ) -> Result<(), TpccError>;
 
-pub trait TransactionExt: BackendTransaction {
-    fn query_one(
+    fn with_query_one(
         &mut self,
         statement: &PreparedStatement,
         params: &[DbParam],
-    ) -> Result<Tuple, TpccError> {
-        let mut iter = self.execute(statement, params)?;
-        match iter.next() {
-            Some(row) => row,
-            None => Err(TpccError::EmptyTuples),
-        }
+        visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+    ) -> Result<(), TpccError> {
+        let tuple = self.query_one(statement, params)?;
+        visitor(&tuple)
     }
-}
 
-impl<T: BackendTransaction + ?Sized> TransactionExt for T {}
+    fn with_query_nth(
+        &mut self,
+        statement: &PreparedStatement,
+        params: &[DbParam],
+        n: usize,
+        visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+    ) -> Result<(), TpccError> {
+        let tuple = self.query_nth(statement, params, n)?;
+        visitor(&tuple)
+    }
+
+    fn commit(self) -> Result<(), TpccError>;
+}
 
 #[derive(Clone, Copy)]
 pub enum ColumnType {
@@ -139,7 +109,7 @@ pub struct StatementSpec {
 
 #[derive(Clone)]
 pub enum PreparedStatement {
-    Kite {
+    KiteSql {
         statement: Statement,
         spec: StatementSpec,
     },
@@ -151,7 +121,7 @@ pub enum PreparedStatement {
 impl PreparedStatement {
     pub fn spec(&self) -> &StatementSpec {
         match self {
-            PreparedStatement::Kite { spec, .. } => spec,
+            PreparedStatement::KiteSql { spec, .. } => spec,
             PreparedStatement::Sqlite { spec } => spec,
         }
     }

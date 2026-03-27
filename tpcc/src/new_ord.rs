@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::backend::{BackendTransaction, PreparedStatement, TransactionExt};
+use crate::backend::{BackendTransaction, PreparedStatement};
 use crate::load::{nu_rand, CUST_PER_DIST, DIST_PER_WARE, MAX_ITEMS, MAX_NUM_ITEMS};
 use crate::{other_ware, TpccArgs, TpccError, TpccTest, TpccTransaction, ALLOW_MULTI_WAREHOUSE_TX};
 use chrono::Utc;
@@ -81,7 +81,11 @@ impl TpccTransaction for NewOrd {
 
         let (c_discount, _c_last, _c_credit, w_tax) = if args.joins {
             // "SELECT c_discount, c_last, c_credit, w_tax FROM customer, warehouse WHERE w_id = ? AND c_w_id = w_id AND c_d_id = ? AND c_id = ?"
-            let tuple = tx.query_one(
+            let mut c_discount = Decimal::default();
+            let mut c_last = String::new();
+            let mut c_credit = String::new();
+            let mut w_tax = Decimal::default();
+            tx.with_query_one(
                 &statements[0],
                 &[
                     ("$1", DataValue::Int16(args.w_id as i16)),
@@ -89,45 +93,63 @@ impl TpccTransaction for NewOrd {
                     ("$3", DataValue::Int8(args.d_id as i8)),
                     ("$4", DataValue::Int64(args.c_id as i64)),
                 ],
+                &mut |tuple| {
+                    c_discount = tuple.values[0].decimal().unwrap();
+                    c_last = tuple.values[1].utf8().unwrap().to_string();
+                    c_credit = tuple.values[2].utf8().unwrap().to_string();
+                    w_tax = tuple.values[3].decimal().unwrap();
+                    Ok(())
+                },
             )?;
-            let c_discount = tuple.values[0].decimal().unwrap();
-            let c_last = tuple.values[1].utf8().unwrap().to_string();
-            let c_credit = tuple.values[2].utf8().unwrap().to_string();
-            let w_tax = tuple.values[3].decimal().unwrap();
 
             (c_discount, c_last, c_credit, w_tax)
         } else {
             // "SELECT c_discount, c_last, c_credit FROM customer WHERE c_w_id = ? AND c_d_id = ? AND c_id = ?"
-            let tuple = tx.query_one(
+            let mut c_discount = Decimal::default();
+            let mut c_last = String::new();
+            let mut c_credit = String::new();
+            tx.with_query_one(
                 &statements[1],
                 &[
                     ("$1", DataValue::Int16(args.w_id as i16)),
                     ("$2", DataValue::Int8(args.d_id as i8)),
                     ("$3", DataValue::Int32(args.c_id as i32)),
                 ],
+                &mut |tuple| {
+                    c_discount = tuple.values[0].decimal().unwrap();
+                    c_last = tuple.values[1].utf8().unwrap().to_string();
+                    c_credit = tuple.values[2].utf8().unwrap().to_string();
+                    Ok(())
+                },
             )?;
-            let c_discount = tuple.values[0].decimal().unwrap();
-            let c_last = tuple.values[1].utf8().unwrap().to_string();
-            let c_credit = tuple.values[2].utf8().unwrap().to_string();
             // "SELECT w_tax FROM warehouse WHERE w_id = ?"
-            let tuple = tx.query_one(
+            let mut w_tax = Decimal::default();
+            tx.with_query_one(
                 &statements[2],
                 &[("$1", DataValue::Int16(args.w_id as i16))],
+                &mut |tuple| {
+                    w_tax = tuple.values[0].decimal().unwrap();
+                    Ok(())
+                },
             )?;
-            let w_tax = tuple.values[0].decimal().unwrap();
 
             (c_discount, c_last, c_credit, w_tax)
         };
         // "SELECT d_next_o_id, d_tax FROM district WHERE d_id = ? AND d_w_id = ? FOR UPDATE"
-        let tuple = tx.query_one(
+        let mut d_next_o_id = 0;
+        let mut d_tax = Decimal::default();
+        tx.with_query_one(
             &statements[3],
             &[
                 ("$1", DataValue::Int8(args.d_id as i8)),
                 ("$2", DataValue::Int16(args.w_id as i16)),
             ],
+            &mut |tuple| {
+                d_next_o_id = tuple.values[0].i32().unwrap();
+                d_tax = tuple.values[1].decimal().unwrap();
+                Ok(())
+            },
         )?;
-        let d_next_o_id = tuple.values[0].i32().unwrap();
-        let d_tax = tuple.values[1].decimal().unwrap();
         // "UPDATE district SET d_next_o_id = ? + 1 WHERE d_id = ? AND d_w_id = ?"
         tx.execute_drain(
             &statements[4],
@@ -189,36 +211,55 @@ impl TpccTransaction for NewOrd {
             let ol_quantity = args.qty[ol_num_seq[ol_number - 1]];
             // "SELECT i_price, i_name, i_data FROM item WHERE i_id = ?"
             let params = [("$1", DataValue::Int32(ol_i_id as i32))];
-            let tuple = tx.query_one(&statements[7], &params)?;
-            let i_price = tuple.values[0].decimal().unwrap();
-            let i_name = tuple.values[1].utf8().unwrap();
-            let i_data = tuple.values[2].utf8().unwrap();
+            let mut i_price = Decimal::default();
+            let mut i_name = String::new();
+            let mut i_data = String::new();
+            tx.with_query_one(&statements[7], &params, &mut |tuple| {
+                i_price = tuple.values[0].decimal().unwrap();
+                i_name = tuple.values[1].utf8().unwrap().to_string();
+                i_data = tuple.values[2].utf8().unwrap().to_string();
+                Ok(())
+            })?;
 
             price[ol_num_seq[ol_number - 1]] = i_price;
-            iname[ol_num_seq[ol_number - 1]] = i_name.to_string();
+            iname[ol_num_seq[ol_number - 1]] = i_name;
 
             // "SELECT s_quantity, s_data, s_dist_01, s_dist_02, s_dist_03, s_dist_04, s_dist_05, s_dist_06, s_dist_07, s_dist_08, s_dist_09, s_dist_10 FROM stock WHERE s_i_id = ? AND s_w_id = ? FOR UPDATE"
             let params = [
                 ("$1", DataValue::Int32(ol_i_id as i32)),
                 ("$2", DataValue::Int16(ol_supply_w_id as i16)),
             ];
-            let tuple = tx.query_one(&statements[8], &params)?;
-            let mut s_quantity = tuple.values[0].i16().unwrap();
-            let s_data = tuple.values[1].utf8().unwrap();
-            let s_dist_01 = tuple.values[2].utf8().unwrap();
-            let s_dist_02 = tuple.values[3].utf8().unwrap();
-            let s_dist_03 = tuple.values[4].utf8().unwrap();
-            let s_dist_04 = tuple.values[5].utf8().unwrap();
-            let s_dist_05 = tuple.values[6].utf8().unwrap();
-            let s_dist_06 = tuple.values[7].utf8().unwrap();
-            let s_dist_07 = tuple.values[8].utf8().unwrap();
-            let s_dist_08 = tuple.values[9].utf8().unwrap();
-            let s_dist_09 = tuple.values[10].utf8().unwrap();
-            let s_dist_10 = tuple.values[11].utf8().unwrap();
+            let mut s_quantity = 0;
+            let mut s_data = String::new();
+            let mut s_dist_01 = String::new();
+            let mut s_dist_02 = String::new();
+            let mut s_dist_03 = String::new();
+            let mut s_dist_04 = String::new();
+            let mut s_dist_05 = String::new();
+            let mut s_dist_06 = String::new();
+            let mut s_dist_07 = String::new();
+            let mut s_dist_08 = String::new();
+            let mut s_dist_09 = String::new();
+            let mut s_dist_10 = String::new();
+            tx.with_query_one(&statements[8], &params, &mut |tuple| {
+                s_quantity = tuple.values[0].i16().unwrap();
+                s_data = tuple.values[1].utf8().unwrap().to_string();
+                s_dist_01 = tuple.values[2].utf8().unwrap().to_string();
+                s_dist_02 = tuple.values[3].utf8().unwrap().to_string();
+                s_dist_03 = tuple.values[4].utf8().unwrap().to_string();
+                s_dist_04 = tuple.values[5].utf8().unwrap().to_string();
+                s_dist_05 = tuple.values[6].utf8().unwrap().to_string();
+                s_dist_06 = tuple.values[7].utf8().unwrap().to_string();
+                s_dist_07 = tuple.values[8].utf8().unwrap().to_string();
+                s_dist_08 = tuple.values[9].utf8().unwrap().to_string();
+                s_dist_09 = tuple.values[10].utf8().unwrap().to_string();
+                s_dist_10 = tuple.values[11].utf8().unwrap().to_string();
+                Ok(())
+            })?;
 
             let ol_dist_info = pick_dist_info(
-                args.d_id, s_dist_01, s_dist_02, s_dist_03, s_dist_04, s_dist_05, s_dist_06,
-                s_dist_07, s_dist_08, s_dist_09, s_dist_10,
+                args.d_id, &s_dist_01, &s_dist_02, &s_dist_03, &s_dist_04, &s_dist_05, &s_dist_06,
+                &s_dist_07, &s_dist_08, &s_dist_09, &s_dist_10,
             );
             stock[ol_num_seq[ol_number - 1]] = s_quantity;
             bg[ol_num_seq[ol_number - 1]] =

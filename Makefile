@@ -3,8 +3,11 @@ CARGO ?= cargo
 WASM_PACK ?= wasm-pack
 SQLLOGIC_PATH ?= tests/slt/**/*.slt
 PYO3_PYTHON ?= /usr/bin/python3.12
+TPCC_MEASURE_TIME ?= 15
+TPCC_NUM_WARE ?= 1
+TPCC_PPROF_OUTPUT ?= /tmp/tpcc_lmdb.svg
 
-.PHONY: test test-python test-wasm test-slt test-all wasm-build check tpcc tpcc-dual cargo-check build wasm-examples native-examples fmt clippy
+.PHONY: test test-python test-wasm test-slt test-all wasm-build check tpcc tpcc-kitesql-rocksdb tpcc-kitesql-lmdb tpcc-lmdb-flamegraph tpcc-sqlite-practical tpcc-dual cargo-check build wasm-examples native-examples fmt clippy
 
 ## Run default Rust tests in the current environment (non-WASM).
 test:
@@ -48,9 +51,23 @@ clippy:
 ## Run formatting (check mode) and clippy linting together.
 check: fmt clippy
 
-## Execute the TPCC workload example as a standalone command.
-tpcc:
-	$(CARGO) run -p tpcc --release
+tpcc: tpcc-kitesql-lmdb
+
+## Execute the TPCC workload on KiteSQL with RocksDB storage.
+tpcc-kitesql-rocksdb:
+	$(CARGO) run -p tpcc --release -- --backend kitesql-rocksdb
+
+## Execute the TPCC workload on KiteSQL with LMDB storage.
+tpcc-kitesql-lmdb:
+	$(CARGO) run -p tpcc --release -- --backend kitesql-lmdb
+
+## Execute TPCC on LMDB and emit a pprof flamegraph SVG.
+tpcc-lmdb-flamegraph:
+	CARGO_PROFILE_RELEASE_DEBUG=true $(CARGO) run -p tpcc --release --features pprof -- --backend kitesql-lmdb --measure-time $(TPCC_MEASURE_TIME) --num-ware $(TPCC_NUM_WARE) --pprof-output $(TPCC_PPROF_OUTPUT)
+
+## Execute the TPCC workload on SQLite with the practical profile.
+tpcc-sqlite-practical:
+	$(CARGO) run -p tpcc --release -- --backend sqlite --sqlite-profile practical --path kite_sql_tpcc.sqlite
 
 ## Execute TPCC while mirroring every statement to an in-memory SQLite instance for validation.
 tpcc-dual:

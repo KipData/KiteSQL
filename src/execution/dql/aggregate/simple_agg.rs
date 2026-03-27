@@ -20,9 +20,6 @@ use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::tuple::SchemaRef;
-use crate::types::value::DataValue;
-use itertools::Itertools;
-
 pub struct SimpleAggExecutor {
     agg_calls: Vec<ScalarExpression>,
     input_schema: SchemaRef,
@@ -78,25 +75,29 @@ impl SimpleAggExecutor {
 
         while arena.next_tuple(input)? {
             let tuple = arena.result_tuple();
-            let values: Vec<DataValue> = self
-                .agg_calls
-                .iter()
-                .map(|expr| match expr {
-                    ScalarExpression::AggCall { args, .. } => {
-                        args[0].eval(Some((tuple, &self.input_schema)))
-                    }
-                    _ => unreachable!(),
-                })
-                .try_collect()?;
+            for (acc, expr) in accs.iter_mut().zip(self.agg_calls.iter()) {
+                let ScalarExpression::AggCall { args, .. } = expr else {
+                    unreachable!()
+                };
+                if args.len() > 1 {
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "currently aggregate functions only support a single Column as a parameter"
+                            .to_string(),
+                    ));
+                }
 
-            for (acc, value) in accs.iter_mut().zip(values.iter()) {
-                acc.update_value(value)?;
+                let value = args[0].eval(Some((tuple, &self.input_schema)))?;
+                acc.update_value(&value)?;
             }
         }
 
         let output = arena.result_tuple_mut();
         output.pk = None;
-        output.values = accs.into_iter().map(|acc| acc.evaluate()).try_collect()?;
+        output.values.clear();
+        output.values.reserve(accs.len());
+        for acc in accs {
+            output.values.push(acc.evaluate()?);
+        }
         arena.resume();
         Ok(())
     }

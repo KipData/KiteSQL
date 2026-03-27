@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::backend::dual::DualBackend;
-use crate::backend::kite::KiteBackend;
+use crate::backend::kitesql_lmdb::KiteSqlLmdbBackend;
+use crate::backend::kitesql_rocksdb::KiteSqlRocksDbBackend;
+use crate::backend::sqlite::{SqliteBackend, SqliteProfile};
 use crate::backend::{
     BackendControl, BackendTransaction, ColumnType, PreparedStatement, StatementSpec,
 };
@@ -28,10 +30,14 @@ use crate::utils::SeqGen;
 use clap::{Parser, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 use kite_sql::errors::DatabaseError;
+#[cfg(all(unix, feature = "pprof"))]
+use pprof::ProfilerGuard;
 use rand::prelude::ThreadRng;
 use rand::Rng;
 use std::fs;
 use std::path::Path;
+#[cfg(all(unix, feature = "pprof"))]
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 mod backend;
@@ -97,7 +103,7 @@ struct Args {
     joins: bool,
     #[clap(long, default_value = "kite_sql_tpcc")]
     path: String,
-    #[clap(long, value_enum, default_value = "kite")]
+    #[clap(long, value_enum, default_value = "kitesql-lmdb")]
     backend: BackendKind,
     #[clap(long, default_value = "5")]
     max_retry: usize,
@@ -107,11 +113,21 @@ struct Args {
     num_ware: usize,
     #[clap(long, default_value = "false")]
     rocksdb_stats: bool,
+    #[clap(long, value_enum, default_value = "practical")]
+    sqlite_profile: SqliteProfile,
+    #[cfg(feature = "pprof")]
+    #[clap(long)]
+    pprof_output: Option<PathBuf>,
+    #[cfg(feature = "pprof")]
+    #[clap(long, default_value = "100")]
+    pprof_frequency: i32,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum BackendKind {
-    Kite,
+    KitesqlRocksdb,
+    KitesqlLmdb,
+    Sqlite,
     Dual,
 }
 
@@ -121,22 +137,38 @@ fn main() -> Result<(), TpccError> {
     let mut rng = rand::thread_rng();
 
     match args.backend {
-        BackendKind::Kite => {
-            let db_path = Path::new(&args.path);
-            if db_path.exists() {
-                fs::remove_dir_all(db_path)?;
-            }
-            let backend = KiteBackend::new(&args.path, args.rocksdb_stats)?;
-            run_tpcc(&backend, &args, &mut rng)?;
+        BackendKind::KitesqlRocksdb => {
+            reset_db_path(Path::new(&args.path))?;
+            let backend = KiteSqlRocksDbBackend::new(&args.path, args.rocksdb_stats)?;
+            run_tpcc(&backend, &args, &mut rng)
+        }
+        BackendKind::KitesqlLmdb => {
+            reset_db_path(Path::new(&args.path))?;
+            let backend = KiteSqlLmdbBackend::new(&args.path)?;
+            run_tpcc(&backend, &args, &mut rng)
+        }
+        BackendKind::Sqlite => {
+            reset_db_path(Path::new(&args.path))?;
+            let backend = SqliteBackend::new(&args.path, args.sqlite_profile)?;
+            run_tpcc(&backend, &args, &mut rng)
         }
         BackendKind::Dual => {
-            let db_path = Path::new(&args.path);
-            if db_path.exists() {
-                fs::remove_dir_all(db_path)?;
-            }
+            reset_db_path(Path::new(&args.path))?;
             let backend = DualBackend::new(&args.path, args.rocksdb_stats)?;
-            run_tpcc(&backend, &args, &mut rng)?;
+            run_tpcc(&backend, &args, &mut rng)
         }
+    }
+}
+
+fn reset_db_path(path: &Path) -> Result<(), TpccError> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    if path.is_dir() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
     }
 
     Ok(())
@@ -172,6 +204,8 @@ fn run_tpcc<B: BackendControl>(
     let mut round_count = 0;
     let mut seq_gen = SeqGen::new(10, 10, 1, 1, 1);
     let tpcc_start = Instant::now();
+    #[cfg(all(unix, feature = "pprof"))]
+    let pprof = PprofSession::start(args)?;
     let progress = ProgressBar::new_spinner();
     progress.set_style(ProgressStyle::with_template("{spinner:.green} [TPCC] {msg}").unwrap());
     progress.enable_steady_tick(Duration::from_millis(120));
@@ -264,6 +298,7 @@ fn run_tpcc<B: BackendControl>(
     print_constraint_checks(&success, &late);
     print_response_checks(&success, &late);
     println!();
+    rt_hist.finalize();
     rt_hist.hist_report();
     println!("<TpmC>");
     let tpmc = ((success[0] + late[0]) as f64 / (actual_tpcc_time.as_secs_f64() / 60.0)).round();
@@ -272,8 +307,45 @@ fn run_tpcc<B: BackendControl>(
         println!();
         println!("{metrics}");
     }
+    #[cfg(all(unix, feature = "pprof"))]
+    if let Some(pprof) = pprof {
+        pprof.finish()?;
+    }
 
     Ok(())
+}
+
+#[cfg(all(unix, feature = "pprof"))]
+struct PprofSession {
+    guard: ProfilerGuard<'static>,
+    output: PathBuf,
+}
+
+#[cfg(all(unix, feature = "pprof"))]
+impl PprofSession {
+    fn start(args: &Args) -> Result<Option<Self>, TpccError> {
+        let Some(output) = args.pprof_output.clone() else {
+            return Ok(None);
+        };
+        let guard = ProfilerGuard::new(args.pprof_frequency)
+            .map_err(|err| TpccError::Profile(err.to_string()))?;
+        Ok(Some(Self { guard, output }))
+    }
+
+    fn finish(self) -> Result<(), TpccError> {
+        let report = self
+            .guard
+            .report()
+            .build()
+            .map_err(|err| TpccError::Profile(err.to_string()))?;
+        let file = fs::File::create(&self.output)?;
+        report
+            .flamegraph(file)
+            .map_err(|err| TpccError::Profile(err.to_string()))?;
+        println!();
+        println!("[pprof] flamegraph written to {}", self.output.display());
+        Ok(())
+    }
 }
 
 fn statement_specs() -> Vec<Vec<StatementSpec>> {
@@ -694,6 +766,8 @@ pub enum TpccError {
     InvalidDateTime,
     #[error("backend mismatch: {0}")]
     BackendMismatch(String),
+    #[error("profile error: {0}")]
+    Profile(String),
 }
 
 #[ignore]
@@ -702,7 +776,7 @@ fn explain_tpcc() -> Result<(), DatabaseError> {
     use kite_sql::db::DataBaseBuilder;
     use kite_sql::types::tuple::create_table;
 
-    let database = DataBaseBuilder::path("./kite_sql_tpcc").build()?;
+    let database = DataBaseBuilder::path("./kite_sql_tpcc").build_lmdb()?;
     let mut tx = database.new_transaction()?;
 
     let customer_tuple = tx

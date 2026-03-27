@@ -3,6 +3,9 @@ name = "tpcc"
 version = "0.1.1"
 edition = "2021"
 
+[features]
+pprof = ["dep:pprof"]
+
 [dependencies]
 clap            = { version = "4", features = ["derive"] }
 chrono          = { version = "0.4" }
@@ -14,3 +17,6 @@ rust_decimal    = { version = "1" }
 thiserror       = { version = "1" }
 sqlite          = { version = "0.34" }
 sqlparser       = { version = "0.61" }
+
+[target.'cfg(unix)'.dependencies]
+pprof = { version = "0.15", features = ["flamegraph"], optional = true }
