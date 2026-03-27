@@ -47,9 +47,7 @@ impl AddColumn {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        id: ExecId,
     ) -> Result<(), DatabaseError> {
-        let _ = id;
         let table_cache = arena.table_cache();
         let Some(AddColumnOperator {
             table_name,

@@ -517,7 +517,7 @@ mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::db::DataBaseBuilder;
     use crate::execution::dql::test::build_integers;
-    use crate::execution::{try_collect, ReadExecutor};
+    use crate::execution::try_collect;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
     use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
@@ -716,8 +716,11 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = NestedLoopJoin::from((op, left, right))
-            .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
+        let executor = crate::execution::execute(
+            NestedLoopJoin::from((op, left, right)),
+            (&table_cache, &view_cache, &meta_cache),
+            &mut transaction,
+        );
         let tuples = try_collect(executor)?;
 
         let mut expected_set = HashSet::with_capacity(1);
@@ -762,8 +765,11 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = NestedLoopJoin::from((op, left, right))
-            .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
+        let executor = crate::execution::execute(
+            NestedLoopJoin::from((op, left, right)),
+            (&table_cache, &view_cache, &meta_cache),
+            &mut transaction,
+        );
         let tuples = try_collect(executor)?;
 
         assert_eq!(
@@ -837,8 +843,11 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = NestedLoopJoin::from((op, left, right))
-            .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
+        let executor = crate::execution::execute(
+            NestedLoopJoin::from((op, left, right)),
+            (&table_cache, &view_cache, &meta_cache),
+            &mut transaction,
+        );
         let tuples = try_collect(executor)?;
 
         let mut expected_set = HashSet::with_capacity(1);
@@ -883,8 +892,11 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = NestedLoopJoin::from((op, left, right))
-            .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
+        let executor = crate::execution::execute(
+            NestedLoopJoin::from((op, left, right)),
+            (&table_cache, &view_cache, &meta_cache),
+            &mut transaction,
+        );
         let tuples = try_collect(executor)?;
 
         let mut expected_set = HashSet::with_capacity(3);
@@ -944,8 +956,11 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = NestedLoopJoin::from((op, left, right))
-            .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
+        let executor = crate::execution::execute(
+            NestedLoopJoin::from((op, left, right)),
+            (&table_cache, &view_cache, &meta_cache),
+            &mut transaction,
+        );
         let tuples = try_collect(executor)?;
 
         assert_eq!(tuples.len(), 16);
@@ -980,8 +995,11 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = NestedLoopJoin::from((op, left, right))
-            .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
+        let executor = crate::execution::execute(
+            NestedLoopJoin::from((op, left, right)),
+            (&table_cache, &view_cache, &meta_cache),
+            &mut transaction,
+        );
         let tuples = try_collect(executor)?;
 
         let mut expected_set = HashSet::with_capacity(1);
@@ -1019,8 +1037,11 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = NestedLoopJoin::from((op, left, right))
-            .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
+        let executor = crate::execution::execute(
+            NestedLoopJoin::from((op, left, right)),
+            (&table_cache, &view_cache, &meta_cache),
+            &mut transaction,
+        );
         let tuples = try_collect(executor)?;
 
         let mut expected_set = HashSet::with_capacity(3);
@@ -1060,8 +1081,11 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = NestedLoopJoin::from((op, left, right))
-            .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
+        let executor = crate::execution::execute(
+            NestedLoopJoin::from((op, left, right)),
+            (&table_cache, &view_cache, &meta_cache),
+            &mut transaction,
+        );
         let tuples = try_collect(executor)?;
 
         let mut expected_set = HashSet::with_capacity(4);
@@ -1130,8 +1154,11 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = NestedLoopJoin::from((op, left, right))
-            .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
+        let executor = crate::execution::execute(
+            NestedLoopJoin::from((op, left, right)),
+            (&table_cache, &view_cache, &meta_cache),
+            &mut transaction,
+        );
         let tuples = try_collect(executor)?;
 
         assert_eq!(
@@ -1275,8 +1302,11 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = NestedLoopJoin::from((op, left, right))
-            .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
+        let executor = crate::execution::execute(
+            NestedLoopJoin::from((op, left, right)),
+            (&table_cache, &view_cache, &meta_cache),
+            &mut transaction,
+        );
         let tuples = try_collect(executor)?;
 
         assert_eq!(tuples.len(), 1);

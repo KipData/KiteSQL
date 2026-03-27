@@ -71,7 +71,6 @@ impl Except {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        _: ExecId,
     ) -> Result<(), DatabaseError> {
         if !self.built {
             while arena.next_tuple(self.right_input)? {

@@ -44,9 +44,7 @@ impl Explain {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        id: ExecId,
     ) -> Result<(), DatabaseError> {
-        let _ = id;
         let Some(plan) = self.plan.take() else {
             arena.finish();
             return Ok(());

@@ -61,7 +61,6 @@ impl Filter {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        _: ExecId,
     ) -> Result<(), DatabaseError> {
         loop {
             if !arena.next_tuple(self.input)? {

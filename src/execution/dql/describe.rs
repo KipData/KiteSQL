@@ -70,9 +70,7 @@ impl Describe {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        id: ExecId,
     ) -> Result<(), DatabaseError> {
-        let _ = id;
         if self.columns.is_none() {
             let table = arena
                 .transaction_mut()

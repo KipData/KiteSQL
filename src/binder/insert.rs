@@ -29,6 +29,7 @@ use crate::storage::Transaction;
 use crate::types::tuple::SchemaRef;
 use crate::types::value::DataValue;
 use sqlparser::ast::{Expr, Ident, ObjectName, Query};
+use std::borrow::Cow;
 use std::slice;
 use std::sync::Arc;
 
@@ -147,17 +148,34 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         is_overwrite: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
         let table_name: Arc<str> = lower_case_name(name)?.into();
-        let source = self
-            .context
-            .source(&table_name)?
-            .ok_or(DatabaseError::TableNotFound)?;
-        let mut schema_buf = None;
-        let table_schema = source.schema_ref(&mut schema_buf);
+        let table_schema = {
+            let source = self
+                .context
+                .source(&table_name)?
+                .ok_or(DatabaseError::TableNotFound)?;
+            let mut schema_buf = None;
+            source.schema_ref(&mut schema_buf)
+        };
+
+        let mut input_plan = self.bind_query(query)?;
+        let input_schema = input_plan.output_schema().clone();
+        let input_len = input_schema.len();
 
         let target_columns = if idents.is_empty() {
-            None
+            if input_len > table_schema.len() {
+                return Err(DatabaseError::ValuesLenMismatch(
+                    table_schema.len(),
+                    input_len,
+                ));
+            }
+            Cow::Borrowed(&table_schema[..input_len])
         } else {
             let mut columns = Vec::with_capacity(idents.len());
+            let source = self
+                .context
+                .source(&table_name)?
+                .ok_or(DatabaseError::TableNotFound)?;
+            let mut schema_buf = None;
             for ident in idents {
                 let column_name = lower_ident(ident);
                 let column = source
@@ -170,30 +188,10 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                     })?;
                 columns.push(column);
             }
-            Some(columns)
-        };
-
-        let mut input_plan = self.bind_query(query)?;
-        let input_schema = input_plan.output_schema().clone();
-        let input_len = input_schema.len();
-
-        let target_columns = if let Some(columns) = target_columns {
             if input_len != columns.len() {
                 return Err(DatabaseError::ValuesLenMismatch(columns.len(), input_len));
             }
-            columns
-        } else {
-            if input_len > table_schema.len() {
-                return Err(DatabaseError::ValuesLenMismatch(
-                    table_schema.len(),
-                    input_len,
-                ));
-            }
-            table_schema
-                .iter()
-                .take(input_len)
-                .cloned()
-                .collect::<Vec<_>>()
+            Cow::Owned(columns)
         };
 
         let projection = input_schema

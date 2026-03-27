@@ -67,9 +67,7 @@ impl StreamDistinctExecutor {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        id: ExecId,
     ) -> Result<(), DatabaseError> {
-        let _ = id;
         loop {
             if !arena.next_tuple(self.input)? {
                 arena.finish();
@@ -100,7 +98,7 @@ mod tests {
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
     use crate::errors::DatabaseError;
     use crate::execution::dql::aggregate::stream_distinct::StreamDistinctExecutor;
-    use crate::execution::{try_collect, ReadExecutor};
+    use crate::execution::try_collect;
     use crate::expression::ScalarExpression;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
     use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
@@ -187,10 +185,11 @@ mod tests {
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let mut transaction = storage.transaction()?;
-        let tuples = try_collect(
-            StreamDistinctExecutor::from((agg, plan.childrens.pop_only()))
-                .execute((&table_cache, &view_cache, &meta_cache), &mut transaction),
-        )?;
+        let tuples = try_collect(crate::execution::execute(
+            StreamDistinctExecutor::from((agg, plan.childrens.pop_only())),
+            (&table_cache, &view_cache, &meta_cache),
+            &mut transaction,
+        ))?;
 
         let actual = tuples
             .into_iter()
@@ -239,10 +238,11 @@ mod tests {
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let mut transaction = storage.transaction()?;
-        let tuples = try_collect(
-            StreamDistinctExecutor::from((agg, plan.childrens.pop_only()))
-                .execute((&table_cache, &view_cache, &meta_cache), &mut transaction),
-        )?;
+        let tuples = try_collect(crate::execution::execute(
+            StreamDistinctExecutor::from((agg, plan.childrens.pop_only())),
+            (&table_cache, &view_cache, &meta_cache),
+            &mut transaction,
+        ))?;
 
         let actual = tuples.into_iter().map(|tuple| tuple.values).collect_vec();
         assert_eq!(

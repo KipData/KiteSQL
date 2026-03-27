@@ -405,7 +405,7 @@ mod test {
     use crate::errors::DatabaseError;
     use crate::execution::dql::join::hash_join::HashJoin;
     use crate::execution::dql::test::build_integers;
-    use crate::execution::{try_collect, ReadExecutor};
+    use crate::execution::try_collect;
     use crate::expression::{BinaryOperator, ScalarExpression};
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
     use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
@@ -550,8 +550,11 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = HashJoin::from((op, left, right))
-            .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
+        let executor = crate::execution::execute(
+            HashJoin::from((op, left, right)),
+            (&table_cache, &view_cache, &meta_cache),
+            &mut transaction,
+        );
         let tuples = try_collect(executor)?;
 
         assert_eq!(tuples.len(), 3);
@@ -603,9 +606,11 @@ mod test {
         let (left, right) = plan.childrens.pop_twins();
         {
             let executor = HashJoin::from((op.clone(), left.clone(), right.clone()));
-            let tuples = try_collect(
-                executor.execute((&table_cache, &view_cache, &meta_cache), &mut transaction),
-            )?;
+            let tuples = try_collect(crate::execution::execute(
+                executor,
+                (&table_cache, &view_cache, &meta_cache),
+                &mut transaction,
+            ))?;
 
             assert_eq!(tuples.len(), 4);
 
@@ -629,9 +634,11 @@ mod test {
         {
             let mut executor = HashJoin::from((op.clone(), left.clone(), right.clone()));
             executor.ty = JoinType::LeftSemi;
-            let mut tuples = try_collect(
-                executor.execute((&table_cache, &view_cache, &meta_cache), &mut transaction),
-            )?;
+            let mut tuples = try_collect(crate::execution::execute(
+                executor,
+                (&table_cache, &view_cache, &meta_cache),
+                &mut transaction,
+            ))?;
 
             let arena = Bump::new();
             assert_eq!(tuples.len(), 2);
@@ -653,9 +660,11 @@ mod test {
         {
             let mut executor = HashJoin::from((op, left, right));
             executor.ty = JoinType::LeftAnti;
-            let tuples = try_collect(
-                executor.execute((&table_cache, &view_cache, &meta_cache), &mut transaction),
-            )?;
+            let tuples = try_collect(crate::execution::execute(
+                executor,
+                (&table_cache, &view_cache, &meta_cache),
+                &mut transaction,
+            ))?;
 
             assert_eq!(tuples.len(), 1);
             assert_eq!(
@@ -696,8 +705,11 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = HashJoin::from((op, left, right))
-            .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
+        let executor = crate::execution::execute(
+            HashJoin::from((op, left, right)),
+            (&table_cache, &view_cache, &meta_cache),
+            &mut transaction,
+        );
         let tuples = try_collect(executor)?;
 
         assert_eq!(tuples.len(), 4);
@@ -796,8 +808,11 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = HashJoin::from((op, left, right))
-            .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
+        let executor = crate::execution::execute(
+            HashJoin::from((op, left, right)),
+            (&table_cache, &view_cache, &meta_cache),
+            &mut transaction,
+        );
         let tuples = try_collect(executor)?;
 
         assert_eq!(tuples.len(), 1);
@@ -842,8 +857,11 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = HashJoin::from((op, left, right))
-            .execute((&table_cache, &view_cache, &meta_cache), &mut transaction);
+        let executor = crate::execution::execute(
+            HashJoin::from((op, left, right)),
+            (&table_cache, &view_cache, &meta_cache),
+            &mut transaction,
+        );
         let tuples = try_collect(executor)?;
 
         assert_eq!(tuples.len(), 5);

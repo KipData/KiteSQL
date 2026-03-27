@@ -75,12 +75,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for IndexScan<'a, T> {
 }
 
 impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
-    pub(crate) fn next_tuple(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-        id: ExecId,
-    ) -> Result<(), DatabaseError> {
-        let _ = id;
+    pub(crate) fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
         if self.iter.is_none() {
             let Some(TableScanOperator {
                 table_name,

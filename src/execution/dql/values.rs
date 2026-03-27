@@ -49,9 +49,7 @@ impl Values {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        id: ExecId,
     ) -> Result<(), DatabaseError> {
-        let _ = id;
         let Some(mut values) = self.rows.next() else {
             arena.finish();
             return Ok(());

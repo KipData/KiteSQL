@@ -62,7 +62,6 @@ impl Limit {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        _: ExecId,
     ) -> Result<(), DatabaseError> {
         let offset = self.offset.unwrap_or(0);
         let limit = self.limit.unwrap_or(usize::MAX);

@@ -35,6 +35,7 @@ use crate::expression::{AliasType, ScalarExpression};
 use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
 use crate::planner::{LogicalPlan, SchemaOutput};
 use crate::storage::Transaction;
+use crate::types::tuple::SchemaRef;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{ColumnId, LogicalType};
 
@@ -78,6 +79,51 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                     "escape character must be a quoted string".to_string(),
                 )),
             },
+        }
+    }
+
+    fn find_column_in_schema<'b>(
+        schema_ref: &'b SchemaRef,
+        column_name: &str,
+    ) -> Option<(usize, &'b ColumnRef)> {
+        schema_ref
+            .iter()
+            .enumerate()
+            .find(|(_, column)| column.name() == column_name)
+    }
+
+    fn find_column_in_scope(
+        context: &BinderContext<'a, T>,
+        table_schema_buf: &mut HashMap<TableName, Option<SchemaOutput>>,
+        column_name: &str,
+    ) -> Option<ScalarExpression> {
+        let mut position_offset = 0;
+
+        for bound_source in &context.bind_table {
+            let schema_buf = table_schema_buf
+                .entry(bound_source.table_name.clone())
+                .or_default();
+            let schema_ref = bound_source.source.schema_ref(schema_buf);
+
+            if let Some((position, column)) = Self::find_column_in_schema(&schema_ref, column_name)
+            {
+                return Some(ScalarExpression::column_expr(
+                    column.clone(),
+                    position_offset + position,
+                ));
+            }
+
+            position_offset += schema_ref.len();
+        }
+
+        None
+    }
+
+    fn column_not_found_with_span(idents: &[Ident], column_name: &str) -> DatabaseError {
+        let err = DatabaseError::column_not_found(column_name.to_string());
+        match idents.last() {
+            Some(ident) => attach_span_from_sqlparser_span_if_absent(err, ident.span),
+            None => err,
         }
     }
 
@@ -497,69 +543,36 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                     }
                 }
             };
-            let (position, column) = schema_ref
-                .iter()
-                .enumerate()
-                .find(|(_, column)| column.name() == full_name.1)
-                .ok_or_else(|| {
-                    let err = DatabaseError::column_not_found(full_name.1.to_string());
-                    match idents.last() {
-                        Some(ident) => attach_span_from_sqlparser_span_if_absent(err, ident.span),
-                        None => err,
-                    }
-                })?;
+            let (position, column) = Self::find_column_in_schema(&schema_ref, full_name.1.as_str())
+                .ok_or_else(|| Self::column_not_found_with_span(idents, full_name.1.as_str()))?;
 
             Ok(ScalarExpression::column_expr(
                 column.clone(),
                 position_offset + position,
             ))
         } else {
-            let op =
-                |got_column: &mut Option<ScalarExpression>,
-                 context: &BinderContext<'a, T>,
-                 table_schema_buf: &mut HashMap<TableName, Option<SchemaOutput>>| {
-                    let mut position_offset = 0;
-
-                    for bound_source in &context.bind_table {
-                        if got_column.is_some() {
-                            break;
-                        }
-                        let schema_buf = table_schema_buf
-                            .entry(bound_source.table_name.clone())
-                            .or_default();
-                        let schema_ref = bound_source.source.schema_ref(schema_buf);
-                        if let Some((position, column)) = schema_ref
-                            .iter()
-                            .enumerate()
-                            .find(|(_, column)| column.name() == full_name.1)
-                        {
-                            *got_column = Some(ScalarExpression::column_expr(
-                                column.clone(),
-                                position_offset + position,
-                            ));
-                        }
-                        position_offset += schema_ref.len();
-                    }
-                };
             // handle col syntax
-            let mut got_column = None;
-
-            op(&mut got_column, &self.context, &mut self.table_schema_buf);
+            let mut got_column = Self::find_column_in_scope(
+                &self.context,
+                &mut self.table_schema_buf,
+                full_name.1.as_str(),
+            );
             if got_column.is_none() {
                 if let Some(parent) = self.parent {
                     self.context.mark_outer_ref();
-                    op(&mut got_column, &parent.context, &mut self.table_schema_buf);
+                    got_column = Self::find_column_in_scope(
+                        &parent.context,
+                        &mut self.table_schema_buf,
+                        full_name.1.as_str(),
+                    );
                 }
             }
             match got_column {
                 Some(column) => Ok(column),
-                None => {
-                    let err = DatabaseError::column_not_found(full_name.1.clone());
-                    Err(match idents.last() {
-                        Some(ident) => attach_span_from_sqlparser_span_if_absent(err, ident.span),
-                        None => err,
-                    })
-                }
+                None => Err(Self::column_not_found_with_span(
+                    idents,
+                    full_name.1.as_str(),
+                )),
             }
         }
     }

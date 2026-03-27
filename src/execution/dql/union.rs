@@ -67,7 +67,6 @@ impl Union {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        _: ExecId,
     ) -> Result<(), DatabaseError> {
         if self.reading_left {
             if arena.next_tuple(self.left_input)? {

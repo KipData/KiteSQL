@@ -43,9 +43,7 @@ impl Truncate {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        id: ExecId,
     ) -> Result<(), DatabaseError> {
-        let _ = id;
         let Some(TruncateOperator { table_name }) = self.op.take() else {
             arena.finish();
             return Ok(());

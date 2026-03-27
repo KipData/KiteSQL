@@ -149,6 +149,112 @@ pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
     Empty,
 }
 
+pub(crate) trait ExecNodeRunner<'a, T: Transaction + 'a> {
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError>;
+}
+
+macro_rules! impl_exec_node_runner {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl<'a, T: Transaction + 'a> ExecNodeRunner<'a, T> for $ty {
+                fn next_tuple(
+                    &mut self,
+                    arena: &mut ExecArena<'a, T>,
+                ) -> Result<(), DatabaseError> {
+                    <$ty>::next_tuple(self, arena)
+                }
+            }
+        )*
+    };
+}
+
+impl_exec_node_runner!(
+    AddColumn,
+    Analyze,
+    ChangeColumn,
+    CopyFromFile,
+    CopyToFile,
+    CreateIndex,
+    CreateTable,
+    CreateView,
+    Delete,
+    Describe,
+    DropColumn,
+    DropIndex,
+    DropTable,
+    DropView,
+    Dummy,
+    Except,
+    Explain,
+    Filter,
+    FunctionScan,
+    HashAggExecutor,
+    HashJoin,
+    IndexScan<'a, T>,
+    Insert,
+    Limit,
+    NestedLoopJoin,
+    Projection,
+    ScalarSubquery,
+    SeqScan<'a, T>,
+    ShowTables,
+    ShowViews,
+    SimpleAggExecutor,
+    Sort,
+    StreamDistinctExecutor,
+    TopK,
+    Truncate,
+    Union,
+    Update,
+    Values,
+);
+
+impl<'a, T: Transaction + 'a> ExecNodeRunner<'a, T> for ExecNode<'a, T> {
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+        match self {
+            ExecNode::AddColumn(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::Analyze(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::ChangeColumn(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::CopyFromFile(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::CopyToFile(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::CreateIndex(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::CreateTable(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::CreateView(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::Delete(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::Describe(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::DropColumn(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::DropIndex(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::DropTable(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::DropView(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::Dummy(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::Except(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::Explain(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::Filter(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::FunctionScan(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::HashAgg(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::HashJoin(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::IndexScan(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::Insert(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::Limit(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::NestedLoopJoin(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::Projection(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::ScalarSubquery(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::SeqScan(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::ShowTables(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::ShowViews(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::SimpleAgg(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::Sort(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::StreamDistinct(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::TopK(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::Truncate(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::Union(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::Update(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::Values(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::Empty => unreachable!("executor node re-entered while active"),
+        }
+    }
+}
+
 pub(crate) struct ExecArena<'a, T: Transaction + 'a> {
     nodes: Vec<ExecNode<'a, T>>,
     result: ExecResult,
@@ -234,74 +340,8 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
 
     pub(crate) fn next_tuple(&mut self, id: ExecId) -> Result<bool, DatabaseError> {
         self.result.status = None;
-        let node = std::mem::replace(&mut self.nodes[id], ExecNode::Empty);
-        let (result, node) = match node {
-            ExecNode::AddColumn(mut exec) => (exec.next_tuple(self, id), ExecNode::AddColumn(exec)),
-            ExecNode::Analyze(mut exec) => (exec.next_tuple(self, id), ExecNode::Analyze(exec)),
-            ExecNode::ChangeColumn(mut exec) => {
-                (exec.next_tuple(self, id), ExecNode::ChangeColumn(exec))
-            }
-            ExecNode::CopyFromFile(mut exec) => {
-                (exec.next_tuple(self, id), ExecNode::CopyFromFile(exec))
-            }
-            ExecNode::CopyToFile(mut exec) => {
-                (exec.next_tuple(self, id), ExecNode::CopyToFile(exec))
-            }
-            ExecNode::CreateIndex(mut exec) => {
-                (exec.next_tuple(self, id), ExecNode::CreateIndex(exec))
-            }
-            ExecNode::CreateTable(mut exec) => {
-                (exec.next_tuple(self, id), ExecNode::CreateTable(exec))
-            }
-            ExecNode::CreateView(mut exec) => {
-                (exec.next_tuple(self, id), ExecNode::CreateView(exec))
-            }
-            ExecNode::Delete(mut exec) => (exec.next_tuple(self, id), ExecNode::Delete(exec)),
-            ExecNode::Describe(mut exec) => (exec.next_tuple(self, id), ExecNode::Describe(exec)),
-            ExecNode::DropColumn(mut exec) => {
-                (exec.next_tuple(self, id), ExecNode::DropColumn(exec))
-            }
-            ExecNode::DropIndex(mut exec) => (exec.next_tuple(self, id), ExecNode::DropIndex(exec)),
-            ExecNode::DropTable(mut exec) => (exec.next_tuple(self, id), ExecNode::DropTable(exec)),
-            ExecNode::DropView(mut exec) => (exec.next_tuple(self, id), ExecNode::DropView(exec)),
-            ExecNode::Dummy(mut exec) => (exec.next_tuple(self, id), ExecNode::Dummy(exec)),
-            ExecNode::Except(mut exec) => (exec.next_tuple(self, id), ExecNode::Except(exec)),
-            ExecNode::Explain(mut exec) => (exec.next_tuple(self, id), ExecNode::Explain(exec)),
-            ExecNode::Filter(mut exec) => (exec.next_tuple(self, id), ExecNode::Filter(exec)),
-            ExecNode::FunctionScan(mut exec) => {
-                (exec.next_tuple(self, id), ExecNode::FunctionScan(exec))
-            }
-            ExecNode::HashAgg(mut exec) => (exec.next_tuple(self, id), ExecNode::HashAgg(exec)),
-            ExecNode::HashJoin(mut exec) => (exec.next_tuple(self), ExecNode::HashJoin(exec)),
-            ExecNode::IndexScan(mut exec) => (exec.next_tuple(self, id), ExecNode::IndexScan(exec)),
-            ExecNode::Insert(mut exec) => (exec.next_tuple(self, id), ExecNode::Insert(exec)),
-            ExecNode::Limit(mut exec) => (exec.next_tuple(self, id), ExecNode::Limit(exec)),
-            ExecNode::NestedLoopJoin(mut exec) => {
-                (exec.next_tuple(self), ExecNode::NestedLoopJoin(exec))
-            }
-            ExecNode::Projection(mut exec) => {
-                (exec.next_tuple(self, id), ExecNode::Projection(exec))
-            }
-            ExecNode::ScalarSubquery(mut exec) => {
-                (exec.next_tuple(self, id), ExecNode::ScalarSubquery(exec))
-            }
-            ExecNode::SeqScan(mut exec) => (exec.next_tuple(self, id), ExecNode::SeqScan(exec)),
-            ExecNode::ShowTables(mut exec) => {
-                (exec.next_tuple(self, id), ExecNode::ShowTables(exec))
-            }
-            ExecNode::ShowViews(mut exec) => (exec.next_tuple(self, id), ExecNode::ShowViews(exec)),
-            ExecNode::SimpleAgg(mut exec) => (exec.next_tuple(self, id), ExecNode::SimpleAgg(exec)),
-            ExecNode::Sort(mut exec) => (exec.next_tuple(self), ExecNode::Sort(exec)),
-            ExecNode::StreamDistinct(mut exec) => {
-                (exec.next_tuple(self, id), ExecNode::StreamDistinct(exec))
-            }
-            ExecNode::TopK(mut exec) => (exec.next_tuple(self), ExecNode::TopK(exec)),
-            ExecNode::Truncate(mut exec) => (exec.next_tuple(self, id), ExecNode::Truncate(exec)),
-            ExecNode::Union(mut exec) => (exec.next_tuple(self, id), ExecNode::Union(exec)),
-            ExecNode::Update(mut exec) => (exec.next_tuple(self, id), ExecNode::Update(exec)),
-            ExecNode::Values(mut exec) => (exec.next_tuple(self, id), ExecNode::Values(exec)),
-            ExecNode::Empty => unreachable!("executor node re-entered while active"),
-        };
+        let mut node = std::mem::replace(&mut self.nodes[id], ExecNode::Empty);
+        let result = ExecNodeRunner::next_tuple(&mut node, self);
         self.nodes[id] = node;
         result?;
 
@@ -319,14 +359,6 @@ pub(crate) trait ReadExecutor<'a, T: Transaction + 'a>: Sized {
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId;
-
-    #[allow(dead_code)]
-    fn execute(self, cache: ExecutionCaches<'a>, transaction: *mut T) -> Executor<'a, T> {
-        let mut arena = ExecArena::default();
-        arena.init_context(cache, transaction);
-        let root = self.into_executor(&mut arena, cache, transaction);
-        Executor::new(arena, root)
-    }
 }
 
 pub(crate) trait WriteExecutor<'a, T: Transaction + 'a>: Sized {
@@ -336,14 +368,6 @@ pub(crate) trait WriteExecutor<'a, T: Transaction + 'a>: Sized {
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId;
-
-    #[allow(dead_code)]
-    fn execute_mut(self, cache: ExecutionCaches<'a>, transaction: *mut T) -> Executor<'a, T> {
-        let mut arena = ExecArena::default();
-        arena.init_context(cache, transaction);
-        let root = self.into_executor(&mut arena, cache, transaction);
-        Executor::new(arena, root)
-    }
 }
 
 pub(crate) fn build_read<'a, T: Transaction + 'a>(
@@ -565,6 +589,38 @@ pub(crate) fn build_write<'a, T: Transaction + 'a>(
             transaction,
         ),
     }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn execute<'a, T, E>(
+    executor: E,
+    cache: ExecutionCaches<'a>,
+    transaction: *mut T,
+) -> Executor<'a, T>
+where
+    T: Transaction + 'a,
+    E: ReadExecutor<'a, T>,
+{
+    let mut arena = ExecArena::default();
+    arena.init_context(cache, transaction);
+    let root = executor.into_executor(&mut arena, cache, transaction);
+    Executor::new(arena, root)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn execute_mut<'a, T, E>(
+    executor: E,
+    cache: ExecutionCaches<'a>,
+    transaction: *mut T,
+) -> Executor<'a, T>
+where
+    T: Transaction + 'a,
+    E: WriteExecutor<'a, T>,
+{
+    let mut arena = ExecArena::default();
+    arena.init_context(cache, transaction);
+    let root = executor.into_executor(&mut arena, cache, transaction);
+    Executor::new(arena, root)
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

@@ -79,9 +79,7 @@ impl HashAggExecutor {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        id: ExecId,
     ) -> Result<(), DatabaseError> {
-        let _ = id;
         if self.output.is_none() {
             let mut group_hash_accs: HashMap<Vec<DataValue>, Vec<Box<dyn Accumulator>>> =
                 HashMap::new();
@@ -143,7 +141,7 @@ mod test {
     use crate::errors::DatabaseError;
     use crate::execution::dql::aggregate::hash_agg::HashAggExecutor;
     use crate::execution::dql::test::build_integers;
-    use crate::execution::{try_collect, ReadExecutor};
+    use crate::execution::try_collect;
     use crate::expression::agg::AggKind;
     use crate::expression::ScalarExpression;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
@@ -238,10 +236,11 @@ mod test {
         let Operator::Aggregate(op) = plan.operator else {
             unreachable!()
         };
-        let tuples = try_collect(
-            HashAggExecutor::from((op, plan.childrens.pop_only()))
-                .execute((&table_cache, &view_cache, &meta_cache), &mut transaction),
-        )?;
+        let tuples = try_collect(crate::execution::execute(
+            HashAggExecutor::from((op, plan.childrens.pop_only())),
+            (&table_cache, &view_cache, &meta_cache),
+            &mut transaction,
+        ))?;
 
         assert_eq!(tuples.len(), 2);
 

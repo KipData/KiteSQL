@@ -49,9 +49,7 @@ impl CopyFromFile {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        id: ExecId,
     ) -> Result<(), DatabaseError> {
-        let _ = id;
         let Some(op) = self.op.take() else {
             arena.finish();
             return Ok(());
@@ -242,7 +240,8 @@ mod tests {
 
         let storage = db.storage;
         let mut transaction = storage.transaction()?;
-        let mut executor = CopyFromFile::from(op).execute_mut(
+        let mut executor = crate::execution::execute_mut(
+            CopyFromFile::from(op),
             (
                 db.state.table_cache(),
                 db.state.view_cache(),

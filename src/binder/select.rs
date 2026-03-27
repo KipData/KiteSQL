@@ -263,7 +263,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         mut children: LogicalPlan,
         mut plan: LogicalPlan,
         join_ty: JoinType,
-        predicates: Vec<ScalarExpression>,
+        predicates: impl IntoIterator<Item = ScalarExpression>,
         rebind_positions: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
         let left_schema = children.output_schema().clone();
@@ -1002,8 +1002,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             }
         };
 
-        if let Some(idents) = alias_idents {
-            let alias_name = table_alias.unwrap();
+        if let (Some(idents), Some(alias_name)) = (alias_idents, table_alias) {
             plan = self.bind_alias(plan, idents, alias_name.clone(), table_name.clone())?;
             self.context.add_bound_source(
                 table_name,
@@ -1043,19 +1042,20 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     });
                 }
                 SelectItem::Wildcard(_) => {
-                    let mut seen_tables = HashSet::new();
-                    let bound_sources = self.context.bind_table.clone();
-                    for bound_source in bound_sources {
-                        let visible_name = bound_source.visible_name().clone();
-                        if !seen_tables.insert(visible_name.clone()) {
-                            continue;
-                        }
-                        if Self::is_joined_values_source(
-                            bound_source.join_type,
-                            &bound_source.source,
-                        ) {
-                            continue;
-                        }
+                    for visible_name in self
+                        .context
+                        .bind_table
+                        .iter()
+                        .filter(|bound_source| {
+                            !Self::is_joined_values_source(
+                                bound_source.join_type,
+                                &bound_source.source,
+                            )
+                        })
+                        .map(|bound_source| bound_source.visible_name())
+                        .unique()
+                        .cloned()
+                    {
                         Self::bind_table_column_refs(
                             &self.context,
                             &mut self.table_schema_buf,
@@ -1286,7 +1286,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     children,
                     plan,
                     join_ty,
-                    vec![predicate.clone()],
+                    std::iter::once(predicate.clone()),
                     true,
                 )?;
             }
@@ -1382,11 +1382,13 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         let (plan, correlated_filters) =
             Self::prepare_correlated_subquery_plan(plan, children.output_schema(), true)?;
         let predicate = Self::rewrite_correlated_in_predicate(predicate);
-        let predicates = std::iter::once(predicate)
-            .chain(correlated_filters)
-            .collect();
-
-        Self::build_join_from_split_scope_predicates(children, plan, join_ty, predicates, false)
+        Self::build_join_from_split_scope_predicates(
+            children,
+            plan,
+            join_ty,
+            std::iter::once(predicate).chain(correlated_filters),
+            false,
+        )
     }
 
     fn rewrite_correlated_in_predicate(predicate: ScalarExpression) -> ScalarExpression {
