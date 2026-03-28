@@ -12,50 +12,69 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::execution::{spawn_executor, Executor, ReadExecutor};
+use crate::errors::DatabaseError;
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
 use crate::planner::operator::table_scan::TableScanOperator;
-use crate::storage::{Iter, StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::throw;
+use crate::storage::{Iter, Transaction, TupleIter};
 
-pub(crate) struct SeqScan {
-    op: TableScanOperator,
+pub(crate) struct SeqScan<'a, T: Transaction + 'a> {
+    op: Option<TableScanOperator>,
+    iter: Option<TupleIter<'a, T>>,
 }
 
-impl From<TableScanOperator> for SeqScan {
+impl<'a, T: Transaction + 'a> From<TableScanOperator> for SeqScan<'a, T> {
     fn from(op: TableScanOperator) -> Self {
-        SeqScan { op }
+        SeqScan {
+            op: Some(op),
+            iter: None,
+        }
     }
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SeqScan {
-    fn execute(
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SeqScan<'a, T> {
+    fn into_executor(
         self,
-        (table_cache, _, _): (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
-        transaction: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let TableScanOperator {
+        arena: &mut ExecArena<'a, T>,
+        _: ExecutionCaches<'a>,
+        _: *mut T,
+    ) -> ExecId {
+        arena.push(ExecNode::SeqScan(self))
+    }
+}
+
+impl<'a, T: Transaction + 'a> SeqScan<'a, T> {
+    pub(crate) fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+        if self.iter.is_none() {
+            let Some(TableScanOperator {
                 table_name,
                 columns,
                 limit,
                 with_pk,
                 ..
-            } = self.op;
+            }) = self.op.take()
+            else {
+                arena.finish();
+                return Ok(());
+            };
+            self.iter = Some(arena.transaction_mut().read(
+                arena.table_cache(),
+                table_name,
+                limit,
+                columns,
+                with_pk,
+            )?);
+        }
 
-            let mut iter = throw!(
-                co,
-                unsafe { &mut (*transaction) }.read(
-                    table_cache,
-                    table_name,
-                    limit,
-                    columns,
-                    with_pk
-                )
-            );
-
-            while let Some(tuple) = throw!(co, iter.next_tuple()) {
-                co.yield_(Ok(tuple)).await;
-            }
-        })
+        if self
+            .iter
+            .as_mut()
+            .expect("seq scan iterator initialized")
+            .next_tuple_into(arena.result_tuple_mut())?
+        {
+            arena.resume();
+        } else {
+            arena.finish();
+        }
+        Ok(())
     }
 }

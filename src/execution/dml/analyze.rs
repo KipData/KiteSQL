@@ -15,20 +15,18 @@
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
-use crate::execution::{build_read, spawn_executor, Executor, WriteExecutor};
-use crate::expression::{BindPosition, ScalarExpression};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
+use crate::expression::ScalarExpression;
 use crate::optimizer::core::histogram::HistogramBuilder;
 use crate::optimizer::core::statistics_meta::StatisticsMeta;
 use crate::planner::operator::analyze::AnalyzeOperator;
 use crate::planner::LogicalPlan;
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::throw;
+use crate::storage::{StatisticsMetaCache, Transaction};
 use crate::types::index::IndexId;
-use crate::types::tuple::Tuple;
+use crate::types::tuple::SchemaRef;
 use crate::types::value::{DataValue, Utf8Type};
 use itertools::Itertools;
 use sqlparser::ast::CharLengthUnits;
-use std::borrow::Cow;
 use std::fmt::{self, Formatter};
 use std::sync::Arc;
 
@@ -36,7 +34,9 @@ const DEFAULT_NUM_OF_BUCKETS: usize = 100;
 
 pub struct Analyze {
     table_name: TableName,
-    input: LogicalPlan,
+    input_schema: SchemaRef,
+    input_plan: Option<LogicalPlan>,
+    input: Option<ExecId>,
     histogram_buckets: Option<usize>,
 }
 
@@ -48,101 +48,93 @@ impl From<(AnalyzeOperator, LogicalPlan)> for Analyze {
                 index_metas,
                 histogram_buckets,
             },
-            input,
+            mut input,
         ): (AnalyzeOperator, LogicalPlan),
     ) -> Self {
         let _ = index_metas;
         Analyze {
             table_name,
-            input,
+            input_schema: input.output_schema().clone(),
+            input_plan: Some(input),
+            input: None,
             histogram_buckets,
         }
     }
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze {
-    fn execute_mut(
-        self,
-        cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
+    fn into_executor(
+        mut self,
+        arena: &mut ExecArena<'a, T>,
+        cache: ExecutionCaches<'a>,
         transaction: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let Analyze {
-                table_name,
-                mut input,
-                histogram_buckets,
-            } = self;
+    ) -> ExecId {
+        self.input = Some(build_read(
+            arena,
+            self.input_plan
+                .take()
+                .expect("analyze input plan initialized"),
+            cache,
+            transaction,
+        ));
+        arena.push(ExecNode::Analyze(self))
+    }
+}
 
-            let schema = input.output_schema().clone();
-            let mut builders = Vec::new();
-            let table = throw!(
-                co,
-                throw!(
-                    co,
-                    unsafe { &mut (*transaction) }.table(cache.0, table_name.clone())
-                )
-                .cloned()
-                .ok_or(DatabaseError::TableNotFound)
-            );
+impl Analyze {
+    pub(crate) fn next_tuple<'a, T: Transaction>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> Result<(), DatabaseError> {
+        let Some(input) = self.input.take() else {
+            arena.finish();
+            return Ok(());
+        };
 
-            for index in table.indexes() {
-                builders.push(State {
-                    is_bound_position: false,
-                    index_id: index.id,
-                    exprs: throw!(co, index.column_exprs(&table)),
-                    builder: HistogramBuilder::new(index, None),
-                    histogram_buckets,
-                });
-            }
+        let mut builders = Vec::new();
+        let table = arena
+            .transaction_mut()
+            .table(arena.table_cache(), self.table_name.clone())?
+            .cloned()
+            .ok_or(DatabaseError::TableNotFound)?;
 
-            let mut coroutine = build_read(input, cache, transaction);
+        for index in table.indexes() {
+            builders.push(State {
+                index_id: index.id,
+                exprs: index.column_exprs(&table)?,
+                builder: HistogramBuilder::new(index, None),
+                histogram_buckets: self.histogram_buckets,
+            });
+        }
 
-            for tuple in coroutine.by_ref() {
-                let tuple = throw!(co, tuple);
+        while arena.next_tuple(input)? {
+            let tuple = arena.result_tuple();
+            for State { exprs, builder, .. } in builders.iter_mut() {
+                let values = Projection::projection(tuple, exprs, &self.input_schema)?;
 
-                for State {
-                    is_bound_position,
-                    exprs,
-                    builder,
-                    ..
-                } in builders.iter_mut()
-                {
-                    if !*is_bound_position {
-                        throw!(
-                            co,
-                            BindPosition::bind_exprs(
-                                exprs.iter_mut(),
-                                || schema.iter().map(Cow::Borrowed),
-                                |a, b| a == b
-                            )
-                        );
-                        *is_bound_position = true;
-                    }
-                    let values = throw!(co, Projection::projection(&tuple, exprs, &schema));
-
-                    if values.len() == 1 {
-                        throw!(co, builder.append(&values[0]));
-                    } else {
-                        throw!(
-                            co,
-                            builder.append(&Arc::new(DataValue::Tuple(values, false)))
-                        );
-                    }
+                if values.len() == 1 {
+                    builder.append(&values[0])?;
+                } else {
+                    builder.append(&Arc::new(DataValue::Tuple(values, false)))?;
                 }
             }
-            drop(coroutine);
-            let values = throw!(
-                co,
-                Self::persist_statistics_meta(&table_name, builders, cache.2, transaction)
-            );
+        }
+        let values = Self::persist_statistics_meta(
+            &self.table_name,
+            builders,
+            arena.meta_cache(),
+            arena.transaction_mut(),
+        )?;
 
-            co.yield_(Ok(Tuple::new(None, values))).await;
-        })
+        let output = arena.result_tuple_mut();
+        output.pk = None;
+        output.values = values;
+        arena.resume();
+        Ok(())
     }
 }
 
 struct State {
-    is_bound_position: bool,
     index_id: IndexId,
     exprs: Vec<ScalarExpression>,
     builder: HistogramBuilder,
@@ -150,11 +142,11 @@ struct State {
 }
 
 impl Analyze {
-    fn persist_statistics_meta<T: Transaction>(
+    fn persist_statistics_meta<U: Transaction>(
         table_name: &TableName,
         builders: Vec<State>,
         cache: &StatisticsMetaCache,
-        transaction: *mut T,
+        transaction: &mut U,
     ) -> Result<Vec<DataValue>, DatabaseError> {
         let mut values = Vec::with_capacity(builders.len());
 
@@ -167,9 +159,9 @@ impl Analyze {
         {
             let (histogram, sketch) =
                 builder.build(histogram_buckets.unwrap_or(DEFAULT_NUM_OF_BUCKETS))?;
-            let meta = StatisticsMeta::new(histogram);
+            let meta = StatisticsMeta::new(histogram, sketch);
 
-            unsafe { &mut (*transaction) }.save_statistics_meta(cache, table_name, meta, sketch)?;
+            transaction.save_statistics_meta(cache, table_name, meta)?;
             values.push(DataValue::Utf8 {
                 value: format!("{table_name}/{index_id}"),
                 ty: Utf8Type::Variable(None),
@@ -193,7 +185,7 @@ impl fmt::Display for AnalyzeOperator {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
-    use crate::db::{DataBaseBuilder, ResultIter};
+    use crate::db::DataBaseBuilder;
     use crate::errors::DatabaseError;
     use crate::execution::dml::analyze::DEFAULT_NUM_OF_BUCKETS;
     use crate::expression::range_detacher::Range;
@@ -218,7 +210,7 @@ mod test {
         let buckets = 10;
         let kite_sql = DataBaseBuilder::path(temp_dir.path())
             .histogram_buckets(buckets)
-            .build()?;
+            .build_rocksdb()?;
 
         kite_sql
             .run("create table t1 (a int primary key, b int)")?
@@ -257,7 +249,7 @@ mod test {
 
     fn test_meta_loader_uses_cache() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql
             .run("create table t1 (a int primary key, b int)")?
@@ -282,13 +274,15 @@ mod test {
         drop(transaction);
 
         let mut transaction = kite_sql.storage.transaction()?;
-        let (min, max) = unsafe { &*transaction.table_codec() }.statistics_index_bound("t1", 1);
-        let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
-        let mut keys: Vec<Vec<u8>> = Vec::new();
-        while let Some((key, _)) = iter.try_next()? {
-            keys.push(key);
-        }
-        drop(iter);
+        let keys: Vec<Vec<u8>> = unsafe { &*transaction.table_codec() }
+            .with_statistics_index_bound("t1", 1, |min, max| {
+                let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+                let mut keys = Vec::new();
+                while let Some((key, _)) = iter.try_next()? {
+                    keys.push(key.to_vec());
+                }
+                Ok(keys)
+            })?;
         for key in keys {
             transaction.remove(&key)?;
         }
@@ -306,7 +300,7 @@ mod test {
 
     fn test_meta_loader_negative_cache() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql
             .run("create table t1 (a int primary key, b int)")?
@@ -330,7 +324,7 @@ mod test {
 
     fn test_clean_expired_index() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql
             .run("create table t1 (a int primary key, b int)")?
@@ -346,34 +340,38 @@ mod test {
         kite_sql.run("analyze table t1")?.done()?;
 
         let transaction = kite_sql.storage.transaction()?;
-        let (min, max) = unsafe { &*transaction.table_codec() }.statistics_bound("t1");
-        let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
-        let mut count = 0;
-        while iter.try_next()?.is_some() {
-            count += 1;
-        }
+        let count =
+            unsafe { &*transaction.table_codec() }.with_statistics_bound("t1", |min, max| {
+                let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+                let mut count = 0;
+                while iter.try_next()?.is_some() {
+                    count += 1;
+                }
+                Ok(count)
+            })?;
         assert!(count > 3);
-        drop(iter);
 
         kite_sql.run("alter table t1 drop column b")?.done()?;
         kite_sql.run("analyze table t1")?.done()?;
 
         let transaction = kite_sql.storage.transaction()?;
-        let (min, max) = unsafe { &*transaction.table_codec() }.statistics_bound("t1");
-        let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
-        let mut keys = 0;
-        while iter.try_next()?.is_some() {
-            keys += 1;
-        }
+        let keys =
+            unsafe { &*transaction.table_codec() }.with_statistics_bound("t1", |min, max| {
+                let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+                let mut keys = 0;
+                while iter.try_next()?.is_some() {
+                    keys += 1;
+                }
+                Ok(keys)
+            })?;
         let table_name = "t1".to_string().into();
         let loader = transaction.meta_loader(kite_sql.state.meta_cache());
         let statistics_meta = loader.load(&table_name, 0)?.unwrap();
-        let statistics_sketch = transaction
-            .statistics_sketch(table_name.as_ref(), 0)?
-            .unwrap();
         let expected_keys = 1
             + 1
-            + statistics_sketch.storage_page_count(COUNT_MIN_SKETCH_STORAGE_PAGE_LEN)
+            + statistics_meta
+                .sketch()
+                .storage_page_count(COUNT_MIN_SKETCH_STORAGE_PAGE_LEN)
             + statistics_meta.histogram().buckets_len();
         assert_eq!(keys, expected_keys);
 

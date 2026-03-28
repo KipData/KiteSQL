@@ -27,8 +27,9 @@ use crate::types::value::{DataValue, TupleMappingRef};
 use crate::types::LogicalType;
 use bumpalo::Bump;
 use siphasher::sip::SipHasher;
+use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::sync::LazyLock;
 
 pub(crate) const BOUND_MIN_TAG: u8 = u8::MIN;
@@ -53,6 +54,15 @@ pub type BumpBytes<'bump> = bumpalo::collections::Vec<'bump, u8>;
 #[derive(Default)]
 pub struct TableCodec {
     arena: Bump,
+    key_buffer: RefCell<KeyBuffer>,
+}
+
+#[derive(Default)]
+struct KeyBuffer {
+    lower: Bytes,
+    upper: Bytes,
+    cached_table_name: String,
+    cached_table_hash: [u8; TABLE_NAME_HASH_LEN],
 }
 
 #[derive(Copy, Clone)]
@@ -99,6 +109,11 @@ impl StatisticsCodecType {
 }
 
 impl TableCodec {
+    #[inline]
+    pub fn arena(&self) -> &Bump {
+        &self.arena
+    }
+
     fn hash_bytes(table_name: &str) -> [u8; 8] {
         let mut hasher = SipHasher::new();
         table_name.hash(&mut hasher);
@@ -149,302 +164,523 @@ impl TableCodec {
         Ok(())
     }
 
-    /// TableName + Type
-    ///
-    /// Tips:
-    /// 1. Root & View & Hash full key = key_prefix
-    /// 2. table-name hash is fixed-width (8 bytes), so [prefix_extractor](https://github.com/facebook/rocksdb/wiki/Prefix-Seek#defining-a-prefix) can be enabled in rocksdb
-    fn key_prefix(&self, ty: CodecType, name: &str) -> BumpBytes<'_> {
-        let mut table_bytes = BumpBytes::new_in(&self.arena);
-        table_bytes.extend_from_slice(Self::hash_bytes(name).as_slice());
-
+    #[inline]
+    fn write_key_prefix(out: &mut Bytes, ty: CodecType, table_hash: [u8; TABLE_NAME_HASH_LEN]) {
+        out.clear();
         match ty {
             CodecType::Column => {
-                table_bytes.push(b'0');
+                out.extend_from_slice(&table_hash);
+                out.push(b'0');
             }
             CodecType::IndexMeta => {
-                table_bytes.push(b'1');
+                out.extend_from_slice(&table_hash);
+                out.push(b'1');
             }
             CodecType::Statistics => {
-                table_bytes.push(b'3');
+                out.extend_from_slice(&table_hash);
+                out.push(b'3');
             }
             CodecType::Index => {
-                table_bytes.push(b'7');
+                out.extend_from_slice(&table_hash);
+                out.push(b'7');
             }
             CodecType::Tuple => {
-                table_bytes.push(b'8');
+                out.extend_from_slice(&table_hash);
+                out.push(b'8');
             }
             CodecType::Root => {
-                let mut bytes = BumpBytes::new_in(&self.arena);
-
-                bytes.extend_from_slice(&ROOT_BYTES);
-                bytes.push(BOUND_MIN_TAG);
-                bytes.extend_from_slice(&table_bytes);
-
-                return bytes;
+                out.extend_from_slice(ROOT_BYTES.as_slice());
+                out.push(BOUND_MIN_TAG);
+                out.extend_from_slice(&table_hash);
             }
             CodecType::View => {
-                let mut bytes = BumpBytes::new_in(&self.arena);
-
-                bytes.extend_from_slice(&VIEW_BYTES);
-                bytes.push(BOUND_MIN_TAG);
-                bytes.extend_from_slice(&table_bytes);
-
-                return bytes;
+                out.extend_from_slice(VIEW_BYTES.as_slice());
+                out.push(BOUND_MIN_TAG);
+                out.extend_from_slice(&table_hash);
             }
             CodecType::Hash => {
-                let mut bytes = BumpBytes::new_in(&self.arena);
-
-                bytes.extend_from_slice(&HASH_BYTES);
-                bytes.push(BOUND_MIN_TAG);
-                bytes.append(&mut table_bytes);
-                bytes.extend_from_slice(&table_bytes);
-
-                return bytes;
+                out.extend_from_slice(HASH_BYTES.as_slice());
+                out.push(BOUND_MIN_TAG);
+                out.extend_from_slice(&table_hash);
             }
         }
-
-        table_bytes
     }
 
-    pub fn tuple_bound(&self, table_name: &str) -> (BumpBytes<'_>, BumpBytes<'_>) {
-        let op = |bound_id| {
-            let mut key_prefix = self.key_prefix(CodecType::Tuple, table_name);
-
-            key_prefix.push(bound_id);
-            key_prefix
-        };
-
-        (op(BOUND_MIN_TAG), op(BOUND_MAX_TAG))
+    #[inline]
+    fn write_global_bound_prefix(out: &mut Bytes, prefix: &[u8], bound: u8) {
+        out.clear();
+        out.extend_from_slice(prefix);
+        out.push(bound);
     }
 
-    pub fn index_meta_bound(&self, table_name: &str) -> (BumpBytes<'_>, BumpBytes<'_>) {
-        let op = |bound_id| {
-            let mut key_prefix = self.key_prefix(CodecType::IndexMeta, table_name);
-
-            key_prefix.push(bound_id);
-            key_prefix
-        };
-
-        (op(BOUND_MIN_TAG), op(BOUND_MAX_TAG))
-    }
-
-    pub fn index_bound(
+    fn with_table_hash<R>(
         &self,
         table_name: &str,
-        index_id: IndexId,
-    ) -> Result<(BumpBytes<'_>, BumpBytes<'_>), DatabaseError> {
-        let op = |bound_id| -> Result<BumpBytes, DatabaseError> {
-            let mut key_prefix = self.key_prefix(CodecType::Index, table_name);
-
-            key_prefix.write_all(&[BOUND_MIN_TAG])?;
-            key_prefix.write_all(&index_id.to_le_bytes()[..])?;
-            key_prefix.write_all(&[bound_id])?;
-            Ok(key_prefix)
+        f: impl FnOnce(&mut KeyBuffer, [u8; TABLE_NAME_HASH_LEN]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        let mut key_buffer = self.key_buffer.borrow_mut();
+        let table_hash = if key_buffer.cached_table_name != table_name {
+            key_buffer.cached_table_name.clear();
+            key_buffer.cached_table_name.push_str(table_name);
+            key_buffer.cached_table_hash = Self::hash_bytes(table_name);
+            key_buffer.cached_table_hash
+        } else {
+            key_buffer.cached_table_hash
         };
 
-        Ok((op(BOUND_MIN_TAG)?, op(BOUND_MAX_TAG)?))
+        f(&mut key_buffer, table_hash)
     }
 
-    pub fn all_index_bound(&self, table_name: &str) -> (BumpBytes<'_>, BumpBytes<'_>) {
-        let op = |bound_id| {
-            let mut key_prefix = self.key_prefix(CodecType::Index, table_name);
-
-            key_prefix.push(bound_id);
-            key_prefix
-        };
-
-        (op(BOUND_MIN_TAG), op(BOUND_MAX_TAG))
-    }
-
-    pub fn root_table_bound(&self) -> (BumpBytes<'_>, BumpBytes<'_>) {
-        let op = |bound_id| {
-            let mut key_prefix = BumpBytes::new_in(&self.arena);
-
-            key_prefix.extend_from_slice(&ROOT_BYTES);
-            key_prefix.push(bound_id);
-            key_prefix
-        };
-
-        (op(BOUND_MIN_TAG), op(BOUND_MAX_TAG))
-    }
-
-    pub fn table_bound(&self, table_name: &str) -> (BumpBytes<'_>, BumpBytes<'_>) {
-        let mut column_prefix = self.key_prefix(CodecType::Column, table_name);
-        column_prefix.push(BOUND_MIN_TAG);
-
-        let mut index_prefix = self.key_prefix(CodecType::IndexMeta, table_name);
-        index_prefix.push(BOUND_MAX_TAG);
-
-        (column_prefix, index_prefix)
-    }
-
-    pub fn columns_bound(&self, table_name: &str) -> (BumpBytes<'_>, BumpBytes<'_>) {
-        let op = |bound_id| {
-            let mut key_prefix = self.key_prefix(CodecType::Column, table_name);
-
-            key_prefix.push(bound_id);
-            key_prefix
-        };
-
-        (op(BOUND_MIN_TAG), op(BOUND_MAX_TAG))
-    }
-
-    pub fn statistics_bound(&self, table_name: &str) -> (BumpBytes<'_>, BumpBytes<'_>) {
-        let op = |bound_id| {
-            let mut key_prefix = self.key_prefix(CodecType::Statistics, table_name);
-
-            key_prefix.push(bound_id);
-            key_prefix
-        };
-
-        (op(BOUND_MIN_TAG), op(BOUND_MAX_TAG))
-    }
-
-    pub fn view_bound(&self) -> (BumpBytes<'_>, BumpBytes<'_>) {
-        let op = |bound_id| {
-            let mut key_prefix = BumpBytes::new_in(&self.arena);
-
-            key_prefix.extend_from_slice(&VIEW_BYTES);
-            key_prefix.push(bound_id);
-            key_prefix
-        };
-
-        (op(BOUND_MIN_TAG), op(BOUND_MAX_TAG))
-    }
-
-    /// Key: {TableName}{TUPLE_TAG}{BOUND_MIN_TAG}{RowID}(Sorted)
-    /// Value: Tuple
-    pub fn encode_tuple(
-        &self,
-        table_name: &str,
-        tuple: &mut Tuple,
-        types: &[TupleValueSerializableImpl],
-    ) -> Result<(BumpBytes<'_>, BumpBytes<'_>), DatabaseError> {
-        let tuple_id = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
-        let key = self.encode_tuple_key(table_name, tuple_id)?;
-
-        Ok((key, tuple.serialize_to(types, &self.arena)?))
-    }
-
-    pub fn encode_tuple_key(
+    /// Key: `{TableName}{TUPLE_TAG}{BOUND_MIN_TAG}{RowID}`.
+    pub fn with_tuple_key<R>(
         &self,
         table_name: &str,
         tuple_id: &TupleId,
-    ) -> Result<BumpBytes<'_>, DatabaseError> {
+        f: impl FnOnce(&[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
         Self::check_primary_key(tuple_id, 0)?;
-
-        let mut key_prefix = self.key_prefix(CodecType::Tuple, table_name);
-        key_prefix.push(BOUND_MIN_TAG);
-
-        tuple_id.memcomparable_encode(&mut key_prefix)?;
-
-        Ok(key_prefix)
+        self.with_tuple_key_unchecked(table_name, tuple_id, f)
     }
 
+    #[inline]
+    pub(crate) fn with_tuple_key_unchecked<R>(
+        &self,
+        table_name: &str,
+        tuple_id: &TupleId,
+        f: impl FnOnce(&[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        self.with_table_hash(table_name, |key_buffer, table_hash| {
+            let lower = &mut key_buffer.lower;
+            Self::write_key_prefix(lower, CodecType::Tuple, table_hash);
+            lower.push(BOUND_MIN_TAG);
+            tuple_id.memcomparable_encode(lower)?;
+
+            f(lower.as_slice())
+        })
+    }
+
+    /// Range bounds covering all tuple keys for a table.
+    pub fn with_tuple_bound<R>(
+        &self,
+        table_name: &str,
+        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        self.with_table_hash(table_name, |key_buffer, table_hash| {
+            let lower = &mut key_buffer.lower;
+            Self::write_key_prefix(lower, CodecType::Tuple, table_hash);
+            lower.push(BOUND_MIN_TAG);
+
+            let upper = &mut key_buffer.upper;
+            Self::write_key_prefix(upper, CodecType::Tuple, table_hash);
+            upper.push(BOUND_MAX_TAG);
+
+            f(lower.as_slice(), upper.as_slice())
+        })
+    }
+
+    /// Key: `{TableName}{INDEX_META_TAG}{BOUND_MIN_TAG}{IndexID}`.
+    pub fn with_index_meta_key<R>(
+        &self,
+        table_name: &str,
+        index_id: IndexId,
+        f: impl FnOnce(&[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        self.with_table_hash(table_name, |key_buffer, table_hash| {
+            let lower = &mut key_buffer.lower;
+            Self::write_key_prefix(lower, CodecType::IndexMeta, table_hash);
+            lower.push(BOUND_MIN_TAG);
+            lower.extend_from_slice(&index_id.to_le_bytes());
+
+            f(lower.as_slice())
+        })
+    }
+
+    /// Range bounds covering all index metadata for a table.
+    pub fn with_index_meta_bound<R>(
+        &self,
+        table_name: &str,
+        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        self.with_table_hash(table_name, |key_buffer, table_hash| {
+            let lower = &mut key_buffer.lower;
+            Self::write_key_prefix(lower, CodecType::IndexMeta, table_hash);
+            lower.push(BOUND_MIN_TAG);
+
+            let upper = &mut key_buffer.upper;
+            Self::write_key_prefix(upper, CodecType::IndexMeta, table_hash);
+            upper.push(BOUND_MAX_TAG);
+
+            f(lower.as_slice(), upper.as_slice())
+        })
+    }
+
+    /// Range bounds covering a single secondary index.
+    pub fn with_index_bound<R>(
+        &self,
+        table_name: &str,
+        index_id: IndexId,
+        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        self.with_table_hash(table_name, |key_buffer, table_hash| {
+            let lower = &mut key_buffer.lower;
+            Self::write_key_prefix(lower, CodecType::Index, table_hash);
+            lower.push(BOUND_MIN_TAG);
+            lower.extend_from_slice(&index_id.to_le_bytes());
+            lower.push(BOUND_MIN_TAG);
+
+            let upper = &mut key_buffer.upper;
+            Self::write_key_prefix(upper, CodecType::Index, table_hash);
+            upper.push(BOUND_MIN_TAG);
+            upper.extend_from_slice(&index_id.to_le_bytes());
+            upper.push(BOUND_MAX_TAG);
+
+            f(lower.as_slice(), upper.as_slice())
+        })
+    }
+
+    /// Range bounds covering all secondary indexes for a table.
+    pub fn with_all_index_bound<R>(
+        &self,
+        table_name: &str,
+        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        self.with_table_hash(table_name, |key_buffer, table_hash| {
+            let lower = &mut key_buffer.lower;
+            Self::write_key_prefix(lower, CodecType::Index, table_hash);
+            lower.push(BOUND_MIN_TAG);
+
+            let upper = &mut key_buffer.upper;
+            Self::write_key_prefix(upper, CodecType::Index, table_hash);
+            upper.push(BOUND_MAX_TAG);
+
+            f(lower.as_slice(), upper.as_slice())
+        })
+    }
+
+    /// Non-unique index key:
+    /// `{TableName}{INDEX_TAG}{BOUND_MIN_TAG}{IndexID}{BOUND_MIN_TAG}{DataValue...}{TupleId}`
+    ///
+    /// Unique index key:
+    /// `{TableName}{INDEX_TAG}{BOUND_MIN_TAG}{IndexID}{BOUND_MIN_TAG}{DataValue}`
+    pub fn with_index_key<R>(
+        &self,
+        table_name: &str,
+        index: &Index,
+        tuple_id: Option<&TupleId>,
+        f: impl FnOnce(&[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        self.with_table_hash(table_name, |key_buffer, table_hash| {
+            let lower = &mut key_buffer.lower;
+            Self::write_key_prefix(lower, CodecType::Index, table_hash);
+            lower.push(BOUND_MIN_TAG);
+            lower.extend_from_slice(&index.id.to_le_bytes());
+            lower.push(BOUND_MIN_TAG);
+            index.value.memcomparable_encode(lower)?;
+
+            if let Some(tuple_id) = tuple_id {
+                if matches!(index.ty, IndexType::Normal | IndexType::Composite) {
+                    tuple_id.memcomparable_encode(lower)?;
+                }
+            }
+
+            f(lower.as_slice())
+        })
+    }
+
+    /// Key: `{TableName}{COLUMN_TAG}{BOUND_MIN_TAG}{ColumnId}`.
+    pub fn with_column_key<R>(
+        &self,
+        col: &ColumnRef,
+        f: impl FnOnce(&[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        if let ColumnRelation::Table {
+            column_id,
+            table_name,
+            is_temp: false,
+        } = &col.summary().relation
+        {
+            self.with_table_hash(table_name, |key_buffer, table_hash| {
+                let lower = &mut key_buffer.lower;
+                Self::write_key_prefix(lower, CodecType::Column, table_hash);
+                lower.push(BOUND_MIN_TAG);
+                lower.extend_from_slice(&column_id.to_bytes());
+
+                f(lower.as_slice())
+            })
+        } else {
+            Err(DatabaseError::invalid_column(
+                "column does not belong to table".to_string(),
+            ))
+        }
+    }
+
+    /// Range bounds covering all column metadata for a table.
+    pub fn with_columns_bound<R>(
+        &self,
+        table_name: &str,
+        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        self.with_table_hash(table_name, |key_buffer, table_hash| {
+            let lower = &mut key_buffer.lower;
+            Self::write_key_prefix(lower, CodecType::Column, table_hash);
+            lower.push(BOUND_MIN_TAG);
+
+            let upper = &mut key_buffer.upper;
+            Self::write_key_prefix(upper, CodecType::Column, table_hash);
+            upper.push(BOUND_MAX_TAG);
+
+            f(lower.as_slice(), upper.as_slice())
+        })
+    }
+
+    /// Range bounds spanning a table's `Column` and `IndexMeta` metadata.
+    pub fn with_table_bound<R>(
+        &self,
+        table_name: &str,
+        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        self.with_table_hash(table_name, |key_buffer, table_hash| {
+            let lower = &mut key_buffer.lower;
+            Self::write_key_prefix(lower, CodecType::Column, table_hash);
+            lower.push(BOUND_MIN_TAG);
+
+            let upper = &mut key_buffer.upper;
+            Self::write_key_prefix(upper, CodecType::IndexMeta, table_hash);
+            upper.push(BOUND_MAX_TAG);
+
+            f(lower.as_slice(), upper.as_slice())
+        })
+    }
+
+    /// Range bounds covering all statistics keys for a table.
+    pub fn with_statistics_bound<R>(
+        &self,
+        table_name: &str,
+        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        self.with_table_hash(table_name, |key_buffer, table_hash| {
+            let lower = &mut key_buffer.lower;
+            Self::write_key_prefix(lower, CodecType::Statistics, table_hash);
+            lower.push(BOUND_MIN_TAG);
+
+            let upper = &mut key_buffer.upper;
+            Self::write_key_prefix(upper, CodecType::Statistics, table_hash);
+            upper.push(BOUND_MAX_TAG);
+
+            f(lower.as_slice(), upper.as_slice())
+        })
+    }
+
+    /// Range bounds covering all statistics keys for one index.
+    pub fn with_statistics_index_bound<R>(
+        &self,
+        table_name: &str,
+        index_id: IndexId,
+        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        self.with_table_hash(table_name, |key_buffer, table_hash| {
+            let lower = &mut key_buffer.lower;
+            Self::write_key_prefix(lower, CodecType::Statistics, table_hash);
+            lower.push(BOUND_MIN_TAG);
+            lower.extend_from_slice(&index_id.to_le_bytes());
+
+            let upper = &mut key_buffer.upper;
+            upper.clear();
+            upper.extend_from_slice(lower);
+            upper.push(BOUND_MAX_TAG);
+
+            f(lower.as_slice(), upper.as_slice())
+        })
+    }
+
+    /// Key: `{TableName}{STATISTICS_TAG}{BOUND_MIN_TAG}{INDEX_ID}{ROOT_TAG}`.
+    pub fn with_statistics_meta_key<R>(
+        &self,
+        table_name: &str,
+        index_id: IndexId,
+        f: impl FnOnce(&[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        self.with_table_hash(table_name, |key_buffer, table_hash| {
+            let lower = &mut key_buffer.lower;
+            Self::write_key_prefix(lower, CodecType::Statistics, table_hash);
+            lower.push(BOUND_MIN_TAG);
+            lower.extend_from_slice(&index_id.to_le_bytes());
+            lower.push(StatisticsCodecType::Root.tag());
+
+            f(lower.as_slice())
+        })
+    }
+
+    /// Key: `{TableName}{STATISTICS_TAG}{BOUND_MIN_TAG}{INDEX_ID}{SKETCH_META_TAG}`.
+    pub fn with_statistics_sketch_meta_key<R>(
+        &self,
+        table_name: &str,
+        index_id: IndexId,
+        f: impl FnOnce(&[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        self.with_table_hash(table_name, |key_buffer, table_hash| {
+            let lower = &mut key_buffer.lower;
+            Self::write_key_prefix(lower, CodecType::Statistics, table_hash);
+            lower.push(BOUND_MIN_TAG);
+            lower.extend_from_slice(&index_id.to_le_bytes());
+            lower.push(StatisticsCodecType::SketchMeta.tag());
+
+            f(lower.as_slice())
+        })
+    }
+
+    /// Key: `{TableName}{STATISTICS_TAG}{BOUND_MIN_TAG}{INDEX_ID}{SKETCH_PAGE_TAG}{BOUND_MIN_TAG}{ROW_ID}{BOUND_MIN_TAG}{PAGE_ID}`.
+    pub fn with_statistics_sketch_page_key<R>(
+        &self,
+        table_name: &str,
+        index_id: IndexId,
+        sketch_page: &CountMinSketchPage,
+        f: impl FnOnce(&[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        self.with_table_hash(table_name, |key_buffer, table_hash| {
+            let lower = &mut key_buffer.lower;
+            Self::write_key_prefix(lower, CodecType::Statistics, table_hash);
+            lower.push(BOUND_MIN_TAG);
+            lower.extend_from_slice(&index_id.to_le_bytes());
+            lower.push(StatisticsCodecType::SketchPage.tag());
+            lower.push(BOUND_MIN_TAG);
+            lower.extend_from_slice(&(sketch_page.row_idx() as u32).to_be_bytes());
+            lower.push(BOUND_MIN_TAG);
+            lower.extend_from_slice(&(sketch_page.page_idx() as u32).to_be_bytes());
+
+            f(lower.as_slice())
+        })
+    }
+
+    /// Key: `{TableName}{STATISTICS_TAG}{BOUND_MIN_TAG}{INDEX_ID}{BUCKET_TAG}{BOUND_MIN_TAG}{ORDINAL}`.
+    pub fn with_statistics_bucket_key<R>(
+        &self,
+        table_name: &str,
+        index_id: IndexId,
+        ordinal: u32,
+        f: impl FnOnce(&[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        self.with_table_hash(table_name, |key_buffer, table_hash| {
+            let lower = &mut key_buffer.lower;
+            Self::write_key_prefix(lower, CodecType::Statistics, table_hash);
+            lower.push(BOUND_MIN_TAG);
+            lower.extend_from_slice(&index_id.to_le_bytes());
+            lower.push(StatisticsCodecType::Bucket.tag());
+            lower.push(BOUND_MIN_TAG);
+            lower.extend_from_slice(&ordinal.to_be_bytes());
+
+            f(lower.as_slice())
+        })
+    }
+
+    /// Key: `View{BOUND_MIN_TAG}{ViewNameHash}`.
+    pub fn with_view_key<R>(
+        &self,
+        view_name: &str,
+        f: impl FnOnce(&[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        self.with_table_hash(view_name, |key_buffer, table_hash| {
+            let lower = &mut key_buffer.lower;
+            Self::write_key_prefix(lower, CodecType::View, table_hash);
+
+            f(lower.as_slice())
+        })
+    }
+
+    /// Range bounds covering all view definitions.
+    pub fn with_view_bound<R>(
+        &self,
+        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        let mut key_buffer = self.key_buffer.borrow_mut();
+        Self::write_global_bound_prefix(
+            &mut key_buffer.lower,
+            VIEW_BYTES.as_slice(),
+            BOUND_MIN_TAG,
+        );
+        Self::write_global_bound_prefix(
+            &mut key_buffer.upper,
+            VIEW_BYTES.as_slice(),
+            BOUND_MAX_TAG,
+        );
+
+        f(key_buffer.lower.as_slice(), key_buffer.upper.as_slice())
+    }
+
+    /// Key: `Root{BOUND_MIN_TAG}{TableNameHash}`.
+    pub fn with_root_table_key<R>(
+        &self,
+        table_name: &str,
+        f: impl FnOnce(&[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        self.with_table_hash(table_name, |key_buffer, table_hash| {
+            let lower = &mut key_buffer.lower;
+            Self::write_key_prefix(lower, CodecType::Root, table_hash);
+
+            f(lower.as_slice())
+        })
+    }
+
+    /// Range bounds covering all root table metadata.
+    pub fn with_root_table_bound<R>(
+        &self,
+        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        let mut key_buffer = self.key_buffer.borrow_mut();
+        Self::write_global_bound_prefix(
+            &mut key_buffer.lower,
+            ROOT_BYTES.as_slice(),
+            BOUND_MIN_TAG,
+        );
+        Self::write_global_bound_prefix(
+            &mut key_buffer.upper,
+            ROOT_BYTES.as_slice(),
+            BOUND_MAX_TAG,
+        );
+
+        f(key_buffer.lower.as_slice(), key_buffer.upper.as_slice())
+    }
+
+    /// Key: `Hash{BOUND_MIN_TAG}{TableNameHash}`.
+    pub fn with_table_hash_key<R>(
+        &self,
+        table_name: &str,
+        f: impl FnOnce(&[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        self.with_table_hash(table_name, |key_buffer, table_hash| {
+            let lower = &mut key_buffer.lower;
+            Self::write_key_prefix(lower, CodecType::Hash, table_hash);
+
+            f(lower.as_slice())
+        })
+    }
     pub fn decode_tuple_key(bytes: &[u8], pk_ty: &LogicalType) -> Result<TupleId, DatabaseError> {
         DataValue::memcomparable_decode(&mut Cursor::new(&bytes[TUPLE_KEY_PREFIX_LEN..]), pk_ty)
     }
 
     #[inline]
-    pub fn decode_tuple(
+    pub fn decode_tuple_into(
+        tuple: &mut Tuple,
         deserializers: &[TupleValueSerializableImpl],
         tuple_id: Option<TupleId>,
         bytes: &[u8],
-        values_len: usize,
         total_len: usize,
-    ) -> Result<Tuple, DatabaseError> {
-        Tuple::deserialize_from(deserializers, tuple_id, bytes, values_len, total_len)
+    ) -> Result<(), DatabaseError> {
+        tuple.pk = tuple_id;
+        tuple.deserialize_from_into(deserializers, bytes, total_len)
     }
 
-    pub fn encode_index_meta_key(
+    pub fn encode_index_meta_value(
         &self,
-        table_name: &str,
-        index_id: IndexId,
-    ) -> Result<BumpBytes<'_>, DatabaseError> {
-        let mut key_prefix = self.key_prefix(CodecType::IndexMeta, table_name);
-
-        key_prefix.write_all(&[BOUND_MIN_TAG])?;
-        key_prefix.write_all(&index_id.to_le_bytes()[..])?;
-        Ok(key_prefix)
-    }
-
-    /// Key: {TableName}{INDEX_META_TAG}{BOUND_MIN_TAG}{IndexID}
-    /// Value: IndexMeta
-    pub fn encode_index_meta(
-        &self,
-        table_name: &str,
         index_meta: &IndexMeta,
-    ) -> Result<(BumpBytes<'_>, BumpBytes<'_>), DatabaseError> {
-        let key_bytes = self.encode_index_meta_key(table_name, index_meta.id)?;
-
+    ) -> Result<BumpBytes<'_>, DatabaseError> {
         let mut value_bytes = BumpBytes::new_in(&self.arena);
         index_meta.encode(&mut value_bytes, true, &mut ReferenceTables::new())?;
-
-        Ok((key_bytes, value_bytes))
+        Ok(value_bytes)
     }
 
     pub fn decode_index_meta<T: Transaction>(bytes: &[u8]) -> Result<IndexMeta, DatabaseError> {
         IndexMeta::decode::<T, _>(&mut Cursor::new(bytes), None, &EMPTY_REFERENCE_TABLES)
-    }
-
-    /// NonUnique Index:
-    /// Key: {TableName}{INDEX_TAG}{BOUND_MIN_TAG}{IndexID}{BOUND_MIN_TAG}{DataValue1}{BOUND_MIN_TAG}{DataValue2} .. {TupleId}
-    /// Value: TupleID
-    ///
-    /// Unique Index:
-    /// Key: {TableName}{INDEX_TAG}{BOUND_MIN_TAG}{IndexID}{BOUND_MIN_TAG}{DataValue}
-    /// Value: TupleID
-    ///
-    /// Tips: The unique index has only one ColumnID and one corresponding DataValue,
-    /// so it can be positioned directly.
-    pub fn encode_index(
-        &self,
-        name: &str,
-        index: &Index,
-        tuple_id: &TupleId,
-    ) -> Result<(BumpBytes<'_>, BumpBytes<'_>), DatabaseError> {
-        let key = self.encode_index_key(name, index, Some(tuple_id))?;
-        let mut bytes = BumpBytes::new_in(&self.arena);
-
-        bincode::serialize_into(&mut bytes, tuple_id)?;
-
-        Ok((key, bytes))
-    }
-
-    pub fn encode_index_bound_key(
-        &self,
-        name: &str,
-        index: &Index,
-        is_upper: bool,
-    ) -> Result<BumpBytes<'_>, DatabaseError> {
-        let mut key_prefix = self.key_prefix(CodecType::Index, name);
-        key_prefix.push(BOUND_MIN_TAG);
-        key_prefix.extend_from_slice(&index.id.to_le_bytes());
-        key_prefix.push(BOUND_MIN_TAG);
-
-        index.value.memcomparable_encode(&mut key_prefix)?;
-        if is_upper {
-            key_prefix.push(BOUND_MAX_TAG)
-        }
-
-        Ok(key_prefix)
-    }
-
-    pub fn encode_index_key(
-        &self,
-        name: &str,
-        index: &Index,
-        tuple_id: Option<&TupleId>,
-    ) -> Result<BumpBytes<'_>, DatabaseError> {
-        let mut key_prefix = self.encode_index_bound_key(name, index, false)?;
-
-        if let Some(tuple_id) = tuple_id {
-            if matches!(index.ty, IndexType::Normal | IndexType::Composite) {
-                tuple_id.memcomparable_encode(&mut key_prefix)?;
-            }
-        }
-        Ok(key_prefix)
     }
 
     pub fn decode_index_key(
@@ -461,35 +697,14 @@ impl TableCodec {
         Ok(bincode::deserialize_from(&mut Cursor::new(bytes))?)
     }
 
-    /// Key: {TableName}{COLUMN_TAG}{BOUND_MIN_TAG}{ColumnId}
-    /// Value: ColumnCatalog
-    ///
-    /// Tips: the `0` for bound range
-    pub fn encode_column(
+    pub fn encode_column_value(
         &self,
         col: &ColumnRef,
         reference_tables: &mut ReferenceTables,
-    ) -> Result<(BumpBytes<'_>, BumpBytes<'_>), DatabaseError> {
-        if let ColumnRelation::Table {
-            column_id,
-            table_name,
-            is_temp: false,
-        } = &col.summary().relation
-        {
-            let mut key_prefix = self.key_prefix(CodecType::Column, table_name);
-
-            key_prefix.write_all(&[BOUND_MIN_TAG])?;
-            key_prefix.write_all(&column_id.to_bytes()[..])?;
-
-            let mut column_bytes = BumpBytes::new_in(&self.arena);
-            col.encode(&mut column_bytes, true, reference_tables)?;
-
-            Ok((key_prefix, column_bytes))
-        } else {
-            Err(DatabaseError::invalid_column(
-                "column does not belong to table".to_string(),
-            ))
-        }
+    ) -> Result<BumpBytes<'_>, DatabaseError> {
+        let mut column_bytes = BumpBytes::new_in(&self.arena);
+        col.encode(&mut column_bytes, true, reference_tables)?;
+        Ok(column_bytes)
     }
 
     pub fn decode_column<T: Transaction, R: Read>(
@@ -500,42 +715,13 @@ impl TableCodec {
         ColumnRef::decode::<T, R>(reader, None, reference_tables)
     }
 
-    /// Key: {TableName}{STATISTICS_TAG}{BOUND_MIN_TAG}{INDEX_ID}
-    /// Value: StatisticsMetaRoot
-    pub fn encode_statistics_meta(
+    pub fn encode_statistics_meta_value(
         &self,
-        table_name: &str,
         statistics_meta: &StatisticsMetaRoot,
-    ) -> Result<(BumpBytes<'_>, BumpBytes<'_>), DatabaseError> {
-        let key = self.encode_statistics_meta_key(table_name, statistics_meta.index_id());
+    ) -> Result<BumpBytes<'_>, DatabaseError> {
         let mut value = BumpBytes::new_in(&self.arena);
-
         statistics_meta.encode(&mut value, true, &mut ReferenceTables::new())?;
-
-        Ok((key, value))
-    }
-
-    fn encode_statistics_index_prefix(&self, table_name: &str, index_id: IndexId) -> BumpBytes<'_> {
-        let mut key = self.key_prefix(CodecType::Statistics, table_name);
-
-        key.push(BOUND_MIN_TAG);
-        key.extend(index_id.to_le_bytes());
-        key
-    }
-
-    fn encode_statistics_key_prefix(
-        &self,
-        table_name: &str,
-        index_id: IndexId,
-        ty: StatisticsCodecType,
-    ) -> BumpBytes<'_> {
-        let mut key = self.encode_statistics_index_prefix(table_name, index_id);
-        key.push(ty.tag());
-        key
-    }
-
-    pub fn encode_statistics_meta_key(&self, table_name: &str, index_id: IndexId) -> BumpBytes<'_> {
-        self.encode_statistics_key_prefix(table_name, index_id, StatisticsCodecType::Root)
+        Ok(value)
     }
 
     pub fn decode_statistics_meta<T: Transaction>(
@@ -544,28 +730,13 @@ impl TableCodec {
         StatisticsMetaRoot::decode::<T, _>(&mut Cursor::new(bytes), None, &ReferenceTables::new())
     }
 
-    /// Key: {TableName}{STATISTICS_TAG}{BOUND_MIN_TAG}{INDEX_ID}{SKETCH_META_TAG}
-    /// Value: CountMinSketchMeta
-    pub fn encode_statistics_sketch_meta(
+    pub fn encode_statistics_sketch_meta_value(
         &self,
-        table_name: &str,
-        index_id: IndexId,
         sketch_meta: &CountMinSketchMeta,
-    ) -> Result<(BumpBytes<'_>, BumpBytes<'_>), DatabaseError> {
-        let key = self.encode_statistics_sketch_meta_key(table_name, index_id);
+    ) -> Result<BumpBytes<'_>, DatabaseError> {
         let mut value = BumpBytes::new_in(&self.arena);
-
         sketch_meta.encode(&mut value, true, &mut ReferenceTables::new())?;
-
-        Ok((key, value))
-    }
-
-    pub fn encode_statistics_sketch_meta_key(
-        &self,
-        table_name: &str,
-        index_id: IndexId,
-    ) -> BumpBytes<'_> {
-        self.encode_statistics_key_prefix(table_name, index_id, StatisticsCodecType::SketchMeta)
+        Ok(value)
     }
 
     pub fn decode_statistics_sketch_meta<T: Transaction>(
@@ -574,40 +745,13 @@ impl TableCodec {
         CountMinSketchMeta::decode::<T, _>(&mut Cursor::new(bytes), None, &ReferenceTables::new())
     }
 
-    /// Key: {TableName}{STATISTICS_TAG}{BOUND_MIN_TAG}{INDEX_ID}{SKETCH_PAGE_TAG}{BOUND_MIN_TAG}{ROW_ID}{BOUND_MIN_TAG}{PAGE_ID}
-    /// Value: CountMinSketchPage
-    pub fn encode_statistics_sketch_page(
+    pub fn encode_statistics_sketch_page_value(
         &self,
-        table_name: &str,
-        index_id: IndexId,
-        sketch_page: &CountMinSketchPage,
-    ) -> Result<(BumpBytes<'_>, BumpBytes<'_>), DatabaseError> {
-        let key = self.encode_statistics_sketch_page_key(table_name, index_id, sketch_page)?;
-        let mut value = BumpBytes::new_in(&self.arena);
-
-        sketch_page.encode(&mut value, true, &mut ReferenceTables::new())?;
-
-        Ok((key, value))
-    }
-
-    pub fn encode_statistics_sketch_page_key(
-        &self,
-        table_name: &str,
-        index_id: IndexId,
         sketch_page: &CountMinSketchPage,
     ) -> Result<BumpBytes<'_>, DatabaseError> {
-        let mut key = self.encode_statistics_key_prefix(
-            table_name,
-            index_id,
-            StatisticsCodecType::SketchPage,
-        );
-
-        key.write_all(&[BOUND_MIN_TAG])?;
-        key.write_all(&(sketch_page.row_idx() as u32).to_be_bytes())?;
-        key.write_all(&[BOUND_MIN_TAG])?;
-        key.write_all(&(sketch_page.page_idx() as u32).to_be_bytes())?;
-
-        Ok(key)
+        let mut value = BumpBytes::new_in(&self.arena);
+        sketch_page.encode(&mut value, true, &mut ReferenceTables::new())?;
+        Ok(value)
     }
 
     pub fn decode_statistics_sketch_page<T: Transaction>(
@@ -616,44 +760,20 @@ impl TableCodec {
         CountMinSketchPage::decode::<T, _>(&mut Cursor::new(bytes), None, &ReferenceTables::new())
     }
 
-    pub fn encode_statistics_bucket(
+    pub fn encode_statistics_bucket_value(
         &self,
-        table_name: &str,
-        index_id: IndexId,
-        ordinal: u32,
         bucket: &Bucket,
-    ) -> Result<(BumpBytes<'_>, BumpBytes<'_>), DatabaseError> {
-        let key = self.encode_statistics_bucket_key(table_name, index_id, ordinal);
+    ) -> Result<BumpBytes<'_>, DatabaseError> {
         let mut value = BumpBytes::new_in(&self.arena);
-
         bucket.encode(&mut value, true, &mut ReferenceTables::new())?;
-
-        Ok((key, value))
-    }
-
-    pub fn encode_statistics_bucket_key(
-        &self,
-        table_name: &str,
-        index_id: IndexId,
-        ordinal: u32,
-    ) -> BumpBytes<'_> {
-        let mut key =
-            self.encode_statistics_key_prefix(table_name, index_id, StatisticsCodecType::Bucket);
-
-        key.push(BOUND_MIN_TAG);
-        key.extend_from_slice(&ordinal.to_be_bytes());
-        key
+        Ok(value)
     }
 
     pub(crate) fn decode_statistics_codec_type(
         &self,
-        table_name: &str,
-        index_id: IndexId,
         key: &[u8],
     ) -> Result<StatisticsCodecType, DatabaseError> {
-        let prefix_len = self
-            .encode_statistics_index_prefix(table_name, index_id)
-            .len();
+        let prefix_len = TUPLE_KEY_PREFIX_LEN + INDEX_ID_LEN;
         let Some(tag) = key.get(prefix_len).copied() else {
             return Err(DatabaseError::InvalidValue(
                 "statistics key is too short".to_string(),
@@ -678,26 +798,7 @@ impl TableCodec {
         Ok(u32::from_be_bytes(ordinal_bytes.try_into().unwrap()))
     }
 
-    pub fn statistics_index_bound(
-        &self,
-        table_name: &str,
-        index_id: IndexId,
-    ) -> (BumpBytes<'_>, BumpBytes<'_>) {
-        let min = self.encode_statistics_index_prefix(table_name, index_id);
-        let mut max = min.clone();
-        max.push(BOUND_MAX_TAG);
-
-        (min, max)
-    }
-
-    /// Key: View{BOUND_MIN_TAG}{ViewName}
-    /// Value: View
-    pub fn encode_view(
-        &self,
-        view: &View,
-    ) -> Result<(BumpBytes<'_>, BumpBytes<'_>), DatabaseError> {
-        let key = self.encode_view_key(&view.name);
-
+    pub fn encode_view_value(&self, view: &View) -> Result<BumpBytes<'_>, DatabaseError> {
         let mut reference_tables = ReferenceTables::new();
         let mut bytes = BumpBytes::new_in(&self.arena);
         bytes.resize(4, 0u8);
@@ -710,11 +811,7 @@ impl TableCodec {
         };
         bytes[..4].copy_from_slice(&(reference_tables_pos as u32).to_le_bytes());
 
-        Ok((key, bytes))
-    }
-
-    pub fn encode_view_key(&self, view_name: &str) -> BumpBytes<'_> {
-        self.key_prefix(CodecType::View, view_name)
+        Ok(bytes)
     }
 
     pub fn decode_view<T: Transaction>(
@@ -734,38 +831,19 @@ impl TableCodec {
         View::decode(&mut cursor, Some(drive), &reference_tables)
     }
 
-    /// Key: Root{BOUND_MIN_TAG}{TableName}
-    /// Value: TableMeta
-    pub fn encode_root_table(
+    pub fn encode_root_table_value(
         &self,
         meta: &TableMeta,
-    ) -> Result<(BumpBytes<'_>, BumpBytes<'_>), DatabaseError> {
-        let key = self.encode_root_table_key(&meta.table_name);
-
+    ) -> Result<BumpBytes<'_>, DatabaseError> {
         let mut meta_bytes = BumpBytes::new_in(&self.arena);
         meta.encode(&mut meta_bytes, true, &mut ReferenceTables::new())?;
-        Ok((key, meta_bytes))
-    }
-
-    pub fn encode_root_table_key(&self, table_name: &str) -> BumpBytes<'_> {
-        self.key_prefix(CodecType::Root, table_name)
+        Ok(meta_bytes)
     }
 
     pub fn decode_root_table<T: Transaction>(bytes: &[u8]) -> Result<TableMeta, DatabaseError> {
         let mut bytes = Cursor::new(bytes);
 
         TableMeta::decode::<T, _>(&mut bytes, None, &EMPTY_REFERENCE_TABLES)
-    }
-
-    pub fn encode_table_hash_key(&self, table_name: &str) -> BumpBytes<'_> {
-        self.key_prefix(CodecType::Hash, table_name)
-    }
-
-    pub fn encode_table_hash(&self, table_name: &str) -> (BumpBytes<'_>, BumpBytes<'_>) {
-        (
-            self.key_prefix(CodecType::Hash, table_name),
-            BumpBytes::new_in(&self.arena),
-        )
     }
 }
 
@@ -781,7 +859,7 @@ mod tests {
     use crate::optimizer::core::statistics_meta::StatisticsMeta;
     use crate::serdes::ReferenceTables;
     use crate::storage::rocksdb::RocksTransaction;
-    use crate::storage::table_codec::{BumpBytes, TableCodec};
+    use crate::storage::table_codec::{Bytes, TableCodec};
     use crate::storage::Storage;
     use crate::types::index::{Index, IndexMeta, IndexType};
     use crate::types::tuple::Tuple;
@@ -813,32 +891,33 @@ mod tests {
 
     #[test]
     fn test_table_codec_tuple() -> Result<(), DatabaseError> {
-        let table_codec = TableCodec {
-            arena: Default::default(),
-        };
+        let table_codec = TableCodec::default();
         let table_catalog = build_table_codec();
 
-        let mut tuple = Tuple::new(
+        let expected = Tuple::new(
             Some(DataValue::Int32(0)),
             vec![DataValue::Int32(0), DataValue::Decimal(Decimal::new(1, 0))],
         );
-        let (_, bytes) = table_codec.encode_tuple(
-            &table_catalog.name,
-            &mut tuple,
+        let bytes = expected.serialize_to(
             &[
                 LogicalType::Integer.serializable(),
                 LogicalType::Decimal(None, None).serializable(),
             ],
+            table_codec.arena(),
         )?;
         let deserializers = table_catalog
             .columns()
             .map(|column| column.datatype().serializable())
             .collect_vec();
 
-        tuple.pk = None;
+        let mut tuple = Tuple::default();
+        TableCodec::decode_tuple_into(&mut tuple, &deserializers, None, &bytes, 2)?;
         assert_eq!(
-            TableCodec::decode_tuple(&deserializers, None, &bytes, deserializers.len(), 2,)?,
-            tuple
+            tuple,
+            Tuple::new(
+                None,
+                vec![DataValue::Int32(0), DataValue::Decimal(Decimal::new(1, 0))]
+            )
         );
 
         Ok(())
@@ -846,12 +925,10 @@ mod tests {
 
     #[test]
     fn test_root_catalog() {
-        let table_codec = TableCodec {
-            arena: Default::default(),
-        };
+        let table_codec = TableCodec::default();
         let table_catalog = build_table_codec();
-        let (_, bytes) = table_codec
-            .encode_root_table(&TableMeta {
+        let bytes = table_codec
+            .encode_root_table_value(&TableMeta {
                 table_name: table_catalog.name.clone(),
             })
             .unwrap();
@@ -863,9 +940,7 @@ mod tests {
 
     #[test]
     fn test_table_codec_statistics_meta() -> Result<(), DatabaseError> {
-        let table_codec = TableCodec {
-            arena: Default::default(),
-        };
+        let table_codec = TableCodec::default();
         let index_meta = IndexMeta {
             id: 0,
             column_ids: vec![Ulid::new()],
@@ -881,9 +956,9 @@ mod tests {
             builder.append(&DataValue::Int32(value))?;
         }
         let (histogram, sketch) = builder.build(2)?;
-        let (root, buckets) = StatisticsMeta::new(histogram).into_parts();
+        let (root, buckets, _) = StatisticsMeta::new(histogram, sketch.clone()).into_parts();
 
-        let (_, root_bytes) = table_codec.encode_statistics_meta("t1", &root)?;
+        let root_bytes = table_codec.encode_statistics_meta_value(&root)?;
         let decoded_root = TableCodec::decode_statistics_meta::<RocksTransaction>(&root_bytes)?;
         assert_eq!(decoded_root.index_id(), root.index_id());
         assert_eq!(
@@ -896,29 +971,33 @@ mod tests {
         );
 
         let (sketch_meta, mut sketch_pages) = sketch.clone().into_storage_parts(1);
-        let (_, sketch_meta_bytes) =
-            table_codec.encode_statistics_sketch_meta("t1", 0, &sketch_meta)?;
+        let sketch_meta_bytes = table_codec.encode_statistics_sketch_meta_value(&sketch_meta)?;
         let decoded_sketch_meta =
             TableCodec::decode_statistics_sketch_meta::<RocksTransaction>(&sketch_meta_bytes)?;
         assert_eq!(decoded_sketch_meta.width(), sketch_meta.width());
         assert_eq!(decoded_sketch_meta.k_num(), sketch_meta.k_num());
 
         let first_sketch_page = sketch_pages.next().unwrap();
-        let (_, sketch_page_bytes) =
-            table_codec.encode_statistics_sketch_page("t1", 0, &first_sketch_page)?;
+        let sketch_page_bytes =
+            table_codec.encode_statistics_sketch_page_value(&first_sketch_page)?;
         let decoded_sketch_page =
             TableCodec::decode_statistics_sketch_page::<RocksTransaction>(&sketch_page_bytes)?;
         assert_eq!(decoded_sketch_page.counters(), first_sketch_page.counters());
 
-        let bucket0_key = table_codec.encode_statistics_bucket_key("t1", 0, 0);
-        let bucket1_key = table_codec.encode_statistics_bucket_key("t1", 0, 1);
+        let bucket0_key = table_codec
+            .with_statistics_bucket_key("t1", 0, 0, |key| Ok::<_, DatabaseError>(key.to_vec()))?;
+        let bucket1_key = table_codec
+            .with_statistics_bucket_key("t1", 0, 1, |key| Ok::<_, DatabaseError>(key.to_vec()))?;
         assert!(bucket0_key < bucket1_key);
 
-        let (bucket0_min, bucket0_max) = table_codec.statistics_index_bound("t1", 0);
-        assert!(bucket0_key >= bucket0_min);
-        assert!(bucket1_key <= bucket0_max);
+        let (bucket0_min, bucket0_max) =
+            table_codec.with_statistics_index_bound("t1", 0, |min, max| {
+                Ok::<_, DatabaseError>((min.to_vec(), max.to_vec()))
+            })?;
+        assert!(bucket0_key.as_slice() >= bucket0_min.as_slice());
+        assert!(bucket1_key.as_slice() <= bucket0_max.as_slice());
 
-        let (_, bucket_bytes) = table_codec.encode_statistics_bucket("t1", 0, 0, &buckets[0])?;
+        let bucket_bytes = table_codec.encode_statistics_bucket_value(&buckets[0])?;
         let decoded_bucket =
             TableCodec::decode_statistics_bucket::<RocksTransaction>(&bucket_bytes)?;
         assert_eq!(decoded_bucket, buckets[0]);
@@ -936,9 +1015,7 @@ mod tests {
 
     #[test]
     fn test_table_codec_index_meta() -> Result<(), DatabaseError> {
-        let table_codec = TableCodec {
-            arena: Default::default(),
-        };
+        let table_codec = TableCodec::default();
         let index_meta = IndexMeta {
             id: 0,
             column_ids: vec![Ulid::new()],
@@ -948,7 +1025,7 @@ mod tests {
             name: "index_1".to_string(),
             ty: IndexType::PrimaryKey { is_multiple: false },
         };
-        let (_, bytes) = table_codec.encode_index_meta("T1", &index_meta)?;
+        let bytes = table_codec.encode_index_meta_value(&index_meta)?;
 
         assert_eq!(
             TableCodec::decode_index_meta::<RocksTransaction>(&bytes)?,
@@ -960,14 +1037,8 @@ mod tests {
 
     #[test]
     fn test_table_codec_index() -> Result<(), DatabaseError> {
-        let table_codec = TableCodec {
-            arena: Default::default(),
-        };
-        let table_catalog = build_table_codec();
-        let value = Arc::new(DataValue::Int32(0));
-        let index = Index::new(0, &value, IndexType::PrimaryKey { is_multiple: false });
         let tuple_id = DataValue::Int32(0);
-        let (_, bytes) = table_codec.encode_index(&table_catalog.name, &index, &tuple_id)?;
+        let bytes = bincode::serialize(&tuple_id)?;
 
         assert_eq!(TableCodec::decode_index(&bytes)?, tuple_id);
 
@@ -990,11 +1061,9 @@ mod tests {
 
         let mut reference_tables = ReferenceTables::new();
 
-        let table_codec = TableCodec {
-            arena: Default::default(),
-        };
-        let (_, bytes) = table_codec
-            .encode_column(&col, &mut reference_tables)
+        let table_codec = TableCodec::default();
+        let bytes = table_codec
+            .encode_column_value(&col, &mut reference_tables)
             .unwrap();
         let mut cursor = Cursor::new(bytes);
         let decode_col =
@@ -1007,9 +1076,7 @@ mod tests {
 
     #[test]
     fn test_table_codec_view() -> Result<(), DatabaseError> {
-        let table_codec = TableCodec {
-            arena: Default::default(),
-        };
+        let table_codec = TableCodec::default();
         let table_state = build_t1_table()?;
         // Subquery
         {
@@ -1021,7 +1088,7 @@ mod tests {
                 name: "view_subquery".to_string().into(),
                 plan: Box::new(plan),
             };
-            let (_, bytes) = table_codec.encode_view(&view)?;
+            let bytes = table_codec.encode_view_value(&view)?;
             let transaction = table_state.storage.transaction()?;
 
             assert_eq!(
@@ -1037,7 +1104,7 @@ mod tests {
                 name: "view_filter".to_string().into(),
                 plan: Box::new(plan),
             };
-            let (_, bytes) = table_codec.encode_view(&view)?;
+            let bytes = table_codec.encode_view_value(&view)?;
             let transaction = table_state.storage.transaction()?;
 
             assert_eq!(
@@ -1053,7 +1120,7 @@ mod tests {
                 name: "view_join".to_string().into(),
                 plan: Box::new(plan),
             };
-            let (_, bytes) = table_codec.encode_view(&view)?;
+            let bytes = table_codec.encode_view_value(&view)?;
             let transaction = table_state.storage.transaction()?;
 
             assert_eq!(
@@ -1068,9 +1135,7 @@ mod tests {
     #[test]
     #[allow(clippy::mutable_key_type)]
     fn test_table_codec_column_bound() {
-        let table_codec = TableCodec {
-            arena: Default::default(),
-        };
+        let table_codec = TableCodec::default();
         let mut set = BTreeSet::new();
         let op = |col_id: usize, table_name: &str| {
             let mut col = ColumnCatalog::new(
@@ -1085,10 +1150,11 @@ mod tests {
                 is_temp: false,
             };
 
-            let (key, _) = table_codec
-                .encode_column(&ColumnRef::from(col), &mut ReferenceTables::new())
-                .unwrap();
-            key
+            table_codec
+                .with_column_key(&ColumnRef::from(col), |key| {
+                    Ok::<_, DatabaseError>(key.to_vec())
+                })
+                .unwrap()
         };
 
         set.insert(op(0, "T0"));
@@ -1103,12 +1169,16 @@ mod tests {
         set.insert(op(0, "T2"));
         set.insert(op(0, "T2"));
 
-        let (min, max) = table_codec.columns_bound("T1");
+        let (min, max) = table_codec
+            .with_columns_bound("T1", |min, max| {
+                Ok::<_, DatabaseError>((min.to_vec(), max.to_vec()))
+            })
+            .unwrap();
 
         let vec = set
-            .range::<BumpBytes, (Bound<&BumpBytes>, Bound<&BumpBytes>)>((
-                Bound::Included(&min),
-                Bound::Included(&max),
+            .range::<[u8], _>((
+                Bound::Included(min.as_slice()),
+                Bound::Included(max.as_slice()),
             ))
             .collect_vec();
 
@@ -1122,9 +1192,7 @@ mod tests {
     #[test]
     #[allow(clippy::mutable_key_type)]
     fn test_table_codec_index_meta_bound() {
-        let table_codec = TableCodec {
-            arena: Default::default(),
-        };
+        let table_codec = TableCodec::default();
         let mut set = BTreeSet::new();
         let op = |index_id: usize, table_name: &str| {
             let index_meta = IndexMeta {
@@ -1137,10 +1205,11 @@ mod tests {
                 ty: IndexType::PrimaryKey { is_multiple: false },
             };
 
-            let (key, _) = table_codec
-                .encode_index_meta(table_name, &index_meta)
-                .unwrap();
-            key
+            table_codec
+                .with_index_meta_key(table_name, index_meta.id, |key| {
+                    Ok::<_, DatabaseError>(key.to_vec())
+                })
+                .unwrap()
         };
 
         set.insert(op(0, "T0"));
@@ -1155,12 +1224,16 @@ mod tests {
         set.insert(op(1, "T2"));
         set.insert(op(2, "T2"));
 
-        let (min, max) = table_codec.index_meta_bound("T1");
+        let (min, max) = table_codec
+            .with_index_meta_bound("T1", |min, max| {
+                Ok::<_, DatabaseError>((min.to_vec(), max.to_vec()))
+            })
+            .unwrap();
 
         let vec = set
-            .range::<BumpBytes, (Bound<&BumpBytes>, Bound<&BumpBytes>)>((
-                Bound::Included(&min),
-                Bound::Included(&max),
+            .range::<[u8], _>((
+                Bound::Included(min.as_slice()),
+                Bound::Included(max.as_slice()),
             ))
             .collect_vec();
 
@@ -1174,9 +1247,7 @@ mod tests {
     #[test]
     #[allow(clippy::mutable_key_type)]
     fn test_table_codec_index_bound() {
-        let table_codec = TableCodec {
-            arena: Default::default(),
-        };
+        let table_codec = TableCodec::default();
         let mut set = BTreeSet::new();
         let column = ColumnCatalog::new(
             "".to_string(),
@@ -1194,7 +1265,9 @@ mod tests {
             );
 
             table_codec
-                .encode_index_key(table_name, &index, None)
+                .with_index_key(table_name, &index, None, |key| {
+                    Ok::<_, DatabaseError>(key.to_vec())
+                })
                 .unwrap()
         };
 
@@ -1210,10 +1283,14 @@ mod tests {
         set.insert(op(DataValue::Int32(1), 2, &table_catalog.name));
         set.insert(op(DataValue::Int32(2), 2, &table_catalog.name));
 
-        let (min, max) = table_codec.index_bound(&table_catalog.name, 1).unwrap();
+        let (min, max) = table_codec
+            .with_index_bound(&table_catalog.name, 1, |min, max| {
+                Ok::<_, DatabaseError>((min.to_vec(), max.to_vec()))
+            })
+            .unwrap();
 
         let vec = set
-            .range::<BumpBytes, (Bound<&BumpBytes>, Bound<&BumpBytes>)>((
+            .range::<Bytes, (Bound<&Bytes>, Bound<&Bytes>)>((
                 Bound::Included(&min),
                 Bound::Included(&max),
             ))
@@ -1229,9 +1306,7 @@ mod tests {
     #[test]
     #[allow(clippy::mutable_key_type)]
     fn test_table_codec_index_all_bound() {
-        let table_codec = TableCodec {
-            arena: Default::default(),
-        };
+        let table_codec = TableCodec::default();
         let mut set = BTreeSet::new();
         let op = |value: DataValue, index_id: usize, table_name: &str| {
             let value = Arc::new(value);
@@ -1242,7 +1317,9 @@ mod tests {
             );
 
             table_codec
-                .encode_index_key(table_name, &index, None)
+                .with_index_key(table_name, &index, None, |key| {
+                    Ok::<_, DatabaseError>(key.to_vec())
+                })
                 .unwrap()
         };
 
@@ -1258,10 +1335,14 @@ mod tests {
         set.insert(op(DataValue::Int32(1), 0, "T2"));
         set.insert(op(DataValue::Int32(2), 0, "T2"));
 
-        let (min, max) = table_codec.all_index_bound("T1");
+        let (min, max) = table_codec
+            .with_all_index_bound("T1", |min, max| {
+                Ok::<_, DatabaseError>((min.to_vec(), max.to_vec()))
+            })
+            .unwrap();
 
         let vec = set
-            .range::<BumpBytes, (Bound<&BumpBytes>, Bound<&BumpBytes>)>((
+            .range::<Bytes, (Bound<&Bytes>, Bound<&Bytes>)>((
                 Bound::Included(&min),
                 Bound::Included(&max),
             ))
@@ -1277,13 +1358,13 @@ mod tests {
     #[test]
     #[allow(clippy::mutable_key_type)]
     fn test_table_codec_tuple_bound() {
-        let table_codec = TableCodec {
-            arena: Default::default(),
-        };
+        let table_codec = TableCodec::default();
         let mut set = BTreeSet::new();
         let op = |tuple_id: DataValue, table_name: &str| {
             table_codec
-                .encode_tuple_key(table_name, &Arc::new(tuple_id))
+                .with_tuple_key(table_name, &Arc::new(tuple_id), |key| {
+                    Ok::<_, DatabaseError>(key.to_vec())
+                })
                 .unwrap()
         };
 
@@ -1299,10 +1380,14 @@ mod tests {
         set.insert(op(DataValue::Int32(1), "T2"));
         set.insert(op(DataValue::Int32(2), "T2"));
 
-        let (min, max) = table_codec.tuple_bound("T1");
+        let (min, max) = table_codec
+            .with_tuple_bound("T1", |min, max| {
+                Ok::<_, DatabaseError>((min.to_vec(), max.to_vec()))
+            })
+            .unwrap();
 
         let vec = set
-            .range::<BumpBytes, (Bound<&BumpBytes>, Bound<&BumpBytes>)>((
+            .range::<Bytes, (Bound<&Bytes>, Bound<&Bytes>)>((
                 Bound::Included(&min),
                 Bound::Included(&max),
             ))
@@ -1318,16 +1403,16 @@ mod tests {
     #[test]
     #[allow(clippy::mutable_key_type)]
     fn test_root_codec_name_bound() {
-        let table_codec = TableCodec {
-            arena: Default::default(),
+        let table_codec = TableCodec::default();
+        let mut set: BTreeSet<Bytes> = BTreeSet::new();
+        let op = |table_name: &str| {
+            table_codec
+                .with_root_table_key(table_name, |key| Ok::<_, DatabaseError>(key.to_vec()))
+                .unwrap()
         };
-        let mut set: BTreeSet<BumpBytes> = BTreeSet::new();
-        let op = |table_name: &str| table_codec.encode_root_table_key(table_name);
 
-        let mut value_0 = BumpBytes::new_in(&table_codec.arena);
-        value_0.push(b'A');
-        let mut value_1 = BumpBytes::new_in(&table_codec.arena);
-        value_1.push(b'Z');
+        let value_0 = Bytes::from([b'A'].as_slice());
+        let value_1 = Bytes::from([b'Z'].as_slice());
 
         set.insert(value_0);
         set.insert(value_1);
@@ -1335,10 +1420,12 @@ mod tests {
         set.insert(op("T1"));
         set.insert(op("T2"));
 
-        let (min, max) = table_codec.root_table_bound();
+        let (min, max) = table_codec
+            .with_root_table_bound(|min, max| Ok::<_, DatabaseError>((min.to_vec(), max.to_vec())))
+            .unwrap();
 
         let vec = set
-            .range::<BumpBytes, (Bound<&BumpBytes>, Bound<&BumpBytes>)>((
+            .range::<Bytes, (Bound<&Bytes>, Bound<&Bytes>)>((
                 Bound::Included(&min),
                 Bound::Included(&max),
             ))
@@ -1352,16 +1439,16 @@ mod tests {
     #[test]
     #[allow(clippy::mutable_key_type)]
     fn test_view_codec_name_bound() {
-        let table_codec = TableCodec {
-            arena: Default::default(),
-        };
+        let table_codec = TableCodec::default();
         let mut set = BTreeSet::new();
-        let op = |view_name: &str| table_codec.encode_view_key(view_name);
+        let op = |view_name: &str| {
+            table_codec
+                .with_view_key(view_name, |key| Ok::<_, DatabaseError>(key.to_vec()))
+                .unwrap()
+        };
 
-        let mut value_0 = BumpBytes::new_in(&table_codec.arena);
-        value_0.push(b'A');
-        let mut value_1 = BumpBytes::new_in(&table_codec.arena);
-        value_1.push(b'Z');
+        let value_0 = Bytes::from([b'A'].as_slice());
+        let value_1 = Bytes::from([b'Z'].as_slice());
 
         set.insert(value_0);
         set.insert(value_1);
@@ -1370,10 +1457,12 @@ mod tests {
         set.insert(op("V1"));
         set.insert(op("V2"));
 
-        let (min, max) = table_codec.view_bound();
+        let (min, max) = table_codec
+            .with_view_bound(|min, max| Ok::<_, DatabaseError>((min.to_vec(), max.to_vec())))
+            .unwrap();
 
         let vec = set
-            .range::<BumpBytes, (Bound<&BumpBytes>, Bound<&BumpBytes>)>((
+            .range::<Bytes, (Bound<&Bytes>, Bound<&Bytes>)>((
                 Bound::Included(&min),
                 Bound::Included(&max),
             ))

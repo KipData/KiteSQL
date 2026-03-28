@@ -32,6 +32,7 @@ pub mod insert;
 pub mod join;
 pub mod limit;
 pub mod project;
+pub mod scalar_subquery;
 pub mod sort;
 pub mod table_scan;
 pub mod top_k;
@@ -43,8 +44,8 @@ pub mod values;
 use self::{
     aggregate::AggregateOperator, alter_table::add_column::AddColumnOperator,
     alter_table::change_column::ChangeColumnOperator, filter::FilterOperator, join::JoinOperator,
-    limit::LimitOperator, project::ProjectOperator, sort::SortOperator,
-    table_scan::TableScanOperator,
+    limit::LimitOperator, project::ProjectOperator, scalar_subquery::ScalarSubqueryOperator,
+    sort::SortOperator, table_scan::TableScanOperator,
 };
 use crate::catalog::ColumnRef;
 use crate::expression::ScalarExpression;
@@ -71,7 +72,6 @@ use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::update::UpdateOperator;
 use crate::planner::operator::values::ValuesOperator;
 use crate::types::index::IndexInfo;
-use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::fmt::Formatter;
@@ -84,6 +84,7 @@ pub enum Operator {
     Filter(FilterOperator),
     Join(JoinOperator),
     Project(ProjectOperator),
+    ScalarSubquery(ScalarSubqueryOperator),
     TableScan(TableScanOperator),
     FunctionScan(FunctionScanOperator),
     Sort(SortOperator),
@@ -156,6 +157,7 @@ pub enum PlanImpl {
     HashJoin,
     NestLoopJoin,
     Project,
+    ScalarSubquery,
     SeqScan,
     FunctionScan,
     IndexScan(Box<IndexInfo>),
@@ -179,25 +181,28 @@ pub enum PlanImpl {
 }
 
 impl Operator {
-    pub fn output_exprs(&self) -> Option<Vec<ScalarExpression>> {
+    pub fn output_exprs(&self, output_exprs: &mut Vec<ScalarExpression>) -> bool {
         match self {
-            Operator::Dummy => None,
-            Operator::Aggregate(op) => Some(
-                op.agg_calls
-                    .iter()
-                    .chain(op.groupby_exprs.iter())
-                    .cloned()
-                    .collect_vec(),
-            ),
-            Operator::Filter(_) | Operator::Join(_) => None,
-            Operator::Project(op) => Some(op.exprs.clone()),
-            Operator::TableScan(op) => Some(
-                op.columns
-                    .values()
-                    .map(|column| ScalarExpression::column_expr(column.clone()))
-                    .collect_vec(),
-            ),
-            Operator::Sort(_) | Operator::Limit(_) | Operator::TopK(_) => None,
+            Operator::Dummy => false,
+            Operator::Aggregate(op) => {
+                output_exprs.clear();
+                output_exprs.extend(op.agg_calls.iter().chain(op.groupby_exprs.iter()).cloned());
+                true
+            }
+            Operator::Filter(_) | Operator::Join(_) | Operator::ScalarSubquery(_) => false,
+            Operator::Project(op) => {
+                output_exprs.clear();
+                output_exprs.extend(op.exprs.iter().cloned());
+                true
+            }
+            Operator::TableScan(op) => {
+                output_exprs.clear();
+                output_exprs.extend(op.columns.values().enumerate().map(|(position, column)| {
+                    ScalarExpression::column_expr(column.clone(), position)
+                }));
+                true
+            }
+            Operator::Sort(_) | Operator::Limit(_) | Operator::TopK(_) => false,
             Operator::Values(ValuesOperator { schema_ref, .. })
             | Operator::Union(UnionOperator {
                 left_schema_ref: schema_ref,
@@ -206,21 +211,31 @@ impl Operator {
             | Operator::Except(ExceptOperator {
                 left_schema_ref: schema_ref,
                 ..
-            }) => Some(
-                schema_ref
-                    .iter()
-                    .cloned()
-                    .map(ScalarExpression::column_expr)
-                    .collect_vec(),
-            ),
-            Operator::FunctionScan(op) => Some(
-                op.table_function
-                    .inner
-                    .output_schema()
-                    .iter()
-                    .map(|column| ScalarExpression::column_expr(column.clone()))
-                    .collect_vec(),
-            ),
+            }) => {
+                output_exprs.clear();
+                output_exprs.extend(
+                    schema_ref
+                        .iter()
+                        .cloned()
+                        .enumerate()
+                        .map(|(position, column)| ScalarExpression::column_expr(column, position)),
+                );
+                true
+            }
+            Operator::FunctionScan(op) => {
+                output_exprs.clear();
+                output_exprs.extend(
+                    op.table_function
+                        .inner
+                        .output_schema()
+                        .iter()
+                        .enumerate()
+                        .map(|(position, column)| {
+                            ScalarExpression::column_expr(column.clone(), position)
+                        }),
+                );
+                true
+            }
             Operator::ShowTable
             | Operator::ShowView
             | Operator::Explain
@@ -240,59 +255,60 @@ impl Operator {
             | Operator::DropIndex(_)
             | Operator::Truncate(_)
             | Operator::CopyFromFile(_)
-            | Operator::CopyToFile(_) => None,
+            | Operator::CopyToFile(_) => false,
         }
     }
 
-    pub fn referenced_columns(&self, only_column_ref: bool) -> Vec<ColumnRef> {
+    pub fn visit_referenced_columns(
+        &self,
+        only_column_ref: bool,
+        f: &mut impl FnMut(&ColumnRef) -> bool,
+    ) -> bool {
         match self {
             Operator::Aggregate(op) => op
                 .agg_calls
                 .iter()
                 .chain(op.groupby_exprs.iter())
-                .flat_map(|expr| expr.referenced_columns(only_column_ref))
-                .collect_vec(),
-            Operator::Filter(op) => op.predicate.referenced_columns(only_column_ref),
+                .all(|expr| expr.visit_referenced_columns(only_column_ref, f)),
+            Operator::Filter(op) => op.predicate.visit_referenced_columns(only_column_ref, f),
             Operator::Join(op) => {
-                let mut exprs = Vec::new();
-
                 if let JoinCondition::On { on, filter } = &op.on {
                     for (left_expr, right_expr) in on {
-                        exprs.append(&mut left_expr.referenced_columns(only_column_ref));
-                        exprs.append(&mut right_expr.referenced_columns(only_column_ref));
+                        if !left_expr.visit_referenced_columns(only_column_ref, f)
+                            || !right_expr.visit_referenced_columns(only_column_ref, f)
+                        {
+                            return false;
+                        }
                     }
 
                     if let Some(filter_expr) = filter {
-                        exprs.append(&mut filter_expr.referenced_columns(only_column_ref));
+                        return filter_expr.visit_referenced_columns(only_column_ref, f);
                     }
                 }
-                exprs
+                true
             }
             Operator::Project(op) => op
                 .exprs
                 .iter()
-                .flat_map(|expr| expr.referenced_columns(only_column_ref))
-                .collect_vec(),
-            Operator::TableScan(op) => op.columns.values().cloned().collect_vec(),
+                .all(|expr| expr.visit_referenced_columns(only_column_ref, f)),
+            Operator::ScalarSubquery(_) => true,
+            Operator::TableScan(op) => op.columns.values().all(f),
             Operator::FunctionScan(op) => op
                 .table_function
                 .args
                 .iter()
-                .flat_map(|expr| expr.referenced_columns(only_column_ref))
-                .collect_vec(),
+                .all(|expr| expr.visit_referenced_columns(only_column_ref, f)),
             Operator::Sort(op) => op
                 .sort_fields
                 .iter()
                 .map(|field| &field.expr)
-                .flat_map(|expr| expr.referenced_columns(only_column_ref))
-                .collect_vec(),
+                .all(|expr| expr.visit_referenced_columns(only_column_ref, f)),
             Operator::TopK(op) => op
                 .sort_fields
                 .iter()
                 .map(|field| &field.expr)
-                .flat_map(|expr| expr.referenced_columns(only_column_ref))
-                .collect_vec(),
-            Operator::Values(ValuesOperator { schema_ref, .. }) => Vec::clone(schema_ref),
+                .all(|expr| expr.visit_referenced_columns(only_column_ref, f)),
+            Operator::Values(ValuesOperator { schema_ref, .. }) => schema_ref.iter().all(f),
             Operator::Union(UnionOperator {
                 left_schema_ref,
                 _right_schema_ref,
@@ -303,10 +319,9 @@ impl Operator {
             }) => left_schema_ref
                 .iter()
                 .chain(_right_schema_ref.iter())
-                .cloned()
-                .collect_vec(),
-            Operator::Analyze(_) => vec![],
-            Operator::Delete(op) => op.primary_keys.clone(),
+                .all(f),
+            Operator::Analyze(_) => true,
+            Operator::Delete(op) => op.primary_keys.iter().all(f),
             Operator::Dummy
             | Operator::Limit(_)
             | Operator::ShowTable
@@ -326,8 +341,34 @@ impl Operator {
             | Operator::DropIndex(_)
             | Operator::Truncate(_)
             | Operator::CopyFromFile(_)
-            | Operator::CopyToFile(_) => vec![],
+            | Operator::CopyToFile(_) => true,
         }
+    }
+
+    pub fn any_referenced_column(
+        &self,
+        only_column_ref: bool,
+        mut predicate: impl FnMut(&ColumnRef) -> bool,
+    ) -> bool {
+        let mut found = false;
+        self.visit_referenced_columns(only_column_ref, &mut |column| {
+            found = predicate(column);
+            !found
+        });
+        found
+    }
+
+    pub fn all_referenced_columns(
+        &self,
+        only_column_ref: bool,
+        mut predicate: impl FnMut(&ColumnRef) -> bool,
+    ) -> bool {
+        let mut all = true;
+        self.visit_referenced_columns(only_column_ref, &mut |column| {
+            all = predicate(column);
+            all
+        });
+        all
     }
 }
 
@@ -339,6 +380,7 @@ impl fmt::Display for Operator {
             Operator::Filter(op) => write!(f, "{op}"),
             Operator::Join(op) => write!(f, "{op}"),
             Operator::Project(op) => write!(f, "{op}"),
+            Operator::ScalarSubquery(op) => write!(f, "{op}"),
             Operator::TableScan(op) => write!(f, "{op}"),
             Operator::FunctionScan(op) => write!(f, "{op}"),
             Operator::Sort(op) => write!(f, "{op}"),
@@ -411,6 +453,7 @@ impl fmt::Display for PlanImpl {
             PlanImpl::HashJoin => write!(f, "HashJoin"),
             PlanImpl::NestLoopJoin => write!(f, "NestLoopJoin"),
             PlanImpl::Project => write!(f, "Project"),
+            PlanImpl::ScalarSubquery => write!(f, "ScalarSubquery"),
             PlanImpl::SeqScan => write!(f, "SeqScan"),
             PlanImpl::FunctionScan => write!(f, "FunctionScan"),
             PlanImpl::IndexScan(index) => write!(f, "IndexScan By {index}"),

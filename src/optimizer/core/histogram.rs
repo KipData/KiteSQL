@@ -18,7 +18,7 @@ use crate::expression::range_detacher::Range;
 use crate::expression::BinaryOperator;
 use crate::optimizer::core::cm_sketch::CountMinSketch;
 use crate::storage::table_codec::BumpBytes;
-use crate::types::evaluator::EvaluatorFactory;
+use crate::types::evaluator::{BinaryEvaluatorBox, EvaluatorFactory};
 use crate::types::index::{IndexId, IndexMeta};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
@@ -39,6 +39,13 @@ pub struct HistogramBuilder {
     sort_keys: Option<NullableVec<'static, (usize, BumpBytes<'static>)>>,
 
     value_index: usize,
+}
+
+struct BoundComparator {
+    lt: BinaryEvaluatorBox,
+    lte: BinaryEvaluatorBox,
+    gt: BinaryEvaluatorBox,
+    gte: BinaryEvaluatorBox,
 }
 
 #[derive(Debug, Clone, PartialEq, ReferenceSerialization)]
@@ -222,22 +229,57 @@ impl HistogramBuilder {
     }
 }
 
+impl BoundComparator {
+    fn new(ty: LogicalType) -> Result<Self, DatabaseError> {
+        Ok(Self {
+            lt: EvaluatorFactory::binary_create(ty.clone(), BinaryOperator::Lt)?,
+            lte: EvaluatorFactory::binary_create(ty.clone(), BinaryOperator::LtEq)?,
+            gt: EvaluatorFactory::binary_create(ty.clone(), BinaryOperator::Gt)?,
+            gte: EvaluatorFactory::binary_create(ty, BinaryOperator::GtEq)?,
+        })
+    }
+
+    fn lt(&self, value: &DataValue, target: &DataValue) -> Result<bool, DatabaseError> {
+        Ok(matches!(
+            self.lt.binary_eval(value, target)?,
+            DataValue::Boolean(true)
+        ))
+    }
+
+    fn lte(&self, value: &DataValue, target: &DataValue) -> Result<bool, DatabaseError> {
+        Ok(matches!(
+            self.lte.binary_eval(value, target)?,
+            DataValue::Boolean(true)
+        ))
+    }
+
+    fn gt(&self, value: &DataValue, target: &DataValue) -> Result<bool, DatabaseError> {
+        Ok(matches!(
+            self.gt.binary_eval(value, target)?,
+            DataValue::Boolean(true)
+        ))
+    }
+
+    fn gte(&self, value: &DataValue, target: &DataValue) -> Result<bool, DatabaseError> {
+        Ok(matches!(
+            self.gte.binary_eval(value, target)?,
+            DataValue::Boolean(true)
+        ))
+    }
+}
+
 fn is_under(
+    comparator: &BoundComparator,
     value: &DataValue,
     target: &Bound<DataValue>,
     is_min: bool,
 ) -> Result<bool, DatabaseError> {
     let _is_under = |value: &DataValue, target: &DataValue, is_min: bool| {
-        let evaluator = EvaluatorFactory::binary_create(
-            value.logical_type(),
-            if is_min {
-                BinaryOperator::Lt
-            } else {
-                BinaryOperator::LtEq
-            },
-        )?;
-        let value = evaluator.0.binary_eval(value, target)?;
-        Ok::<bool, DatabaseError>(matches!(value, DataValue::Boolean(true)))
+        if is_min {
+            comparator.lt(value, target)
+        } else {
+            comparator.lte(value, target)
+        }
     };
 
     Ok(match target {
@@ -248,21 +290,17 @@ fn is_under(
 }
 
 fn is_above(
+    comparator: &BoundComparator,
     value: &DataValue,
     target: &Bound<DataValue>,
     is_min: bool,
 ) -> Result<bool, DatabaseError> {
     let _is_above = |value: &DataValue, target: &DataValue, is_min: bool| {
-        let evaluator = EvaluatorFactory::binary_create(
-            value.logical_type(),
-            if is_min {
-                BinaryOperator::GtEq
-            } else {
-                BinaryOperator::Gt
-            },
-        )?;
-        let value = evaluator.0.binary_eval(value, target)?;
-        Ok::<bool, DatabaseError>(matches!(value, DataValue::Boolean(true)))
+        if is_min {
+            comparator.gte(value, target)
+        } else {
+            comparator.gt(value, target)
+        }
     };
     Ok(match target {
         Bound::Included(target) => _is_above(value, target, is_min)?,
@@ -316,17 +354,15 @@ impl Histogram {
         self.meta.buckets_len
     }
 
-    pub fn collect_count<F>(
+    pub fn collect_count(
         &self,
         ranges: &[Range],
-        estimate: &mut F,
-    ) -> Result<usize, DatabaseError>
-    where
-        F: FnMut(&DataValue) -> Result<usize, DatabaseError>,
-    {
+        sketch: &CountMinSketch<DataValue>,
+    ) -> Result<usize, DatabaseError> {
         if self.buckets.is_empty() || ranges.is_empty() {
             return Ok(0);
         }
+        let comparator = BoundComparator::new(self.buckets[0].upper.logical_type())?;
 
         let mut count = 0;
         let mut binary_i = 0;
@@ -340,7 +376,8 @@ impl Histogram {
                 &mut bucket_i,
                 &mut bucket_idxs,
                 &mut count,
-                estimate,
+                sketch,
+                &comparator,
             )?;
             if is_dummy {
                 return Ok(0);
@@ -354,18 +391,17 @@ impl Histogram {
             + count)
     }
 
-    fn _collect_count<F>(
+    #[allow(clippy::too_many_arguments)]
+    fn _collect_count(
         &self,
         ranges: &[Range],
         binary_i: &mut usize,
         bucket_i: &mut usize,
         bucket_idxs: &mut Vec<usize>,
         count: &mut usize,
-        estimate: &mut F,
-    ) -> Result<bool, DatabaseError>
-    where
-        F: FnMut(&DataValue) -> Result<usize, DatabaseError>,
-    {
+        sketch: &CountMinSketch<DataValue>,
+        comparator: &BoundComparator,
+    ) -> Result<bool, DatabaseError> {
         let float_value = |value: &DataValue, prefix_len: usize| {
             let value = match value.logical_type() {
                 LogicalType::Varchar(..) | LogicalType::Char(..) => match value {
@@ -472,22 +508,23 @@ impl Histogram {
                     _ => false,
                 };
 
-                if (is_above(&bucket.lower, min, true)? || is_eq(&bucket.lower, min))
-                    && (is_under(&bucket.upper, max, false)? || is_eq(&bucket.upper, max))
+                if (is_above(comparator, &bucket.lower, min, true)? || is_eq(&bucket.lower, min))
+                    && (is_under(comparator, &bucket.upper, max, false)?
+                        || is_eq(&bucket.upper, max))
                 {
                     bucket_idxs.push(mem::replace(bucket_i, *bucket_i + 1));
-                } else if is_above(&bucket.lower, max, false)? {
+                } else if is_above(comparator, &bucket.lower, max, false)? {
                     *binary_i += 1;
-                } else if is_under(&bucket.upper, min, true)? {
+                } else if is_under(comparator, &bucket.upper, min, true)? {
                     *bucket_i += 1;
-                } else if is_above(&bucket.lower, min, true)? {
+                } else if is_above(comparator, &bucket.lower, min, true)? {
                     let (temp_ratio, option) = match max {
                         Bound::Included(val) => {
                             (calc_fraction(&bucket.lower, &bucket.upper, val)?, None)
                         }
                         Bound::Excluded(val) => (
                             calc_fraction(&bucket.lower, &bucket.upper, val)?,
-                            Some(estimate(val)?),
+                            Some(sketch.estimate(val)),
                         ),
                         Bound::Unbounded => unreachable!(),
                     };
@@ -497,14 +534,14 @@ impl Histogram {
                         temp_count = temp_count.saturating_sub(count);
                     }
                     *bucket_i += 1;
-                } else if is_under(&bucket.upper, max, false)? {
+                } else if is_under(comparator, &bucket.upper, max, false)? {
                     let (temp_ratio, option) = match min {
                         Bound::Included(val) => {
                             (calc_fraction(&bucket.lower, &bucket.upper, val)?, None)
                         }
                         Bound::Excluded(val) => (
                             calc_fraction(&bucket.lower, &bucket.upper, val)?,
-                            Some(estimate(val)?),
+                            Some(sketch.estimate(val)),
                         ),
                         Bound::Unbounded => unreachable!(),
                     };
@@ -521,7 +558,7 @@ impl Histogram {
                         }
                         Bound::Excluded(val) => (
                             calc_fraction(&bucket.lower, &bucket.upper, val)?,
-                            Some(estimate(val)?),
+                            Some(sketch.estimate(val)),
                         ),
                         Bound::Unbounded => unreachable!(),
                     };
@@ -531,7 +568,7 @@ impl Histogram {
                         }
                         Bound::Excluded(val) => (
                             calc_fraction(&bucket.lower, &bucket.upper, val)?,
-                            Some(estimate(val)?),
+                            Some(sketch.estimate(val)),
                         ),
                         Bound::Unbounded => unreachable!(),
                     };
@@ -549,7 +586,7 @@ impl Histogram {
                 *count += cmp::max(temp_count, 0);
             }
             Range::Eq(value) => {
-                *count += estimate(value)?;
+                *count += sketch.estimate(value);
                 *binary_i += 1
             }
             Range::Dummy => return Ok(true),
@@ -823,7 +860,6 @@ mod tests {
         builder.append(&DataValue::Null)?;
 
         let (histogram, sketch) = builder.build(4)?;
-        let mut estimate = |value: &DataValue| Ok(sketch.estimate(value));
 
         let count_1 = histogram.collect_count(
             &[
@@ -833,7 +869,7 @@ mod tests {
                     max: Bound::Excluded(DataValue::Int32(12)),
                 },
             ],
-            &mut estimate,
+            &sketch,
         )?;
 
         assert_eq!(count_1, 9);
@@ -843,7 +879,7 @@ mod tests {
                 min: Bound::Included(DataValue::Int32(4)),
                 max: Bound::Unbounded,
             }],
-            &mut estimate,
+            &sketch,
         )?;
 
         assert_eq!(count_2, 11);
@@ -853,7 +889,7 @@ mod tests {
                 min: Bound::Excluded(DataValue::Int32(7)),
                 max: Bound::Unbounded,
             }],
-            &mut estimate,
+            &sketch,
         )?;
 
         assert_eq!(count_3, 7);
@@ -863,7 +899,7 @@ mod tests {
                 min: Bound::Unbounded,
                 max: Bound::Included(DataValue::Int32(11)),
             }],
-            &mut estimate,
+            &sketch,
         )?;
 
         assert_eq!(count_4, 12);
@@ -873,7 +909,7 @@ mod tests {
                 min: Bound::Unbounded,
                 max: Bound::Excluded(DataValue::Int32(8)),
             }],
-            &mut estimate,
+            &sketch,
         )?;
 
         assert_eq!(count_5, 8);
@@ -883,7 +919,7 @@ mod tests {
                 min: Bound::Included(DataValue::Int32(2)),
                 max: Bound::Unbounded,
             }],
-            &mut estimate,
+            &sketch,
         )?;
 
         assert_eq!(count_6, 13);
@@ -893,7 +929,7 @@ mod tests {
                 min: Bound::Excluded(DataValue::Int32(1)),
                 max: Bound::Unbounded,
             }],
-            &mut estimate,
+            &sketch,
         )?;
 
         assert_eq!(count_7, 13);
@@ -903,7 +939,7 @@ mod tests {
                 min: Bound::Unbounded,
                 max: Bound::Included(DataValue::Int32(12)),
             }],
-            &mut estimate,
+            &sketch,
         )?;
 
         assert_eq!(count_8, 13);
@@ -913,7 +949,7 @@ mod tests {
                 min: Bound::Unbounded,
                 max: Bound::Excluded(DataValue::Int32(13)),
             }],
-            &mut estimate,
+            &sketch,
         )?;
 
         assert_eq!(count_9, 13);
@@ -923,7 +959,7 @@ mod tests {
                 min: Bound::Excluded(DataValue::Int32(0)),
                 max: Bound::Excluded(DataValue::Int32(3)),
             }],
-            &mut estimate,
+            &sketch,
         )?;
 
         assert_eq!(count_10, 2);
@@ -933,7 +969,7 @@ mod tests {
                 min: Bound::Included(DataValue::Int32(1)),
                 max: Bound::Included(DataValue::Int32(2)),
             }],
-            &mut estimate,
+            &sketch,
         )?;
 
         assert_eq!(count_11, 2);

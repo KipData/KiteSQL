@@ -53,6 +53,11 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         let plan = match source {
             Source::Table(table) => TableScanOperator::build(table_name.clone(), table, true)?,
             Source::View(view) => LogicalPlan::clone(&view.plan),
+            Source::Schema(_) => {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "derived source cannot be rebound as a base relation".to_string(),
+                ))
+            }
         };
         let mut columns = Vec::with_capacity(index_columns.len());
 

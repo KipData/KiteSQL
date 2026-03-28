@@ -30,7 +30,7 @@ pub type TupleId = DataValue;
 pub type Schema = Vec<ColumnRef>;
 pub type SchemaRef = Arc<Schema>;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub struct Tuple {
     pub pk: Option<TupleId>,
     pub values: Vec<DataValue>,
@@ -48,33 +48,30 @@ impl Tuple {
     }
 
     #[inline]
-    pub fn deserialize_from(
+    pub fn deserialize_from_into(
+        &mut self,
         deserializers: &[TupleValueSerializableImpl],
-        tuple_id: Option<TupleId>,
         bytes: &[u8],
-        values_len: usize,
         total_len: usize,
-    ) -> Result<Self, DatabaseError> {
+    ) -> Result<(), DatabaseError> {
         fn is_null(bits: u8, i: usize) -> bool {
             bits & (1 << (7 - i)) > 0
         }
 
         let bits_len = (total_len + BITS_MAX_INDEX) / BITS_MAX_INDEX;
-        let mut values = Vec::with_capacity(values_len);
+        self.values.clear();
+        self.values.reserve(deserializers.len());
 
         let mut cursor = Cursor::new(&bytes[bits_len..]);
 
         for (i, deserializer) in deserializers.iter().enumerate() {
             if is_null(bytes[i / BITS_MAX_INDEX], i % BITS_MAX_INDEX) {
-                values.push(DataValue::Null);
+                self.values.push(DataValue::Null);
                 continue;
             }
-            deserializer.filling_value(&mut cursor, &mut values)?;
+            deserializer.filling_value(&mut cursor, &mut self.values)?;
         }
-        Ok(Tuple {
-            pk: tuple_id,
-            values,
-        })
+        Ok(())
     }
 
     /// e.g.: bits(u8)..|data_0(len for utf8_1)|utf8_0|data_1|
@@ -336,26 +333,32 @@ mod tests {
         let columns = Arc::new(columns);
         let arena = Bump::new();
         {
-            let tuple_0 = Tuple::deserialize_from(
-                &serializers,
-                tuples[0].pk.clone(),
-                &tuples[0].serialize_to(&serializers, &arena).unwrap(),
-                serializers.len(),
-                columns.len(),
-            )
-            .unwrap();
+            let mut tuple_0 = Tuple {
+                pk: tuples[0].pk.clone(),
+                values: Vec::with_capacity(serializers.len()),
+            };
+            tuple_0
+                .deserialize_from_into(
+                    &serializers,
+                    &tuples[0].serialize_to(&serializers, &arena).unwrap(),
+                    columns.len(),
+                )
+                .unwrap();
 
             assert_eq!(tuples[0], tuple_0);
         }
         {
-            let tuple_1 = Tuple::deserialize_from(
-                &serializers,
-                tuples[1].pk.clone(),
-                &tuples[1].serialize_to(&serializers, &arena).unwrap(),
-                serializers.len(),
-                columns.len(),
-            )
-            .unwrap();
+            let mut tuple_1 = Tuple {
+                pk: tuples[1].pk.clone(),
+                values: Vec::with_capacity(serializers.len()),
+            };
+            tuple_1
+                .deserialize_from_into(
+                    &serializers,
+                    &tuples[1].serialize_to(&serializers, &arena).unwrap(),
+                    columns.len(),
+                )
+                .unwrap();
 
             assert_eq!(tuples[1], tuple_1);
         }
@@ -367,14 +370,17 @@ mod tests {
                 columns[2].datatype().skip_serializable(),
                 columns[3].datatype().serializable(),
             ];
-            let tuple_2 = Tuple::deserialize_from(
-                &projection_serializers,
-                tuples[0].pk.clone(),
-                &tuples[0].serialize_to(&serializers, &arena).unwrap(),
-                2,
-                columns.len(),
-            )
-            .unwrap();
+            let mut tuple_2 = Tuple {
+                pk: tuples[0].pk.clone(),
+                values: Vec::with_capacity(2),
+            };
+            tuple_2
+                .deserialize_from_into(
+                    &projection_serializers,
+                    &tuples[0].serialize_to(&serializers, &arena).unwrap(),
+                    columns.len(),
+                )
+                .unwrap();
 
             assert_eq!(
                 tuple_2,
@@ -400,14 +406,17 @@ mod tests {
                 false,
             ));
 
-            let tuple_3 = Tuple::deserialize_from(
-                &multiple_pk_serializers,
-                multi_pk_tuple.pk.clone(),
-                &multi_pk_tuple.serialize_to(&serializers, &arena).unwrap(),
-                serializers.len(),
-                columns.len(),
-            )
-            .unwrap();
+            let mut tuple_3 = Tuple {
+                pk: multi_pk_tuple.pk.clone(),
+                values: Vec::with_capacity(serializers.len()),
+            };
+            tuple_3
+                .deserialize_from_into(
+                    &multiple_pk_serializers,
+                    &multi_pk_tuple.serialize_to(&serializers, &arena).unwrap(),
+                    columns.len(),
+                )
+                .unwrap();
 
             assert_eq!(
                 tuple_3,

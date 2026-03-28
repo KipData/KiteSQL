@@ -39,8 +39,11 @@ pub trait Visitor<'a>: Sized {
     fn visit_alias(
         &mut self,
         expr: &'a ScalarExpression,
-        _ty: &'a AliasType,
+        ty: &'a AliasType,
     ) -> Result<(), DatabaseError> {
+        if let AliasType::Expr(alias_expr) = ty {
+            self.visit(alias_expr)?;
+        }
         self.visit(expr)
     }
 

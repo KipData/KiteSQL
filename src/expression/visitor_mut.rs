@@ -23,6 +23,25 @@ use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use sqlparser::ast::TrimWhereField;
 
+pub(crate) struct PositionShift {
+    pub(crate) delta: isize,
+}
+
+impl VisitorMut<'_> for PositionShift {
+    fn visit_column_ref(
+        &mut self,
+        _column: &mut ColumnRef,
+        position: &mut usize,
+    ) -> Result<(), DatabaseError> {
+        if self.delta.is_negative() {
+            *position = position.saturating_sub(self.delta.unsigned_abs());
+        } else {
+            *position += self.delta as usize;
+        }
+        Ok(())
+    }
+}
+
 pub trait VisitorMut<'a>: Sized {
     fn visit(&mut self, expr: &'a mut ScalarExpression) -> Result<(), DatabaseError> {
         walk_mut_expr(self, expr)
@@ -32,15 +51,22 @@ pub trait VisitorMut<'a>: Sized {
         Ok(())
     }
 
-    fn visit_column_ref(&mut self, _column: &'a mut ColumnRef) -> Result<(), DatabaseError> {
+    fn visit_column_ref(
+        &mut self,
+        _column: &'a mut ColumnRef,
+        _position: &'a mut usize,
+    ) -> Result<(), DatabaseError> {
         Ok(())
     }
 
     fn visit_alias(
         &mut self,
         expr: &'a mut ScalarExpression,
-        _ty: &'a mut AliasType,
+        ty: &'a mut AliasType,
     ) -> Result<(), DatabaseError> {
+        if let AliasType::Expr(alias_expr) = ty {
+            self.visit(alias_expr)?;
+        }
         self.visit(expr)
     }
 
@@ -268,7 +294,9 @@ pub fn walk_mut_expr<'a, V: VisitorMut<'a>>(
 ) -> Result<(), DatabaseError> {
     match expr {
         ScalarExpression::Constant(value) => visitor.visit_constant(value),
-        ScalarExpression::ColumnRef { column, .. } => visitor.visit_column_ref(column),
+        ScalarExpression::ColumnRef { column, position } => {
+            visitor.visit_column_ref(column, position)
+        }
         ScalarExpression::Alias { expr, alias } => visitor.visit_alias(expr, alias),
         ScalarExpression::TypeCast { expr, ty } => visitor.visit_type_cast(expr, ty),
         ScalarExpression::IsNull { negated, expr } => visitor.visit_is_null(*negated, expr),

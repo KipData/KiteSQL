@@ -211,7 +211,7 @@ pub enum DatabaseError {
     PrimaryKeyNotFound,
     #[error("primaryKey only allows single or multiple values")]
     PrimaryKeyTooManyLayers,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
     #[error("rocksdb: {0}")]
     RocksDB(
         #[source]
@@ -430,7 +430,7 @@ fn build_sql_highlight(sql: &str, span: &SqlErrorSpan) -> Option<String> {
 
     for (i, line) in lines.iter().enumerate() {
         let line_no = i + 1;
-        out.push_str(&format!("{line_no:>width$} | {line}\n", width = width));
+        out.push_str(&format!("{line_no:>width$} | {line}\n"));
 
         if line_no == span.line {
             let char_len = line.chars().count();

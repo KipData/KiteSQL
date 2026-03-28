@@ -13,33 +13,41 @@
 // limitations under the License.
 
 use crate::catalog::TableMeta;
-use crate::execution::{spawn_executor, Executor, ReadExecutor};
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::throw;
-use crate::types::tuple::Tuple;
+use crate::errors::DatabaseError;
+use crate::execution::ExecArena;
+use crate::storage::Transaction;
 use crate::types::value::{DataValue, Utf8Type};
 use sqlparser::ast::CharLengthUnits;
 
-pub struct ShowTables;
+pub struct ShowTables {
+    pub(crate) metas: Option<std::vec::IntoIter<TableMeta>>,
+}
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ShowTables {
-    fn execute(
-        self,
-        _: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
-        transaction: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let metas = throw!(co, unsafe { &mut (*transaction) }.table_metas());
+impl ShowTables {
+    pub(crate) fn next_tuple<'a, T: Transaction>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> Result<(), DatabaseError> {
+        if self.metas.is_none() {
+            self.metas = Some(arena.transaction_mut().table_metas()?.into_iter());
+        }
 
-            for TableMeta { table_name } in metas {
-                let values = vec![DataValue::Utf8 {
-                    value: table_name.to_string(),
-                    ty: Utf8Type::Variable(None),
-                    unit: CharLengthUnits::Characters,
-                }];
+        let Some(TableMeta { table_name }) = self.metas.as_mut().and_then(|metas| metas.next())
+        else {
+            arena.finish();
+            return Ok(());
+        };
 
-                co.yield_(Ok(Tuple::new(None, values))).await;
-            }
-        })
+        let output = arena.result_tuple_mut();
+        output.pk = None;
+        output.values.clear();
+        output.values.push(DataValue::Utf8 {
+            value: table_name.to_string(),
+            ty: Utf8Type::Variable(None),
+            unit: CharLengthUnits::Characters,
+        });
+
+        arena.resume();
+        Ok(())
     }
 }

@@ -15,54 +15,22 @@
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::{Range, RangeDetacher};
+use crate::expression::visitor_mut::{PositionShift, VisitorMut};
 use crate::expression::{BinaryOperator, ScalarExpression};
-use crate::optimizer::core::pattern::Pattern;
-use crate::optimizer::core::pattern::PatternChildrenPredicate;
-use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
+use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{
-    left_child, only_child_mut, replace_with_only_child, right_child, wrap_child_with,
+    left_child, replace_with_only_child, right_child, wrap_child_with,
 };
 use crate::planner::operator::filter::FilterOperator;
 use crate::planner::operator::join::{JoinCondition, JoinType};
 use crate::planner::operator::{Operator, SortOption};
-use crate::planner::{LogicalPlan, SchemaOutput};
+use crate::planner::{Childrens, LogicalPlan, SchemaOutput};
 use crate::types::index::{IndexInfo, IndexMetaRef, IndexType};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use itertools::Itertools;
 use std::ops::Bound;
-use std::sync::LazyLock;
 use std::{mem, slice};
-
-static PUSH_PREDICATE_THROUGH_JOIN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |op| matches!(op, Operator::Filter(_)),
-    children: PatternChildrenPredicate::Predicate(vec![Pattern {
-        predicate: |op| matches!(op, Operator::Join(_)),
-        children: PatternChildrenPredicate::None,
-    }]),
-});
-
-static PUSH_PREDICATE_INTO_SCAN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |op| matches!(op, Operator::Filter(_)),
-    children: PatternChildrenPredicate::Predicate(vec![Pattern {
-        predicate: |op| matches!(op, Operator::TableScan(_)),
-        children: PatternChildrenPredicate::None,
-    }]),
-});
-
-static JOIN_WITH_FILTER_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |op| matches!(op, Operator::Join(_)),
-    children: PatternChildrenPredicate::None,
-});
-
-#[allow(dead_code)]
-static PUSH_PREDICATE_THROUGH_NON_JOIN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |op| matches!(op, Operator::Filter(_)),
-    children: PatternChildrenPredicate::Predicate(vec![Pattern {
-        predicate: |op| matches!(op, Operator::Project(_)),
-        children: PatternChildrenPredicate::None,
-    }]),
-});
 
 fn split_conjunctive_predicates(expr: &ScalarExpression) -> Vec<ScalarExpression> {
     match expr {
@@ -98,13 +66,6 @@ fn reduce_filters(filters: Vec<ScalarExpression>, having: bool) -> Option<Filter
         })
 }
 
-/// Return true when left is subset of right, only compare table_id and column_id, so it's safe to
-/// used for join output cols with nullable columns.
-/// If left equals right, return true.
-pub fn is_subset_cols(left: &[ColumnRef], right: &[ColumnRef]) -> bool {
-    left.iter().all(|l| right.contains(l))
-}
-
 fn plan_output_columns(plan: &LogicalPlan) -> Vec<ColumnRef> {
     match plan.output_schema_direct() {
         SchemaOutput::Schema(schema) => schema,
@@ -122,26 +83,25 @@ fn plan_output_columns(plan: &LogicalPlan) -> Vec<ColumnRef> {
 /// attributes of the left or right side of sub query when applicable.
 pub struct PushPredicateThroughJoin;
 
-impl MatchPattern for PushPredicateThroughJoin {
-    fn pattern(&self) -> &Pattern {
-        &PUSH_PREDICATE_THROUGH_JOIN
-    }
-}
-
 impl NormalizationRule for PushPredicateThroughJoin {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
-        let filter_op = match &plan.operator {
-            Operator::Filter(op) => op.clone(),
-            _ => return Ok(false),
-        };
-
         let mut applied = false;
 
         let parent_replacement = {
-            let join_plan = match only_child_mut(plan) {
-                Some(child) => child,
-                None => return Ok(false),
+            let LogicalPlan {
+                operator,
+                childrens,
+                ..
+            } = plan;
+            let filter_op = match operator {
+                Operator::Filter(op) => op,
+                _ => return Ok(false),
             };
+
+            let Childrens::Only(join_plan) = childrens.as_mut() else {
+                return Ok(false);
+            };
+            let join_plan = join_plan.as_mut();
 
             let join_op = match &join_plan.operator {
                 Operator::Join(op) => op,
@@ -167,12 +127,13 @@ impl NormalizationRule for PushPredicateThroughJoin {
                 .unwrap_or_default();
 
             let filter_exprs = split_conjunctive_predicates(&filter_op.predicate);
-            let (left_filters, rest): (Vec<_>, Vec<_>) = filter_exprs
-                .into_iter()
-                .partition(|f| is_subset_cols(&f.referenced_columns(true), &left_columns));
-            let (right_filters, common_filters): (Vec<_>, Vec<_>) = rest
-                .into_iter()
-                .partition(|f| is_subset_cols(&f.referenced_columns(true), &right_columns));
+            let (left_filters, rest): (Vec<_>, Vec<_>) = filter_exprs.into_iter().partition(|f| {
+                f.all_referenced_columns(true, |column| left_columns.contains(column))
+            });
+            let (right_filters, common_filters): (Vec<_>, Vec<_>) =
+                rest.into_iter().partition(|f| {
+                    f.all_referenced_columns(true, |column| right_columns.contains(column))
+                });
 
             let mut new_ops = (None, None, None);
             let replace_filters = match join_op.join_type {
@@ -239,92 +200,97 @@ impl NormalizationRule for PushPredicateThroughJoin {
 
 pub struct PushPredicateIntoScan;
 
-impl MatchPattern for PushPredicateIntoScan {
-    fn pattern(&self) -> &Pattern {
-        &PUSH_PREDICATE_INTO_SCAN
-    }
-}
-
 impl NormalizationRule for PushPredicateIntoScan {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
-        if let Operator::Filter(op) = plan.operator.clone() {
-            if let Some(child) = only_child_mut(plan) {
-                if let Operator::TableScan(scan_op) = &mut child.operator {
-                    let mut changed = false;
-                    for IndexInfo {
-                        meta,
-                        range,
-                        covered_deserializers,
-                        cover_mapping,
-                        sort_option,
-                        sort_elimination_hint: _,
-                        stream_distinct_hint: _,
-                    } in &mut scan_op.index_infos
-                    {
-                        if range.is_some() {
-                            continue;
-                        }
-                        let SortOption::OrderBy {
-                            ignore_prefix_len, ..
-                        } = sort_option
-                        else {
-                            return Err(DatabaseError::InvalidIndex);
-                        };
-                        *range = match meta.ty {
-                            IndexType::PrimaryKey { is_multiple: false }
-                            | IndexType::Unique
-                            | IndexType::Normal => {
-                                RangeDetacher::new(meta.table_name.as_ref(), &meta.column_ids[0])
-                                    .detach(&op.predicate)?
-                            }
-                            IndexType::PrimaryKey { is_multiple: true } | IndexType::Composite => {
-                                Self::composite_range(&op, meta, ignore_prefix_len)?
-                            }
-                        };
-                        if range.is_none() {
-                            continue;
-                        }
-                        changed = true;
+        let LogicalPlan {
+            operator,
+            childrens,
+            ..
+        } = plan;
+        let filter_op = match operator {
+            Operator::Filter(op) => op,
+            _ => return Ok(false),
+        };
+        let Childrens::Only(child) = childrens.as_mut() else {
+            return Ok(false);
+        };
+        let child = child.as_mut();
+        let Operator::TableScan(scan_op) = &mut child.operator else {
+            return Ok(false);
+        };
 
-                        *covered_deserializers = None;
-                        *cover_mapping = None;
+        let mut changed = false;
+        for IndexInfo {
+            meta,
+            range,
+            covered_deserializers,
+            cover_mapping,
+            sort_option,
+            sort_elimination_hint: _,
+            stream_distinct_hint: _,
+        } in &mut scan_op.index_infos
+        {
+            if range.is_some() {
+                continue;
+            }
+            let SortOption::OrderBy {
+                ignore_prefix_len, ..
+            } = sort_option
+            else {
+                return Err(DatabaseError::InvalidIndex);
+            };
+            *range = match meta.ty {
+                IndexType::PrimaryKey { is_multiple: false }
+                | IndexType::Unique
+                | IndexType::Normal => {
+                    RangeDetacher::new(meta.table_name.as_ref(), &meta.column_ids[0])
+                        .detach(&filter_op.predicate)?
+                }
+                IndexType::PrimaryKey { is_multiple: true } | IndexType::Composite => {
+                    Self::composite_range(filter_op, meta, ignore_prefix_len)?
+                }
+            };
+            if range.is_none() {
+                continue;
+            }
+            changed = true;
 
-                        // try index covered
-                        let mut mapping_slots = vec![usize::MAX; scan_op.columns.len()];
-                        let mut needs_mapping = false;
-                        let index_column_types = match &meta.value_ty {
-                            LogicalType::Tuple(tys) => tys,
-                            ty => slice::from_ref(ty),
-                        };
-                        let mut deserializers = Vec::with_capacity(meta.column_ids.len());
+            *covered_deserializers = None;
+            *cover_mapping = None;
 
-                        for (idx, column_id) in meta.column_ids.iter().enumerate() {
-                            if let Some((scan_idx, column)) =
-                                scan_op.columns.values().enumerate().find(|(_, column)| {
-                                    column.id().map(|id| id == *column_id).unwrap_or(false)
-                                })
-                            {
-                                mapping_slots[scan_idx] = idx;
-                                needs_mapping |= scan_idx != idx;
-                                deserializers.push(column.datatype().serializable());
-                            } else {
-                                deserializers.push(index_column_types[idx].skip_serializable());
-                            }
-                        }
+            // try index covered
+            let mut mapping_slots = vec![usize::MAX; scan_op.columns.len()];
+            let mut needs_mapping = false;
+            let index_column_types = match &meta.value_ty {
+                LogicalType::Tuple(tys) => tys,
+                ty => slice::from_ref(ty),
+            };
+            let mut deserializers = Vec::with_capacity(meta.column_ids.len());
 
-                        if mapping_slots.iter().all(|slot| *slot != usize::MAX) {
-                            *covered_deserializers = Some(deserializers);
-                            if needs_mapping {
-                                *cover_mapping = Some(mapping_slots);
-                            }
-                        }
-                    }
-                    return Ok(changed);
+            for (idx, column_id) in meta.column_ids.iter().enumerate() {
+                if let Some((scan_idx, column)) = scan_op
+                    .columns
+                    .values()
+                    .enumerate()
+                    .find(|(_, column)| column.id().map(|id| id == *column_id).unwrap_or(false))
+                {
+                    mapping_slots[scan_idx] = idx;
+                    needs_mapping |= scan_idx != idx;
+                    deserializers.push(column.datatype().serializable());
+                } else {
+                    deserializers.push(index_column_types[idx].skip_serializable());
+                }
+            }
+
+            if mapping_slots.iter().all(|slot| *slot != usize::MAX) {
+                *covered_deserializers = Some(deserializers);
+                if needs_mapping {
+                    *cover_mapping = Some(mapping_slots);
                 }
             }
         }
 
-        Ok(false)
+        Ok(changed)
     }
 }
 
@@ -388,12 +354,6 @@ impl PushPredicateIntoScan {
 
 pub struct PushJoinPredicateIntoScan;
 
-impl MatchPattern for PushJoinPredicateIntoScan {
-    fn pattern(&self) -> &Pattern {
-        &JOIN_WITH_FILTER_PATTERN
-    }
-}
-
 impl NormalizationRule for PushJoinPredicateIntoScan {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
         let (join_type, filter_expr) = {
@@ -427,12 +387,13 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
             .unwrap_or_default();
 
         let filter_exprs = split_conjunctive_predicates(&filter_expr);
-        let (left_filters, rest): (Vec<_>, Vec<_>) = filter_exprs
-            .into_iter()
-            .partition(|expr| is_subset_cols(&expr.referenced_columns(true), &left_columns));
-        let (right_filters, common_filters): (Vec<_>, Vec<_>) = rest
-            .into_iter()
-            .partition(|expr| is_subset_cols(&expr.referenced_columns(true), &right_columns));
+        let (left_filters, rest): (Vec<_>, Vec<_>) = filter_exprs.into_iter().partition(|expr| {
+            expr.all_referenced_columns(true, |column| left_columns.contains(column))
+        });
+        let (right_filters, common_filters): (Vec<_>, Vec<_>) =
+            rest.into_iter().partition(|expr| {
+                expr.all_referenced_columns(true, |column| right_columns.contains(column))
+            });
 
         let (push_left, push_right) = match join_type {
             JoinType::Inner => (true, true),
@@ -457,11 +418,19 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
             remaining_filters.extend(left_remain);
         }
 
-        let (right_push, right_remain) = if push_right {
+        let (mut right_push, right_remain) = if push_right {
             (right_filters, Vec::new())
         } else {
             (Vec::new(), right_filters)
         };
+        if !right_push.is_empty() {
+            let mut localizer = PositionShift {
+                delta: -(left_columns.len() as isize),
+            };
+            for expr in &mut right_push {
+                localizer.visit(expr)?;
+            }
+        }
         if let Some(filter_op) = reduce_filters(right_push, false) {
             new_ops.1 = Some(Operator::Filter(filter_op));
         } else {
@@ -687,14 +656,14 @@ mod tests {
 
         let c1_gt = ScalarExpression::Binary {
             op: BinaryOperator::Gt,
-            left_expr: Box::new(ScalarExpression::column_expr(c1_ref.clone())),
+            left_expr: Box::new(ScalarExpression::column_expr(c1_ref.clone(), 0)),
             right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(0))),
             evaluator: None,
             ty: LogicalType::Boolean,
         };
         let c2_gt = ScalarExpression::Binary {
             op: BinaryOperator::Gt,
-            left_expr: Box::new(ScalarExpression::column_expr(c2_ref.clone())),
+            left_expr: Box::new(ScalarExpression::column_expr(c2_ref.clone(), 1)),
             right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(0))),
             evaluator: None,
             ty: LogicalType::Boolean,

@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::errors::DatabaseError;
 use crate::execution::dql::join::hash::left_semi_join::LeftSemiJoinState;
-use crate::execution::dql::join::hash::{filter, FilterArgs, JoinProbeState, ProbeArgs};
-use crate::execution::dql::join::hash_join::BuildState;
-use crate::execution::dql::sort::BumpVec;
-use crate::execution::{spawn_executor, Executor};
-use crate::throw;
+use crate::execution::dql::join::hash::{
+    filter, FilterArgs, JoinProbeState, LeftDropState, LeftDropTuples, ProbeState,
+};
+use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
-use ahash::HashMap;
 use fixedbitset::FixedBitSet;
 
 pub(crate) struct LeftAntiJoinState {
@@ -27,40 +26,32 @@ pub(crate) struct LeftAntiJoinState {
     pub(crate) inner: LeftSemiJoinState,
 }
 
-impl<'a> JoinProbeState<'a> for LeftAntiJoinState {
-    fn probe(
+impl JoinProbeState for LeftAntiJoinState {
+    fn probe_next(
         &mut self,
-        probe_args: ProbeArgs<'a>,
-        filter_args: Option<&'a FilterArgs>,
-    ) -> Executor<'a> {
-        self.inner.probe(probe_args, filter_args)
+        probe_state: &mut ProbeState,
+        build_state: Option<&mut crate::execution::dql::join::hash_join::BuildState>,
+        filter_args: Option<&FilterArgs>,
+    ) -> Result<Option<Tuple>, DatabaseError> {
+        self.inner.probe_next(probe_state, build_state, filter_args)
     }
 
-    fn left_drop(
+    fn left_drop_next(
         &mut self,
-        _build_map: HashMap<BumpVec<'a, DataValue>, BuildState>,
-        filter_args: Option<&'a FilterArgs>,
-    ) -> Option<Executor<'a>> {
-        let bits_ptr: *mut FixedBitSet = &mut self.inner.bits;
+        left_drop_state: &mut LeftDropState,
+        filter_args: Option<&FilterArgs>,
+    ) -> Result<Option<Tuple>, DatabaseError> {
+        let bits: &FixedBitSet = &self.inner.bits;
         let right_schema_len = self.right_schema_len;
-        Some(spawn_executor(move |co| async move {
-            for (
-                _,
-                BuildState {
-                    tuples,
-                    is_used,
-                    has_filted,
-                },
-            ) in _build_map
+
+        loop {
+            if let Some(LeftDropTuples {
+                tuples, has_filted, ..
+            }) = left_drop_state.current.as_mut()
             {
-                if is_used {
-                    continue;
-                }
-                for (i, tuple) in tuples {
-                    unsafe {
-                        if (*bits_ptr).contains(i) && has_filted {
-                            continue;
-                        }
+                for (i, tuple) in tuples.by_ref() {
+                    if bits.contains(i) && *has_filted {
+                        continue;
                     }
                     if let Some(filter_args) = filter_args {
                         let full_values = Vec::from_iter(
@@ -70,13 +61,26 @@ impl<'a> JoinProbeState<'a> for LeftAntiJoinState {
                                 .cloned()
                                 .chain((0..right_schema_len).map(|_| DataValue::Null)),
                         );
-                        if !throw!(co, filter(&full_values, filter_args)) {
+                        if !filter(&full_values, filter_args)? {
                             continue;
                         }
                     }
-                    co.yield_(Ok(tuple)).await;
+                    return Ok(Some(tuple));
                 }
+                left_drop_state.current = None;
             }
-        }))
+
+            let Some((_, state)) = left_drop_state.states.next() else {
+                return Ok(None);
+            };
+
+            if state.is_used {
+                continue;
+            }
+            left_drop_state.current = Some(LeftDropTuples {
+                tuples: state.tuples.into_iter(),
+                has_filted: state.has_filted,
+            });
+        }
     }
 }

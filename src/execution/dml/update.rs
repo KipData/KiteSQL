@@ -15,24 +15,25 @@
 use crate::catalog::{ColumnRef, TableName};
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
-use crate::execution::{build_read, spawn_executor, Executor, WriteExecutor};
-use crate::expression::{BindPosition, ScalarExpression};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
+use crate::expression::ScalarExpression;
 use crate::planner::operator::update::UpdateOperator;
 use crate::planner::LogicalPlan;
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::throw;
+use crate::storage::Transaction;
 use crate::types::index::Index;
+use crate::types::tuple::SchemaRef;
 use crate::types::tuple::Tuple;
 use crate::types::tuple_builder::TupleBuilder;
 use crate::types::value::DataValue;
 use itertools::Itertools;
-use std::borrow::Cow;
 use std::collections::HashMap;
 
 pub struct Update {
     table_name: TableName,
     value_exprs: Vec<(ColumnRef, ScalarExpression)>,
-    input: LogicalPlan,
+    input_schema: SchemaRef,
+    input_plan: Option<LogicalPlan>,
+    input: Option<ExecId>,
 }
 
 impl From<(UpdateOperator, LogicalPlan)> for Update {
@@ -42,139 +43,132 @@ impl From<(UpdateOperator, LogicalPlan)> for Update {
                 table_name,
                 value_exprs,
             },
-            input,
+            mut input,
         ): (UpdateOperator, LogicalPlan),
     ) -> Self {
         Update {
             table_name,
             value_exprs,
-            input,
+            input_schema: input.output_schema().clone(),
+            input_plan: Some(input),
+            input: None,
         }
     }
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Update {
-    fn execute_mut(
-        self,
-        cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
+    fn into_executor(
+        mut self,
+        arena: &mut ExecArena<'a, T>,
+        cache: ExecutionCaches<'a>,
         transaction: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let Update {
-                table_name,
-                value_exprs,
-                mut input,
-            } = self;
+    ) -> ExecId {
+        self.input = Some(build_read(
+            arena,
+            self.input_plan
+                .take()
+                .expect("update input plan initialized"),
+            cache,
+            transaction,
+        ));
+        arena.push(ExecNode::Update(self))
+    }
+}
 
-            let mut exprs_map = HashMap::with_capacity(value_exprs.len());
-            for (column, expr) in value_exprs {
-                exprs_map.insert(column.id(), expr);
-            }
+impl Update {
+    pub(crate) fn next_tuple<'a, T: Transaction>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> Result<(), DatabaseError> {
+        let Some(input) = self.input.take() else {
+            arena.finish();
+            return Ok(());
+        };
 
-            let input_schema = input.output_schema().clone();
+        let mut exprs_map = HashMap::with_capacity(self.value_exprs.len());
+        for (column, expr) in self.value_exprs.drain(..) {
+            exprs_map.insert(column.id(), expr);
+        }
 
-            if let Some(table_catalog) = throw!(
-                co,
-                unsafe { &mut (*transaction) }.table(cache.0, table_name.clone())
-            )
+        if let Some(table_catalog) = arena
+            .transaction_mut()
+            .table(arena.table_cache(), self.table_name.clone())?
             .cloned()
-            {
-                let serializers = input_schema
-                    .iter()
-                    .map(|column| column.datatype().serializable())
-                    .collect_vec();
-                let mut index_metas = Vec::new();
-                for index_meta in table_catalog.indexes() {
-                    let mut exprs = throw!(co, index_meta.column_exprs(&table_catalog));
-                    throw!(
-                        co,
-                        BindPosition::bind_exprs(
-                            exprs.iter_mut(),
-                            || input_schema.iter().map(Cow::Borrowed),
-                            |a, b| a == b
-                        )
-                    );
-                    index_metas.push((index_meta, exprs));
-                }
-
-                let mut coroutine = build_read(input, cache, transaction);
-                let mut updated_count = 0;
-
-                for tuple in coroutine.by_ref() {
-                    let mut tuple: Tuple = throw!(co, tuple);
-
-                    let mut is_overwrite = true;
-
-                    let old_pk = throw!(
-                        co,
-                        tuple.pk.clone().ok_or(DatabaseError::PrimaryKeyNotFound)
-                    );
-                    for (index_meta, exprs) in index_metas.iter() {
-                        let values =
-                            throw!(co, Projection::projection(&tuple, exprs, &input_schema));
-                        let Some(value) = DataValue::values_to_tuple(values) else {
-                            continue;
-                        };
-                        let index = Index::new(index_meta.id, &value, index_meta.ty);
-                        throw!(
-                            co,
-                            unsafe { &mut (*transaction) }.del_index(&table_name, &index, &old_pk)
-                        );
-                    }
-                    for (i, column) in input_schema.iter().enumerate() {
-                        if let Some(expr) = exprs_map.get(&column.id()) {
-                            tuple.values[i] = throw!(co, expr.eval(Some((&tuple, &input_schema))));
-                        }
-                    }
-
-                    tuple.pk = Some(Tuple::primary_projection(
-                        table_catalog.primary_keys_indices(),
-                        &tuple.values,
-                    ));
-                    let new_pk = throw!(
-                        co,
-                        tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)
-                    );
-
-                    if new_pk != &old_pk {
-                        throw!(
-                            co,
-                            unsafe { &mut (*transaction) }.remove_tuple(&table_name, &old_pk)
-                        );
-                        is_overwrite = false;
-                    }
-                    for (index_meta, exprs) in index_metas.iter() {
-                        let values =
-                            throw!(co, Projection::projection(&tuple, exprs, &input_schema));
-                        let Some(value) = DataValue::values_to_tuple(values) else {
-                            continue;
-                        };
-                        let index = Index::new(index_meta.id, &value, index_meta.ty);
-                        throw!(
-                            co,
-                            unsafe { &mut (*transaction) }.add_index(&table_name, index, new_pk)
-                        );
-                    }
-
-                    throw!(
-                        co,
-                        unsafe { &mut (*transaction) }.append_tuple(
-                            &table_name,
-                            tuple,
-                            &serializers,
-                            is_overwrite
-                        )
-                    );
-                    updated_count += 1;
-                }
-                drop(coroutine);
-
-                co.yield_(Ok(TupleBuilder::build_result(updated_count.to_string())))
-                    .await;
-            } else {
-                co.yield_(Ok(TupleBuilder::build_result("0".to_string())))
-                    .await;
+        {
+            let serializers = self
+                .input_schema
+                .iter()
+                .map(|column| column.datatype().serializable())
+                .collect_vec();
+            let mut index_metas = Vec::new();
+            for index_meta in table_catalog.indexes() {
+                let exprs = index_meta.column_exprs(&table_catalog)?;
+                index_metas.push((index_meta, exprs));
             }
-        })
+
+            let mut updated_count = 0;
+
+            while arena.next_tuple(input)? {
+                let mut tuple = arena.result_tuple().clone();
+                let mut is_overwrite = true;
+
+                let old_pk = tuple.pk.clone().ok_or(DatabaseError::PrimaryKeyNotFound)?;
+                for (index_meta, exprs) in index_metas.iter() {
+                    let values = Projection::projection(&tuple, exprs, &self.input_schema)?;
+                    let Some(value) = DataValue::values_to_tuple(values) else {
+                        continue;
+                    };
+                    let index = Index::new(index_meta.id, &value, index_meta.ty);
+                    arena
+                        .transaction_mut()
+                        .del_index(&self.table_name, &index, &old_pk)?;
+                }
+                for (i, column) in self.input_schema.iter().enumerate() {
+                    if let Some(expr) = exprs_map.get(&column.id()) {
+                        let value = expr.eval(Some((&tuple, &self.input_schema)))?;
+                        tuple.values[i] = value;
+                    }
+                }
+
+                tuple.pk = Some(Tuple::primary_projection(
+                    table_catalog.primary_keys_indices(),
+                    &tuple.values,
+                ));
+                let new_pk = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
+
+                if new_pk != &old_pk {
+                    arena
+                        .transaction_mut()
+                        .remove_tuple(&self.table_name, &old_pk)?;
+                    is_overwrite = false;
+                }
+                for (index_meta, exprs) in index_metas.iter() {
+                    let values = Projection::projection(&tuple, exprs, &self.input_schema)?;
+                    let Some(value) = DataValue::values_to_tuple(values) else {
+                        continue;
+                    };
+                    let index = Index::new(index_meta.id, &value, index_meta.ty);
+                    arena
+                        .transaction_mut()
+                        .add_index(&self.table_name, index, new_pk)?;
+                }
+
+                arena.transaction_mut().append_tuple(
+                    &self.table_name,
+                    tuple,
+                    &serializers,
+                    is_overwrite,
+                )?;
+                updated_count += 1;
+            }
+
+            TupleBuilder::build_result_into(arena.result_tuple_mut(), updated_count.to_string());
+            arena.resume();
+            Ok(())
+        } else {
+            TupleBuilder::build_result_into(arena.result_tuple_mut(), "0".to_string());
+            arena.resume();
+            Ok(())
+        }
     }
 }

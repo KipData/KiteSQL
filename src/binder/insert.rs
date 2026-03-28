@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::binder::{attach_span_if_absent, lower_case_name, Binder};
+use crate::binder::{
+    attach_span_from_sqlparser_span_if_absent, attach_span_if_absent, lower_case_name, lower_ident,
+    Binder,
+};
 use crate::errors::DatabaseError;
 use crate::expression::simplify::ConstantCalculator;
 use crate::expression::visitor_mut::VisitorMut;
@@ -26,6 +29,7 @@ use crate::storage::Transaction;
 use crate::types::tuple::SchemaRef;
 use crate::types::value::DataValue;
 use sqlparser::ast::{Expr, Ident, ObjectName, Query};
+use std::borrow::Cow;
 use std::slice;
 use std::sync::Arc;
 
@@ -144,12 +148,14 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         is_overwrite: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
         let table_name: Arc<str> = lower_case_name(name)?.into();
-        let source = self
-            .context
-            .source_and_bind(table_name.clone(), None, None, false)?
-            .ok_or(DatabaseError::TableNotFound)?;
-        let mut schema_buf = None;
-        let table_schema = source.schema_ref(&mut schema_buf);
+        let table_schema = {
+            let source = self
+                .context
+                .source(&table_name)?
+                .ok_or(DatabaseError::TableNotFound)?;
+            let mut schema_buf = None;
+            source.schema_ref(&mut schema_buf)
+        };
 
         let mut input_plan = self.bind_query(query)?;
         let input_schema = input_plan.output_schema().clone();
@@ -162,35 +168,45 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                     input_len,
                 ));
             }
-            table_schema
-                .iter()
-                .take(input_len)
-                .cloned()
-                .collect::<Vec<_>>()
+            Cow::Borrowed(&table_schema[..input_len])
         } else {
             let mut columns = Vec::with_capacity(idents.len());
+            let source = self
+                .context
+                .source(&table_name)?
+                .ok_or(DatabaseError::TableNotFound)?;
+            let mut schema_buf = None;
             for ident in idents {
-                match self.bind_column_ref_from_identifiers(
-                    slice::from_ref(ident),
-                    Some(table_name.to_string()),
-                )? {
-                    ScalarExpression::ColumnRef { column, .. } => columns.push(column),
-                    _ => return Err(DatabaseError::UnsupportedStmt(ident.to_string())),
-                }
+                let column_name = lower_ident(ident);
+                let column = source
+                    .column(&column_name, &mut schema_buf)
+                    .ok_or_else(|| {
+                        attach_span_from_sqlparser_span_if_absent(
+                            DatabaseError::column_not_found(column_name),
+                            ident.span,
+                        )
+                    })?;
+                columns.push(column);
             }
             if input_len != columns.len() {
                 return Err(DatabaseError::ValuesLenMismatch(columns.len(), input_len));
             }
-            columns
+            Cow::Owned(columns)
         };
 
         let projection = input_schema
             .iter()
+            .enumerate()
             .zip(target_columns.iter())
-            .map(|(input_column, target_column)| ScalarExpression::Alias {
-                expr: Box::new(ScalarExpression::column_expr(input_column.clone())),
-                alias: AliasType::Name(target_column.name().to_string()),
-            })
+            .map(
+                |((position, input_column), target_column)| ScalarExpression::Alias {
+                    expr: Box::new(ScalarExpression::column_expr(
+                        input_column.clone(),
+                        position,
+                    )),
+                    alias: AliasType::Name(target_column.name().to_string()),
+                },
+            )
             .collect::<Vec<_>>();
         input_plan = self.bind_project(input_plan, projection)?;
 

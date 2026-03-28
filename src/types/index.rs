@@ -68,8 +68,12 @@ impl IndexMeta {
         let mut exprs = Vec::with_capacity(self.column_ids.len());
 
         for column_id in self.column_ids.iter() {
-            if let Some(column) = table.get_column_by_id(column_id) {
-                exprs.push(ScalarExpression::column_expr(column.clone()));
+            if let Some((position, column)) = table
+                .columns()
+                .enumerate()
+                .find(|(_, column)| column.id() == Some(*column_id))
+            {
+                exprs.push(ScalarExpression::column_expr(column.clone(), position));
             } else {
                 return Err(DatabaseError::column_not_found(column_id.to_string()));
             }

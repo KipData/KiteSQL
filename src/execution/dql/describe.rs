@@ -12,13 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::{ColumnCatalog, TableName};
-use crate::execution::DatabaseError;
-use crate::execution::{spawn_executor, Executor, ReadExecutor};
+use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
+use crate::errors::DatabaseError;
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
 use crate::planner::operator::describe::DescribeOperator;
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::throw;
-use crate::types::tuple::Tuple;
+use crate::storage::Transaction;
 use crate::types::value::{DataValue, Utf8Type};
 use sqlparser::ast::CharLengthUnits;
 use std::sync::LazyLock;
@@ -43,82 +41,112 @@ static EMPTY_KEY_TYPE: LazyLock<DataValue> = LazyLock::new(|| DataValue::Utf8 {
 
 pub struct Describe {
     table_name: TableName,
+    columns: Option<Vec<ColumnRef>>,
+    cursor: usize,
 }
 
 impl From<DescribeOperator> for Describe {
     fn from(op: DescribeOperator) -> Self {
         Describe {
             table_name: op.table_name,
+            columns: None,
+            cursor: 0,
         }
     }
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Describe {
-    fn execute(
+    fn into_executor(
         self,
-        cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
-        transaction: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let table = throw!(
-                co,
-                throw!(
-                    co,
-                    unsafe { &mut (*transaction) }.table(cache.0, self.table_name.clone())
-                )
-                .ok_or(DatabaseError::TableNotFound)
-            );
-            let key_fn = |column: &ColumnCatalog| {
-                if column.desc().is_primary() {
-                    PRIMARY_KEY_TYPE.clone()
-                } else if column.desc().is_unique() {
-                    UNIQUE_KEY_TYPE.clone()
-                } else {
-                    EMPTY_KEY_TYPE.clone()
-                }
-            };
+        arena: &mut ExecArena<'a, T>,
+        _: ExecutionCaches<'a>,
+        _: *mut T,
+    ) -> ExecId {
+        arena.push(ExecNode::Describe(self))
+    }
+}
 
-            for column in table.columns() {
-                let datatype = column.datatype();
-                let default = column
-                    .desc()
-                    .default
-                    .as_ref()
-                    .map(|expr| format!("{expr}"))
-                    .unwrap_or_else(|| "null".to_string());
-                let values = vec![
-                    DataValue::Utf8 {
-                        value: column.name().to_string(),
-                        ty: Utf8Type::Variable(None),
-                        unit: CharLengthUnits::Characters,
-                    },
-                    DataValue::Utf8 {
-                        value: datatype.to_string(),
-                        ty: Utf8Type::Variable(None),
-                        unit: CharLengthUnits::Characters,
-                    },
-                    DataValue::Utf8 {
-                        value: datatype
-                            .raw_len()
-                            .map(|len| len.to_string())
-                            .unwrap_or_else(|| "variable".to_string()),
-                        ty: Utf8Type::Variable(None),
-                        unit: CharLengthUnits::Characters,
-                    },
-                    DataValue::Utf8 {
-                        value: column.nullable().to_string(),
-                        ty: Utf8Type::Variable(None),
-                        unit: CharLengthUnits::Characters,
-                    },
-                    key_fn(column),
-                    DataValue::Utf8 {
-                        value: default,
-                        ty: Utf8Type::Variable(None),
-                        unit: CharLengthUnits::Characters,
-                    },
-                ];
-                co.yield_(Ok(Tuple::new(None, values))).await;
-            }
-        })
+impl Describe {
+    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> Result<(), DatabaseError> {
+        if self.columns.is_none() {
+            let table = arena
+                .transaction_mut()
+                .table(arena.table_cache(), self.table_name.clone())?
+                .ok_or(DatabaseError::TableNotFound)?;
+            self.columns = Some(table.columns().cloned().collect());
+        }
+
+        let Some(column) = self
+            .columns
+            .as_ref()
+            .and_then(|columns| columns.get(self.cursor))
+            .cloned()
+        else {
+            arena.finish();
+            return Ok(());
+        };
+
+        self.cursor += 1;
+
+        let output = arena.result_tuple_mut();
+        output.pk = None;
+        output.values.clear();
+        fill_describe_row(&mut output.values, &column);
+
+        arena.resume();
+        Ok(())
+    }
+}
+
+fn fill_describe_row(values: &mut Vec<DataValue>, column: &ColumnCatalog) {
+    let datatype = column.datatype();
+    let default = column
+        .desc()
+        .default
+        .as_ref()
+        .map(|expr| format!("{expr}"))
+        .unwrap_or_else(|| "null".to_string());
+
+    values.push(DataValue::Utf8 {
+        value: column.name().to_string(),
+        ty: Utf8Type::Variable(None),
+        unit: CharLengthUnits::Characters,
+    });
+    values.push(DataValue::Utf8 {
+        value: datatype.to_string(),
+        ty: Utf8Type::Variable(None),
+        unit: CharLengthUnits::Characters,
+    });
+    values.push(DataValue::Utf8 {
+        value: datatype
+            .raw_len()
+            .map(|len| len.to_string())
+            .unwrap_or_else(|| "variable".to_string()),
+        ty: Utf8Type::Variable(None),
+        unit: CharLengthUnits::Characters,
+    });
+    values.push(DataValue::Utf8 {
+        value: column.nullable().to_string(),
+        ty: Utf8Type::Variable(None),
+        unit: CharLengthUnits::Characters,
+    });
+    values.push(key_value(column));
+    values.push(DataValue::Utf8 {
+        value: default,
+        ty: Utf8Type::Variable(None),
+        unit: CharLengthUnits::Characters,
+    });
+}
+
+fn key_value(column: &ColumnCatalog) -> DataValue {
+    if column.desc().is_primary() {
+        PRIMARY_KEY_TYPE.clone()
+    } else if column.desc().is_unique() {
+        UNIQUE_KEY_TYPE.clone()
+    } else {
+        EMPTY_KEY_TYPE.clone()
     }
 }

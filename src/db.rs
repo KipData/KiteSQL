@@ -14,7 +14,7 @@
 
 use crate::binder::{command_type, Binder, BinderContext, CommandType};
 use crate::errors::DatabaseError;
-use crate::execution::{build_write, Executor};
+use crate::execution::{build_write, ExecArena, Executor};
 use crate::expression::function::scala::ScalarFunctionImpl;
 use crate::expression::function::table::TableFunctionImpl;
 use crate::expression::function::FunctionSummary;
@@ -32,8 +32,10 @@ use crate::optimizer::rule::normalization::NormalizationRuleImpl;
 use crate::parser::parse_sql;
 use crate::planner::operator::Operator;
 use crate::planner::LogicalPlan;
+#[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
+use crate::storage::lmdb::{LmdbConfig, LmdbStorage};
 use crate::storage::memory::MemoryStorage;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
 use crate::storage::rocksdb::{OptimisticRocksStorage, RocksStorage, StorageConfig};
 use crate::storage::{StatisticsMetaCache, Storage, TableCache, Transaction, ViewCache};
 use crate::types::tuple::{SchemaRef, Tuple};
@@ -115,8 +117,10 @@ pub struct DataBaseBuilder {
     scala_functions: ScalaFunctions,
     table_functions: TableFunctions,
     histogram_buckets: Option<usize>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
     storage_config: StorageConfig,
+    #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
+    lmdb_config: LmdbConfig,
 }
 
 impl DataBaseBuilder {
@@ -130,8 +134,10 @@ impl DataBaseBuilder {
             scala_functions: Default::default(),
             table_functions: Default::default(),
             histogram_buckets: None,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
             storage_config: Default::default(),
+            #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
+            lmdb_config: Default::default(),
         };
         builder = builder.register_scala_function(CharLength::new("char_length".to_lowercase()));
         builder =
@@ -168,9 +174,56 @@ impl DataBaseBuilder {
     }
 
     /// Enables or disables RocksDB statistics collection.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "rocksdb", feature = "lmdb")
+    ))]
     pub fn storage_statistics(mut self, enable: bool) -> Self {
-        self.storage_config.enable_statistics = enable;
+        #[cfg(feature = "rocksdb")]
+        {
+            self.storage_config.enable_statistics = enable;
+        }
+        #[cfg(feature = "lmdb")]
+        {
+            self.lmdb_config.enable_statistics = enable;
+        }
+        self
+    }
+
+    /// Sets the LMDB map size in bytes.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
+    pub fn lmdb_map_size(mut self, map_size: usize) -> Self {
+        self.lmdb_config.map_size = map_size;
+        self
+    }
+
+    /// Sets the LMDB environment flags.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
+    pub fn lmdb_flags(mut self, flags: lmdb::EnvironmentFlags) -> Self {
+        self.lmdb_config.flags = flags;
+        self
+    }
+
+    /// Enables or disables LMDB `NO_SYNC`.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
+    pub fn lmdb_no_sync(mut self, enable: bool) -> Self {
+        self.lmdb_config
+            .flags
+            .set(lmdb::EnvironmentFlags::NO_SYNC, enable);
+        self
+    }
+
+    /// Sets the maximum number of LMDB readers.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
+    pub fn lmdb_max_readers(mut self, max_readers: u32) -> Self {
+        self.lmdb_config.max_readers = Some(max_readers);
+        self
+    }
+
+    /// Sets the maximum number of LMDB named databases.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
+    pub fn lmdb_max_dbs(mut self, max_dbs: u32) -> Self {
+        self.lmdb_config.max_dbs = Some(max_dbs);
         self
     }
 
@@ -198,8 +251,8 @@ impl DataBaseBuilder {
     }
 
     /// Builds a RocksDB-backed database.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn build(self) -> Result<Database<RocksStorage>, DatabaseError> {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
+    pub fn build_rocksdb(self) -> Result<Database<RocksStorage>, DatabaseError> {
         let storage = RocksStorage::with_config(self.path, self.storage_config)?;
 
         Self::_build::<RocksStorage>(
@@ -224,9 +277,22 @@ impl DataBaseBuilder {
         )
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Builds a LMDB-backed database.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
+    pub fn build_lmdb(self) -> Result<Database<LmdbStorage>, DatabaseError> {
+        let storage = LmdbStorage::with_config(self.path, self.lmdb_config)?;
+
+        Self::_build::<LmdbStorage>(
+            storage,
+            self.scala_functions,
+            self.table_functions,
+            self.histogram_buckets,
+        )
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
     /// Builds a RocksDB-backed database that uses optimistic transactions.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
     pub fn build_optimistic(self) -> Result<Database<OptimisticRocksStorage>, DatabaseError> {
         let storage = OptimisticRocksStorage::with_config(self.path, self.storage_config)?;
 
@@ -280,10 +346,12 @@ fn default_optimizer_pipeline() -> HepOptimizerPipeline {
         .before_batch(
             "Simplify Filter".to_string(),
             HepBatchStrategy::fix_point_topdown(10),
-            vec![
-                NormalizationRuleImpl::SimplifyFilter,
-                NormalizationRuleImpl::ConstantCalculation,
-            ],
+            vec![NormalizationRuleImpl::SimplifyFilter],
+        )
+        .before_batch(
+            "Constant Calculation".to_string(),
+            HepBatchStrategy::once_topdown(),
+            vec![NormalizationRuleImpl::ConstantCalculation],
         )
         .before_batch(
             "Predicate Pushdown".to_string(),
@@ -321,20 +389,9 @@ fn default_optimizer_pipeline() -> HepOptimizerPipeline {
             ],
         )
         .after_batch(
-            "Eliminate Aggregate".to_string(),
-            HepBatchStrategy::once_topdown(),
-            vec![
-                NormalizationRuleImpl::EliminateRedundantSort,
-                NormalizationRuleImpl::UseStreamDistinct,
-            ],
-        )
-        .after_batch(
             "Expression Remapper".to_string(),
             HepBatchStrategy::once_topdown(),
-            vec![
-                NormalizationRuleImpl::BindExpressionPosition,
-                NormalizationRuleImpl::EvaluatorBind,
-            ],
+            vec![NormalizationRuleImpl::EvaluatorBind],
         )
         .implementations(vec![
             // DQL
@@ -345,6 +402,7 @@ fn default_optimizer_pipeline() -> HepOptimizerPipeline {
             ImplementationRuleImpl::HashJoin,
             ImplementationRuleImpl::Limit,
             ImplementationRuleImpl::Projection,
+            ImplementationRuleImpl::ScalarSubquery,
             ImplementationRuleImpl::SeqScan,
             ImplementationRuleImpl::IndexScan,
             ImplementationRuleImpl::FunctionScan,
@@ -443,12 +501,15 @@ impl<S: Storage> State<S> {
         Ok(best_plan)
     }
 
-    fn execute<'a, A: AsRef<[(&'static str, DataValue)]>>(
+    fn execute<'a, 'txn, A: AsRef<[(&'static str, DataValue)]>>(
         &'a self,
-        transaction: &'a mut S::TransactionType<'_>,
+        transaction: &'a mut S::TransactionType<'txn>,
         stmt: &Statement,
         params: A,
-    ) -> Result<(SchemaRef, Executor<'a>), DatabaseError> {
+    ) -> Result<(SchemaRef, Executor<'a, S::TransactionType<'txn>>), DatabaseError>
+    where
+        S: 'txn,
+    {
         let mut plan = self.build_plan(
             stmt,
             params,
@@ -460,11 +521,14 @@ impl<S: Storage> State<S> {
             self.table_functions(),
         )?;
         let schema = plan.output_schema().clone();
-        let executor = build_write(
+        let mut arena = ExecArena::default();
+        let root = build_write(
+            &mut arena,
             plan,
             (&self.table_cache, &self.view_cache, &self.meta_cache),
             transaction,
         );
+        let executor = Executor::new(arena, root);
 
         Ok((schema, executor))
     }
@@ -611,14 +675,38 @@ impl<S: Storage> Database<S> {
     }
 }
 
-/// Common interface for result iterators returned by database execution APIs.
-///
-/// A result iterator streams [`Tuple`] values and exposes the output schema of
-/// the current statement.
-pub trait ResultIter: Iterator<Item = Result<Tuple, DatabaseError>> {
+/// Borrowing interface for result iterators returned by database execution APIs.
+pub trait BorrowResultIter {
     /// Returns the output schema for the current result set.
     fn schema(&self) -> &SchemaRef;
 
+    /// Returns the next row as a borrowed tuple.
+    fn next_borrowed_tuple(&mut self) -> Result<Option<&Tuple>, DatabaseError>;
+
+    /// Creates a mapped iterator that transforms borrowed tuples into owned output values.
+    fn map_result<F, O>(self, mapper: F) -> MappedResultIter<Self, F, O>
+    where
+        Self: Sized,
+        F: for<'a> FnMut(&'a SchemaRef, &'a Tuple) -> Result<O, DatabaseError>,
+    {
+        let schema = self.schema().clone();
+        MappedResultIter {
+            inner: self,
+            mapper,
+            schema,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Finishes consuming the iterator and flushes any remaining work.
+    fn done(self) -> Result<(), DatabaseError>;
+}
+
+/// Common interface for owned-tuple result iterators.
+///
+/// This remains for compatibility with existing callers that expect
+/// `Iterator<Item = Result<Tuple, DatabaseError>>`.
+pub trait ResultIter: BorrowResultIter + Iterator<Item = Result<Tuple, DatabaseError>> {
     #[cfg(feature = "orm")]
     /// Converts this iterator into a typed ORM iterator.
     ///
@@ -632,9 +720,46 @@ pub trait ResultIter: Iterator<Item = Result<Tuple, DatabaseError>> {
     {
         OrmIter::new(self)
     }
+}
 
-    /// Finishes consuming the iterator and flushes any remaining work.
-    fn done(self) -> Result<(), DatabaseError>;
+impl<I> ResultIter for I where I: BorrowResultIter + Iterator<Item = Result<Tuple, DatabaseError>> {}
+
+/// Typed adapter over a borrowing result iterator.
+pub struct MappedResultIter<I, F, O> {
+    inner: I,
+    mapper: F,
+    schema: SchemaRef,
+    _marker: PhantomData<O>,
+}
+
+impl<I, F, O> MappedResultIter<I, F, O>
+where
+    I: BorrowResultIter,
+    F: for<'a> FnMut(&'a SchemaRef, &'a Tuple) -> Result<O, DatabaseError>,
+{
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    pub fn done(self) -> Result<(), DatabaseError> {
+        self.inner.done()
+    }
+}
+
+impl<I, F, O> Iterator for MappedResultIter<I, F, O>
+where
+    I: BorrowResultIter,
+    F: for<'a> FnMut(&'a SchemaRef, &'a Tuple) -> Result<O, DatabaseError>,
+{
+    type Item = Result<O, DatabaseError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.inner.next_borrowed_tuple() {
+            Ok(Some(tuple)) => Some((self.mapper)(&self.schema, tuple)),
+            Ok(None) => None,
+            Err(err) => Some(Err(err)),
+        }
+    }
 }
 
 #[cfg(feature = "orm")]
@@ -690,7 +815,7 @@ where
 /// Raw result iterator returned by [`Database::run`] and [`Database::execute`].
 pub struct DatabaseIter<'a, S: Storage + 'a> {
     transaction: *mut S::TransactionType<'a>,
-    inner: *mut TransactionIter<'a>,
+    inner: *mut TransactionIter<'a, S::TransactionType<'a>>,
     _guard: Option<MetaDataLock>,
 }
 
@@ -702,6 +827,33 @@ impl<S: Storage> Drop for DatabaseIter<'_, S> {
         if !self.transaction.is_null() {
             unsafe { drop(Box::from_raw(self.transaction)) }
         }
+    }
+}
+
+impl<S: Storage> DatabaseIter<'_, S> {
+    #[inline]
+    pub fn schema(&self) -> &SchemaRef {
+        unsafe { (*self.inner).schema() }
+    }
+
+    #[inline]
+    pub fn next_borrowed_tuple(&mut self) -> Result<Option<&Tuple>, DatabaseError> {
+        let result = unsafe { (*self.inner).next_borrowed_tuple() };
+        if result.as_ref().is_ok_and(Option::is_none) {
+            self._guard = None;
+        }
+        result
+    }
+
+    #[inline]
+    pub fn done(mut self) -> Result<(), DatabaseError> {
+        unsafe {
+            Box::from_raw(mem::replace(&mut self.inner, std::ptr::null_mut())).done()?;
+        }
+        unsafe {
+            Box::from_raw(mem::replace(&mut self.transaction, std::ptr::null_mut())).commit()?;
+        }
+        Ok(())
     }
 }
 
@@ -717,19 +869,17 @@ impl<S: Storage> Iterator for DatabaseIter<'_, S> {
     }
 }
 
-impl<S: Storage> ResultIter for DatabaseIter<'_, S> {
+impl<S: Storage> BorrowResultIter for DatabaseIter<'_, S> {
     fn schema(&self) -> &SchemaRef {
-        unsafe { (*self.inner).schema() }
+        DatabaseIter::schema(self)
     }
 
-    fn done(mut self) -> Result<(), DatabaseError> {
-        unsafe {
-            Box::from_raw(mem::replace(&mut self.inner, std::ptr::null_mut())).done()?;
-        }
-        unsafe {
-            Box::from_raw(mem::replace(&mut self.transaction, std::ptr::null_mut())).commit()?;
-        }
-        Ok(())
+    fn next_borrowed_tuple(&mut self) -> Result<Option<&Tuple>, DatabaseError> {
+        DatabaseIter::next_borrowed_tuple(self)
+    }
+
+    fn done(self) -> Result<(), DatabaseError> {
+        DatabaseIter::done(self)
     }
 }
 
@@ -740,9 +890,12 @@ pub struct DBTransaction<'a, S: Storage + 'a> {
     state: Arc<State<S>>,
 }
 
-impl<S: Storage> DBTransaction<'_, S> {
+impl<'txn, S: Storage> DBTransaction<'txn, S> {
     /// Runs SQL inside the current transaction and returns the final result iterator.
-    pub fn run<T: AsRef<str>>(&mut self, sql: T) -> Result<TransactionIter<'_>, DatabaseError> {
+    pub fn run<'a, T: AsRef<str>>(
+        &'a mut self,
+        sql: T,
+    ) -> Result<TransactionIter<'a, S::TransactionType<'txn>>, DatabaseError> {
         let sql = sql.as_ref();
         let mut statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
         let last_statement = statements
@@ -761,11 +914,11 @@ impl<S: Storage> DBTransaction<'_, S> {
     }
 
     /// Executes a prepared [`Statement`] inside the current transaction.
-    pub fn execute<A: AsRef<[(&'static str, DataValue)]>>(
-        &mut self,
+    pub fn execute<'a, A: AsRef<[(&'static str, DataValue)]>>(
+        &'a mut self,
         statement: &Statement,
         params: A,
-    ) -> Result<TransactionIter<'_>, DatabaseError> {
+    ) -> Result<TransactionIter<'a, S::TransactionType<'txn>>, DatabaseError> {
         if matches!(command_type(statement)?, CommandType::DDL) {
             return Err(DatabaseError::UnsupportedStmt(
                 "`DDL` is not allowed to execute within a transaction".to_string(),
@@ -784,47 +937,73 @@ impl<S: Storage> DBTransaction<'_, S> {
 }
 
 /// Raw result iterator returned by [`DBTransaction::run`] and [`DBTransaction::execute`].
-pub struct TransactionIter<'a> {
-    executor: Executor<'a>,
+pub struct TransactionIter<'a, T: Transaction + 'a> {
+    executor: Executor<'a, T>,
     schema: SchemaRef,
 }
 
-impl<'a> TransactionIter<'a> {
-    fn new(schema: SchemaRef, executor: Executor<'a>) -> Self {
+impl<'a, T: Transaction + 'a> TransactionIter<'a, T> {
+    fn new(schema: SchemaRef, executor: Executor<'a, T>) -> Self {
         Self { executor, schema }
     }
-}
 
-impl Iterator for TransactionIter<'_> {
-    type Item = Result<Tuple, DatabaseError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.executor.next()
-    }
-}
-
-impl ResultIter for TransactionIter<'_> {
-    fn schema(&self) -> &SchemaRef {
+    #[inline]
+    pub fn schema(&self) -> &SchemaRef {
         &self.schema
     }
 
-    fn done(mut self) -> Result<(), DatabaseError> {
-        for result in self.by_ref() {
-            let _ = result?;
-        }
+    #[inline]
+    pub fn next_borrowed_tuple(&mut self) -> Result<Option<&Tuple>, DatabaseError> {
+        self.executor.next_tuple()
+    }
+
+    #[inline]
+    pub fn done(mut self) -> Result<(), DatabaseError> {
+        while self.next_borrowed_tuple()?.is_some() {}
         Ok(())
+    }
+}
+
+impl<T: Transaction> Iterator for TransactionIter<'_, T> {
+    type Item = Result<Tuple, DatabaseError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.executor.next_tuple() {
+            Ok(Some(tuple)) => Some(Ok(tuple.clone())),
+            Ok(None) => None,
+            Err(err) => Some(Err(err)),
+        }
+    }
+}
+
+impl<T: Transaction> BorrowResultIter for TransactionIter<'_, T> {
+    fn schema(&self) -> &SchemaRef {
+        TransactionIter::schema(self)
+    }
+
+    fn next_borrowed_tuple(&mut self) -> Result<Option<&Tuple>, DatabaseError> {
+        TransactionIter::next_borrowed_tuple(self)
+    }
+
+    fn done(self) -> Result<(), DatabaseError> {
+        TransactionIter::done(self)
     }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod test {
+    use crate::binder::{Binder, BinderContext};
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
-    use crate::db::{DataBaseBuilder, DatabaseError, ResultIter};
+    use crate::db::{DataBaseBuilder, DatabaseError};
+    use crate::expression::ScalarExpression;
+    use crate::planner::operator::join::JoinCondition;
+    use crate::planner::operator::Operator;
     use crate::storage::{Storage, TableCache, Transaction};
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use chrono::{Datelike, Local};
+    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -857,7 +1036,7 @@ pub(crate) mod test {
     #[test]
     fn test_run_sql() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let database = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let database = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
         let mut transaction = database.storage.transaction()?;
 
         build_table(database.state.table_cache(), &mut transaction)?;
@@ -873,7 +1052,7 @@ pub(crate) mod test {
     #[test]
     fn test_udf() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
         let mut iter = kite_sql.run("select current_date()")?;
 
         assert_eq!(
@@ -900,7 +1079,7 @@ pub(crate) mod test {
     #[test]
     fn test_udtf() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
         let mut iter = kite_sql.run(
             "SELECT * FROM (select * from table(numbers(10)) a ORDER BY number LIMIT 5) OFFSET 3",
         )?;
@@ -926,9 +1105,305 @@ pub(crate) mod test {
     }
 
     #[test]
+    fn test_join_on_alias_right_key_is_localized() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+
+        kite_sql
+            .run("CREATE TABLE onecolumn (id INT PRIMARY KEY, x INT NULL)")?
+            .done()?;
+        kite_sql
+            .run("CREATE TABLE empty (e_id INT PRIMARY KEY, x INT)")?
+            .done()?;
+
+        let stmt = crate::db::prepare(
+            "SELECT * FROM onecolumn AS a(aid, x) JOIN empty AS b(bid, y) ON a.x = b.y",
+        )?;
+        let transaction = kite_sql.storage.transaction()?;
+        let mut binder = Binder::new(
+            BinderContext::new(
+                kite_sql.state.table_cache(),
+                kite_sql.state.view_cache(),
+                &transaction,
+                kite_sql.state.scala_functions(),
+                kite_sql.state.table_functions(),
+                Arc::new(AtomicUsize::new(0)),
+            ),
+            &[],
+            None,
+        );
+        let source_plan = binder.bind(&stmt)?;
+        let best_plan = kite_sql.state.build_plan(
+            &stmt,
+            [],
+            kite_sql.state.table_cache(),
+            kite_sql.state.view_cache(),
+            kite_sql.state.meta_cache(),
+            &transaction,
+            kite_sql.state.scala_functions(),
+            kite_sql.state.table_functions(),
+        )?;
+
+        let join_plan = match source_plan.operator {
+            Operator::Project(_) => source_plan.childrens.pop_only(),
+            Operator::Join(_) => source_plan,
+            _ => unreachable!("expected a join plan"),
+        };
+        let Operator::Join(join_op) = join_plan.operator else {
+            unreachable!("expected join operator");
+        };
+        let JoinCondition::On { on, filter } = join_op.on else {
+            unreachable!("expected join condition");
+        };
+        assert!(filter.is_none());
+        assert_eq!(on.len(), 1);
+        let ScalarExpression::ColumnRef {
+            position: left_position,
+            ..
+        } = on[0].0.unpack_alias_ref()
+        else {
+            unreachable!("expected left join key column ref");
+        };
+        let ScalarExpression::ColumnRef {
+            position: right_position,
+            ..
+        } = on[0].1.unpack_alias_ref()
+        else {
+            unreachable!("expected right join key column ref");
+        };
+        assert_eq!(*left_position, 1);
+        assert_eq!(*right_position, 1);
+
+        let join_plan = match best_plan.operator {
+            Operator::Project(_) => best_plan.childrens.pop_only(),
+            Operator::Join(_) => best_plan,
+            _ => unreachable!("expected a join plan"),
+        };
+        let Operator::Join(join_op) = join_plan.operator else {
+            unreachable!("expected join operator");
+        };
+        let JoinCondition::On { on, .. } = join_op.on else {
+            unreachable!("expected join condition");
+        };
+        let ScalarExpression::ColumnRef {
+            position: right_position,
+            ..
+        } = on[0].1.unpack_alias_ref()
+        else {
+            unreachable!("expected right join key column ref");
+        };
+        assert_eq!(*right_position, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_join_on_with_right_filter_keeps_localized_key() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+
+        kite_sql
+            .run("CREATE TABLE onecolumn (id INT PRIMARY KEY, x INT NULL)")?
+            .done()?;
+        kite_sql
+            .run("CREATE TABLE twocolumn (t_id INT PRIMARY KEY, x INT NULL, y INT NULL)")?
+            .done()?;
+
+        let stmt = crate::db::prepare(
+            "SELECT o.x, t.y FROM onecolumn o INNER JOIN twocolumn t ON (o.x=t.x AND t.y=53)",
+        )?;
+        let transaction = kite_sql.storage.transaction()?;
+        let mut binder = Binder::new(
+            BinderContext::new(
+                kite_sql.state.table_cache(),
+                kite_sql.state.view_cache(),
+                &transaction,
+                kite_sql.state.scala_functions(),
+                kite_sql.state.table_functions(),
+                Arc::new(AtomicUsize::new(0)),
+            ),
+            &[],
+            None,
+        );
+        let source_plan = binder.bind(&stmt)?;
+        let best_plan = kite_sql.state.build_plan(
+            &stmt,
+            [],
+            kite_sql.state.table_cache(),
+            kite_sql.state.view_cache(),
+            kite_sql.state.meta_cache(),
+            &transaction,
+            kite_sql.state.scala_functions(),
+            kite_sql.state.table_functions(),
+        )?;
+
+        let join_plan = match source_plan.operator {
+            Operator::Project(_) => source_plan.childrens.pop_only(),
+            Operator::Join(_) => source_plan,
+            _ => unreachable!("expected a join plan"),
+        };
+        let Operator::Join(join_op) = join_plan.operator else {
+            unreachable!("expected join operator");
+        };
+        let JoinCondition::On { on, filter } = join_op.on else {
+            unreachable!("expected join condition");
+        };
+        assert_eq!(on.len(), 1);
+        let ScalarExpression::ColumnRef {
+            position: left_position,
+            ..
+        } = on[0].0.unpack_alias_ref()
+        else {
+            unreachable!("expected left join key column ref");
+        };
+        let ScalarExpression::ColumnRef {
+            position: right_position,
+            ..
+        } = on[0].1.unpack_alias_ref()
+        else {
+            unreachable!("expected right join key column ref");
+        };
+        assert_eq!(*left_position, 1);
+        assert_eq!(*right_position, 1);
+        let Some(filter) = filter else {
+            unreachable!("expected join filter");
+        };
+        let mut referenced_columns = Vec::new();
+        filter.visit_referenced_columns(true, &mut |column| {
+            referenced_columns.push(column.clone());
+            true
+        });
+        assert_eq!(referenced_columns.len(), 1);
+        assert_eq!(referenced_columns[0].name(), "y");
+
+        let join_plan = match best_plan.operator {
+            Operator::Project(_) => best_plan.childrens.pop_only(),
+            Operator::Join(_) => best_plan,
+            _ => unreachable!("expected a join plan"),
+        };
+        let Operator::Join(join_op) = join_plan.operator else {
+            unreachable!("expected join operator");
+        };
+        let JoinCondition::On { on, filter } = join_op.on else {
+            unreachable!("expected join condition");
+        };
+        assert_eq!(on.len(), 1);
+        assert!(filter.is_none());
+        let ScalarExpression::ColumnRef {
+            position: left_position,
+            ..
+        } = on[0].0.unpack_alias_ref()
+        else {
+            unreachable!("expected left join key column ref");
+        };
+        let ScalarExpression::ColumnRef {
+            position: right_position,
+            ..
+        } = on[0].1.unpack_alias_ref()
+        else {
+            unreachable!("expected right join key column ref");
+        };
+        assert_eq!(*left_position, 0);
+        assert_eq!(*right_position, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_join_on_with_right_filter_keeps_localized_key_with_data() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+
+        kite_sql
+            .run("CREATE TABLE onecolumn (id INT PRIMARY KEY, x INT NULL)")?
+            .done()?;
+        kite_sql
+            .run("CREATE TABLE twocolumn (t_id INT PRIMARY KEY, x INT NULL, y INT NULL)")?
+            .done()?;
+        kite_sql
+            .run("INSERT INTO onecolumn(id, x) VALUES (0, 44), (1, NULL), (2, 42)")?
+            .done()?;
+        kite_sql
+            .run(
+                "INSERT INTO twocolumn(t_id, x, y) VALUES (0,44,51), (1,NULL,52), (2,42,53), (3,45,45)",
+            )?
+            .done()?;
+
+        let stmt = crate::db::prepare(
+            "SELECT o.x, t.y FROM onecolumn o INNER JOIN twocolumn t ON (o.x=t.x AND t.y=53)",
+        )?;
+        let transaction = kite_sql.storage.transaction()?;
+        let best_plan = kite_sql.state.build_plan(
+            &stmt,
+            [],
+            kite_sql.state.table_cache(),
+            kite_sql.state.view_cache(),
+            kite_sql.state.meta_cache(),
+            &transaction,
+            kite_sql.state.scala_functions(),
+            kite_sql.state.table_functions(),
+        )?;
+        let join_plan = match best_plan.operator {
+            Operator::Project(_) => best_plan.childrens.pop_only(),
+            Operator::Join(_) => best_plan,
+            _ => unreachable!("expected a join plan"),
+        };
+        let Operator::Join(join_op) = join_plan.operator else {
+            unreachable!("expected join operator");
+        };
+        let JoinCondition::On { on, filter } = join_op.on else {
+            unreachable!("expected join condition");
+        };
+        assert_eq!(on.len(), 1);
+        assert!(filter.is_none());
+        let ScalarExpression::ColumnRef {
+            position: left_position,
+            ..
+        } = on[0].0.unpack_alias_ref()
+        else {
+            unreachable!("expected left join key column ref");
+        };
+        let ScalarExpression::ColumnRef {
+            position: right_position,
+            ..
+        } = on[0].1.unpack_alias_ref()
+        else {
+            unreachable!("expected right join key column ref");
+        };
+        assert_eq!(*left_position, 0);
+        assert_eq!(*right_position, 0);
+        let (_, right_child) = join_plan.childrens.pop_twins();
+        let Operator::Filter(filter_op) = right_child.operator else {
+            unreachable!("expected pushed-down filter on right child");
+        };
+        let ScalarExpression::Binary {
+            left_expr,
+            right_expr,
+            ..
+        } = filter_op.predicate
+        else {
+            unreachable!("expected binary filter predicate");
+        };
+        let ScalarExpression::ColumnRef {
+            position: filter_position,
+            ..
+        } = left_expr.unpack_alias_ref()
+        else {
+            unreachable!("expected filter column ref");
+        };
+        assert_eq!(*filter_position, 1);
+        assert!(matches!(
+            *right_expr,
+            ScalarExpression::Constant(DataValue::Int32(53))
+        ));
+
+        Ok(())
+    }
+
+    #[test]
     fn test_prepare_statment() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql
             .run("create table t1 (a int primary key, b int)")?
@@ -1004,7 +1479,7 @@ pub(crate) mod test {
     #[test]
     fn test_run_multi_statement() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql
             .run("create table t_multi (a int primary key, b int)")?
@@ -1030,7 +1505,7 @@ pub(crate) mod test {
     #[test]
     fn test_run_multi_statement_disallow_ddl() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         let err = match kite_sql.run("create table t_multi_ddl (a int primary key); select 1") {
             Ok(_) => panic!("multi-statement execution with DDL should be rejected"),
@@ -1049,7 +1524,7 @@ pub(crate) mod test {
     #[test]
     fn test_bind_error_with_span() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql
             .run("create table t_bind_span(id int primary key)")?
@@ -1059,7 +1534,7 @@ pub(crate) mod test {
             Ok(_) => panic!("expected bind error"),
             Err(err) => err,
         };
-        println!("{}", err);
+        println!("{err}");
 
         match err {
             DatabaseError::ColumnNotFound { span, .. }
@@ -1082,7 +1557,7 @@ pub(crate) mod test {
     #[test]
     fn test_bind_function_error_with_span() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql
             .run("create table t_bind_fn_span(id int primary key)")?
@@ -1092,7 +1567,7 @@ pub(crate) mod test {
             Ok(_) => panic!("expected function bind error"),
             Err(err) => err,
         };
-        println!("{}", err);
+        println!("{err}");
 
         match err {
             DatabaseError::FunctionNotFound { span, .. } => {
@@ -1114,7 +1589,7 @@ pub(crate) mod test {
     #[test]
     fn test_transaction_sql() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql
             .run("create table t1 (a int primary key, b int)")?
@@ -1161,7 +1636,7 @@ pub(crate) mod test {
     #[test]
     fn test_transaction_run_multi_statement() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql
             .run("create table t_multi_tx (a int primary key, b int)")?
@@ -1298,7 +1773,7 @@ pub(crate) mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let result = DataBaseBuilder::path(temp_dir.path())
             .histogram_buckets(0)
-            .build();
+            .build_rocksdb();
 
         assert!(matches!(
             result,

@@ -18,9 +18,8 @@ pub(crate) mod dql;
 pub(crate) mod macros;
 
 use crate::errors::DatabaseError;
-use crate::optimizer::core::memo::GroupExpression;
 use crate::optimizer::core::pattern::Pattern;
-use crate::optimizer::core::rule::{ImplementationRule, MatchPattern};
+use crate::optimizer::core::rule::{BestPhysicalOption, ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::rule::implementation::ddl::add_column::AddColumnImplementation;
 use crate::optimizer::rule::implementation::ddl::change_column::ChangeColumnImplementation;
@@ -43,6 +42,7 @@ use crate::optimizer::rule::implementation::dql::function_scan::FunctionScanImpl
 use crate::optimizer::rule::implementation::dql::join::JoinImplementation;
 use crate::optimizer::rule::implementation::dql::limit::LimitImplementation;
 use crate::optimizer::rule::implementation::dql::projection::ProjectionImplementation;
+use crate::optimizer::rule::implementation::dql::scalar_subquery::ScalarSubqueryImplementation;
 use crate::optimizer::rule::implementation::dql::sort::SortImplementation;
 use crate::optimizer::rule::implementation::dql::table_scan::{
     IndexScanImplementation, SeqScanImplementation,
@@ -52,7 +52,79 @@ use crate::optimizer::rule::implementation::dql::values::ValuesImplementation;
 use crate::planner::operator::Operator;
 use crate::storage::Transaction;
 
-#[derive(Debug, Copy, Clone)]
+#[repr(usize)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum ImplementationRuleRootTag {
+    Aggregate = 0,
+    Dummy,
+    Filter,
+    Join,
+    Limit,
+    Project,
+    ScalarSubquery,
+    TableScan,
+    FunctionScan,
+    Sort,
+    TopK,
+    Values,
+    Analyze,
+    CopyFromFile,
+    CopyToFile,
+    Delete,
+    Insert,
+    Update,
+    AddColumn,
+    ChangeColumn,
+    CreateTable,
+    DropColumn,
+    DropTable,
+    Truncate,
+}
+
+impl ImplementationRuleRootTag {
+    pub const COUNT: usize = Self::Truncate as usize + 1;
+
+    pub fn from_operator(operator: &Operator) -> Option<Self> {
+        match operator {
+            Operator::Aggregate(_) => Some(Self::Aggregate),
+            Operator::Dummy => Some(Self::Dummy),
+            Operator::Filter(_) => Some(Self::Filter),
+            Operator::Join(_) => Some(Self::Join),
+            Operator::Limit(_) => Some(Self::Limit),
+            Operator::Project(_) => Some(Self::Project),
+            Operator::ScalarSubquery(_) => Some(Self::ScalarSubquery),
+            Operator::TableScan(_) => Some(Self::TableScan),
+            Operator::FunctionScan(_) => Some(Self::FunctionScan),
+            Operator::Sort(_) => Some(Self::Sort),
+            Operator::TopK(_) => Some(Self::TopK),
+            Operator::Values(_) => Some(Self::Values),
+            Operator::Analyze(_) => Some(Self::Analyze),
+            Operator::CopyFromFile(_) => Some(Self::CopyFromFile),
+            Operator::CopyToFile(_) => Some(Self::CopyToFile),
+            Operator::Delete(_) => Some(Self::Delete),
+            Operator::Insert(_) => Some(Self::Insert),
+            Operator::Update(_) => Some(Self::Update),
+            Operator::AddColumn(_) => Some(Self::AddColumn),
+            Operator::ChangeColumn(_) => Some(Self::ChangeColumn),
+            Operator::CreateTable(_) => Some(Self::CreateTable),
+            Operator::DropColumn(_) => Some(Self::DropColumn),
+            Operator::DropTable(_) => Some(Self::DropTable),
+            Operator::Truncate(_) => Some(Self::Truncate),
+            Operator::ShowTable
+            | Operator::ShowView
+            | Operator::Explain
+            | Operator::Describe(_)
+            | Operator::Except(_)
+            | Operator::Union(_)
+            | Operator::CreateIndex(_)
+            | Operator::CreateView(_)
+            | Operator::DropView(_)
+            | Operator::DropIndex(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ImplementationRuleImpl {
     // DQL
     GroupByAggregate,
@@ -62,6 +134,7 @@ pub enum ImplementationRuleImpl {
     HashJoin,
     Limit,
     Projection,
+    ScalarSubquery,
     SeqScan,
     FunctionScan,
     IndexScan,
@@ -94,6 +167,7 @@ impl MatchPattern for ImplementationRuleImpl {
             ImplementationRuleImpl::HashJoin => JoinImplementation.pattern(),
             ImplementationRuleImpl::Limit => LimitImplementation.pattern(),
             ImplementationRuleImpl::Projection => ProjectionImplementation.pattern(),
+            ImplementationRuleImpl::ScalarSubquery => ScalarSubqueryImplementation.pattern(),
             ImplementationRuleImpl::SeqScan => SeqScanImplementation.pattern(),
             ImplementationRuleImpl::IndexScan => IndexScanImplementation.pattern(),
             ImplementationRuleImpl::FunctionScan => FunctionScanImplementation.pattern(),
@@ -116,88 +190,143 @@ impl MatchPattern for ImplementationRuleImpl {
     }
 }
 
+impl ImplementationRuleImpl {
+    pub fn root_tag(&self) -> ImplementationRuleRootTag {
+        match self {
+            ImplementationRuleImpl::GroupByAggregate | ImplementationRuleImpl::SimpleAggregate => {
+                ImplementationRuleRootTag::Aggregate
+            }
+            ImplementationRuleImpl::Dummy => ImplementationRuleRootTag::Dummy,
+            ImplementationRuleImpl::Filter => ImplementationRuleRootTag::Filter,
+            ImplementationRuleImpl::HashJoin => ImplementationRuleRootTag::Join,
+            ImplementationRuleImpl::Limit => ImplementationRuleRootTag::Limit,
+            ImplementationRuleImpl::Projection => ImplementationRuleRootTag::Project,
+            ImplementationRuleImpl::ScalarSubquery => ImplementationRuleRootTag::ScalarSubquery,
+            ImplementationRuleImpl::SeqScan | ImplementationRuleImpl::IndexScan => {
+                ImplementationRuleRootTag::TableScan
+            }
+            ImplementationRuleImpl::FunctionScan => ImplementationRuleRootTag::FunctionScan,
+            ImplementationRuleImpl::Sort => ImplementationRuleRootTag::Sort,
+            ImplementationRuleImpl::TopK => ImplementationRuleRootTag::TopK,
+            ImplementationRuleImpl::Values => ImplementationRuleRootTag::Values,
+            ImplementationRuleImpl::Analyze => ImplementationRuleRootTag::Analyze,
+            ImplementationRuleImpl::CopyFromFile => ImplementationRuleRootTag::CopyFromFile,
+            ImplementationRuleImpl::CopyToFile => ImplementationRuleRootTag::CopyToFile,
+            ImplementationRuleImpl::Delete => ImplementationRuleRootTag::Delete,
+            ImplementationRuleImpl::Insert => ImplementationRuleRootTag::Insert,
+            ImplementationRuleImpl::Update => ImplementationRuleRootTag::Update,
+            ImplementationRuleImpl::AddColumn => ImplementationRuleRootTag::AddColumn,
+            ImplementationRuleImpl::ChangeColumn => ImplementationRuleRootTag::ChangeColumn,
+            ImplementationRuleImpl::CreateTable => ImplementationRuleRootTag::CreateTable,
+            ImplementationRuleImpl::DropColumn => ImplementationRuleRootTag::DropColumn,
+            ImplementationRuleImpl::DropTable => ImplementationRuleRootTag::DropTable,
+            ImplementationRuleImpl::Truncate => ImplementationRuleRootTag::Truncate,
+        }
+    }
+}
+
 impl<T: Transaction> ImplementationRule<T> for ImplementationRuleImpl {
-    fn to_expression(
+    fn update_best_option(
         &self,
         operator: &Operator,
         loader: &StatisticMetaLoader<'_, T>,
-        group_expr: &mut GroupExpression,
+        best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
         match self {
-            ImplementationRuleImpl::GroupByAggregate => {
-                GroupByAggregateImplementation.to_expression(operator, loader, group_expr)?
-            }
-            ImplementationRuleImpl::SimpleAggregate => {
-                SimpleAggregateImplementation.to_expression(operator, loader, group_expr)?
-            }
+            ImplementationRuleImpl::GroupByAggregate => GroupByAggregateImplementation
+                .update_best_option(operator, loader, best_physical_option)?,
+            ImplementationRuleImpl::SimpleAggregate => SimpleAggregateImplementation
+                .update_best_option(operator, loader, best_physical_option)?,
             ImplementationRuleImpl::Dummy => {
-                DummyImplementation.to_expression(operator, loader, group_expr)?
+                DummyImplementation.update_best_option(operator, loader, best_physical_option)?
             }
             ImplementationRuleImpl::Filter => {
-                FilterImplementation.to_expression(operator, loader, group_expr)?
+                FilterImplementation.update_best_option(operator, loader, best_physical_option)?
             }
             ImplementationRuleImpl::HashJoin => {
-                JoinImplementation.to_expression(operator, loader, group_expr)?
+                JoinImplementation.update_best_option(operator, loader, best_physical_option)?
             }
             ImplementationRuleImpl::Limit => {
-                LimitImplementation.to_expression(operator, loader, group_expr)?
+                LimitImplementation.update_best_option(operator, loader, best_physical_option)?
             }
-            ImplementationRuleImpl::Projection => {
-                ProjectionImplementation.to_expression(operator, loader, group_expr)?
-            }
+            ImplementationRuleImpl::Projection => ProjectionImplementation.update_best_option(
+                operator,
+                loader,
+                best_physical_option,
+            )?,
+            ImplementationRuleImpl::ScalarSubquery => ScalarSubqueryImplementation
+                .update_best_option(operator, loader, best_physical_option)?,
             ImplementationRuleImpl::SeqScan => {
-                SeqScanImplementation.to_expression(operator, loader, group_expr)?
+                SeqScanImplementation.update_best_option(operator, loader, best_physical_option)?
             }
-            ImplementationRuleImpl::IndexScan => {
-                IndexScanImplementation.to_expression(operator, loader, group_expr)?
-            }
-            ImplementationRuleImpl::FunctionScan => {
-                FunctionScanImplementation.to_expression(operator, loader, group_expr)?
-            }
+            ImplementationRuleImpl::IndexScan => IndexScanImplementation.update_best_option(
+                operator,
+                loader,
+                best_physical_option,
+            )?,
+            ImplementationRuleImpl::FunctionScan => FunctionScanImplementation.update_best_option(
+                operator,
+                loader,
+                best_physical_option,
+            )?,
             ImplementationRuleImpl::Sort => {
-                SortImplementation.to_expression(operator, loader, group_expr)?
+                SortImplementation.update_best_option(operator, loader, best_physical_option)?
             }
             ImplementationRuleImpl::TopK => {
-                TopKImplementation.to_expression(operator, loader, group_expr)?
+                TopKImplementation.update_best_option(operator, loader, best_physical_option)?
             }
             ImplementationRuleImpl::Values => {
-                ValuesImplementation.to_expression(operator, loader, group_expr)?
+                ValuesImplementation.update_best_option(operator, loader, best_physical_option)?
             }
-            ImplementationRuleImpl::CopyFromFile => {
-                CopyFromFileImplementation.to_expression(operator, loader, group_expr)?
-            }
-            ImplementationRuleImpl::CopyToFile => {
-                CopyToFileImplementation.to_expression(operator, loader, group_expr)?
-            }
+            ImplementationRuleImpl::CopyFromFile => CopyFromFileImplementation.update_best_option(
+                operator,
+                loader,
+                best_physical_option,
+            )?,
+            ImplementationRuleImpl::CopyToFile => CopyToFileImplementation.update_best_option(
+                operator,
+                loader,
+                best_physical_option,
+            )?,
             ImplementationRuleImpl::Delete => {
-                DeleteImplementation.to_expression(operator, loader, group_expr)?
+                DeleteImplementation.update_best_option(operator, loader, best_physical_option)?
             }
             ImplementationRuleImpl::Insert => {
-                InsertImplementation.to_expression(operator, loader, group_expr)?
+                InsertImplementation.update_best_option(operator, loader, best_physical_option)?
             }
             ImplementationRuleImpl::Update => {
-                UpdateImplementation.to_expression(operator, loader, group_expr)?
+                UpdateImplementation.update_best_option(operator, loader, best_physical_option)?
             }
-            ImplementationRuleImpl::AddColumn => {
-                AddColumnImplementation.to_expression(operator, loader, group_expr)?
-            }
-            ImplementationRuleImpl::ChangeColumn => {
-                ChangeColumnImplementation.to_expression(operator, loader, group_expr)?
-            }
-            ImplementationRuleImpl::CreateTable => {
-                CreateTableImplementation.to_expression(operator, loader, group_expr)?
-            }
-            ImplementationRuleImpl::DropColumn => {
-                DropColumnImplementation.to_expression(operator, loader, group_expr)?
-            }
-            ImplementationRuleImpl::DropTable => {
-                DropTableImplementation.to_expression(operator, loader, group_expr)?
-            }
+            ImplementationRuleImpl::AddColumn => AddColumnImplementation.update_best_option(
+                operator,
+                loader,
+                best_physical_option,
+            )?,
+            ImplementationRuleImpl::ChangeColumn => ChangeColumnImplementation.update_best_option(
+                operator,
+                loader,
+                best_physical_option,
+            )?,
+            ImplementationRuleImpl::CreateTable => CreateTableImplementation.update_best_option(
+                operator,
+                loader,
+                best_physical_option,
+            )?,
+            ImplementationRuleImpl::DropColumn => DropColumnImplementation.update_best_option(
+                operator,
+                loader,
+                best_physical_option,
+            )?,
+            ImplementationRuleImpl::DropTable => DropTableImplementation.update_best_option(
+                operator,
+                loader,
+                best_physical_option,
+            )?,
             ImplementationRuleImpl::Truncate => {
-                TruncateImplementation.to_expression(operator, loader, group_expr)?
+                TruncateImplementation.update_best_option(operator, loader, best_physical_option)?
             }
             ImplementationRuleImpl::Analyze => {
-                AnalyzeImplementation.to_expression(operator, loader, group_expr)?
+                AnalyzeImplementation.update_best_option(operator, loader, best_physical_option)?
             }
         }
 

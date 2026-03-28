@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use kite_sql::db::{Database, ResultIter};
+use kite_sql::db::Database;
 use kite_sql::errors::DatabaseError;
 use kite_sql::storage::rocksdb::RocksStorage;
 use sqllogictest::{DBOutput, DefaultColumnType, DB};
@@ -33,14 +33,14 @@ impl DB for SQLBase {
         let types = vec![DefaultColumnType::Any; iter.schema().len()];
         let mut rows = Vec::new();
 
-        for tuple in iter.by_ref() {
+        while let Some(tuple) = iter.next_borrowed_tuple()? {
             rows.push(
-                tuple?
+                tuple
                     .values
-                    .into_iter()
+                    .iter()
                     .map(|value| format!("{}", value))
                     .collect(),
-            )
+            );
         }
         iter.done()?;
         println!(" |— time spent: {:?}", start.elapsed());

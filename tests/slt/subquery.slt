@@ -91,6 +91,27 @@ SELECT id, a, b FROM t2 WHERE a*2 in (SELECT a FROM t3 where a/2 in (select a fr
 0 1 2
 3 4 5
 
+# Regression: alias projection inside an IN subquery must keep the right-side
+# output positions stable so the final rows are still ordered/filterable.
+statement ok
+CREATE TABLE tab64784(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 VARCHAR, col3 INTEGER, col4 FLOAT, col5 VARCHAR);
+
+statement ok
+INSERT INTO tab64784 VALUES(0,212,202.62,'nshdy',212,208.79,'wsxfc'),(1,213,203.64,'xwfuo',213,209.26,'lyswz'),(2,214,204.82,'jnued',216,210.48,'qczzf'),(3,215,205.40,'jtijf',217,211.96,'dpugl'),(4,216,206.3,'dpdzk',219,212.43,'xfirg'),(5,218,207.43,'qpwyw',220,213.50,'fmgky'),(6,219,208.3,'uooxb',221,215.30,'xpmdy'),(7,220,209.54,'ndtbb',225,218.8,'ivqyw'),(8,221,210.65,'zjpts',226,219.82,'sezsm'),(9,222,211.57,'slaxq',227,220.91,'bdqyb');
+
+query II
+SELECT pk, col0 FROM tab64784 WHERE (col0 IN (SELECT col3 FROM tab64784 WHERE col3 IS NULL OR (col1 < 22.54) OR col4 > 85.74) OR ((col4 IS NULL)) AND col3 < 8 OR (col4 > 82.93 AND (col0 <= 61) AND col0 > 94 AND col0 > 15)) ORDER BY col0 DESC;
+----
+8 221
+7 220
+6 219
+4 216
+1 213
+0 212
+
+statement ok
+DROP TABLE tab64784;
+
 statement ok
 drop table t2;
 
@@ -153,6 +174,92 @@ where id in (
 ----
 1
 2
+
+# Regression: correlated IN should still work after column pruning rewrites.
+statement ok
+create table prune_t1(id int primary key, a int);
+
+statement ok
+create table prune_t2(id int primary key, b int);
+
+statement ok
+insert into prune_t1 values (0, 1), (1, 2), (2, 3);
+
+statement ok
+insert into prune_t2 values (0, 2), (1, 3);
+
+query I rowsort
+select a from prune_t1 where a in (select b from prune_t2 where b = a) order by a;
+----
+2
+3
+
+statement ok
+drop table prune_t1;
+
+statement ok
+drop table prune_t2;
+
+# Regression: tuple IN should keep the tuple-subquery path instead of falling
+# back to the scalar temporary-alias rewrite.
+statement ok
+create table kv(k int primary key, v int);
+
+statement ok
+insert into kv values (1, 2), (3, 4), (5, 6), (7, 8);
+
+query II
+select * from kv where (k, v) in (select * from kv) order by k;
+----
+1 2
+3 4
+5 6
+7 8
+
+statement ok
+drop table kv;
+
+statement ok
+create table scalar_outer(id int primary key);
+
+statement ok
+create table scalar_inner(v int primary key);
+
+statement ok
+insert into scalar_outer values (1), (2);
+
+query IT
+select id, (select v from scalar_inner where v = -1) from scalar_outer order by id;
+----
+1 null
+2 null
+
+statement ok
+drop table scalar_outer;
+
+statement ok
+drop table scalar_inner;
+
+statement ok
+create table scalar_outer_err(id int primary key);
+
+statement ok
+create table scalar_inner_err(v int primary key);
+
+statement ok
+insert into scalar_outer_err values (1);
+
+statement ok
+insert into scalar_inner_err values (1), (2);
+
+statement error
+select * from scalar_outer_err where id = (select v from scalar_inner_err);
+
+statement ok
+drop table scalar_outer_err;
+
+statement ok
+drop table scalar_inner_err;
 
 statement error
 select count(*) from users

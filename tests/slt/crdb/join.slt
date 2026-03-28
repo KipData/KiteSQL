@@ -207,19 +207,21 @@ query II
 SELECT * FROM empty AS a JOIN onecolumn AS b USING(x)
 ----
 
+# Regression: SELECT * on outer joins should keep left-to-right output slots
+# even when the right side is empty.
 query IT
 SELECT * FROM onecolumn AS a(aid, x) LEFT OUTER JOIN empty AS b(bid, y) ON a.x = b.y ORDER BY a.x
 ----
-null null 2 42
-null null 0 44
-null null 1 null
+2 42 null null
+0 44 null null
+1 null null null
 
 query I rowsort
 SELECT * FROM onecolumn AS a LEFT OUTER JOIN empty AS b USING(x) ORDER BY x
 ----
-null 0 44
-null 1 null
-null 2 42
+0 44 null
+1 null null
+2 42 null
 
 query I
 SELECT * FROM empty AS a(aid, x) LEFT OUTER JOIN onecolumn AS b(bid, y) ON a.x = b.y
@@ -250,16 +252,16 @@ SELECT * FROM empty AS a FULL OUTER JOIN onecolumn AS b USING(x) ORDER BY x
 query IIII
 SELECT * FROM onecolumn AS a(aid, x) FULL OUTER JOIN empty AS b(bid, y) ON a.x = b.y ORDER BY a.x
 ----
-null null 2 42
-null null 0 44
-null null 1 null
+2 42 null null
+0 44 null null
+1 null null null
 
 query III rowsort
 SELECT * FROM onecolumn AS a FULL OUTER JOIN empty AS b USING(x) ORDER BY x
 ----
-null 0 44
-null 1 null
-null 2 42
+0 44 null
+1 null null
+2 42 null
 
 query II
 SELECT * FROM empty AS a(aid, x) FULL OUTER JOIN onecolumn AS b(bid, y) ON a.x = b.y ORDER BY b.y
@@ -294,6 +296,8 @@ SELECT * FROM twocolumn AS a JOIN twocolumn AS b ON a.x = a.y order by a.x
 3 45 45 2 42 53
 3 45 45 3 45 45
 
+# Regression: the right-side filter should stay localized after ON pushdown,
+# so this inner join still finds the single matching row.
 query II
 SELECT o.x, t.y FROM onecolumn o INNER JOIN twocolumn t ON (o.x=t.x AND t.y=53)
 ----

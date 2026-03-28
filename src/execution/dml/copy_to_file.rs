@@ -14,63 +14,75 @@
 
 use crate::binder::copy::FileFormat;
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, spawn_executor, Executor, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
 use crate::planner::operator::copy_to_file::CopyToFileOperator;
 use crate::planner::LogicalPlan;
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::throw;
+use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
 
 pub struct CopyToFile {
     op: CopyToFileOperator,
-    input: LogicalPlan,
+    input_plan: Option<LogicalPlan>,
+    input: Option<ExecId>,
 }
 
 impl From<(CopyToFileOperator, LogicalPlan)> for CopyToFile {
     fn from((op, input): (CopyToFileOperator, LogicalPlan)) -> Self {
-        CopyToFile { op, input }
+        CopyToFile {
+            op,
+            input_plan: Some(input),
+            input: None,
+        }
     }
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for CopyToFile {
-    fn execute(
-        self,
-        cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
+    fn into_executor(
+        mut self,
+        arena: &mut ExecArena<'a, T>,
+        cache: ExecutionCaches<'a>,
         transaction: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let this = self;
-            let mut writer = throw!(co, this.create_writer());
-            let CopyToFile { input, op } = this;
-
-            let coroutine = build_read(input, cache, transaction);
-
-            for tuple in coroutine {
-                let tuple = throw!(co, tuple);
-
-                throw!(
-                    co,
-                    writer
-                        .write_record(
-                            tuple
-                                .values
-                                .iter()
-                                .map(|v| v.to_string())
-                                .collect::<Vec<_>>()
-                        )
-                        .map_err(DatabaseError::from)
-                );
-            }
-
-            throw!(co, writer.flush().map_err(DatabaseError::from));
-
-            co.yield_(Ok(TupleBuilder::build_result(format!("{op}"))))
-                .await;
-        })
+    ) -> ExecId {
+        self.input = Some(build_read(
+            arena,
+            self.input_plan
+                .take()
+                .expect("copy to file input plan initialized"),
+            cache,
+            transaction,
+        ));
+        arena.push(ExecNode::CopyToFile(self))
     }
 }
 
 impl CopyToFile {
+    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> Result<(), DatabaseError> {
+        let Some(input) = self.input.take() else {
+            arena.finish();
+            return Ok(());
+        };
+
+        let mut writer = self.create_writer()?;
+        while arena.next_tuple(input)? {
+            let tuple = arena.result_tuple();
+            writer.write_record(
+                tuple
+                    .values
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>(),
+            )?;
+        }
+        writer.flush().map_err(DatabaseError::from)?;
+
+        TupleBuilder::build_result_into(arena.result_tuple_mut(), format!("{}", self.op));
+        arena.resume();
+        Ok(())
+    }
+
     fn create_writer(&self) -> Result<csv::Writer<std::fs::File>, DatabaseError> {
         let mut writer = match self.op.target.format {
             FileFormat::Csv {
@@ -104,7 +116,7 @@ mod tests {
     use super::*;
     use crate::binder::copy::ExtSource;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation, ColumnSummary};
-    use crate::db::{DataBaseBuilder, ResultIter};
+    use crate::db::DataBaseBuilder;
     use crate::errors::DatabaseError;
     use crate::planner::operator::table_scan::TableScanOperator;
     use crate::storage::Storage;
@@ -180,7 +192,7 @@ mod tests {
         };
 
         let temp_dir = TempDir::new().unwrap();
-        let db = DataBaseBuilder::path(temp_dir.path()).build()?;
+        let db = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
         db.run("create table t1 (a int primary key, b float, c varchar(10))")?
             .done()?;
         db.run("insert into t1 values (1, 1.1, 'foo')")?.done()?;
@@ -195,9 +207,15 @@ mod tests {
 
         let executor = CopyToFile {
             op: op.clone(),
-            input: TableScanOperator::build("t1".to_string().into(), table, true)?,
+            input_plan: Some(TableScanOperator::build(
+                "t1".to_string().into(),
+                table,
+                true,
+            )?),
+            input: None,
         };
-        let mut executor = executor.execute(
+        let mut executor = crate::execution::execute(
+            executor,
             (
                 db.state.table_cache(),
                 db.state.view_cache(),
@@ -222,10 +240,7 @@ mod tests {
         let record3 = records.next().unwrap()?;
         assert_eq!(record3, vec!["3", "2.1", "Kite"]);
 
-        assert!(records.next().is_none());
-
-        assert_eq!(tuple, TupleBuilder::build_result(format!("{op}")));
-
+        assert_eq!(tuple.values[0].to_string(), format!("{op}"));
         Ok(())
     }
 }

@@ -39,7 +39,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
     ) -> Result<ScalarExpression, DatabaseError> {
         let mut expr = self.bind_expr(expr)?;
 
-        if !expr.referenced_columns(true).is_empty() {
+        if expr.any_referenced_column(true, |_| true) {
             return Err(DatabaseError::UnsupportedStmt(
                 "column is not allowed to exist in default".to_string(),
             ));

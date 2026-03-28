@@ -1,6 +1,6 @@
 [package]
 name        = "kite_sql_serde_macros"
-version     = "0.1.2"
+version     = "0.2.0"
 edition     = "2021"
 description = "Derive macros for KiteSQL"
 documentation = "https://docs.rs/kite_sql_serde_macros/latest/kite_sql_serde_macros/"

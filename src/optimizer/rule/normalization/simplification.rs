@@ -15,65 +15,56 @@
 use crate::errors::DatabaseError;
 use crate::expression::simplify::{ConstantCalculator, Simplify};
 use crate::expression::visitor_mut::VisitorMut;
-use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
-use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
+use crate::optimizer::core::rule::NormalizationRule;
 use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
-use std::sync::LazyLock;
-
-static CONSTANT_CALCULATION_RULE: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |_| true,
-    children: PatternChildrenPredicate::None,
-});
-
-static SIMPLIFY_FILTER_RULE: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |op| matches!(op, Operator::Filter(_)),
-    children: PatternChildrenPredicate::Predicate(vec![Pattern {
-        predicate: |op| !matches!(op, Operator::Aggregate(_)),
-        children: PatternChildrenPredicate::Recursive,
-    }]),
-});
 
 #[derive(Copy, Clone)]
 pub struct ConstantCalculation;
 
+pub(crate) fn constant_calculation_current(plan: &mut LogicalPlan) -> Result<(), DatabaseError> {
+    let operator = &mut plan.operator;
+
+    match operator {
+        Operator::Aggregate(op) => {
+            for expr in op.agg_calls.iter_mut().chain(op.groupby_exprs.iter_mut()) {
+                ConstantCalculator.visit(expr)?;
+            }
+        }
+        Operator::Filter(op) => {
+            ConstantCalculator.visit(&mut op.predicate)?;
+        }
+        Operator::Join(op) => {
+            if let JoinCondition::On { on, filter } = &mut op.on {
+                for (left_expr, right_expr) in on {
+                    ConstantCalculator.visit(left_expr)?;
+                    ConstantCalculator.visit(right_expr)?;
+                }
+                if let Some(expr) = filter {
+                    ConstantCalculator.visit(expr)?;
+                }
+            }
+        }
+        Operator::Project(op) => {
+            for expr in &mut op.exprs {
+                ConstantCalculator.visit(expr)?;
+            }
+        }
+        Operator::Sort(op) => {
+            for field in &mut op.sort_fields {
+                ConstantCalculator.visit(&mut field.expr)?;
+            }
+        }
+        _ => (),
+    }
+
+    Ok(())
+}
+
 impl ConstantCalculation {
     fn _apply(plan: &mut LogicalPlan) -> Result<(), DatabaseError> {
-        let operator = &mut plan.operator;
-
-        match operator {
-            Operator::Aggregate(op) => {
-                for expr in op.agg_calls.iter_mut().chain(op.groupby_exprs.iter_mut()) {
-                    ConstantCalculator.visit(expr)?;
-                }
-            }
-            Operator::Filter(op) => {
-                ConstantCalculator.visit(&mut op.predicate)?;
-            }
-            Operator::Join(op) => {
-                if let JoinCondition::On { on, filter } = &mut op.on {
-                    for (left_expr, right_expr) in on {
-                        ConstantCalculator.visit(left_expr)?;
-                        ConstantCalculator.visit(right_expr)?;
-                    }
-                    if let Some(expr) = filter {
-                        ConstantCalculator.visit(expr)?;
-                    }
-                }
-            }
-            Operator::Project(op) => {
-                for expr in &mut op.exprs {
-                    ConstantCalculator.visit(expr)?;
-                }
-            }
-            Operator::Sort(op) => {
-                for field in &mut op.sort_fields {
-                    ConstantCalculator.visit(&mut field.expr)?;
-                }
-            }
-            _ => (),
-        }
+        constant_calculation_current(plan)?;
         match plan.childrens.as_mut() {
             Childrens::Only(child) => Self::_apply(child.as_mut())?,
             Childrens::Twins { left, right } => {
@@ -87,12 +78,6 @@ impl ConstantCalculation {
     }
 }
 
-impl MatchPattern for ConstantCalculation {
-    fn pattern(&self) -> &Pattern {
-        &CONSTANT_CALCULATION_RULE
-    }
-}
-
 impl NormalizationRule for ConstantCalculation {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
         Self::_apply(plan)?;
@@ -103,9 +88,17 @@ impl NormalizationRule for ConstantCalculation {
 #[derive(Copy, Clone)]
 pub struct SimplifyFilter;
 
-impl MatchPattern for SimplifyFilter {
-    fn pattern(&self) -> &Pattern {
-        &SIMPLIFY_FILTER_RULE
+fn has_aggregate_descendant(plan: &LogicalPlan) -> bool {
+    if matches!(plan.operator, Operator::Aggregate(_)) {
+        return true;
+    }
+
+    match plan.childrens.as_ref() {
+        Childrens::Only(child) => has_aggregate_descendant(child),
+        Childrens::Twins { left, right } => {
+            has_aggregate_descendant(left) || has_aggregate_descendant(right)
+        }
+        Childrens::None => false,
     }
 }
 
@@ -114,6 +107,11 @@ impl NormalizationRule for SimplifyFilter {
         if let Operator::Filter(filter_op) = &mut plan.operator {
             if filter_op.is_optimized {
                 return Ok(false);
+            }
+            if let Some(child) = plan.childrens.iter().next() {
+                if has_aggregate_descendant(child) {
+                    return Ok(false);
+                }
             }
             ConstantCalculator.visit(&mut filter_op.predicate)?;
             Simplify::default().visit(&mut filter_op.predicate)?;
@@ -358,9 +356,10 @@ mod test {
                         op: UnaryOperator::Minus,
                         expr: Box::new(ScalarExpression::Binary {
                             op: BinaryOperator::Plus,
-                            left_expr: Box::new(ScalarExpression::column_expr(ColumnRef::from(
-                                c1_col
-                            ))),
+                            left_expr: Box::new(ScalarExpression::column_expr(
+                                ColumnRef::from(c1_col),
+                                0
+                            )),
                             right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(1))),
                             evaluator: None,
                             ty: LogicalType::Integer,
@@ -368,7 +367,9 @@ mod test {
                         evaluator: None,
                         ty: LogicalType::Integer,
                     }),
-                    right_expr: Box::new(ScalarExpression::column_expr(ColumnRef::from(c2_col))),
+                    right_expr: Box::new(
+                        ScalarExpression::column_expr(ColumnRef::from(c2_col), 1,)
+                    ),
                     evaluator: None,
                     ty: LogicalType::Boolean,
                 }

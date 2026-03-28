@@ -52,9 +52,7 @@ impl ScalarExpression {
                 let Some((tuple, _)) = tuple else {
                     return Ok(DataValue::Null);
                 };
-                let position = position
-                    .ok_or_else(|| DatabaseError::UnbindExpressionPosition(self.clone()))?;
-                Ok(tuple.into()[position].clone())
+                Ok(tuple.into()[*position].clone())
             }
             ScalarExpression::Alias { expr, alias } => {
                 let Some((tuple, schema)) = tuple else {

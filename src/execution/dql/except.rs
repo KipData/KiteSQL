@@ -12,58 +12,92 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::execution::{build_read, spawn_executor, Executor, ReadExecutor};
+use crate::errors::DatabaseError;
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
 use crate::planner::LogicalPlan;
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::throw;
+use crate::storage::Transaction;
+use crate::types::tuple::Tuple;
 use ahash::{HashMap, HashMapExt};
 pub struct Except {
-    left_input: LogicalPlan,
-    right_input: LogicalPlan,
+    left_plan: Option<LogicalPlan>,
+    right_plan: Option<LogicalPlan>,
+    left_input: ExecId,
+    right_input: ExecId,
+    except_col: HashMap<Tuple, usize>,
+    built: bool,
 }
 
 impl From<(LogicalPlan, LogicalPlan)> for Except {
     fn from((left_input, right_input): (LogicalPlan, LogicalPlan)) -> Self {
         Except {
-            left_input,
-            right_input,
+            left_plan: Some(left_input),
+            right_plan: Some(right_input),
+            left_input: 0,
+            right_input: 0,
+            except_col: HashMap::new(),
+            built: false,
         }
     }
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Except {
-    fn execute(
-        self,
-        cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
+    fn into_executor(
+        mut self,
+        arena: &mut ExecArena<'a, T>,
+        cache: ExecutionCaches<'a>,
         transaction: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let Except {
-                left_input,
-                right_input,
-            } = self;
+    ) -> ExecId {
+        self.left_input = build_read(
+            arena,
+            self.left_plan
+                .take()
+                .expect("except left input plan initialized"),
+            cache,
+            transaction,
+        );
+        self.right_input = build_read(
+            arena,
+            self.right_plan
+                .take()
+                .expect("except right input plan initialized"),
+            cache,
+            transaction,
+        );
+        arena.push(ExecNode::Except(self))
+    }
+}
 
-            let mut coroutine = build_read(right_input, cache, transaction);
-
-            let mut except_col = HashMap::new();
-
-            for tuple in coroutine.by_ref() {
-                let tuple = throw!(co, tuple);
-                *except_col.entry(tuple).or_insert(0usize) += 1;
+impl Except {
+    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> Result<(), DatabaseError> {
+        if !self.built {
+            while arena.next_tuple(self.right_input)? {
+                *self
+                    .except_col
+                    .entry(arena.result_tuple().clone())
+                    .or_insert(0) += 1;
             }
+            self.built = true;
+        }
 
-            let coroutine = build_read(left_input, cache, transaction);
+        loop {
+            if !arena.next_tuple(self.left_input)? {
+                arena.finish();
+                return Ok(());
+            }
+            let tuple = arena.result_tuple();
 
-            for tuple in coroutine {
-                let tuple = throw!(co, tuple);
-                if let Some(count) = except_col.get_mut(&tuple) {
-                    if *count > 0 {
-                        *count -= 1;
-                        continue;
-                    }
+            if let Some(count) = self.except_col.get_mut(tuple) {
+                if *count > 0 {
+                    *count -= 1;
+                    continue;
                 }
-                co.yield_(Ok(tuple)).await;
             }
-        })
+
+            arena.resume();
+            return Ok(());
+        }
     }
 }

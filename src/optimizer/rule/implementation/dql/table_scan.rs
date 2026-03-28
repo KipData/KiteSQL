@@ -13,9 +13,8 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::optimizer::core::memo::{Expression, GroupExpression};
 use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
-use crate::optimizer::core::rule::{ImplementationRule, MatchPattern};
+use crate::optimizer::core::rule::{BestPhysicalOption, ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
 use crate::storage::Transaction;
@@ -37,11 +36,11 @@ impl MatchPattern for SeqScanImplementation {
 }
 
 impl<T: Transaction> ImplementationRule<T> for SeqScanImplementation {
-    fn to_expression(
+    fn update_best_option(
         &self,
         op: &Operator,
         loader: &StatisticMetaLoader<T>,
-        group_expr: &mut GroupExpression,
+        best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
         if let Operator::TableScan(scan_op) = op {
             let cost = scan_op
@@ -53,10 +52,11 @@ impl<T: Transaction> ImplementationRule<T> for SeqScanImplementation {
                 .flatten()
                 .map(|statistics_meta| statistics_meta.histogram().values_len());
 
-            group_expr.append_expr(Expression {
-                op: PhysicalOption::new(PlanImpl::SeqScan, SortOption::None),
+            crate::optimizer::core::rule::keep_best_physical_option(
+                best_physical_option,
+                PhysicalOption::new(PlanImpl::SeqScan, SortOption::None),
                 cost,
-            });
+            );
             Ok(())
         } else {
             unreachable!("invalid operator!")
@@ -73,11 +73,11 @@ impl MatchPattern for IndexScanImplementation {
 }
 
 impl<T: Transaction> ImplementationRule<T> for IndexScanImplementation {
-    fn to_expression(
+    fn update_best_option(
         &self,
         op: &Operator,
         loader: &StatisticMetaLoader<'_, T>,
-        group_expr: &mut GroupExpression,
+        best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
         if let Operator::TableScan(scan_op) = op {
             for index_info in scan_op.index_infos.iter() {
@@ -126,13 +126,14 @@ impl<T: Transaction> ImplementationRule<T> for IndexScanImplementation {
                     }
                 }
 
-                group_expr.append_expr(Expression {
-                    op: PhysicalOption::new(
+                crate::optimizer::core::rule::keep_best_physical_option(
+                    best_physical_option,
+                    PhysicalOption::new(
                         PlanImpl::IndexScan(Box::new(index_info.clone())),
                         index_info.sort_option.clone(),
                     ),
                     cost,
-                });
+                );
             }
 
             Ok(())

@@ -32,8 +32,10 @@ use crate::expression::function::scala::{ArcScalarFunctionImpl, ScalarFunction};
 use crate::expression::function::table::{ArcTableFunctionImpl, TableFunction};
 use crate::expression::function::FunctionSummary;
 use crate::expression::{AliasType, ScalarExpression};
+use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
 use crate::planner::{LogicalPlan, SchemaOutput};
 use crate::storage::Transaction;
+use crate::types::tuple::SchemaRef;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{ColumnId, LogicalType};
 
@@ -77,6 +79,51 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                     "escape character must be a quoted string".to_string(),
                 )),
             },
+        }
+    }
+
+    fn find_column_in_schema<'b>(
+        schema_ref: &'b SchemaRef,
+        column_name: &str,
+    ) -> Option<(usize, &'b ColumnRef)> {
+        schema_ref
+            .iter()
+            .enumerate()
+            .find(|(_, column)| column.name() == column_name)
+    }
+
+    fn find_column_in_scope(
+        context: &BinderContext<'a, T>,
+        table_schema_buf: &mut HashMap<TableName, Option<SchemaOutput>>,
+        column_name: &str,
+    ) -> Option<ScalarExpression> {
+        let mut position_offset = 0;
+
+        for bound_source in &context.bind_table {
+            let schema_buf = table_schema_buf
+                .entry(bound_source.table_name.clone())
+                .or_default();
+            let schema_ref = bound_source.source.schema_ref(schema_buf);
+
+            if let Some((position, column)) = Self::find_column_in_schema(&schema_ref, column_name)
+            {
+                return Some(ScalarExpression::column_expr(
+                    column.clone(),
+                    position_offset + position,
+                ));
+            }
+
+            position_offset += schema_ref.len();
+        }
+
+        None
+    }
+
+    fn column_not_found_with_span(idents: &[Ident], column_name: &str) -> DatabaseError {
+        let err = DatabaseError::column_not_found(column_name.to_string());
+        match idents.last() {
+            Some(ident) => attach_span_from_sqlparser_span_if_absent(err, ident.span),
+            None => err,
         }
     }
 
@@ -212,6 +259,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             }
             Expr::Subquery(subquery) => {
                 let (sub_query, column, correlated) = self.bind_subquery(None, subquery)?;
+                let sub_query = ScalarSubqueryOperator::build(sub_query);
                 let (expr, sub_query) = if !self.context.is_step(&QueryBindStep::Where) {
                     self.bind_temp_table(column, sub_query)?
                 } else {
@@ -317,17 +365,43 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         expr: ScalarExpression,
         sub_query: LogicalPlan,
     ) -> Result<(ScalarExpression, LogicalPlan), DatabaseError> {
+        let (exprs, is_tuple) = match expr {
+            ScalarExpression::Tuple(exprs) => (exprs, true),
+            expr => (vec![expr], false),
+        };
+        let mut alias_exprs = Vec::with_capacity(exprs.len());
+        let mut alias_refs = Vec::with_capacity(exprs.len());
+
+        for (position, expr) in exprs.into_iter().enumerate() {
+            let (alias_expr, alias_ref) = self.bind_temp_table_alias(expr, position);
+            if !is_tuple {
+                let alias_plan = Self::build_project_plan(sub_query, vec![alias_expr.clone()]);
+                return Ok((alias_expr, alias_plan));
+            }
+            alias_exprs.push(alias_expr);
+            alias_refs.push(alias_ref);
+        }
+
+        let alias_plan = Self::build_project_plan(sub_query, alias_exprs);
+        Ok((ScalarExpression::Tuple(alias_refs), alias_plan))
+    }
+
+    fn bind_temp_table_alias(
+        &mut self,
+        expr: ScalarExpression,
+        position: usize,
+    ) -> (ScalarExpression, ScalarExpression) {
         let mut alias_column = ColumnCatalog::clone(&expr.output_column());
         alias_column.set_ref_table(self.context.temp_table(), ColumnId::new(), true);
 
-        let alias_expr = ScalarExpression::Alias {
-            expr: Box::new(expr),
-            alias: AliasType::Expr(Box::new(ScalarExpression::column_expr(ColumnRef::from(
-                alias_column,
-            )))),
-        };
-        let alias_plan = self.bind_project(sub_query, vec![alias_expr.clone()])?;
-        Ok((alias_expr, alias_plan))
+        let alias_ref = ScalarExpression::column_expr(ColumnRef::from(alias_column), position);
+        (
+            ScalarExpression::Alias {
+                expr: Box::new(expr),
+                alias: AliasType::Expr(Box::new(alias_ref.clone())),
+            },
+            alias_ref,
+        )
     }
 
     fn bind_subquery(
@@ -375,13 +449,14 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
 
             let columns = sub_query_schema
                 .iter()
-                .map(|column| ScalarExpression::column_expr(column.clone()))
+                .enumerate()
+                .map(|(position, column)| ScalarExpression::column_expr(column.clone(), position))
                 .collect::<Vec<_>>();
             ScalarExpression::Tuple(columns)
         } else {
             fn_check(1)?;
 
-            ScalarExpression::column_expr(sub_query_schema[0].clone())
+            ScalarExpression::column_expr(sub_query_schema[0].clone(), 0)
         };
         Ok((sub_query, expr, correlated))
     }
@@ -431,17 +506,28 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 });
             }
         };
-        try_alias!(self.context, full_name);
+        if full_name.0.is_none() {
+            try_alias!(self.context, full_name);
+        }
         if self.context.allow_default {
             try_default!(&full_name.0, full_name.1);
         }
         if let Some(table) = full_name.0.or(bind_table_name) {
-            let source = match self.context.bind_source(&table) {
+            let (schema_ref, position_offset) = match Self::resolve_source_columns_in_scope(
+                &self.context,
+                &mut self.table_schema_buf,
+                &table,
+            ) {
                 Ok(source) => source,
                 Err(err) => {
                     if let Some(parent) = self.parent {
                         self.context.mark_outer_ref();
-                        parent.context.bind_source(&table).map_err(|_| {
+                        Self::resolve_source_columns_in_scope(
+                            &parent.context,
+                            &mut self.table_schema_buf,
+                            &table,
+                        )
+                        .map_err(|_| {
                             if let [table_ident, _] = idents {
                                 attach_span_from_sqlparser_span_if_absent(err, table_ident.span)
                             } else {
@@ -457,67 +543,36 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                     }
                 }
             };
-            let schema_buf = self.table_schema_buf.entry(table.into()).or_default();
+            let (position, column) = Self::find_column_in_schema(&schema_ref, full_name.1.as_str())
+                .ok_or_else(|| Self::column_not_found_with_span(idents, full_name.1.as_str()))?;
 
             Ok(ScalarExpression::column_expr(
-                source.column(&full_name.1, schema_buf).ok_or_else(|| {
-                    let err = DatabaseError::column_not_found(full_name.1.to_string());
-                    match idents.last() {
-                        Some(ident) => attach_span_from_sqlparser_span_if_absent(err, ident.span),
-                        None => err,
-                    }
-                })?,
+                column.clone(),
+                position_offset + position,
             ))
         } else {
-            let op =
-                |got_column: &mut Option<ScalarExpression>,
-                 context: &BinderContext<'a, T>,
-                 table_schema_buf: &mut HashMap<TableName, Option<SchemaOutput>>| {
-                    for ((table_name, alias, _), source) in context.bind_table.iter() {
-                        if got_column.is_some() {
-                            break;
-                        }
-                        if let Some(alias) = alias {
-                            *got_column = context.expr_aliases.iter().find_map(
-                                |((alias_table, alias_column), expr)| {
-                                    matches!(
-                                        alias_table
-                                            .as_ref()
-                                            .map(|table_name| table_name == alias.as_ref()
-                                                && alias_column == &full_name.1),
-                                        Some(true)
-                                    )
-                                    .then(|| expr.clone())
-                                },
-                            );
-                        } else if let Some(column) = {
-                            let schema_buf =
-                                table_schema_buf.entry(table_name.clone()).or_default();
-                            source.column(&full_name.1, schema_buf)
-                        } {
-                            *got_column = Some(ScalarExpression::column_expr(column));
-                        }
-                    }
-                };
             // handle col syntax
-            let mut got_column = None;
-
-            op(&mut got_column, &self.context, &mut self.table_schema_buf);
+            let mut got_column = Self::find_column_in_scope(
+                &self.context,
+                &mut self.table_schema_buf,
+                full_name.1.as_str(),
+            );
             if got_column.is_none() {
                 if let Some(parent) = self.parent {
                     self.context.mark_outer_ref();
-                    op(&mut got_column, &parent.context, &mut self.table_schema_buf);
+                    got_column = Self::find_column_in_scope(
+                        &parent.context,
+                        &mut self.table_schema_buf,
+                        full_name.1.as_str(),
+                    );
                 }
             }
             match got_column {
                 Some(column) => Ok(column),
-                None => {
-                    let err = DatabaseError::column_not_found(full_name.1.clone());
-                    Err(match idents.last() {
-                        Some(ident) => attach_span_from_sqlparser_span_if_absent(err, ident.span),
-                        None => err,
-                    })
-                }
+                None => Err(Self::column_not_found_with_span(
+                    idents,
+                    full_name.1.as_str(),
+                )),
             }
         }
     }

@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::storage::table_codec::{BumpBytes, Bytes, TableCodec};
+use crate::storage::table_codec::{Bytes, TableCodec};
 use crate::storage::{EmptyStorageMetrics, InnerIter, Storage, Transaction};
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell};
 use std::collections::{BTreeMap, Bound, VecDeque};
 use std::rc::Rc;
 
@@ -53,15 +53,36 @@ pub struct MemoryTransaction {
 
 pub struct MemoryIter {
     entries: VecDeque<(Bytes, Bytes)>,
+    current: Option<(Bytes, Bytes)>,
+}
+
+pub struct MemoryValue<'a> {
+    value: Ref<'a, Vec<u8>>,
+}
+
+impl AsRef<[u8]> for MemoryValue<'_> {
+    fn as_ref(&self) -> &[u8] {
+        self.value.as_slice()
+    }
 }
 
 impl InnerIter for MemoryIter {
-    fn try_next(&mut self) -> Result<Option<(Bytes, Bytes)>, DatabaseError> {
-        Ok(self.entries.pop_front())
+    fn try_next(&mut self) -> Result<Option<crate::storage::KeyValueRef<'_>>, DatabaseError> {
+        self.current = self.entries.pop_front();
+
+        Ok(self
+            .current
+            .as_ref()
+            .map(|(key, value)| (key.as_slice(), value.as_slice())))
     }
 }
 
 impl Transaction for MemoryTransaction {
+    type BorrowedBytes<'a>
+        = MemoryValue<'a>
+    where
+        Self: 'a;
+
     type IterType<'a>
         = MemoryIter
     where
@@ -71,11 +92,19 @@ impl Transaction for MemoryTransaction {
         &self.table_codec
     }
 
-    fn get(&self, key: &[u8]) -> Result<Option<Bytes>, DatabaseError> {
-        Ok(self.inner.borrow().get(key).cloned())
+    fn get_borrowed<'a>(
+        &'a self,
+        key: &[u8],
+    ) -> Result<Option<Self::BorrowedBytes<'a>>, DatabaseError> {
+        let map = self.inner.borrow();
+        let Ok(value) = Ref::filter_map(map, |map| map.get(key)) else {
+            return Ok(None);
+        };
+
+        Ok(Some(MemoryValue { value }))
     }
 
-    fn set(&mut self, key: BumpBytes, value: BumpBytes) -> Result<(), DatabaseError> {
+    fn set(&mut self, key: &[u8], value: &[u8]) -> Result<(), DatabaseError> {
         self.inner.borrow_mut().insert(key.to_vec(), value.to_vec());
         Ok(())
     }
@@ -85,20 +114,20 @@ impl Transaction for MemoryTransaction {
         Ok(())
     }
 
-    fn range<'a>(
-        &'a self,
-        min: Bound<BumpBytes<'a>>,
-        max: Bound<BumpBytes<'a>>,
-    ) -> Result<Self::IterType<'a>, DatabaseError> {
+    fn range<'txn, 'key>(
+        &'txn self,
+        min: Bound<&'key [u8]>,
+        max: Bound<&'key [u8]>,
+    ) -> Result<Self::IterType<'txn>, DatabaseError> {
         let map = self.inner.borrow();
         let start = match &min {
-            Bound::Included(b) => Bound::Included(b.as_ref()),
-            Bound::Excluded(b) => Bound::Excluded(b.as_ref()),
+            Bound::Included(b) => Bound::Included(*b),
+            Bound::Excluded(b) => Bound::Excluded(*b),
             Bound::Unbounded => Bound::Unbounded,
         };
         let end = match &max {
-            Bound::Included(b) => Bound::Included(b.as_ref()),
-            Bound::Excluded(b) => Bound::Excluded(b.as_ref()),
+            Bound::Included(b) => Bound::Included(*b),
+            Bound::Excluded(b) => Bound::Excluded(*b),
             Bound::Unbounded => Bound::Unbounded,
         };
 
@@ -107,7 +136,10 @@ impl Transaction for MemoryTransaction {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
-        Ok(MemoryIter { entries })
+        Ok(MemoryIter {
+            entries,
+            current: None,
+        })
     }
 
     fn commit(self) -> Result<(), DatabaseError> {
@@ -119,9 +151,8 @@ impl Transaction for MemoryTransaction {
 mod wasm_tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
-    use crate::db::{DataBaseBuilder, ResultIter};
+    use crate::db::DataBaseBuilder;
     use crate::expression::range_detacher::Range;
-    use crate::storage::Iter;
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -197,10 +228,10 @@ mod wasm_tests {
             true,
         )?;
 
-        let option_1 = iter.next_tuple()?;
+        let option_1 = crate::storage::next_tuple_for_test(&mut iter)?;
         assert_eq!(option_1.unwrap().pk, Some(DataValue::Int32(2)));
 
-        let option_2 = iter.next_tuple()?;
+        let option_2 = crate::storage::next_tuple_for_test(&mut iter)?;
         assert_eq!(option_2, None);
 
         Ok(())
@@ -239,7 +270,7 @@ mod wasm_tests {
         )?;
 
         let mut result = Vec::new();
-        while let Some(tuple) = iter.next_tuple()? {
+        while let Some(tuple) = crate::storage::next_tuple_for_test(&mut iter)? {
             result.push(tuple.pk.unwrap());
         }
 
@@ -253,9 +284,8 @@ mod wasm_tests {
 mod native_tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
-    use crate::db::{DataBaseBuilder, ResultIter};
+    use crate::db::DataBaseBuilder;
     use crate::expression::range_detacher::Range;
-    use crate::storage::Iter;
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -330,10 +360,10 @@ mod native_tests {
             true,
         )?;
 
-        let option_1 = iter.next_tuple()?;
+        let option_1 = crate::storage::next_tuple_for_test(&mut iter)?;
         assert_eq!(option_1.unwrap().pk, Some(DataValue::Int32(2)));
 
-        let option_2 = iter.next_tuple()?;
+        let option_2 = crate::storage::next_tuple_for_test(&mut iter)?;
         assert_eq!(option_2, None);
 
         Ok(())
@@ -372,7 +402,7 @@ mod native_tests {
         )?;
 
         let mut result = Vec::new();
-        while let Some(tuple) = iter.next_tuple()? {
+        while let Some(tuple) = crate::storage::next_tuple_for_test(&mut iter)? {
             result.push(tuple.pk.unwrap());
         }
 

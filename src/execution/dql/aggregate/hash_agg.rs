@@ -14,22 +14,26 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::{create_accumulators, Accumulator};
-use crate::execution::{build_read, spawn_executor, Executor, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::LogicalPlan;
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::throw;
-use crate::types::tuple::Tuple;
+use crate::storage::Transaction;
+use crate::types::tuple::SchemaRef;
 use crate::types::value::DataValue;
 use ahash::{HashMap, HashMapExt};
 use itertools::Itertools;
-use std::collections::hash_map::Entry;
+use std::collections::hash_map::{Entry, IntoIter as HashMapIntoIter};
+
+type HashAggOutput = HashMapIntoIter<Vec<DataValue>, Vec<Box<dyn Accumulator>>>;
 
 pub struct HashAggExecutor {
     agg_calls: Vec<ScalarExpression>,
     groupby_exprs: Vec<ScalarExpression>,
-    input: LogicalPlan,
+    input_schema: SchemaRef,
+    input_plan: Option<LogicalPlan>,
+    input: ExecId,
+    output: Option<HashAggOutput>,
 }
 
 impl From<(AggregateOperator, LogicalPlan)> for HashAggExecutor {
@@ -40,84 +44,96 @@ impl From<(AggregateOperator, LogicalPlan)> for HashAggExecutor {
                 groupby_exprs,
                 ..
             },
-            input,
+            mut input,
         ): (AggregateOperator, LogicalPlan),
     ) -> Self {
         HashAggExecutor {
             agg_calls,
             groupby_exprs,
-            input,
+            input_schema: input.output_schema().clone(),
+            input_plan: Some(input),
+            input: 0,
+            output: None,
         }
     }
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashAggExecutor {
-    fn execute(
-        self,
-        cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
+    fn into_executor(
+        mut self,
+        arena: &mut ExecArena<'a, T>,
+        cache: ExecutionCaches<'a>,
         transaction: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let HashAggExecutor {
-                agg_calls,
-                groupby_exprs,
-                mut input,
-            } = self;
+    ) -> ExecId {
+        self.input = build_read(
+            arena,
+            self.input_plan
+                .take()
+                .expect("hash aggregate input plan initialized"),
+            cache,
+            transaction,
+        );
+        arena.push(ExecNode::HashAgg(self))
+    }
+}
 
-            let schema_ref = input.output_schema().clone();
+impl HashAggExecutor {
+    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> Result<(), DatabaseError> {
+        if self.output.is_none() {
             let mut group_hash_accs: HashMap<Vec<DataValue>, Vec<Box<dyn Accumulator>>> =
                 HashMap::new();
 
-            let mut executor = build_read(input, cache, transaction);
-
-            for result in executor.by_ref() {
-                let tuple = throw!(co, result);
-                let mut values = Vec::with_capacity(agg_calls.len());
-
-                for expr in agg_calls.iter() {
-                    if let ScalarExpression::AggCall { args, .. } = expr {
-                        if args.len() > 1 {
-                            throw!(co, Err(DatabaseError::UnsupportedStmt(
-                                "currently aggregate functions only support a single Column as a parameter"
-                                    .to_string()
-                            )))
-                        }
-                        values.push(throw!(co, args[0].eval(Some((&tuple, &schema_ref)))));
-                    } else {
-                        unreachable!()
-                    }
-                }
-                let group_keys: Vec<DataValue> = throw!(
-                    co,
-                    groupby_exprs
-                        .iter()
-                        .map(|expr| expr.eval(Some((&tuple, &schema_ref))))
-                        .try_collect()
-                );
+            while arena.next_tuple(self.input)? {
+                let tuple = arena.result_tuple();
+                let group_keys = self
+                    .groupby_exprs
+                    .iter()
+                    .map(|expr| expr.eval(Some((tuple, &self.input_schema))))
+                    .try_collect()?;
 
                 let entry = match group_hash_accs.entry(group_keys) {
                     Entry::Occupied(entry) => entry.into_mut(),
-                    Entry::Vacant(entry) => {
-                        entry.insert(throw!(co, create_accumulators(&agg_calls)))
-                    }
+                    Entry::Vacant(entry) => entry.insert(create_accumulators(&self.agg_calls)?),
                 };
-                for (acc, value) in entry.iter_mut().zip_eq(values.iter()) {
-                    throw!(co, acc.update_value(value));
+
+                for (acc, expr) in entry.iter_mut().zip_eq(self.agg_calls.iter()) {
+                    let ScalarExpression::AggCall { args, .. } = expr else {
+                        unreachable!()
+                    };
+                    if args.len() > 1 {
+                        return Err(DatabaseError::UnsupportedStmt(
+                            "currently aggregate functions only support a single Column as a parameter"
+                                .to_string(),
+                        ));
+                    }
+                    let value = args[0].eval(Some((tuple, &self.input_schema)))?;
+                    acc.update_value(&value)?;
                 }
             }
 
-            for (group_keys, accs) in group_hash_accs {
-                // Tips: Accumulator First
-                let values: Vec<DataValue> = throw!(
-                    co,
-                    accs.iter()
-                        .map(|acc| acc.evaluate())
-                        .chain(group_keys.into_iter().map(Ok))
-                        .try_collect()
-                );
-                co.yield_(Ok(Tuple::new(None, values))).await;
-            }
-        })
+            self.output = Some(group_hash_accs.into_iter());
+        }
+
+        let Some((group_keys, accs)) = self.output.as_mut().and_then(Iterator::next) else {
+            arena.finish();
+            return Ok(());
+        };
+
+        let output = arena.result_tuple_mut();
+
+        output.pk = None;
+        output.values.clear();
+        output.values.reserve(accs.len() + group_keys.len());
+
+        for acc in accs.iter() {
+            output.values.push(acc.evaluate()?);
+        }
+        output.values.extend(group_keys);
+        arena.resume();
+        Ok(())
     }
 }
 
@@ -127,7 +143,7 @@ mod test {
     use crate::errors::DatabaseError;
     use crate::execution::dql::aggregate::hash_agg::HashAggExecutor;
     use crate::execution::dql::test::build_integers;
-    use crate::execution::{try_collect, ReadExecutor};
+    use crate::execution::try_collect;
     use crate::expression::agg::AggKind;
     use crate::expression::ScalarExpression;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
@@ -196,11 +212,11 @@ mod test {
         };
         let plan = LogicalPlan::new(
             Operator::Aggregate(AggregateOperator {
-                groupby_exprs: vec![ScalarExpression::column_expr(t1_schema[0].clone())],
+                groupby_exprs: vec![ScalarExpression::column_expr(t1_schema[0].clone(), 0)],
                 agg_calls: vec![ScalarExpression::AggCall {
                     distinct: false,
                     kind: AggKind::Sum,
-                    args: vec![ScalarExpression::column_expr(t1_schema[1].clone())],
+                    args: vec![ScalarExpression::column_expr(t1_schema[1].clone(), 1)],
                     ty: LogicalType::Integer,
                 }],
                 is_distinct: false,
@@ -212,11 +228,7 @@ mod test {
             .before_batch(
                 "Expression Remapper".to_string(),
                 HepBatchStrategy::once_topdown(),
-                vec![
-                    NormalizationRuleImpl::BindExpressionPosition,
-                    // TIPS: This rule is necessary
-                    NormalizationRuleImpl::EvaluatorBind,
-                ],
+                vec![NormalizationRuleImpl::EvaluatorBind],
             )
             .build();
         let plan = pipeline
@@ -226,10 +238,11 @@ mod test {
         let Operator::Aggregate(op) = plan.operator else {
             unreachable!()
         };
-        let tuples = try_collect(
-            HashAggExecutor::from((op, plan.childrens.pop_only()))
-                .execute((&table_cache, &view_cache, &meta_cache), &mut transaction),
-        )?;
+        let tuples = try_collect(crate::execution::execute(
+            HashAggExecutor::from((op, plan.childrens.pop_only())),
+            (&table_cache, &view_cache, &meta_cache),
+            &mut transaction,
+        ))?;
 
         assert_eq!(tuples.len(), 2);
 

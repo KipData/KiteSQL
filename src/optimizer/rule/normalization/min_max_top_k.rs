@@ -15,27 +15,14 @@
 use crate::errors::DatabaseError;
 use crate::expression::agg::AggKind;
 use crate::expression::ScalarExpression;
-use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
-use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
+use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{only_child, wrap_child_with};
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::top_k::TopKOperator;
 use crate::planner::operator::Operator;
 use crate::planner::LogicalPlan;
-use std::sync::LazyLock;
-
-static MIN_MAX_TOPK_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |op| matches!(op, Operator::Aggregate(_)),
-    children: PatternChildrenPredicate::None,
-});
 
 pub struct MinMaxToTopK;
-
-impl MatchPattern for MinMaxToTopK {
-    fn pattern(&self) -> &Pattern {
-        &MIN_MAX_TOPK_PATTERN
-    }
-}
 
 impl NormalizationRule for MinMaxToTopK {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
@@ -98,9 +85,7 @@ mod tests {
     use crate::planner::operator::Operator;
     use crate::planner::Childrens;
 
-    fn find_aggregate<'a>(
-        plan: &'a crate::planner::LogicalPlan,
-    ) -> &'a crate::planner::LogicalPlan {
+    fn find_aggregate(plan: &crate::planner::LogicalPlan) -> &crate::planner::LogicalPlan {
         if matches!(plan.operator, Operator::Aggregate(_)) {
             return plan;
         }
@@ -110,9 +95,9 @@ mod tests {
         }
     }
 
-    fn find_aggregate_mut<'a>(
-        plan: &'a mut crate::planner::LogicalPlan,
-    ) -> &'a mut crate::planner::LogicalPlan {
+    fn find_aggregate_mut(
+        plan: &mut crate::planner::LogicalPlan,
+    ) -> &mut crate::planner::LogicalPlan {
         if matches!(plan.operator, Operator::Aggregate(_)) {
             return plan;
         }

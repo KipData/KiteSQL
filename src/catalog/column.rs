@@ -66,6 +66,10 @@ pub struct ColumnSummary {
 }
 
 impl ColumnRef {
+    pub(crate) fn same_column(&self, other: &ColumnRef) -> bool {
+        self.summary() == other.summary()
+    }
+
     pub(crate) fn nullable_for_join(&self, nullable: bool) -> Option<ColumnRef> {
         if self.nullable == nullable {
             return None;
@@ -198,6 +202,39 @@ impl ColumnCatalog {
 
     pub(crate) fn desc_mut(&mut self) -> &mut ColumnDesc {
         &mut self.desc
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::{ColumnCatalog, ColumnDesc, ColumnRef};
+    use crate::errors::DatabaseError;
+    use crate::types::LogicalType;
+
+    #[test]
+    fn test_same_column_ignores_nullable_and_desc() -> Result<(), DatabaseError> {
+        let mut left = ColumnCatalog::new(
+            "c1".to_string(),
+            false,
+            ColumnDesc::new(LogicalType::Integer, None, false, None)?,
+        );
+        let mut right = ColumnCatalog::new(
+            "c1".to_string(),
+            true,
+            ColumnDesc::new(LogicalType::Bigint, None, false, None)?,
+        );
+        let left_ref = ColumnRef::from(left.clone());
+        let right_ref = ColumnRef::from(right.clone());
+
+        assert_ne!(left_ref, right_ref);
+        assert!(left_ref.same_column(&right_ref));
+
+        left.set_name("c2".to_string());
+        right.set_name("c3".to_string());
+        let left_ref = ColumnRef::from(left);
+        let right_ref = ColumnRef::from(right);
+        assert!(!left_ref.same_column(&right_ref));
+        Ok(())
     }
 }
 

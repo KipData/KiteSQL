@@ -2,7 +2,7 @@
 
 [package]
 name          = "kite_sql"
-version       = "0.1.8"
+version       = "0.2.0"
 edition       = "2021"
 authors       = ["Kould <kould2333@gmail.com>", "Xwg <loloxwg@gmail.com>"]
 description   = "SQL as a Function for Rust"
@@ -17,17 +17,19 @@ default-run   = "kite_sql"
 [[bin]]
 name              = "kite_sql"
 path              = "src/bin/server.rs"
-required-features = ["net"]
+required-features = ["net", "rocksdb"]
 
 [lib]
 doctest = false
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["macros"]
+default = ["macros", "rocksdb"]
 macros  = []
 orm     = []
-net     = ["dep:pgwire", "dep:async-trait", "dep:clap", "dep:env_logger", "dep:futures", "dep:log", "dep:tokio"]
+rocksdb = ["dep:rocksdb"]
+lmdb    = ["dep:lmdb", "dep:lmdb-sys"]
+net     = ["rocksdb", "dep:pgwire", "dep:async-trait", "dep:clap", "dep:env_logger", "dep:futures", "dep:log", "dep:tokio"]
 pprof   = ["pprof/criterion", "pprof/flamegraph"]
 python  = ["dep:pyo3"]
 
@@ -55,13 +57,12 @@ recursive             = { version = "0.1" }
 regex                 = { version = "1" }
 rust_decimal          = { version = "1" }
 serde                 = { version = "1", features = ["derive", "rc"] }
-kite_sql_serde_macros = { version = "0.1.2", path = "kite_sql_serde_macros" }
+kite_sql_serde_macros = { version = "0.2.0", path = "kite_sql_serde_macros" }
 siphasher             = { version = "1", features = ["serde"] }
 sqlparser             = { version = "0.61", features = ["serde"] }
 thiserror             = { version = "1" }
 typetag               = { version = "0.2" }
 ulid                  = { version = "1", features = ["serde"] }
-genawaiter            = { version = "0.99" }
 
 # Feature: net
 async-trait           = { version = "0.1", optional = true }
@@ -84,7 +85,9 @@ tempfile              = { version = "3.10" }
 sqlite                = { version = "0.34" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-rocksdb = { version = "0.23" }
+rocksdb = { version = "0.23", optional = true }
+lmdb = { version = "0.8.0", optional = true }
+lmdb-sys = { version = "0.8.0", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen        = { version = "0.2.106" }

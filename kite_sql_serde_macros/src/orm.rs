@@ -176,7 +176,6 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             primary_key_value = Some(quote! {
                 &self.#field_name
             });
-        } else {
         }
 
         generics
@@ -257,11 +256,11 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             }
         });
         if is_unique {
-            let unique_index_name_value = format!("uk_{}_index", column_name);
+            let unique_index_name_value = format!("uk_{column_name}_index");
             if !index_names.insert(unique_index_name_value.clone()) {
                 return Err(Error::new_spanned(
                     struct_name,
-                    format!("duplicate ORM index name: {}", unique_index_name_value),
+                    format!("duplicate ORM index name: {unique_index_name_value}"),
                 ));
             }
         }
@@ -272,7 +271,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             if !index_names.insert(index_name.clone()) {
                 return Err(Error::new_spanned(
                     struct_name,
-                    format!("duplicate ORM index name: {}", index_name),
+                    format!("duplicate ORM index name: {index_name}"),
                 ));
             }
             create_index_statements.push(quote! {
@@ -325,8 +324,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                     Error::new_spanned(
                         struct_name,
                         format!(
-                            "unknown ORM index column `{}`; use a persisted field name or column name",
-                            raw_column
+                            "unknown ORM index column `{raw_column}`; use a persisted field name or column name",
                         ),
                     )
                 })?;

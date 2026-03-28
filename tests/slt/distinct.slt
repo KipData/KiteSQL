@@ -24,3 +24,20 @@ SELECT DISTINCT sum(x) FROM test ORDER BY sum(x);
 # if SELECT DISTINCT is specified
 statement error
 SELECT DISTINCT x FROM test ORDER BY y;
+
+# Regression: DISTINCT + ORDER BY + LIMIT should keep using the DISTINCT
+# output positions after binding/order-by rewriting.
+statement ok
+CREATE TABLE distinct_pos(id int primary key, a int, b int);
+
+statement ok
+INSERT INTO distinct_pos VALUES (1, 9, 1), (2, 8, 0), (3, 7, 0);
+
+query II
+SELECT DISTINCT b, a FROM distinct_pos ORDER BY a DESC LIMIT 2;
+----
+1 9
+0 8
+
+statement ok
+DROP TABLE distinct_pos;

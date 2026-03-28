@@ -15,7 +15,7 @@
 use async_trait::async_trait;
 use clap::Parser;
 use futures::stream;
-use kite_sql::db::{DBTransaction, DataBaseBuilder, Database, ResultIter};
+use kite_sql::db::{BorrowResultIter, DBTransaction, DataBaseBuilder, Database};
 use kite_sql::errors::DatabaseError;
 use kite_sql::storage::rocksdb::RocksStorage;
 use kite_sql::types::tuple::{SchemaRef, Tuple};
@@ -28,6 +28,7 @@ use pgwire::api::query::{PlaceholderExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo, QueryResponse, Response, Tag};
 use pgwire::api::{ClientInfo, NoopErrorHandler, PgWireServerHandlers, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
+use pgwire::messages::data::DataRow;
 use pgwire::tokio::process_socket;
 use std::fmt::Debug;
 use std::io;
@@ -85,7 +86,7 @@ pub struct KiteSQLBackend {
 
 impl KiteSQLBackend {
     pub fn new(path: impl Into<PathBuf> + Send) -> Result<KiteSQLBackend, DatabaseError> {
-        let database = DataBaseBuilder::path(path).build()?;
+        let database = DataBaseBuilder::path(path).build_rocksdb()?;
 
         Ok(KiteSQLBackend {
             inner: Arc::new(database),
@@ -213,29 +214,22 @@ impl SimpleQueryHandler for SessionBackend {
             _ => {
                 let mut guard = self.tx.lock();
 
-                let mut tuples = Vec::new();
                 let response = if let Some(transaction) = guard.as_mut() {
                     let mut iter = unsafe { transaction.as_mut().run(query) }
                         .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-                    for tuple in iter.by_ref() {
-                        tuples.push(tuple.map_err(|e| PgWireError::ApiError(Box::new(e)))?);
-                    }
-                    let schema = iter.schema().clone();
+                    let response = encode_query_result(&mut iter)?;
                     iter.done()
                         .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-                    encode_tuples(&schema, tuples)?
+                    response
                 } else {
                     let mut iter = self
                         .inner
                         .run(query)
                         .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-                    for tuple in iter.by_ref() {
-                        tuples.push(tuple.map_err(|e| PgWireError::ApiError(Box::new(e)))?);
-                    }
-                    let schema = iter.schema().clone();
+                    let response = encode_query_result(&mut iter)?;
                     iter.done()
                         .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-                    encode_tuples(&schema, tuples)?
+                    response
                 };
                 Ok(vec![Response::Query(response)])
             }
@@ -243,13 +237,25 @@ impl SimpleQueryHandler for SessionBackend {
     }
 }
 
-fn encode_tuples<'a>(schema: &SchemaRef, tuples: Vec<Tuple>) -> PgWireResult<QueryResponse<'a>> {
-    if tuples.is_empty() {
-        return Ok(QueryResponse::new(Arc::new(vec![]), stream::empty()));
+fn encode_query_result<'a, I>(iter: &mut I) -> PgWireResult<QueryResponse<'a>>
+where
+    I: BorrowResultIter,
+{
+    let fields = encode_fields(iter.schema())?;
+    let mut results = Vec::new();
+
+    while let Some(tuple) = iter
+        .next_borrowed_tuple()
+        .map_err(|e| PgWireError::ApiError(Box::new(e)))?
+    {
+        results.push(encode_tuple(fields.clone(), tuple));
     }
 
-    let mut results = Vec::with_capacity(tuples.len());
-    let schema = Arc::new(
+    Ok(QueryResponse::new(fields, stream::iter(results)))
+}
+
+fn encode_fields(schema: &SchemaRef) -> PgWireResult<Arc<Vec<FieldInfo>>> {
+    Ok(Arc::new(
         schema
             .iter()
             .map(|column| {
@@ -264,41 +270,37 @@ fn encode_tuples<'a>(schema: &SchemaRef, tuples: Vec<Tuple>) -> PgWireResult<Que
                 ))
             })
             .collect::<PgWireResult<Vec<FieldInfo>>>()?,
-    );
+    ))
+}
 
-    for tuple in tuples {
-        let mut encoder = DataRowEncoder::new(schema.clone());
-        for value in tuple.values {
-            match value.logical_type() {
-                LogicalType::SqlNull => encoder.encode_field(&None::<i8>),
-                LogicalType::Boolean => encoder.encode_field(&value.bool()),
-                LogicalType::Tinyint => encoder.encode_field(&value.i8()),
-                LogicalType::UTinyint => encoder.encode_field(&value.u8().map(|v| v as i8)),
-                LogicalType::Smallint => encoder.encode_field(&value.i16()),
-                LogicalType::USmallint => encoder.encode_field(&value.u16().map(|v| v as i16)),
-                LogicalType::Integer => encoder.encode_field(&value.i32()),
-                LogicalType::UInteger => encoder.encode_field(&value.u32()),
-                LogicalType::Bigint => encoder.encode_field(&value.i64()),
-                LogicalType::UBigint => encoder.encode_field(&value.u64().map(|v| v as i64)),
-                LogicalType::Float => encoder.encode_field(&value.float()),
-                LogicalType::Double => encoder.encode_field(&value.double()),
-                LogicalType::Char(..) | LogicalType::Varchar(..) => {
-                    encoder.encode_field(&value.utf8())
-                }
-                LogicalType::Date => encoder.encode_field(&value.date()),
-                LogicalType::DateTime => encoder.encode_field(&value.datetime()),
-                LogicalType::Time(_) => encoder.encode_field(&value.time()),
-                LogicalType::Decimal(_, _) => {
-                    encoder.encode_field(&value.decimal().map(|decimal| decimal.to_string()))
-                }
-                _ => unreachable!(),
-            }?;
-        }
-
-        results.push(encoder.finish());
+fn encode_tuple(schema: Arc<Vec<FieldInfo>>, tuple: &Tuple) -> PgWireResult<DataRow> {
+    let mut encoder = DataRowEncoder::new(schema);
+    for value in &tuple.values {
+        match value.logical_type() {
+            LogicalType::SqlNull => encoder.encode_field(&None::<i8>),
+            LogicalType::Boolean => encoder.encode_field(&value.bool()),
+            LogicalType::Tinyint => encoder.encode_field(&value.i8()),
+            LogicalType::UTinyint => encoder.encode_field(&value.u8().map(|v| v as i8)),
+            LogicalType::Smallint => encoder.encode_field(&value.i16()),
+            LogicalType::USmallint => encoder.encode_field(&value.u16().map(|v| v as i16)),
+            LogicalType::Integer => encoder.encode_field(&value.i32()),
+            LogicalType::UInteger => encoder.encode_field(&value.u32()),
+            LogicalType::Bigint => encoder.encode_field(&value.i64()),
+            LogicalType::UBigint => encoder.encode_field(&value.u64().map(|v| v as i64)),
+            LogicalType::Float => encoder.encode_field(&value.float()),
+            LogicalType::Double => encoder.encode_field(&value.double()),
+            LogicalType::Char(..) | LogicalType::Varchar(..) => encoder.encode_field(&value.utf8()),
+            LogicalType::Date => encoder.encode_field(&value.date()),
+            LogicalType::DateTime => encoder.encode_field(&value.datetime()),
+            LogicalType::Time(_) => encoder.encode_field(&value.time()),
+            LogicalType::Decimal(_, _) => {
+                encoder.encode_field(&value.decimal().map(|decimal| decimal.to_string()))
+            }
+            _ => unreachable!(),
+        }?;
     }
 
-    Ok(QueryResponse::new(schema, stream::iter(results)))
+    encoder.finish()
 }
 
 fn into_pg_type(data_type: &LogicalType) -> PgWireResult<Type> {

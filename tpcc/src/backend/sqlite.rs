@@ -13,11 +13,12 @@
 // limitations under the License.
 
 use super::{
-    BackendControl, BackendTransaction, ColumnType, DbParam, PreparedStatement, QueryResult,
-    SimpleExecutor, StatementSpec,
+    BackendControl, BackendTransaction, ColumnType, DbParam, PreparedStatement, SimpleExecutor,
+    StatementSpec,
 };
 use crate::TpccError;
 use chrono::{NaiveDateTime, TimeZone, Utc};
+use clap::ValueEnum;
 use kite_sql::types::tuple::Tuple;
 use kite_sql::types::value::{DataValue, Utf8Type};
 use rust_decimal::Decimal;
@@ -28,18 +29,23 @@ pub struct SqliteBackend {
     connection: Connection,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum SqliteProfile {
+    Balanced,
+    Practical,
+}
+
 impl SqliteBackend {
-    #[allow(dead_code)]
-    pub fn new(path: &str) -> Result<Self, TpccError> {
-        Ok(Self {
-            connection: Connection::open(path)?,
-        })
+    pub fn new(path: &str, profile: SqliteProfile) -> Result<Self, TpccError> {
+        let connection = Connection::open(path)?;
+        configure_sqlite(&connection, profile)?;
+        Ok(Self { connection })
     }
 
     pub fn new_memory() -> Result<Self, TpccError> {
-        Ok(Self {
-            connection: Connection::open(":memory:")?,
-        })
+        let connection = Connection::open(":memory:")?;
+        configure_sqlite(&connection, SqliteProfile::Balanced)?;
+        Ok(Self { connection })
     }
 
     fn prepare_spec_groups(
@@ -87,7 +93,9 @@ impl BackendControl for SqliteBackend {
 
 impl SimpleExecutor for SqliteBackend {
     fn execute_batch(&self, sql: &str) -> Result<(), TpccError> {
-        self.connection.execute(sql)?;
+        if let Some(stmt) = normalize_sqlite_sql(sql) {
+            self.connection.execute(&stmt)?;
+        }
         Ok(())
     }
 }
@@ -121,13 +129,45 @@ impl Drop for SqliteTransaction<'_> {
 }
 
 impl<'a> BackendTransaction for SqliteTransaction<'a> {
-    fn execute<'b>(
-        &'b mut self,
+    fn query_one(
+        &mut self,
         statement: &PreparedStatement,
         params: &[DbParam],
-    ) -> Result<QueryResult<'b>, TpccError> {
-        let iter = self.execute_raw(statement, params)?;
-        Ok(QueryResult::from_sqlite(iter))
+    ) -> Result<Tuple, TpccError> {
+        match self.execute_raw(statement, params)?.next() {
+            Some(row) => row,
+            None => Err(TpccError::EmptyTuples),
+        }
+    }
+
+    fn query_nth(
+        &mut self,
+        statement: &PreparedStatement,
+        params: &[DbParam],
+        n: usize,
+    ) -> Result<Tuple, TpccError> {
+        let mut iter = self.execute_raw(statement, params)?;
+        for _ in 0..n {
+            if iter.next().transpose()?.is_none() {
+                return Err(TpccError::EmptyTuples);
+            }
+        }
+        match iter.next() {
+            Some(row) => row,
+            None => Err(TpccError::EmptyTuples),
+        }
+    }
+
+    fn execute_drain(
+        &mut self,
+        statement: &PreparedStatement,
+        params: &[DbParam],
+    ) -> Result<(), TpccError> {
+        let mut iter = self.execute_raw(statement, params)?;
+        while let Some(row) = iter.next() {
+            row?;
+        }
+        Ok(())
     }
 
     fn commit(mut self) -> Result<(), TpccError> {
@@ -177,6 +217,45 @@ fn convert_value(value: &DataValue) -> Result<Value, TpccError> {
         DataValue::Decimal(v) => Value::String(v.to_string()),
         DataValue::Tuple(_, _) => Value::Null,
     })
+}
+
+fn configure_sqlite(connection: &Connection, profile: SqliteProfile) -> Result<(), TpccError> {
+    let pragmas: &[&str] = match profile {
+        SqliteProfile::Balanced => &[
+            "PRAGMA journal_mode = WAL;",
+            "PRAGMA synchronous = NORMAL;",
+            "PRAGMA temp_store = FILE;",
+            "PRAGMA foreign_keys = OFF;",
+            "PRAGMA busy_timeout = 5000;",
+        ],
+        SqliteProfile::Practical => &[
+            "PRAGMA journal_mode = WAL;",
+            "PRAGMA synchronous = NORMAL;",
+            "PRAGMA temp_store = MEMORY;",
+            "PRAGMA cache_size = -32768;",
+            "PRAGMA mmap_size = 67108864;",
+            "PRAGMA foreign_keys = OFF;",
+            "PRAGMA busy_timeout = 5000;",
+        ],
+    };
+
+    for pragma in pragmas {
+        connection.execute(pragma)?;
+    }
+    Ok(())
+}
+
+fn normalize_sqlite_sql(sql: &str) -> Option<String> {
+    let trimmed = sql.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if let Some(table) = lower.strip_prefix("analyze table ") {
+        let table = table.trim().trim_end_matches(';');
+        if table.is_empty() {
+            return None;
+        }
+        return Some(format!("ANALYZE {table};"));
+    }
+    Some(trimmed.to_string())
 }
 
 pub struct SqliteResult<'a> {

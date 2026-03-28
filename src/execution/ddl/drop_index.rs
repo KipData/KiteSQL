@@ -12,48 +12,58 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::execution::{spawn_executor, Executor, WriteExecutor};
+use crate::errors::DatabaseError;
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
 use crate::planner::operator::drop_index::DropIndexOperator;
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::throw;
+use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
 
 pub struct DropIndex {
-    op: DropIndexOperator,
+    op: Option<DropIndexOperator>,
 }
 
 impl From<DropIndexOperator> for DropIndex {
     fn from(op: DropIndexOperator) -> Self {
-        Self { op }
+        Self { op: Some(op) }
     }
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropIndex {
-    fn execute_mut(
+    fn into_executor(
         self,
-        (table_cache, _, meta_cache): (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
-        transaction: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let DropIndexOperator {
-                table_name,
-                index_name,
-                if_exists,
-            } = self.op;
+        arena: &mut ExecArena<'a, T>,
+        _: ExecutionCaches<'a>,
+        _: *mut T,
+    ) -> ExecId {
+        arena.push(ExecNode::DropIndex(self))
+    }
+}
 
-            throw!(
-                co,
-                unsafe { &mut (*transaction) }.drop_index(
-                    table_cache,
-                    meta_cache,
-                    table_name,
-                    &index_name,
-                    if_exists
-                )
-            );
+impl DropIndex {
+    pub(crate) fn next_tuple<'a, T: Transaction>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> Result<(), DatabaseError> {
+        let Some(DropIndexOperator {
+            table_name,
+            index_name,
+            if_exists,
+        }) = self.op.take()
+        else {
+            arena.finish();
+            return Ok(());
+        };
 
-            co.yield_(Ok(TupleBuilder::build_result(index_name.to_string())))
-                .await;
-        })
+        arena.transaction_mut().drop_index(
+            arena.table_cache(),
+            arena.meta_cache(),
+            table_name,
+            &index_name,
+            if_exists,
+        )?;
+
+        TupleBuilder::build_result_into(arena.result_tuple_mut(), index_name.to_string());
+        arena.resume();
+        Ok(())
     }
 }

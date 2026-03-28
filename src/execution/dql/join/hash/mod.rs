@@ -28,38 +28,50 @@ use crate::execution::dql::join::hash::left_semi_join::LeftSemiJoinState;
 use crate::execution::dql::join::hash::right_join::RightJoinState;
 use crate::execution::dql::join::hash_join::BuildState;
 use crate::execution::dql::sort::BumpVec;
-use crate::execution::Executor;
 use crate::expression::ScalarExpression;
 use crate::types::tuple::{SchemaRef, Tuple};
 use crate::types::value::DataValue;
-use ahash::HashMap;
-
-#[derive(Debug)]
-pub(crate) struct ProbeArgs<'a> {
-    pub(crate) is_keys_has_null: bool,
-    pub(crate) probe_tuple: Tuple,
-    pub(crate) build_state: Option<&'a mut BuildState>,
-}
+use std::collections::hash_map::IntoIter as HashMapIntoIter;
 
 pub(crate) struct FilterArgs {
     pub(crate) full_schema: SchemaRef,
     pub(crate) filter_expr: ScalarExpression,
 }
 
-pub(crate) trait JoinProbeState<'a> {
-    fn probe(
-        &mut self,
-        probe_args: ProbeArgs<'a>,
-        filter_args: Option<&'a FilterArgs>,
-    ) -> Executor<'a>;
+pub(crate) struct ProbeState {
+    pub(crate) is_keys_has_null: bool,
+    pub(crate) probe_tuple: Tuple,
+    pub(crate) index: usize,
+    pub(crate) has_filtered: bool,
+    pub(crate) produced: bool,
+    pub(crate) finished: bool,
+    pub(crate) emitted_unmatched: bool,
+}
 
-    #[allow(clippy::mutable_key_type)]
-    fn left_drop(
+pub(crate) struct LeftDropState {
+    pub(crate) states: HashMapIntoIter<BumpVec<'static, DataValue>, BuildState>,
+    pub(crate) current: Option<LeftDropTuples>,
+}
+
+pub(crate) struct LeftDropTuples {
+    pub(crate) tuples: std::vec::IntoIter<(usize, Tuple)>,
+    pub(crate) has_filted: bool,
+}
+
+pub(crate) trait JoinProbeState {
+    fn probe_next(
         &mut self,
-        _build_map: HashMap<BumpVec<'a, DataValue>, BuildState>,
-        _filter_args: Option<&'a FilterArgs>,
-    ) -> Option<Executor<'a>> {
-        None
+        probe_state: &mut ProbeState,
+        build_state: Option<&mut BuildState>,
+        filter_args: Option<&FilterArgs>,
+    ) -> Result<Option<Tuple>, DatabaseError>;
+
+    fn left_drop_next(
+        &mut self,
+        _left_drop_state: &mut LeftDropState,
+        _filter_args: Option<&FilterArgs>,
+    ) -> Result<Option<Tuple>, DatabaseError> {
+        Ok(None)
     }
 }
 
@@ -72,34 +84,51 @@ pub(crate) enum JoinProbeStateImpl {
     LeftAnti(LeftAntiJoinState),
 }
 
-impl<'a> JoinProbeState<'a> for JoinProbeStateImpl {
-    fn probe(
+impl JoinProbeState for JoinProbeStateImpl {
+    fn probe_next(
         &mut self,
-        probe_args: ProbeArgs<'a>,
-        filter_args: Option<&'a FilterArgs>,
-    ) -> Executor<'a> {
+        probe_state: &mut ProbeState,
+        build_state: Option<&mut BuildState>,
+        filter_args: Option<&FilterArgs>,
+    ) -> Result<Option<Tuple>, DatabaseError> {
         match self {
-            JoinProbeStateImpl::Inner(state) => state.probe(probe_args, filter_args),
-            JoinProbeStateImpl::Left(state) => state.probe(probe_args, filter_args),
-            JoinProbeStateImpl::Right(state) => state.probe(probe_args, filter_args),
-            JoinProbeStateImpl::Full(state) => state.probe(probe_args, filter_args),
-            JoinProbeStateImpl::LeftSemi(state) => state.probe(probe_args, filter_args),
-            JoinProbeStateImpl::LeftAnti(state) => state.probe(probe_args, filter_args),
+            JoinProbeStateImpl::Inner(state) => {
+                state.probe_next(probe_state, build_state, filter_args)
+            }
+            JoinProbeStateImpl::Left(state) => {
+                state.probe_next(probe_state, build_state, filter_args)
+            }
+            JoinProbeStateImpl::Right(state) => {
+                state.probe_next(probe_state, build_state, filter_args)
+            }
+            JoinProbeStateImpl::Full(state) => {
+                state.probe_next(probe_state, build_state, filter_args)
+            }
+            JoinProbeStateImpl::LeftSemi(state) => {
+                state.probe_next(probe_state, build_state, filter_args)
+            }
+            JoinProbeStateImpl::LeftAnti(state) => {
+                state.probe_next(probe_state, build_state, filter_args)
+            }
         }
     }
 
-    fn left_drop(
+    fn left_drop_next(
         &mut self,
-        _build_map: HashMap<BumpVec<'a, DataValue>, BuildState>,
-        filter_args: Option<&'a FilterArgs>,
-    ) -> Option<Executor<'a>> {
+        left_drop_state: &mut LeftDropState,
+        filter_args: Option<&FilterArgs>,
+    ) -> Result<Option<Tuple>, DatabaseError> {
         match self {
-            JoinProbeStateImpl::Inner(state) => state.left_drop(_build_map, filter_args),
-            JoinProbeStateImpl::Left(state) => state.left_drop(_build_map, filter_args),
-            JoinProbeStateImpl::Right(state) => state.left_drop(_build_map, filter_args),
-            JoinProbeStateImpl::Full(state) => state.left_drop(_build_map, filter_args),
-            JoinProbeStateImpl::LeftSemi(state) => state.left_drop(_build_map, filter_args),
-            JoinProbeStateImpl::LeftAnti(state) => state.left_drop(_build_map, filter_args),
+            JoinProbeStateImpl::Inner(state) => state.left_drop_next(left_drop_state, filter_args),
+            JoinProbeStateImpl::Left(state) => state.left_drop_next(left_drop_state, filter_args),
+            JoinProbeStateImpl::Right(state) => state.left_drop_next(left_drop_state, filter_args),
+            JoinProbeStateImpl::Full(state) => state.left_drop_next(left_drop_state, filter_args),
+            JoinProbeStateImpl::LeftSemi(state) => {
+                state.left_drop_next(left_drop_state, filter_args)
+            }
+            JoinProbeStateImpl::LeftAnti(state) => {
+                state.left_drop_next(left_drop_state, filter_args)
+            }
         }
     }
 }

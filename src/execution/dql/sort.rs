@@ -13,16 +13,15 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, spawn_executor, Executor, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::LogicalPlan;
 use crate::storage::table_codec::BumpBytes;
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::throw;
-use crate::types::tuple::{Schema, Tuple};
+use crate::storage::Transaction;
+use crate::types::tuple::{Schema, SchemaRef, Tuple};
 use bumpalo::Bump;
 use std::cmp::Ordering;
-use std::mem::MaybeUninit;
+use std::mem::{transmute, MaybeUninit};
 
 pub(crate) type BumpVec<'bump, T> = bumpalo::collections::Vec<'bump, T>;
 
@@ -276,45 +275,57 @@ impl SortBy {
 }
 
 pub struct Sort {
-    arena: Bump,
+    output: Option<Box<dyn Iterator<Item = Tuple>>>,
+    arena: Box<Bump>,
     sort_fields: Vec<SortField>,
     limit: Option<usize>,
-    input: LogicalPlan,
+    input_schema: SchemaRef,
+    input: ExecId,
+    input_plan: Option<LogicalPlan>,
 }
 
 impl From<(SortOperator, LogicalPlan)> for Sort {
-    fn from((SortOperator { sort_fields, limit }, input): (SortOperator, LogicalPlan)) -> Self {
+    fn from((SortOperator { sort_fields, limit }, mut input): (SortOperator, LogicalPlan)) -> Self {
         Sort {
-            arena: Default::default(),
+            output: None,
+            arena: Box::<Bump>::default(),
             sort_fields,
             limit,
-            input,
+            input_schema: input.output_schema().clone(),
+            input: 0,
+            input_plan: Some(input),
         }
     }
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Sort {
-    fn execute(
-        self,
-        cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
+    fn into_executor(
+        mut self,
+        arena: &mut ExecArena<'a, T>,
+        cache: ExecutionCaches<'a>,
         transaction: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let Sort {
-                arena,
-                sort_fields,
-                limit,
-                mut input,
-            } = self;
+    ) -> ExecId {
+        self.input = build_read(
+            arena,
+            self.input_plan.take().expect("sort input plan initialized"),
+            cache,
+            transaction,
+        );
+        arena.push(ExecNode::Sort(self))
+    }
+}
 
-            let arena: *const Bump = &arena;
-            let schema = input.output_schema().clone();
-            let mut tuples = NullableVec::new(unsafe { &*arena });
+impl Sort {
+    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> Result<(), DatabaseError> {
+        if self.output.is_none() {
+            let mut tuples = NullableVec::new(&self.arena);
 
-            let mut coroutine = build_read(input, cache, transaction);
-
-            for (offset, tuple) in coroutine.by_ref().enumerate() {
-                tuples.put((offset, throw!(co, tuple)));
+            while arena.next_tuple(self.input)? {
+                let offset = tuples.len();
+                tuples.put((offset, arena.result_tuple().clone()));
             }
 
             let sort_by = if tuples.len() > 256 {
@@ -322,18 +333,29 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Sort {
             } else {
                 SortBy::Fast
             };
-            let mut limit = limit.unwrap_or(tuples.len());
+            let limit = self.limit.unwrap_or(tuples.len());
+            let rows = sort_by.sorted_tuples(
+                &self.arena,
+                &self.input_schema,
+                &self.sort_fields,
+                tuples,
+            )?;
+            let rows: Box<dyn Iterator<Item = Tuple> + '_> = Box::new(rows.take(limit));
+            // The arena lives at a stable boxed address, so we can keep the old iterator shape
+            // and resume it across executor polls.
+            self.output = Some(unsafe {
+                transmute::<Box<dyn Iterator<Item = Tuple> + '_>, Box<dyn Iterator<Item = Tuple>>>(
+                    rows,
+                )
+            });
+        }
 
-            for tuple in throw!(
-                co,
-                sort_by.sorted_tuples(unsafe { &*arena }, &schema, &sort_fields, tuples)
-            ) {
-                if limit != 0 {
-                    co.yield_(Ok(tuple)).await;
-                    limit -= 1;
-                }
-            }
-        })
+        if let Some(tuple) = self.output.as_mut().and_then(std::iter::Iterator::next) {
+            arena.produce_tuple(tuple);
+        } else {
+            arena.finish();
+        }
+        Ok(())
     }
 }
 
@@ -381,7 +403,7 @@ mod test {
                         false,
                         ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
                     ))),
-                    position: Some(0),
+                    position: 0,
                 },
                 asc,
                 nulls_first,
@@ -540,7 +562,7 @@ mod test {
                             false,
                             ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
                         ))),
-                        position: Some(0),
+                        position: 0,
                     },
                     asc: asc_1,
                     nulls_first: nulls_first_1,
@@ -552,7 +574,7 @@ mod test {
                             false,
                             ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
                         ))),
-                        position: Some(1),
+                        position: 1,
                     },
                     asc: asc_2,
                     nulls_first: nulls_first_2,

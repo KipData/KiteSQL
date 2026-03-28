@@ -13,46 +13,13 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::optimizer::core::pattern::Pattern;
-use crate::optimizer::core::pattern::PatternChildrenPredicate;
-use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
+use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child, wrap_child_with};
 use crate::planner::operator::join::JoinType;
 use crate::planner::operator::Operator;
 use crate::planner::LogicalPlan;
-use std::sync::LazyLock;
-
-static LIMIT_PROJECT_TRANSPOSE_RULE: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |op| matches!(op, Operator::Limit(_)),
-    children: PatternChildrenPredicate::Predicate(vec![Pattern {
-        predicate: |op| matches!(op, Operator::Project(_)),
-        children: PatternChildrenPredicate::None,
-    }]),
-});
-
-static PUSH_LIMIT_THROUGH_JOIN_RULE: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |op| matches!(op, Operator::Limit(_)),
-    children: PatternChildrenPredicate::Predicate(vec![Pattern {
-        predicate: |op| matches!(op, Operator::Join(_)),
-        children: PatternChildrenPredicate::None,
-    }]),
-});
-
-static PUSH_LIMIT_INTO_TABLE_SCAN_RULE: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |op| matches!(op, Operator::Limit(_)),
-    children: PatternChildrenPredicate::Predicate(vec![Pattern {
-        predicate: |op| matches!(op, Operator::TableScan(_)),
-        children: PatternChildrenPredicate::None,
-    }]),
-});
 
 pub struct LimitProjectTranspose;
-
-impl MatchPattern for LimitProjectTranspose {
-    fn pattern(&self) -> &Pattern {
-        &LIMIT_PROJECT_TRANSPOSE_RULE
-    }
-}
 
 impl NormalizationRule for LimitProjectTranspose {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
@@ -95,12 +62,6 @@ impl NormalizationRule for LimitProjectTranspose {
 /// TODO: if join condition is empty.
 pub struct PushLimitThroughJoin;
 
-impl MatchPattern for PushLimitThroughJoin {
-    fn pattern(&self) -> &Pattern {
-        &PUSH_LIMIT_THROUGH_JOIN_RULE
-    }
-}
-
 impl NormalizationRule for PushLimitThroughJoin {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
         let limit_op = match &plan.operator {
@@ -130,12 +91,6 @@ impl NormalizationRule for PushLimitThroughJoin {
 
 /// Push down `Limit` past a `Scan`.
 pub struct PushLimitIntoScan;
-
-impl MatchPattern for PushLimitIntoScan {
-    fn pattern(&self) -> &Pattern {
-        &PUSH_LIMIT_INTO_TABLE_SCAN_RULE
-    }
-}
 
 impl NormalizationRule for PushLimitIntoScan {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {

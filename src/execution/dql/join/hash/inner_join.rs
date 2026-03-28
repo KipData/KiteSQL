@@ -12,45 +12,50 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::execution::dql::join::hash::{filter, FilterArgs, JoinProbeState, ProbeArgs};
-use crate::execution::{spawn_executor, Executor};
-use crate::throw;
+use crate::errors::DatabaseError;
+use crate::execution::dql::join::hash::{filter, FilterArgs, JoinProbeState, ProbeState};
+use crate::execution::dql::join::hash_join::BuildState;
 use crate::types::tuple::Tuple;
 
 pub(crate) struct InnerJoinState;
 
-impl<'a> JoinProbeState<'a> for InnerJoinState {
-    fn probe(
+impl JoinProbeState for InnerJoinState {
+    fn probe_next(
         &mut self,
-        probe_args: ProbeArgs<'a>,
-        filter_args: Option<&'a FilterArgs>,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let ProbeArgs {
-                is_keys_has_null: false,
-                probe_tuple,
-                build_state: Some(build_state),
-                ..
-            } = probe_args
-            else {
-                return;
-            };
+        probe_state: &mut ProbeState,
+        build_state: Option<&mut BuildState>,
+        filter_args: Option<&FilterArgs>,
+    ) -> Result<Option<Tuple>, DatabaseError> {
+        if probe_state.is_keys_has_null {
+            probe_state.finished = true;
+            return Ok(None);
+        }
 
-            build_state.is_used = true;
-            for (_, Tuple { values, pk }) in build_state.tuples.iter() {
-                let full_values =
-                    Vec::from_iter(values.iter().chain(probe_tuple.values.iter()).cloned());
+        let Some(build_state) = build_state else {
+            probe_state.finished = true;
+            return Ok(None);
+        };
 
-                match &filter_args {
-                    None => (),
-                    Some(filter_args) => {
-                        if !throw!(co, filter(&full_values, filter_args)) {
-                            continue;
-                        }
-                    }
+        build_state.is_used = true;
+        while probe_state.index < build_state.tuples.len() {
+            let (_, Tuple { values, pk }) = &build_state.tuples[probe_state.index];
+            probe_state.index += 1;
+            let full_values = Vec::from_iter(
+                values
+                    .iter()
+                    .chain(probe_state.probe_tuple.values.iter())
+                    .cloned(),
+            );
+
+            if let Some(filter_args) = filter_args {
+                if !filter(&full_values, filter_args)? {
+                    continue;
                 }
-                co.yield_(Ok(Tuple::new(pk.clone(), full_values))).await;
             }
-        })
+            return Ok(Some(Tuple::new(pk.clone(), full_values)));
+        }
+
+        probe_state.finished = true;
+        Ok(None)
     }
 }

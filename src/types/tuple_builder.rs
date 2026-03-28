@@ -38,6 +38,16 @@ impl<'a> TupleBuilder<'a> {
         Tuple::new(None, values)
     }
 
+    pub fn build_result_into(tuple: &mut Tuple, message: String) {
+        tuple.pk = None;
+        tuple.values.clear();
+        tuple.values.push(DataValue::Utf8 {
+            value: message,
+            ty: Utf8Type::Variable(None),
+            unit: CharLengthUnits::Characters,
+        });
+    }
+
     pub fn build_with_row<'b>(
         &self,
         row: impl IntoIterator<Item = &'b str>,

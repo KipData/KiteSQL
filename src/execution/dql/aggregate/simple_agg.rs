@@ -12,70 +12,91 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::create_accumulators;
-use crate::execution::{build_read, spawn_executor, Executor, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::LogicalPlan;
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::throw;
-use crate::types::tuple::Tuple;
-use crate::types::value::DataValue;
-use itertools::Itertools;
+use crate::storage::Transaction;
+use crate::types::tuple::SchemaRef;
 pub struct SimpleAggExecutor {
     agg_calls: Vec<ScalarExpression>,
-    input: LogicalPlan,
+    input_schema: SchemaRef,
+    input_plan: Option<LogicalPlan>,
+    input: Option<ExecId>,
 }
 
 impl From<(AggregateOperator, LogicalPlan)> for SimpleAggExecutor {
     fn from(
-        (AggregateOperator { agg_calls, .. }, input): (AggregateOperator, LogicalPlan),
+        (AggregateOperator { agg_calls, .. }, mut input): (AggregateOperator, LogicalPlan),
     ) -> Self {
-        SimpleAggExecutor { agg_calls, input }
+        SimpleAggExecutor {
+            agg_calls,
+            input_schema: input.output_schema().clone(),
+            input_plan: Some(input),
+            input: None,
+        }
     }
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SimpleAggExecutor {
-    fn execute(
-        self,
-        cache: (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
+    fn into_executor(
+        mut self,
+        arena: &mut ExecArena<'a, T>,
+        cache: ExecutionCaches<'a>,
         transaction: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let SimpleAggExecutor {
-                agg_calls,
-                mut input,
-            } = self;
+    ) -> ExecId {
+        self.input = Some(build_read(
+            arena,
+            self.input_plan
+                .take()
+                .expect("simple aggregate input plan initialized"),
+            cache,
+            transaction,
+        ));
+        arena.push(ExecNode::SimpleAgg(self))
+    }
+}
 
-            let mut accs = throw!(co, create_accumulators(&agg_calls));
-            let schema = input.output_schema().clone();
+impl SimpleAggExecutor {
+    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> Result<(), DatabaseError> {
+        let Some(input) = self.input.take() else {
+            arena.finish();
+            return Ok(());
+        };
 
-            let mut executor = build_read(input, cache, transaction);
+        let mut accs = create_accumulators(&self.agg_calls)?;
 
-            for tuple in executor.by_ref() {
-                let tuple = throw!(co, tuple);
-
-                let values: Vec<DataValue> = throw!(
-                    co,
-                    agg_calls
-                        .iter()
-                        .map(|expr| match expr {
-                            ScalarExpression::AggCall { args, .. } => {
-                                args[0].eval(Some((&tuple, &schema)))
-                            }
-                            _ => unreachable!(),
-                        })
-                        .try_collect()
-                );
-
-                for (acc, value) in accs.iter_mut().zip_eq(values.iter()) {
-                    throw!(co, acc.update_value(value));
+        while arena.next_tuple(input)? {
+            let tuple = arena.result_tuple();
+            for (acc, expr) in accs.iter_mut().zip(self.agg_calls.iter()) {
+                let ScalarExpression::AggCall { args, .. } = expr else {
+                    unreachable!()
+                };
+                if args.len() > 1 {
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "currently aggregate functions only support a single Column as a parameter"
+                            .to_string(),
+                    ));
                 }
-            }
-            let values: Vec<DataValue> =
-                throw!(co, accs.into_iter().map(|acc| acc.evaluate()).try_collect());
 
-            co.yield_(Ok(Tuple::new(None, values))).await;
-        })
+                let value = args[0].eval(Some((tuple, &self.input_schema)))?;
+                acc.update_value(&value)?;
+            }
+        }
+
+        let output = arena.result_tuple_mut();
+        output.pk = None;
+        output.values.clear();
+        output.values.reserve(accs.len());
+        for acc in accs {
+            output.values.push(acc.evaluate()?);
+        }
+        arena.resume();
+        Ok(())
     }
 }

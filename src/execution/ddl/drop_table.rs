@@ -12,45 +12,53 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::execution::{spawn_executor, Executor, WriteExecutor};
+use crate::errors::DatabaseError;
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
 use crate::planner::operator::drop_table::DropTableOperator;
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::throw;
+use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
 
 pub struct DropTable {
-    op: DropTableOperator,
+    op: Option<DropTableOperator>,
 }
 
 impl From<DropTableOperator> for DropTable {
     fn from(op: DropTableOperator) -> Self {
-        DropTable { op }
+        DropTable { op: Some(op) }
     }
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropTable {
-    fn execute_mut(
+    fn into_executor(
         self,
-        (table_cache, _, _): (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache),
-        transaction: *mut T,
-    ) -> Executor<'a> {
-        spawn_executor(move |co| async move {
-            let DropTableOperator {
-                table_name,
-                if_exists,
-            } = self.op;
+        arena: &mut ExecArena<'a, T>,
+        _: ExecutionCaches<'a>,
+        _: *mut T,
+    ) -> ExecId {
+        arena.push(ExecNode::DropTable(self))
+    }
+}
 
-            throw!(
-                co,
-                unsafe { &mut (*transaction) }.drop_table(
-                    table_cache,
-                    table_name.clone(),
-                    if_exists
-                )
-            );
+impl DropTable {
+    pub(crate) fn next_tuple<'a, T: Transaction>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> Result<(), DatabaseError> {
+        let Some(DropTableOperator {
+            table_name,
+            if_exists,
+        }) = self.op.take()
+        else {
+            arena.finish();
+            return Ok(());
+        };
 
-            co.yield_(Ok(TupleBuilder::build_result(format!("{table_name}"))))
-                .await;
-        })
+        arena
+            .transaction_mut()
+            .drop_table(arena.table_cache(), table_name.clone(), if_exists)?;
+
+        TupleBuilder::build_result_into(arena.result_tuple_mut(), format!("{table_name}"));
+        arena.resume();
+        Ok(())
     }
 }

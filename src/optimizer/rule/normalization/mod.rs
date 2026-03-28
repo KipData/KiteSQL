@@ -13,20 +13,16 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+use crate::expression::visitor_mut::{walk_mut_expr, VisitorMut};
 use crate::expression::{AliasType, ScalarExpression};
-use crate::optimizer::core::pattern::Pattern;
-use crate::optimizer::core::rule::{MatchPattern, NormalizationRule};
+use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::rule::normalization::column_pruning::ColumnPruning;
 use crate::optimizer::rule::normalization::combine_operators::{
     CollapseGroupByAgg, CollapseProject, CombineFilter,
 };
-use crate::optimizer::rule::normalization::compilation_in_advance::{
-    BindExpressionPosition, EvaluatorBind,
-};
+use crate::optimizer::rule::normalization::compilation_in_advance::EvaluatorBind;
+use crate::planner::operator::Operator;
 
-use crate::optimizer::rule::normalization::agg_elimination::{
-    EliminateRedundantSort, UseStreamDistinct,
-};
 use crate::optimizer::rule::normalization::min_max_top_k::MinMaxToTopK;
 use crate::optimizer::rule::normalization::pushdown_limit::{
     LimitProjectTranspose, PushLimitIntoScan, PushLimitThroughJoin,
@@ -47,7 +43,11 @@ mod pushdown_limit;
 mod pushdown_predicates;
 mod simplification;
 mod top_k;
-pub use agg_elimination::{annotate_sort_preserving_indexes, annotate_stream_distinct_indexes};
+pub(crate) use agg_elimination::{
+    apply_annotated_post_rules, apply_scan_order_hint, OrderHintKind, ScanOrderHint,
+};
+pub(crate) use compilation_in_advance::evaluator_bind_current;
+pub(crate) use simplification::constant_calculation_current;
 
 #[derive(Debug, Copy, Clone)]
 pub enum NormalizationRuleImpl {
@@ -69,35 +69,107 @@ pub enum NormalizationRuleImpl {
     SimplifyFilter,
     ConstantCalculation,
     // CompilationInAdvance
-    BindExpressionPosition,
     EvaluatorBind,
     MinMaxToTopK,
     TopK,
-    EliminateRedundantSort,
-    UseStreamDistinct,
 }
 
-impl MatchPattern for NormalizationRuleImpl {
-    fn pattern(&self) -> &Pattern {
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum WholeTreePassKind {
+    ColumnPruning,
+    ExpressionRewrite,
+}
+
+#[repr(usize)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum NormalizationRuleRootTag {
+    Any = 0,
+    Aggregate,
+    Filter,
+    Join,
+    Limit,
+    Project,
+    SortLike,
+}
+
+impl NormalizationRuleRootTag {
+    pub const COUNT: usize = Self::SortLike as usize + 1;
+
+    pub fn from_operator(operator: &Operator) -> Option<Self> {
+        match operator {
+            Operator::Aggregate(_) => Some(Self::Aggregate),
+            Operator::Filter(_) => Some(Self::Filter),
+            Operator::Join(_) => Some(Self::Join),
+            Operator::Limit(_) => Some(Self::Limit),
+            Operator::Project(_) => Some(Self::Project),
+            Operator::Sort(_) | Operator::TopK(_) => Some(Self::SortLike),
+            Operator::Dummy
+            | Operator::TableScan(_)
+            | Operator::ScalarSubquery(_)
+            | Operator::Values(_)
+            | Operator::ShowTable
+            | Operator::ShowView
+            | Operator::Explain
+            | Operator::Describe(_)
+            | Operator::Insert(_)
+            | Operator::Delete(_)
+            | Operator::Analyze(_)
+            | Operator::AddColumn(_)
+            | Operator::ChangeColumn(_)
+            | Operator::DropColumn(_)
+            | Operator::CreateTable(_)
+            | Operator::CreateIndex(_)
+            | Operator::CreateView(_)
+            | Operator::DropTable(_)
+            | Operator::DropView(_)
+            | Operator::DropIndex(_)
+            | Operator::Truncate(_)
+            | Operator::CopyFromFile(_)
+            | Operator::CopyToFile(_)
+            | Operator::FunctionScan(_)
+            | Operator::Update(_)
+            | Operator::Union(_)
+            | Operator::Except(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum NormalizationPassKind {
+    WholeTreePass(WholeTreePassKind),
+    LocalRewrite,
+}
+
+impl NormalizationRuleImpl {
+    pub fn pass_kind(&self) -> NormalizationPassKind {
         match self {
-            NormalizationRuleImpl::ColumnPruning => ColumnPruning.pattern(),
-            NormalizationRuleImpl::CollapseProject => CollapseProject.pattern(),
-            NormalizationRuleImpl::CollapseGroupByAgg => CollapseGroupByAgg.pattern(),
-            NormalizationRuleImpl::CombineFilter => CombineFilter.pattern(),
-            NormalizationRuleImpl::LimitProjectTranspose => LimitProjectTranspose.pattern(),
-            NormalizationRuleImpl::PushLimitThroughJoin => PushLimitThroughJoin.pattern(),
-            NormalizationRuleImpl::PushLimitIntoTableScan => PushLimitIntoScan.pattern(),
-            NormalizationRuleImpl::PushPredicateThroughJoin => PushPredicateThroughJoin.pattern(),
-            NormalizationRuleImpl::PushJoinPredicateIntoScan => PushJoinPredicateIntoScan.pattern(),
-            NormalizationRuleImpl::PushPredicateIntoScan => PushPredicateIntoScan.pattern(),
-            NormalizationRuleImpl::SimplifyFilter => SimplifyFilter.pattern(),
-            NormalizationRuleImpl::ConstantCalculation => ConstantCalculation.pattern(),
-            NormalizationRuleImpl::BindExpressionPosition => BindExpressionPosition.pattern(),
-            NormalizationRuleImpl::EvaluatorBind => EvaluatorBind.pattern(),
-            NormalizationRuleImpl::MinMaxToTopK => MinMaxToTopK.pattern(),
-            NormalizationRuleImpl::TopK => TopK.pattern(),
-            NormalizationRuleImpl::EliminateRedundantSort => EliminateRedundantSort.pattern(),
-            NormalizationRuleImpl::UseStreamDistinct => UseStreamDistinct.pattern(),
+            NormalizationRuleImpl::ColumnPruning => {
+                NormalizationPassKind::WholeTreePass(WholeTreePassKind::ColumnPruning)
+            }
+            NormalizationRuleImpl::ConstantCalculation | NormalizationRuleImpl::EvaluatorBind => {
+                NormalizationPassKind::WholeTreePass(WholeTreePassKind::ExpressionRewrite)
+            }
+            _ => NormalizationPassKind::LocalRewrite,
+        }
+    }
+
+    pub fn root_tag(&self) -> NormalizationRuleRootTag {
+        match self {
+            NormalizationRuleImpl::ColumnPruning => NormalizationRuleRootTag::Any,
+            NormalizationRuleImpl::CollapseProject => NormalizationRuleRootTag::Project,
+            NormalizationRuleImpl::CollapseGroupByAgg => NormalizationRuleRootTag::Aggregate,
+            NormalizationRuleImpl::CombineFilter => NormalizationRuleRootTag::Filter,
+            NormalizationRuleImpl::LimitProjectTranspose
+            | NormalizationRuleImpl::PushLimitThroughJoin
+            | NormalizationRuleImpl::PushLimitIntoTableScan
+            | NormalizationRuleImpl::TopK => NormalizationRuleRootTag::Limit,
+            NormalizationRuleImpl::PushPredicateThroughJoin
+            | NormalizationRuleImpl::PushPredicateIntoScan
+            | NormalizationRuleImpl::SimplifyFilter => NormalizationRuleRootTag::Filter,
+            NormalizationRuleImpl::PushJoinPredicateIntoScan => NormalizationRuleRootTag::Join,
+            NormalizationRuleImpl::ConstantCalculation => NormalizationRuleRootTag::Any,
+            NormalizationRuleImpl::EvaluatorBind => NormalizationRuleRootTag::Any,
+            NormalizationRuleImpl::MinMaxToTopK => NormalizationRuleRootTag::Aggregate,
         }
     }
 }
@@ -119,12 +191,9 @@ impl NormalizationRule for NormalizationRuleImpl {
             NormalizationRuleImpl::SimplifyFilter => SimplifyFilter.apply(plan),
             NormalizationRuleImpl::PushPredicateIntoScan => PushPredicateIntoScan.apply(plan),
             NormalizationRuleImpl::ConstantCalculation => ConstantCalculation.apply(plan),
-            NormalizationRuleImpl::BindExpressionPosition => BindExpressionPosition.apply(plan),
             NormalizationRuleImpl::EvaluatorBind => EvaluatorBind.apply(plan),
             NormalizationRuleImpl::MinMaxToTopK => MinMaxToTopK.apply(plan),
             NormalizationRuleImpl::TopK => TopK.apply(plan),
-            NormalizationRuleImpl::EliminateRedundantSort => EliminateRedundantSort.apply(plan),
-            NormalizationRuleImpl::UseStreamDistinct => UseStreamDistinct.apply(plan),
         }
     }
 }
@@ -156,13 +225,65 @@ pub fn is_subset_exprs(left: &[ScalarExpression], right: &[ScalarExpression]) ->
         let lhs_stripped = strip_alias(lhs);
         right.iter().any(|rhs| {
             let rhs_stripped = strip_alias(rhs);
-            if lhs_stripped == rhs_stripped {
+            if lhs_stripped.eq_ignore_colref_pos(rhs_stripped) {
                 return true;
             }
-            if matches!(lhs, ScalarExpression::ColumnRef { .. }) {
-                return lhs_stripped == strip_all_alias(rhs);
+            if matches!(lhs_stripped, ScalarExpression::ColumnRef { .. }) {
+                return lhs_stripped.eq_ignore_colref_pos(strip_all_alias(rhs));
             }
             false
         })
     })
+}
+
+pub(crate) fn remap_position(position: &mut usize, removed_positions: &[usize]) {
+    match removed_positions.binary_search(position) {
+        Ok(_) => {
+            debug_assert!(
+                false,
+                "encountered a reference to pruned output slot {position}"
+            );
+        }
+        Err(shift) => {
+            *position -= shift;
+        }
+    }
+}
+
+struct PositionRemapper<'a> {
+    removed_positions: &'a [usize],
+}
+
+impl<'a> VisitorMut<'a> for PositionRemapper<'_> {
+    fn visit(&mut self, expr: &'a mut ScalarExpression) -> Result<(), DatabaseError> {
+        match expr {
+            ScalarExpression::ColumnRef { position, .. } => {
+                remap_position(position, self.removed_positions);
+                Ok(())
+            }
+            ScalarExpression::Alias { expr, alias } => match alias {
+                AliasType::Expr(alias_expr) => self.visit(alias_expr),
+                AliasType::Name(_) => self.visit(expr),
+            },
+            _ => walk_mut_expr(self, expr),
+        }
+    }
+}
+
+pub(crate) fn remap_expr_positions(
+    expr: &mut ScalarExpression,
+    removed_positions: &[usize],
+) -> Result<(), DatabaseError> {
+    PositionRemapper { removed_positions }.visit(expr)
+}
+
+pub(crate) fn remap_exprs_positions<'a>(
+    exprs: impl IntoIterator<Item = &'a mut ScalarExpression>,
+    removed_positions: &[usize],
+) -> Result<(), DatabaseError> {
+    let mut remapper = PositionRemapper { removed_positions };
+    for expr in exprs {
+        remapper.visit(expr)?;
+    }
+    Ok(())
 }
