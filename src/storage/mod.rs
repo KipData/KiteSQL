@@ -48,6 +48,8 @@ use std::io::Cursor;
 use std::mem;
 use std::ops::SubAssign;
 use std::sync::Arc;
+
+pub type KeyValueRef<'a> = (&'a [u8], &'a [u8]);
 use std::vec::IntoIter;
 use ulid::Generator;
 
@@ -372,6 +374,7 @@ pub trait Transaction: Sized {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn change_column(
         &mut self,
         table_cache: &TableCache,
@@ -761,7 +764,7 @@ pub trait Transaction: Sized {
             let mut iter = self.range(Bound::Included(min), Bound::Included(max))?;
 
             while let Some((_, value)) = iter.try_next().ok().flatten() {
-                let meta = TableCodec::decode_view(&value, (self, table_cache))?;
+                let meta = TableCodec::decode_view(value, (self, table_cache))?;
 
                 metas.push(meta);
             }
@@ -795,7 +798,7 @@ pub trait Transaction: Sized {
             let mut iter = self.range(Bound::Included(min), Bound::Included(max))?;
 
             while let Some((_, value)) = iter.try_next().ok().flatten() {
-                let meta = TableCodec::decode_root_table::<Self>(&value)?;
+                let meta = TableCodec::decode_root_table::<Self>(value)?;
 
                 metas.push(meta);
             }
@@ -873,15 +876,15 @@ pub trait Transaction: Sized {
                 let mut has_extra = false;
 
                 while let Some((key, value)) = iter.try_next()? {
-                    match unsafe { &*self.table_codec() }.decode_statistics_codec_type(&key)? {
+                    match unsafe { &*self.table_codec() }.decode_statistics_codec_type(key)? {
                         StatisticsCodecType::Root => {
-                            root = Some(TableCodec::decode_statistics_meta::<Self>(&value)?);
+                            root = Some(TableCodec::decode_statistics_meta::<Self>(value)?);
                         }
                         StatisticsCodecType::SketchMeta | StatisticsCodecType::SketchPage => {
                             has_extra = true
                         }
                         StatisticsCodecType::Bucket => {
-                            buckets.push(TableCodec::decode_statistics_bucket::<Self>(&value)?);
+                            buckets.push(TableCodec::decode_statistics_bucket::<Self>(value)?);
                         }
                     }
                 }
@@ -912,17 +915,17 @@ pub trait Transaction: Sized {
                 let mut has_root_or_bucket = false;
 
                 while let Some((key, value)) = iter.try_next()? {
-                    match unsafe { &*self.table_codec() }.decode_statistics_codec_type(&key)? {
+                    match unsafe { &*self.table_codec() }.decode_statistics_codec_type(key)? {
                         StatisticsCodecType::Root | StatisticsCodecType::Bucket => {
                             has_root_or_bucket = true
                         }
                         StatisticsCodecType::SketchMeta => {
                             sketch_meta =
-                                Some(TableCodec::decode_statistics_sketch_meta::<Self>(&value)?);
+                                Some(TableCodec::decode_statistics_sketch_meta::<Self>(value)?);
                         }
                         StatisticsCodecType::SketchPage => {
                             sketch_pages
-                                .push(TableCodec::decode_statistics_sketch_page::<Self>(&value)?);
+                                .push(TableCodec::decode_statistics_sketch_page::<Self>(value)?);
                         }
                     }
                 }
@@ -990,7 +993,7 @@ pub trait Transaction: Sized {
                         &reference_tables,
                     )?);
                 } else {
-                    index_metas.push(Arc::new(TableCodec::decode_index_meta::<Self>(&value)?));
+                    index_metas.push(Arc::new(TableCodec::decode_index_meta::<Self>(value)?));
                 }
             }
 
@@ -1046,10 +1049,6 @@ pub trait Transaction: Sized {
         &'a self,
         key: &[u8],
     ) -> Result<Option<Self::BorrowedBytes<'a>>, DatabaseError>;
-
-    fn get(&self, key: &[u8]) -> Result<Option<Bytes>, DatabaseError> {
-        Ok(self.get_borrowed(key)?.map(|bytes| bytes.as_ref().to_vec()))
-    }
 
     fn exists(&self, key: &[u8]) -> Result<bool, DatabaseError> {
         Ok(self.get_borrowed(key)?.is_some())
@@ -1677,7 +1676,7 @@ impl<'a, T: Transaction + 'a> Iter for TupleIter<'a, T> {
                 *limit -= 1;
             }
             let tuple_id = if let Some(pk_ty) = &self.pk_ty {
-                Some(TableCodec::decode_tuple_key(&key, pk_ty)?)
+                Some(TableCodec::decode_tuple_key(key, pk_ty)?)
             } else {
                 None
             };
@@ -1685,7 +1684,7 @@ impl<'a, T: Transaction + 'a> Iter for TupleIter<'a, T> {
                 tuple,
                 &self.deserializers,
                 tuple_id,
-                &value,
+                value,
                 self.total_len,
             )?;
 
@@ -1819,7 +1818,7 @@ impl<T: Transaction> Iter for IndexIter<'_, T> {
                         }
                         Self::limit_sub(&mut self.limit);
                         self.inner
-                            .index_lookup_into(tuple, &key, &value, &self.params)?;
+                            .index_lookup_into(tuple, key, value, &self.params)?;
 
                         return Ok(true);
                     }
@@ -1832,19 +1831,20 @@ impl<T: Transaction> Iter for IndexIter<'_, T> {
 }
 
 pub trait InnerIter {
-    fn try_next(&mut self) -> Result<Option<(&[u8], &[u8])>, DatabaseError>;
+    fn try_next(&mut self) -> Result<Option<KeyValueRef<'_>>, DatabaseError>;
 }
 
 pub trait Iter {
     fn next_tuple_into(&mut self, tuple: &mut Tuple) -> Result<bool, DatabaseError>;
+}
 
-    fn next_tuple(&mut self) -> Result<Option<Tuple>, DatabaseError> {
-        let mut tuple = Tuple::default();
-        if self.next_tuple_into(&mut tuple)? {
-            Ok(Some(tuple))
-        } else {
-            Ok(None)
-        }
+#[cfg(test)]
+pub(crate) fn next_tuple_for_test<I: Iter>(iter: &mut I) -> Result<Option<Tuple>, DatabaseError> {
+    let mut tuple = Tuple::default();
+    if iter.next_tuple_into(&mut tuple)? {
+        Ok(Some(tuple))
+    } else {
+        Ok(None)
     }
 }
 
@@ -1861,7 +1861,7 @@ mod test {
     use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
     use crate::storage::table_codec::TableCodec;
     use crate::storage::{
-        IndexIter, InnerIter, Iter, StatisticsMetaCache, Storage, TableCache, Transaction,
+        IndexIter, InnerIter, StatisticsMetaCache, Storage, TableCache, Transaction,
     };
     use crate::types::index::{Index, IndexMeta, IndexType};
     use crate::types::tuple::Tuple;
@@ -2062,9 +2062,18 @@ mod test {
                 true,
             )?;
 
-            assert_eq!(tuple_iter.next_tuple()?.unwrap(), tuples[0]);
-            assert_eq!(tuple_iter.next_tuple()?.unwrap(), tuples[1]);
-            assert_eq!(tuple_iter.next_tuple()?.unwrap(), tuples[2]);
+            assert_eq!(
+                super::next_tuple_for_test(&mut tuple_iter)?.unwrap(),
+                tuples[0]
+            );
+            assert_eq!(
+                super::next_tuple_for_test(&mut tuple_iter)?.unwrap(),
+                tuples[1]
+            );
+            assert_eq!(
+                super::next_tuple_for_test(&mut tuple_iter)?.unwrap(),
+                tuples[2]
+            );
 
             let mut iter = table_codec.with_tuple_bound("t1", |min, max| {
                 transaction.range(Bound::Included(min), Bound::Included(max))
@@ -2089,8 +2098,14 @@ mod test {
                 true,
             )?;
 
-            assert_eq!(tuple_iter.next_tuple()?.unwrap(), tuples[0]);
-            assert_eq!(tuple_iter.next_tuple()?.unwrap(), tuples[2]);
+            assert_eq!(
+                super::next_tuple_for_test(&mut tuple_iter)?.unwrap(),
+                tuples[0]
+            );
+            assert_eq!(
+                super::next_tuple_for_test(&mut tuple_iter)?.unwrap(),
+                tuples[2]
+            );
 
             let mut iter = table_codec.with_tuple_bound("t1", |min, max| {
                 transaction.range(Bound::Included(min), Bound::Included(max))
@@ -2312,9 +2327,18 @@ mod test {
         {
             let mut index_iter = build_index_iter(&transaction, &table_cache, c3_column_id)?;
 
-            assert_eq!(index_iter.next_tuple()?.unwrap(), tuples[0]);
-            assert_eq!(index_iter.next_tuple()?.unwrap(), tuples[2]);
-            assert_eq!(index_iter.next_tuple()?.unwrap(), tuples[1]);
+            assert_eq!(
+                super::next_tuple_for_test(&mut index_iter)?.unwrap(),
+                tuples[0]
+            );
+            assert_eq!(
+                super::next_tuple_for_test(&mut index_iter)?.unwrap(),
+                tuples[2]
+            );
+            assert_eq!(
+                super::next_tuple_for_test(&mut index_iter)?.unwrap(),
+                tuples[1]
+            );
 
             let mut iter = table_codec.with_index_bound("t1", 1, |min, max| {
                 transaction.range(Bound::Included(min), Bound::Included(max))
@@ -2332,8 +2356,14 @@ mod test {
 
         let mut index_iter = build_index_iter(&transaction, &table_cache, c3_column_id)?;
 
-        assert_eq!(index_iter.next_tuple()?.unwrap(), tuples[2]);
-        assert_eq!(index_iter.next_tuple()?.unwrap(), tuples[1]);
+        assert_eq!(
+            super::next_tuple_for_test(&mut index_iter)?.unwrap(),
+            tuples[2]
+        );
+        assert_eq!(
+            super::next_tuple_for_test(&mut index_iter)?.unwrap(),
+            tuples[1]
+        );
 
         let mut iter = table_codec.with_index_bound("t1", 1, |min, max| {
             transaction.range(Bound::Included(min), Bound::Included(max))

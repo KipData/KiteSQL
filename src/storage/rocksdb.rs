@@ -475,7 +475,7 @@ pub struct OptimisticRocksIter<'txn, 'iter> {
 
 impl InnerIter for OptimisticRocksIter<'_, '_> {
     #[inline]
-    fn try_next(&mut self) -> Result<Option<(&[u8], &[u8])>, DatabaseError> {
+    fn try_next(&mut self) -> Result<Option<crate::storage::KeyValueRef<'_>>, DatabaseError> {
         next(
             &mut self.iter,
             &self.upper,
@@ -497,7 +497,7 @@ pub struct RocksIter<'txn, 'iter> {
 
 impl InnerIter for RocksIter<'_, '_> {
     #[inline]
-    fn try_next(&mut self) -> Result<Option<(&[u8], &[u8])>, DatabaseError> {
+    fn try_next(&mut self) -> Result<Option<crate::storage::KeyValueRef<'_>>, DatabaseError> {
         next(
             &mut self.iter,
             &self.upper,
@@ -513,7 +513,7 @@ fn next<'a, D: rocksdb::DBAccess>(
     upper: &Bound<Bytes>,
     advanced: &mut bool,
     done: &mut bool,
-) -> Result<Option<(&'a [u8], &'a [u8])>, DatabaseError> {
+) -> Result<Option<crate::storage::KeyValueRef<'a>>, DatabaseError> {
     if *done {
         return Ok(None);
     }
@@ -561,8 +561,8 @@ mod test {
     use crate::expression::range_detacher::Range;
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::{
-        IndexImplEnum, IndexImplParams, IndexIter, IndexIterState, Iter, PrimaryKeyIndexImpl,
-        Storage, Transaction,
+        IndexImplEnum, IndexImplParams, IndexIter, IndexIterState, PrimaryKeyIndexImpl, Storage,
+        Transaction,
     };
     use crate::types::index::{IndexMeta, IndexType};
     use crate::types::tuple::Tuple;
@@ -676,10 +676,10 @@ mod test {
             true,
         )?;
 
-        let option_1 = iter.next_tuple()?;
+        let option_1 = crate::storage::next_tuple_for_test(&mut iter)?;
         assert_eq!(option_1.unwrap().pk, Some(DataValue::Int32(2)));
 
-        let option_2 = iter.next_tuple()?;
+        let option_2 = crate::storage::next_tuple_for_test(&mut iter)?;
         assert_eq!(option_2, None);
 
         Ok(())
@@ -749,7 +749,7 @@ mod test {
         };
         let mut result = Vec::new();
 
-        while let Some(tuple) = iter.next_tuple()? {
+        while let Some(tuple) = crate::storage::next_tuple_for_test(&mut iter)? {
             result.push(tuple.pk.unwrap());
         }
 
@@ -792,7 +792,7 @@ mod test {
                 )
                 .unwrap();
 
-            while let Some(tuple) = iter.next_tuple()? {
+            while let Some(tuple) = crate::storage::next_tuple_for_test(&mut iter)? {
                 assert_eq!(tuple.pk, Some(DataValue::Int32(1)));
                 assert_eq!(tuple.values, vec![DataValue::Int32(1), DataValue::Int32(1)])
             }
@@ -819,7 +819,7 @@ mod test {
                 )
                 .unwrap();
 
-            while let Some(tuple) = iter.next_tuple()? {
+            while let Some(tuple) = crate::storage::next_tuple_for_test(&mut iter)? {
                 assert_eq!(tuple.pk, Some(DataValue::Int32(3)));
                 assert_eq!(tuple.values, vec![DataValue::Int32(3)])
             }
@@ -915,7 +915,7 @@ mod test {
             Some(reordered_deserializers),
             Some(cover_mapping),
         )?;
-        let first_tuple = iter.next_tuple()?.unwrap();
+        let first_tuple = crate::storage::next_tuple_for_test(&mut iter)?.unwrap();
         assert_eq!(
             first_tuple.values,
             vec![DataValue::Int32(0), DataValue::Int32(0)]
@@ -939,7 +939,7 @@ mod test {
         )?;
 
         let mut tuples = Vec::new();
-        while let Some(tuple) = iter.next_tuple()? {
+        while let Some(tuple) = crate::storage::next_tuple_for_test(&mut iter)? {
             tuples.push(tuple);
         }
 
@@ -972,7 +972,7 @@ mod test {
             Some(vec![0]),
         )?;
         let mut row_count = 0;
-        while let Some(tuple) = iter.next_tuple()? {
+        while let Some(tuple) = crate::storage::next_tuple_for_test(&mut iter)? {
             assert_eq!(tuple.values.len(), 1);
             row_count += 1;
         }

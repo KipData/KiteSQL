@@ -298,8 +298,8 @@ impl ColumnPruning {
         remap_exprs_positions(exprs, removed_positions)
     }
 
-    fn apply_only_child<'a, 'bump>(
-        referenced_columns: HashSet<&'a ColumnSummary>,
+    fn apply_only_child<'bump>(
+        referenced_columns: HashSet<&ColumnSummary>,
         all_referenced: bool,
         childrens: &mut Childrens,
         arena: &'bump Bump,
@@ -310,8 +310,8 @@ impl ColumnPruning {
         Self::_apply(referenced_columns, all_referenced, child.as_mut(), arena)
     }
 
-    fn apply_join_children<'a, 'bump>(
-        referenced_columns: HashSet<&'a ColumnSummary>,
+    fn apply_join_children<'bump>(
+        referenced_columns: HashSet<&ColumnSummary>,
         all_referenced: bool,
         childrens: &mut Childrens,
         arena: &'bump Bump,
@@ -335,8 +335,9 @@ impl ColumnPruning {
         })
     }
 
-    fn apply_twins<'a, 'bump>(
-        referenced_columns: HashSet<&'a ColumnSummary>,
+    #[allow(clippy::needless_lifetimes)]
+    fn apply_twins<'bump>(
+        referenced_columns: HashSet<&ColumnSummary>,
         all_referenced: bool,
         childrens: &mut Childrens,
         arena: &'bump Bump,
@@ -377,8 +378,8 @@ impl ColumnPruning {
         removed_positions
     }
 
-    fn _apply<'a, 'bump>(
-        required_columns: HashSet<&'a ColumnSummary>,
+    fn _apply<'bump>(
+        required_columns: HashSet<&ColumnSummary>,
         all_referenced: bool,
         plan: &mut LogicalPlan,
         arena: &'bump Bump,
@@ -389,7 +390,6 @@ impl ColumnPruning {
 
         match operator {
             Operator::Aggregate(op) => {
-                let required_columns = required_columns;
                 if !all_referenced {
                     Self::clear_exprs(
                         &required_columns,
@@ -439,7 +439,6 @@ impl ColumnPruning {
                 }
             }
             Operator::Project(op) => {
-                let required_columns = required_columns;
                 let mut has_count_star = HasCountStar::default();
                 for expr in &op.exprs {
                     has_count_star.visit(expr)?;
@@ -471,7 +470,6 @@ impl ColumnPruning {
                 }
             }
             Operator::TableScan(op) => {
-                let required_columns = required_columns;
                 if !all_referenced {
                     output_removed_positions.clear();
                     op.columns.retain(|position, column| {

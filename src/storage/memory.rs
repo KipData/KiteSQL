@@ -67,7 +67,7 @@ impl AsRef<[u8]> for MemoryValue<'_> {
 }
 
 impl InnerIter for MemoryIter {
-    fn try_next(&mut self) -> Result<Option<(&[u8], &[u8])>, DatabaseError> {
+    fn try_next(&mut self) -> Result<Option<crate::storage::KeyValueRef<'_>>, DatabaseError> {
         self.current = self.entries.pop_front();
 
         Ok(self
@@ -121,13 +121,13 @@ impl Transaction for MemoryTransaction {
     ) -> Result<Self::IterType<'txn>, DatabaseError> {
         let map = self.inner.borrow();
         let start = match &min {
-            Bound::Included(b) => Bound::Included(b.as_ref()),
-            Bound::Excluded(b) => Bound::Excluded(b.as_ref()),
+            Bound::Included(b) => Bound::Included(*b),
+            Bound::Excluded(b) => Bound::Excluded(*b),
             Bound::Unbounded => Bound::Unbounded,
         };
         let end = match &max {
-            Bound::Included(b) => Bound::Included(b.as_ref()),
-            Bound::Excluded(b) => Bound::Excluded(b.as_ref()),
+            Bound::Included(b) => Bound::Included(*b),
+            Bound::Excluded(b) => Bound::Excluded(*b),
             Bound::Unbounded => Bound::Unbounded,
         };
 
@@ -153,7 +153,6 @@ mod wasm_tests {
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
     use crate::db::DataBaseBuilder;
     use crate::expression::range_detacher::Range;
-    use crate::storage::Iter;
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -229,10 +228,10 @@ mod wasm_tests {
             true,
         )?;
 
-        let option_1 = iter.next_tuple()?;
+        let option_1 = crate::storage::next_tuple_for_test(&mut iter)?;
         assert_eq!(option_1.unwrap().pk, Some(DataValue::Int32(2)));
 
-        let option_2 = iter.next_tuple()?;
+        let option_2 = crate::storage::next_tuple_for_test(&mut iter)?;
         assert_eq!(option_2, None);
 
         Ok(())
@@ -271,7 +270,7 @@ mod wasm_tests {
         )?;
 
         let mut result = Vec::new();
-        while let Some(tuple) = iter.next_tuple()? {
+        while let Some(tuple) = crate::storage::next_tuple_for_test(&mut iter)? {
             result.push(tuple.pk.unwrap());
         }
 
@@ -287,7 +286,6 @@ mod native_tests {
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
     use crate::db::DataBaseBuilder;
     use crate::expression::range_detacher::Range;
-    use crate::storage::Iter;
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -362,10 +360,10 @@ mod native_tests {
             true,
         )?;
 
-        let option_1 = iter.next_tuple()?;
+        let option_1 = crate::storage::next_tuple_for_test(&mut iter)?;
         assert_eq!(option_1.unwrap().pk, Some(DataValue::Int32(2)));
 
-        let option_2 = iter.next_tuple()?;
+        let option_2 = crate::storage::next_tuple_for_test(&mut iter)?;
         assert_eq!(option_2, None);
 
         Ok(())
@@ -404,7 +402,7 @@ mod native_tests {
         )?;
 
         let mut result = Vec::new();
-        while let Some(tuple) = iter.next_tuple()? {
+        while let Some(tuple) = crate::storage::next_tuple_for_test(&mut iter)? {
             result.push(tuple.pk.unwrap());
         }
 

@@ -29,7 +29,7 @@ macro_rules! single_mapping {
                 best_physical_option: &mut BestPhysicalOption,
             ) -> Result<(), DatabaseError> {
                 //TODO: CostModel
-                crate::optimizer::core::rule::keep_best_physical_option(
+                $crate::optimizer::core::rule::keep_best_physical_option(
                     best_physical_option,
                     $option,
                     None,

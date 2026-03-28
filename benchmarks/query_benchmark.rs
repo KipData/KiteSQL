@@ -14,7 +14,7 @@
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use indicatif::{ProgressBar, ProgressStyle};
-use kite_sql::db::{DataBaseBuilder, ResultIter};
+use kite_sql::db::DataBaseBuilder;
 use kite_sql::errors::DatabaseError;
 #[cfg(unix)]
 use pprof::criterion::{Output, PProfProfiler};
@@ -38,7 +38,7 @@ fn query_cases() -> Vec<(&'static str, &'static str)> {
 }
 
 fn init_kitesql_query_bench() -> Result<(), DatabaseError> {
-    let database = DataBaseBuilder::path(QUERY_BENCH_KITE_SQL_PATH).build()?;
+    let database = DataBaseBuilder::path(QUERY_BENCH_KITE_SQL_PATH).build_rocksdb()?;
     database
         .run("create table t1 (c1 int primary key, c2 int)")?
         .done()?;
@@ -104,7 +104,7 @@ fn query_on_execute(c: &mut Criterion) {
         init_kitesql_query_bench().unwrap();
     }
     let database = DataBaseBuilder::path(QUERY_BENCH_KITE_SQL_PATH)
-        .build()
+        .build_rocksdb()
         .unwrap();
     println!("Table initialization completed");
 

@@ -394,6 +394,7 @@ impl Histogram {
             + count)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn _collect_count<F>(
         &self,
         ranges: &[Range],

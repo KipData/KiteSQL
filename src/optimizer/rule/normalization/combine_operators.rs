@@ -79,12 +79,12 @@ impl NormalizationRule for CombineFilter {
                 return Ok(false);
             }
         };
-        let mut parent_filter = Some(parent_filter);
+        let parent_filter = parent_filter;
 
         let cursor = match only_child_mut(plan) {
             Some(child) => child,
             None => {
-                plan.operator = Operator::Filter(parent_filter.take().unwrap());
+                plan.operator = Operator::Filter(parent_filter);
                 return Ok(false);
             }
         };
@@ -96,7 +96,7 @@ impl NormalizationRule for CombineFilter {
                         predicate,
                         having,
                         is_optimized: _,
-                    } = parent_filter.take().unwrap();
+                    } = parent_filter;
                     let child_predicate = mem::replace(
                         &mut child_op.predicate,
                         ScalarExpression::Constant(DataValue::Boolean(true)),
@@ -116,11 +116,11 @@ impl NormalizationRule for CombineFilter {
                     if replace_with_only_child(cursor) {
                         continue;
                     }
-                    plan.operator = Operator::Filter(parent_filter.take().unwrap());
+                    plan.operator = Operator::Filter(parent_filter);
                     return Ok(false);
                 }
                 _ => {
-                    plan.operator = Operator::Filter(parent_filter.take().unwrap());
+                    plan.operator = Operator::Filter(parent_filter);
                     return Ok(false);
                 }
             }

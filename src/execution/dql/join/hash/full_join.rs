@@ -60,7 +60,7 @@ impl JoinProbeState for FullJoinState {
             )));
         };
 
-        while probe_state.index < build_state.tuples.len() {
+        if probe_state.index < build_state.tuples.len() {
             let (i, Tuple { values, pk }) = &build_state.tuples[probe_state.index];
             probe_state.index += 1;
             let full_values = Vec::from_iter(
@@ -103,7 +103,7 @@ impl JoinProbeState for FullJoinState {
                 tuples, has_filted, ..
             }) = left_drop_state.current.as_mut()
             {
-                while let Some((i, mut left_tuple)) = tuples.next() {
+                for (i, mut left_tuple) in tuples.by_ref() {
                     if !self.bits.contains(i) && *has_filted {
                         continue;
                     }

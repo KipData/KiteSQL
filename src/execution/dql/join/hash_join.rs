@@ -139,10 +139,12 @@ fn force_nullable(schema: &mut [ColumnRef], force_nullable: bool) {
 }
 
 impl HashJoin {
+    #[allow(clippy::mutable_key_type)]
     fn own_bump_vec(buf: BumpVec<'_, DataValue>) -> BumpVec<'static, DataValue> {
         unsafe { transmute::<BumpVec<'_, DataValue>, BumpVec<'static, DataValue>>(buf) }
     }
 
+    #[allow(clippy::mutable_key_type)]
     fn own_build_map(
         build_map: HashMap<BumpVec<'_, DataValue>, BuildState>,
     ) -> HashMap<BumpVec<'static, DataValue>, BuildState> {
@@ -178,6 +180,7 @@ impl HashJoin {
         // build phase:
         // 1.construct hashtable, one hash key may contains multiple rows indices.
         // 2.merged all left tuples.
+        #[allow(clippy::mutable_key_type)]
         let mut build_map = HashMap::new();
         let mut build_buf = BumpVec::with_capacity_in(self.on_left_keys.len(), &self.bump);
         let mut build_count = 0usize;

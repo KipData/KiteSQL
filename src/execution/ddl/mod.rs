@@ -34,6 +34,7 @@ use std::collections::Bound;
 
 const REWRITE_BATCH_SIZE: usize = 1024;
 
+#[allow(clippy::too_many_arguments)]
 fn read_tuple_batch<T: Transaction>(
     transaction: &T,
     table_name: &TableName,
@@ -67,7 +68,7 @@ fn read_tuple_batch<T: Transaction>(
             let Some((key, value)) = iter.try_next()? else {
                 break;
             };
-            let tuple_id = TableCodec::decode_tuple_key(&key, pk_ty)?;
+            let tuple_id = TableCodec::decode_tuple_key(key, pk_ty)?;
             let tuple = if len < batch.len() {
                 &mut batch[len]
             } else {
@@ -83,7 +84,7 @@ fn read_tuple_batch<T: Transaction>(
                 tuple,
                 old_deserializers,
                 Some(tuple_id),
-                &value,
+                value,
                 old_total_len,
             )?;
             len += 1;
@@ -138,6 +139,7 @@ where
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn rewrite_table_in_batches<T, F, G>(
     transaction: &mut T,
     table_name: &TableName,

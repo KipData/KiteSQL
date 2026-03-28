@@ -1411,10 +1411,8 @@ mod tests {
                 .unwrap()
         };
 
-        let mut value_0 = Bytes::new();
-        value_0.push(b'A');
-        let mut value_1 = Bytes::new();
-        value_1.push(b'Z');
+        let value_0 = Bytes::from([b'A'].as_slice());
+        let value_1 = Bytes::from([b'Z'].as_slice());
 
         set.insert(value_0);
         set.insert(value_1);
@@ -1449,10 +1447,8 @@ mod tests {
                 .unwrap()
         };
 
-        let mut value_0 = Bytes::new();
-        value_0.push(b'A');
-        let mut value_1 = Bytes::new();
-        value_1.push(b'Z');
+        let value_0 = Bytes::from([b'A'].as_slice());
+        let value_1 = Bytes::from([b'Z'].as_slice());
 
         set.insert(value_0);
         set.insert(value_1);

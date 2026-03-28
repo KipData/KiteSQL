@@ -30,19 +30,10 @@ pub type TupleId = DataValue;
 pub type Schema = Vec<ColumnRef>;
 pub type SchemaRef = Arc<Schema>;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub struct Tuple {
     pub pk: Option<TupleId>,
     pub values: Vec<DataValue>,
-}
-
-impl Default for Tuple {
-    fn default() -> Self {
-        Self {
-            pk: None,
-            values: Vec::new(),
-        }
-    }
 }
 
 impl<'a> From<&'a Tuple> for &'a [DataValue] {

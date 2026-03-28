@@ -107,8 +107,8 @@ impl<K> CountMinSketch<K> {
             width,
             k_num,
             page_len,
-            hasher_0: hashers[0].clone(),
-            hasher_1: hashers[1].clone(),
+            hasher_0: hashers[0],
+            hasher_1: hashers[1],
         };
         let pages = counters
             .into_iter()

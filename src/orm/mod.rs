@@ -304,10 +304,12 @@ trait ValueExpressionOps: Sized {
         })
     }
 
+    #[allow(clippy::wrong_self_convention)]
     fn is_null_expr(self) -> QueryExpr {
         QueryExpr::from_expr(Expr::IsNull(Box::new(self.into_query_value().into_expr())))
     }
 
+    #[allow(clippy::wrong_self_convention)]
     fn is_not_null_expr(self) -> QueryExpr {
         QueryExpr::from_expr(Expr::IsNotNull(Box::new(
             self.into_query_value().into_expr(),
@@ -467,21 +469,25 @@ impl<M, T> Field<M, T> {
     }
 
     /// Builds `field + value`.
+    #[allow(clippy::should_implement_trait)]
     pub fn add<V: Into<QueryValue>>(self, value: V) -> QueryValue {
         ValueExpressionOps::add_expr(self, value)
     }
 
     /// Builds `field - value`.
+    #[allow(clippy::should_implement_trait)]
     pub fn sub<V: Into<QueryValue>>(self, value: V) -> QueryValue {
         ValueExpressionOps::sub_expr(self, value)
     }
 
     /// Builds `field * value`.
+    #[allow(clippy::should_implement_trait)]
     pub fn mul<V: Into<QueryValue>>(self, value: V) -> QueryValue {
         ValueExpressionOps::mul_expr(self, value)
     }
 
     /// Builds `field / value`.
+    #[allow(clippy::should_implement_trait)]
     pub fn div<V: Into<QueryValue>>(self, value: V) -> QueryValue {
         ValueExpressionOps::div_expr(self, value)
     }
@@ -492,6 +498,7 @@ impl<M, T> Field<M, T> {
     }
 
     /// Builds unary `-field`.
+    #[allow(clippy::should_implement_trait)]
     pub fn neg(self) -> QueryValue {
         ValueExpressionOps::neg_expr(self)
     }
@@ -818,6 +825,7 @@ impl QueryExpr {
     /// let users = database.from::<User>().filter(expr).fetch()?;
     /// # Ok::<(), kite_sql::errors::DatabaseError>(())
     /// ```
+    #[allow(clippy::should_implement_trait)]
     pub fn not(self) -> QueryExpr {
         QueryExpr::from_expr(Expr::UnaryOp {
             op: sqlparser::ast::UnaryOperator::Not,
@@ -1041,21 +1049,25 @@ impl QueryValue {
     }
 
     /// Builds `expr + value`.
+    #[allow(clippy::should_implement_trait)]
     pub fn add<V: Into<QueryValue>>(self, value: V) -> QueryValue {
         ValueExpressionOps::add_expr(self, value)
     }
 
     /// Builds `expr - value`.
+    #[allow(clippy::should_implement_trait)]
     pub fn sub<V: Into<QueryValue>>(self, value: V) -> QueryValue {
         ValueExpressionOps::sub_expr(self, value)
     }
 
     /// Builds `expr * value`.
+    #[allow(clippy::should_implement_trait)]
     pub fn mul<V: Into<QueryValue>>(self, value: V) -> QueryValue {
         ValueExpressionOps::mul_expr(self, value)
     }
 
     /// Builds `expr / value`.
+    #[allow(clippy::should_implement_trait)]
     pub fn div<V: Into<QueryValue>>(self, value: V) -> QueryValue {
         ValueExpressionOps::div_expr(self, value)
     }
@@ -1066,6 +1078,7 @@ impl QueryValue {
     }
 
     /// Builds unary `-expr`.
+    #[allow(clippy::should_implement_trait)]
     pub fn neg(self) -> QueryValue {
         ValueExpressionOps::neg_expr(self)
     }
@@ -1460,6 +1473,7 @@ struct UpdateAssignment {
     value: UpdateAssignmentValue,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum UpdateAssignmentValue {
     Param(DataValue),
     Expr(QueryValue),
@@ -3507,10 +3521,12 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
         self.push_filter(left.into().lte(right), FilterMode::Replace)
     }
 
+    #[allow(clippy::wrong_self_convention)]
     fn is_null<V: Into<QueryValue>>(self, value: V) -> Self {
         self.push_filter(value.into().is_null(), FilterMode::Replace)
     }
 
+    #[allow(clippy::wrong_self_convention)]
     fn is_not_null<V: Into<QueryValue>>(self, value: V) -> Self {
         self.push_filter(value.into().is_not_null(), FilterMode::Replace)
     }
@@ -3648,8 +3664,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
                 Some(DataValue::UInt64(value)) => *value as usize,
                 other => {
                     return Err(DatabaseError::InvalidValue(format!(
-                        "unexpected count result: {:?}",
-                        other
+                        "unexpected count result: {other:?}"
                     )))
                 }
             },
@@ -3943,6 +3958,7 @@ fn model_insert_columns<M: Model>() -> Vec<Ident> {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn select_query(
     source: &QuerySource,
     joins: Vec<JoinSpec>,

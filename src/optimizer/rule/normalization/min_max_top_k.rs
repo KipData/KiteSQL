@@ -85,9 +85,7 @@ mod tests {
     use crate::planner::operator::Operator;
     use crate::planner::Childrens;
 
-    fn find_aggregate<'a>(
-        plan: &'a crate::planner::LogicalPlan,
-    ) -> &'a crate::planner::LogicalPlan {
+    fn find_aggregate(plan: &crate::planner::LogicalPlan) -> &crate::planner::LogicalPlan {
         if matches!(plan.operator, Operator::Aggregate(_)) {
             return plan;
         }
@@ -97,9 +95,9 @@ mod tests {
         }
     }
 
-    fn find_aggregate_mut<'a>(
-        plan: &'a mut crate::planner::LogicalPlan,
-    ) -> &'a mut crate::planner::LogicalPlan {
+    fn find_aggregate_mut(
+        plan: &mut crate::planner::LogicalPlan,
+    ) -> &mut crate::planner::LogicalPlan {
         if matches!(plan.operator, Operator::Aggregate(_)) {
             return plan;
         }

@@ -1525,7 +1525,7 @@ pub(crate) mod test {
             Ok(_) => panic!("expected bind error"),
             Err(err) => err,
         };
-        println!("{}", err);
+        println!("{err}");
 
         match err {
             DatabaseError::ColumnNotFound { span, .. }
@@ -1558,7 +1558,7 @@ pub(crate) mod test {
             Ok(_) => panic!("expected function bind error"),
             Err(err) => err,
         };
-        println!("{}", err);
+        println!("{err}");
 
         match err {
             DatabaseError::FunctionNotFound { span, .. } => {

@@ -25,13 +25,15 @@ use ahash::{HashMap, HashMapExt};
 use itertools::Itertools;
 use std::collections::hash_map::{Entry, IntoIter as HashMapIntoIter};
 
+type HashAggOutput = HashMapIntoIter<Vec<DataValue>, Vec<Box<dyn Accumulator>>>;
+
 pub struct HashAggExecutor {
     agg_calls: Vec<ScalarExpression>,
     groupby_exprs: Vec<ScalarExpression>,
     input_schema: SchemaRef,
     input_plan: Option<LogicalPlan>,
     input: ExecId,
-    output: Option<HashMapIntoIter<Vec<DataValue>, Vec<Box<dyn Accumulator>>>>,
+    output: Option<HashAggOutput>,
 }
 
 impl From<(AggregateOperator, LogicalPlan)> for HashAggExecutor {

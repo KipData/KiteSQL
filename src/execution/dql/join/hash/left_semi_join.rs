@@ -75,7 +75,7 @@ impl JoinProbeState for LeftSemiJoinState {
                 tuples, has_filted, ..
             }) = left_drop_state.current.as_mut()
             {
-                while let Some((i, tuple)) = tuples.next() {
+                for (i, tuple) in tuples.by_ref() {
                     if self.bits.contains(i) && *has_filted {
                         continue;
                     }

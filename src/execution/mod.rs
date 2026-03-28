@@ -107,6 +107,7 @@ impl<T: Transaction> Iterator for Executor<'_, T> {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
     AddColumn(AddColumn),
     Analyze(Analyze),

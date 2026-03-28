@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::{Bytes, TableCodec};
-use crate::storage::{reuse_bound_as_excluded, InnerIter, Storage, Transaction};
+use crate::storage::{reuse_bound_as_excluded, InnerIter, KeyValueRef, Storage, Transaction};
 use lmdb::{
     Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, RoCursor, RwTransaction,
     Transaction as _, WriteFlags,
@@ -177,7 +177,7 @@ impl LmdbIter<'_> {
             return None;
         }
 
-        while let Some((key, value)) = self.iter.next() {
+        if let Some((key, value)) = self.iter.next() {
             if !within_upper_bound(key, &self.max) {
                 self.done = true;
                 return None;
@@ -191,7 +191,7 @@ impl LmdbIter<'_> {
 }
 
 impl InnerIter for LmdbIter<'_> {
-    fn try_next(&mut self) -> Result<Option<(&[u8], &[u8])>, DatabaseError> {
+    fn try_next(&mut self) -> Result<Option<KeyValueRef<'_>>, DatabaseError> {
         if self.done {
             return Ok(None);
         }
@@ -286,7 +286,7 @@ impl Transaction for LmdbTransaction<'_> {
 fn initial_entry<'txn>(
     cursor: &mut RoCursor<'txn>,
     min: &Bound<&[u8]>,
-) -> Result<(Option<(&'txn [u8], &'txn [u8])>, bool), lmdb::Error> {
+) -> Result<(Option<KeyValueRef<'txn>>, bool), lmdb::Error> {
     match min {
         Bound::Unbounded => Ok((None, false)),
         Bound::Included(min) => match cursor.get(Some(*min), None, lmdb_sys::MDB_SET_RANGE) {
@@ -313,7 +313,7 @@ fn cursor_seek<'txn>(
     cursor: &mut lmdb::RwCursor<'txn>,
     lower: &Bound<Bytes>,
     seek_key: &mut Bytes,
-) -> Result<Option<(&'txn [u8], &'txn [u8])>, lmdb::Error> {
+) -> Result<Option<KeyValueRef<'txn>>, lmdb::Error> {
     match lower {
         Bound::Unbounded => match cursor.get(None, None, lmdb_sys::MDB_FIRST) {
             Ok((key, value)) => Ok(Some((key.unwrap_or_default(), value))),
