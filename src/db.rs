@@ -32,10 +32,10 @@ use crate::optimizer::rule::normalization::NormalizationRuleImpl;
 use crate::parser::parse_sql;
 use crate::planner::operator::Operator;
 use crate::planner::LogicalPlan;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
 use crate::storage::lmdb::{LmdbConfig, LmdbStorage};
 use crate::storage::memory::MemoryStorage;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
 use crate::storage::rocksdb::{OptimisticRocksStorage, RocksStorage, StorageConfig};
 use crate::storage::{StatisticsMetaCache, Storage, TableCache, Transaction, ViewCache};
 use crate::types::tuple::{SchemaRef, Tuple};
@@ -117,9 +117,9 @@ pub struct DataBaseBuilder {
     scala_functions: ScalaFunctions,
     table_functions: TableFunctions,
     histogram_buckets: Option<usize>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
     storage_config: StorageConfig,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
     lmdb_config: LmdbConfig,
 }
 
@@ -134,9 +134,9 @@ impl DataBaseBuilder {
             scala_functions: Default::default(),
             table_functions: Default::default(),
             histogram_buckets: None,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
             storage_config: Default::default(),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
             lmdb_config: Default::default(),
         };
         builder = builder.register_scala_function(CharLength::new("char_length".to_lowercase()));
@@ -174,29 +174,38 @@ impl DataBaseBuilder {
     }
 
     /// Enables or disables RocksDB statistics collection.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "rocksdb", feature = "lmdb")
+    ))]
     pub fn storage_statistics(mut self, enable: bool) -> Self {
-        self.storage_config.enable_statistics = enable;
-        self.lmdb_config.enable_statistics = enable;
+        #[cfg(feature = "rocksdb")]
+        {
+            self.storage_config.enable_statistics = enable;
+        }
+        #[cfg(feature = "lmdb")]
+        {
+            self.lmdb_config.enable_statistics = enable;
+        }
         self
     }
 
     /// Sets the LMDB map size in bytes.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
     pub fn lmdb_map_size(mut self, map_size: usize) -> Self {
         self.lmdb_config.map_size = map_size;
         self
     }
 
     /// Sets the LMDB environment flags.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
     pub fn lmdb_flags(mut self, flags: lmdb::EnvironmentFlags) -> Self {
         self.lmdb_config.flags = flags;
         self
     }
 
     /// Enables or disables LMDB `NO_SYNC`.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
     pub fn lmdb_no_sync(mut self, enable: bool) -> Self {
         self.lmdb_config
             .flags
@@ -205,14 +214,14 @@ impl DataBaseBuilder {
     }
 
     /// Sets the maximum number of LMDB readers.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
     pub fn lmdb_max_readers(mut self, max_readers: u32) -> Self {
         self.lmdb_config.max_readers = Some(max_readers);
         self
     }
 
     /// Sets the maximum number of LMDB named databases.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
     pub fn lmdb_max_dbs(mut self, max_dbs: u32) -> Self {
         self.lmdb_config.max_dbs = Some(max_dbs);
         self
@@ -242,7 +251,7 @@ impl DataBaseBuilder {
     }
 
     /// Builds a RocksDB-backed database.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
     pub fn build_rocksdb(self) -> Result<Database<RocksStorage>, DatabaseError> {
         let storage = RocksStorage::with_config(self.path, self.storage_config)?;
 
@@ -269,7 +278,7 @@ impl DataBaseBuilder {
     }
 
     /// Builds a LMDB-backed database.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
     pub fn build_lmdb(self) -> Result<Database<LmdbStorage>, DatabaseError> {
         let storage = LmdbStorage::with_config(self.path, self.lmdb_config)?;
 
@@ -281,9 +290,9 @@ impl DataBaseBuilder {
         )
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
     /// Builds a RocksDB-backed database that uses optimistic transactions.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
     pub fn build_optimistic(self) -> Result<Database<OptimisticRocksStorage>, DatabaseError> {
         let storage = OptimisticRocksStorage::with_config(self.path, self.storage_config)?;
 

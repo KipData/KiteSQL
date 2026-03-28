@@ -134,6 +134,10 @@ fn main() -> Result<(), DatabaseError> {
 - `build_lmdb()` opens a persistent LMDB-backed database.
 - `build_in_memory()` opens an in-memory database for tests, examples, and temporary workloads.
 - `build_optimistic()` is available on native targets when you specifically want optimistic transactions on top of RocksDB.
+- Cargo features:
+  - `rocksdb` is enabled by default
+  - `lmdb` is optional
+  - `cargo check --no-default-features --features lmdb` builds an LMDB-only native configuration
 
 On native targets, `LMDB` shines when reads dominate, while `RocksDB` is usually the stronger choice when writes do.
 

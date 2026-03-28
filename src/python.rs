@@ -16,8 +16,10 @@
 
 use crate::db::{DataBaseBuilder, Database, DatabaseIter};
 use crate::errors::DatabaseError;
+#[cfg(feature = "lmdb")]
 use crate::storage::lmdb::LmdbStorage;
 use crate::storage::memory::MemoryStorage;
+#[cfg(feature = "rocksdb")]
 use crate::storage::rocksdb::RocksStorage;
 use crate::types::tuple::{SchemaRef, Tuple};
 use crate::types::value::DataValue;
@@ -94,14 +96,17 @@ fn schema_to_python(py: Python<'_>, schema: &SchemaRef) -> PyResult<Vec<PyObject
 }
 
 enum PythonDatabaseInner {
+    #[cfg(feature = "lmdb")]
     Lmdb(Database<LmdbStorage>),
     Memory(Database<MemoryStorage>),
+    #[cfg(feature = "rocksdb")]
     Rocks(Database<RocksStorage>),
 }
 
 impl PythonDatabaseInner {
     fn run(&self, sql: &str) -> Result<PythonResultIterInner, DatabaseError> {
         match self {
+            #[cfg(feature = "lmdb")]
             PythonDatabaseInner::Lmdb(db) => {
                 let iter = db.run(sql)?;
                 // DatabaseIter owns state internally; only the type carries the lifetime.
@@ -116,6 +121,7 @@ impl PythonDatabaseInner {
                     unsafe { std::mem::transmute(iter) };
                 Ok(PythonResultIterInner::Memory(iter_static))
             }
+            #[cfg(feature = "rocksdb")]
             PythonDatabaseInner::Rocks(db) => {
                 let iter = db.run(sql)?;
                 // DatabaseIter owns state internally; only the type carries the lifetime.
@@ -128,32 +134,40 @@ impl PythonDatabaseInner {
 }
 
 enum PythonResultIterInner {
+    #[cfg(feature = "lmdb")]
     Lmdb(DatabaseIter<'static, LmdbStorage>),
     Memory(DatabaseIter<'static, MemoryStorage>),
+    #[cfg(feature = "rocksdb")]
     Rocks(DatabaseIter<'static, RocksStorage>),
 }
 
 impl PythonResultIterInner {
     fn next_tuple(&mut self) -> Result<Option<&Tuple>, DatabaseError> {
         match self {
+            #[cfg(feature = "lmdb")]
             PythonResultIterInner::Lmdb(iter) => iter.next_borrowed_tuple(),
             PythonResultIterInner::Memory(iter) => iter.next_borrowed_tuple(),
+            #[cfg(feature = "rocksdb")]
             PythonResultIterInner::Rocks(iter) => iter.next_borrowed_tuple(),
         }
     }
 
     fn schema(&self) -> &SchemaRef {
         match self {
+            #[cfg(feature = "lmdb")]
             PythonResultIterInner::Lmdb(iter) => iter.schema(),
             PythonResultIterInner::Memory(iter) => iter.schema(),
+            #[cfg(feature = "rocksdb")]
             PythonResultIterInner::Rocks(iter) => iter.schema(),
         }
     }
 
     fn done(self) -> Result<(), DatabaseError> {
         match self {
+            #[cfg(feature = "lmdb")]
             PythonResultIterInner::Lmdb(iter) => iter.done(),
             PythonResultIterInner::Memory(iter) => iter.done(),
+            #[cfg(feature = "rocksdb")]
             PythonResultIterInner::Rocks(iter) => iter.done(),
         }
     }
@@ -171,19 +185,27 @@ impl PythonDatabase {
     pub fn new(path: String, backend: Option<&str>) -> PyResult<Self> {
         let backend = backend.unwrap_or("rocksdb").to_ascii_lowercase();
         let inner = match backend.as_str() {
+            #[cfg(feature = "rocksdb")]
             "rocksdb" => PythonDatabaseInner::Rocks(
                 DataBaseBuilder::path(path)
                     .build_rocksdb()
                     .map_err(to_py_err)?,
             ),
+            #[cfg(feature = "lmdb")]
             "lmdb" => PythonDatabaseInner::Lmdb(
                 DataBaseBuilder::path(path)
                     .build_lmdb()
                     .map_err(to_py_err)?,
             ),
             other => {
+                let mut expected = Vec::new();
+                #[cfg(feature = "rocksdb")]
+                expected.push("rocksdb");
+                #[cfg(feature = "lmdb")]
+                expected.push("lmdb");
                 return Err(PyValueError::new_err(format!(
-                    "unsupported backend '{other}', expected 'rocksdb' or 'lmdb'"
+                    "unsupported backend '{other}', expected {}",
+                    expected.join(" or ")
                 )));
             }
         };
@@ -325,16 +347,22 @@ mod tests {
     ) -> PyResult<()> {
         run_script(py, module, script, "memory", "")?;
 
-        let temp_dir =
-            TempDir::new().map_err(|e| PyRuntimeError::new_err(format!("create tempdir: {e}")))?;
-        let path = temp_dir.path().to_string_lossy().to_string();
+        #[cfg(feature = "rocksdb")]
+        {
+            let temp_dir = TempDir::new()
+                .map_err(|e| PyRuntimeError::new_err(format!("create tempdir: {e}")))?;
+            let path = temp_dir.path().to_string_lossy().to_string();
 
-        run_script(py, module, script, "rocksdb", &path)?;
+            run_script(py, module, script, "rocksdb", &path)?;
+        }
 
-        let temp_dir =
-            TempDir::new().map_err(|e| PyRuntimeError::new_err(format!("create tempdir: {e}")))?;
-        let path = temp_dir.path().to_string_lossy().to_string();
-        run_script(py, module, script, "lmdb", &path)?;
+        #[cfg(feature = "lmdb")]
+        {
+            let temp_dir = TempDir::new()
+                .map_err(|e| PyRuntimeError::new_err(format!("create tempdir: {e}")))?;
+            let path = temp_dir.path().to_string_lossy().to_string();
+            run_script(py, module, script, "lmdb", &path)?;
+        }
 
         Ok(())
     }

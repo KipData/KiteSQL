@@ -90,10 +90,20 @@ mod app {
         let backend = env::var("KITESQL_BACKEND").unwrap_or_else(|_| "rocksdb".to_string());
 
         match backend.to_ascii_lowercase().as_str() {
+            #[cfg(feature = "rocksdb")]
             "rocksdb" => run_with_database(DataBaseBuilder::path(EXAMPLE_DB_PATH).build_rocksdb()?),
+            #[cfg(feature = "lmdb")]
             "lmdb" => run_with_database(DataBaseBuilder::path(EXAMPLE_DB_PATH).build_lmdb()?),
             other => Err(DatabaseError::InvalidValue(format!(
-                "unsupported example backend '{other}', expected 'rocksdb' or 'lmdb'"
+                "unsupported example backend '{other}', expected {}",
+                {
+                    let mut expected = Vec::new();
+                    #[cfg(feature = "rocksdb")]
+                    expected.push("rocksdb");
+                    #[cfg(feature = "lmdb")]
+                    expected.push("lmdb");
+                    expected.join(" or ")
+                }
             ))),
         }
     }

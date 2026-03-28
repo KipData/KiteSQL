@@ -17,6 +17,10 @@
 //! making it possible to call SQL just like calling a function.
 //! It supports most of the syntax of SQL 2016.
 //!
+//! Native storage backends are feature-gated:
+//! - `rocksdb` is enabled by default
+//! - `lmdb` is optional
+//!
 //! KiteSQL provides thread-safe API: [`DataBase::run`](db::Database::run) for running SQL
 //!
 //! KiteSQL uses [`DataBaseBuilder`](db::DataBaseBuilder) for instance construction,

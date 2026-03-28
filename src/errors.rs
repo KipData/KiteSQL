@@ -211,7 +211,7 @@ pub enum DatabaseError {
     PrimaryKeyNotFound,
     #[error("primaryKey only allows single or multiple values")]
     PrimaryKeyTooManyLayers,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
     #[error("rocksdb: {0}")]
     RocksDB(
         #[source]
