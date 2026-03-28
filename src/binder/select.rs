@@ -93,13 +93,13 @@ impl VisitorMut<'_> for SplitScopePositionRebinder<'_> {
         if let Some(left_position) = self
             .left_schema
             .iter()
-            .position(|candidate| candidate.summary() == column.summary())
+            .position(|candidate| candidate.same_column(column))
         {
             *position = left_position;
         } else if let Some(right_position) = self
             .right_schema
             .iter()
-            .position(|candidate| candidate.summary() == column.summary())
+            .position(|candidate| candidate.same_column(column))
         {
             *position = right_position;
         }

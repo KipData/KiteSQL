@@ -240,6 +240,20 @@ impl ScalarExpression {
         ScalarExpression::ColumnRef { column, position }
     }
 
+    pub(crate) fn eq_ignore_colref_pos(&self, other: &ScalarExpression) -> bool {
+        match (self.unpack_alias_ref(), other.unpack_alias_ref()) {
+            (
+                ScalarExpression::ColumnRef {
+                    column: lhs_column, ..
+                },
+                ScalarExpression::ColumnRef {
+                    column: rhs_column, ..
+                },
+            ) => lhs_column.same_column(rhs_column),
+            (lhs, rhs) => lhs == rhs,
+        }
+    }
+
     pub fn unpack_alias(self) -> ScalarExpression {
         if let ScalarExpression::Alias {
             alias: AliasType::Expr(expr),
@@ -808,6 +822,38 @@ mod test {
     use std::io::{Cursor, Seek, SeekFrom};
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_eq_ignore_colref_pos() -> Result<(), DatabaseError> {
+        let left = ScalarExpression::column_expr(
+            ColumnRef::from(ColumnCatalog::new(
+                "c1".to_string(),
+                false,
+                ColumnDesc::new(LogicalType::Integer, None, false, None)?,
+            )),
+            0,
+        );
+        let right = ScalarExpression::column_expr(
+            ColumnRef::from(ColumnCatalog::new(
+                "c1".to_string(),
+                true,
+                ColumnDesc::new(LogicalType::Bigint, None, false, None)?,
+            )),
+            2,
+        );
+        let different = ScalarExpression::column_expr(
+            ColumnRef::from(ColumnCatalog::new(
+                "c2".to_string(),
+                false,
+                ColumnDesc::new(LogicalType::Integer, None, false, None)?,
+            )),
+            0,
+        );
+
+        assert!(left.eq_ignore_colref_pos(&right));
+        assert!(!left.eq_ignore_colref_pos(&different));
+        Ok(())
+    }
 
     #[test]
     fn test_serialization() -> Result<(), DatabaseError> {

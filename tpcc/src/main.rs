@@ -19,7 +19,7 @@ use crate::backend::sqlite::{SqliteBackend, SqliteProfile};
 use crate::backend::{
     BackendControl, BackendTransaction, ColumnType, PreparedStatement, StatementSpec,
 };
-use crate::delivery::DeliveryTest;
+use crate::delivery::{Delivery, DeliveryArgs, DeliveryTest};
 use crate::load::Load;
 use crate::new_ord::NewOrdTest;
 use crate::order_stat::OrderStatTest;
@@ -30,13 +30,13 @@ use crate::utils::SeqGen;
 use clap::{Parser, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 use kite_sql::errors::DatabaseError;
+use kite_sql::types::value::DataValue;
 #[cfg(all(unix, feature = "pprof"))]
 use pprof::ProfilerGuard;
 use rand::prelude::ThreadRng;
 use rand::Rng;
 use std::fs;
 use std::path::Path;
-#[cfg(all(unix, feature = "pprof"))]
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -113,7 +113,7 @@ struct Args {
     num_ware: usize,
     #[clap(long, default_value = "false")]
     rocksdb_stats: bool,
-    #[clap(long, value_enum, default_value = "practical")]
+    #[clap(long, value_enum, default_value = "balanced")]
     sqlite_profile: SqliteProfile,
     #[cfg(feature = "pprof")]
     #[clap(long)]
@@ -776,7 +776,7 @@ fn explain_tpcc() -> Result<(), DatabaseError> {
     use kite_sql::db::DataBaseBuilder;
     use kite_sql::types::tuple::create_table;
 
-    let database = DataBaseBuilder::path("./kite_sql_tpcc").build_lmdb()?;
+    let database = DataBaseBuilder::path(tpcc_db_path()).build_lmdb()?;
     let mut tx = database.new_transaction()?;
 
     let customer_tuple = tx
@@ -1029,4 +1029,12 @@ fn explain_tpcc() -> Result<(), DatabaseError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+fn tpcc_db_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("kite_sql_tpcc")
 }

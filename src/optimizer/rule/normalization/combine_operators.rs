@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::expression::{BinaryOperator, ScalarExpression};
+use crate::expression::{AliasType, BinaryOperator, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child};
 use crate::optimizer::rule::normalization::{is_subset_exprs, strip_alias};
@@ -23,7 +23,6 @@ use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
-use std::collections::HashSet;
 use std::mem;
 
 fn is_passthrough_project(op: &ProjectOperator) -> bool {
@@ -32,30 +31,85 @@ fn is_passthrough_project(op: &ProjectOperator) -> bool {
         .all(|expr| matches!(strip_alias(expr), ScalarExpression::ColumnRef { .. }))
 }
 
+fn passthrough_source_position(expr: &ScalarExpression) -> Option<usize> {
+    match strip_alias(expr) {
+        ScalarExpression::ColumnRef { position, .. } => Some(*position),
+        _ => None,
+    }
+}
+
+fn rewrite_column_position(expr: &mut ScalarExpression, new_position: usize) {
+    match expr {
+        ScalarExpression::ColumnRef { position, .. } => {
+            *position = new_position;
+        }
+        ScalarExpression::Alias { expr, alias } => {
+            rewrite_column_position(expr, new_position);
+            if let AliasType::Expr(alias_expr) = alias {
+                rewrite_column_position(alias_expr, new_position);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn remap_passthrough_project_exprs(
+    parent_exprs: &mut [ScalarExpression],
+    child_exprs: &[ScalarExpression],
+) -> bool {
+    let mut remapped_positions = Vec::with_capacity(parent_exprs.len());
+
+    for parent_expr in parent_exprs.iter() {
+        let Some(position) = child_exprs
+            .iter()
+            .find(|child_expr| parent_expr.eq_ignore_colref_pos(child_expr))
+            .and_then(passthrough_source_position)
+        else {
+            return false;
+        };
+        remapped_positions.push(position);
+    }
+
+    for (parent_expr, position) in parent_exprs.iter_mut().zip(remapped_positions) {
+        rewrite_column_position(parent_expr, position);
+    }
+
+    true
+}
+
+fn groupby_exprs_match(
+    parent_exprs: &[ScalarExpression],
+    child_exprs: &[ScalarExpression],
+) -> bool {
+    parent_exprs.len() == child_exprs.len()
+        && parent_exprs
+            .iter()
+            .zip(child_exprs.iter())
+            .all(|(parent_expr, child_expr)| parent_expr.eq_ignore_colref_pos(child_expr))
+}
+
 /// Combine two adjacent project operators into one.
 pub struct CollapseProject;
 
 impl NormalizationRule for CollapseProject {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
-        let LogicalPlan {
-            operator,
-            childrens,
-            ..
-        } = plan;
-        let parent_exprs = match operator {
-            Operator::Project(op) => &op.exprs,
-            _ => return Ok(false),
+        let Operator::Project(parent_op) = &mut plan.operator else {
+            return Ok(false);
         };
 
         let mut removed = false;
         loop {
-            let Childrens::Only(child) = childrens.as_mut() else {
+            let Childrens::Only(child) = plan.childrens.as_mut() else {
                 break;
             };
             match &child.operator {
                 Operator::Project(child_op)
                     if is_passthrough_project(child_op)
-                        && is_subset_exprs(parent_exprs, &child_op.exprs) =>
+                        && is_subset_exprs(&parent_op.exprs, &child_op.exprs)
+                        && remap_passthrough_project_exprs(
+                            &mut parent_op.exprs,
+                            &child_op.exprs,
+                        ) =>
                 {
                     removed |= replace_with_only_child(child.as_mut());
                 }
@@ -151,18 +205,7 @@ impl NormalizationRule for CollapseGroupByAgg {
             let Operator::Aggregate(child_op) = &child.operator else {
                 return Ok(false);
             };
-            if op.groupby_exprs.len() != child_op.groupby_exprs.len() {
-                return Ok(false);
-            }
-            let mut expr_set = HashSet::new();
-
-            for expr in &op.groupby_exprs {
-                expr_set.insert(expr);
-            }
-            for expr in &child_op.groupby_exprs {
-                expr_set.remove(expr);
-            }
-            expr_set.is_empty()
+            groupby_exprs_match(&op.groupby_exprs, &child_op.groupby_exprs)
         };
 
         if can_collapse {
@@ -176,14 +219,28 @@ impl NormalizationRule for CollapseGroupByAgg {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::binder::test::build_t1_table;
+    use crate::catalog::{ColumnCatalog, ColumnRef};
     use crate::errors::DatabaseError;
     use crate::expression::{BinaryOperator, ScalarExpression};
+    use crate::optimizer::core::rule::NormalizationRule;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
     use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
+    use crate::optimizer::rule::normalization::combine_operators::{
+        CollapseGroupByAgg, CollapseProject,
+    };
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
+    use crate::planner::operator::aggregate::AggregateOperator;
+    use crate::planner::operator::project::ProjectOperator;
     use crate::planner::operator::Operator;
-    use crate::planner::Childrens;
+    use crate::planner::{Childrens, LogicalPlan};
     use crate::storage::rocksdb::RocksTransaction;
+
+    fn column_expr(name: &str, position: usize) -> ScalarExpression {
+        ScalarExpression::column_expr(
+            ColumnRef::from(ColumnCatalog::new_dummy(name.to_string())),
+            position,
+        )
+    }
 
     #[test]
     fn test_collapse_project() -> Result<(), DatabaseError> {
@@ -257,6 +314,37 @@ mod tests {
     }
 
     #[test]
+    fn test_collapse_project_remaps_reordered_passthrough_positions() -> Result<(), DatabaseError> {
+        let child = LogicalPlan::new(
+            Operator::Project(ProjectOperator {
+                exprs: vec![column_expr("c2", 1), column_expr("c1", 0)],
+            }),
+            Childrens::Only(Box::new(LogicalPlan::new(Operator::Dummy, Childrens::None))),
+        );
+        let mut plan = LogicalPlan::new(
+            Operator::Project(ProjectOperator {
+                exprs: vec![column_expr("c2", 0)],
+            }),
+            Childrens::Only(Box::new(child)),
+        );
+
+        assert!(CollapseProject.apply(&mut plan)?);
+
+        let Operator::Project(op) = &plan.operator else {
+            unreachable!("expected project");
+        };
+        let ScalarExpression::ColumnRef { position, .. } = &op.exprs[0] else {
+            unreachable!("expected column ref");
+        };
+        assert_eq!(*position, 1);
+        assert!(matches!(
+            plan.childrens.pop_only().operator,
+            Operator::Dummy
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn test_combine_filter() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
         let plan =
@@ -314,5 +402,26 @@ mod tests {
             }
         }
         unreachable!("Should be a agg operator")
+    }
+
+    #[test]
+    fn test_collapse_group_by_agg_ignores_columnref_position() -> Result<(), DatabaseError> {
+        let child = AggregateOperator::build(
+            LogicalPlan::new(Operator::Dummy, Childrens::None),
+            vec![],
+            vec![column_expr("c2", 1)],
+            false,
+        );
+        let mut plan = AggregateOperator::build(child, vec![], vec![column_expr("c2", 0)], true);
+
+        assert!(CollapseGroupByAgg.apply(&mut plan)?);
+        let Operator::Aggregate(op) = &plan.operator else {
+            unreachable!("expected aggregate");
+        };
+        let ScalarExpression::ColumnRef { position, .. } = &op.groupby_exprs[0] else {
+            unreachable!("expected column ref");
+        };
+        assert_eq!(*position, 1);
+        Ok(())
     }
 }

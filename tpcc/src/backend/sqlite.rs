@@ -31,6 +31,7 @@ pub struct SqliteBackend {
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub enum SqliteProfile {
+    Balanced,
     Practical,
 }
 
@@ -43,7 +44,7 @@ impl SqliteBackend {
 
     pub fn new_memory() -> Result<Self, TpccError> {
         let connection = Connection::open(":memory:")?;
-        configure_sqlite(&connection, SqliteProfile::Practical)?;
+        configure_sqlite(&connection, SqliteProfile::Balanced)?;
         Ok(Self { connection })
     }
 
@@ -220,6 +221,13 @@ fn convert_value(value: &DataValue) -> Result<Value, TpccError> {
 
 fn configure_sqlite(connection: &Connection, profile: SqliteProfile) -> Result<(), TpccError> {
     let pragmas: &[&str] = match profile {
+        SqliteProfile::Balanced => &[
+            "PRAGMA journal_mode = WAL;",
+            "PRAGMA synchronous = NORMAL;",
+            "PRAGMA temp_store = FILE;",
+            "PRAGMA foreign_keys = OFF;",
+            "PRAGMA busy_timeout = 5000;",
+        ],
         SqliteProfile::Practical => &[
             "PRAGMA journal_mode = WAL;",
             "PRAGMA synchronous = NORMAL;",

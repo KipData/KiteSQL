@@ -225,11 +225,11 @@ pub fn is_subset_exprs(left: &[ScalarExpression], right: &[ScalarExpression]) ->
         let lhs_stripped = strip_alias(lhs);
         right.iter().any(|rhs| {
             let rhs_stripped = strip_alias(rhs);
-            if lhs_stripped == rhs_stripped {
+            if lhs_stripped.eq_ignore_colref_pos(rhs_stripped) {
                 return true;
             }
-            if matches!(lhs, ScalarExpression::ColumnRef { .. }) {
-                return lhs_stripped == strip_all_alias(rhs);
+            if matches!(lhs_stripped, ScalarExpression::ColumnRef { .. }) {
+                return lhs_stripped.eq_ignore_colref_pos(strip_all_alias(rhs));
             }
             false
         })

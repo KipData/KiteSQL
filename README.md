@@ -183,8 +183,10 @@ Recent 720-second local comparison on the machine above:
 
 | Backend | TpmC | New-Order p90 | Payment p90 | Order-Status p90 | Delivery p90 | Stock-Level p90 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| KiteSQL LMDB | 53510 | 0.001s | 0.001s | 0.001s | 0.002s | 0.001s |
+| KiteSQL RocksDB | 32248 | 0.001s | 0.001s | 0.002s | 0.011s | 0.003s |
+| SQLite balanced | 36273 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
 | SQLite practical | 35516 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
-| KiteSQL LMDB | 29171 | 0.001s | 0.001s | 0.001s | 0.015s | 0.002s |
 
 The detailed raw outputs for both runs are recorded in [tpcc/README.md](tpcc/README.md).
 #### 👉[check more](tpcc/README.md)

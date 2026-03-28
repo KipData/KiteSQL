@@ -165,10 +165,10 @@ fn hint_len(required: ScanOrderHint<'_>) -> usize {
 
 fn hint_covers(required: ScanOrderHint<'_>, provided: &SortOption) -> bool {
     match required {
-        ScanOrderHint::SortFields(fields) => covers(fields, provided, |lhs, rhs| lhs == rhs),
+        ScanOrderHint::SortFields(fields) => covers(fields, provided, sort_field_matches),
         ScanOrderHint::DistinctGroupBy(groupby_exprs) => {
             covers(groupby_exprs, provided, |expr, field| {
-                field.asc && !field.nulls_first && field.expr == *expr
+                field.asc && !field.nulls_first && expr.eq_ignore_colref_pos(&field.expr)
             })
         }
     }
@@ -239,7 +239,7 @@ fn ensure_stream_distinct_order(plan: &mut LogicalPlan, required: &[SortField]) 
         ..
     }) = plan.physical_option.as_ref()
     {
-        if covers(required, &index_info.sort_option, |lhs, rhs| lhs == rhs) {
+        if covers(required, &index_info.sort_option, sort_field_matches) {
             return true;
         }
     }
@@ -247,9 +247,7 @@ fn ensure_stream_distinct_order(plan: &mut LogicalPlan, required: &[SortField]) 
     if let Some(physical_option) = plan.physical_option.as_ref() {
         match physical_option.sort_option() {
             SortOption::OrderBy { .. }
-                if covers(required, physical_option.sort_option(), |lhs, rhs| {
-                    lhs == rhs
-                }) =>
+                if covers(required, physical_option.sort_option(), sort_field_matches) =>
             {
                 return true
             }
@@ -274,7 +272,7 @@ fn ensure_index_order(plan: &mut LogicalPlan, required: &[SortField]) -> bool {
         ..
     }) = plan.physical_option.as_ref()
     {
-        if covers(required, &index_info.sort_option, |lhs, rhs| lhs == rhs) {
+        if covers(required, &index_info.sort_option, sort_field_matches) {
             return true;
         }
     }
@@ -290,6 +288,12 @@ fn ensure_index_order(plan: &mut LogicalPlan, required: &[SortField]) -> bool {
     }
 
     false
+}
+
+fn sort_field_matches(required: &SortField, provided: &SortField) -> bool {
+    required.asc == provided.asc
+        && required.nulls_first == provided.nulls_first
+        && required.expr.eq_ignore_colref_pos(&provided.expr)
 }
 
 pub(crate) fn covers<T>(
@@ -353,8 +357,12 @@ mod tests {
     use ulid::Ulid;
 
     fn make_sort_field(name: &str) -> SortField {
+        make_sort_field_with_position(name, 0)
+    }
+
+    fn make_sort_field_with_position(name: &str, position: usize) -> SortField {
         let column = ColumnRef::from(ColumnCatalog::new_dummy(name.to_string()));
-        SortField::new(ScalarExpression::column_expr(column, 0), true, false)
+        SortField::new(ScalarExpression::column_expr(column, position), true, false)
     }
 
     fn build_plan(
@@ -522,6 +530,31 @@ mod tests {
         let rule = EliminateRedundantSort;
 
         assert!(rule.apply(&mut plan)?);
+        Ok(())
+    }
+
+    #[test]
+    fn remove_topk_when_index_matches_same_column_with_different_positions(
+    ) -> Result<(), DatabaseError> {
+        let required = make_sort_field_with_position("no_o_id", 0);
+        let provided_prefix_1 = make_sort_field_with_position("no_w_id", 0);
+        let provided_prefix_2 = make_sort_field_with_position("no_d_id", 1);
+        let provided_target = make_sort_field_with_position("no_o_id", 2);
+
+        let mut plan = build_plan(
+            vec![required.clone()],
+            vec![provided_prefix_1, provided_prefix_2, provided_target],
+            2,
+        );
+        plan.operator = Operator::TopK(TopKOperator {
+            sort_fields: vec![required],
+            limit: 1,
+            offset: None,
+        });
+
+        let rule = EliminateRedundantSort;
+        assert!(rule.apply(&mut plan)?);
+        assert!(matches!(plan.operator, Operator::Limit(_)));
         Ok(())
     }
 
