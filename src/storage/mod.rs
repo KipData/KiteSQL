@@ -27,9 +27,7 @@ use crate::expression::ScalarExpression;
 use crate::optimizer::core::cm_sketch::{
     CountMinSketch, CountMinSketchPage, COUNT_MIN_SKETCH_STORAGE_PAGE_LEN,
 };
-use crate::optimizer::core::statistics_meta::{
-    StatisticMetaLoader, StatisticsMeta, StatisticsMetaCacheValue,
-};
+use crate::optimizer::core::statistics_meta::{StatisticMetaLoader, StatisticsMeta};
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
 use crate::serdes::ReferenceTables;
 use crate::storage::table_codec::{
@@ -53,8 +51,7 @@ pub type KeyValueRef<'a> = (&'a [u8], &'a [u8]);
 use std::vec::IntoIter;
 use ulid::Generator;
 
-pub(crate) type StatisticsMetaCache =
-    SharedLruCache<(TableName, IndexId), Option<StatisticsMetaCacheValue>>;
+pub(crate) type StatisticsMetaCache = SharedLruCache<(TableName, IndexId), Option<StatisticsMeta>>;
 pub(crate) type TableCache = SharedLruCache<TableName, TableCatalog>;
 pub(crate) type ViewCache = SharedLruCache<TableName, View>;
 
@@ -812,17 +809,16 @@ pub trait Transaction: Sized {
         meta_cache: &StatisticsMetaCache,
         table_name: &TableName,
         statistics_meta: StatisticsMeta,
-        cm_sketch: CountMinSketch<DataValue>,
     ) -> Result<(), DatabaseError> {
         let index_id = statistics_meta.index_id();
-        let (root, buckets) = statistics_meta.clone().into_parts();
+        let cached_meta = statistics_meta.clone();
+        let (root, buckets, cm_sketch) = statistics_meta.into_parts();
         let value = unsafe { &*self.table_codec() }.encode_statistics_meta_value(&root)?;
         unsafe { &*self.table_codec() }.with_statistics_meta_key(
             table_name.as_ref(),
             index_id,
             |key| self.set(key, value.as_slice()),
         )?;
-        let cached_sketch = cm_sketch.clone();
         let (sketch_meta, sketch_pages) =
             cm_sketch.into_storage_parts(COUNT_MIN_SKETCH_STORAGE_PAGE_LEN);
         let value =
@@ -853,10 +849,7 @@ pub trait Transaction: Sized {
             )?;
         }
 
-        meta_cache.put(
-            (table_name.clone(), index_id),
-            Some(StatisticsMetaCacheValue::new(statistics_meta).with_sketch(cached_sketch)),
-        );
+        meta_cache.put((table_name.clone(), index_id), Some(cached_meta));
 
         Ok(())
     }
@@ -873,51 +866,13 @@ pub trait Transaction: Sized {
                 let mut iter = self.range(Bound::Included(min), Bound::Included(max))?;
                 let mut root = None;
                 let mut buckets = Vec::new();
-                let mut has_extra = false;
+                let mut sketch_meta = None;
+                let mut sketch_pages = Vec::<CountMinSketchPage>::new();
 
                 while let Some((key, value)) = iter.try_next()? {
                     match unsafe { &*self.table_codec() }.decode_statistics_codec_type(key)? {
                         StatisticsCodecType::Root => {
                             root = Some(TableCodec::decode_statistics_meta::<Self>(value)?);
-                        }
-                        StatisticsCodecType::SketchMeta | StatisticsCodecType::SketchPage => {
-                            has_extra = true
-                        }
-                        StatisticsCodecType::Bucket => {
-                            buckets.push(TableCodec::decode_statistics_bucket::<Self>(value)?);
-                        }
-                    }
-                }
-
-                match root {
-                    Some(root) => StatisticsMeta::from_parts(root, buckets).map(Some),
-                    None if !has_extra && buckets.is_empty() => Ok(None),
-                    _ => Err(DatabaseError::InvalidValue(
-                        "statistics meta is incomplete".to_string(),
-                    )),
-                }
-            },
-        )
-    }
-
-    fn statistics_sketch(
-        &self,
-        table_name: &str,
-        index_id: IndexId,
-    ) -> Result<Option<CountMinSketch<DataValue>>, DatabaseError> {
-        unsafe { &*self.table_codec() }.with_statistics_index_bound(
-            table_name,
-            index_id,
-            |min, max| {
-                let mut iter = self.range(Bound::Included(min), Bound::Included(max))?;
-                let mut sketch_meta = None;
-                let mut sketch_pages = Vec::<CountMinSketchPage>::new();
-                let mut has_root_or_bucket = false;
-
-                while let Some((key, value)) = iter.try_next()? {
-                    match unsafe { &*self.table_codec() }.decode_statistics_codec_type(key)? {
-                        StatisticsCodecType::Root | StatisticsCodecType::Bucket => {
-                            has_root_or_bucket = true
                         }
                         StatisticsCodecType::SketchMeta => {
                             sketch_meta =
@@ -927,16 +882,20 @@ pub trait Transaction: Sized {
                             sketch_pages
                                 .push(TableCodec::decode_statistics_sketch_page::<Self>(value)?);
                         }
+                        StatisticsCodecType::Bucket => {
+                            buckets.push(TableCodec::decode_statistics_bucket::<Self>(value)?);
+                        }
                     }
                 }
 
-                match sketch_meta {
-                    Some(sketch_meta) => {
-                        CountMinSketch::from_storage_parts(sketch_meta, sketch_pages).map(Some)
+                match (root, sketch_meta) {
+                    (Some(root), Some(sketch_meta)) => {
+                        let sketch = CountMinSketch::from_storage_parts(sketch_meta, sketch_pages)?;
+                        StatisticsMeta::from_parts(root, buckets, sketch).map(Some)
                     }
-                    None if !has_root_or_bucket && sketch_pages.is_empty() => Ok(None),
+                    (None, None) if buckets.is_empty() && sketch_pages.is_empty() => Ok(None),
                     _ => Err(DatabaseError::InvalidValue(
-                        "statistics sketch is incomplete".to_string(),
+                        "statistics meta is incomplete".to_string(),
                     )),
                 }
             },

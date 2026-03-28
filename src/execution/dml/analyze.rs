@@ -159,9 +159,9 @@ impl Analyze {
         {
             let (histogram, sketch) =
                 builder.build(histogram_buckets.unwrap_or(DEFAULT_NUM_OF_BUCKETS))?;
-            let meta = StatisticsMeta::new(histogram);
+            let meta = StatisticsMeta::new(histogram, sketch);
 
-            transaction.save_statistics_meta(cache, table_name, meta, sketch)?;
+            transaction.save_statistics_meta(cache, table_name, meta)?;
             values.push(DataValue::Utf8 {
                 value: format!("{table_name}/{index_id}"),
                 ty: Utf8Type::Variable(None),
@@ -367,12 +367,11 @@ mod test {
         let table_name = "t1".to_string().into();
         let loader = transaction.meta_loader(kite_sql.state.meta_cache());
         let statistics_meta = loader.load(&table_name, 0)?.unwrap();
-        let statistics_sketch = transaction
-            .statistics_sketch(table_name.as_ref(), 0)?
-            .unwrap();
         let expected_keys = 1
             + 1
-            + statistics_sketch.storage_page_count(COUNT_MIN_SKETCH_STORAGE_PAGE_LEN)
+            + statistics_meta
+                .sketch()
+                .storage_page_count(COUNT_MIN_SKETCH_STORAGE_PAGE_LEN)
             + statistics_meta.histogram().buckets_len();
         assert_eq!(keys, expected_keys);
 

@@ -956,7 +956,7 @@ mod tests {
             builder.append(&DataValue::Int32(value))?;
         }
         let (histogram, sketch) = builder.build(2)?;
-        let (root, buckets) = StatisticsMeta::new(histogram).into_parts();
+        let (root, buckets, _) = StatisticsMeta::new(histogram, sketch.clone()).into_parts();
 
         let root_bytes = table_codec.encode_statistics_meta_value(&root)?;
         let decoded_root = TableCodec::decode_statistics_meta::<RocksTransaction>(&root_bytes)?;

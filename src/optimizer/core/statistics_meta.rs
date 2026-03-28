@@ -40,24 +40,18 @@ impl<'a, T: Transaction> StatisticMetaLoader<'a, T> {
     ) -> Result<Option<&StatisticsMeta>, DatabaseError> {
         let key = (table_name.clone(), index_id);
         match self.cache.get(&key) {
-            Some(Some(entry)) => return Ok(Some(entry.meta())),
+            Some(Some(entry)) => return Ok(Some(entry)),
             Some(None) => return Ok(None),
-            None => {}
+            _ => {}
         }
 
         let Some(statistics_meta) = self.tx.statistics_meta(table_name.as_ref(), index_id)? else {
             self.cache.put(key, None);
             return Ok(None);
         };
-        self.cache.put(
-            key.clone(),
-            Some(StatisticsMetaCacheValue::new(statistics_meta)),
-        );
+        self.cache.put(key.clone(), Some(statistics_meta));
 
-        Ok(self
-            .cache
-            .get(&key)
-            .and_then(|entry| entry.as_ref().map(|entry| entry.meta())))
+        Ok(self.cache.get(&key).and_then(|entry| entry.as_ref()))
     }
 
     pub fn collect_count(
@@ -66,7 +60,7 @@ impl<'a, T: Transaction> StatisticMetaLoader<'a, T> {
         index_id: IndexId,
         range: &Range,
     ) -> Result<Option<usize>, DatabaseError> {
-        let Some(statistics_meta) = self.load(table_name, index_id)? else {
+        let Some(entry) = self.load(table_name, index_id)? else {
             return Ok(None);
         };
         let ranges = if let Range::SortedRanges(ranges) = range {
@@ -74,65 +68,11 @@ impl<'a, T: Transaction> StatisticMetaLoader<'a, T> {
         } else {
             slice::from_ref(range)
         };
-        let mut sketch = None;
-        let mut estimate = |value: &DataValue| -> Result<usize, DatabaseError> {
-            if sketch.is_none() {
-                sketch = self.load_sketch(table_name, index_id)?;
-            }
-            sketch
-                .as_ref()
-                .ok_or_else(|| {
-                    DatabaseError::InvalidValue("statistics sketch is incomplete".to_string())
-                })
-                .map(|sketch| sketch.estimate(value))
-        };
 
-        statistics_meta
+        entry
             .histogram()
-            .collect_count(ranges, &mut estimate)
+            .collect_count(ranges, entry.sketch())
             .map(Some)
-    }
-
-    fn load_sketch(
-        &self,
-        table_name: &TableName,
-        index_id: IndexId,
-    ) -> Result<Option<&CountMinSketch<DataValue>>, DatabaseError> {
-        let key = (table_name.clone(), index_id);
-        match self.cache.get(&key) {
-            Some(Some(entry)) => {
-                if let Some(sketch) = entry.sketch() {
-                    return Ok(Some(sketch));
-                }
-            }
-            Some(None) => return Ok(None),
-            None => {}
-        }
-
-        let Some(sketch) = self.tx.statistics_sketch(table_name.as_ref(), index_id)? else {
-            return Ok(None);
-        };
-        let meta = match self.cache.get(&key) {
-            Some(Some(entry)) => entry.meta().clone(),
-            Some(None) | None => {
-                let Some(meta) = self.tx.statistics_meta(table_name.as_ref(), index_id)? else {
-                    self.cache.put(key, None);
-                    return Ok(None);
-                };
-                meta
-            }
-        };
-        self.cache.put(
-            key.clone(),
-            Some(StatisticsMetaCacheValue::new(meta).with_sketch(sketch)),
-        );
-
-        Ok(match self.cache.get(&key) {
-            Some(Some(entry)) => entry.sketch(),
-            Some(None) | None => {
-                return Ok(None);
-            }
-        })
     }
 }
 
@@ -167,28 +107,35 @@ impl StatisticsMetaRoot {
 pub struct StatisticsMeta {
     index_id: IndexId,
     histogram: Histogram,
+    sketch: CountMinSketch<DataValue>,
 }
 
 impl StatisticsMeta {
-    pub fn new(histogram: Histogram) -> Self {
+    pub fn new(histogram: Histogram, sketch: CountMinSketch<DataValue>) -> Self {
         StatisticsMeta {
             index_id: histogram.index_id(),
             histogram,
+            sketch,
         }
     }
 
     pub fn from_parts(
         root: StatisticsMetaRoot,
         buckets: Vec<Bucket>,
+        sketch: CountMinSketch<DataValue>,
     ) -> Result<Self, DatabaseError> {
         let histogram = Histogram::from_parts(root.into_histogram_meta(), buckets)?;
 
-        Ok(Self::new(histogram))
+        Ok(Self::new(histogram, sketch))
     }
 
-    pub fn into_parts(self) -> (StatisticsMetaRoot, Vec<Bucket>) {
+    pub fn into_parts(self) -> (StatisticsMetaRoot, Vec<Bucket>, CountMinSketch<DataValue>) {
         let (histogram_meta, buckets) = self.histogram.into_parts();
-        (StatisticsMetaRoot::new(histogram_meta), buckets)
+        (
+            StatisticsMetaRoot::new(histogram_meta),
+            buckets,
+            self.sketch,
+        )
     }
 
     pub fn index_id(&self) -> IndexId {
@@ -198,30 +145,9 @@ impl StatisticsMeta {
     pub fn histogram(&self) -> &Histogram {
         &self.histogram
     }
-}
 
-#[derive(Debug, Clone)]
-pub struct StatisticsMetaCacheValue {
-    meta: StatisticsMeta,
-    sketch: Option<CountMinSketch<DataValue>>,
-}
-
-impl StatisticsMetaCacheValue {
-    pub fn new(meta: StatisticsMeta) -> Self {
-        Self { meta, sketch: None }
-    }
-
-    pub fn with_sketch(mut self, sketch: CountMinSketch<DataValue>) -> Self {
-        self.sketch = Some(sketch);
-        self
-    }
-
-    pub fn meta(&self) -> &StatisticsMeta {
-        &self.meta
-    }
-
-    pub fn sketch(&self) -> Option<&CountMinSketch<DataValue>> {
-        self.sketch.as_ref()
+    pub fn sketch(&self) -> &CountMinSketch<DataValue> {
+        &self.sketch
     }
 }
 
@@ -268,12 +194,17 @@ mod tests {
         builder.append(&Arc::new(DataValue::Null))?;
         builder.append(&Arc::new(DataValue::Null))?;
 
-        let (histogram, _) = builder.build(4)?;
-        let meta = StatisticsMeta::new(histogram.clone());
-        let (root, buckets) = meta.into_parts();
-        let statistics_meta = StatisticsMeta::from_parts(root, buckets)?;
+        let (histogram, sketch) = builder.build(4)?;
+        let expected_estimate = sketch.estimate(&DataValue::Int32(7));
+        let meta = StatisticsMeta::new(histogram.clone(), sketch);
+        let (root, buckets, sketch) = meta.into_parts();
+        let statistics_meta = StatisticsMeta::from_parts(root, buckets, sketch)?;
 
         assert_eq!(histogram, statistics_meta.histogram);
+        assert_eq!(
+            expected_estimate,
+            statistics_meta.sketch().estimate(&DataValue::Int32(7))
+        );
 
         Ok(())
     }
