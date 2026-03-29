@@ -14,21 +14,30 @@
 
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::{Bytes, TableCodec};
-use crate::storage::{InnerIter, Storage, Transaction};
+use crate::storage::{CheckpointableStorage, InnerIter, Storage, Transaction};
+#[cfg(feature = "unsafe_txdb_checkpoint")]
+use librocksdb_sys as ffi;
 use rocksdb::{
+    checkpoint::Checkpoint,
     statistics::{StatsLevel, Ticker},
     DBPinnableSlice, DBRawIteratorWithThreadMode, OptimisticTransactionDB, Options, ReadOptions,
     SliceTransform, TransactionDB,
 };
 use std::collections::Bound;
+#[cfg(feature = "unsafe_txdb_checkpoint")]
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt::{self, Display, Formatter};
-use std::path::PathBuf;
+use std::fs;
+use std::io::{self, ErrorKind};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 // Table data keys are `{table_hash(8)}{type_tag(1)}...`, so use hash+type as prefix.
 const ROCKSDB_FIXED_PREFIX_LEN: usize = 9;
 const ROCKSDB_BLOOM_BITS_PER_KEY: f64 = 10.0;
 const ROCKSDB_MEMTABLE_PREFIX_BLOOM_RATIO: f64 = 0.10;
+#[cfg(feature = "unsafe_txdb_checkpoint")]
+const ROCKSDB_TRANSACTION_DB_INNER_OFFSET: usize = 0x30;
 
 /// A lightweight snapshot of key RocksDB runtime indicators for tuning and diagnostics.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -309,6 +318,114 @@ fn default_opts(config: StorageConfig) -> Options {
     opts
 }
 
+fn prepare_checkpoint_dir(path: &Path) -> Result<(), DatabaseError> {
+    match fs::metadata(path) {
+        Ok(metadata) => {
+            if !metadata.is_dir() {
+                return Err(io::Error::new(
+                    ErrorKind::AlreadyExists,
+                    format!(
+                        "checkpoint target path '{}' already exists and is not a directory",
+                        path.display()
+                    ),
+                )
+                .into());
+            }
+
+            if fs::read_dir(path)?.next().is_some() {
+                return Err(io::Error::new(
+                    ErrorKind::AlreadyExists,
+                    format!(
+                        "checkpoint target directory '{}' must be empty",
+                        path.display()
+                    ),
+                )
+                .into());
+            }
+
+            fs::remove_dir(path)?;
+            Ok(())
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn cleanup_failed_checkpoint_dir(path: &Path) -> Result<(), DatabaseError> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+#[cfg(not(feature = "unsafe_txdb_checkpoint"))]
+fn unsupported_transactiondb_checkpoint_error() -> DatabaseError {
+    DatabaseError::UnsupportedStmt(format!(
+        "rocksdb TransactionDB checkpoint is disabled; enable the `unsafe_txdb_checkpoint` feature to opt in to the current implementation",
+    ))
+}
+
+#[cfg(feature = "unsafe_txdb_checkpoint")]
+fn rocksdb_error_from_ptr(err: *mut c_char) -> DatabaseError {
+    unsafe {
+        let message = CStr::from_ptr(err).to_string_lossy().into_owned();
+        ffi::rocksdb_free(err.cast::<c_void>());
+        io::Error::other(message).into()
+    }
+}
+
+#[cfg(feature = "unsafe_txdb_checkpoint")]
+fn checkpoint_path_to_cstring(path: &Path) -> Result<CString, DatabaseError> {
+    CString::new(path.to_string_lossy().into_owned()).map_err(|_| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "checkpoint path '{}' contains an interior NUL byte",
+                path.display()
+            ),
+        )
+        .into()
+    })
+}
+
+#[cfg(feature = "unsafe_txdb_checkpoint")]
+fn create_transactiondb_checkpoint(
+    db: &TransactionDB<rocksdb::MultiThreaded>,
+    path: &Path,
+) -> Result<(), DatabaseError> {
+    let path = checkpoint_path_to_cstring(path)?;
+    let mut err: *mut c_char = std::ptr::null_mut();
+
+    // `rocksdb` 0.23 does not expose a safe checkpoint API for `TransactionDB`.
+    // This fallback is intentionally gated behind the `unsafe_txdb_checkpoint`
+    // feature so callers must opt in explicitly.
+    let db_ptr = unsafe {
+        *(std::ptr::from_ref(db)
+            .cast::<u8>()
+            .add(ROCKSDB_TRANSACTION_DB_INNER_OFFSET)
+            .cast::<*mut ffi::rocksdb_transactiondb_t>())
+    };
+    let checkpoint =
+        unsafe { ffi::rocksdb_transactiondb_checkpoint_object_create(db_ptr, &mut err) };
+    if !err.is_null() {
+        return Err(rocksdb_error_from_ptr(err));
+    }
+    if checkpoint.is_null() {
+        return Err(io::Error::other("Could not create checkpoint object.").into());
+    }
+
+    unsafe {
+        ffi::rocksdb_checkpoint_create(checkpoint, path.as_ptr(), 0, &mut err);
+        ffi::rocksdb_checkpoint_object_destroy(checkpoint);
+    }
+    if !err.is_null() {
+        return Err(rocksdb_error_from_ptr(err));
+    }
+
+    Ok(())
+}
+
 impl Storage for OptimisticRocksStorage {
     type Metrics = RocksDbMetrics;
 
@@ -358,6 +475,43 @@ impl Storage for RocksStorage {
         Some(collect_metrics(self.options.as_ref(), |name| {
             self.inner.property_int_value(name)
         }))
+    }
+}
+
+impl CheckpointableStorage for OptimisticRocksStorage {
+    fn create_checkpoint<P: AsRef<Path>>(&self, path: P) -> Result<(), DatabaseError> {
+        let path = path.as_ref();
+        prepare_checkpoint_dir(path)?;
+
+        let checkpoint = Checkpoint::new(self.inner.as_ref())?;
+        if let Err(err) = checkpoint.create_checkpoint(path) {
+            cleanup_failed_checkpoint_dir(path)?;
+            return Err(err.into());
+        }
+
+        Ok(())
+    }
+}
+
+impl CheckpointableStorage for RocksStorage {
+    fn create_checkpoint<P: AsRef<Path>>(&self, path: P) -> Result<(), DatabaseError> {
+        let path = path.as_ref();
+        prepare_checkpoint_dir(path)?;
+
+        #[cfg(feature = "unsafe_txdb_checkpoint")]
+        {
+            if let Err(err) = create_transactiondb_checkpoint(self.inner.as_ref(), path) {
+                cleanup_failed_checkpoint_dir(path)?;
+                return Err(err);
+            }
+
+            return Ok(());
+        }
+
+        #[cfg(not(feature = "unsafe_txdb_checkpoint"))]
+        {
+            return Err(unsupported_transactiondb_checkpoint_error());
+        }
     }
 }
 

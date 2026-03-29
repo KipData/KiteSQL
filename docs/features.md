@@ -58,6 +58,35 @@ let kite_sql = DataBaseBuilder::path("./data")
 - Pessimistic (Default)
 - Optimistic
 
+### Checkpoint
+KiteSQL exposes checkpoint as a storage capability rather than a full backup workflow. A checkpoint only creates a consistent local snapshot directory; compressing, uploading, retaining, and pruning backups should stay in application code.
+
+Support matrix:
+- `build_optimistic()` supports `Database::checkpoint(...)` through RocksDB's safe checkpoint API.
+- `build_rocksdb()` requires Cargo feature `unsafe_txdb_checkpoint` because upstream `rocksdb` does not currently expose a safe `TransactionDB` checkpoint API.
+- `build_lmdb()` and `build_in_memory()` do not currently expose checkpoint support.
+
+Opt in for `TransactionDB` checkpoint support:
+```bash
+cargo check --features unsafe_txdb_checkpoint
+```
+
+Minimal usage:
+```rust
+use kite_sql::db::DataBaseBuilder;
+use kite_sql::errors::DatabaseError;
+
+fn main() -> Result<(), DatabaseError> {
+    let database = DataBaseBuilder::path("./data").build_rocksdb()?;
+
+    database.checkpoint("./backup/checkpoint-2026-03-29")?;
+
+    Ok(())
+}
+```
+
+If `unsafe_txdb_checkpoint` is not enabled, `build_rocksdb()` returns an explicit error instead of attempting the experimental implementation.
+
 ### Field options
 - [not] null
 - unique

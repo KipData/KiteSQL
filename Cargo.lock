@@ -1307,7 +1307,7 @@ dependencies = [
 
 [[package]]
 name = "kite_sql"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ahash 0.8.12",
  "async-trait",
@@ -1329,6 +1329,7 @@ dependencies = [
  "itertools 0.12.1",
  "js-sys",
  "kite_sql_serde_macros",
+ "librocksdb-sys",
  "lmdb",
  "lmdb-sys",
  "log",

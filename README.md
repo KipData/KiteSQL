@@ -134,12 +134,15 @@ fn main() -> Result<(), DatabaseError> {
 - `build_lmdb()` opens a persistent LMDB-backed database.
 - `build_in_memory()` opens an in-memory database for tests, examples, and temporary workloads.
 - `build_optimistic()` is available on native targets when you specifically want optimistic transactions on top of RocksDB.
+- `Database::checkpoint(path)` creates a local consistent snapshot when the selected storage backend supports it.
 - Cargo features:
   - `rocksdb` is enabled by default
   - `lmdb` is optional
+  - `unsafe_txdb_checkpoint` enables experimental checkpoint support for RocksDB `TransactionDB`
   - `cargo check --no-default-features --features lmdb` builds an LMDB-only native configuration
 
 On native targets, `LMDB` shines when reads dominate, while `RocksDB` is usually the stronger choice when writes do.
+Checkpoint support and feature-gating details are documented in [docs/features.md](docs/features.md).
 
 👉**more examples**
 - [hello_world](examples/hello_world.rs)

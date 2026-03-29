@@ -45,6 +45,7 @@ use std::fmt::{self, Display, Formatter};
 use std::io::Cursor;
 use std::mem;
 use std::ops::SubAssign;
+use std::path::Path;
 use std::sync::Arc;
 
 pub type KeyValueRef<'a> = (&'a [u8], &'a [u8]);
@@ -97,6 +98,12 @@ pub trait Storage: Clone {
     fn metrics(&self) -> Option<Self::Metrics> {
         None
     }
+}
+
+/// Optional capability for storage engines that can materialize an online
+/// consistent checkpoint to the local filesystem.
+pub trait CheckpointableStorage: Storage {
+    fn create_checkpoint<P: AsRef<Path>>(&self, path: P) -> Result<(), DatabaseError>;
 }
 
 /// Optional bounds of the reader, of the form (offset, limit).
