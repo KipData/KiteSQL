@@ -37,7 +37,9 @@ use crate::storage::lmdb::{LmdbConfig, LmdbStorage};
 use crate::storage::memory::MemoryStorage;
 #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
 use crate::storage::rocksdb::{OptimisticRocksStorage, RocksStorage, StorageConfig};
-use crate::storage::{StatisticsMetaCache, Storage, TableCache, Transaction, ViewCache};
+use crate::storage::{
+    CheckpointableStorage, StatisticsMetaCache, Storage, TableCache, Transaction, ViewCache,
+};
 use crate::types::tuple::{SchemaRef, Tuple};
 use crate::types::value::DataValue;
 use crate::utils::lru::SharedLruCache;
@@ -47,6 +49,7 @@ use parking_lot::{RawRwLock, RwLock};
 use std::hash::RandomState;
 use std::marker::PhantomData;
 use std::mem;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
@@ -675,6 +678,19 @@ impl<S: Storage> Database<S> {
     }
 }
 
+impl<S> Database<S>
+where
+    S: CheckpointableStorage,
+{
+    /// Creates an online consistent checkpoint in `path`.
+    ///
+    /// The target path must not exist or must be an empty directory.
+    #[inline]
+    pub fn checkpoint<P: AsRef<Path>>(&self, path: P) -> Result<(), DatabaseError> {
+        self.storage.create_checkpoint(path)
+    }
+}
+
 /// Borrowing interface for result iterators returned by database execution APIs.
 pub trait BorrowResultIter {
     /// Returns the output schema for the current result set.
@@ -1003,8 +1019,15 @@ pub(crate) mod test {
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use chrono::{Datelike, Local};
+    use std::io::ErrorKind;
     use std::sync::atomic::AtomicUsize;
+    #[cfg(feature = "unsafe_txdb_checkpoint")]
+    use std::sync::atomic::Ordering;
     use std::sync::Arc;
+    #[cfg(feature = "unsafe_txdb_checkpoint")]
+    use std::thread;
+    #[cfg(feature = "unsafe_txdb_checkpoint")]
+    use std::time::Duration;
     use tempfile::TempDir;
 
     pub(crate) fn build_table<T: Transaction>(
@@ -1031,6 +1054,23 @@ pub(crate) mod test {
         let _ = transaction.create_table(table_cache, "t1".to_string().into(), columns, false)?;
 
         Ok(())
+    }
+
+    #[cfg(feature = "unsafe_txdb_checkpoint")]
+    fn query_i32<S: Storage>(
+        database: &crate::db::Database<S>,
+        sql: &str,
+    ) -> Result<i32, DatabaseError> {
+        let mut iter = database.run(sql)?;
+        let value = match iter.next().transpose()?.map(|tuple| tuple.values) {
+            Some(values) => match values.as_slice() {
+                [DataValue::Int32(value)] => *value,
+                other => panic!("expected a single Int32 column, got {other:?}"),
+            },
+            None => panic!("expected one result row for query: {sql}"),
+        };
+        iter.done()?;
+        Ok(value)
     }
 
     #[test]
@@ -1779,5 +1819,137 @@ pub(crate) mod test {
             result,
             Err(DatabaseError::InvalidValue(message)) if message == "histogram buckets must be >= 1"
         ));
+    }
+
+    #[cfg(feature = "unsafe_txdb_checkpoint")]
+    #[test]
+    fn test_checkpoint_restores_snapshot() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let live_path = temp_dir.path().join("live");
+        let checkpoint_path = temp_dir.path().join("checkpoint");
+        let kite_sql = DataBaseBuilder::path(&live_path).build_rocksdb()?;
+
+        kite_sql
+            .run("create table t_checkpoint (id int primary key, v int)")?
+            .done()?;
+        kite_sql
+            .run("insert into t_checkpoint values (1, 10), (2, 20)")?
+            .done()?;
+
+        kite_sql.checkpoint(&checkpoint_path)?;
+
+        kite_sql
+            .run("insert into t_checkpoint values (3, 30)")?
+            .done()?;
+
+        let snapshot = DataBaseBuilder::path(&checkpoint_path).build_rocksdb()?;
+        assert_eq!(
+            query_i32(&snapshot, "select count(*) from t_checkpoint")?,
+            2
+        );
+        assert_eq!(
+            query_i32(&kite_sql, "select count(*) from t_checkpoint")?,
+            3
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_checkpoint_rejects_non_empty_target_dir() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let live_path = temp_dir.path().join("live");
+        let checkpoint_path = temp_dir.path().join("checkpoint");
+        let kite_sql = DataBaseBuilder::path(&live_path).build_rocksdb()?;
+
+        std::fs::create_dir(&checkpoint_path)?;
+        std::fs::write(checkpoint_path.join("stale.txt"), b"stale")?;
+
+        let err = kite_sql
+            .checkpoint(&checkpoint_path)
+            .expect_err("checkpoint should reject non-empty directories");
+        assert!(matches!(
+            err,
+            DatabaseError::IO(ref io_err) if io_err.kind() == ErrorKind::AlreadyExists
+        ));
+
+        Ok(())
+    }
+
+    #[cfg(not(feature = "unsafe_txdb_checkpoint"))]
+    #[test]
+    fn test_checkpoint_requires_unsafe_feature() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let live_path = temp_dir.path().join("live");
+        let checkpoint_path = temp_dir.path().join("checkpoint");
+        let kite_sql = DataBaseBuilder::path(&live_path).build_rocksdb()?;
+
+        kite_sql
+            .run("create table t_checkpoint_disabled (id int primary key, v int)")?
+            .done()?;
+
+        let err = kite_sql
+            .checkpoint(&checkpoint_path)
+            .expect_err("checkpoint should require the unsafe feature");
+        assert!(matches!(err, DatabaseError::UnsupportedStmt(_)));
+
+        Ok(())
+    }
+
+    #[cfg(feature = "unsafe_txdb_checkpoint")]
+    #[test]
+    fn test_checkpoint_during_concurrent_writes() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let live_path = temp_dir.path().join("live");
+        let checkpoint_path = temp_dir.path().join("checkpoint");
+        let kite_sql = Arc::new(DataBaseBuilder::path(&live_path).build_rocksdb()?);
+
+        kite_sql
+            .run("create table t_checkpoint_concurrent (id int primary key, v int)")?
+            .done()?;
+
+        let inserted = Arc::new(AtomicUsize::new(0));
+        let writer_db = Arc::clone(&kite_sql);
+        let writer_inserted = Arc::clone(&inserted);
+        let writer = thread::spawn(move || -> Result<usize, DatabaseError> {
+            for i in 0..64 {
+                writer_db
+                    .run(format!(
+                        "insert into t_checkpoint_concurrent values ({i}, {i})"
+                    ))?
+                    .done()?;
+                writer_inserted.store(i + 1, Ordering::SeqCst);
+
+                if i >= 8 {
+                    thread::sleep(Duration::from_millis(2));
+                }
+            }
+
+            Ok(64)
+        });
+
+        while inserted.load(Ordering::SeqCst) < 8 {
+            thread::yield_now();
+        }
+
+        kite_sql.checkpoint(&checkpoint_path)?;
+
+        let total = writer.join().expect("writer thread should not panic")?;
+        let snapshot = DataBaseBuilder::path(&checkpoint_path).build_rocksdb()?;
+        let snapshot_count = query_i32(&snapshot, "select count(*) from t_checkpoint_concurrent")?;
+        let consistent_count = query_i32(
+            &snapshot,
+            "select count(*) from t_checkpoint_concurrent where id = v",
+        )?;
+
+        assert!(snapshot_count >= 8);
+        assert!(snapshot_count <= total as i32);
+        assert_eq!(snapshot_count, consistent_count);
+        assert_eq!(
+            query_i32(&kite_sql, "select count(*) from t_checkpoint_concurrent")?,
+            total as i32
+        );
+
+        Ok(())
     }
 }
