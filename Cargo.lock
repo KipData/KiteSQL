@@ -1532,6 +1532,7 @@ dependencies = [
  "rust_decimal",
  "serde",
  "sqlparser",
+ "tempfile",
  "typetag",
 ]
 

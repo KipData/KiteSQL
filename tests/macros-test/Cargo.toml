@@ -9,4 +9,5 @@ lazy_static = { version = "1" }
 serde       = { version = "1", features = ["derive", "rc"] }
 rust_decimal = { version = "1" }
 sqlparser   = { version = "0.61", features = ["serde"] }
+tempfile    = { version = "3.10" }
 typetag     = { version = "0.2" }
