@@ -25,11 +25,11 @@ mod test {
     use kite_sql::expression::BinaryOperator;
     use kite_sql::expression::ScalarExpression;
     use kite_sql::orm::{case_when, count_all, func, max, min, sum, QueryValue};
+    use kite_sql::storage::rocksdb::RocksStorage;
     use kite_sql::types::evaluator::EvaluatorFactory;
     use kite_sql::types::tuple::{SchemaRef, Tuple};
     use kite_sql::types::value::{DataValue, Utf8Type};
     use kite_sql::types::LogicalType;
-    use kite_sql::storage::rocksdb::RocksStorage;
     use kite_sql::{from_tuple, scala_function, table_function, Model, Projection};
     use rust_decimal::Decimal;
     use sqlparser::ast::{CharLengthUnits, DataType as SqlDataType};
