@@ -116,7 +116,11 @@ impl TableCatalog {
         if self.column_idxs.contains_key(col.name()) {
             return Err(DatabaseError::DuplicateColumn(col.name().to_string()));
         }
-        let col_id = generator.generate().unwrap();
+        let max_existing_id = self.columns.keys().max().copied();
+        let mut col_id = generator.generate().unwrap();
+        while max_existing_id.is_some_and(|max_id| col_id <= max_id) {
+            col_id = generator.generate().unwrap();
+        }
 
         col.summary_mut().relation = ColumnRelation::Table {
             column_id: col_id,
@@ -292,6 +296,7 @@ mod tests {
     use super::*;
     use crate::catalog::ColumnDesc;
     use crate::types::LogicalType;
+    use ulid::Generator;
 
     #[test]
     // | a (Int32) | b (Bool) |
@@ -327,5 +332,51 @@ mod tests {
         let column_catalog = table_catalog.get_column_by_id(col_b_id).unwrap();
         assert_eq!(column_catalog.name(), "b");
         assert_eq!(*column_catalog.datatype(), LogicalType::Boolean,);
+    }
+
+    #[test]
+    fn test_add_column_generates_id_after_existing_columns() {
+        for _ in 0..256 {
+            let mut table_catalog = TableCatalog::new(
+                "test".to_string().into(),
+                vec![
+                    ColumnCatalog::new(
+                        "id".into(),
+                        false,
+                        ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
+                    ),
+                    ColumnCatalog::new(
+                        "name".into(),
+                        true,
+                        ColumnDesc::new(
+                            LogicalType::Varchar(None, sqlparser::ast::CharLengthUnits::Characters),
+                            None,
+                            false,
+                            None,
+                        )
+                        .unwrap(),
+                    ),
+                ],
+            )
+            .unwrap();
+            let max_existing_id = table_catalog
+                .columns()
+                .filter_map(|column| column.id())
+                .max()
+                .unwrap();
+            let mut generator = Generator::new();
+            let new_id = table_catalog
+                .add_column(
+                    ColumnCatalog::new(
+                        "age".into(),
+                        true,
+                        ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
+                    ),
+                    &mut generator,
+                )
+                .unwrap();
+
+            assert!(new_id > max_existing_id);
+        }
     }
 }
