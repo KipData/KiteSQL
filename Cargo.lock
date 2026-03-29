@@ -1361,7 +1361,7 @@ dependencies = [
 
 [[package]]
 name = "kite_sql_serde_macros"
-version = "0.2.1"
+version = "0.2.0"
 dependencies = [
  "darling",
  "proc-macro2",
