@@ -17,7 +17,7 @@ fn main() {}
 #[cfg(test)]
 mod test {
     use kite_sql::catalog::column::{ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation};
-    use kite_sql::db::{DataBaseBuilder, ResultIter};
+    use kite_sql::db::{DataBaseBuilder, Database, ResultIter};
     use kite_sql::errors::DatabaseError;
     use kite_sql::expression::function::scala::ScalarFunctionImpl;
     use kite_sql::expression::function::table::TableFunctionImpl;
@@ -29,10 +29,12 @@ mod test {
     use kite_sql::types::tuple::{SchemaRef, Tuple};
     use kite_sql::types::value::{DataValue, Utf8Type};
     use kite_sql::types::LogicalType;
+    use kite_sql::storage::rocksdb::RocksStorage;
     use kite_sql::{from_tuple, scala_function, table_function, Model, Projection};
     use rust_decimal::Decimal;
     use sqlparser::ast::{CharLengthUnits, DataType as SqlDataType};
     use std::sync::Arc;
+    use tempfile::TempDir;
 
     fn build_tuple() -> (Tuple, SchemaRef) {
         let schema_ref = Arc::new(vec![
@@ -63,6 +65,13 @@ mod test {
         ];
 
         (Tuple::new(None, values), schema_ref)
+    }
+
+    fn build_test_database() -> Result<(TempDir, Database<RocksStorage>), DatabaseError> {
+        let temp_dir = TempDir::new().expect("create temp dir for ORM test");
+        let database = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+
+        Ok((temp_dir, database))
     }
 
     #[derive(Default, Debug, PartialEq)]
@@ -299,7 +308,7 @@ mod test {
 
     #[test]
     fn test_result_iter_to_orm_iter() -> Result<(), DatabaseError> {
-        let database = DataBaseBuilder::path(".").build_in_memory()?;
+        let (_temp_dir, database) = build_test_database()?;
 
         database
             .run("create table users (c1 int primary key, c2 varchar, age int)")?
@@ -336,7 +345,7 @@ mod test {
 
     #[test]
     fn test_model_decimal_ddl() -> Result<(), DatabaseError> {
-        let database = DataBaseBuilder::path(".").build_in_memory()?;
+        let (_temp_dir, database) = build_test_database()?;
 
         database.create_table::<Wallet>()?;
         for id in 1..=101 {
@@ -371,7 +380,7 @@ mod test {
 
     #[test]
     fn test_model_char_ddl() -> Result<(), DatabaseError> {
-        let database = DataBaseBuilder::path(".").build_in_memory()?;
+        let (_temp_dir, database) = build_test_database()?;
 
         database.create_table::<CountryCode>()?;
 
@@ -399,7 +408,7 @@ mod test {
 
     #[test]
     fn test_model_migrate() -> Result<(), DatabaseError> {
-        let database = DataBaseBuilder::path(".").build_in_memory()?;
+        let (_temp_dir, database) = build_test_database()?;
 
         database.create_table::<MigratingUserV1>()?;
         database.insert(&MigratingUserV1 {
@@ -458,9 +467,10 @@ mod test {
 
     #[test]
     fn test_orm_query_builder() -> Result<(), DatabaseError> {
-        let database = DataBaseBuilder::path(".")
+        let temp_dir = TempDir::new().expect("create temp dir for ORM test");
+        let database = DataBaseBuilder::path(temp_dir.path())
             .register_scala_function(MyOrmFunction::new())
-            .build_in_memory()?;
+            .build_rocksdb()?;
 
         database.create_table::<User>()?;
         database.run("drop index users.users_age_index")?.done()?;
@@ -988,7 +998,7 @@ mod test {
 
     #[test]
     fn test_orm_expression_and_set_query_helpers() -> Result<(), DatabaseError> {
-        let database = DataBaseBuilder::path(".").build_in_memory()?;
+        let (_temp_dir, database) = build_test_database()?;
 
         database.create_table::<User>()?;
         database.insert(&User {
@@ -1292,7 +1302,7 @@ mod test {
 
     #[test]
     fn test_orm_group_by_builder() -> Result<(), DatabaseError> {
-        let database = DataBaseBuilder::path(".").build_in_memory()?;
+        let (_temp_dir, database) = build_test_database()?;
 
         database.create_table::<EventLog>()?;
         database.insert(&EventLog {
@@ -1413,7 +1423,7 @@ mod test {
 
     #[test]
     fn test_orm_model_lifecycle() -> Result<(), DatabaseError> {
-        let database = DataBaseBuilder::path(".").build_in_memory()?;
+        let (_temp_dir, database) = build_test_database()?;
 
         database.create_table::<User>()?;
         database.run("drop index users.users_age_index")?.done()?;
@@ -1521,7 +1531,7 @@ mod test {
 
     #[test]
     fn test_orm_update_delete_builder() -> Result<(), DatabaseError> {
-        let database = DataBaseBuilder::path(".").build_in_memory()?;
+        let (_temp_dir, database) = build_test_database()?;
         database.create_table::<User>()?;
 
         for (id, name, age) in [
@@ -1591,7 +1601,7 @@ mod test {
 
     #[test]
     fn test_orm_insert_query_builder() -> Result<(), DatabaseError> {
-        let database = DataBaseBuilder::path(".").build_in_memory()?;
+        let (_temp_dir, database) = build_test_database()?;
         database.create_table::<User>()?;
         database.create_table::<ArchivedUser>()?;
 
@@ -1674,7 +1684,7 @@ mod test {
 
     #[test]
     fn test_orm_extended_write_and_ddl_helpers() -> Result<(), DatabaseError> {
-        let database = DataBaseBuilder::path(".").build_in_memory()?;
+        let (_temp_dir, database) = build_test_database()?;
         database.create_table::<User>()?;
 
         database.insert_many([
@@ -1792,7 +1802,7 @@ mod test {
 
     #[test]
     fn test_orm_introspection_helpers() -> Result<(), DatabaseError> {
-        let database = DataBaseBuilder::path(".").build_in_memory()?;
+        let (_temp_dir, database) = build_test_database()?;
         database.create_table::<User>()?;
         database.create_table::<Wallet>()?;
         database.create_view(
@@ -1856,7 +1866,7 @@ mod test {
 
     #[test]
     fn test_orm_drop_index() -> Result<(), DatabaseError> {
-        let database = DataBaseBuilder::path(".").build_in_memory()?;
+        let (_temp_dir, database) = build_test_database()?;
 
         database.create_table::<User>()?;
         database.insert(&User {
