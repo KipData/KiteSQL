@@ -160,6 +160,8 @@ pub enum SubQueryType {
         negated: bool,
         plan: LogicalPlan,
         correlated: bool,
+        output_column: ColumnRef,
+        predicate: ScalarExpression,
     },
 }
 

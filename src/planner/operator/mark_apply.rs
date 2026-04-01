@@ -23,6 +23,7 @@ use std::fmt::Formatter;
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub enum MarkApplyKind {
     Exists,
+    In,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
@@ -56,6 +57,29 @@ impl MarkApplyOperator {
         )
     }
 
+    pub fn new_in(output_column: ColumnRef, predicates: Vec<ScalarExpression>) -> Self {
+        Self {
+            kind: MarkApplyKind::In,
+            predicates,
+            output_column,
+        }
+    }
+
+    pub fn build_in(
+        left: LogicalPlan,
+        right: LogicalPlan,
+        output_column: ColumnRef,
+        predicates: Vec<ScalarExpression>,
+    ) -> LogicalPlan {
+        LogicalPlan::new(
+            Operator::MarkApply(MarkApplyOperator::new_in(output_column, predicates)),
+            Childrens::Twins {
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        )
+    }
+
     pub fn predicates(&self) -> &[ScalarExpression] {
         &self.predicates
     }
@@ -73,6 +97,7 @@ impl fmt::Display for MarkApplyOperator {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self.kind {
             MarkApplyKind::Exists => write!(f, "MarkExistsApply"),
+            MarkApplyKind::In => write!(f, "MarkInApply"),
         }
     }
 }

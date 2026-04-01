@@ -76,6 +76,12 @@ impl<'a> VisitorMut<'a> for RightSidePositionGlobalizer<'_> {
     }
 }
 
+struct AppendedRightOutput {
+    column: ColumnRef,
+    child_position: usize,
+    output_position: usize,
+}
+
 struct SplitScopePositionRebinder<'a> {
     left_schema: &'a Schema,
     right_schema: &'a Schema,
@@ -257,6 +263,65 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 left_len,
             }
             .visit(expr)?;
+        }
+
+        Ok(())
+    }
+
+    fn globalize_mark_predicate(
+        predicate: &mut ScalarExpression,
+        output_column: &ColumnRef,
+        left_len: usize,
+    ) -> Result<(), DatabaseError> {
+        MarkerPositionGlobalizer {
+            output_column,
+            left_len,
+        }
+        .visit(predicate)
+    }
+
+    fn globalize_right_side_exprs<'expr>(
+        exprs: impl Iterator<Item = &'expr mut ScalarExpression>,
+        left_len: usize,
+        right_schema: &Schema,
+    ) -> Result<(), DatabaseError> {
+        for expr in exprs {
+            RightSidePositionGlobalizer {
+                right_schema,
+                left_len,
+            }
+            .visit(expr)?;
+        }
+
+        Ok(())
+    }
+
+    fn localize_appended_right_outputs<'expr>(
+        exprs: impl Iterator<Item = &'expr mut ScalarExpression>,
+        appended_outputs: &[AppendedRightOutput],
+    ) -> Result<(), DatabaseError> {
+        struct AppendedRightOutputBinder<'a> {
+            appended_outputs: &'a [AppendedRightOutput],
+        }
+
+        impl VisitorMut<'_> for AppendedRightOutputBinder<'_> {
+            fn visit_column_ref(
+                &mut self,
+                column: &mut ColumnRef,
+                position: &mut usize,
+            ) -> Result<(), DatabaseError> {
+                if let Some(output) = self.appended_outputs.iter().find(|output| {
+                    *position == output.child_position && column.same_column(&output.column)
+                }) {
+                    *position = output.output_position;
+                }
+                Ok(())
+            }
+        }
+
+        let mut binder = AppendedRightOutputBinder { appended_outputs };
+        for expr in exprs {
+            binder.visit(expr)?;
         }
 
         Ok(())
@@ -1251,10 +1316,12 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         let mut predicate = self.bind_expr(predicate)?;
 
         if let Some(sub_queries) = self.context.sub_queries_at_now() {
-            if sub_queries
-                .iter()
-                .all(|sub_query| matches!(sub_query, SubQueryType::ExistsSubQuery { .. }))
-            {
+            if sub_queries.iter().all(|sub_query| {
+                matches!(
+                    sub_query,
+                    SubQueryType::ExistsSubQuery { .. } | SubQueryType::InSubQuery { .. }
+                )
+            }) {
                 let passthrough_exprs = children
                     .output_schema()
                     .iter()
@@ -1263,39 +1330,56 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     .map(|(position, column)| ScalarExpression::column_expr(column, position))
                     .collect();
                 for sub_query in sub_queries {
-                    let SubQueryType::ExistsSubQuery {
-                        plan,
-                        correlated,
-                        output_column,
-                    } = sub_query
-                    else {
-                        unreachable!()
-                    };
-                    let left_len = children.output_schema().len();
-                    MarkerPositionGlobalizer {
-                        output_column: &output_column,
-                        left_len,
-                    }
-                    .visit(&mut predicate)?;
-                    let (mut plan, mut predicates) = if correlated {
-                        Self::prepare_correlated_subquery_plan(
+                    match sub_query {
+                        SubQueryType::ExistsSubQuery {
                             plan,
-                            children.output_schema(),
-                            false,
-                        )?
-                    } else {
-                        (plan, Vec::new())
-                    };
-                    let right_schema = plan.output_schema();
-                    for expr in predicates.iter_mut() {
-                        RightSidePositionGlobalizer {
-                            right_schema: right_schema.as_ref(),
-                            left_len,
+                            correlated,
+                            output_column,
+                        } => {
+                            let (plan, predicates) = Self::prepare_mark_apply(
+                                &mut predicate,
+                                &output_column,
+                                children.output_schema(),
+                                plan,
+                                correlated,
+                                false,
+                                Vec::new(),
+                            )?;
+                            children = MarkApplyOperator::build_exists(
+                                children,
+                                plan,
+                                output_column,
+                                predicates,
+                            );
                         }
-                        .visit(expr)?;
+                        SubQueryType::InSubQuery {
+                            plan,
+                            correlated,
+                            output_column,
+                            predicate: mut in_predicate,
+                            ..
+                        } => {
+                            if correlated {
+                                in_predicate = Self::rewrite_correlated_in_predicate(in_predicate);
+                            }
+                            let (plan, predicates) = Self::prepare_mark_apply(
+                                &mut predicate,
+                                &output_column,
+                                children.output_schema(),
+                                plan,
+                                correlated,
+                                true,
+                                vec![in_predicate],
+                            )?;
+                            children = MarkApplyOperator::build_in(
+                                children,
+                                plan,
+                                output_column,
+                                predicates,
+                            );
+                        }
+                        SubQueryType::SubQuery { .. } => unreachable!(),
                     }
-                    children =
-                        MarkApplyOperator::build_exists(children, plan, output_column, predicates);
                 }
                 let filter = FilterOperator::build(predicate, children, false);
                 return Ok(LogicalPlan::new(
@@ -1305,12 +1389,14 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     Childrens::Only(Box::new(filter)),
                 ));
             }
-            if sub_queries
-                .iter()
-                .any(|sub_query| matches!(sub_query, SubQueryType::ExistsSubQuery { .. }))
-            {
+            if sub_queries.iter().any(|sub_query| {
+                matches!(
+                    sub_query,
+                    SubQueryType::ExistsSubQuery { .. } | SubQueryType::InSubQuery { .. }
+                )
+            }) {
                 return Err(DatabaseError::UnsupportedStmt(
-                    "mixed EXISTS with other WHERE subqueries is not supported yet".to_string(),
+                    "mixed EXISTS/IN with other WHERE subqueries is not supported yet".to_string(),
                 ));
             }
             for sub_query in sub_queries {
@@ -1324,27 +1410,8 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         }
                         (plan, JoinType::Inner)
                     }
-                    SubQueryType::ExistsSubQuery { .. } => unreachable!(),
-                    SubQueryType::InSubQuery {
-                        negated,
-                        plan,
-                        correlated,
-                    } => {
-                        if correlated {
-                            children = self.bind_correlated_in_subquery(
-                                children,
-                                plan,
-                                negated,
-                                predicate.clone(),
-                            )?;
-                            continue;
-                        }
-                        let join_ty = if negated {
-                            JoinType::LeftAnti
-                        } else {
-                            JoinType::LeftSemi
-                        };
-                        (plan, join_ty)
+                    SubQueryType::ExistsSubQuery { .. } | SubQueryType::InSubQuery { .. } => {
+                        unreachable!()
                     }
                 };
 
@@ -1361,28 +1428,91 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         Ok(FilterOperator::build(predicate, children, false))
     }
 
-    fn bind_correlated_in_subquery(
-        &self,
-        mut children: LogicalPlan,
+    fn ensure_mark_apply_right_outputs(
+        plan: &mut LogicalPlan,
+        predicates: &[ScalarExpression],
+    ) -> Vec<AppendedRightOutput> {
+        let output_schema = plan.output_schema().clone();
+        let output_len = output_schema.len();
+        if let LogicalPlan {
+            operator: Operator::Project(op),
+            childrens,
+            ..
+        } = plan
+        {
+            let Childrens::Only(child) = childrens.as_mut() else {
+                return Vec::new();
+            };
+            let mut appended_outputs = Vec::new();
+            op.exprs.extend(
+                child
+                    .output_schema()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, column)| {
+                        !output_schema.contains(column)
+                            && predicates.iter().any(|expr| {
+                                expr.any_referenced_column(true, |candidate| {
+                                    candidate.same_column(column)
+                                })
+                            })
+                    })
+                    .map(|(position, column)| {
+                        appended_outputs.push(AppendedRightOutput {
+                            column: column.clone(),
+                            child_position: position,
+                            output_position: output_len + appended_outputs.len(),
+                        });
+                        ScalarExpression::column_expr(column.clone(), position)
+                    }),
+            );
+            if !appended_outputs.is_empty() {
+                plan.reset_output_schema_cache();
+            }
+            return appended_outputs;
+        }
+
+        Vec::new()
+    }
+
+    fn prepare_mark_apply(
+        predicate: &mut ScalarExpression,
+        output_column: &ColumnRef,
+        left_schema: &Schema,
         plan: LogicalPlan,
-        negated: bool,
-        predicate: ScalarExpression,
-    ) -> Result<LogicalPlan, DatabaseError> {
-        let join_ty = if negated {
-            JoinType::LeftAnti
+        correlated: bool,
+        preserve_projection: bool,
+        mut apply_predicates: Vec<ScalarExpression>,
+    ) -> Result<(LogicalPlan, Vec<ScalarExpression>), DatabaseError> {
+        let left_len = left_schema.len();
+        Self::globalize_mark_predicate(predicate, output_column, left_len)?;
+
+        let (plan, correlated_filters) = if correlated {
+            Self::prepare_correlated_subquery_plan(plan, left_schema, preserve_projection)?
         } else {
-            JoinType::LeftSemi
+            (plan, Vec::new())
         };
-        let (plan, correlated_filters) =
-            Self::prepare_correlated_subquery_plan(plan, children.output_schema(), true)?;
-        let predicate = Self::rewrite_correlated_in_predicate(predicate);
-        Self::build_join_from_split_scope_predicates(
-            children,
-            plan,
-            join_ty,
-            std::iter::once(predicate).chain(correlated_filters),
-            false,
-        )
+        apply_predicates.extend(correlated_filters);
+
+        let mut plan = plan;
+        if correlated {
+            let appended_right_outputs =
+                Self::ensure_mark_apply_right_outputs(&mut plan, &apply_predicates);
+            if !appended_right_outputs.is_empty() {
+                Self::localize_appended_right_outputs(
+                    apply_predicates.iter_mut(),
+                    &appended_right_outputs,
+                )?;
+            }
+        }
+        let right_schema = plan.output_schema().clone();
+        Self::globalize_right_side_exprs(
+            apply_predicates.iter_mut(),
+            left_len,
+            right_schema.as_ref(),
+        )?;
+
+        Ok((plan, apply_predicates))
     }
 
     fn rewrite_correlated_in_predicate(predicate: ScalarExpression) -> ScalarExpression {
@@ -2020,6 +2150,7 @@ mod tests {
     use crate::expression::visitor_mut::VisitorMut;
     use crate::expression::{AliasType, ScalarExpression};
     use crate::planner::operator::join::{JoinCondition, JoinType};
+    use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyOperator};
     use crate::planner::operator::Operator;
     use crate::planner::{Childrens, LogicalPlan};
     use crate::types::LogicalType;
@@ -2152,6 +2283,20 @@ mod tests {
         }
     }
 
+    fn find_mark_apply(plan: &LogicalPlan) -> Option<&MarkApplyOperator> {
+        if let Operator::MarkApply(op) = &plan.operator {
+            return Some(op);
+        }
+
+        match plan.childrens.as_ref() {
+            Childrens::Only(child) => find_mark_apply(child),
+            Childrens::Twins { left, right } => {
+                find_mark_apply(left).or_else(|| find_mark_apply(right))
+            }
+            Childrens::None => None,
+        }
+    }
+
     #[test]
     fn test_scalar_subquery_in_where_binds_as_inner_join() -> Result<(), DatabaseError> {
         let table_states = build_t1_table()?;
@@ -2162,6 +2307,35 @@ mod tests {
 
         assert_eq!(*join_type, JoinType::Inner);
         assert!(matches!(join_condition, JoinCondition::On { .. }));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_in_subquery_in_where_binds_as_mark_apply() -> Result<(), DatabaseError> {
+        let table_states = build_t1_table()?;
+        let plan = table_states.plan("select * from t1 where c1 in (select c3 from t2)")?;
+        let Some(mark_apply) = find_mark_apply(&plan) else {
+            panic!("expected IN subquery to introduce a mark apply")
+        };
+
+        assert_eq!(mark_apply.kind, MarkApplyKind::In);
+        assert_eq!(mark_apply.predicates().len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_correlated_in_subquery_in_where_binds_as_mark_apply() -> Result<(), DatabaseError> {
+        let table_states = build_t1_table()?;
+        let plan =
+            table_states.plan("select * from t1 where c1 in (select c3 from t2 where c4 = c2)")?;
+        let Some(mark_apply) = find_mark_apply(&plan) else {
+            panic!("expected correlated IN subquery to introduce a mark apply")
+        };
+
+        assert_eq!(mark_apply.kind, MarkApplyKind::In);
+        assert_eq!(mark_apply.predicates().len(), 2);
 
         Ok(())
     }

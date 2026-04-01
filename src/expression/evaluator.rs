@@ -102,22 +102,29 @@ impl ScalarExpression {
                 if value.is_null() {
                     return Ok(DataValue::Null);
                 }
-                let mut is_in = false;
+
+                let mut matched = false;
+                let mut saw_null = false;
                 for arg in args {
                     let arg_value = arg.eval(tuple)?;
 
                     if arg_value.is_null() {
-                        return Ok(DataValue::Null);
+                        saw_null = true;
+                        continue;
                     }
                     if arg_value == value {
-                        is_in = true;
+                        matched = true;
                         break;
                     }
                 }
-                if *negated {
-                    is_in = !is_in;
+
+                if matched {
+                    Ok(DataValue::Boolean(!negated))
+                } else if saw_null {
+                    Ok(DataValue::Null)
+                } else {
+                    Ok(DataValue::Boolean(*negated))
                 }
-                Ok(DataValue::Boolean(is_in))
             }
             ScalarExpression::Unary {
                 expr, evaluator, ..
@@ -363,5 +370,54 @@ impl ScalarExpression {
             }
             ScalarExpression::TableFunction(_) => unreachable!(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn const_in(expr: DataValue, args: Vec<DataValue>, negated: bool) -> ScalarExpression {
+        ScalarExpression::In {
+            negated,
+            expr: Box::new(ScalarExpression::Constant(expr)),
+            args: args.into_iter().map(ScalarExpression::Constant).collect(),
+        }
+    }
+
+    #[test]
+    fn in_eval_matches_even_if_null_appears_first() -> Result<(), DatabaseError> {
+        let expr = const_in(
+            DataValue::Int32(1),
+            vec![DataValue::Null, DataValue::Int32(1)],
+            false,
+        );
+
+        assert_eq!(expr.eval::<&[DataValue]>(None)?, DataValue::Boolean(true));
+        Ok(())
+    }
+
+    #[test]
+    fn in_eval_returns_null_when_only_null_blocks_non_match() -> Result<(), DatabaseError> {
+        let expr = const_in(
+            DataValue::Int32(2),
+            vec![DataValue::Null, DataValue::Int32(1)],
+            false,
+        );
+
+        assert_eq!(expr.eval::<&[DataValue]>(None)?, DataValue::Null);
+        Ok(())
+    }
+
+    #[test]
+    fn not_in_eval_matches_even_if_null_appears_first() -> Result<(), DatabaseError> {
+        let expr = const_in(
+            DataValue::Int32(1),
+            vec![DataValue::Null, DataValue::Int32(1)],
+            true,
+        );
+
+        assert_eq!(expr.eval::<&[DataValue]>(None)?, DataValue::Boolean(false));
+        Ok(())
     }
 }
