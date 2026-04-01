@@ -61,7 +61,7 @@ impl JoinProbeState for LeftAntiJoinState {
                                 .cloned()
                                 .chain((0..right_schema_len).map(|_| DataValue::Null)),
                         );
-                        if !filter(&full_values, filter_args)? {
+                        if !filter(&full_values.as_slice(), filter_args)? {
                             continue;
                         }
                     }

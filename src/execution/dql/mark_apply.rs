@@ -17,7 +17,7 @@ use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches,
 use crate::planner::operator::mark_apply::MarkApplyOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
-use crate::types::tuple::{Schema, SchemaRef, Tuple};
+use crate::types::tuple::{Schema, SchemaRef, SplitTupleRef, Tuple};
 use crate::types::value::DataValue;
 use std::mem;
 use std::sync::Arc;
@@ -92,6 +92,7 @@ impl MarkApply {
     ) -> ExecId {
         let cache = (arena.table_cache(), arena.view_cache(), arena.meta_cache());
         let transaction = arena.transaction_mut() as *mut T;
+        // Fixme: Executor reset
         build_read(arena, self.right_input_plan.clone(), cache, transaction)
     }
 
@@ -100,16 +101,10 @@ impl MarkApply {
         left_tuple: &Tuple,
         right_tuple: &Tuple,
     ) -> Result<bool, DatabaseError> {
-        let values = Vec::from_iter(
-            left_tuple
-                .values
-                .iter()
-                .chain(right_tuple.values.iter())
-                .cloned(),
-        );
+        let values = SplitTupleRef::new(left_tuple, right_tuple);
 
         for predicate in self.op.predicates() {
-            match predicate.eval(Some((values.as_slice(), self.predicate_schema.as_ref())))? {
+            match predicate.eval(Some((values, self.predicate_schema.as_ref())))? {
                 DataValue::Boolean(true) => {}
                 DataValue::Boolean(false) | DataValue::Null => return Ok(false),
                 _ => return Err(DatabaseError::InvalidType),

@@ -18,6 +18,7 @@ use crate::expression::function::scala::FuncMonotonicity;
 use crate::expression::function::scala::ScalarFunctionImpl;
 use crate::expression::function::FunctionSummary;
 use crate::expression::ScalarExpression;
+use crate::types::tuple::TupleLike;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use serde::Deserialize;
@@ -50,7 +51,7 @@ impl ScalarFunctionImpl for Upper {
     fn eval(
         &self,
         exprs: &[ScalarExpression],
-        tuples: Option<(&[DataValue], &[ColumnRef])>,
+        tuples: Option<(&dyn TupleLike, &[ColumnRef])>,
     ) -> Result<DataValue, DatabaseError> {
         let mut value = exprs[0].eval(tuples)?;
         if !matches!(value.logical_type(), LogicalType::Varchar(_, _)) {

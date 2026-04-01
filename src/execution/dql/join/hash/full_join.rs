@@ -17,7 +17,7 @@ use crate::execution::dql::join::hash::{
     filter, FilterArgs, JoinProbeState, LeftDropState, LeftDropTuples, ProbeState,
 };
 use crate::execution::dql::join::hash_join::BuildState;
-use crate::types::tuple::Tuple;
+use crate::types::tuple::{SplitTupleRef, Tuple};
 use crate::types::value::DataValue;
 use fixedbitset::FixedBitSet;
 
@@ -63,14 +63,10 @@ impl JoinProbeState for FullJoinState {
         if probe_state.index < build_state.tuples.len() {
             let (i, Tuple { values, pk }) = &build_state.tuples[probe_state.index];
             probe_state.index += 1;
-            let full_values = Vec::from_iter(
-                values
-                    .iter()
-                    .chain(probe_state.probe_tuple.values.iter())
-                    .cloned(),
-            );
 
             if let Some(filter_args) = filter_args {
+                let full_values =
+                    SplitTupleRef::from_slices(values, &probe_state.probe_tuple.values);
                 if !filter(&full_values, filter_args)? {
                     probe_state.has_filtered = true;
                     self.bits.set(*i, true);
@@ -80,6 +76,12 @@ impl JoinProbeState for FullJoinState {
                     )));
                 }
             }
+            let full_values = Vec::from_iter(
+                values
+                    .iter()
+                    .chain(probe_state.probe_tuple.values.iter())
+                    .cloned(),
+            );
             build_state.is_used = true;
             build_state.has_filted = probe_state.has_filtered;
             return Ok(Some(Tuple::new(pk.clone(), full_values)));

@@ -26,7 +26,7 @@ use crate::expression::ScalarExpression;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
-use crate::types::tuple::{Schema, SchemaRef, Tuple};
+use crate::types::tuple::{Schema, SchemaRef, SplitTupleRef, Tuple};
 use crate::types::value::DataValue;
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
@@ -206,6 +206,7 @@ impl NestedLoopJoin {
     ) -> ExecId {
         let cache = (arena.table_cache(), arena.view_cache(), arena.meta_cache());
         let transaction = arena.transaction_mut() as *mut T;
+        // Fixme: Executor reset
         build_read(arena, self.right_input_plan.clone(), cache, transaction)
     }
 
@@ -276,13 +277,12 @@ impl NestedLoopJoin {
                                 )
                             }
                             (Some(filter), true) => {
-                                let new_tuple = Self::merge_tuple(
-                                    &active_left.left_tuple,
-                                    &right_tuple,
-                                    &self.ty,
-                                );
-                                let value =
-                                    filter.eval(Some((&new_tuple, &self.output_schema_ref)))?;
+                                let values = if matches!(self.ty, JoinType::RightOuter) {
+                                    SplitTupleRef::new(&right_tuple, &active_left.left_tuple)
+                                } else {
+                                    SplitTupleRef::new(&active_left.left_tuple, &right_tuple)
+                                };
+                                let value = filter.eval(Some((values, &self.output_schema_ref)))?;
                                 match &value {
                                     DataValue::Boolean(true) => {
                                         let tuple = match self.ty {
@@ -476,33 +476,6 @@ impl NestedLoopJoin {
             left_tuple.pk.as_ref().or(right_tuple.pk.as_ref()).cloned(),
             values,
         ))
-    }
-
-    /// Merge the two tuples.
-    /// `left_tuple` must be from the `NestedLoopJoin.left_input`
-    /// `right_tuple` must be from the `NestedLoopJoin.right_input`
-    fn merge_tuple(left_tuple: &Tuple, right_tuple: &Tuple, ty: &JoinType) -> Tuple {
-        let pk = left_tuple.pk.as_ref().or(right_tuple.pk.as_ref()).cloned();
-        match ty {
-            JoinType::RightOuter => Tuple::new(
-                pk,
-                right_tuple
-                    .values
-                    .iter()
-                    .chain(left_tuple.values.iter())
-                    .cloned()
-                    .collect_vec(),
-            ),
-            _ => Tuple::new(
-                pk,
-                left_tuple
-                    .values
-                    .iter()
-                    .chain(right_tuple.values.iter())
-                    .cloned()
-                    .collect_vec(),
-            ),
-        }
     }
 
     fn merge_schema(

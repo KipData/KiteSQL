@@ -17,7 +17,7 @@ use crate::execution::dql::join::hash::{
     filter, FilterArgs, JoinProbeState, LeftDropState, LeftDropTuples, ProbeState,
 };
 use crate::execution::dql::join::hash_join::BuildState;
-use crate::types::tuple::Tuple;
+use crate::types::tuple::{SplitTupleRef, Tuple};
 use fixedbitset::FixedBitSet;
 
 pub(crate) struct LeftSemiJoinState {
@@ -44,14 +44,10 @@ impl JoinProbeState for LeftSemiJoinState {
         while probe_state.index < build_state.tuples.len() {
             let (i, Tuple { values, .. }) = &build_state.tuples[probe_state.index];
             probe_state.index += 1;
-            let full_values = Vec::from_iter(
-                values
-                    .iter()
-                    .chain(probe_state.probe_tuple.values.iter())
-                    .cloned(),
-            );
 
             if let Some(filter_args) = filter_args {
+                let full_values =
+                    SplitTupleRef::from_slices(values, &probe_state.probe_tuple.values);
                 if !filter(&full_values, filter_args)? {
                     probe_state.has_filtered = true;
                     self.bits.set(*i, true);

@@ -17,6 +17,7 @@ use crate::errors::DatabaseError;
 use crate::expression::function::scala::ScalarFunction;
 use crate::expression::{AliasType, BinaryOperator, ScalarExpression};
 use crate::types::evaluator::EvaluatorFactory;
+use crate::types::tuple::TupleLike;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::LogicalType;
 use regex::Regex;
@@ -35,7 +36,7 @@ macro_rules! eval_to_num {
 }
 
 impl ScalarExpression {
-    pub fn eval<'a, T: Into<&'a [DataValue]> + Copy>(
+    pub fn eval<T: TupleLike + Copy>(
         &self,
         tuple: Option<(T, &[ColumnRef])>,
     ) -> Result<DataValue, DatabaseError> {
@@ -52,7 +53,7 @@ impl ScalarExpression {
                 let Some((tuple, _)) = tuple else {
                     return Ok(DataValue::Null);
                 };
-                Ok(tuple.into()[*position].clone())
+                Ok(tuple.value_at(*position).clone())
             }
             ScalarExpression::Alias { expr, alias } => {
                 let Some((tuple, schema)) = tuple else {
@@ -260,9 +261,15 @@ impl ScalarExpression {
                 }
                 Ok(DataValue::Tuple(values, false))
             }
-            ScalarExpression::ScalaFunction(ScalarFunction { inner, args, .. }) => inner
-                .eval(args, tuple.map(|(a, b)| (a.into(), b)))?
-                .cast(inner.return_type()),
+            ScalarExpression::ScalaFunction(ScalarFunction { inner, args, .. }) => {
+                let value = inner.eval(
+                    args,
+                    tuple
+                        .as_ref()
+                        .map(|(tuple, schema)| (tuple as &dyn TupleLike, *schema)),
+                )?;
+                value.cast(inner.return_type())
+            }
             ScalarExpression::Empty => unreachable!(),
             ScalarExpression::If {
                 condition,

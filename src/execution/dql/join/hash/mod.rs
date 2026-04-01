@@ -29,7 +29,7 @@ use crate::execution::dql::join::hash::right_join::RightJoinState;
 use crate::execution::dql::join::hash_join::BuildState;
 use crate::execution::dql::sort::BumpVec;
 use crate::expression::ScalarExpression;
-use crate::types::tuple::{SchemaRef, Tuple};
+use crate::types::tuple::{SchemaRef, Tuple, TupleLike};
 use crate::types::value::DataValue;
 use std::collections::hash_map::IntoIter as HashMapIntoIter;
 
@@ -133,14 +133,17 @@ impl JoinProbeState for JoinProbeStateImpl {
     }
 }
 
-pub(crate) fn filter(values: &[DataValue], filter_arg: &FilterArgs) -> Result<bool, DatabaseError> {
+pub(crate) fn filter<T: TupleLike>(
+    values: &T,
+    filter_arg: &FilterArgs,
+) -> Result<bool, DatabaseError> {
     let FilterArgs {
         full_schema,
         filter_expr,
         ..
     } = filter_arg;
 
-    match &filter_expr.eval(Some((values, full_schema)))? {
+    match &filter_expr.eval(Some((values as &dyn TupleLike, full_schema)))? {
         DataValue::Boolean(false) | DataValue::Null => Ok(false),
         DataValue::Boolean(true) => Ok(true),
         _ => Err(DatabaseError::InvalidType),

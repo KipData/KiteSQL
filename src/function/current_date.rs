@@ -18,6 +18,7 @@ use crate::expression::function::scala::FuncMonotonicity;
 use crate::expression::function::scala::ScalarFunctionImpl;
 use crate::expression::function::FunctionSummary;
 use crate::expression::ScalarExpression;
+use crate::types::tuple::TupleLike;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use chrono::{Datelike, Local};
@@ -50,7 +51,7 @@ impl ScalarFunctionImpl for CurrentDate {
     fn eval(
         &self,
         _: &[ScalarExpression],
-        _: Option<(&[DataValue], &[ColumnRef])>,
+        _: Option<(&dyn TupleLike, &[ColumnRef])>,
     ) -> Result<DataValue, DatabaseError> {
         Ok(DataValue::Date32(Local::now().num_days_from_ce()))
     }

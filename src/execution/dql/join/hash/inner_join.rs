@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::hash::{filter, FilterArgs, JoinProbeState, ProbeState};
 use crate::execution::dql::join::hash_join::BuildState;
-use crate::types::tuple::Tuple;
+use crate::types::tuple::{SplitTupleRef, Tuple};
 
 pub(crate) struct InnerJoinState;
 
@@ -40,18 +40,20 @@ impl JoinProbeState for InnerJoinState {
         while probe_state.index < build_state.tuples.len() {
             let (_, Tuple { values, pk }) = &build_state.tuples[probe_state.index];
             probe_state.index += 1;
+
+            if let Some(filter_args) = filter_args {
+                let full_values =
+                    SplitTupleRef::from_slices(values, &probe_state.probe_tuple.values);
+                if !filter(&full_values, filter_args)? {
+                    continue;
+                }
+            }
             let full_values = Vec::from_iter(
                 values
                     .iter()
                     .chain(probe_state.probe_tuple.values.iter())
                     .cloned(),
             );
-
-            if let Some(filter_args) = filter_args {
-                if !filter(&full_values, filter_args)? {
-                    continue;
-                }
-            }
             return Ok(Some(Tuple::new(pk.clone(), full_values)));
         }
 
