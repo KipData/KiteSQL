@@ -454,8 +454,14 @@ impl ImplementationRuleIndex {
             Operator::Limit(_) if self.contains(ImplementationRuleImpl::Limit) => {
                 Some(PhysicalOption::new(PlanImpl::Limit, SortOption::Follow))
             }
+            Operator::MarkApply(_) if self.contains(ImplementationRuleImpl::MarkApply) => {
+                Some(PhysicalOption::new(PlanImpl::MarkApply, SortOption::Follow))
+            }
             Operator::Project(_) if self.contains(ImplementationRuleImpl::Projection) => {
                 Some(PhysicalOption::new(PlanImpl::Project, SortOption::Follow))
+            }
+            Operator::ScalarApply(_) if self.contains(ImplementationRuleImpl::ScalarApply) => {
+                Some(PhysicalOption::new(PlanImpl::ScalarApply, SortOption::Follow))
             }
             Operator::ScalarSubquery(_)
                 if self.contains(ImplementationRuleImpl::ScalarSubquery) =>

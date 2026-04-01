@@ -166,6 +166,28 @@ impl LogicalPlan {
             | Operator::Limit(_)
             | Operator::TopK(_)
             | Operator::ScalarSubquery(_) => childrens_iter.next().unwrap().output_schema_direct(),
+            Operator::ScalarApply(_) => {
+                let mut columns = Vec::new();
+
+                for plan in childrens_iter {
+                    for column in plan.output_schema_direct().columns() {
+                        columns.push(column.clone());
+                    }
+                }
+                SchemaOutput::Schema(columns)
+            }
+            Operator::MarkApply(op) => {
+                let mut columns = Vec::new();
+
+                if let Some(left) = childrens_iter.next() {
+                    for column in left.output_schema_direct().columns() {
+                        columns.push(column.clone());
+                    }
+                }
+                columns.push(op.output_column().clone());
+
+                SchemaOutput::Schema(columns)
+            }
             Operator::Aggregate(op) => SchemaOutput::Schema(
                 op.agg_calls
                     .iter()

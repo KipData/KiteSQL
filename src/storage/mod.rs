@@ -136,7 +136,7 @@ pub trait Transaction: Sized {
         let table = self
             .table(table_cache, table_name.clone())?
             .ok_or(DatabaseError::TableNotFound)?;
-        if columns.is_empty() {
+        if with_pk {
             for (i, column) in table.primary_keys() {
                 columns.insert(*i, column.clone());
             }
@@ -178,7 +178,7 @@ pub trait Transaction: Sized {
         let table_name = table.name.as_ref();
         let offset = offset_option.unwrap_or(0);
 
-        if columns.is_empty() || with_pk {
+        if with_pk {
             for (i, column) in table.primary_keys() {
                 columns.insert(*i, column.clone());
             }

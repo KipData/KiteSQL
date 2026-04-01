@@ -31,7 +31,9 @@ pub mod function_scan;
 pub mod insert;
 pub mod join;
 pub mod limit;
+pub mod mark_apply;
 pub mod project;
+pub mod scalar_apply;
 pub mod scalar_subquery;
 pub mod sort;
 pub mod table_scan;
@@ -43,9 +45,10 @@ pub mod values;
 
 use self::{
     aggregate::AggregateOperator, alter_table::add_column::AddColumnOperator,
-    alter_table::change_column::ChangeColumnOperator, filter::FilterOperator, join::JoinOperator,
-    limit::LimitOperator, project::ProjectOperator, scalar_subquery::ScalarSubqueryOperator,
-    sort::SortOperator, table_scan::TableScanOperator,
+    alter_table::change_column::ChangeColumnOperator, filter::FilterOperator,
+    join::JoinOperator, limit::LimitOperator, mark_apply::MarkApplyOperator,
+    project::ProjectOperator, scalar_apply::ScalarApplyOperator,
+    scalar_subquery::ScalarSubqueryOperator, sort::SortOperator, table_scan::TableScanOperator,
 };
 use crate::catalog::ColumnRef;
 use crate::expression::ScalarExpression;
@@ -81,6 +84,8 @@ pub enum Operator {
     // DQL
     Dummy,
     Aggregate(AggregateOperator),
+    ScalarApply(ScalarApplyOperator),
+    MarkApply(MarkApplyOperator),
     Filter(FilterOperator),
     Join(JoinOperator),
     Project(ProjectOperator),
@@ -153,6 +158,8 @@ pub enum PlanImpl {
     SimpleAggregate,
     HashAggregate,
     StreamDistinct,
+    ScalarApply,
+    MarkApply,
     Filter,
     HashJoin,
     NestLoopJoin,
@@ -189,7 +196,11 @@ impl Operator {
                 output_exprs.extend(op.agg_calls.iter().chain(op.groupby_exprs.iter()).cloned());
                 true
             }
-            Operator::Filter(_) | Operator::Join(_) | Operator::ScalarSubquery(_) => false,
+            Operator::ScalarApply(_)
+            | Operator::MarkApply(_)
+            | Operator::Filter(_)
+            | Operator::Join(_)
+            | Operator::ScalarSubquery(_) => false,
             Operator::Project(op) => {
                 output_exprs.clear();
                 output_exprs.extend(op.exprs.iter().cloned());
@@ -269,6 +280,11 @@ impl Operator {
                 .agg_calls
                 .iter()
                 .chain(op.groupby_exprs.iter())
+                .all(|expr| expr.visit_referenced_columns(only_column_ref, f)),
+            Operator::ScalarApply(_) => true,
+            Operator::MarkApply(op) => op
+                .predicates()
+                .iter()
                 .all(|expr| expr.visit_referenced_columns(only_column_ref, f)),
             Operator::Filter(op) => op.predicate.visit_referenced_columns(only_column_ref, f),
             Operator::Join(op) => {
@@ -377,6 +393,8 @@ impl fmt::Display for Operator {
         match self {
             Operator::Dummy => write!(f, "Dummy"),
             Operator::Aggregate(op) => write!(f, "{op}"),
+            Operator::ScalarApply(op) => write!(f, "{op}"),
+            Operator::MarkApply(op) => write!(f, "{op}"),
             Operator::Filter(op) => write!(f, "{op}"),
             Operator::Join(op) => write!(f, "{op}"),
             Operator::Project(op) => write!(f, "{op}"),
@@ -449,6 +467,8 @@ impl fmt::Display for PlanImpl {
             PlanImpl::SimpleAggregate => write!(f, "SimpleAggregate"),
             PlanImpl::HashAggregate => write!(f, "HashAggregate"),
             PlanImpl::StreamDistinct => write!(f, "StreamDistinct"),
+            PlanImpl::ScalarApply => write!(f, "ScalarApply"),
+            PlanImpl::MarkApply => write!(f, "MarkApply"),
             PlanImpl::Filter => write!(f, "Filter"),
             PlanImpl::HashJoin => write!(f, "HashJoin"),
             PlanImpl::NestLoopJoin => write!(f, "NestLoopJoin"),

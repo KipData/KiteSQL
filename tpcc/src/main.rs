@@ -19,7 +19,7 @@ use crate::backend::sqlite::{SqliteBackend, SqliteProfile};
 use crate::backend::{
     BackendControl, BackendTransaction, ColumnType, PreparedStatement, StatementSpec,
 };
-use crate::delivery::{Delivery, DeliveryArgs, DeliveryTest};
+use crate::delivery::DeliveryTest;
 use crate::load::Load;
 use crate::new_ord::NewOrdTest;
 use crate::order_stat::OrderStatTest;
@@ -30,7 +30,6 @@ use crate::utils::SeqGen;
 use clap::{Parser, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 use kite_sql::errors::DatabaseError;
-use kite_sql::types::value::DataValue;
 #[cfg(all(unix, feature = "pprof"))]
 use pprof::ProfilerGuard;
 use rand::prelude::ThreadRng;

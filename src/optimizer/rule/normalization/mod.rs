@@ -98,6 +98,7 @@ impl NormalizationRuleRootTag {
     pub fn from_operator(operator: &Operator) -> Option<Self> {
         match operator {
             Operator::Aggregate(_) => Some(Self::Aggregate),
+            Operator::ScalarApply(_) | Operator::MarkApply(_) => Some(Self::Any),
             Operator::Filter(_) => Some(Self::Filter),
             Operator::Join(_) => Some(Self::Join),
             Operator::Limit(_) => Some(Self::Limit),

@@ -149,6 +149,26 @@ where not exists (
 
 query I rowsort
 select id from users
+where exists (
+    select 1 from orders where orders.user_id = users.id
+) or age = 40;
+----
+1
+2
+3
+
+query I rowsort
+select id from users
+where not (
+    exists (
+        select 1 from orders where orders.user_id = users.id
+    ) or age = 30
+);
+----
+3
+
+query I rowsort
+select id from users
 where id in (
     select user_id from orders where orders.user_id = users.id
 );

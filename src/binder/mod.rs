@@ -152,9 +152,9 @@ pub enum SubQueryType {
         correlated: bool,
     },
     ExistsSubQuery {
-        negated: bool,
         plan: LogicalPlan,
         correlated: bool,
+        output_column: ColumnRef,
     },
     InSubQuery {
         negated: bool,

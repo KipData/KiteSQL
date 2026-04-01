@@ -68,7 +68,6 @@ impl Filter {
                 return Ok(());
             };
             let tuple = arena.result_tuple();
-
             if self
                 .predicate
                 .eval(Some((tuple, &self.input_schema)))?

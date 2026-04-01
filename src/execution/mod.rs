@@ -19,6 +19,8 @@ pub(crate) mod dql;
 use self::ddl::add_column::AddColumn;
 use self::ddl::change_column::ChangeColumn;
 use self::dql::join::nested_loop_join::NestedLoopJoin;
+use self::dql::mark_apply::MarkApply;
+use self::dql::scalar_apply::ScalarApply;
 use crate::errors::DatabaseError;
 use crate::execution::ddl::create_index::CreateIndex;
 use crate::execution::ddl::create_table::CreateTable;
@@ -133,8 +135,10 @@ pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
     IndexScan(IndexScan<'a, T>),
     Insert(Insert),
     Limit(Limit),
+    MarkApply(MarkApply),
     NestedLoopJoin(NestedLoopJoin),
     Projection(Projection),
+    ScalarApply(ScalarApply),
     ScalarSubquery(ScalarSubquery),
     SeqScan(SeqScan<'a, T>),
     ShowTables(ShowTables),
@@ -194,8 +198,10 @@ impl_exec_node_runner!(
     IndexScan<'a, T>,
     Insert,
     Limit,
+    MarkApply,
     NestedLoopJoin,
     Projection,
+    ScalarApply,
     ScalarSubquery,
     SeqScan<'a, T>,
     ShowTables,
@@ -237,8 +243,10 @@ impl<'a, T: Transaction + 'a> ExecNodeRunner<'a, T> for ExecNode<'a, T> {
             ExecNode::IndexScan(exec) => ExecNodeRunner::next_tuple(exec, arena),
             ExecNode::Insert(exec) => ExecNodeRunner::next_tuple(exec, arena),
             ExecNode::Limit(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::MarkApply(exec) => ExecNodeRunner::next_tuple(exec, arena),
             ExecNode::NestedLoopJoin(exec) => ExecNodeRunner::next_tuple(exec, arena),
             ExecNode::Projection(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::ScalarApply(exec) => ExecNodeRunner::next_tuple(exec, arena),
             ExecNode::ScalarSubquery(exec) => ExecNodeRunner::next_tuple(exec, arena),
             ExecNode::SeqScan(exec) => ExecNodeRunner::next_tuple(exec, arena),
             ExecNode::ShowTables(exec) => ExecNodeRunner::next_tuple(exec, arena),
@@ -412,6 +420,18 @@ pub(crate) fn build_read<'a, T: Transaction + 'a>(
             let input = childrens.pop_only();
 
             Filter::from((op, input)).into_executor(arena, cache, transaction)
+        }
+        Operator::ScalarApply(op) => {
+            let (left_input, right_input) = childrens.pop_twins();
+
+            ScalarApply::from((op, left_input, right_input))
+                .into_executor(arena, cache, transaction)
+        }
+        Operator::MarkApply(op) => {
+            let (left_input, right_input) = childrens.pop_twins();
+
+            MarkApply::from((op, left_input, right_input))
+                .into_executor(arena, cache, transaction)
         }
         Operator::Join(op) => {
             let (left_input, right_input) = childrens.pop_twins();

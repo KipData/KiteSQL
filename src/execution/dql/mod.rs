@@ -22,6 +22,8 @@ pub(crate) mod function_scan;
 pub(crate) mod index_scan;
 pub(crate) mod join;
 pub(crate) mod limit;
+pub(crate) mod mark_apply;
+pub(crate) mod scalar_apply;
 pub(crate) mod projection;
 pub(crate) mod scalar_subquery;
 pub(crate) mod seq_scan;

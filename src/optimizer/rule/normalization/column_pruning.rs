@@ -104,6 +104,10 @@ impl ColumnPruning {
             Operator::Project(op) => {
                 Self::extend_expr_referenced_columns(op.exprs.iter(), referenced_columns);
             }
+            Operator::MarkApply(op) => {
+                Self::extend_expr_referenced_columns(op.predicates().iter(), referenced_columns);
+                referenced_columns.insert(op.output_column().summary());
+            }
             Operator::TableScan(op) => {
                 referenced_columns.extend(op.columns.values().map(|column| column.summary()));
             }
@@ -149,6 +153,7 @@ impl ColumnPruning {
             }
             Operator::Dummy
             | Operator::Limit(_)
+            | Operator::ScalarApply(_)
             | Operator::ScalarSubquery(_)
             | Operator::Analyze(_)
             | Operator::ShowTable
@@ -237,6 +242,10 @@ impl ColumnPruning {
             Operator::Project(op) => {
                 remap_exprs_positions(op.exprs.iter_mut(), removed_positions)?;
             }
+            Operator::MarkApply(op) => {
+                Self::remap_exprs_after_child_change(op.predicates_mut().iter_mut(), removed_positions)?;
+            }
+            Operator::ScalarApply(_) => {}
             Operator::ScalarSubquery(_) => {}
             Operator::Sort(op) => {
                 Self::remap_exprs_after_child_change(
@@ -486,13 +495,18 @@ impl ColumnPruning {
             }
             Operator::Sort(_)
             | Operator::Limit(_)
+            | Operator::ScalarApply(_)
+            | Operator::MarkApply(_)
             | Operator::ScalarSubquery(_)
             | Operator::Join(_)
             | Operator::Filter(_)
             | Operator::Union(_)
             | Operator::Except(_)
             | Operator::TopK(_) => {
-                if matches!(operator, Operator::Join(_)) {
+                if matches!(
+                    operator,
+                    Operator::ScalarApply(_) | Operator::MarkApply(_) | Operator::Join(_)
+                ) {
                     let (child_outcome, old_left_outputs_len) = {
                         let mut child_required = required_columns.clone();
                         Self::extend_operator_referenced_columns(operator, &mut child_required);
@@ -548,6 +562,26 @@ impl ColumnPruning {
                                 output_removed_positions =
                                     Self::copy_removed_positions(&left_removed_positions, arena);
                             }
+                        } else if let Operator::MarkApply(op) = operator {
+                            let removed_positions = Self::merge_removed_positions(
+                                &left_removed_positions,
+                                &right_removed_positions,
+                                old_left_outputs_len,
+                                arena,
+                            );
+                            Self::remap_exprs_after_child_change(
+                                op.predicates_mut().iter_mut(),
+                                &removed_positions,
+                            )?;
+                            output_removed_positions =
+                                Self::copy_removed_positions(&left_removed_positions, arena);
+                        } else {
+                            output_removed_positions = Self::merge_removed_positions(
+                                &left_removed_positions,
+                                &right_removed_positions,
+                                old_left_outputs_len,
+                                arena,
+                            );
                         }
                         changed = true;
                     }
