@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor};
 use crate::expression::range_detacher::Range;
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::storage::{IndexIter, Iter, Transaction};
@@ -71,6 +71,29 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for IndexScan<'a, T> {
         _: *mut T,
     ) -> ExecId {
         arena.push(ExecNode::IndexScan(self))
+    }
+}
+
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for IndexScan<'a, T> {
+    type Input = (
+        TableScanOperator,
+        IndexMetaRef,
+        Range,
+        Option<Vec<TupleValueSerializableImpl>>,
+        Option<Vec<usize>>,
+    );
+
+    fn into_executor(
+        input: Self::Input,
+        arena: &mut ExecArena<'a, T>,
+        _: ExecutionCaches<'a>,
+        _: *mut T,
+    ) -> ExecId {
+        arena.push(ExecNode::IndexScan(IndexScan::from(input)))
+    }
+
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+        IndexScan::next_tuple(self, arena)
     }
 }
 

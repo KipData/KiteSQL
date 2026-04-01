@@ -25,7 +25,9 @@ use crate::execution::dql::join::hash::{
 };
 use crate::execution::dql::join::joins_nullable;
 use crate::execution::dql::sort::BumpVec;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{
+    build_read, take_plan, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor,
+};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::LogicalPlan;
@@ -47,8 +49,8 @@ pub struct HashJoin {
     filter: Option<FilterArgs>,
     left_schema_len: usize,
     right_schema_len: usize,
-    left_input_plan: Option<LogicalPlan>,
-    right_input_plan: Option<LogicalPlan>,
+    left_input_plan: LogicalPlan,
+    right_input_plan: LogicalPlan,
     left_input: ExecId,
     right_input: ExecId,
     bump: Box<Bump>,
@@ -120,8 +122,8 @@ impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for HashJoin {
             }),
             left_schema_len,
             right_schema_len,
-            left_input_plan: Some(left_input),
-            right_input_plan: Some(right_input),
+            left_input_plan: left_input,
+            right_input_plan: right_input,
             left_input: 0,
             right_input: 0,
             bump: Box::<Bump>::default(),
@@ -275,21 +277,34 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
     ) -> ExecId {
         self.left_input = build_read(
             arena,
-            self.left_input_plan
-                .take()
-                .expect("hash join left input plan initialized"),
+            take_plan(&mut self.left_input_plan),
             cache,
             transaction,
         );
         self.right_input = build_read(
             arena,
-            self.right_input_plan
-                .take()
-                .expect("hash join right input plan initialized"),
+            take_plan(&mut self.right_input_plan),
             cache,
             transaction,
         );
         arena.push(ExecNode::HashJoin(self))
+    }
+}
+
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashJoin {
+    type Input = (JoinOperator, LogicalPlan, LogicalPlan);
+
+    fn into_executor(
+        input: Self::Input,
+        arena: &mut ExecArena<'a, T>,
+        cache: ExecutionCaches<'a>,
+        transaction: *mut T,
+    ) -> ExecId {
+        <Self as ReadExecutor<'a, T>>::into_executor(Self::from(input), arena, cache, transaction)
+    }
+
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+        HashJoin::next_tuple(self, arena)
     }
 }
 

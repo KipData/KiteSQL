@@ -460,9 +460,9 @@ impl ImplementationRuleIndex {
             Operator::Project(_) if self.contains(ImplementationRuleImpl::Projection) => {
                 Some(PhysicalOption::new(PlanImpl::Project, SortOption::Follow))
             }
-            Operator::ScalarApply(_) if self.contains(ImplementationRuleImpl::ScalarApply) => {
-                Some(PhysicalOption::new(PlanImpl::ScalarApply, SortOption::Follow))
-            }
+            Operator::ScalarApply(_) if self.contains(ImplementationRuleImpl::ScalarApply) => Some(
+                PhysicalOption::new(PlanImpl::ScalarApply, SortOption::Follow),
+            ),
             Operator::ScalarSubquery(_)
                 if self.contains(ImplementationRuleImpl::ScalarSubquery) =>
             {

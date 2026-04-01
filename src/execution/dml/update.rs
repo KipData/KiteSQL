@@ -15,7 +15,9 @@
 use crate::catalog::{ColumnRef, TableName};
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
+use crate::execution::{
+    build_read, take_plan, ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor,
+};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::update::UpdateOperator;
 use crate::planner::LogicalPlan;
@@ -32,7 +34,7 @@ pub struct Update {
     table_name: TableName,
     value_exprs: Vec<(ColumnRef, ScalarExpression)>,
     input_schema: SchemaRef,
-    input_plan: Option<LogicalPlan>,
+    input_plan: LogicalPlan,
     input: Option<ExecId>,
 }
 
@@ -50,7 +52,7 @@ impl From<(UpdateOperator, LogicalPlan)> for Update {
             table_name,
             value_exprs,
             input_schema: input.output_schema().clone(),
-            input_plan: Some(input),
+            input_plan: input,
             input: None,
         }
     }
@@ -65,9 +67,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Update {
     ) -> ExecId {
         self.input = Some(build_read(
             arena,
-            self.input_plan
-                .take()
-                .expect("update input plan initialized"),
+            take_plan(&mut self.input_plan),
             cache,
             transaction,
         ));

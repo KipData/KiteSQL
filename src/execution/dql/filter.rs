@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::filter::FilterOperator;
 use crate::planner::LogicalPlan;
@@ -22,46 +22,28 @@ use crate::types::tuple::SchemaRef;
 pub struct Filter {
     predicate: ScalarExpression,
     input_schema: SchemaRef,
-    input_plan: Option<LogicalPlan>,
     input: ExecId,
 }
 
-impl From<(FilterOperator, LogicalPlan)> for Filter {
-    fn from((FilterOperator { predicate, .. }, mut input): (FilterOperator, LogicalPlan)) -> Self {
-        let input_schema = input.output_schema().clone();
-        Filter {
-            predicate,
-            input_schema,
-            input_plan: Some(input),
-            input: 0,
-        }
-    }
-}
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Filter {
+    type Input = (FilterOperator, LogicalPlan);
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Filter {
     fn into_executor(
-        mut self,
+        (FilterOperator { predicate, .. }, mut input): Self::Input,
         arena: &mut ExecArena<'a, T>,
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        self.input = build_read(
-            arena,
-            self.input_plan
-                .take()
-                .expect("filter input plan initialized"),
-            cache,
-            transaction,
-        );
-        arena.push(ExecNode::Filter(self))
+        let input_schema = input.output_schema().clone();
+        let input = build_read(arena, input, cache, transaction);
+        arena.push(ExecNode::Filter(Filter {
+            predicate,
+            input_schema,
+            input,
+        }))
     }
-}
 
-impl Filter {
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-    ) -> Result<(), DatabaseError> {
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
         loop {
             if !arena.next_tuple(self.input)? {
                 arena.finish();

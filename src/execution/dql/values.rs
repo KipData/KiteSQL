@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor};
 use crate::planner::operator::values::ValuesOperator;
 use crate::storage::Transaction;
 use crate::types::tuple::SchemaRef;
@@ -42,6 +42,23 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Values {
         _: *mut T,
     ) -> ExecId {
         arena.push(ExecNode::Values(self))
+    }
+}
+
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values {
+    type Input = ValuesOperator;
+
+    fn into_executor(
+        input: Self::Input,
+        arena: &mut ExecArena<'a, T>,
+        _: ExecutionCaches<'a>,
+        _: *mut T,
+    ) -> ExecId {
+        arena.push(ExecNode::Values(Values::from(input)))
+    }
+
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+        Values::next_tuple(self, arena)
     }
 }
 

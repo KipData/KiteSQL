@@ -243,7 +243,10 @@ impl ColumnPruning {
                 remap_exprs_positions(op.exprs.iter_mut(), removed_positions)?;
             }
             Operator::MarkApply(op) => {
-                Self::remap_exprs_after_child_change(op.predicates_mut().iter_mut(), removed_positions)?;
+                Self::remap_exprs_after_child_change(
+                    op.predicates_mut().iter_mut(),
+                    removed_positions,
+                )?;
             }
             Operator::ScalarApply(_) => {}
             Operator::ScalarSubquery(_) => {}

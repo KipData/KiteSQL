@@ -45,10 +45,10 @@ pub mod values;
 
 use self::{
     aggregate::AggregateOperator, alter_table::add_column::AddColumnOperator,
-    alter_table::change_column::ChangeColumnOperator, filter::FilterOperator,
-    join::JoinOperator, limit::LimitOperator, mark_apply::MarkApplyOperator,
-    project::ProjectOperator, scalar_apply::ScalarApplyOperator,
-    scalar_subquery::ScalarSubqueryOperator, sort::SortOperator, table_scan::TableScanOperator,
+    alter_table::change_column::ChangeColumnOperator, filter::FilterOperator, join::JoinOperator,
+    limit::LimitOperator, mark_apply::MarkApplyOperator, project::ProjectOperator,
+    scalar_apply::ScalarApplyOperator, scalar_subquery::ScalarSubqueryOperator, sort::SortOperator,
+    table_scan::TableScanOperator,
 };
 use crate::catalog::ColumnRef;
 use crate::expression::ScalarExpression;

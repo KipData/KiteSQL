@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::sort::BumpVec;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::top_k::TopKOperator;
 use crate::planner::LogicalPlan;
@@ -95,12 +95,13 @@ pub struct TopK {
     limit: usize,
     offset: Option<usize>,
     input_schema: SchemaRef,
-    input_plan: Option<LogicalPlan>,
     input: ExecId,
 }
 
-impl From<(TopKOperator, LogicalPlan)> for TopK {
-    fn from(
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for TopK {
+    type Input = (TopKOperator, LogicalPlan);
+
+    fn into_executor(
         (
             TopKOperator {
                 sort_fields,
@@ -108,46 +109,26 @@ impl From<(TopKOperator, LogicalPlan)> for TopK {
                 offset,
             },
             mut input,
-        ): (TopKOperator, LogicalPlan),
-    ) -> Self {
-        TopK {
+        ): Self::Input,
+        arena: &mut ExecArena<'a, T>,
+        cache: ExecutionCaches<'a>,
+        transaction: *mut T,
+    ) -> ExecId {
+        let input_schema = input.output_schema().clone();
+        let input = build_read(arena, input, cache, transaction);
+        arena.push(ExecNode::TopK(TopK {
             output: None,
             arena: Box::<Bump>::default(),
             sort_fields,
             limit,
             offset,
-            input_schema: input.output_schema().clone(),
-            input_plan: Some(input),
-            input: 0,
-        }
+            input_schema,
+            input,
+        }))
     }
-}
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for TopK {
-    fn into_executor(
-        mut self,
-        arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
-    ) -> ExecId {
-        self.input = build_read(
-            arena,
-            self.input_plan
-                .take()
-                .expect("top-k input plan initialized"),
-            cache,
-            transaction,
-        );
-        arena.push(ExecNode::TopK(self))
-    }
-}
-
-impl TopK {
     #[allow(clippy::mutable_key_type)]
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-    ) -> Result<(), DatabaseError> {
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
         if self.output.is_none() {
             let keep_count = self.offset.unwrap_or(0) + self.limit;
             let mut set = BTreeSet::new();

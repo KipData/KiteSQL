@@ -13,14 +13,16 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{
+    build_read, take_plan, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor,
+};
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use ahash::{HashMap, HashMapExt};
 pub struct Except {
-    left_plan: Option<LogicalPlan>,
-    right_plan: Option<LogicalPlan>,
+    left_plan: LogicalPlan,
+    right_plan: LogicalPlan,
     left_input: ExecId,
     right_input: ExecId,
     except_col: HashMap<Tuple, usize>,
@@ -30,8 +32,8 @@ pub struct Except {
 impl From<(LogicalPlan, LogicalPlan)> for Except {
     fn from((left_input, right_input): (LogicalPlan, LogicalPlan)) -> Self {
         Except {
-            left_plan: Some(left_input),
-            right_plan: Some(right_input),
+            left_plan: left_input,
+            right_plan: right_input,
             left_input: 0,
             right_input: 0,
             except_col: HashMap::new(),
@@ -47,23 +49,26 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Except {
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        self.left_input = build_read(
-            arena,
-            self.left_plan
-                .take()
-                .expect("except left input plan initialized"),
-            cache,
-            transaction,
-        );
-        self.right_input = build_read(
-            arena,
-            self.right_plan
-                .take()
-                .expect("except right input plan initialized"),
-            cache,
-            transaction,
-        );
+        self.left_input = build_read(arena, take_plan(&mut self.left_plan), cache, transaction);
+        self.right_input = build_read(arena, take_plan(&mut self.right_plan), cache, transaction);
         arena.push(ExecNode::Except(self))
+    }
+}
+
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Except {
+    type Input = (LogicalPlan, LogicalPlan);
+
+    fn into_executor(
+        input: Self::Input,
+        arena: &mut ExecArena<'a, T>,
+        cache: ExecutionCaches<'a>,
+        transaction: *mut T,
+    ) -> ExecId {
+        <Self as ReadExecutor<'a, T>>::into_executor(Self::from(input), arena, cache, transaction)
+    }
+
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+        Except::next_tuple(self, arena)
     }
 }
 

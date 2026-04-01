@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::LogicalPlan;
 use crate::storage::table_codec::BumpBytes;
@@ -281,45 +281,30 @@ pub struct Sort {
     limit: Option<usize>,
     input_schema: SchemaRef,
     input: ExecId,
-    input_plan: Option<LogicalPlan>,
 }
 
-impl From<(SortOperator, LogicalPlan)> for Sort {
-    fn from((SortOperator { sort_fields, limit }, mut input): (SortOperator, LogicalPlan)) -> Self {
-        Sort {
-            output: None,
-            arena: Box::<Bump>::default(),
-            sort_fields,
-            limit,
-            input_schema: input.output_schema().clone(),
-            input: 0,
-            input_plan: Some(input),
-        }
-    }
-}
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort {
+    type Input = (SortOperator, LogicalPlan);
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Sort {
     fn into_executor(
-        mut self,
+        (SortOperator { sort_fields, limit }, mut input): Self::Input,
         arena: &mut ExecArena<'a, T>,
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        self.input = build_read(
-            arena,
-            self.input_plan.take().expect("sort input plan initialized"),
-            cache,
-            transaction,
-        );
-        arena.push(ExecNode::Sort(self))
+        let input_schema = input.output_schema().clone();
+        let input = build_read(arena, input, cache, transaction);
+        arena.push(ExecNode::Sort(Sort {
+            output: None,
+            arena: Box::<Bump>::default(),
+            sort_fields,
+            limit,
+            input_schema,
+            input,
+        }))
     }
-}
 
-impl Sort {
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-    ) -> Result<(), DatabaseError> {
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
         if self.output.is_none() {
             let mut tuples = NullableVec::new(&self.arena);
 

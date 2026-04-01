@@ -14,7 +14,9 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
+use crate::execution::{
+    build_read, take_plan, ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor,
+};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::create_index::CreateIndexOperator;
 use crate::planner::LogicalPlan;
@@ -28,7 +30,7 @@ use crate::types::ColumnId;
 pub struct CreateIndex {
     op: Option<CreateIndexOperator>,
     input_schema: SchemaRef,
-    input_plan: Option<LogicalPlan>,
+    input_plan: LogicalPlan,
     input: ExecId,
 }
 
@@ -37,7 +39,7 @@ impl From<(CreateIndexOperator, LogicalPlan)> for CreateIndex {
         Self {
             op: Some(op),
             input_schema: input.output_schema().clone(),
-            input_plan: Some(input),
+            input_plan: input,
             input: 0,
         }
     }
@@ -50,14 +52,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateIndex {
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        self.input = build_read(
-            arena,
-            self.input_plan
-                .take()
-                .expect("create index input plan initialized"),
-            cache,
-            transaction,
-        );
+        self.input = build_read(arena, take_plan(&mut self.input_plan), cache, transaction);
         arena.push(ExecNode::CreateIndex(self))
     }
 }

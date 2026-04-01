@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::create_accumulators;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::LogicalPlan;
@@ -23,55 +23,38 @@ use crate::types::tuple::SchemaRef;
 pub struct SimpleAggExecutor {
     agg_calls: Vec<ScalarExpression>,
     input_schema: SchemaRef,
-    input_plan: Option<LogicalPlan>,
-    input: Option<ExecId>,
+    input: ExecId,
+    returned: bool,
 }
 
-impl From<(AggregateOperator, LogicalPlan)> for SimpleAggExecutor {
-    fn from(
-        (AggregateOperator { agg_calls, .. }, mut input): (AggregateOperator, LogicalPlan),
-    ) -> Self {
-        SimpleAggExecutor {
-            agg_calls,
-            input_schema: input.output_schema().clone(),
-            input_plan: Some(input),
-            input: None,
-        }
-    }
-}
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor {
+    type Input = (AggregateOperator, LogicalPlan);
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SimpleAggExecutor {
     fn into_executor(
-        mut self,
+        (AggregateOperator { agg_calls, .. }, mut input): Self::Input,
         arena: &mut ExecArena<'a, T>,
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        self.input = Some(build_read(
-            arena,
-            self.input_plan
-                .take()
-                .expect("simple aggregate input plan initialized"),
-            cache,
-            transaction,
-        ));
-        arena.push(ExecNode::SimpleAgg(self))
+        let input_schema = input.output_schema().clone();
+        let input = build_read(arena, input, cache, transaction);
+        arena.push(ExecNode::SimpleAgg(SimpleAggExecutor {
+            agg_calls,
+            input_schema,
+            input,
+            returned: false,
+        }))
     }
-}
 
-impl SimpleAggExecutor {
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-    ) -> Result<(), DatabaseError> {
-        let Some(input) = self.input.take() else {
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+        if self.returned {
             arena.finish();
             return Ok(());
-        };
+        }
 
         let mut accs = create_accumulators(&self.agg_calls)?;
 
-        while arena.next_tuple(input)? {
+        while arena.next_tuple(self.input)? {
             let tuple = arena.result_tuple();
             for (acc, expr) in accs.iter_mut().zip(self.agg_calls.iter()) {
                 let ScalarExpression::AggCall { args, .. } = expr else {
@@ -96,6 +79,7 @@ impl SimpleAggExecutor {
         for acc in accs {
             output.values.push(acc.evaluate()?);
         }
+        self.returned = true;
         arena.resume();
         Ok(())
     }

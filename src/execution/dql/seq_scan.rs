@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor};
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::storage::{Iter, Transaction, TupleIter};
 
@@ -39,6 +39,23 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SeqScan<'a, T> {
         _: *mut T,
     ) -> ExecId {
         arena.push(ExecNode::SeqScan(self))
+    }
+}
+
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SeqScan<'a, T> {
+    type Input = TableScanOperator;
+
+    fn into_executor(
+        input: Self::Input,
+        arena: &mut ExecArena<'a, T>,
+        _: ExecutionCaches<'a>,
+        _: *mut T,
+    ) -> ExecId {
+        arena.push(ExecNode::SeqScan(SeqScan::from(input)))
+    }
+
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+        SeqScan::next_tuple(self, arena)
     }
 }
 

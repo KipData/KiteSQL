@@ -15,68 +15,63 @@
 use std::mem;
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
 use crate::planner::operator::scalar_apply::ScalarApplyOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 
 pub struct ScalarApply {
-    left_input_plan: Option<LogicalPlan>,
-    right_input_plan: Option<LogicalPlan>,
-    left_input: Option<ExecId>,
-    right_input: Option<ExecId>,
+    left_input: ExecId,
+    right_input: ExecId,
     cached_right: Option<Tuple>,
 }
 
-impl From<(ScalarApplyOperator, LogicalPlan, LogicalPlan)> for ScalarApply {
-    fn from((_, left_input, right_input): (ScalarApplyOperator, LogicalPlan, LogicalPlan)) -> Self {
-        Self {
-            left_input_plan: Some(left_input),
-            right_input_plan: Some(right_input),
-            left_input: None,
-            right_input: None,
-            cached_right: None,
-        }
-    }
-}
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarApply {
+    type Input = (ScalarApplyOperator, LogicalPlan, LogicalPlan);
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ScalarApply {
     fn into_executor(
-        mut self,
+        (_, left_input, right_input): Self::Input,
         arena: &mut ExecArena<'a, T>,
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        self.left_input = Some(build_read(
-            arena,
-            self.left_input_plan
-                .take()
-                .expect("scalar apply left input plan initialized"),
-            cache,
-            transaction,
-        ));
-        self.right_input = Some(build_read(
-            arena,
-            self.right_input_plan
-                .take()
-                .expect("scalar apply right input plan initialized"),
-            cache,
-            transaction,
-        ));
-        arena.push(ExecNode::ScalarApply(self))
+        let left_input = build_read(arena, left_input, cache, transaction);
+        let right_input = build_read(arena, right_input, cache, transaction);
+        arena.push(ExecNode::ScalarApply(Self {
+            left_input,
+            right_input,
+            cached_right: None,
+        }))
+    }
+
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+        Self::load_right_once(&mut self.cached_right, self.right_input, arena)?;
+
+        let right_tuple = self
+            .cached_right
+            .as_ref()
+            .expect("scalar apply right tuple initialized");
+        if !arena.next_tuple(self.left_input)? {
+            arena.finish();
+            return Ok(());
+        }
+        arena
+            .result_tuple_mut()
+            .values
+            .extend(right_tuple.values.iter().cloned());
+        arena.resume();
+        Ok(())
     }
 }
 
 impl ScalarApply {
     fn load_right_once<'a, T: Transaction + 'a>(
         cached_right: &mut Option<Tuple>,
-        right_input: Option<ExecId>,
+        right_input: ExecId,
         arena: &mut ExecArena<'a, T>,
     ) -> Result<(), DatabaseError> {
         if cached_right.is_none() {
-            let right_input = right_input
-                .expect("scalar apply right input executor initialized");
             if !arena.next_tuple(right_input)? {
                 return Err(DatabaseError::InvalidValue(
                     "scalar apply right input returned no rows".to_string(),
@@ -87,35 +82,13 @@ impl ScalarApply {
 
         Ok(())
     }
-
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-    ) -> Result<(), DatabaseError> {
-        Self::load_right_once(&mut self.cached_right, self.right_input, arena)?;
-
-        let right_tuple = self.cached_right
-            .as_ref()
-            .expect("scalar apply right tuple initialized");
-        let left_input = self
-            .left_input
-            .expect("scalar apply left input executor initialized");
-
-        if !arena.next_tuple(left_input)? {
-            arena.finish();
-            return Ok(());
-        }
-        arena.result_tuple_mut().values.extend(right_tuple.values.iter().cloned());
-        arena.resume();
-        Ok(())
-    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
-    use crate::execution::{execute, try_collect};
+    use crate::execution::{execute_input, try_collect};
     use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
@@ -179,8 +152,8 @@ mod tests {
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let mut transaction = storage.transaction()?;
-        let tuples = try_collect(execute(
-            ScalarApply::from((ScalarApplyOperator, left, right)),
+        let tuples = try_collect(execute_input::<_, ScalarApply>(
+            (ScalarApplyOperator, left, right),
             (&table_cache, &view_cache, &meta_cache),
             &mut transaction,
         ))?;
@@ -208,15 +181,13 @@ mod tests {
             "left_c1",
             vec![vec![DataValue::Int32(1)], vec![DataValue::Int32(2)]],
         );
-        let right = ScalarSubqueryOperator::build(build_values(
-            "right_c1",
-            vec![vec![DataValue::Null]],
-        ));
+        let right =
+            ScalarSubqueryOperator::build(build_values("right_c1", vec![vec![DataValue::Null]]));
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let mut transaction = storage.transaction()?;
-        let tuples = try_collect(execute(
-            ScalarApply::from((ScalarApplyOperator, left, right)),
+        let tuples = try_collect(execute_input::<_, ScalarApply>(
+            (ScalarApplyOperator, left, right),
             (&table_cache, &view_cache, &meta_cache),
             &mut transaction,
         ))?;

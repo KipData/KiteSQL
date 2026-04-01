@@ -261,16 +261,21 @@ impl<T: Transaction> ImplementationRule<T> for ImplementationRuleImpl {
             ImplementationRuleImpl::Limit => {
                 LimitImplementation.update_best_option(operator, loader, best_physical_option)?
             }
-            ImplementationRuleImpl::MarkApply => {
-                MarkApplyImplementation.update_best_option(operator, loader, best_physical_option)?
-            }
+            ImplementationRuleImpl::MarkApply => MarkApplyImplementation.update_best_option(
+                operator,
+                loader,
+                best_physical_option,
+            )?,
             ImplementationRuleImpl::Projection => ProjectionImplementation.update_best_option(
                 operator,
                 loader,
                 best_physical_option,
             )?,
-            ImplementationRuleImpl::ScalarApply => ScalarApplyImplementation
-                .update_best_option(operator, loader, best_physical_option)?,
+            ImplementationRuleImpl::ScalarApply => ScalarApplyImplementation.update_best_option(
+                operator,
+                loader,
+                best_physical_option,
+            )?,
             ImplementationRuleImpl::ScalarSubquery => ScalarSubqueryImplementation
                 .update_best_option(operator, loader, best_physical_option)?,
             ImplementationRuleImpl::SeqScan => {

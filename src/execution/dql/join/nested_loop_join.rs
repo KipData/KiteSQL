@@ -19,7 +19,9 @@ use super::joins_nullable;
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{
+    build_read, take_plan, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor,
+};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::LogicalPlan;
@@ -85,7 +87,7 @@ impl EqualCondition {
 /// |--------------------------------|----------------|----------------|
 /// | Full                           |    left        |      right     |
 pub struct NestedLoopJoin {
-    left_input_plan: Option<LogicalPlan>,
+    left_input_plan: LogicalPlan,
     right_input_plan: LogicalPlan,
     output_schema_ref: SchemaRef,
     ty: JoinType,
@@ -151,7 +153,7 @@ impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for NestedLoopJoin {
         );
 
         NestedLoopJoin {
-            left_input_plan: Some(left_input),
+            left_input_plan: left_input,
             right_input_plan: right_input,
             output_schema_ref,
             ty: join_type,
@@ -172,9 +174,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
     ) -> ExecId {
         self.left_input = build_read(
             arena,
-            self.left_input_plan
-                .take()
-                .expect("nested loop join left input plan initialized"),
+            take_plan(&mut self.left_input_plan),
             cache,
             transaction,
         );
@@ -182,8 +182,28 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
     }
 }
 
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
+    type Input = (JoinOperator, LogicalPlan, LogicalPlan);
+
+    fn into_executor(
+        input: Self::Input,
+        arena: &mut ExecArena<'a, T>,
+        cache: ExecutionCaches<'a>,
+        transaction: *mut T,
+    ) -> ExecId {
+        <Self as ReadExecutor<'a, T>>::into_executor(Self::from(input), arena, cache, transaction)
+    }
+
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+        NestedLoopJoin::next_tuple(self, arena)
+    }
+}
+
 impl NestedLoopJoin {
-    fn build_right_input<'a, T: Transaction + 'a>(&self, arena: &mut ExecArena<'a, T>) -> ExecId {
+    fn build_right_input<'a, T: Transaction + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> ExecId {
         let cache = (arena.table_cache(), arena.view_cache(), arena.meta_cache());
         let transaction = arena.transaction_mut() as *mut T;
         build_read(arena, self.right_input_plan.clone(), cache, transaction)
