@@ -20,7 +20,6 @@ use crate::expression::{HasCountStar, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::rule::normalization::{remap_expr_positions, remap_exprs_positions};
 use crate::planner::operator::join::JoinCondition;
-use crate::planner::operator::join::JoinType;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::types::value::{DataValue, Utf8Type};
@@ -554,17 +553,12 @@ impl ColumnPruning {
                                 }
                                 JoinCondition::None => {}
                             }
-                            if !matches!(op.join_type, JoinType::LeftSemi | JoinType::LeftAnti) {
-                                output_removed_positions = Self::merge_removed_positions(
-                                    &left_removed_positions,
-                                    &right_removed_positions,
-                                    old_left_outputs_len,
-                                    arena,
-                                );
-                            } else {
-                                output_removed_positions =
-                                    Self::copy_removed_positions(&left_removed_positions, arena);
-                            }
+                            output_removed_positions = Self::merge_removed_positions(
+                                &left_removed_positions,
+                                &right_removed_positions,
+                                old_left_outputs_len,
+                                arena,
+                            );
                         } else if let Operator::MarkApply(op) = operator {
                             let removed_positions = Self::merge_removed_positions(
                                 &left_removed_positions,

@@ -110,11 +110,7 @@ impl NormalizationRule for PushPredicateThroughJoin {
 
             if !matches!(
                 join_op.join_type,
-                JoinType::Inner
-                    | JoinType::LeftOuter
-                    | JoinType::LeftSemi
-                    | JoinType::LeftAnti
-                    | JoinType::RightOuter
+                JoinType::Inner | JoinType::LeftOuter | JoinType::RightOuter
             ) {
                 return Ok(false);
             }
@@ -148,7 +144,7 @@ impl NormalizationRule for PushPredicateThroughJoin {
 
                     common_filters
                 }
-                JoinType::LeftOuter | JoinType::LeftSemi | JoinType::LeftAnti => {
+                JoinType::LeftOuter => {
                     if let Some(left_filter_op) = reduce_filters(left_filters, filter_op.having) {
                         new_ops.0 = Some(Operator::Filter(left_filter_op));
                     }
@@ -362,11 +358,7 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
             };
             if !matches!(
                 join_op.join_type,
-                JoinType::Inner
-                    | JoinType::LeftOuter
-                    | JoinType::LeftSemi
-                    | JoinType::LeftAnti
-                    | JoinType::RightOuter
+                JoinType::Inner | JoinType::LeftOuter | JoinType::RightOuter
             ) {
                 return Ok(false);
             }
@@ -399,8 +391,6 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
             JoinType::Inner => (true, true),
             JoinType::LeftOuter => (false, true),
             JoinType::RightOuter => (true, false),
-            JoinType::LeftSemi => (true, false),
-            JoinType::LeftAnti => (false, false),
             _ => (false, false),
         };
 
@@ -501,27 +491,6 @@ mod tests {
             .build()
             .instantiate(plan)
             .find_best::<RocksTransaction>(None)
-    }
-
-    fn with_join_type(mut plan: LogicalPlan, join_type: JoinType) -> LogicalPlan {
-        fn visit(plan: &mut LogicalPlan, join_type: JoinType) -> bool {
-            if let Operator::Join(join_op) = &mut plan.operator {
-                join_op.join_type = join_type;
-                return true;
-            }
-            match plan.childrens.as_mut() {
-                Childrens::Only(child) => visit(child, join_type),
-                Childrens::Twins { left, right } => {
-                    visit(left, join_type) || visit(right, join_type)
-                }
-                Childrens::None => false,
-            }
-        }
-        assert!(
-            visit(&mut plan, join_type),
-            "expected plan to contain a join"
-        );
-        plan
     }
 
     #[test]
@@ -1049,100 +1018,6 @@ mod tests {
             Operator::TableScan(_) => (),
             _ => unreachable!("filter child should be a table scan"),
         }
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_push_join_predicate_left_semi_keeps_right_filter() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
-        let plan =
-            table_state.plan("select * from t1 inner join t2 on t1.c1 = t2.c3 and t2.c3 < 2")?;
-        let plan = with_join_type(plan, JoinType::LeftSemi);
-
-        let mut best_plan = apply_pipeline(
-            plan,
-            HepOptimizerPipeline::builder().before_batch(
-                "push_join_predicate_into_scan".to_string(),
-                HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::PushJoinPredicateIntoScan],
-            ),
-        )?;
-
-        if matches!(best_plan.operator, Operator::Project(_)) {
-            best_plan = best_plan.childrens.pop_only();
-        }
-
-        let join_plan = best_plan;
-        {
-            let join_op = match &join_plan.operator {
-                Operator::Join(op) => op,
-                _ => unreachable!("expected join root"),
-            };
-
-            assert!(matches!(join_op.join_type, JoinType::LeftSemi));
-            match &join_op.on {
-                JoinCondition::On { filter, .. } => assert!(
-                    filter.is_some(),
-                    "semi join should keep right-side predicates in the join filter"
-                ),
-                JoinCondition::None => unreachable!("expected join condition"),
-            }
-        }
-        let (_left_child, right_child) = join_plan.childrens.pop_twins();
-        assert!(
-            !matches!(right_child.operator, Operator::Filter(_)),
-            "right child should not get a pushed-down filter for semi join"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_push_join_predicate_left_anti_keeps_filters() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
-        let plan = table_state
-            .plan("select * from t1 inner join t2 on t1.c1 = t2.c3 and t1.c1 > 1 and t2.c3 < 2")?;
-        let plan = with_join_type(plan, JoinType::LeftAnti);
-
-        let mut best_plan = apply_pipeline(
-            plan,
-            HepOptimizerPipeline::builder().before_batch(
-                "push_join_predicate_into_scan".to_string(),
-                HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::PushJoinPredicateIntoScan],
-            ),
-        )?;
-
-        if matches!(best_plan.operator, Operator::Project(_)) {
-            best_plan = best_plan.childrens.pop_only();
-        }
-
-        let join_plan = best_plan;
-        {
-            let join_op = match &join_plan.operator {
-                Operator::Join(op) => op,
-                _ => unreachable!("expected join root"),
-            };
-            assert!(matches!(join_op.join_type, JoinType::LeftAnti));
-
-            match &join_op.on {
-                JoinCondition::On { filter, .. } => {
-                    assert!(filter.is_some(), "left anti join should keep ON predicates")
-                }
-                JoinCondition::None => unreachable!("expected join condition"),
-            }
-        }
-
-        let (left_child, right_child) = join_plan.childrens.pop_twins();
-        assert!(
-            !matches!(left_child.operator, Operator::Filter(_)),
-            "left anti join should not push predicates to the left child"
-        );
-        assert!(
-            !matches!(right_child.operator, Operator::Filter(_)),
-            "left anti join should not push predicates to the right child"
-        );
 
         Ok(())
     }

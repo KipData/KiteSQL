@@ -14,17 +14,13 @@
 
 pub(crate) mod full_join;
 pub(crate) mod inner_join;
-pub(crate) mod left_anti_join;
 pub(crate) mod left_join;
-pub(crate) mod left_semi_join;
 pub(crate) mod right_join;
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::hash::full_join::FullJoinState;
 use crate::execution::dql::join::hash::inner_join::InnerJoinState;
-use crate::execution::dql::join::hash::left_anti_join::LeftAntiJoinState;
 use crate::execution::dql::join::hash::left_join::LeftJoinState;
-use crate::execution::dql::join::hash::left_semi_join::LeftSemiJoinState;
 use crate::execution::dql::join::hash::right_join::RightJoinState;
 use crate::execution::dql::join::hash_join::BuildState;
 use crate::execution::dql::sort::BumpVec;
@@ -80,8 +76,6 @@ pub(crate) enum JoinProbeStateImpl {
     Left(LeftJoinState),
     Right(RightJoinState),
     Full(FullJoinState),
-    LeftSemi(LeftSemiJoinState),
-    LeftAnti(LeftAntiJoinState),
 }
 
 impl JoinProbeState for JoinProbeStateImpl {
@@ -104,12 +98,6 @@ impl JoinProbeState for JoinProbeStateImpl {
             JoinProbeStateImpl::Full(state) => {
                 state.probe_next(probe_state, build_state, filter_args)
             }
-            JoinProbeStateImpl::LeftSemi(state) => {
-                state.probe_next(probe_state, build_state, filter_args)
-            }
-            JoinProbeStateImpl::LeftAnti(state) => {
-                state.probe_next(probe_state, build_state, filter_args)
-            }
         }
     }
 
@@ -123,12 +111,6 @@ impl JoinProbeState for JoinProbeStateImpl {
             JoinProbeStateImpl::Left(state) => state.left_drop_next(left_drop_state, filter_args),
             JoinProbeStateImpl::Right(state) => state.left_drop_next(left_drop_state, filter_args),
             JoinProbeStateImpl::Full(state) => state.left_drop_next(left_drop_state, filter_args),
-            JoinProbeStateImpl::LeftSemi(state) => {
-                state.left_drop_next(left_drop_state, filter_args)
-            }
-            JoinProbeStateImpl::LeftAnti(state) => {
-                state.left_drop_next(left_drop_state, filter_args)
-            }
         }
     }
 }

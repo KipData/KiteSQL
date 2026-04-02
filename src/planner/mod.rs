@@ -16,7 +16,6 @@ pub mod operator;
 
 use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
 use crate::planner::operator::except::ExceptOperator;
-use crate::planner::operator::join::JoinType;
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::operator::{Operator, PhysicalOption};
@@ -166,7 +165,7 @@ impl LogicalPlan {
             | Operator::Limit(_)
             | Operator::TopK(_)
             | Operator::ScalarSubquery(_) => childrens_iter.next().unwrap().output_schema_direct(),
-            Operator::ScalarApply(_) => {
+            Operator::ScalarApply(_) | Operator::Join(_) => {
                 let mut columns = Vec::new();
 
                 for plan in childrens_iter {
@@ -195,19 +194,6 @@ impl LogicalPlan {
                     .map(|expr| expr.output_column())
                     .collect_vec(),
             ),
-            Operator::Join(op) => {
-                if matches!(op.join_type, JoinType::LeftSemi | JoinType::LeftAnti) {
-                    return childrens_iter.next().unwrap().output_schema_direct();
-                }
-                let mut columns = Vec::new();
-
-                for plan in childrens_iter {
-                    for column in plan.output_schema_direct().columns() {
-                        columns.push(column.clone());
-                    }
-                }
-                SchemaOutput::Schema(columns)
-            }
             Operator::Project(op) => SchemaOutput::Schema(
                 op.exprs
                     .iter()

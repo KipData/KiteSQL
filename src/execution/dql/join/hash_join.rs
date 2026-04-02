@@ -16,9 +16,7 @@ use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::hash::full_join::FullJoinState;
 use crate::execution::dql::join::hash::inner_join::InnerJoinState;
-use crate::execution::dql::join::hash::left_anti_join::LeftAntiJoinState;
 use crate::execution::dql::join::hash::left_join::LeftJoinState;
-use crate::execution::dql::join::hash::left_semi_join::LeftSemiJoinState;
 use crate::execution::dql::join::hash::right_join::RightJoinState;
 use crate::execution::dql::join::hash::{
     FilterArgs, JoinProbeState, JoinProbeStateImpl, LeftDropState, ProbeState,
@@ -241,15 +239,6 @@ impl HashJoin {
                 right_schema_len,
                 bits: FixedBitSet::with_capacity(build_count),
             }),
-            JoinType::LeftSemi => JoinProbeStateImpl::LeftSemi(LeftSemiJoinState {
-                bits: FixedBitSet::with_capacity(build_count),
-            }),
-            JoinType::LeftAnti => JoinProbeStateImpl::LeftAnti(LeftAntiJoinState {
-                right_schema_len,
-                inner: LeftSemiJoinState {
-                    bits: FixedBitSet::with_capacity(build_count),
-                },
-            }),
             JoinType::RightOuter => JoinProbeStateImpl::Right(RightJoinState { left_schema_len }),
             JoinType::Full => JoinProbeStateImpl::Full(FullJoinState {
                 left_schema_len,
@@ -433,12 +422,10 @@ mod test {
     use crate::planner::operator::Operator;
     use crate::planner::{Childrens, LogicalPlan};
     use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
-    use crate::storage::table_codec::BumpBytes;
     use crate::storage::Storage;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use crate::utils::lru::SharedLruCache;
-    use bumpalo::Bump;
     use std::hash::RandomState;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -647,47 +634,6 @@ mod test {
             assert_eq!(
                 tuples[3].values,
                 build_integers(vec![Some(3), Some(5), Some(7), None, None, None])
-            );
-        }
-        {
-            let mut executor = HashJoin::from((op.clone(), left.clone(), right.clone()));
-            executor.ty = JoinType::LeftSemi;
-            let mut tuples = try_collect(crate::execution::execute(
-                executor,
-                (&table_cache, &view_cache, &meta_cache),
-                &mut transaction,
-            ))?;
-
-            let arena = Bump::new();
-            assert_eq!(tuples.len(), 2);
-            tuples.sort_by_key(|tuple| {
-                let mut bytes = BumpBytes::new_in(&arena);
-                tuple.values[0].memcomparable_encode(&mut bytes).unwrap();
-                bytes
-            });
-
-            assert_eq!(
-                tuples[0].values,
-                build_integers(vec![Some(0), Some(2), Some(4)])
-            );
-            assert_eq!(
-                tuples[1].values,
-                build_integers(vec![Some(1), Some(3), Some(5)])
-            );
-        }
-        {
-            let mut executor = HashJoin::from((op, left, right));
-            executor.ty = JoinType::LeftAnti;
-            let tuples = try_collect(crate::execution::execute(
-                executor,
-                (&table_cache, &view_cache, &meta_cache),
-                &mut transaction,
-            ))?;
-
-            assert_eq!(tuples.len(), 1);
-            assert_eq!(
-                tuples[0].values,
-                build_integers(vec![Some(3), Some(5), Some(7)])
             );
         }
 

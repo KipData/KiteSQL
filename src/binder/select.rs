@@ -1253,14 +1253,12 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 (JoinType::RightOuter, Some(constraint))
             }
             JoinOperator::FullOuter(constraint) => (JoinType::Full, Some(constraint)),
-            JoinOperator::Semi(constraint) | JoinOperator::LeftSemi(constraint) => {
-                (JoinType::LeftSemi, Some(constraint))
-            }
-            JoinOperator::Anti(constraint) | JoinOperator::LeftAnti(constraint) => {
-                (JoinType::LeftAnti, Some(constraint))
-            }
             JoinOperator::CrossJoin(constraint) => (JoinType::Cross, Some(constraint)),
-            JoinOperator::RightSemi(_)
+            JoinOperator::Semi(_)
+            | JoinOperator::LeftSemi(_)
+            | JoinOperator::Anti(_)
+            | JoinOperator::LeftAnti(_)
+            | JoinOperator::RightSemi(_)
             | JoinOperator::RightAnti(_)
             | JoinOperator::CrossApply
             | JoinOperator::OuterApply
