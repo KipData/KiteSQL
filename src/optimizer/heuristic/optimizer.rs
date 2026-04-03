@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::optimizer::core::rule::{
-    BestPhysicalOption, ImplementationRule, MatchPattern, NormalizationRule,
+    BestPhysicalOption, ImplementationRule, MatchPattern, NormalizationContext, NormalizationRule,
 };
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::heuristic::batch::{
@@ -40,6 +40,7 @@ pub struct HepOptimizer<'a> {
     after_batches: &'a [HepBatch],
     implementation_index: &'a ImplementationRuleIndex,
     plan: LogicalPlan,
+    runtime_param_count: usize,
 }
 
 impl<'a> HepOptimizer<'a> {
@@ -54,14 +55,17 @@ impl<'a> HepOptimizer<'a> {
             after_batches,
             implementation_index,
             plan,
+            runtime_param_count: 0,
         }
     }
 
-    pub fn find_best<T: Transaction>(
-        mut self,
+    pub fn optimize<T: Transaction>(
+        &mut self,
         loader: Option<&StatisticMetaLoader<'_, T>>,
-    ) -> Result<LogicalPlan, DatabaseError> {
-        Self::apply_batches(&mut self.plan, self.before_batches)?;
+    ) -> Result<(), DatabaseError> {
+        self.runtime_param_count = 0;
+        let mut ctx = NormalizationContext::new();
+        Self::apply_batches(&mut self.plan, self.before_batches, &mut ctx)?;
 
         if let Some(loader) = loader {
             if self.implementation_index.is_empty().not() {
@@ -73,44 +77,71 @@ impl<'a> HepOptimizer<'a> {
                     self.implementation_index,
                     &apply_no_sort_hints,
                     &apply_no_stream_distinct_hints,
+                    &mut ctx,
                 )?;
             }
         }
-        Self::apply_batches(&mut self.plan, self.after_batches)?;
+        Self::apply_batches(&mut self.plan, self.after_batches, &mut ctx)?;
+        self.runtime_param_count = ctx.runtime_param_count();
 
+        Ok(())
+    }
+
+    pub fn runtime_param_count(&self) -> usize {
+        self.runtime_param_count
+    }
+
+    pub fn into_plan(self) -> LogicalPlan {
+        self.plan
+    }
+
+    #[allow(dead_code)]
+    pub fn find_best<T: Transaction>(
+        mut self,
+        loader: Option<&StatisticMetaLoader<'_, T>>,
+    ) -> Result<LogicalPlan, DatabaseError> {
+        self.optimize(loader)?;
         Ok(self.plan)
     }
 
     #[inline]
-    fn apply_batches(plan: &mut LogicalPlan, batches: &[HepBatch]) -> Result<(), DatabaseError> {
+    fn apply_batches(
+        plan: &mut LogicalPlan,
+        batches: &[HepBatch],
+        ctx: &mut NormalizationContext,
+    ) -> Result<(), DatabaseError> {
         for batch in batches {
             match batch.strategy {
                 HepBatchStrategy::MaxTimes(max_iteration) => {
                     for _ in 0..max_iteration {
-                        if !Self::apply_batch(plan, batch)? {
+                        if !Self::apply_batch(plan, batch, ctx)? {
                             break;
                         }
                     }
                 }
-                HepBatchStrategy::LoopIfApplied => while Self::apply_batch(plan, batch)? {},
+                HepBatchStrategy::LoopIfApplied => while Self::apply_batch(plan, batch, ctx)? {},
             }
         }
         Ok(())
     }
 
     #[inline]
-    fn apply_batch(plan: &mut LogicalPlan, batch: &HepBatch) -> Result<bool, DatabaseError> {
+    fn apply_batch(
+        plan: &mut LogicalPlan,
+        batch: &HepBatch,
+        ctx: &mut NormalizationContext,
+    ) -> Result<bool, DatabaseError> {
         let mut applied = false;
         for step in &batch.steps {
             match step {
                 HepBatchStep::WholeTree(pass) => {
-                    if Self::apply_whole_tree_pass(plan, pass)? {
+                    if Self::apply_whole_tree_pass(plan, pass, ctx)? {
                         plan.reset_output_schema_cache_recursive();
                         applied = true;
                     }
                 }
                 HepBatchStep::LocalRewrite(rules) => {
-                    if Self::apply_local_rules(plan, rules)? {
+                    if Self::apply_local_rules(plan, rules, ctx)? {
                         applied = true;
                     }
                 }
@@ -122,12 +153,13 @@ impl<'a> HepOptimizer<'a> {
     fn apply_whole_tree_pass(
         plan: &mut LogicalPlan,
         pass: &HepWholeTreePass,
+        ctx: &mut NormalizationContext,
     ) -> Result<bool, DatabaseError> {
         match pass.kind {
             WholeTreePassKind::ColumnPruning => {
                 let mut applied = false;
                 for rule in &pass.rules {
-                    applied |= rule.apply(plan)?;
+                    applied |= rule.apply(plan, ctx)?;
                 }
                 Ok(applied)
             }
@@ -207,6 +239,7 @@ impl<'a> HepOptimizer<'a> {
         implementation_index: &ImplementationRuleIndex,
         inherited_sort_hints: &'plan ScanHintApplier<'plan>,
         inherited_stream_distinct_hints: &'plan ScanHintApplier<'plan>,
+        ctx: &mut NormalizationContext,
     ) -> Result<(), DatabaseError> {
         if let Operator::TableScan(scan_op) = &mut plan.operator {
             inherited_sort_hints(scan_op);
@@ -249,6 +282,7 @@ impl<'a> HepOptimizer<'a> {
                             implementation_index,
                             child_sort_hints,
                             child_stream_distinct_hints,
+                            ctx,
                         ),
                         Childrens::Twins { left, right } => {
                             Self::annotate_hints_and_physical_options(
@@ -257,6 +291,7 @@ impl<'a> HepOptimizer<'a> {
                                 implementation_index,
                                 child_sort_hints,
                                 child_stream_distinct_hints,
+                                ctx,
                             )?;
                             Self::annotate_hints_and_physical_options(
                                 right,
@@ -264,6 +299,7 @@ impl<'a> HepOptimizer<'a> {
                                 implementation_index,
                                 child_sort_hints,
                                 child_stream_distinct_hints,
+                                ctx,
                             )
                         }
                         Childrens::None => Ok(()),
@@ -272,7 +308,7 @@ impl<'a> HepOptimizer<'a> {
             })?;
         }
 
-        apply_annotated_post_rules(plan)?;
+        apply_annotated_post_rules(plan, ctx)?;
 
         Ok(())
     }
@@ -349,15 +385,17 @@ impl<'a> HepOptimizer<'a> {
     fn apply_local_rules(
         plan: &mut LogicalPlan,
         rules: &HepLocalRewriteBatch,
+        ctx: &mut NormalizationContext,
     ) -> Result<bool, DatabaseError> {
         let mut applied_rules = vec![false; rules.len()];
-        Self::apply_local_rules_inner(plan, rules, &mut applied_rules)
+        Self::apply_local_rules_inner(plan, rules, &mut applied_rules, ctx)
     }
 
     fn apply_local_rules_inner(
         plan: &mut LogicalPlan,
         rules: &HepLocalRewriteBatch,
         applied_rules: &mut [bool],
+        ctx: &mut NormalizationContext,
     ) -> Result<bool, DatabaseError> {
         let mut applied = false;
         let mut next_rule_idx = 0;
@@ -368,7 +406,8 @@ impl<'a> HepOptimizer<'a> {
             if applied_rules[idx] {
                 continue;
             }
-            if rule.apply(plan)? {
+            let applied_rule = rule.apply(plan, ctx)?;
+            if applied_rule {
                 plan.reset_output_schema_cache_recursive();
                 applied_rules[idx] = true;
                 applied = true;
@@ -377,12 +416,14 @@ impl<'a> HepOptimizer<'a> {
 
         match plan.childrens.as_mut() {
             Childrens::Only(child) => {
-                let child_applied = Self::apply_local_rules_inner(child, rules, applied_rules)?;
+                let child_applied =
+                    Self::apply_local_rules_inner(child, rules, applied_rules, ctx)?;
                 applied |= child_applied;
             }
             Childrens::Twins { left, right } => {
-                let left_applied = Self::apply_local_rules_inner(left, rules, applied_rules)?;
-                let right_applied = Self::apply_local_rules_inner(right, rules, applied_rules)?;
+                let left_applied = Self::apply_local_rules_inner(left, rules, applied_rules, ctx)?;
+                let right_applied =
+                    Self::apply_local_rules_inner(right, rules, applied_rules, ctx)?;
                 applied |= left_applied || right_applied;
             }
             Childrens::None => {}
@@ -569,7 +610,7 @@ mod tests {
     use crate::planner::operator::sort::SortField;
     use crate::planner::operator::{PhysicalOption, PlanImpl, SortOption};
     use crate::storage::{Storage, Transaction};
-    use crate::types::index::{IndexInfo, IndexMeta, IndexType};
+    use crate::types::index::{IndexInfo, IndexLookup, IndexMeta, IndexType};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::ops::Bound;
@@ -677,13 +718,13 @@ mod tests {
                         fields: sort_fields.clone(),
                         ignore_prefix_len: 0,
                     },
-                    range: Some(Range::SortedRanges(vec![
+                    lookup: Some(IndexLookup::Static(Range::SortedRanges(vec![
                         Range::Eq(DataValue::Int32(2)),
                         Range::Scope {
                             min: Bound::Excluded(DataValue::Int32(40)),
                             max: Bound::Unbounded,
                         }
-                    ])),
+                    ]))),
                     covered_deserializers: None,
                     cover_mapping: None,
                     sort_elimination_hint: None,

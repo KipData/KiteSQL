@@ -21,12 +21,14 @@ use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::value::DataValue;
 use crate::types::{ColumnId, LogicalType};
 use kite_sql_serde_macros::ReferenceSerialization;
+use std::collections::Bound;
 use std::fmt;
 use std::fmt::Formatter;
 use std::sync::Arc;
 
 pub type IndexId = u32;
 pub type IndexMetaRef = Arc<IndexMeta>;
+pub type RuntimeParam = usize;
 
 pub const INDEX_ID_LEN: usize = 4;
 
@@ -39,10 +41,25 @@ pub enum IndexType {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]
+pub enum RuntimeIndexProbe {
+    Eq(DataValue),
+    Scope {
+        min: Bound<DataValue>,
+        max: Bound<DataValue>,
+    },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]
+pub enum IndexLookup {
+    Static(Range),
+    Probe(RuntimeParam),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]
 pub struct IndexInfo {
     pub(crate) meta: IndexMetaRef,
     pub(crate) sort_option: SortOption,
-    pub(crate) range: Option<Range>,
+    pub(crate) lookup: Option<IndexLookup>,
     pub(crate) covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
     pub(crate) cover_mapping: Option<Vec<usize>>,
     pub(crate) sort_elimination_hint: Option<usize>,
@@ -100,8 +117,11 @@ impl fmt::Display for IndexInfo {
         write!(f, "{}", self.meta)?;
         write!(f, " => ")?;
 
-        if let Some(range) = &self.range {
-            write!(f, "{range}")?;
+        if let Some(lookup) = &self.lookup {
+            match lookup {
+                IndexLookup::Static(range) => write!(f, "{range}")?,
+                IndexLookup::Probe(param) => write!(f, "Probe ${param}")?,
+            }
         } else {
             write!(f, "EMPTY")?;
         }

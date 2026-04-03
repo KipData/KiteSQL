@@ -17,7 +17,7 @@ use crate::errors::DatabaseError;
 use crate::expression::agg::AggKind;
 use crate::expression::visitor::Visitor;
 use crate::expression::{HasCountStar, ScalarExpression};
-use crate::optimizer::core::rule::NormalizationRule;
+use crate::optimizer::core::rule::{NormalizationContext, NormalizationRule};
 use crate::optimizer::rule::normalization::{remap_expr_positions, remap_exprs_positions};
 use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::Operator;
@@ -658,7 +658,11 @@ impl ColumnPruning {
 }
 
 impl NormalizationRule for ColumnPruning {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        _ctx: &mut NormalizationContext,
+    ) -> Result<bool, DatabaseError> {
         let arena = Bump::new();
         let outcome = Self::_apply(HashSet::<&ColumnSummary>::new(), true, plan, &arena)?;
         Ok(outcome.changed)

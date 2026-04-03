@@ -17,45 +17,58 @@ use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNod
 use crate::expression::range_detacher::Range;
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::storage::{IndexIter, Iter, Transaction};
-use crate::types::index::IndexMetaRef;
+use crate::types::index::{IndexLookup, IndexMetaRef, RuntimeIndexProbe};
 use crate::types::serialize::TupleValueSerializableImpl;
+use std::array;
+use std::vec;
+
+enum IndexLookupRanges {
+    One(array::IntoIter<Range, 1>),
+    Many(vec::IntoIter<Range>),
+}
+
+impl Iterator for IndexLookupRanges {
+    type Item = Range;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            IndexLookupRanges::One(iter) => iter.next(),
+            IndexLookupRanges::Many(iter) => iter.next(),
+        }
+    }
+}
 
 pub(crate) struct IndexScan<'a, T: Transaction + 'a> {
     op: Option<TableScanOperator>,
     index_by: IndexMetaRef,
-    ranges: Vec<Range>,
+    lookup: Option<IndexLookup>,
     covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
     cover_mapping: Option<Vec<usize>>,
-    iter: Option<IndexIter<'a, T>>,
+    iter: Option<IndexIter<'a, T, IndexLookupRanges>>,
 }
 
 impl<'a, T: Transaction + 'a>
     From<(
         TableScanOperator,
         IndexMetaRef,
-        Range,
+        IndexLookup,
         Option<Vec<TupleValueSerializableImpl>>,
         Option<Vec<usize>>,
     )> for IndexScan<'a, T>
 {
     fn from(
-        (op, index_by, range, covered_deserializers, cover_mapping): (
+        (op, index_by, lookup, covered_deserializers, cover_mapping): (
             TableScanOperator,
             IndexMetaRef,
-            Range,
+            IndexLookup,
             Option<Vec<TupleValueSerializableImpl>>,
             Option<Vec<usize>>,
         ),
     ) -> Self {
-        let ranges = match range {
-            Range::SortedRanges(ranges) => ranges,
-            range => vec![range],
-        };
-
         IndexScan {
             op: Some(op),
             index_by,
-            ranges,
+            lookup: Some(lookup),
             covered_deserializers,
             cover_mapping,
             iter: None,
@@ -78,7 +91,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for IndexScan<'a, T> {
     type Input = (
         TableScanOperator,
         IndexMetaRef,
-        Range,
+        IndexLookup,
         Option<Vec<TupleValueSerializableImpl>>,
         Option<Vec<usize>>,
     );
@@ -98,6 +111,27 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for IndexScan<'a, T> {
 }
 
 impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
+    fn ranges_from_lookup(lookup: IndexLookup, arena: &ExecArena<'a, T>) -> IndexLookupRanges {
+        match lookup {
+            IndexLookup::Static(Range::SortedRanges(ranges)) => {
+                IndexLookupRanges::Many(ranges.into_iter())
+            }
+            IndexLookup::Static(range) => IndexLookupRanges::One([range].into_iter()),
+            IndexLookup::Probe(param) => match arena.runtime_param(param) {
+                RuntimeIndexProbe::Eq(value) => {
+                    IndexLookupRanges::One([Range::Eq(value.clone())].into_iter())
+                }
+                RuntimeIndexProbe::Scope { min, max } => IndexLookupRanges::One(
+                    [Range::Scope {
+                        min: min.clone(),
+                        max: max.clone(),
+                    }]
+                    .into_iter(),
+                ),
+            },
+        }
+    }
+
     pub(crate) fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
         if self.iter.is_none() {
             let Some(TableScanOperator {
@@ -111,13 +145,17 @@ impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
                 arena.finish();
                 return Ok(());
             };
+            let ranges = Self::ranges_from_lookup(
+                self.lookup.take().expect("index scan lookup initialized"),
+                arena,
+            );
             self.iter = Some(arena.transaction().read_by_index(
                 arena.table_cache(),
                 table_name,
                 limit,
                 columns,
                 self.index_by.clone(),
-                std::mem::take(&mut self.ranges),
+                ranges,
                 with_pk,
                 self.covered_deserializers.take(),
                 self.cover_mapping.take(),

@@ -18,7 +18,7 @@ use crate::optimizer::core::rule::{BestPhysicalOption, ImplementationRule, Match
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
 use crate::storage::Transaction;
-use crate::types::index::IndexType;
+use crate::types::index::{IndexLookup, IndexType};
 use std::sync::LazyLock;
 
 static TABLE_SCAN_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
@@ -81,23 +81,21 @@ impl<T: Transaction> ImplementationRule<T> for IndexScanImplementation {
     ) -> Result<(), DatabaseError> {
         if let Operator::TableScan(scan_op) = op {
             for index_info in scan_op.index_infos.iter() {
-                if index_info.range.is_none() {
+                let Some(IndexLookup::Static(range)) = &index_info.lookup else {
                     continue;
-                }
+                };
                 let mut cost = None;
 
-                if let Some(range) = &index_info.range {
-                    if let Some(mut row_count) =
-                        loader.collect_count(&scan_op.table_name, index_info.meta.id, range)?
+                if let Some(mut row_count) =
+                    loader.collect_count(&scan_op.table_name, index_info.meta.id, range)?
+                {
+                    if index_info.covered_deserializers.is_none()
+                        && !matches!(index_info.meta.ty, IndexType::PrimaryKey { .. })
                     {
-                        if index_info.covered_deserializers.is_none()
-                            && !matches!(index_info.meta.ty, IndexType::PrimaryKey { .. })
-                        {
-                            // need to return table query(non-covering index)
-                            row_count *= 2;
-                        }
-                        cost = Some(row_count);
+                        // need to return table query(non-covering index)
+                        row_count *= 2;
                     }
+                    cost = Some(row_count);
                 }
 
                 if let Some(row_count) = cost {

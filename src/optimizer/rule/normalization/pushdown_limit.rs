@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::optimizer::core::rule::NormalizationRule;
+use crate::optimizer::core::rule::{NormalizationContext, NormalizationRule};
 use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child, wrap_child_with};
 use crate::planner::operator::join::JoinType;
 use crate::planner::operator::Operator;
@@ -22,7 +22,11 @@ use crate::planner::LogicalPlan;
 pub struct LimitProjectTranspose;
 
 impl NormalizationRule for LimitProjectTranspose {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        _ctx: &mut NormalizationContext,
+    ) -> Result<bool, DatabaseError> {
         let operator = std::mem::replace(&mut plan.operator, Operator::Dummy);
 
         let limit_op = match operator {
@@ -63,7 +67,11 @@ impl NormalizationRule for LimitProjectTranspose {
 pub struct PushLimitThroughJoin;
 
 impl NormalizationRule for PushLimitThroughJoin {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        _ctx: &mut NormalizationContext,
+    ) -> Result<bool, DatabaseError> {
         let limit_op = match &plan.operator {
             Operator::Limit(op) => op.clone(),
             _ => return Ok(false),
@@ -93,7 +101,11 @@ impl NormalizationRule for PushLimitThroughJoin {
 pub struct PushLimitIntoScan;
 
 impl NormalizationRule for PushLimitIntoScan {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        _ctx: &mut NormalizationContext,
+    ) -> Result<bool, DatabaseError> {
         let (offset, limit) = match &plan.operator {
             Operator::Limit(limit_op) => (limit_op.offset, limit_op.limit),
             _ => return Ok(false),

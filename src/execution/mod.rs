@@ -61,7 +61,9 @@ use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
 use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
+use crate::types::index::RuntimeIndexProbe;
 use crate::types::tuple::Tuple;
+use crate::types::value::DataValue;
 
 pub(crate) type ExecutionCaches<'a> = (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache);
 pub(crate) type ExecId = usize;
@@ -265,6 +267,7 @@ pub(crate) struct ExecArena<'a, T: Transaction + 'a> {
     result: ExecResult,
     cache: Option<ExecutionCaches<'a>>,
     transaction: *mut T,
+    runtime_params: Vec<RuntimeIndexProbe>,
 }
 
 impl<'a, T: Transaction + 'a> Default for ExecArena<'a, T> {
@@ -274,6 +277,7 @@ impl<'a, T: Transaction + 'a> Default for ExecArena<'a, T> {
             result: ExecResult::default(),
             cache: None,
             transaction: std::ptr::null_mut(),
+            runtime_params: Vec::new(),
         }
     }
 }
@@ -289,6 +293,11 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
             self.cache = Some(cache);
             self.transaction = transaction;
         }
+    }
+
+    pub(crate) fn init_runtime_params(&mut self, count: usize) {
+        debug_assert!(self.runtime_params.is_empty() || self.runtime_params.len() == count);
+        self.runtime_params = vec![RuntimeIndexProbe::Eq(DataValue::Null); count];
     }
 
     pub(crate) fn push(&mut self, node: ExecNode<'a, T>) -> ExecId {
@@ -315,6 +324,20 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
 
     pub(crate) fn transaction_mut(&mut self) -> &'a mut T {
         unsafe { &mut *self.transaction }
+    }
+
+    pub(crate) fn set_runtime_param(&mut self, param: usize, value: RuntimeIndexProbe) {
+        debug_assert!(param < self.runtime_params.len());
+        *self
+            .runtime_params
+            .get_mut(param)
+            .expect("runtime parameter slot initialized") = value;
+    }
+
+    pub(crate) fn runtime_param(&self, param: usize) -> &RuntimeIndexProbe {
+        self.runtime_params
+            .get(param)
+            .expect("runtime parameter initialized")
     }
 
     #[inline]
@@ -686,12 +709,12 @@ pub(crate) fn build_read<'a, T: Transaction + 'a>(
                 ..
             }) = physical_option
             {
-                if let Some(range) = index_info.range.clone() {
+                if let Some(lookup) = index_info.lookup.clone() {
                     return <IndexScan<'a, T> as ExecutorNode<'a, T>>::into_executor(
                         (
                             op,
                             index_info.meta.clone(),
-                            range,
+                            lookup,
                             index_info.covered_deserializers.clone(),
                             index_info.cover_mapping.clone(),
                         ),

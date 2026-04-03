@@ -49,7 +49,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 pub type KeyValueRef<'a> = (&'a [u8], &'a [u8]);
-use std::vec::IntoIter;
 use ulid::Generator;
 
 pub(crate) type StatisticsMetaCache = SharedLruCache<(TableName, IndexId), Option<StatisticsMeta>>;
@@ -159,18 +158,21 @@ pub trait Transaction: Sized {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn read_by_index<'a>(
+    fn read_by_index<'a, I>(
         &'a self,
         table_cache: &'a TableCache,
         table_name: TableName,
         (offset_option, limit_option): Bounds,
         mut columns: BTreeMap<usize, ColumnRef>,
         index_meta: IndexMetaRef,
-        ranges: Vec<Range>,
+        ranges: I,
         with_pk: bool,
         covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
         cover_mapping_indices: Option<Vec<usize>>,
-    ) -> Result<IndexIter<'a, Self>, DatabaseError> {
+    ) -> Result<IndexIter<'a, Self, I>, DatabaseError>
+    where
+        I: IntoIterator<Item = Range>,
+    {
         debug_assert!(columns.keys().all_unique());
         let table = self
             .table(table_cache, table_name.clone())?
@@ -1661,13 +1663,13 @@ impl<'a, T: Transaction + 'a> Iter for TupleIter<'a, T> {
     }
 }
 
-pub struct IndexIter<'a, T: Transaction> {
+pub struct IndexIter<'a, T: Transaction, I: IntoIterator<Item = Range>> {
     offset: usize,
     limit: Option<usize>,
     params: IndexImplParams<'a, T>,
     inner: IndexImplEnum,
     // for buffering data
-    ranges: IntoIter<Range>,
+    ranges: I::IntoIter,
     state: IndexIterState<'a, T>,
     encode_min_buffer: Bytes,
     encode_max_buffer: Bytes,
@@ -1679,7 +1681,7 @@ pub enum IndexIterState<'a, T: Transaction + 'a> {
     Over,
 }
 
-impl<'a, T: Transaction + 'a> IndexIter<'a, T> {
+impl<'a, T: Transaction + 'a, I: IntoIterator<Item = Range>> IndexIter<'a, T, I> {
     fn offset_move(offset: &mut usize) -> bool {
         if *offset > 0 {
             offset.sub_assign(1);
@@ -1698,7 +1700,7 @@ impl<'a, T: Transaction + 'a> IndexIter<'a, T> {
 }
 
 /// expression -> index value -> tuple
-impl<T: Transaction> Iter for IndexIter<'_, T> {
+impl<T: Transaction, I: IntoIterator<Item = Range>> Iter for IndexIter<'_, T, I> {
     fn next_tuple_into(&mut self, tuple: &mut Tuple) -> Result<bool, DatabaseError> {
         if matches!(self.limit, Some(0)) {
             self.state = IndexIterState::Over;
@@ -2215,7 +2217,7 @@ mod test {
             transaction: &'a RocksTransaction<'a>,
             table_cache: &'a Arc<TableCache>,
             index_column_id: ColumnId,
-        ) -> Result<IndexIter<'a, RocksTransaction<'a>>, DatabaseError> {
+        ) -> Result<IndexIter<'a, RocksTransaction<'a>, Vec<Range>>, DatabaseError> {
             transaction.read_by_index(
                 table_cache,
                 "t1".to_string().into(),

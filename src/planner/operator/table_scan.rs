@@ -80,7 +80,7 @@ impl TableScanOperator {
                     fields: sort_fields,
                     ignore_prefix_len: 0,
                 },
-                range: None,
+                lookup: None,
                 covered_deserializers: None,
                 cover_mapping: None,
                 sort_elimination_hint: None,

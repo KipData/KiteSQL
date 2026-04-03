@@ -27,9 +27,41 @@ pub trait MatchPattern {
     fn pattern(&self) -> &Pattern;
 }
 
+pub struct NormalizationContext {
+    runtime_param_count: usize,
+}
+
+impl NormalizationContext {
+    pub fn new() -> Self {
+        Self {
+            runtime_param_count: 0,
+        }
+    }
+
+    pub fn alloc_runtime_param(&mut self) -> usize {
+        let param = self.runtime_param_count;
+        self.runtime_param_count += 1;
+        param
+    }
+
+    pub fn runtime_param_count(&self) -> usize {
+        self.runtime_param_count
+    }
+}
+
+impl Default for NormalizationContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub trait NormalizationRule {
     /// Returns true when the plan tree is modified.
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError>;
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        ctx: &mut NormalizationContext,
+    ) -> Result<bool, DatabaseError>;
 }
 
 fn compare_costs(candidate_cost: Option<usize>, best_cost: Option<usize>) -> Ordering {

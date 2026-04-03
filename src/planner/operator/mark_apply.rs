@@ -16,6 +16,7 @@ use super::Operator;
 use crate::catalog::ColumnRef;
 use crate::expression::ScalarExpression;
 use crate::planner::{Childrens, LogicalPlan};
+use crate::types::index::RuntimeParam;
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::fmt::Formatter;
@@ -27,10 +28,31 @@ pub enum MarkApplyKind {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
+pub struct ParameterizedMarkProbe {
+    param: RuntimeParam,
+    left_expr: ScalarExpression,
+}
+
+impl ParameterizedMarkProbe {
+    pub fn new(param: RuntimeParam, left_expr: ScalarExpression) -> Self {
+        Self { param, left_expr }
+    }
+
+    pub fn param(&self) -> RuntimeParam {
+        self.param
+    }
+
+    pub fn left_expr(&self) -> &ScalarExpression {
+        &self.left_expr
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct MarkApplyOperator {
     pub kind: MarkApplyKind,
     predicates: Vec<ScalarExpression>,
     output_column: ColumnRef,
+    parameterized_probe: Option<ParameterizedMarkProbe>,
 }
 
 impl MarkApplyOperator {
@@ -39,6 +61,7 @@ impl MarkApplyOperator {
             kind: MarkApplyKind::Exists,
             predicates,
             output_column,
+            parameterized_probe: None,
         }
     }
 
@@ -62,6 +85,7 @@ impl MarkApplyOperator {
             kind: MarkApplyKind::In,
             predicates,
             output_column,
+            parameterized_probe: None,
         }
     }
 
@@ -90,6 +114,14 @@ impl MarkApplyOperator {
 
     pub fn output_column(&self) -> &ColumnRef {
         &self.output_column
+    }
+
+    pub fn parameterized_probe(&self) -> Option<&ParameterizedMarkProbe> {
+        self.parameterized_probe.as_ref()
+    }
+
+    pub fn set_parameterized_probe(&mut self, probe: Option<ParameterizedMarkProbe>) {
+        self.parameterized_probe = probe;
     }
 }
 

@@ -868,7 +868,7 @@ mod test {
             .columns()
             .map(|column| column.datatype().serializable())
             .collect_vec();
-        let mut iter = IndexIter {
+        let mut iter: IndexIter<'_, _, Vec<Range>> = IndexIter {
             offset: 0,
             limit: None,
             params: IndexImplParams {

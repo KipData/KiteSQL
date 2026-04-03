@@ -17,7 +17,7 @@ use crate::errors::DatabaseError;
 use crate::expression::range_detacher::{Range, RangeDetacher};
 use crate::expression::visitor_mut::{PositionShift, VisitorMut};
 use crate::expression::{BinaryOperator, ScalarExpression};
-use crate::optimizer::core::rule::NormalizationRule;
+use crate::optimizer::core::rule::{NormalizationContext, NormalizationRule};
 use crate::optimizer::plan_utils::{
     left_child, replace_with_only_child, right_child, wrap_child_with,
 };
@@ -25,7 +25,7 @@ use crate::planner::operator::filter::FilterOperator;
 use crate::planner::operator::join::{JoinCondition, JoinType};
 use crate::planner::operator::{Operator, SortOption};
 use crate::planner::{Childrens, LogicalPlan, SchemaOutput};
-use crate::types::index::{IndexInfo, IndexMetaRef, IndexType};
+use crate::types::index::{IndexInfo, IndexLookup, IndexMetaRef, IndexType};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use itertools::Itertools;
@@ -84,7 +84,11 @@ fn plan_output_columns(plan: &LogicalPlan) -> Vec<ColumnRef> {
 pub struct PushPredicateThroughJoin;
 
 impl NormalizationRule for PushPredicateThroughJoin {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        _ctx: &mut NormalizationContext,
+    ) -> Result<bool, DatabaseError> {
         let mut applied = false;
 
         let parent_replacement = {
@@ -197,7 +201,11 @@ impl NormalizationRule for PushPredicateThroughJoin {
 pub struct PushPredicateIntoScan;
 
 impl NormalizationRule for PushPredicateIntoScan {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        _ctx: &mut NormalizationContext,
+    ) -> Result<bool, DatabaseError> {
         let LogicalPlan {
             operator,
             childrens,
@@ -218,7 +226,7 @@ impl NormalizationRule for PushPredicateIntoScan {
         let mut changed = false;
         for IndexInfo {
             meta,
-            range,
+            lookup,
             covered_deserializers,
             cover_mapping,
             sort_option,
@@ -226,7 +234,7 @@ impl NormalizationRule for PushPredicateIntoScan {
             stream_distinct_hint: _,
         } in &mut scan_op.index_infos
         {
-            if range.is_some() {
+            if lookup.is_some() {
                 continue;
             }
             let SortOption::OrderBy {
@@ -235,18 +243,20 @@ impl NormalizationRule for PushPredicateIntoScan {
             else {
                 return Err(DatabaseError::InvalidIndex);
             };
-            *range = match meta.ty {
+            *lookup = match meta.ty {
                 IndexType::PrimaryKey { is_multiple: false }
                 | IndexType::Unique
                 | IndexType::Normal => {
                     RangeDetacher::new(meta.table_name.as_ref(), &meta.column_ids[0])
                         .detach(&filter_op.predicate)?
+                        .map(IndexLookup::Static)
                 }
                 IndexType::PrimaryKey { is_multiple: true } | IndexType::Composite => {
                     Self::composite_range(filter_op, meta, ignore_prefix_len)?
+                        .map(IndexLookup::Static)
                 }
             };
-            if range.is_none() {
+            if lookup.is_none() {
                 continue;
             }
             changed = true;
@@ -351,7 +361,11 @@ impl PushPredicateIntoScan {
 pub struct PushJoinPredicateIntoScan;
 
 impl NormalizationRule for PushJoinPredicateIntoScan {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        _ctx: &mut NormalizationContext,
+    ) -> Result<bool, DatabaseError> {
         let (join_type, filter_expr) = {
             let Operator::Join(join_op) = &mut plan.operator else {
                 return Ok(false);
@@ -476,7 +490,7 @@ mod tests {
     use crate::planner::operator::{Operator, SortOption};
     use crate::planner::{Childrens, LogicalPlan};
     use crate::storage::rocksdb::RocksTransaction;
-    use crate::types::index::{IndexInfo, IndexMeta, IndexType};
+    use crate::types::index::{IndexInfo, IndexLookup, IndexMeta, IndexType};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::collections::{BTreeMap, Bound};
@@ -521,7 +535,10 @@ mod tests {
                 max: Bound::Unbounded,
             };
 
-            assert_eq!(op.index_infos[0].range, Some(mock_range));
+            assert_eq!(
+                op.index_infos[0].lookup,
+                Some(IndexLookup::Static(mock_range))
+            );
         } else {
             unreachable!("Should be a filter operator")
         }
@@ -599,7 +616,7 @@ mod tests {
                             fields: vec![],
                             ignore_prefix_len: 0,
                         },
-                        range: None,
+                        lookup: None,
                         covered_deserializers: None,
                         cover_mapping: None,
                         sort_elimination_hint: None,
@@ -611,7 +628,7 @@ mod tests {
                             fields: vec![],
                             ignore_prefix_len: 0,
                         },
-                        range: None,
+                        lookup: None,
                         covered_deserializers: None,
                         cover_mapping: None,
                         sort_elimination_hint: None,
