@@ -57,10 +57,10 @@ impl<'a> HepOptimizer<'a> {
         }
     }
 
-    pub fn optimize<T: Transaction>(
-        &mut self,
+    pub fn find_best<T: Transaction>(
+        mut self,
         loader: Option<&StatisticMetaLoader<'_, T>>,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<LogicalPlan, DatabaseError> {
         Self::apply_batches(&mut self.plan, self.before_batches)?;
 
         if let Some(loader) = loader {
@@ -78,19 +78,6 @@ impl<'a> HepOptimizer<'a> {
         }
         Self::apply_batches(&mut self.plan, self.after_batches)?;
 
-        Ok(())
-    }
-
-    pub fn into_plan(self) -> LogicalPlan {
-        self.plan
-    }
-
-    #[allow(dead_code)]
-    pub fn find_best<T: Transaction>(
-        mut self,
-        loader: Option<&StatisticMetaLoader<'_, T>>,
-    ) -> Result<LogicalPlan, DatabaseError> {
-        self.optimize(loader)?;
         Ok(self.plan)
     }
 

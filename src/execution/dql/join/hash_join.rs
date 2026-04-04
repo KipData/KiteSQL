@@ -19,32 +19,30 @@ use crate::execution::dql::join::hash::inner_join::InnerJoinState;
 use crate::execution::dql::join::hash::left_join::LeftJoinState;
 use crate::execution::dql::join::hash::right_join::RightJoinState;
 use crate::execution::dql::join::hash::{
-    FilterArgs, JoinProbeState, JoinProbeStateImpl, LeftDropState, ProbeState,
+    JoinProbeState, JoinProbeStateImpl, LeftDropState, ProbeState,
 };
 use crate::execution::dql::join::joins_nullable;
 use crate::execution::dql::sort::BumpVec;
 use crate::execution::{
-    build_read, take_plan, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
-use crate::types::tuple::{SchemaRef, Tuple};
+use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use ahash::{HashMap, HashMapExt};
 use bumpalo::Bump;
 use fixedbitset::FixedBitSet;
 use std::mem::transmute;
-use std::sync::Arc;
 
 pub struct HashJoin {
     state: HashJoinState,
     ty: JoinType,
     on_left_keys: Vec<ScalarExpression>,
     on_right_keys: Vec<ScalarExpression>,
-    full_schema: SchemaRef,
-    filter: Option<FilterArgs>,
+    filter: Option<ScalarExpression>,
     left_schema_len: usize,
     right_schema_len: usize,
     left_input_plan: LogicalPlan,
@@ -113,11 +111,7 @@ impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for HashJoin {
             ty: join_type,
             on_left_keys,
             on_right_keys,
-            full_schema: Arc::new(full_schema_ref.clone()),
-            filter: filter_expr.map(|filter_expr| FilterArgs {
-                full_schema: Arc::new(full_schema_ref),
-                filter_expr,
-            }),
+            filter: filter_expr,
             left_schema_len,
             right_schema_len,
             left_input_plan: left_input,
@@ -159,12 +153,11 @@ impl HashJoin {
     fn eval_keys(
         on_keys: &[ScalarExpression],
         tuple: &Tuple,
-        schema: &[ColumnRef],
         build_buf: &mut BumpVec<'_, DataValue>,
     ) -> Result<(), DatabaseError> {
         build_buf.clear();
         for expr in on_keys {
-            build_buf.push(expr.eval(Some((tuple, schema)))?);
+            build_buf.push(expr.eval(Some(tuple))?);
         }
         Ok(())
     }
@@ -187,12 +180,7 @@ impl HashJoin {
 
         while arena.next_tuple(self.left_input)? {
             let tuple = arena.result_tuple().clone();
-            Self::eval_keys(
-                &self.on_left_keys,
-                &tuple,
-                &self.full_schema[0..self.left_schema_len],
-                &mut build_buf,
-            )?;
+            Self::eval_keys(&self.on_left_keys, &tuple, &mut build_buf)?;
 
             match build_map.get_mut(&build_buf) {
                 None => {
@@ -264,18 +252,8 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        self.left_input = build_read(
-            arena,
-            take_plan(&mut self.left_input_plan),
-            cache,
-            transaction,
-        );
-        self.right_input = build_read(
-            arena,
-            take_plan(&mut self.right_input_plan),
-            cache,
-            transaction,
-        );
+        self.left_input = build_read(arena, self.left_input_plan.take(), cache, transaction);
+        self.right_input = build_read(arena, self.right_input_plan.take(), cache, transaction);
         arena.push(ExecNode::HashJoin(self))
     }
 }
@@ -324,12 +302,7 @@ impl HashJoin {
                                 break true;
                             }
                             let tuple = arena.result_tuple().clone();
-                            Self::eval_keys(
-                                &self.on_right_keys,
-                                &tuple,
-                                &self.full_schema[self.left_schema_len..],
-                                &mut probe_buf,
-                            )?;
+                            Self::eval_keys(&self.on_right_keys, &tuple, &mut probe_buf)?;
                             probe_state = Some(ProbeState {
                                 is_keys_has_null: probe_buf.iter().any(DataValue::is_null),
                                 probe_tuple: tuple,

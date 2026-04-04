@@ -568,13 +568,6 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowViews {
     }
 }
 
-pub(crate) fn take_plan(plan: &mut LogicalPlan) -> LogicalPlan {
-    std::mem::replace(
-        plan,
-        LogicalPlan::new(Operator::Dummy, crate::planner::Childrens::None),
-    )
-}
-
 pub(crate) fn build_read<'a, T: Transaction + 'a>(
     arena: &mut ExecArena<'a, T>,
     plan: LogicalPlan,

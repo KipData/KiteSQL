@@ -18,10 +18,8 @@ use crate::expression::ScalarExpression;
 use crate::planner::operator::filter::FilterOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
-use crate::types::tuple::SchemaRef;
 pub struct Filter {
     predicate: ScalarExpression,
-    input_schema: SchemaRef,
     input: ExecId,
 }
 
@@ -29,18 +27,13 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Filter {
     type Input = (FilterOperator, LogicalPlan);
 
     fn into_executor(
-        (FilterOperator { predicate, .. }, mut input): Self::Input,
+        (FilterOperator { predicate, .. }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        let input_schema = input.output_schema().clone();
         let input = build_read(arena, input, cache, transaction);
-        arena.push(ExecNode::Filter(Filter {
-            predicate,
-            input_schema,
-            input,
-        }))
+        arena.push(ExecNode::Filter(Filter { predicate, input }))
     }
 
     fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
@@ -50,11 +43,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Filter {
                 return Ok(());
             };
             let tuple = arena.result_tuple();
-            if self
-                .predicate
-                .eval(Some((tuple, &self.input_schema)))?
-                .is_true()?
-            {
+            if self.predicate.eval(Some(tuple))?.is_true()? {
                 arena.resume();
                 return Ok(());
             }

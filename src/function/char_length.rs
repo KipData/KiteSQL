@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::function::scala::FuncMonotonicity;
 use crate::expression::function::scala::ScalarFunctionImpl;
@@ -49,7 +48,7 @@ impl ScalarFunctionImpl for CharLength {
     fn eval(
         &self,
         exprs: &[ScalarExpression],
-        tuples: Option<(&dyn TupleLike, &[ColumnRef])>,
+        tuples: Option<&dyn TupleLike>,
     ) -> Result<DataValue, DatabaseError> {
         let mut value = exprs[0].eval(tuples)?;
         if !matches!(value.logical_type(), LogicalType::Varchar(_, _)) {

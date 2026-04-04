@@ -19,12 +19,10 @@ use crate::expression::ScalarExpression;
 use crate::planner::operator::project::ProjectOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
-use crate::types::tuple::SchemaRef;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 pub struct Projection {
     exprs: Vec<ScalarExpression>,
-    input_schema: SchemaRef,
     input: ExecId,
     scratch: Tuple,
 }
@@ -33,16 +31,14 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection {
     type Input = (ProjectOperator, LogicalPlan);
 
     fn into_executor(
-        (ProjectOperator { exprs }, mut input): Self::Input,
+        (ProjectOperator { exprs }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        let input_schema = input.output_schema().clone();
         let input = build_read(arena, input, cache, transaction);
         arena.push(ExecNode::Projection(Projection {
             exprs,
-            input_schema,
             input,
             scratch: Tuple::default(),
         }))
@@ -61,9 +57,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection {
         output.values.clear();
         output.values.reserve(self.exprs.len());
         for expr in self.exprs.iter() {
-            output
-                .values
-                .push(expr.eval(Some((tuple, &self.input_schema)))?);
+            output.values.push(expr.eval(Some(tuple))?);
         }
         arena.resume();
         Ok(())
@@ -74,12 +68,12 @@ impl Projection {
     pub fn projection(
         tuple: &Tuple,
         exprs: &[ScalarExpression],
-        schema: &[ColumnRef],
+        _schema: &[ColumnRef],
     ) -> Result<Vec<DataValue>, DatabaseError> {
         let mut values = Vec::with_capacity(exprs.len());
 
         for expr in exprs.iter() {
-            values.push(expr.eval(Some((tuple, schema)))?);
+            values.push(expr.eval(Some(tuple))?);
         }
         Ok(values)
     }

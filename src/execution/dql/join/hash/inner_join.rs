@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::dql::join::hash::{filter, FilterArgs, JoinProbeState, ProbeState};
+use crate::execution::dql::join::hash::{filter, JoinProbeState, ProbeState};
 use crate::execution::dql::join::hash_join::BuildState;
+use crate::expression::ScalarExpression;
 use crate::types::tuple::{SplitTupleRef, Tuple};
 
 pub(crate) struct InnerJoinState;
@@ -24,7 +25,7 @@ impl JoinProbeState for InnerJoinState {
         &mut self,
         probe_state: &mut ProbeState,
         build_state: Option<&mut BuildState>,
-        filter_args: Option<&FilterArgs>,
+        filter_expr: Option<&ScalarExpression>,
     ) -> Result<Option<Tuple>, DatabaseError> {
         if probe_state.is_keys_has_null {
             probe_state.finished = true;
@@ -41,10 +42,10 @@ impl JoinProbeState for InnerJoinState {
             let (_, Tuple { values, pk }) = &build_state.tuples[probe_state.index];
             probe_state.index += 1;
 
-            if let Some(filter_args) = filter_args {
+            if let Some(filter_expr) = filter_expr {
                 let full_values =
                     SplitTupleRef::from_slices(values, &probe_state.probe_tuple.values);
-                if !filter(&full_values, filter_args)? {
+                if !filter(&full_values, filter_expr)? {
                     continue;
                 }
             }

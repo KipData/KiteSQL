@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::function::scala::FuncMonotonicity;
 use crate::expression::function::scala::ScalarFunctionImpl;
@@ -51,7 +50,7 @@ impl ScalarFunctionImpl for CurrentDate {
     fn eval(
         &self,
         _: &[ScalarExpression],
-        _: Option<(&dyn TupleLike, &[ColumnRef])>,
+        _: Option<&dyn TupleLike>,
     ) -> Result<DataValue, DatabaseError> {
         Ok(DataValue::Date32(Local::now().num_days_from_ce()))
     }

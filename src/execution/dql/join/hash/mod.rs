@@ -25,14 +25,9 @@ use crate::execution::dql::join::hash::right_join::RightJoinState;
 use crate::execution::dql::join::hash_join::BuildState;
 use crate::execution::dql::sort::BumpVec;
 use crate::expression::ScalarExpression;
-use crate::types::tuple::{SchemaRef, Tuple, TupleLike};
+use crate::types::tuple::{Tuple, TupleLike};
 use crate::types::value::DataValue;
 use std::collections::hash_map::IntoIter as HashMapIntoIter;
-
-pub(crate) struct FilterArgs {
-    pub(crate) full_schema: SchemaRef,
-    pub(crate) filter_expr: ScalarExpression,
-}
 
 pub(crate) struct ProbeState {
     pub(crate) is_keys_has_null: bool,
@@ -59,13 +54,13 @@ pub(crate) trait JoinProbeState {
         &mut self,
         probe_state: &mut ProbeState,
         build_state: Option<&mut BuildState>,
-        filter_args: Option<&FilterArgs>,
+        filter_expr: Option<&ScalarExpression>,
     ) -> Result<Option<Tuple>, DatabaseError>;
 
     fn left_drop_next(
         &mut self,
         _left_drop_state: &mut LeftDropState,
-        _filter_args: Option<&FilterArgs>,
+        _filter_expr: Option<&ScalarExpression>,
     ) -> Result<Option<Tuple>, DatabaseError> {
         Ok(None)
     }
@@ -83,20 +78,20 @@ impl JoinProbeState for JoinProbeStateImpl {
         &mut self,
         probe_state: &mut ProbeState,
         build_state: Option<&mut BuildState>,
-        filter_args: Option<&FilterArgs>,
+        filter_expr: Option<&ScalarExpression>,
     ) -> Result<Option<Tuple>, DatabaseError> {
         match self {
             JoinProbeStateImpl::Inner(state) => {
-                state.probe_next(probe_state, build_state, filter_args)
+                state.probe_next(probe_state, build_state, filter_expr)
             }
             JoinProbeStateImpl::Left(state) => {
-                state.probe_next(probe_state, build_state, filter_args)
+                state.probe_next(probe_state, build_state, filter_expr)
             }
             JoinProbeStateImpl::Right(state) => {
-                state.probe_next(probe_state, build_state, filter_args)
+                state.probe_next(probe_state, build_state, filter_expr)
             }
             JoinProbeStateImpl::Full(state) => {
-                state.probe_next(probe_state, build_state, filter_args)
+                state.probe_next(probe_state, build_state, filter_expr)
             }
         }
     }
@@ -104,28 +99,22 @@ impl JoinProbeState for JoinProbeStateImpl {
     fn left_drop_next(
         &mut self,
         left_drop_state: &mut LeftDropState,
-        filter_args: Option<&FilterArgs>,
+        filter_expr: Option<&ScalarExpression>,
     ) -> Result<Option<Tuple>, DatabaseError> {
         match self {
-            JoinProbeStateImpl::Inner(state) => state.left_drop_next(left_drop_state, filter_args),
-            JoinProbeStateImpl::Left(state) => state.left_drop_next(left_drop_state, filter_args),
-            JoinProbeStateImpl::Right(state) => state.left_drop_next(left_drop_state, filter_args),
-            JoinProbeStateImpl::Full(state) => state.left_drop_next(left_drop_state, filter_args),
+            JoinProbeStateImpl::Inner(state) => state.left_drop_next(left_drop_state, filter_expr),
+            JoinProbeStateImpl::Left(state) => state.left_drop_next(left_drop_state, filter_expr),
+            JoinProbeStateImpl::Right(state) => state.left_drop_next(left_drop_state, filter_expr),
+            JoinProbeStateImpl::Full(state) => state.left_drop_next(left_drop_state, filter_expr),
         }
     }
 }
 
 pub(crate) fn filter<T: TupleLike>(
     values: &T,
-    filter_arg: &FilterArgs,
+    filter_expr: &ScalarExpression,
 ) -> Result<bool, DatabaseError> {
-    let FilterArgs {
-        full_schema,
-        filter_expr,
-        ..
-    } = filter_arg;
-
-    match &filter_expr.eval(Some((values as &dyn TupleLike, full_schema)))? {
+    match &filter_expr.eval(Some(values as &dyn TupleLike))? {
         DataValue::Boolean(false) | DataValue::Null => Ok(false),
         DataValue::Boolean(true) => Ok(true),
         _ => Err(DatabaseError::InvalidType),

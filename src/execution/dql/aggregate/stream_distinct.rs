@@ -18,13 +18,12 @@ use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
-use crate::types::tuple::{SchemaRef, Tuple};
+use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use itertools::Itertools;
 
 pub struct StreamDistinctExecutor {
     groupby_exprs: Vec<ScalarExpression>,
-    input_schema: SchemaRef,
     input: ExecId,
     last_keys: Option<Vec<DataValue>>,
     scratch: Tuple,
@@ -34,16 +33,14 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor {
     type Input = (AggregateOperator, LogicalPlan);
 
     fn into_executor(
-        (op, mut input): Self::Input,
+        (op, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        let input_schema = input.output_schema().clone();
         let input = build_read(arena, input, cache, transaction);
         arena.push(ExecNode::StreamDistinct(StreamDistinctExecutor {
             groupby_exprs: op.groupby_exprs,
-            input_schema,
             input,
             last_keys: None,
             scratch: Tuple::default(),
@@ -61,7 +58,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor {
             let group_keys = self
                 .groupby_exprs
                 .iter()
-                .map(|expr| expr.eval(Some((tuple, &self.input_schema))))
+                .map(|expr| expr.eval(Some(tuple)))
                 .try_collect()?;
 
             if self.last_keys.as_ref() != Some(&group_keys) {

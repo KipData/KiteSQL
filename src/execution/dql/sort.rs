@@ -18,7 +18,7 @@ use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::LogicalPlan;
 use crate::storage::table_codec::BumpBytes;
 use crate::storage::Transaction;
-use crate::types::tuple::{Schema, SchemaRef, Tuple};
+use crate::types::tuple::Tuple;
 use bumpalo::Bump;
 use std::cmp::Ordering;
 use std::mem::{transmute, MaybeUninit};
@@ -176,7 +176,6 @@ impl SortBy {
     pub(crate) fn sorted_tuples<'a>(
         &self,
         arena: &'a Bump,
-        schema: &Schema,
         sort_fields: &[SortField],
         mut tuples: NullableVec<'a, (usize, Tuple)>,
     ) -> Result<Box<dyn Iterator<Item = Tuple> + 'a>, DatabaseError> {
@@ -195,7 +194,7 @@ impl SortBy {
                     {
                         let mut key = BumpBytes::new_in(arena);
 
-                        expr.eval(Some((tuple, schema)))?
+                        expr.eval(Some(tuple))?
                             .memcomparable_encode_with_null_order(&mut key, *nulls_first)?;
 
                         if !asc && key.len() > 1 {
@@ -228,7 +227,7 @@ impl SortBy {
 
                 for (x, SortField { expr, .. }) in sort_fields.iter().enumerate() {
                     for (_, tuple) in tuples.iter() {
-                        eval_values[x].push(expr.eval(Some((tuple, schema)))?);
+                        eval_values[x].push(expr.eval(Some(tuple))?);
                     }
                 }
 
@@ -279,7 +278,6 @@ pub struct Sort {
     arena: Box<Bump>,
     sort_fields: Vec<SortField>,
     limit: Option<usize>,
-    input_schema: SchemaRef,
     input: ExecId,
 }
 
@@ -287,19 +285,17 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort {
     type Input = (SortOperator, LogicalPlan);
 
     fn into_executor(
-        (SortOperator { sort_fields, limit }, mut input): Self::Input,
+        (SortOperator { sort_fields, limit }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        let input_schema = input.output_schema().clone();
         let input = build_read(arena, input, cache, transaction);
         arena.push(ExecNode::Sort(Sort {
             output: None,
             arena: Box::<Bump>::default(),
             sort_fields,
             limit,
-            input_schema,
             input,
         }))
     }
@@ -319,12 +315,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort {
                 SortBy::Fast
             };
             let limit = self.limit.unwrap_or(tuples.len());
-            let rows = sort_by.sorted_tuples(
-                &self.arena,
-                &self.input_schema,
-                &self.sort_fields,
-                tuples,
-            )?;
+            let rows = sort_by.sorted_tuples(&self.arena, &self.sort_fields, tuples)?;
             let rows: Box<dyn Iterator<Item = Tuple> + '_> = Box::new(rows.take(limit));
             // The arena lives at a stable boxed address, so we can keep the old iterator shape
             // and resume it across executor polls.
@@ -394,7 +385,7 @@ mod test {
                 nulls_first,
             }]
         };
-        let schema = Arc::new(vec![ColumnRef::from(ColumnCatalog::new(
+        let _schema = Arc::new(vec![ColumnRef::from(ColumnCatalog::new(
             "c1".to_string(),
             true,
             ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
@@ -481,25 +472,21 @@ mod test {
         // RadixSort
         fn_asc_and_nulls_first_eq(SortBy::Radix.sorted_tuples(
             &arena,
-            &schema,
             &fn_sort_fields(true, true),
             fn_tuples(),
         )?);
         fn_asc_and_nulls_last_eq(SortBy::Radix.sorted_tuples(
             &arena,
-            &schema,
             &fn_sort_fields(true, false),
             fn_tuples(),
         )?);
         fn_desc_and_nulls_first_eq(SortBy::Radix.sorted_tuples(
             &arena,
-            &schema,
             &fn_sort_fields(false, true),
             fn_tuples(),
         )?);
         fn_desc_and_nulls_last_eq(SortBy::Radix.sorted_tuples(
             &arena,
-            &schema,
             &fn_sort_fields(false, false),
             fn_tuples(),
         )?);
@@ -507,25 +494,21 @@ mod test {
         // FastSort
         fn_asc_and_nulls_first_eq(SortBy::Fast.sorted_tuples(
             &arena,
-            &schema,
             &fn_sort_fields(true, true),
             fn_tuples(),
         )?);
         fn_asc_and_nulls_last_eq(SortBy::Fast.sorted_tuples(
             &arena,
-            &schema,
             &fn_sort_fields(true, false),
             fn_tuples(),
         )?);
         fn_desc_and_nulls_first_eq(SortBy::Fast.sorted_tuples(
             &arena,
-            &schema,
             &fn_sort_fields(false, true),
             fn_tuples(),
         )?);
         fn_desc_and_nulls_last_eq(SortBy::Fast.sorted_tuples(
             &arena,
-            &schema,
             &fn_sort_fields(false, false),
             fn_tuples(),
         )?);
@@ -566,7 +549,7 @@ mod test {
                 },
             ]
         };
-        let schema = Arc::new(vec![
+        let _schema = Arc::new(vec![
             ColumnRef::from(ColumnCatalog::new(
                 "c1".to_string(),
                 true,
@@ -744,25 +727,21 @@ mod test {
         // RadixSort
         fn_asc_1_and_nulls_first_1_and_asc_2_and_nulls_first_2_eq(SortBy::Radix.sorted_tuples(
             &arena,
-            &schema,
             &fn_sort_fields(true, true, true, true),
             fn_tuples(),
         )?);
         fn_asc_1_and_nulls_last_1_and_asc_2_and_nulls_first_2_eq(SortBy::Radix.sorted_tuples(
             &arena,
-            &schema,
             &fn_sort_fields(true, false, true, true),
             fn_tuples(),
         )?);
         fn_desc_1_and_nulls_first_1_and_asc_2_and_nulls_first_2_eq(SortBy::Radix.sorted_tuples(
             &arena,
-            &schema,
             &fn_sort_fields(false, true, true, true),
             fn_tuples(),
         )?);
         fn_desc_1_and_nulls_last_1_and_asc_2_and_nulls_first_2_eq(SortBy::Radix.sorted_tuples(
             &arena,
-            &schema,
             &fn_sort_fields(false, false, true, true),
             fn_tuples(),
         )?);
@@ -770,25 +749,21 @@ mod test {
         // FastSort
         fn_asc_1_and_nulls_first_1_and_asc_2_and_nulls_first_2_eq(SortBy::Fast.sorted_tuples(
             &arena,
-            &schema,
             &fn_sort_fields(true, true, true, true),
             fn_tuples(),
         )?);
         fn_asc_1_and_nulls_last_1_and_asc_2_and_nulls_first_2_eq(SortBy::Fast.sorted_tuples(
             &arena,
-            &schema,
             &fn_sort_fields(true, false, true, true),
             fn_tuples(),
         )?);
         fn_desc_1_and_nulls_first_1_and_asc_2_and_nulls_first_2_eq(SortBy::Fast.sorted_tuples(
             &arena,
-            &schema,
             &fn_sort_fields(false, true, true, true),
             fn_tuples(),
         )?);
         fn_desc_1_and_nulls_last_1_and_asc_2_and_nulls_first_2_eq(SortBy::Fast.sorted_tuples(
             &arena,
-            &schema,
             &fn_sort_fields(false, false, true, true),
             fn_tuples(),
         )?);

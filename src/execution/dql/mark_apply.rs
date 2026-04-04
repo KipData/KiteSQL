@@ -18,10 +18,9 @@ use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyOperator};
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::index::RuntimeIndexProbe;
-use crate::types::tuple::{Schema, SchemaRef, SplitTupleRef, Tuple};
+use crate::types::tuple::{SplitTupleRef, Tuple};
 use crate::types::value::DataValue;
 use std::mem;
-use std::sync::Arc;
 
 #[derive(PartialEq, Eq)]
 enum InPredicateOutcome {
@@ -34,8 +33,6 @@ pub struct MarkApply {
     op: MarkApplyOperator,
     right_input_plan: LogicalPlan,
     left_input: ExecId,
-    left_schema: SchemaRef,
-    predicate_schema: SchemaRef,
     left_tuple: Tuple,
 }
 
@@ -43,26 +40,16 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply {
     type Input = (MarkApplyOperator, LogicalPlan, LogicalPlan);
 
     fn into_executor(
-        (op, mut left_input, mut right_input): Self::Input,
+        (op, left_input, right_input): Self::Input,
         arena: &mut ExecArena<'a, T>,
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        let left_schema = left_input.output_schema().clone();
-        let predicate_schema = Arc::new(
-            left_schema
-                .iter()
-                .chain(right_input.output_schema().iter())
-                .cloned()
-                .collect::<Schema>(),
-        );
         let left_input = build_read(arena, left_input, cache, transaction);
         arena.push(ExecNode::MarkApply(Self {
             op,
             right_input_plan: right_input,
             left_input,
-            left_schema,
-            predicate_schema,
             left_tuple: Tuple::default(),
         }))
     }
@@ -131,7 +118,7 @@ impl MarkApply {
     fn parameterized_probe_value(&self) -> Result<Option<DataValue>, DatabaseError> {
         self.op
             .parameterized_probe()
-            .map(|probe| probe.eval(Some((&self.left_tuple, self.left_schema.as_ref()))))
+            .map(|probe| probe.eval(Some(&self.left_tuple)))
             .transpose()
     }
 
@@ -229,7 +216,7 @@ impl MarkApply {
         let values = SplitTupleRef::new(left_tuple, right_tuple);
 
         for predicate in self.op.predicates() {
-            match predicate.eval(Some((values, self.predicate_schema.as_ref())))? {
+            match predicate.eval(Some(values))? {
                 DataValue::Boolean(true) => {}
                 DataValue::Boolean(false) | DataValue::Null => return Ok(false),
                 _ => return Err(DatabaseError::InvalidType),
@@ -266,16 +253,14 @@ impl MarkApply {
             .ok_or(DatabaseError::InvalidType)?;
 
         for predicate in correlated_predicates {
-            match predicate.eval(Some((values, self.predicate_schema.as_ref())))? {
+            match predicate.eval(Some(values))? {
                 DataValue::Boolean(true) => {}
                 DataValue::Boolean(false) | DataValue::Null => return Ok(None),
                 _ => return Err(DatabaseError::InvalidType),
             }
         }
 
-        Ok(Some(
-            probe_predicate.eval(Some((values, self.predicate_schema.as_ref())))?,
-        ))
+        Ok(Some(probe_predicate.eval(Some(values))?))
     }
 }
 
@@ -493,14 +478,6 @@ mod tests {
         );
         op.set_parameterized_probe(Some(ScalarExpression::column_expr(left_value_column, 0)));
 
-        let left_schema = left.output_schema().clone();
-        let predicate_schema = Arc::new(
-            left_schema
-                .iter()
-                .chain(right.output_schema().iter())
-                .cloned()
-                .collect::<crate::types::tuple::Schema>(),
-        );
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let mut transaction = storage.transaction()?;
         let mut arena = ExecArena::default();
@@ -510,8 +487,6 @@ mod tests {
             op,
             right_input_plan: right,
             left_input: 0,
-            left_schema,
-            predicate_schema,
             left_tuple: Tuple::new(None, vec![DataValue::Int32(2), DataValue::Int32(1)]),
         };
 
@@ -538,14 +513,6 @@ mod tests {
         let mut op = MarkApplyOperator::new_in(build_marker_column(), vec![predicate]);
         op.set_parameterized_probe(Some(ScalarExpression::column_expr(left_value_column, 0)));
 
-        let left_schema = left.output_schema().clone();
-        let predicate_schema = Arc::new(
-            left_schema
-                .iter()
-                .chain(right.output_schema().iter())
-                .cloned()
-                .collect::<crate::types::tuple::Schema>(),
-        );
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let mut transaction = storage.transaction()?;
         let mut arena = ExecArena::default();
@@ -555,8 +522,6 @@ mod tests {
             op,
             right_input_plan: right,
             left_input: 0,
-            left_schema,
-            predicate_schema,
             left_tuple: Tuple::new(None, vec![DataValue::Int32(2)]),
         };
 
@@ -583,14 +548,6 @@ mod tests {
         let mut op = MarkApplyOperator::new_in(build_marker_column(), vec![predicate]);
         op.set_parameterized_probe(Some(ScalarExpression::column_expr(left_value_column, 0)));
 
-        let left_schema = left.output_schema().clone();
-        let predicate_schema = Arc::new(
-            left_schema
-                .iter()
-                .chain(right.output_schema().iter())
-                .cloned()
-                .collect::<crate::types::tuple::Schema>(),
-        );
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let mut transaction = storage.transaction()?;
         let mut arena = ExecArena::default();
@@ -600,8 +557,6 @@ mod tests {
             op,
             right_input_plan: right,
             left_input: 0,
-            left_schema,
-            predicate_schema,
             left_tuple: Tuple::new(None, vec![DataValue::Null]),
         };
 

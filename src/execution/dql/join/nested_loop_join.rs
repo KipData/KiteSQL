@@ -15,12 +15,10 @@
 //! Defines the nested loop join executor, it supports [`JoinType::Inner`], [`JoinType::LeftOuter`],
 //! [`JoinType::RightOuter`], [`JoinType::Cross`], [`JoinType::Full`].
 
-use super::joins_nullable;
-use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
 use crate::execution::{
-    build_read, take_plan, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
@@ -89,7 +87,6 @@ impl EqualCondition {
 pub struct NestedLoopJoin {
     left_input_plan: LogicalPlan,
     right_input_plan: LogicalPlan,
-    output_schema_ref: SchemaRef,
     ty: JoinType,
     filter: Option<ScalarExpression>,
     eq_cond: EqualCondition,
@@ -137,7 +134,6 @@ impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for NestedLoopJoin {
         let (mut left_input, mut right_input) = (left_input, right_input);
         let mut left_schema = left_input.output_schema().clone();
         let mut right_schema = right_input.output_schema().clone();
-        let output_schema_ref = Self::merge_schema(&left_schema, &right_schema, join_type);
 
         if matches!(join_type, JoinType::RightOuter) {
             std::mem::swap(&mut left_input, &mut right_input);
@@ -155,7 +151,6 @@ impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for NestedLoopJoin {
         NestedLoopJoin {
             left_input_plan: left_input,
             right_input_plan: right_input,
-            output_schema_ref,
             ty: join_type,
             filter,
             eq_cond,
@@ -172,12 +167,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        self.left_input = build_read(
-            arena,
-            take_plan(&mut self.left_input_plan),
-            cache,
-            transaction,
-        );
+        self.left_input = build_read(arena, self.left_input_plan.take(), cache, transaction);
         arena.push(ExecNode::NestedLoopJoin(self))
     }
 }
@@ -282,7 +272,7 @@ impl NestedLoopJoin {
                                 } else {
                                     SplitTupleRef::new(&active_left.left_tuple, &right_tuple)
                                 };
-                                let value = filter.eval(Some((values, &self.output_schema_ref)))?;
+                                let value = filter.eval(Some(values))?;
                                 match &value {
                                     DataValue::Boolean(true) => {
                                         let tuple = match self.ty {
@@ -453,37 +443,12 @@ impl NestedLoopJoin {
             values,
         ))
     }
-
-    fn merge_schema(
-        left_schema: &[ColumnRef],
-        right_schema: &[ColumnRef],
-        ty: JoinType,
-    ) -> Arc<Vec<ColumnRef>> {
-        let (left_force_nullable, right_force_nullable) = joins_nullable(&ty);
-
-        let mut join_schema = vec![];
-        for column in left_schema.iter() {
-            join_schema.push(
-                column
-                    .nullable_for_join(left_force_nullable)
-                    .unwrap_or_else(|| column.clone()),
-            );
-        }
-        for column in right_schema.iter() {
-            join_schema.push(
-                column
-                    .nullable_for_join(right_force_nullable)
-                    .unwrap_or_else(|| column.clone()),
-            );
-        }
-        Arc::new(join_schema)
-    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
-    use crate::catalog::{ColumnCatalog, ColumnDesc};
+    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
     use crate::db::DataBaseBuilder;
     use crate::execution::dql::test::build_integers;
     use crate::execution::try_collect;

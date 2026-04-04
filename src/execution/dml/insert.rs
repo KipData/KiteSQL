@@ -15,9 +15,7 @@
 use crate::catalog::{ColumnCatalog, TableName};
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
-use crate::execution::{
-    build_read, take_plan, ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor,
-};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
 use crate::planner::operator::insert::InsertOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
@@ -86,7 +84,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert {
     ) -> ExecId {
         self.input = Some(build_read(
             arena,
-            take_plan(&mut self.input_plan),
+            self.input_plan.take(),
             cache,
             transaction,
         ));

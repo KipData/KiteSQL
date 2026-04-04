@@ -14,9 +14,7 @@
 
 use crate::binder::copy::FileFormat;
 use crate::errors::DatabaseError;
-use crate::execution::{
-    build_read, take_plan, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor,
-};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
 use crate::planner::operator::copy_to_file::CopyToFileOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
@@ -47,7 +45,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for CopyToFile {
     ) -> ExecId {
         self.input = Some(build_read(
             arena,
-            take_plan(&mut self.input_plan),
+            self.input_plan.take(),
             cache,
             transaction,
         ));

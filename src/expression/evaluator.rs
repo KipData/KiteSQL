@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::function::scala::ScalarFunction;
 use crate::expression::{AliasType, BinaryOperator, ScalarExpression};
@@ -36,10 +35,7 @@ macro_rules! eval_to_num {
 }
 
 impl ScalarExpression {
-    pub fn eval<T: TupleLike + Copy>(
-        &self,
-        tuple: Option<(T, &[ColumnRef])>,
-    ) -> Result<DataValue, DatabaseError> {
+    pub fn eval<T: TupleLike + Copy>(&self, tuple: Option<T>) -> Result<DataValue, DatabaseError> {
         let check_cast = |value: DataValue, return_type: &LogicalType| {
             if value.logical_type() != *return_type {
                 return value.cast(return_type);
@@ -50,24 +46,22 @@ impl ScalarExpression {
         match self {
             ScalarExpression::Constant(val) => Ok(val.clone()),
             ScalarExpression::ColumnRef { position, .. } => {
-                let Some((tuple, _)) = tuple else {
+                let Some(tuple) = tuple else {
                     return Ok(DataValue::Null);
                 };
                 Ok(tuple.value_at(*position).clone())
             }
             ScalarExpression::Alias { expr, alias } => {
-                let Some((tuple, schema)) = tuple else {
+                let Some(tuple) = tuple else {
                     return Ok(DataValue::Null);
                 };
                 if let AliasType::Expr(inner_expr) = alias {
-                    match inner_expr.eval(Some((tuple, schema))) {
-                        Err(DatabaseError::UnbindExpressionPosition(_)) => {
-                            expr.eval(Some((tuple, schema)))
-                        }
+                    match inner_expr.eval(Some(tuple)) {
+                        Err(DatabaseError::UnbindExpressionPosition(_)) => expr.eval(Some(tuple)),
                         res => res,
                     }
                 } else {
-                    expr.eval(Some((tuple, schema)))
+                    expr.eval(Some(tuple))
                 }
             }
             ScalarExpression::TypeCast { expr, ty, .. } => Ok(expr.eval(tuple)?.cast(ty)?),
@@ -269,12 +263,10 @@ impl ScalarExpression {
                 Ok(DataValue::Tuple(values, false))
             }
             ScalarExpression::ScalaFunction(ScalarFunction { inner, args, .. }) => {
-                let value = inner.eval(
-                    args,
-                    tuple
-                        .as_ref()
-                        .map(|(tuple, schema)| (tuple as &dyn TupleLike, *schema)),
-                )?;
+                let value = match tuple {
+                    Some(tuple) => inner.eval(args, Some(&tuple as &dyn TupleLike))?,
+                    None => inner.eval(args, None)?,
+                };
                 value.cast(inner.return_type())
             }
             ScalarExpression::Empty => unreachable!(),

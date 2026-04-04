@@ -19,7 +19,6 @@ use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
-use crate::types::tuple::SchemaRef;
 use crate::types::value::DataValue;
 use ahash::{HashMap, HashMapExt};
 use itertools::Itertools;
@@ -30,7 +29,6 @@ type HashAggOutput = HashMapIntoIter<Vec<DataValue>, Vec<Box<dyn Accumulator>>>;
 pub struct HashAggExecutor {
     agg_calls: Vec<ScalarExpression>,
     groupby_exprs: Vec<ScalarExpression>,
-    input_schema: SchemaRef,
     input: ExecId,
     output: Option<HashAggOutput>,
 }
@@ -45,18 +43,16 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
                 groupby_exprs,
                 ..
             },
-            mut input,
+            input,
         ): Self::Input,
         arena: &mut ExecArena<'a, T>,
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        let input_schema = input.output_schema().clone();
         let input = build_read(arena, input, cache, transaction);
         arena.push(ExecNode::HashAgg(HashAggExecutor {
             agg_calls,
             groupby_exprs,
-            input_schema,
             input,
             output: None,
         }))
@@ -72,7 +68,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
                 let group_keys = self
                     .groupby_exprs
                     .iter()
-                    .map(|expr| expr.eval(Some((tuple, &self.input_schema))))
+                    .map(|expr| expr.eval(Some(tuple)))
                     .try_collect()?;
 
                 let entry = match group_hash_accs.entry(group_keys) {
@@ -90,7 +86,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
                                 .to_string(),
                         ));
                     }
-                    let value = args[0].eval(Some((tuple, &self.input_schema)))?;
+                    let value = args[0].eval(Some(tuple))?;
                     acc.update_value(&value)?;
                 }
             }

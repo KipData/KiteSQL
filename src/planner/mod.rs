@@ -124,6 +124,10 @@ impl LogicalPlan {
         }
     }
 
+    pub(crate) fn take(&mut self) -> Self {
+        std::mem::replace(self, Self::new(Operator::Dummy, Childrens::None))
+    }
+
     pub(crate) fn reset_output_schema_cache(&mut self) {
         self._output_schema_ref = None;
     }

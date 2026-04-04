@@ -15,9 +15,7 @@
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
-use crate::execution::{
-    build_read, take_plan, ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor,
-};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::delete::DeleteOperator;
 use crate::planner::LogicalPlan;
@@ -55,7 +53,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Delete {
     ) -> ExecId {
         self.input = Some(build_read(
             arena,
-            take_plan(&mut self.input_plan),
+            self.input_plan.take(),
             cache,
             transaction,
         ));

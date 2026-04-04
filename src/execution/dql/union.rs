@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, take_plan, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor,
 };
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
@@ -45,8 +45,8 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Union {
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        self.left_input = build_read(arena, take_plan(&mut self.left_plan), cache, transaction);
-        self.right_input = build_read(arena, take_plan(&mut self.right_plan), cache, transaction);
+        self.left_input = build_read(arena, self.left_plan.take(), cache, transaction);
+        self.right_input = build_read(arena, self.right_plan.take(), cache, transaction);
         arena.push(ExecNode::Union(self))
     }
 }

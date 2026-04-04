@@ -489,9 +489,10 @@ impl<S: Storage> State<S> {
         ///     Limit(1)
         ///       Project(a,b)
         let source_plan = binder.bind(stmt)?;
-        let mut optimizer = self.optimizer_pipeline.instantiate(source_plan);
-        optimizer.optimize(Some(&transaction.meta_loader(self.meta_cache())))?;
-        let mut best_plan = optimizer.into_plan();
+        let mut best_plan = self
+            .optimizer_pipeline
+            .instantiate(source_plan)
+            .find_best(Some(&transaction.meta_loader(self.meta_cache())))?;
 
         if let Operator::Analyze(op) = &mut best_plan.operator {
             if op.histogram_buckets.is_none() {

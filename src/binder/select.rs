@@ -268,34 +268,6 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         Ok(())
     }
 
-    fn globalize_mark_predicate(
-        predicate: &mut ScalarExpression,
-        output_column: &ColumnRef,
-        left_len: usize,
-    ) -> Result<(), DatabaseError> {
-        MarkerPositionGlobalizer {
-            output_column,
-            left_len,
-        }
-        .visit(predicate)
-    }
-
-    fn globalize_right_side_exprs<'expr>(
-        exprs: impl Iterator<Item = &'expr mut ScalarExpression>,
-        left_len: usize,
-        right_schema: &Schema,
-    ) -> Result<(), DatabaseError> {
-        for expr in exprs {
-            RightSidePositionGlobalizer {
-                right_schema,
-                left_len,
-            }
-            .visit(expr)?;
-        }
-
-        Ok(())
-    }
-
     fn localize_appended_right_outputs<'expr>(
         exprs: impl Iterator<Item = &'expr mut ScalarExpression>,
         appended_outputs: &[AppendedRightOutput],
@@ -1314,12 +1286,91 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         let mut predicate = self.bind_expr(predicate)?;
 
         if let Some(sub_queries) = self.context.sub_queries_at_now() {
-            if sub_queries.iter().all(|sub_query| {
-                matches!(
-                    sub_query,
-                    SubQueryType::ExistsSubQuery { .. } | SubQueryType::InSubQuery { .. }
-                )
-            }) {
+            let mut uses_mark_apply = None;
+            for sub_query in sub_queries {
+                match sub_query {
+                    SubQueryType::ExistsSubQuery {
+                        plan,
+                        correlated,
+                        output_column,
+                    } => {
+                        if matches!(uses_mark_apply, Some(false)) {
+                            return Err(DatabaseError::UnsupportedStmt(
+                                "mixed EXISTS/IN with other WHERE subqueries is not supported yet"
+                                    .to_string(),
+                            ));
+                        }
+                        uses_mark_apply = Some(true);
+                        let (plan, predicates) = Self::prepare_mark_apply(
+                            &mut predicate,
+                            &output_column,
+                            children.output_schema(),
+                            plan,
+                            correlated,
+                            false,
+                            Vec::new(),
+                        )?;
+                        children = MarkApplyOperator::build_exists(
+                            children,
+                            plan,
+                            output_column,
+                            predicates,
+                        );
+                    }
+                    SubQueryType::InSubQuery {
+                        plan,
+                        correlated,
+                        output_column,
+                        predicate: mut in_predicate,
+                        ..
+                    } => {
+                        if matches!(uses_mark_apply, Some(false)) {
+                            return Err(DatabaseError::UnsupportedStmt(
+                                "mixed EXISTS/IN with other WHERE subqueries is not supported yet"
+                                    .to_string(),
+                            ));
+                        }
+                        uses_mark_apply = Some(true);
+                        if correlated {
+                            in_predicate = Self::rewrite_correlated_in_predicate(in_predicate);
+                        }
+                        let (plan, predicates) = Self::prepare_mark_apply(
+                            &mut predicate,
+                            &output_column,
+                            children.output_schema(),
+                            plan,
+                            correlated,
+                            true,
+                            vec![in_predicate],
+                        )?;
+                        children =
+                            MarkApplyOperator::build_in(children, plan, output_column, predicates);
+                    }
+                    SubQueryType::SubQuery { plan, correlated } => {
+                        if matches!(uses_mark_apply, Some(true)) {
+                            return Err(DatabaseError::UnsupportedStmt(
+                                "mixed EXISTS/IN with other WHERE subqueries is not supported yet"
+                                    .to_string(),
+                            ));
+                        }
+                        uses_mark_apply = Some(false);
+                        if correlated {
+                            return Err(DatabaseError::UnsupportedStmt(
+                                "correlated scalar subqueries in WHERE are not supported"
+                                    .to_string(),
+                            ));
+                        }
+                        children = Self::build_join_from_split_scope_predicates(
+                            children,
+                            plan,
+                            JoinType::Inner,
+                            std::iter::once(predicate.clone()),
+                            true,
+                        )?;
+                    }
+                }
+            }
+            if matches!(uses_mark_apply, Some(true)) {
                 let passthrough_exprs = children
                     .output_schema()
                     .iter()
@@ -1327,58 +1378,6 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     .enumerate()
                     .map(|(position, column)| ScalarExpression::column_expr(column, position))
                     .collect();
-                for sub_query in sub_queries {
-                    match sub_query {
-                        SubQueryType::ExistsSubQuery {
-                            plan,
-                            correlated,
-                            output_column,
-                        } => {
-                            let (plan, predicates) = Self::prepare_mark_apply(
-                                &mut predicate,
-                                &output_column,
-                                children.output_schema(),
-                                plan,
-                                correlated,
-                                false,
-                                Vec::new(),
-                            )?;
-                            children = MarkApplyOperator::build_exists(
-                                children,
-                                plan,
-                                output_column,
-                                predicates,
-                            );
-                        }
-                        SubQueryType::InSubQuery {
-                            plan,
-                            correlated,
-                            output_column,
-                            predicate: mut in_predicate,
-                            ..
-                        } => {
-                            if correlated {
-                                in_predicate = Self::rewrite_correlated_in_predicate(in_predicate);
-                            }
-                            let (plan, predicates) = Self::prepare_mark_apply(
-                                &mut predicate,
-                                &output_column,
-                                children.output_schema(),
-                                plan,
-                                correlated,
-                                true,
-                                vec![in_predicate],
-                            )?;
-                            children = MarkApplyOperator::build_in(
-                                children,
-                                plan,
-                                output_column,
-                                predicates,
-                            );
-                        }
-                        SubQueryType::SubQuery { .. } => unreachable!(),
-                    }
-                }
                 let filter = FilterOperator::build(predicate, children, false);
                 return Ok(LogicalPlan::new(
                     Operator::Project(ProjectOperator {
@@ -1386,40 +1385,6 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     }),
                     Childrens::Only(Box::new(filter)),
                 ));
-            }
-            if sub_queries.iter().any(|sub_query| {
-                matches!(
-                    sub_query,
-                    SubQueryType::ExistsSubQuery { .. } | SubQueryType::InSubQuery { .. }
-                )
-            }) {
-                return Err(DatabaseError::UnsupportedStmt(
-                    "mixed EXISTS/IN with other WHERE subqueries is not supported yet".to_string(),
-                ));
-            }
-            for sub_query in sub_queries {
-                let (plan, join_ty) = match sub_query {
-                    SubQueryType::SubQuery { plan, correlated } => {
-                        if correlated {
-                            return Err(DatabaseError::UnsupportedStmt(
-                                "correlated scalar subqueries in WHERE are not supported"
-                                    .to_string(),
-                            ));
-                        }
-                        (plan, JoinType::Inner)
-                    }
-                    SubQueryType::ExistsSubQuery { .. } | SubQueryType::InSubQuery { .. } => {
-                        unreachable!()
-                    }
-                };
-
-                children = Self::build_join_from_split_scope_predicates(
-                    children,
-                    plan,
-                    join_ty,
-                    std::iter::once(predicate.clone()),
-                    true,
-                )?;
             }
             return Ok(children);
         }
@@ -1483,16 +1448,19 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         mut apply_predicates: Vec<ScalarExpression>,
     ) -> Result<(LogicalPlan, Vec<ScalarExpression>), DatabaseError> {
         let left_len = left_schema.len();
-        Self::globalize_mark_predicate(predicate, output_column, left_len)?;
+        MarkerPositionGlobalizer {
+            output_column,
+            left_len,
+        }
+        .visit(predicate)?;
 
-        let (plan, correlated_filters) = if correlated {
+        let (mut plan, correlated_filters) = if correlated {
             Self::prepare_correlated_subquery_plan(plan, left_schema, preserve_projection)?
         } else {
             (plan, Vec::new())
         };
         apply_predicates.extend(correlated_filters);
 
-        let mut plan = plan;
         if correlated {
             let appended_right_outputs =
                 Self::ensure_mark_apply_right_outputs(&mut plan, &apply_predicates);
@@ -1504,11 +1472,13 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             }
         }
         let right_schema = plan.output_schema().clone();
-        Self::globalize_right_side_exprs(
-            apply_predicates.iter_mut(),
-            left_len,
-            right_schema.as_ref(),
-        )?;
+        for expr in apply_predicates.iter_mut() {
+            RightSidePositionGlobalizer {
+                right_schema: right_schema.as_ref(),
+                left_len,
+            }
+            .visit(expr)?;
+        }
 
         Ok((plan, apply_predicates))
     }

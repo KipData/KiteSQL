@@ -19,10 +19,8 @@ use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
-use crate::types::tuple::SchemaRef;
 pub struct SimpleAggExecutor {
     agg_calls: Vec<ScalarExpression>,
-    input_schema: SchemaRef,
     input: ExecId,
     returned: bool,
 }
@@ -31,16 +29,14 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor {
     type Input = (AggregateOperator, LogicalPlan);
 
     fn into_executor(
-        (AggregateOperator { agg_calls, .. }, mut input): Self::Input,
+        (AggregateOperator { agg_calls, .. }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        let input_schema = input.output_schema().clone();
         let input = build_read(arena, input, cache, transaction);
         arena.push(ExecNode::SimpleAgg(SimpleAggExecutor {
             agg_calls,
-            input_schema,
             input,
             returned: false,
         }))
@@ -67,7 +63,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor {
                     ));
                 }
 
-                let value = args[0].eval(Some((tuple, &self.input_schema)))?;
+                let value = args[0].eval(Some(tuple))?;
                 acc.update_value(&value)?;
             }
         }

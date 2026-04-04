@@ -15,9 +15,7 @@
 use crate::catalog::{ColumnRef, TableName};
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
-use crate::execution::{
-    build_read, take_plan, ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor,
-};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::update::UpdateOperator;
 use crate::planner::LogicalPlan;
@@ -67,7 +65,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Update {
     ) -> ExecId {
         self.input = Some(build_read(
             arena,
-            take_plan(&mut self.input_plan),
+            self.input_plan.take(),
             cache,
             transaction,
         ));
@@ -125,7 +123,7 @@ impl Update {
                 }
                 for (i, column) in self.input_schema.iter().enumerate() {
                     if let Some(expr) = exprs_map.get(&column.id()) {
-                        let value = expr.eval(Some((&tuple, &self.input_schema)))?;
+                        let value = expr.eval(Some(&tuple))?;
                         tuple.values[i] = value;
                     }
                 }
