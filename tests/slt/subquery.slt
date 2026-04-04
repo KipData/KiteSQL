@@ -280,7 +280,7 @@ where exists (
     select 1 from orders where orders.user_id = users.id
 );
 ----
-Projection [users.id] [Project => (Sort Option: Follow)] Filter _temp_table_0_.true, Is Having: false [Filter => (Sort Option: Follow)] MarkExistsApply TableScan users -> [id] [SeqScan => (Sort Option: None)] TableScan orders -> [user_id] [IndexScan By orders_user_id_index => Probe $0 => (Sort Option: OrderBy: (orders.user_id Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [users.id] [Project => (Sort Option: Follow)] Filter _temp_table_0_.true, Is Having: false [Filter => (Sort Option: Follow)] MarkExistsApply TableScan users -> [id] [SeqScan => (Sort Option: None)] TableScan orders -> [user_id] [IndexScan By orders_user_id_index => Probe ? => (Sort Option: OrderBy: (orders.user_id Asc Nulls Last) ignore_prefix_len: 0)]
 
 query I rowsort
 select id from users
