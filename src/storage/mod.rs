@@ -1670,10 +1670,6 @@ impl IndexRanges {
 
         range
     }
-
-    pub(crate) fn reset(&mut self) {
-        self.next_idx = 0;
-    }
 }
 
 impl From<Vec<Range>> for IndexRanges {
@@ -1908,31 +1904,6 @@ mod test {
             )),
         );
         columns
-    }
-
-    #[test]
-    fn test_index_ranges_next_and_reset() {
-        let mut ranges = super::IndexRanges::from(vec![
-            Range::Eq(DataValue::Int32(1)),
-            Range::Eq(DataValue::Int32(2)),
-        ]);
-
-        assert!(matches!(
-            ranges.next(),
-            Some(range) if *range == Range::Eq(DataValue::Int32(1))
-        ));
-        assert!(matches!(
-            ranges.next(),
-            Some(range) if *range == Range::Eq(DataValue::Int32(2))
-        ));
-        assert!(ranges.next().is_none());
-
-        ranges.reset();
-
-        assert!(matches!(
-            ranges.next(),
-            Some(range) if *range == Range::Eq(DataValue::Int32(1))
-        ));
     }
 
     fn build_tuples() -> Vec<Tuple> {
