@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
-use crate::optimizer::core::rule::{NormalizationContext, NormalizationRule};
+use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child};
 use crate::planner::operator::limit::LimitOperator;
 use crate::planner::operator::sort::SortField;
@@ -25,11 +25,7 @@ use crate::planner::{Childrens, LogicalPlan};
 pub struct EliminateRedundantSort;
 
 impl NormalizationRule for EliminateRedundantSort {
-    fn apply(
-        &self,
-        plan: &mut LogicalPlan,
-        _ctx: &mut NormalizationContext,
-    ) -> Result<bool, DatabaseError> {
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
         let (sort_fields, topk_limit) = match &plan.operator {
             Operator::Sort(sort_op) => (sort_op.sort_fields.clone(), None),
             Operator::TopK(topk_op) => (
@@ -189,11 +185,7 @@ pub(crate) fn distinct_sort_fields(groupby_exprs: &[ScalarExpression]) -> Vec<So
 pub struct UseStreamDistinct;
 
 impl NormalizationRule for UseStreamDistinct {
-    fn apply(
-        &self,
-        plan: &mut LogicalPlan,
-        _ctx: &mut NormalizationContext,
-    ) -> Result<bool, DatabaseError> {
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
         let Operator::Aggregate(op) = &plan.operator else {
             return Ok(false);
         };
@@ -227,17 +219,14 @@ impl NormalizationRule for UseStreamDistinct {
     }
 }
 
-pub(crate) fn apply_annotated_post_rules(
-    plan: &mut LogicalPlan,
-    ctx: &mut NormalizationContext,
-) -> Result<bool, DatabaseError> {
+pub(crate) fn apply_annotated_post_rules(plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
     let mut changed = false;
 
-    if EliminateRedundantSort.apply(plan, ctx)? {
+    if EliminateRedundantSort.apply(plan)? {
         plan.reset_output_schema_cache_recursive();
         changed = true;
     }
-    if UseStreamDistinct.apply(plan, ctx)? {
+    if UseStreamDistinct.apply(plan)? {
         changed = true;
     }
 
@@ -351,7 +340,7 @@ mod tests {
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
     use crate::expression::ScalarExpression;
-    use crate::optimizer::core::rule::{NormalizationContext, NormalizationRule};
+    use crate::optimizer::core::rule::NormalizationRule;
     use crate::planner::operator::aggregate::AggregateOperator;
     use crate::planner::operator::filter::FilterOperator;
     use crate::planner::operator::sort::{SortField, SortOperator};
@@ -505,7 +494,7 @@ mod tests {
         let mut plan = build_plan(vec![sort_field.clone()], vec![sort_field], 0);
         let rule = EliminateRedundantSort;
 
-        assert!(rule.apply(&mut plan, &mut NormalizationContext::new())?);
+        assert!(rule.apply(&mut plan)?);
         assert!(matches!(plan.operator, Operator::Filter(_)));
         Ok(())
     }
@@ -521,7 +510,7 @@ mod tests {
         });
         let rule = EliminateRedundantSort;
 
-        assert!(rule.apply(&mut plan, &mut NormalizationContext::new())?);
+        assert!(rule.apply(&mut plan)?);
         match plan.operator {
             Operator::Limit(limit_op) => {
                 assert_eq!(limit_op.limit, Some(10));
@@ -540,7 +529,7 @@ mod tests {
         super::mark_sort_preserving_indexes(&mut plan, &[c2]);
         let rule = EliminateRedundantSort;
 
-        assert!(rule.apply(&mut plan, &mut NormalizationContext::new())?);
+        assert!(rule.apply(&mut plan)?);
         Ok(())
     }
 
@@ -564,7 +553,7 @@ mod tests {
         });
 
         let rule = EliminateRedundantSort;
-        assert!(rule.apply(&mut plan, &mut NormalizationContext::new())?);
+        assert!(rule.apply(&mut plan)?);
         assert!(matches!(plan.operator, Operator::Limit(_)));
         Ok(())
     }
@@ -661,7 +650,7 @@ mod tests {
         ));
 
         let rule = UseStreamDistinct;
-        assert!(rule.apply(&mut plan, &mut NormalizationContext::new())?);
+        assert!(rule.apply(&mut plan)?);
         assert!(matches!(
             plan.physical_option,
             Some(PhysicalOption {
@@ -680,7 +669,7 @@ mod tests {
         super::mark_sort_preserving_indexes(&mut plan, &[c2]);
         let rule = EliminateRedundantSort;
 
-        assert!(!rule.apply(&mut plan, &mut NormalizationContext::new())?);
+        assert!(!rule.apply(&mut plan)?);
         assert!(matches!(plan.operator, Operator::Sort(_)));
         Ok(())
     }
@@ -745,7 +734,7 @@ mod tests {
         };
         super::mark_sort_preserving_indexes(&mut plan, &sort_fields);
         let rule = EliminateRedundantSort;
-        assert!(rule.apply(&mut plan, &mut NormalizationContext::new())?);
+        assert!(rule.apply(&mut plan)?);
         assert!(matches!(plan.operator, Operator::Filter(_)));
 
         let table_plan = plan.childrens.pop_only();

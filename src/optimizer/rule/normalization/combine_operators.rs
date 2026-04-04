@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::expression::{AliasType, BinaryOperator, ScalarExpression};
-use crate::optimizer::core::rule::{NormalizationContext, NormalizationRule};
+use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child};
 use crate::optimizer::rule::normalization::{is_subset_exprs, strip_alias};
 use crate::planner::operator::filter::FilterOperator;
@@ -92,11 +92,7 @@ fn groupby_exprs_match(
 pub struct CollapseProject;
 
 impl NormalizationRule for CollapseProject {
-    fn apply(
-        &self,
-        plan: &mut LogicalPlan,
-        _ctx: &mut NormalizationContext,
-    ) -> Result<bool, DatabaseError> {
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
         let Operator::Project(parent_op) = &mut plan.operator else {
             return Ok(false);
         };
@@ -129,11 +125,7 @@ impl NormalizationRule for CollapseProject {
 pub struct CombineFilter;
 
 impl NormalizationRule for CombineFilter {
-    fn apply(
-        &self,
-        plan: &mut LogicalPlan,
-        _ctx: &mut NormalizationContext,
-    ) -> Result<bool, DatabaseError> {
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
         let parent_filter = match mem::replace(&mut plan.operator, Operator::Dummy) {
             Operator::Filter(op) => op,
             operator => {
@@ -193,11 +185,7 @@ impl NormalizationRule for CombineFilter {
 pub struct CollapseGroupByAgg;
 
 impl NormalizationRule for CollapseGroupByAgg {
-    fn apply(
-        &self,
-        plan: &mut LogicalPlan,
-        _ctx: &mut NormalizationContext,
-    ) -> Result<bool, DatabaseError> {
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
         let can_collapse = {
             let LogicalPlan {
                 operator,
@@ -234,7 +222,7 @@ mod tests {
     use crate::catalog::{ColumnCatalog, ColumnRef};
     use crate::errors::DatabaseError;
     use crate::expression::{BinaryOperator, ScalarExpression};
-    use crate::optimizer::core::rule::{NormalizationContext, NormalizationRule};
+    use crate::optimizer::core::rule::NormalizationRule;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
     use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::normalization::combine_operators::{
@@ -340,7 +328,7 @@ mod tests {
             Childrens::Only(Box::new(child)),
         );
 
-        assert!(CollapseProject.apply(&mut plan, &mut NormalizationContext::new())?);
+        assert!(CollapseProject.apply(&mut plan)?);
 
         let Operator::Project(op) = &plan.operator else {
             unreachable!("expected project");
@@ -426,7 +414,7 @@ mod tests {
         );
         let mut plan = AggregateOperator::build(child, vec![], vec![column_expr("c2", 0)], true);
 
-        assert!(CollapseGroupByAgg.apply(&mut plan, &mut NormalizationContext::new())?);
+        assert!(CollapseGroupByAgg.apply(&mut plan)?);
         let Operator::Aggregate(op) = &plan.operator else {
             unreachable!("expected aggregate");
         };

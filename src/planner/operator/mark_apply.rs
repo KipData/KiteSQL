@@ -16,7 +16,6 @@ use super::Operator;
 use crate::catalog::ColumnRef;
 use crate::expression::ScalarExpression;
 use crate::planner::{Childrens, LogicalPlan};
-use crate::types::index::RuntimeParam;
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::fmt::Formatter;
@@ -28,31 +27,11 @@ pub enum MarkApplyKind {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
-pub struct ParameterizedMarkProbe {
-    param: RuntimeParam,
-    left_expr: ScalarExpression,
-}
-
-impl ParameterizedMarkProbe {
-    pub fn new(param: RuntimeParam, left_expr: ScalarExpression) -> Self {
-        Self { param, left_expr }
-    }
-
-    pub fn param(&self) -> RuntimeParam {
-        self.param
-    }
-
-    pub fn left_expr(&self) -> &ScalarExpression {
-        &self.left_expr
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct MarkApplyOperator {
     pub kind: MarkApplyKind,
     predicates: Vec<ScalarExpression>,
     output_column: ColumnRef,
-    parameterized_probe: Option<ParameterizedMarkProbe>,
+    parameterized_probe: Option<ScalarExpression>,
 }
 
 impl MarkApplyOperator {
@@ -116,11 +95,11 @@ impl MarkApplyOperator {
         &self.output_column
     }
 
-    pub fn parameterized_probe(&self) -> Option<&ParameterizedMarkProbe> {
+    pub fn parameterized_probe(&self) -> Option<&ScalarExpression> {
         self.parameterized_probe.as_ref()
     }
 
-    pub fn set_parameterized_probe(&mut self, probe: Option<ParameterizedMarkProbe>) {
+    pub fn set_parameterized_probe(&mut self, probe: Option<ScalarExpression>) {
         self.parameterized_probe = probe;
     }
 }

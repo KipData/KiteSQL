@@ -84,41 +84,54 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply {
 }
 
 impl MarkApply {
-    fn build_right_input<'a, T: Transaction + 'a>(
+    fn runtime_probe_for(&self, param_value: Option<DataValue>) -> Option<RuntimeIndexProbe> {
+        self.op.parameterized_probe()?;
+
+        match param_value {
+            Some(value) => Some(RuntimeIndexProbe::Eq(value)),
+            None if matches!(self.op.kind, MarkApplyKind::In) => Some(RuntimeIndexProbe::Scope {
+                min: std::collections::Bound::Unbounded,
+                max: std::collections::Bound::Unbounded,
+            }),
+            None => None,
+        }
+    }
+
+    fn with_right_input<'a, T: Transaction + 'a, R>(
         &self,
         arena: &mut ExecArena<'a, T>,
         param_value: Option<DataValue>,
-    ) -> ExecId {
-        if let Some(probe) = self.op.parameterized_probe() {
-            let runtime_probe = match param_value {
-                Some(value) => Some(RuntimeIndexProbe::Eq(value)),
-                None if matches!(self.op.kind, MarkApplyKind::In) => {
-                    Some(RuntimeIndexProbe::Scope {
-                        min: std::collections::Bound::Unbounded,
-                        max: std::collections::Bound::Unbounded,
-                    })
-                }
-                None => None,
-            };
-            if let Some(runtime_probe) = runtime_probe {
-                arena.set_runtime_param(probe.param(), runtime_probe);
-            }
+        f: impl FnOnce(&mut ExecArena<'a, T>, ExecId) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        let runtime_probe = self.runtime_probe_for(param_value);
+        let depth_before = arena.runtime_probe_depth();
+        if let Some(runtime_probe) = runtime_probe {
+            arena.push_runtime_probe(runtime_probe);
         }
 
         let cache = (arena.table_cache(), arena.view_cache(), arena.meta_cache());
         let transaction = arena.transaction_mut() as *mut T;
-        // Fixme: Executor reset
-        build_read(arena, self.right_input_plan.clone(), cache, transaction)
+        let result = {
+            let right_input = build_read(arena, self.right_input_plan.clone(), cache, transaction);
+            f(arena, right_input)
+        };
+
+        let depth_after = arena.runtime_probe_depth();
+        debug_assert!(
+            depth_after == depth_before || depth_after == depth_before + 1,
+            "parameterized right input should consume at most one runtime probe"
+        );
+        if depth_after > depth_before {
+            let _ = arena.pop_runtime_probe();
+        }
+
+        result
     }
 
     fn parameterized_probe_value(&self) -> Result<Option<DataValue>, DatabaseError> {
         self.op
             .parameterized_probe()
-            .map(|probe| {
-                probe
-                    .left_expr()
-                    .eval(Some((&self.left_tuple, self.left_schema.as_ref())))
-            })
+            .map(|probe| probe.eval(Some((&self.left_tuple, self.left_schema.as_ref()))))
             .transpose()
     }
 
@@ -127,62 +140,83 @@ impl MarkApply {
         arena: &mut ExecArena<'a, T>,
     ) -> Result<DataValue, DatabaseError> {
         match self.op.kind {
-            MarkApplyKind::Exists => {
-                let right_input = self.build_right_input(arena, self.parameterized_probe_value()?);
-
-                while arena.next_tuple(right_input)? {
-                    let right_tuple = arena.result_tuple();
-                    if self.exists_predicate_matched(&self.left_tuple, right_tuple)? {
-                        return Ok(DataValue::Boolean(true));
+            MarkApplyKind::Exists => self.with_right_input(
+                arena,
+                self.parameterized_probe_value()?,
+                |arena, right_input| {
+                    while arena.next_tuple(right_input)? {
+                        let right_tuple = arena.result_tuple();
+                        if self.exists_predicate_matched(&self.left_tuple, right_tuple)? {
+                            return Ok(DataValue::Boolean(true));
+                        }
                     }
-                }
 
-                Ok(DataValue::Boolean(false))
-            }
+                    Ok(DataValue::Boolean(false))
+                },
+            ),
             MarkApplyKind::In => {
                 if let Some(probe_value) = self.parameterized_probe_value()? {
                     if !probe_value.is_null() {
-                        let right_input = self.build_right_input(arena, Some(probe_value));
-                        while arena.next_tuple(right_input)? {
-                            let right_tuple = arena.result_tuple();
-                            if self.in_predicate_outcome(&self.left_tuple, right_tuple)?
-                                == InPredicateOutcome::Match
-                            {
-                                return Ok(DataValue::Boolean(true));
-                            }
+                        if self.with_right_input(
+                            arena,
+                            Some(probe_value),
+                            |arena, right_input| {
+                                while arena.next_tuple(right_input)? {
+                                    let right_tuple = arena.result_tuple();
+                                    if self.in_predicate_outcome(&self.left_tuple, right_tuple)?
+                                        == InPredicateOutcome::Match
+                                    {
+                                        return Ok(true);
+                                    }
+                                }
+
+                                Ok(false)
+                            },
+                        )? {
+                            return Ok(DataValue::Boolean(true));
                         }
 
-                        let right_input = self.build_right_input(arena, Some(DataValue::Null));
-                        while arena.next_tuple(right_input)? {
-                            let right_tuple = arena.result_tuple();
-                            if self.in_predicate_outcome(&self.left_tuple, right_tuple)?
-                                == InPredicateOutcome::Null
-                            {
-                                return Ok(DataValue::Null);
-                            }
+                        if self.with_right_input(
+                            arena,
+                            Some(DataValue::Null),
+                            |arena, right_input| {
+                                while arena.next_tuple(right_input)? {
+                                    let right_tuple = arena.result_tuple();
+                                    if self.in_predicate_outcome(&self.left_tuple, right_tuple)?
+                                        == InPredicateOutcome::Null
+                                    {
+                                        return Ok(true);
+                                    }
+                                }
+
+                                Ok(false)
+                            },
+                        )? {
+                            return Ok(DataValue::Null);
                         }
 
                         return Ok(DataValue::Boolean(false));
                     }
                 }
 
-                let right_input = self.build_right_input(arena, None);
-                let mut saw_null = false;
+                self.with_right_input(arena, None, |arena, right_input| {
+                    let mut saw_null = false;
 
-                while arena.next_tuple(right_input)? {
-                    let right_tuple = arena.result_tuple();
-                    match self.in_predicate_outcome(&self.left_tuple, right_tuple)? {
-                        InPredicateOutcome::Match => return Ok(DataValue::Boolean(true)),
-                        InPredicateOutcome::Null => saw_null = true,
-                        InPredicateOutcome::Continue => {}
+                    while arena.next_tuple(right_input)? {
+                        let right_tuple = arena.result_tuple();
+                        match self.in_predicate_outcome(&self.left_tuple, right_tuple)? {
+                            InPredicateOutcome::Match => return Ok(DataValue::Boolean(true)),
+                            InPredicateOutcome::Null => saw_null = true,
+                            InPredicateOutcome::Continue => {}
+                        }
                     }
-                }
 
-                if saw_null {
-                    Ok(DataValue::Null)
-                } else {
-                    Ok(DataValue::Boolean(false))
-                }
+                    if saw_null {
+                        Ok(DataValue::Null)
+                    } else {
+                        Ok(DataValue::Boolean(false))
+                    }
+                })
             }
         }
     }
@@ -251,7 +285,6 @@ mod tests {
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
     use crate::execution::{execute_input, try_collect, ExecArena};
     use crate::expression::{BinaryOperator, ScalarExpression};
-    use crate::planner::operator::mark_apply::ParameterizedMarkProbe;
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
     use crate::planner::{Childrens, LogicalPlan};
@@ -458,10 +491,7 @@ mod tests {
             build_marker_column(),
             vec![probe_predicate, flag_predicate],
         );
-        op.set_parameterized_probe(Some(ParameterizedMarkProbe::new(
-            0,
-            ScalarExpression::column_expr(left_value_column, 0),
-        )));
+        op.set_parameterized_probe(Some(ScalarExpression::column_expr(left_value_column, 0)));
 
         let left_schema = left.output_schema().clone();
         let predicate_schema = Arc::new(
@@ -475,7 +505,6 @@ mod tests {
         let mut transaction = storage.transaction()?;
         let mut arena = ExecArena::default();
         arena.init_context((&table_cache, &view_cache, &meta_cache), &mut transaction);
-        arena.init_runtime_params(1);
 
         let mut exec = MarkApply {
             op,
@@ -488,8 +517,8 @@ mod tests {
 
         assert_eq!(exec.mark_value(&mut arena)?, DataValue::Boolean(true));
         assert_eq!(
-            arena.runtime_param(0),
-            &RuntimeIndexProbe::Eq(DataValue::Int32(2))
+            exec.runtime_probe_for(Some(DataValue::Int32(2))),
+            Some(RuntimeIndexProbe::Eq(DataValue::Int32(2)))
         );
 
         Ok(())
@@ -507,10 +536,7 @@ mod tests {
         let predicate =
             build_equality_predicate(left_value_column.clone(), 0, right_value_column, 1)?;
         let mut op = MarkApplyOperator::new_in(build_marker_column(), vec![predicate]);
-        op.set_parameterized_probe(Some(ParameterizedMarkProbe::new(
-            0,
-            ScalarExpression::column_expr(left_value_column, 0),
-        )));
+        op.set_parameterized_probe(Some(ScalarExpression::column_expr(left_value_column, 0)));
 
         let left_schema = left.output_schema().clone();
         let predicate_schema = Arc::new(
@@ -524,7 +550,6 @@ mod tests {
         let mut transaction = storage.transaction()?;
         let mut arena = ExecArena::default();
         arena.init_context((&table_cache, &view_cache, &meta_cache), &mut transaction);
-        arena.init_runtime_params(1);
 
         let mut exec = MarkApply {
             op,
@@ -537,8 +562,8 @@ mod tests {
 
         assert_eq!(exec.mark_value(&mut arena)?, DataValue::Boolean(true));
         assert_eq!(
-            arena.runtime_param(0),
-            &RuntimeIndexProbe::Eq(DataValue::Int32(2))
+            exec.runtime_probe_for(Some(DataValue::Int32(2))),
+            Some(RuntimeIndexProbe::Eq(DataValue::Int32(2)))
         );
 
         Ok(())
@@ -556,10 +581,7 @@ mod tests {
         let predicate =
             build_equality_predicate(left_value_column.clone(), 0, right_value_column, 1)?;
         let mut op = MarkApplyOperator::new_in(build_marker_column(), vec![predicate]);
-        op.set_parameterized_probe(Some(ParameterizedMarkProbe::new(
-            0,
-            ScalarExpression::column_expr(left_value_column, 0),
-        )));
+        op.set_parameterized_probe(Some(ScalarExpression::column_expr(left_value_column, 0)));
 
         let left_schema = left.output_schema().clone();
         let predicate_schema = Arc::new(
@@ -573,7 +595,6 @@ mod tests {
         let mut transaction = storage.transaction()?;
         let mut arena = ExecArena::default();
         arena.init_context((&table_cache, &view_cache, &meta_cache), &mut transaction);
-        arena.init_runtime_params(1);
 
         let mut exec = MarkApply {
             op,
@@ -586,11 +607,11 @@ mod tests {
 
         assert_eq!(exec.mark_value(&mut arena)?, DataValue::Null);
         assert_eq!(
-            arena.runtime_param(0),
-            &RuntimeIndexProbe::Scope {
+            exec.runtime_probe_for(None),
+            Some(RuntimeIndexProbe::Scope {
                 min: std::collections::Bound::Unbounded,
                 max: std::collections::Bound::Unbounded,
-            }
+            })
         );
 
         Ok(())

@@ -63,7 +63,6 @@ use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::types::index::RuntimeIndexProbe;
 use crate::types::tuple::Tuple;
-use crate::types::value::DataValue;
 
 pub(crate) type ExecutionCaches<'a> = (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache);
 pub(crate) type ExecId = usize;
@@ -267,7 +266,7 @@ pub(crate) struct ExecArena<'a, T: Transaction + 'a> {
     result: ExecResult,
     cache: Option<ExecutionCaches<'a>>,
     transaction: *mut T,
-    runtime_params: Vec<RuntimeIndexProbe>,
+    runtime_probe_stack: Vec<RuntimeIndexProbe>,
 }
 
 impl<'a, T: Transaction + 'a> Default for ExecArena<'a, T> {
@@ -277,7 +276,7 @@ impl<'a, T: Transaction + 'a> Default for ExecArena<'a, T> {
             result: ExecResult::default(),
             cache: None,
             transaction: std::ptr::null_mut(),
-            runtime_params: Vec::new(),
+            runtime_probe_stack: Vec::new(),
         }
     }
 }
@@ -293,11 +292,6 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
             self.cache = Some(cache);
             self.transaction = transaction;
         }
-    }
-
-    pub(crate) fn init_runtime_params(&mut self, count: usize) {
-        debug_assert!(self.runtime_params.is_empty() || self.runtime_params.len() == count);
-        self.runtime_params = vec![RuntimeIndexProbe::Eq(DataValue::Null); count];
     }
 
     pub(crate) fn push(&mut self, node: ExecNode<'a, T>) -> ExecId {
@@ -326,18 +320,18 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
         unsafe { &mut *self.transaction }
     }
 
-    pub(crate) fn set_runtime_param(&mut self, param: usize, value: RuntimeIndexProbe) {
-        debug_assert!(param < self.runtime_params.len());
-        *self
-            .runtime_params
-            .get_mut(param)
-            .expect("runtime parameter slot initialized") = value;
+    pub(crate) fn push_runtime_probe(&mut self, value: RuntimeIndexProbe) {
+        self.runtime_probe_stack.push(value);
     }
 
-    pub(crate) fn runtime_param(&self, param: usize) -> &RuntimeIndexProbe {
-        self.runtime_params
-            .get(param)
-            .expect("runtime parameter initialized")
+    pub(crate) fn pop_runtime_probe(&mut self) -> RuntimeIndexProbe {
+        self.runtime_probe_stack
+            .pop()
+            .expect("runtime probe scope initialized")
+    }
+
+    pub(crate) fn runtime_probe_depth(&self) -> usize {
+        self.runtime_probe_stack.len()
     }
 
     #[inline]

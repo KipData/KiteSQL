@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::VisitorMut;
 use crate::expression::BindEvaluator;
-use crate::optimizer::core::rule::{NormalizationContext, NormalizationRule};
+use crate::optimizer::core::rule::NormalizationRule;
 use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
@@ -138,11 +138,7 @@ impl EvaluatorBind {
 }
 
 impl NormalizationRule for EvaluatorBind {
-    fn apply(
-        &self,
-        plan: &mut LogicalPlan,
-        _ctx: &mut NormalizationContext,
-    ) -> Result<bool, DatabaseError> {
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
         Self::_apply(plan)?;
         Ok(true)
     }

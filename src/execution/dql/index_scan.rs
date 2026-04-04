@@ -16,27 +16,9 @@ use crate::errors::DatabaseError;
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor};
 use crate::expression::range_detacher::Range;
 use crate::planner::operator::table_scan::TableScanOperator;
-use crate::storage::{IndexIter, Iter, Transaction};
+use crate::storage::{IndexIter, IndexRanges, Iter, Transaction};
 use crate::types::index::{IndexLookup, IndexMetaRef, RuntimeIndexProbe};
 use crate::types::serialize::TupleValueSerializableImpl;
-use std::array;
-use std::vec;
-
-enum IndexLookupRanges {
-    One(array::IntoIter<Range, 1>),
-    Many(vec::IntoIter<Range>),
-}
-
-impl Iterator for IndexLookupRanges {
-    type Item = Range;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            IndexLookupRanges::One(iter) => iter.next(),
-            IndexLookupRanges::Many(iter) => iter.next(),
-        }
-    }
-}
 
 pub(crate) struct IndexScan<'a, T: Transaction + 'a> {
     op: Option<TableScanOperator>,
@@ -44,7 +26,7 @@ pub(crate) struct IndexScan<'a, T: Transaction + 'a> {
     lookup: Option<IndexLookup>,
     covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
     cover_mapping: Option<Vec<usize>>,
-    iter: Option<IndexIter<'a, T, IndexLookupRanges>>,
+    iter: Option<IndexIter<'a, T>>,
 }
 
 impl<'a, T: Transaction + 'a>
@@ -111,23 +93,13 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for IndexScan<'a, T> {
 }
 
 impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
-    fn ranges_from_lookup(lookup: IndexLookup, arena: &ExecArena<'a, T>) -> IndexLookupRanges {
+    fn ranges_from_lookup(lookup: IndexLookup, arena: &mut ExecArena<'a, T>) -> IndexRanges {
         match lookup {
-            IndexLookup::Static(Range::SortedRanges(ranges)) => {
-                IndexLookupRanges::Many(ranges.into_iter())
-            }
-            IndexLookup::Static(range) => IndexLookupRanges::One([range].into_iter()),
-            IndexLookup::Probe(param) => match arena.runtime_param(param) {
-                RuntimeIndexProbe::Eq(value) => {
-                    IndexLookupRanges::One([Range::Eq(value.clone())].into_iter())
-                }
-                RuntimeIndexProbe::Scope { min, max } => IndexLookupRanges::One(
-                    [Range::Scope {
-                        min: min.clone(),
-                        max: max.clone(),
-                    }]
-                    .into_iter(),
-                ),
+            IndexLookup::Static(Range::SortedRanges(ranges)) => ranges.into(),
+            IndexLookup::Static(range) => range.into(),
+            IndexLookup::Probe => match arena.pop_runtime_probe() {
+                RuntimeIndexProbe::Eq(value) => Range::Eq(value).into(),
+                RuntimeIndexProbe::Scope { min, max } => Range::Scope { min, max }.into(),
             },
         }
     }

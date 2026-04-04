@@ -15,8 +15,8 @@
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::{BinaryOperator, ScalarExpression};
-use crate::optimizer::core::rule::{NormalizationContext, NormalizationRule};
-use crate::planner::operator::mark_apply::{MarkApplyKind, ParameterizedMarkProbe};
+use crate::optimizer::core::rule::NormalizationRule;
+use crate::planner::operator::mark_apply::MarkApplyKind;
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
 use crate::planner::{Childrens, LogicalPlan};
@@ -26,11 +26,7 @@ use crate::types::tuple::Schema;
 pub(crate) struct ParameterizeMarkApply;
 
 impl NormalizationRule for ParameterizeMarkApply {
-    fn apply(
-        &self,
-        plan: &mut LogicalPlan,
-        ctx: &mut NormalizationContext,
-    ) -> Result<bool, DatabaseError> {
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
         let (op, new_probe) = match (&mut plan.operator, plan.childrens.as_mut()) {
             (Operator::MarkApply(op), Childrens::Twins { left, right }) => {
                 let new_probe = find_parameterized_probe(
@@ -40,8 +36,7 @@ impl NormalizationRule for ParameterizeMarkApply {
                     right.output_schema().as_ref(),
                 )
                 .and_then(|(right_column, left_expr)| {
-                    parameterize_right_subtree(right, &right_column, ctx)
-                        .map(|param| ParameterizedMarkProbe::new(param, left_expr))
+                    parameterize_right_subtree(right, &right_column).then_some(left_expr)
                 });
                 (op, new_probe)
             }
@@ -114,27 +109,25 @@ fn extract_parameterized_probe_side(
     Some((right_column, left_expr.clone()))
 }
 
-fn parameterize_right_subtree(
-    plan: &mut LogicalPlan,
-    right_column: &ColumnRef,
-    ctx: &mut NormalizationContext,
-) -> Option<usize> {
+fn parameterize_right_subtree(plan: &mut LogicalPlan, right_column: &ColumnRef) -> bool {
     if matches!(plan.operator, Operator::TableScan(_)) {
-        let (param, index_info) = {
+        let index_info = {
             let Operator::TableScan(scan_op) = &mut plan.operator else {
                 unreachable!();
             };
-            let target_index = pick_parameterized_index_position(scan_op, right_column)?;
-            let param = ctx.alloc_runtime_param();
-            scan_op.index_infos[target_index].lookup = Some(IndexLookup::Probe(param));
-            (param, scan_op.index_infos[target_index].clone())
+            let Some(target_index) = pick_parameterized_index_position(scan_op, right_column)
+            else {
+                return false;
+            };
+            scan_op.index_infos[target_index].lookup = Some(IndexLookup::Probe);
+            scan_op.index_infos[target_index].clone()
         };
         let sort_option = index_info.sort_option.clone();
         plan.physical_option = Some(PhysicalOption::new(
             PlanImpl::IndexScan(Box::new(index_info)),
             sort_option,
         ));
-        return Some(param);
+        return true;
     }
 
     let passthrough = matches!(
@@ -147,12 +140,12 @@ fn parameterize_right_subtree(
     );
 
     if !passthrough {
-        return None;
+        return false;
     }
 
     match plan.childrens.as_mut() {
-        Childrens::Only(child) => parameterize_right_subtree(child, right_column, ctx),
-        _ => None,
+        Childrens::Only(child) => parameterize_right_subtree(child, right_column),
+        _ => false,
     }
 }
 

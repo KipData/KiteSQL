@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::expression::agg::AggKind;
 use crate::expression::ScalarExpression;
-use crate::optimizer::core::rule::{NormalizationContext, NormalizationRule};
+use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{only_child, wrap_child_with};
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::top_k::TopKOperator;
@@ -25,11 +25,7 @@ use crate::planner::LogicalPlan;
 pub struct MinMaxToTopK;
 
 impl NormalizationRule for MinMaxToTopK {
-    fn apply(
-        &self,
-        plan: &mut LogicalPlan,
-        _ctx: &mut NormalizationContext,
-    ) -> Result<bool, DatabaseError> {
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
         let Operator::Aggregate(op) = &plan.operator else {
             return Ok(false);
         };
@@ -85,7 +81,7 @@ mod tests {
     use super::MinMaxToTopK;
     use crate::binder::test::build_t1_table;
     use crate::errors::DatabaseError;
-    use crate::optimizer::core::rule::{NormalizationContext, NormalizationRule};
+    use crate::optimizer::core::rule::NormalizationRule;
     use crate::planner::operator::Operator;
     use crate::planner::Childrens;
 
@@ -117,7 +113,7 @@ mod tests {
         let mut plan = table_state.plan("select min(c1) from t1")?;
 
         let agg_plan = find_aggregate_mut(&mut plan);
-        assert!(MinMaxToTopK.apply(agg_plan, &mut NormalizationContext::new())?);
+        assert!(MinMaxToTopK.apply(agg_plan)?);
 
         let agg_plan = find_aggregate(&plan);
         let Operator::Aggregate(op) = &agg_plan.operator else {
@@ -154,7 +150,7 @@ mod tests {
         let mut plan = table_state.plan("select max(c2) from t1")?;
 
         let agg_plan = find_aggregate_mut(&mut plan);
-        assert!(MinMaxToTopK.apply(agg_plan, &mut NormalizationContext::new())?);
+        assert!(MinMaxToTopK.apply(agg_plan)?);
 
         let agg_plan = find_aggregate(&plan);
         let child = match agg_plan.childrens.as_ref() {

@@ -142,13 +142,13 @@ pub trait Transaction: Sized {
         }
         let deserializers = Self::create_deserializers(&columns, table);
         let pk_ty = with_pk.then(|| table.primary_keys_type().clone());
+        let offset = bounds.0.unwrap_or(0);
 
         unsafe { &*self.table_codec() }.with_tuple_bound(&table_name, |min, max| {
             let iter = self.range(Bound::Included(min), Bound::Included(max))?;
 
             Ok(TupleIter {
-                offset: bounds.0.unwrap_or(0),
-                limit: bounds.1,
+                bounds: IterBounds::new(offset, bounds.1),
                 pk_ty,
                 deserializers,
                 total_len: table.columns_len(),
@@ -158,20 +158,20 @@ pub trait Transaction: Sized {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn read_by_index<'a, I>(
+    fn read_by_index<'a, R>(
         &'a self,
         table_cache: &'a TableCache,
         table_name: TableName,
         (offset_option, limit_option): Bounds,
         mut columns: BTreeMap<usize, ColumnRef>,
         index_meta: IndexMetaRef,
-        ranges: I,
+        ranges: R,
         with_pk: bool,
         covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
         cover_mapping_indices: Option<Vec<usize>>,
-    ) -> Result<IndexIter<'a, Self, I>, DatabaseError>
+    ) -> Result<IndexIter<'a, Self>, DatabaseError>
     where
-        I: IntoIterator<Item = Range>,
+        R: Into<IndexRanges>,
     {
         debug_assert!(columns.keys().all_unique());
         let table = self
@@ -211,8 +211,7 @@ pub trait Transaction: Sized {
         };
 
         Ok(IndexIter {
-            offset,
-            limit: limit_option,
+            bounds: IterBounds::new(offset, limit_option),
             params: IndexImplParams {
                 index_meta,
                 table_name,
@@ -223,7 +222,7 @@ pub trait Transaction: Sized {
                 with_pk,
             },
             inner,
-            ranges: ranges.into_iter(),
+            ranges: ranges.into(),
             state: IndexIterState::Init,
             encode_min_buffer: Bytes::new(),
             encode_max_buffer: Bytes::new(),
@@ -1118,20 +1117,18 @@ fn encode_bound_key(buffer: &mut Bytes, key: &[u8], is_upper: bool) {
 
 #[inline]
 fn encode_bound<'a>(
-    bound: Bound<DataValue>,
+    bound: &Bound<DataValue>,
     is_upper: bool,
     buffer: &'a mut Bytes,
     params: &IndexImplParams<'_, impl Transaction>,
     inner: &IndexImplEnum,
 ) -> Result<Bound<&'a [u8]>, DatabaseError> {
     match bound {
-        Bound::Included(mut val) => {
-            val = params.try_cast(val)?;
+        Bound::Included(val) => {
             inner.bound_key(params, &val, is_upper, buffer)?;
             Ok(Bound::Included(buffer.as_slice()))
         }
-        Bound::Excluded(mut val) => {
-            val = params.try_cast(val)?;
+        Bound::Excluded(val) => {
             inner.bound_key(params, &val, is_upper, buffer)?;
             Ok(Bound::Excluded(buffer.as_slice()))
         }
@@ -1233,15 +1230,6 @@ impl<T: Transaction> IndexImplParams<'_, T> {
     #[inline]
     pub(crate) fn table_codec(&self) -> *const TableCodec {
         self.tx.table_codec()
-    }
-
-    pub(crate) fn try_cast(&self, mut val: DataValue) -> Result<DataValue, DatabaseError> {
-        let value_ty = self.value_ty();
-
-        if &val.logical_type() != value_ty {
-            val = val.cast(value_ty)?;
-        }
-        Ok(val)
     }
 
     fn get_tuple_by_id_into(
@@ -1618,8 +1606,7 @@ fn eq_to_res_scope<'a, T: Transaction + 'a>(
 }
 
 pub struct TupleIter<'a, T: Transaction + 'a> {
-    offset: usize,
-    limit: Option<usize>,
+    bounds: IterBounds,
     pk_ty: Option<LogicalType>,
     deserializers: Vec<TupleValueSerializableImpl>,
     total_len: usize,
@@ -1628,21 +1615,18 @@ pub struct TupleIter<'a, T: Transaction + 'a> {
 
 impl<'a, T: Transaction + 'a> Iter for TupleIter<'a, T> {
     fn next_tuple_into(&mut self, tuple: &mut Tuple) -> Result<bool, DatabaseError> {
-        while self.offset > 0 {
+        while self.bounds.consume_offset() {
             if self.iter.try_next()?.is_none() {
                 return Ok(false);
             }
-            self.offset -= 1;
         }
 
         #[allow(clippy::never_loop)]
         while let Some((key, value)) = self.iter.try_next()? {
-            if let Some(limit) = self.limit.as_mut() {
-                if *limit == 0 {
-                    return Ok(false);
-                }
-                *limit -= 1;
+            if self.bounds.limit_reached() {
+                return Ok(false);
             }
+            self.bounds.consume_limit();
             let tuple_id = if let Some(pk_ty) = &self.pk_ty {
                 Some(TableCodec::decode_tuple_key(key, pk_ty)?)
             } else {
@@ -1663,13 +1647,89 @@ impl<'a, T: Transaction + 'a> Iter for TupleIter<'a, T> {
     }
 }
 
-pub struct IndexIter<'a, T: Transaction, I: IntoIterator<Item = Range>> {
+enum IndexRangesInner {
+    One(Range),
+    Many(Vec<Range>),
+}
+
+pub struct IndexRanges {
+    inner: IndexRangesInner,
+    next_idx: usize,
+}
+
+impl IndexRanges {
+    fn next(&mut self) -> Option<&Range> {
+        let range = match &self.inner {
+            IndexRangesInner::One(range) => (self.next_idx == 0).then_some(range),
+            IndexRangesInner::Many(ranges) => ranges.get(self.next_idx),
+        };
+
+        if range.is_some() {
+            self.next_idx += 1;
+        }
+
+        range
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.next_idx = 0;
+    }
+}
+
+impl From<Vec<Range>> for IndexRanges {
+    fn from(value: Vec<Range>) -> Self {
+        Self {
+            inner: IndexRangesInner::Many(value),
+            next_idx: 0,
+        }
+    }
+}
+
+impl From<Range> for IndexRanges {
+    fn from(value: Range) -> Self {
+        Self {
+            inner: IndexRangesInner::One(value),
+            next_idx: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct IterBounds {
     offset: usize,
     limit: Option<usize>,
+}
+
+impl IterBounds {
+    fn new(offset: usize, limit: Option<usize>) -> Self {
+        Self { offset, limit }
+    }
+
+    fn consume_offset(&mut self) -> bool {
+        if self.offset > 0 {
+            self.offset.sub_assign(1);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn limit_reached(&self) -> bool {
+        matches!(self.limit, Some(0))
+    }
+
+    fn consume_limit(&mut self) {
+        if let Some(num) = self.limit.as_mut() {
+            num.sub_assign(1);
+        }
+    }
+}
+
+pub struct IndexIter<'a, T: Transaction> {
+    bounds: IterBounds,
     params: IndexImplParams<'a, T>,
     inner: IndexImplEnum,
-    // for buffering data
-    ranges: I::IntoIter,
+    ranges: IndexRanges,
     state: IndexIterState<'a, T>,
     encode_min_buffer: Bytes,
     encode_max_buffer: Bytes,
@@ -1681,28 +1741,9 @@ pub enum IndexIterState<'a, T: Transaction + 'a> {
     Over,
 }
 
-impl<'a, T: Transaction + 'a, I: IntoIterator<Item = Range>> IndexIter<'a, T, I> {
-    fn offset_move(offset: &mut usize) -> bool {
-        if *offset > 0 {
-            offset.sub_assign(1);
-
-            true
-        } else {
-            false
-        }
-    }
-
-    fn limit_sub(limit: &mut Option<usize>) {
-        if let Some(num) = limit.as_mut() {
-            num.sub_assign(1);
-        }
-    }
-}
-
-/// expression -> index value -> tuple
-impl<T: Transaction, I: IntoIterator<Item = Range>> Iter for IndexIter<'_, T, I> {
+impl<T: Transaction> Iter for IndexIter<'_, T> {
     fn next_tuple_into(&mut self, tuple: &mut Tuple) -> Result<bool, DatabaseError> {
-        if matches!(self.limit, Some(0)) {
+        if self.bounds.limit_reached() {
             self.state = IndexIterState::Over;
 
             return Ok(false);
@@ -1753,21 +1794,19 @@ impl<T: Transaction, I: IntoIterator<Item = Range>> Iter for IndexIter<'_, T, I>
                             };
                             self.state = IndexIterState::Range(iter);
                         }
-                        Range::Eq(mut val) => {
-                            val = self.params.try_cast(val)?;
-
+                        Range::Eq(val) => {
                             match self.inner.eq_to_res(
                                 tuple,
-                                &val,
+                                val,
                                 &self.params,
                                 &mut self.encode_min_buffer,
                                 &mut self.encode_max_buffer,
                             )? {
                                 IndexResult::Hit => {
-                                    if Self::offset_move(&mut self.offset) {
+                                    if self.bounds.consume_offset() {
                                         continue;
                                     }
-                                    Self::limit_sub(&mut self.limit);
+                                    self.bounds.consume_limit();
                                     return Ok(true);
                                 }
                                 IndexResult::Miss => return Ok(false),
@@ -1781,10 +1820,10 @@ impl<T: Transaction, I: IntoIterator<Item = Range>> Iter for IndexIter<'_, T, I>
                 }
                 IndexIterState::Range(iter) => {
                     while let Some((key, value)) = iter.try_next()? {
-                        if Self::offset_move(&mut self.offset) {
+                        if self.bounds.consume_offset() {
                             continue;
                         }
-                        Self::limit_sub(&mut self.limit);
+                        self.bounds.consume_limit();
                         self.inner
                             .index_lookup_into(tuple, key, value, &self.params)?;
 
@@ -1870,6 +1909,32 @@ mod test {
         );
         columns
     }
+
+    #[test]
+    fn test_index_ranges_next_and_reset() {
+        let mut ranges = super::IndexRanges::from(vec![
+            Range::Eq(DataValue::Int32(1)),
+            Range::Eq(DataValue::Int32(2)),
+        ]);
+
+        assert!(matches!(
+            ranges.next(),
+            Some(range) if *range == Range::Eq(DataValue::Int32(1))
+        ));
+        assert!(matches!(
+            ranges.next(),
+            Some(range) if *range == Range::Eq(DataValue::Int32(2))
+        ));
+        assert!(ranges.next().is_none());
+
+        ranges.reset();
+
+        assert!(matches!(
+            ranges.next(),
+            Some(range) if *range == Range::Eq(DataValue::Int32(1))
+        ));
+    }
+
     fn build_tuples() -> Vec<Tuple> {
         vec![
             Tuple::new(
@@ -2217,7 +2282,7 @@ mod test {
             transaction: &'a RocksTransaction<'a>,
             table_cache: &'a Arc<TableCache>,
             index_column_id: ColumnId,
-        ) -> Result<IndexIter<'a, RocksTransaction<'a>, Vec<Range>>, DatabaseError> {
+        ) -> Result<IndexIter<'a, RocksTransaction<'a>>, DatabaseError> {
             transaction.read_by_index(
                 table_cache,
                 "t1".to_string().into(),

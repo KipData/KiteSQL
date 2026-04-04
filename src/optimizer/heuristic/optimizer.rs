@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::optimizer::core::rule::{
-    BestPhysicalOption, ImplementationRule, MatchPattern, NormalizationContext, NormalizationRule,
+    BestPhysicalOption, ImplementationRule, MatchPattern, NormalizationRule,
 };
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::heuristic::batch::{
@@ -40,7 +40,6 @@ pub struct HepOptimizer<'a> {
     after_batches: &'a [HepBatch],
     implementation_index: &'a ImplementationRuleIndex,
     plan: LogicalPlan,
-    runtime_param_count: usize,
 }
 
 impl<'a> HepOptimizer<'a> {
@@ -55,7 +54,6 @@ impl<'a> HepOptimizer<'a> {
             after_batches,
             implementation_index,
             plan,
-            runtime_param_count: 0,
         }
     }
 
@@ -63,9 +61,7 @@ impl<'a> HepOptimizer<'a> {
         &mut self,
         loader: Option<&StatisticMetaLoader<'_, T>>,
     ) -> Result<(), DatabaseError> {
-        self.runtime_param_count = 0;
-        let mut ctx = NormalizationContext::new();
-        Self::apply_batches(&mut self.plan, self.before_batches, &mut ctx)?;
+        Self::apply_batches(&mut self.plan, self.before_batches)?;
 
         if let Some(loader) = loader {
             if self.implementation_index.is_empty().not() {
@@ -77,18 +73,12 @@ impl<'a> HepOptimizer<'a> {
                     self.implementation_index,
                     &apply_no_sort_hints,
                     &apply_no_stream_distinct_hints,
-                    &mut ctx,
                 )?;
             }
         }
-        Self::apply_batches(&mut self.plan, self.after_batches, &mut ctx)?;
-        self.runtime_param_count = ctx.runtime_param_count();
+        Self::apply_batches(&mut self.plan, self.after_batches)?;
 
         Ok(())
-    }
-
-    pub fn runtime_param_count(&self) -> usize {
-        self.runtime_param_count
     }
 
     pub fn into_plan(self) -> LogicalPlan {
@@ -105,43 +95,35 @@ impl<'a> HepOptimizer<'a> {
     }
 
     #[inline]
-    fn apply_batches(
-        plan: &mut LogicalPlan,
-        batches: &[HepBatch],
-        ctx: &mut NormalizationContext,
-    ) -> Result<(), DatabaseError> {
+    fn apply_batches(plan: &mut LogicalPlan, batches: &[HepBatch]) -> Result<(), DatabaseError> {
         for batch in batches {
             match batch.strategy {
                 HepBatchStrategy::MaxTimes(max_iteration) => {
                     for _ in 0..max_iteration {
-                        if !Self::apply_batch(plan, batch, ctx)? {
+                        if !Self::apply_batch(plan, batch)? {
                             break;
                         }
                     }
                 }
-                HepBatchStrategy::LoopIfApplied => while Self::apply_batch(plan, batch, ctx)? {},
+                HepBatchStrategy::LoopIfApplied => while Self::apply_batch(plan, batch)? {},
             }
         }
         Ok(())
     }
 
     #[inline]
-    fn apply_batch(
-        plan: &mut LogicalPlan,
-        batch: &HepBatch,
-        ctx: &mut NormalizationContext,
-    ) -> Result<bool, DatabaseError> {
+    fn apply_batch(plan: &mut LogicalPlan, batch: &HepBatch) -> Result<bool, DatabaseError> {
         let mut applied = false;
         for step in &batch.steps {
             match step {
                 HepBatchStep::WholeTree(pass) => {
-                    if Self::apply_whole_tree_pass(plan, pass, ctx)? {
+                    if Self::apply_whole_tree_pass(plan, pass)? {
                         plan.reset_output_schema_cache_recursive();
                         applied = true;
                     }
                 }
                 HepBatchStep::LocalRewrite(rules) => {
-                    if Self::apply_local_rules(plan, rules, ctx)? {
+                    if Self::apply_local_rules(plan, rules)? {
                         applied = true;
                     }
                 }
@@ -153,13 +135,12 @@ impl<'a> HepOptimizer<'a> {
     fn apply_whole_tree_pass(
         plan: &mut LogicalPlan,
         pass: &HepWholeTreePass,
-        ctx: &mut NormalizationContext,
     ) -> Result<bool, DatabaseError> {
         match pass.kind {
             WholeTreePassKind::ColumnPruning => {
                 let mut applied = false;
                 for rule in &pass.rules {
-                    applied |= rule.apply(plan, ctx)?;
+                    applied |= rule.apply(plan)?;
                 }
                 Ok(applied)
             }
@@ -239,7 +220,6 @@ impl<'a> HepOptimizer<'a> {
         implementation_index: &ImplementationRuleIndex,
         inherited_sort_hints: &'plan ScanHintApplier<'plan>,
         inherited_stream_distinct_hints: &'plan ScanHintApplier<'plan>,
-        ctx: &mut NormalizationContext,
     ) -> Result<(), DatabaseError> {
         if let Operator::TableScan(scan_op) = &mut plan.operator {
             inherited_sort_hints(scan_op);
@@ -282,7 +262,6 @@ impl<'a> HepOptimizer<'a> {
                             implementation_index,
                             child_sort_hints,
                             child_stream_distinct_hints,
-                            ctx,
                         ),
                         Childrens::Twins { left, right } => {
                             Self::annotate_hints_and_physical_options(
@@ -291,7 +270,6 @@ impl<'a> HepOptimizer<'a> {
                                 implementation_index,
                                 child_sort_hints,
                                 child_stream_distinct_hints,
-                                ctx,
                             )?;
                             Self::annotate_hints_and_physical_options(
                                 right,
@@ -299,7 +277,6 @@ impl<'a> HepOptimizer<'a> {
                                 implementation_index,
                                 child_sort_hints,
                                 child_stream_distinct_hints,
-                                ctx,
                             )
                         }
                         Childrens::None => Ok(()),
@@ -308,7 +285,7 @@ impl<'a> HepOptimizer<'a> {
             })?;
         }
 
-        apply_annotated_post_rules(plan, ctx)?;
+        apply_annotated_post_rules(plan)?;
 
         Ok(())
     }
@@ -385,17 +362,15 @@ impl<'a> HepOptimizer<'a> {
     fn apply_local_rules(
         plan: &mut LogicalPlan,
         rules: &HepLocalRewriteBatch,
-        ctx: &mut NormalizationContext,
     ) -> Result<bool, DatabaseError> {
         let mut applied_rules = vec![false; rules.len()];
-        Self::apply_local_rules_inner(plan, rules, &mut applied_rules, ctx)
+        Self::apply_local_rules_inner(plan, rules, &mut applied_rules)
     }
 
     fn apply_local_rules_inner(
         plan: &mut LogicalPlan,
         rules: &HepLocalRewriteBatch,
         applied_rules: &mut [bool],
-        ctx: &mut NormalizationContext,
     ) -> Result<bool, DatabaseError> {
         let mut applied = false;
         let mut next_rule_idx = 0;
@@ -406,7 +381,7 @@ impl<'a> HepOptimizer<'a> {
             if applied_rules[idx] {
                 continue;
             }
-            let applied_rule = rule.apply(plan, ctx)?;
+            let applied_rule = rule.apply(plan)?;
             if applied_rule {
                 plan.reset_output_schema_cache_recursive();
                 applied_rules[idx] = true;
@@ -416,14 +391,12 @@ impl<'a> HepOptimizer<'a> {
 
         match plan.childrens.as_mut() {
             Childrens::Only(child) => {
-                let child_applied =
-                    Self::apply_local_rules_inner(child, rules, applied_rules, ctx)?;
+                let child_applied = Self::apply_local_rules_inner(child, rules, applied_rules)?;
                 applied |= child_applied;
             }
             Childrens::Twins { left, right } => {
-                let left_applied = Self::apply_local_rules_inner(left, rules, applied_rules, ctx)?;
-                let right_applied =
-                    Self::apply_local_rules_inner(right, rules, applied_rules, ctx)?;
+                let left_applied = Self::apply_local_rules_inner(left, rules, applied_rules)?;
+                let right_applied = Self::apply_local_rules_inner(right, rules, applied_rules)?;
                 applied |= left_applied || right_applied;
             }
             Childrens::None => {}

@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::expression::simplify::{ConstantCalculator, Simplify};
 use crate::expression::visitor_mut::VisitorMut;
-use crate::optimizer::core::rule::{NormalizationContext, NormalizationRule};
+use crate::optimizer::core::rule::NormalizationRule;
 use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
@@ -79,11 +79,7 @@ impl ConstantCalculation {
 }
 
 impl NormalizationRule for ConstantCalculation {
-    fn apply(
-        &self,
-        plan: &mut LogicalPlan,
-        _ctx: &mut NormalizationContext,
-    ) -> Result<bool, DatabaseError> {
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
         Self::_apply(plan)?;
         Ok(true)
     }
@@ -107,11 +103,7 @@ fn has_aggregate_descendant(plan: &LogicalPlan) -> bool {
 }
 
 impl NormalizationRule for SimplifyFilter {
-    fn apply(
-        &self,
-        plan: &mut LogicalPlan,
-        _ctx: &mut NormalizationContext,
-    ) -> Result<bool, DatabaseError> {
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
         if let Operator::Filter(filter_op) = &mut plan.operator {
             if filter_op.is_optimized {
                 return Ok(false);

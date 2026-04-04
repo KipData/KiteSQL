@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::{walk_mut_expr, VisitorMut};
 use crate::expression::{AliasType, ScalarExpression};
-use crate::optimizer::core::rule::{NormalizationContext, NormalizationRule};
+use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::rule::normalization::column_pruning::ColumnPruning;
 use crate::optimizer::rule::normalization::combine_operators::{
     CollapseGroupByAgg, CollapseProject, CombineFilter,
@@ -182,32 +182,26 @@ impl NormalizationRuleImpl {
 }
 
 impl NormalizationRule for NormalizationRuleImpl {
-    fn apply(
-        &self,
-        plan: &mut LogicalPlan,
-        ctx: &mut NormalizationContext,
-    ) -> Result<bool, DatabaseError> {
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
         match self {
-            NormalizationRuleImpl::ColumnPruning => ColumnPruning.apply(plan, ctx),
-            NormalizationRuleImpl::CollapseProject => CollapseProject.apply(plan, ctx),
-            NormalizationRuleImpl::CollapseGroupByAgg => CollapseGroupByAgg.apply(plan, ctx),
-            NormalizationRuleImpl::CombineFilter => CombineFilter.apply(plan, ctx),
-            NormalizationRuleImpl::LimitProjectTranspose => LimitProjectTranspose.apply(plan, ctx),
-            NormalizationRuleImpl::PushLimitThroughJoin => PushLimitThroughJoin.apply(plan, ctx),
-            NormalizationRuleImpl::PushLimitIntoTableScan => PushLimitIntoScan.apply(plan, ctx),
-            NormalizationRuleImpl::PushPredicateThroughJoin => {
-                PushPredicateThroughJoin.apply(plan, ctx)
-            }
+            NormalizationRuleImpl::ColumnPruning => ColumnPruning.apply(plan),
+            NormalizationRuleImpl::CollapseProject => CollapseProject.apply(plan),
+            NormalizationRuleImpl::CollapseGroupByAgg => CollapseGroupByAgg.apply(plan),
+            NormalizationRuleImpl::CombineFilter => CombineFilter.apply(plan),
+            NormalizationRuleImpl::LimitProjectTranspose => LimitProjectTranspose.apply(plan),
+            NormalizationRuleImpl::PushLimitThroughJoin => PushLimitThroughJoin.apply(plan),
+            NormalizationRuleImpl::PushLimitIntoTableScan => PushLimitIntoScan.apply(plan),
+            NormalizationRuleImpl::PushPredicateThroughJoin => PushPredicateThroughJoin.apply(plan),
             NormalizationRuleImpl::PushJoinPredicateIntoScan => {
-                PushJoinPredicateIntoScan.apply(plan, ctx)
+                PushJoinPredicateIntoScan.apply(plan)
             }
-            NormalizationRuleImpl::SimplifyFilter => SimplifyFilter.apply(plan, ctx),
-            NormalizationRuleImpl::PushPredicateIntoScan => PushPredicateIntoScan.apply(plan, ctx),
-            NormalizationRuleImpl::ConstantCalculation => ConstantCalculation.apply(plan, ctx),
-            NormalizationRuleImpl::EvaluatorBind => EvaluatorBind.apply(plan, ctx),
-            NormalizationRuleImpl::MinMaxToTopK => MinMaxToTopK.apply(plan, ctx),
-            NormalizationRuleImpl::TopK => TopK.apply(plan, ctx),
-            NormalizationRuleImpl::ParameterizeMarkApply => ParameterizeMarkApply.apply(plan, ctx),
+            NormalizationRuleImpl::SimplifyFilter => SimplifyFilter.apply(plan),
+            NormalizationRuleImpl::PushPredicateIntoScan => PushPredicateIntoScan.apply(plan),
+            NormalizationRuleImpl::ConstantCalculation => ConstantCalculation.apply(plan),
+            NormalizationRuleImpl::EvaluatorBind => EvaluatorBind.apply(plan),
+            NormalizationRuleImpl::MinMaxToTopK => MinMaxToTopK.apply(plan),
+            NormalizationRuleImpl::TopK => TopK.apply(plan),
+            NormalizationRuleImpl::ParameterizeMarkApply => ParameterizeMarkApply.apply(plan),
         }
     }
 }

@@ -463,12 +463,12 @@ impl<S: Storage> State<S> {
         &self.view_cache
     }
 
-    fn build_plan_and_runtime_params<A: AsRef<[(&'static str, DataValue)]>>(
+    fn build_plan<A: AsRef<[(&'static str, DataValue)]>>(
         &self,
         stmt: &Statement,
         params: A,
         transaction: &<S as Storage>::TransactionType<'_>,
-    ) -> Result<(LogicalPlan, usize), DatabaseError> {
+    ) -> Result<LogicalPlan, DatabaseError> {
         let mut binder = Binder::new(
             BinderContext::new(
                 self.table_cache(),
@@ -491,7 +491,6 @@ impl<S: Storage> State<S> {
         let source_plan = binder.bind(stmt)?;
         let mut optimizer = self.optimizer_pipeline.instantiate(source_plan);
         optimizer.optimize(Some(&transaction.meta_loader(self.meta_cache())))?;
-        let runtime_param_count = optimizer.runtime_param_count();
         let mut best_plan = optimizer.into_plan();
 
         if let Operator::Analyze(op) = &mut best_plan.operator {
@@ -500,7 +499,7 @@ impl<S: Storage> State<S> {
             }
         }
 
-        Ok((best_plan, runtime_param_count))
+        Ok(best_plan)
     }
 
     fn execute<'a, 'txn, A: AsRef<[(&'static str, DataValue)]>>(
@@ -512,11 +511,9 @@ impl<S: Storage> State<S> {
     where
         S: 'txn,
     {
-        let (mut plan, runtime_param_count) =
-            self.build_plan_and_runtime_params(stmt, params, transaction)?;
+        let mut plan = self.build_plan(stmt, params, transaction)?;
         let schema = plan.output_schema().clone();
         let mut arena = ExecArena::default();
-        arena.init_runtime_params(runtime_param_count);
         let root = build_write(
             &mut arena,
             plan,
@@ -1165,10 +1162,7 @@ pub(crate) mod test {
             None,
         );
         let source_plan = binder.bind(&stmt)?;
-        let (best_plan, _) =
-            kite_sql
-                .state
-                .build_plan_and_runtime_params(&stmt, [], &transaction)?;
+        let best_plan = kite_sql.state.build_plan(&stmt, [], &transaction)?;
 
         let join_plan = match source_plan.operator {
             Operator::Project(_) => source_plan.childrens.pop_only(),
@@ -1252,10 +1246,7 @@ pub(crate) mod test {
             None,
         );
         let source_plan = binder.bind(&stmt)?;
-        let (best_plan, _) =
-            kite_sql
-                .state
-                .build_plan_and_runtime_params(&stmt, [], &transaction)?;
+        let best_plan = kite_sql.state.build_plan(&stmt, [], &transaction)?;
 
         let join_plan = match source_plan.operator {
             Operator::Project(_) => source_plan.childrens.pop_only(),
@@ -1353,10 +1344,7 @@ pub(crate) mod test {
             "SELECT o.x, t.y FROM onecolumn o INNER JOIN twocolumn t ON (o.x=t.x AND t.y=53)",
         )?;
         let transaction = kite_sql.storage.transaction()?;
-        let (best_plan, _) =
-            kite_sql
-                .state
-                .build_plan_and_runtime_params(&stmt, [], &transaction)?;
+        let best_plan = kite_sql.state.build_plan(&stmt, [], &transaction)?;
         let join_plan = match best_plan.operator {
             Operator::Project(_) => best_plan.childrens.pop_only(),
             Operator::Join(_) => best_plan,
@@ -1556,7 +1544,7 @@ pub(crate) mod test {
                     "unexpected explain plan: {explain_plan}"
                 );
                 assert!(
-                    explain_plan.contains(&format!("IndexScan By {index_name} => Probe $0")),
+                    explain_plan.contains(&format!("IndexScan By {index_name} => Probe")),
                     "unexpected explain plan: {explain_plan}"
                 );
                 Ok(())
@@ -1727,7 +1715,7 @@ pub(crate) mod test {
                 "unexpected explain plan: {explain_plan}"
             );
             assert!(
-                explain_plan.contains("IndexScan By exists_inner_v_index => Probe $0"),
+                explain_plan.contains("IndexScan By exists_inner_v_index => Probe"),
                 "unexpected explain plan: {explain_plan}"
             );
             Ok(())

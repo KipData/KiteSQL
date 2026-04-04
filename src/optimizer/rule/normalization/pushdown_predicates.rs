@@ -17,7 +17,7 @@ use crate::errors::DatabaseError;
 use crate::expression::range_detacher::{Range, RangeDetacher};
 use crate::expression::visitor_mut::{PositionShift, VisitorMut};
 use crate::expression::{BinaryOperator, ScalarExpression};
-use crate::optimizer::core::rule::{NormalizationContext, NormalizationRule};
+use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{
     left_child, replace_with_only_child, right_child, wrap_child_with,
 };
@@ -84,11 +84,7 @@ fn plan_output_columns(plan: &LogicalPlan) -> Vec<ColumnRef> {
 pub struct PushPredicateThroughJoin;
 
 impl NormalizationRule for PushPredicateThroughJoin {
-    fn apply(
-        &self,
-        plan: &mut LogicalPlan,
-        _ctx: &mut NormalizationContext,
-    ) -> Result<bool, DatabaseError> {
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
         let mut applied = false;
 
         let parent_replacement = {
@@ -201,11 +197,7 @@ impl NormalizationRule for PushPredicateThroughJoin {
 pub struct PushPredicateIntoScan;
 
 impl NormalizationRule for PushPredicateIntoScan {
-    fn apply(
-        &self,
-        plan: &mut LogicalPlan,
-        _ctx: &mut NormalizationContext,
-    ) -> Result<bool, DatabaseError> {
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
         let LogicalPlan {
             operator,
             childrens,
@@ -361,11 +353,7 @@ impl PushPredicateIntoScan {
 pub struct PushJoinPredicateIntoScan;
 
 impl NormalizationRule for PushJoinPredicateIntoScan {
-    fn apply(
-        &self,
-        plan: &mut LogicalPlan,
-        _ctx: &mut NormalizationContext,
-    ) -> Result<bool, DatabaseError> {
+    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
         let (join_type, filter_expr) = {
             let Operator::Join(join_op) = &mut plan.operator else {
                 return Ok(false);

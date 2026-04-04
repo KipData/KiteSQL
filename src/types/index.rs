@@ -28,7 +28,6 @@ use std::sync::Arc;
 
 pub type IndexId = u32;
 pub type IndexMetaRef = Arc<IndexMeta>;
-pub type RuntimeParam = usize;
 
 pub const INDEX_ID_LEN: usize = 4;
 
@@ -52,7 +51,7 @@ pub enum RuntimeIndexProbe {
 #[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]
 pub enum IndexLookup {
     Static(Range),
-    Probe(RuntimeParam),
+    Probe,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]
@@ -120,7 +119,7 @@ impl fmt::Display for IndexInfo {
         if let Some(lookup) = &self.lookup {
             match lookup {
                 IndexLookup::Static(range) => write!(f, "{range}")?,
-                IndexLookup::Probe(param) => write!(f, "Probe ${param}")?,
+                IndexLookup::Probe => write!(f, "Probe ?")?,
             }
         } else {
             write!(f, "EMPTY")?;
