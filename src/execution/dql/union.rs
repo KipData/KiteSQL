@@ -13,12 +13,14 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{
+    build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor,
+};
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 pub struct Union {
-    left_plan: Option<LogicalPlan>,
-    right_plan: Option<LogicalPlan>,
+    left_plan: LogicalPlan,
+    right_plan: LogicalPlan,
     left_input: ExecId,
     right_input: ExecId,
     reading_left: bool,
@@ -27,8 +29,8 @@ pub struct Union {
 impl From<(LogicalPlan, LogicalPlan)> for Union {
     fn from((left_input, right_input): (LogicalPlan, LogicalPlan)) -> Self {
         Union {
-            left_plan: Some(left_input),
-            right_plan: Some(right_input),
+            left_plan: left_input,
+            right_plan: right_input,
             left_input: 0,
             right_input: 0,
             reading_left: true,
@@ -43,23 +45,26 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Union {
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        self.left_input = build_read(
-            arena,
-            self.left_plan
-                .take()
-                .expect("union left input plan initialized"),
-            cache,
-            transaction,
-        );
-        self.right_input = build_read(
-            arena,
-            self.right_plan
-                .take()
-                .expect("union right input plan initialized"),
-            cache,
-            transaction,
-        );
+        self.left_input = build_read(arena, self.left_plan.take(), cache, transaction);
+        self.right_input = build_read(arena, self.right_plan.take(), cache, transaction);
         arena.push(ExecNode::Union(self))
+    }
+}
+
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Union {
+    type Input = (LogicalPlan, LogicalPlan);
+
+    fn into_executor(
+        input: Self::Input,
+        arena: &mut ExecArena<'a, T>,
+        cache: ExecutionCaches<'a>,
+        transaction: *mut T,
+    ) -> ExecId {
+        <Self as ReadExecutor<'a, T>>::into_executor(Self::from(input), arena, cache, transaction)
+    }
+
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+        Union::next_tuple(self, arena)
     }
 }
 

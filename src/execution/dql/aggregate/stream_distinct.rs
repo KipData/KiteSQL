@@ -13,61 +13,41 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
-use crate::types::tuple::{SchemaRef, Tuple};
+use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use itertools::Itertools;
 
 pub struct StreamDistinctExecutor {
     groupby_exprs: Vec<ScalarExpression>,
-    input_schema: SchemaRef,
-    input_plan: Option<LogicalPlan>,
     input: ExecId,
     last_keys: Option<Vec<DataValue>>,
     scratch: Tuple,
 }
 
-impl From<(AggregateOperator, LogicalPlan)> for StreamDistinctExecutor {
-    fn from((op, mut input): (AggregateOperator, LogicalPlan)) -> Self {
-        StreamDistinctExecutor {
-            groupby_exprs: op.groupby_exprs,
-            input_schema: input.output_schema().clone(),
-            input_plan: Some(input),
-            input: 0,
-            last_keys: None,
-            scratch: Tuple::default(),
-        }
-    }
-}
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor {
+    type Input = (AggregateOperator, LogicalPlan);
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor {
     fn into_executor(
-        mut self,
+        (op, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        self.input = build_read(
-            arena,
-            self.input_plan
-                .take()
-                .expect("stream distinct input plan initialized"),
-            cache,
-            transaction,
-        );
-        arena.push(ExecNode::StreamDistinct(self))
+        let input = build_read(arena, input, cache, transaction);
+        arena.push(ExecNode::StreamDistinct(StreamDistinctExecutor {
+            groupby_exprs: op.groupby_exprs,
+            input,
+            last_keys: None,
+            scratch: Tuple::default(),
+        }))
     }
-}
 
-impl StreamDistinctExecutor {
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-    ) -> Result<(), DatabaseError> {
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
         loop {
             if !arena.next_tuple(self.input)? {
                 arena.finish();
@@ -78,7 +58,7 @@ impl StreamDistinctExecutor {
             let group_keys = self
                 .groupby_exprs
                 .iter()
-                .map(|expr| expr.eval(Some((tuple, &self.input_schema))))
+                .map(|expr| expr.eval(Some(tuple)))
                 .try_collect()?;
 
             if self.last_keys.as_ref() != Some(&group_keys) {
@@ -98,7 +78,7 @@ mod tests {
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
     use crate::errors::DatabaseError;
     use crate::execution::dql::aggregate::stream_distinct::StreamDistinctExecutor;
-    use crate::execution::try_collect;
+    use crate::execution::{execute_input, try_collect};
     use crate::expression::ScalarExpression;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
     use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
@@ -185,8 +165,8 @@ mod tests {
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let mut transaction = storage.transaction()?;
-        let tuples = try_collect(crate::execution::execute(
-            StreamDistinctExecutor::from((agg, plan.childrens.pop_only())),
+        let tuples = try_collect(execute_input::<_, StreamDistinctExecutor>(
+            (agg, plan.childrens.pop_only()),
             (&table_cache, &view_cache, &meta_cache),
             &mut transaction,
         ))?;
@@ -238,8 +218,8 @@ mod tests {
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let mut transaction = storage.transaction()?;
-        let tuples = try_collect(crate::execution::execute(
-            StreamDistinctExecutor::from((agg, plan.childrens.pop_only())),
+        let tuples = try_collect(execute_input::<_, StreamDistinctExecutor>(
+            (agg, plan.childrens.pop_only()),
             (&table_cache, &view_cache, &meta_cache),
             &mut transaction,
         ))?;

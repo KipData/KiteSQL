@@ -73,7 +73,7 @@ impl NormalizationRule for PushLimitThroughJoin {
             if let Operator::Join(join_op) = &child.operator {
                 let mut applied = false;
                 match join_op.join_type {
-                    JoinType::LeftOuter | JoinType::LeftSemi | JoinType::LeftAnti => {
+                    JoinType::LeftOuter => {
                         applied |= wrap_child_with(child, 0, Operator::Limit(limit_op.clone()));
                     }
                     JoinType::RightOuter => {

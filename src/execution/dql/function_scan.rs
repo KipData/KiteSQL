@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor};
 use crate::expression::function::table::TableFunction;
 use crate::planner::operator::function_scan::FunctionScanOperator;
 use crate::storage::Transaction;
@@ -41,6 +41,23 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for FunctionScan {
         _: *mut T,
     ) -> ExecId {
         arena.push(ExecNode::FunctionScan(self))
+    }
+}
+
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for FunctionScan {
+    type Input = FunctionScanOperator;
+
+    fn into_executor(
+        input: Self::Input,
+        arena: &mut ExecArena<'a, T>,
+        _: ExecutionCaches<'a>,
+        _: *mut T,
+    ) -> ExecId {
+        arena.push(ExecNode::FunctionScan(FunctionScan::from(input)))
+    }
+
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+        FunctionScan::next_tuple(self, arena)
     }
 }
 

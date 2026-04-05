@@ -19,6 +19,8 @@ pub(crate) mod dql;
 use self::ddl::add_column::AddColumn;
 use self::ddl::change_column::ChangeColumn;
 use self::dql::join::nested_loop_join::NestedLoopJoin;
+use self::dql::mark_apply::MarkApply;
+use self::dql::scalar_apply::ScalarApply;
 use crate::errors::DatabaseError;
 use crate::execution::ddl::create_index::CreateIndex;
 use crate::execution::ddl::create_table::CreateTable;
@@ -59,7 +61,7 @@ use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
 use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::types::index::IndexInfo;
+use crate::types::index::RuntimeIndexProbe;
 use crate::types::tuple::Tuple;
 
 pub(crate) type ExecutionCaches<'a> = (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache);
@@ -133,8 +135,10 @@ pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
     IndexScan(IndexScan<'a, T>),
     Insert(Insert),
     Limit(Limit),
+    MarkApply(MarkApply),
     NestedLoopJoin(NestedLoopJoin),
     Projection(Projection),
+    ScalarApply(ScalarApply),
     ScalarSubquery(ScalarSubquery),
     SeqScan(SeqScan<'a, T>),
     ShowTables(ShowTables),
@@ -150,107 +154,108 @@ pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
     Empty,
 }
 
-pub(crate) trait ExecNodeRunner<'a, T: Transaction + 'a> {
+pub(crate) trait ExecutorNode<'a, T: Transaction + 'a>: Sized {
+    type Input;
+
+    fn into_executor(
+        input: Self::Input,
+        arena: &mut ExecArena<'a, T>,
+        cache: ExecutionCaches<'a>,
+        transaction: *mut T,
+    ) -> ExecId;
+
     fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError>;
 }
 
-macro_rules! impl_exec_node_runner {
-    ($($ty:ty),* $(,)?) => {
-        $(
-            impl<'a, T: Transaction + 'a> ExecNodeRunner<'a, T> for $ty {
-                fn next_tuple(
-                    &mut self,
-                    arena: &mut ExecArena<'a, T>,
-                ) -> Result<(), DatabaseError> {
-                    <$ty>::next_tuple(self, arena)
-                }
-            }
-        )*
-    };
-}
-
-impl_exec_node_runner!(
-    AddColumn,
-    Analyze,
-    ChangeColumn,
-    CopyFromFile,
-    CopyToFile,
-    CreateIndex,
-    CreateTable,
-    CreateView,
-    Delete,
-    Describe,
-    DropColumn,
-    DropIndex,
-    DropTable,
-    DropView,
-    Dummy,
-    Except,
-    Explain,
-    Filter,
-    FunctionScan,
-    HashAggExecutor,
-    HashJoin,
-    IndexScan<'a, T>,
-    Insert,
-    Limit,
-    NestedLoopJoin,
-    Projection,
-    ScalarSubquery,
-    SeqScan<'a, T>,
-    ShowTables,
-    ShowViews,
-    SimpleAggExecutor,
-    Sort,
-    StreamDistinctExecutor,
-    TopK,
-    Truncate,
-    Union,
-    Update,
-    Values,
-);
-
-impl<'a, T: Transaction + 'a> ExecNodeRunner<'a, T> for ExecNode<'a, T> {
+impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
     fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
         match self {
-            ExecNode::AddColumn(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::Analyze(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::ChangeColumn(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::CopyFromFile(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::CopyToFile(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::CreateIndex(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::CreateTable(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::CreateView(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::Delete(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::Describe(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::DropColumn(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::DropIndex(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::DropTable(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::DropView(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::Dummy(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::Except(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::Explain(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::Filter(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::FunctionScan(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::HashAgg(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::HashJoin(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::IndexScan(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::Insert(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::Limit(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::NestedLoopJoin(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::Projection(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::ScalarSubquery(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::SeqScan(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::ShowTables(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::ShowViews(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::SimpleAgg(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::Sort(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::StreamDistinct(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::TopK(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::Truncate(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::Union(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::Update(exec) => ExecNodeRunner::next_tuple(exec, arena),
-            ExecNode::Values(exec) => ExecNodeRunner::next_tuple(exec, arena),
+            ExecNode::AddColumn(exec) => {
+                <AddColumn as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::Analyze(exec) => <Analyze as ExecutorNode<'a, T>>::next_tuple(exec, arena),
+            ExecNode::ChangeColumn(exec) => {
+                <ChangeColumn as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::CopyFromFile(exec) => {
+                <CopyFromFile as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::CopyToFile(exec) => {
+                <CopyToFile as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::CreateIndex(exec) => {
+                <CreateIndex as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::CreateTable(exec) => {
+                <CreateTable as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::CreateView(exec) => {
+                <CreateView as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::Delete(exec) => <Delete as ExecutorNode<'a, T>>::next_tuple(exec, arena),
+            ExecNode::Describe(exec) => <Describe as ExecutorNode<'a, T>>::next_tuple(exec, arena),
+            ExecNode::DropColumn(exec) => {
+                <DropColumn as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::DropIndex(exec) => {
+                <DropIndex as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::DropTable(exec) => {
+                <DropTable as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::DropView(exec) => <DropView as ExecutorNode<'a, T>>::next_tuple(exec, arena),
+            ExecNode::Dummy(exec) => <Dummy as ExecutorNode<'a, T>>::next_tuple(exec, arena),
+            ExecNode::Except(exec) => <Except as ExecutorNode<'a, T>>::next_tuple(exec, arena),
+            ExecNode::Explain(exec) => <Explain as ExecutorNode<'a, T>>::next_tuple(exec, arena),
+            ExecNode::Filter(exec) => <Filter as ExecutorNode<'a, T>>::next_tuple(exec, arena),
+            ExecNode::FunctionScan(exec) => {
+                <FunctionScan as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::HashAgg(exec) => {
+                <HashAggExecutor as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::HashJoin(exec) => <HashJoin as ExecutorNode<'a, T>>::next_tuple(exec, arena),
+            ExecNode::IndexScan(exec) => {
+                <IndexScan<'a, T> as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::Insert(exec) => <Insert as ExecutorNode<'a, T>>::next_tuple(exec, arena),
+            ExecNode::Limit(exec) => <Limit as ExecutorNode<'a, T>>::next_tuple(exec, arena),
+            ExecNode::MarkApply(exec) => {
+                <MarkApply as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::NestedLoopJoin(exec) => {
+                <NestedLoopJoin as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::Projection(exec) => {
+                <Projection as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::ScalarApply(exec) => {
+                <ScalarApply as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::ScalarSubquery(exec) => {
+                <ScalarSubquery as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::SeqScan(exec) => {
+                <SeqScan<'a, T> as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::ShowTables(exec) => {
+                <ShowTables as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::ShowViews(exec) => {
+                <ShowViews as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::SimpleAgg(exec) => {
+                <SimpleAggExecutor as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::Sort(exec) => <Sort as ExecutorNode<'a, T>>::next_tuple(exec, arena),
+            ExecNode::StreamDistinct(exec) => {
+                <StreamDistinctExecutor as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::TopK(exec) => <TopK as ExecutorNode<'a, T>>::next_tuple(exec, arena),
+            ExecNode::Truncate(exec) => <Truncate as ExecutorNode<'a, T>>::next_tuple(exec, arena),
+            ExecNode::Union(exec) => <Union as ExecutorNode<'a, T>>::next_tuple(exec, arena),
+            ExecNode::Update(exec) => <Update as ExecutorNode<'a, T>>::next_tuple(exec, arena),
+            ExecNode::Values(exec) => <Values as ExecutorNode<'a, T>>::next_tuple(exec, arena),
             ExecNode::Empty => unreachable!("executor node re-entered while active"),
         }
     }
@@ -261,6 +266,7 @@ pub(crate) struct ExecArena<'a, T: Transaction + 'a> {
     result: ExecResult,
     cache: Option<ExecutionCaches<'a>>,
     transaction: *mut T,
+    runtime_probe_stack: Vec<RuntimeIndexProbe>,
 }
 
 impl<'a, T: Transaction + 'a> Default for ExecArena<'a, T> {
@@ -270,6 +276,7 @@ impl<'a, T: Transaction + 'a> Default for ExecArena<'a, T> {
             result: ExecResult::default(),
             cache: None,
             transaction: std::ptr::null_mut(),
+            runtime_probe_stack: Vec::new(),
         }
     }
 }
@@ -313,6 +320,20 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
         unsafe { &mut *self.transaction }
     }
 
+    pub(crate) fn push_runtime_probe(&mut self, value: RuntimeIndexProbe) {
+        self.runtime_probe_stack.push(value);
+    }
+
+    pub(crate) fn pop_runtime_probe(&mut self) -> RuntimeIndexProbe {
+        self.runtime_probe_stack
+            .pop()
+            .expect("runtime probe scope initialized")
+    }
+
+    pub(crate) fn runtime_probe_depth(&self) -> usize {
+        self.runtime_probe_stack.len()
+    }
+
     #[inline]
     pub(crate) fn result_tuple(&self) -> &Tuple {
         &self.result.tuple
@@ -342,7 +363,7 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
     pub(crate) fn next_tuple(&mut self, id: ExecId) -> Result<bool, DatabaseError> {
         self.result.status = None;
         let mut node = std::mem::replace(&mut self.nodes[id], ExecNode::Empty);
-        let result = ExecNodeRunner::next_tuple(&mut node, self);
+        let result = node.next_tuple(self);
         self.nodes[id] = node;
         result?;
 
@@ -371,6 +392,182 @@ pub(crate) trait WriteExecutor<'a, T: Transaction + 'a>: Sized {
     ) -> ExecId;
 }
 
+macro_rules! impl_read_executor_node_via_from {
+    ($ty:ty, $input:ty) => {
+        impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for $ty
+        where
+            Self: ReadExecutor<'a, T> + From<$input>,
+        {
+            type Input = $input;
+
+            fn into_executor(
+                input: Self::Input,
+                arena: &mut ExecArena<'a, T>,
+                cache: ExecutionCaches<'a>,
+                transaction: *mut T,
+            ) -> ExecId {
+                <Self as ReadExecutor<'a, T>>::into_executor(
+                    Self::from(input),
+                    arena,
+                    cache,
+                    transaction,
+                )
+            }
+
+            fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+                <$ty>::next_tuple(self, arena)
+            }
+        }
+    };
+}
+
+macro_rules! impl_write_executor_node_via_from {
+    ($ty:ty, $input:ty) => {
+        impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for $ty
+        where
+            Self: WriteExecutor<'a, T> + From<$input>,
+        {
+            type Input = $input;
+
+            fn into_executor(
+                input: Self::Input,
+                arena: &mut ExecArena<'a, T>,
+                cache: ExecutionCaches<'a>,
+                transaction: *mut T,
+            ) -> ExecId {
+                <Self as WriteExecutor<'a, T>>::into_executor(
+                    Self::from(input),
+                    arena,
+                    cache,
+                    transaction,
+                )
+            }
+
+            fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+                <$ty>::next_tuple(self, arena)
+            }
+        }
+    };
+}
+
+impl_read_executor_node_via_from!(
+    CopyToFile,
+    (
+        crate::planner::operator::copy_to_file::CopyToFileOperator,
+        LogicalPlan
+    )
+);
+
+impl_write_executor_node_via_from!(
+    AddColumn,
+    crate::planner::operator::alter_table::add_column::AddColumnOperator
+);
+impl_write_executor_node_via_from!(
+    Analyze,
+    (
+        crate::planner::operator::analyze::AnalyzeOperator,
+        LogicalPlan
+    )
+);
+impl_write_executor_node_via_from!(
+    ChangeColumn,
+    crate::planner::operator::alter_table::change_column::ChangeColumnOperator
+);
+impl_write_executor_node_via_from!(
+    CopyFromFile,
+    crate::planner::operator::copy_from_file::CopyFromFileOperator
+);
+impl_write_executor_node_via_from!(
+    CreateIndex,
+    (
+        crate::planner::operator::create_index::CreateIndexOperator,
+        LogicalPlan
+    )
+);
+impl_write_executor_node_via_from!(
+    CreateTable,
+    crate::planner::operator::create_table::CreateTableOperator
+);
+impl_write_executor_node_via_from!(
+    CreateView,
+    crate::planner::operator::create_view::CreateViewOperator
+);
+impl_write_executor_node_via_from!(
+    Delete,
+    (
+        crate::planner::operator::delete::DeleteOperator,
+        LogicalPlan
+    )
+);
+impl_write_executor_node_via_from!(
+    DropColumn,
+    crate::planner::operator::alter_table::drop_column::DropColumnOperator
+);
+impl_write_executor_node_via_from!(
+    DropIndex,
+    crate::planner::operator::drop_index::DropIndexOperator
+);
+impl_write_executor_node_via_from!(
+    DropTable,
+    crate::planner::operator::drop_table::DropTableOperator
+);
+impl_write_executor_node_via_from!(
+    DropView,
+    crate::planner::operator::drop_view::DropViewOperator
+);
+impl_write_executor_node_via_from!(
+    Insert,
+    (
+        crate::planner::operator::insert::InsertOperator,
+        LogicalPlan
+    )
+);
+impl_write_executor_node_via_from!(
+    Truncate,
+    crate::planner::operator::truncate::TruncateOperator
+);
+impl_write_executor_node_via_from!(
+    Update,
+    (
+        crate::planner::operator::update::UpdateOperator,
+        LogicalPlan
+    )
+);
+
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowTables {
+    type Input = Self;
+
+    fn into_executor(
+        input: Self::Input,
+        arena: &mut ExecArena<'a, T>,
+        _: ExecutionCaches<'a>,
+        _: *mut T,
+    ) -> ExecId {
+        arena.push(ExecNode::ShowTables(input))
+    }
+
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+        ShowTables::next_tuple(self, arena)
+    }
+}
+
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowViews {
+    type Input = Self;
+
+    fn into_executor(
+        input: Self::Input,
+        arena: &mut ExecArena<'a, T>,
+        _: ExecutionCaches<'a>,
+        _: *mut T,
+    ) -> ExecId {
+        arena.push(ExecNode::ShowViews(input))
+    }
+
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+        ShowViews::next_tuple(self, arena)
+    }
+}
+
 pub(crate) fn build_read<'a, T: Transaction + 'a>(
     arena: &mut ExecArena<'a, T>,
     plan: LogicalPlan,
@@ -383,16 +580,26 @@ pub(crate) fn build_read<'a, T: Transaction + 'a>(
         operator,
         childrens,
         physical_option,
-        ..
+        _output_schema_ref,
     } = plan;
 
     match operator {
-        Operator::Dummy => Dummy::default().into_executor(arena, cache, transaction),
+        Operator::Dummy => <Dummy as ExecutorNode<'a, T>>::into_executor(
+            Dummy::default(),
+            arena,
+            cache,
+            transaction,
+        ),
         Operator::Aggregate(op) => {
             let input = childrens.pop_only();
 
             if op.groupby_exprs.is_empty() {
-                SimpleAggExecutor::from((op, input)).into_executor(arena, cache, transaction)
+                <SimpleAggExecutor as ExecutorNode<'a, T>>::into_executor(
+                    (op, input),
+                    arena,
+                    cache,
+                    transaction,
+                )
             } else if op.is_distinct
                 && op.agg_calls.is_empty()
                 && matches!(
@@ -403,117 +610,167 @@ pub(crate) fn build_read<'a, T: Transaction + 'a>(
                     })
                 )
             {
-                StreamDistinctExecutor::from((op, input)).into_executor(arena, cache, transaction)
-            } else {
-                HashAggExecutor::from((op, input)).into_executor(arena, cache, transaction)
-            }
-        }
-        Operator::Filter(op) => {
-            let input = childrens.pop_only();
-
-            Filter::from((op, input)).into_executor(arena, cache, transaction)
-        }
-        Operator::Join(op) => {
-            let (left_input, right_input) = childrens.pop_twins();
-
-            match &op.on {
-                JoinCondition::On { on, .. }
-                    if !on.is_empty()
-                        && matches!(
-                            physical_option,
-                            Some(PhysicalOption {
-                                plan: PlanImpl::HashJoin,
-                                ..
-                            })
-                        ) =>
-                {
-                    HashJoin::from((op, left_input, right_input)).into_executor(
-                        arena,
-                        cache,
-                        transaction,
-                    )
-                }
-                _ => NestedLoopJoin::from((op, left_input, right_input)).into_executor(
+                <StreamDistinctExecutor as ExecutorNode<'a, T>>::into_executor(
+                    (op, input),
                     arena,
                     cache,
                     transaction,
-                ),
+                )
+            } else {
+                <HashAggExecutor as ExecutorNode<'a, T>>::into_executor(
+                    (op, input),
+                    arena,
+                    cache,
+                    transaction,
+                )
             }
         }
-        Operator::Project(op) => {
-            let input = childrens.pop_only();
-
-            Projection::from((op, input)).into_executor(arena, cache, transaction)
+        Operator::Filter(op) => <Filter as ExecutorNode<'a, T>>::into_executor(
+            (op, childrens.pop_only()),
+            arena,
+            cache,
+            transaction,
+        ),
+        Operator::ScalarApply(op) => {
+            let (left, right) = childrens.pop_twins();
+            <ScalarApply as ExecutorNode<'a, T>>::into_executor(
+                (op, left, right),
+                arena,
+                cache,
+                transaction,
+            )
         }
-        Operator::ScalarSubquery(op) => {
-            let input = childrens.pop_only();
-
-            ScalarSubquery::from((op, input)).into_executor(arena, cache, transaction)
+        Operator::MarkApply(op) => {
+            let (left, right) = childrens.pop_twins();
+            <MarkApply as ExecutorNode<'a, T>>::into_executor(
+                (op, left, right),
+                arena,
+                cache,
+                transaction,
+            )
         }
+        Operator::Join(op) => {
+            let use_hash_join = matches!(
+                &op.on,
+                JoinCondition::On { on, .. } if !on.is_empty()
+            ) && matches!(
+                physical_option,
+                Some(PhysicalOption {
+                    plan: PlanImpl::HashJoin,
+                    ..
+                })
+            );
+            let (left, right) = childrens.pop_twins();
+
+            if use_hash_join {
+                <HashJoin as ExecutorNode<'a, T>>::into_executor(
+                    (op, left, right),
+                    arena,
+                    cache,
+                    transaction,
+                )
+            } else {
+                <NestedLoopJoin as ExecutorNode<'a, T>>::into_executor(
+                    (op, left, right),
+                    arena,
+                    cache,
+                    transaction,
+                )
+            }
+        }
+        Operator::Project(op) => <Projection as ExecutorNode<'a, T>>::into_executor(
+            (op, childrens.pop_only()),
+            arena,
+            cache,
+            transaction,
+        ),
+        Operator::ScalarSubquery(op) => <ScalarSubquery as ExecutorNode<'a, T>>::into_executor(
+            (op, childrens.pop_only()),
+            arena,
+            cache,
+            transaction,
+        ),
         Operator::TableScan(op) => {
             if let Some(PhysicalOption {
                 plan: PlanImpl::IndexScan(index_info),
                 ..
             }) = physical_option
             {
-                let IndexInfo {
-                    meta,
-                    range,
-                    covered_deserializers,
-                    cover_mapping,
-                    ..
-                } = *index_info;
-                if let Some(range) = range {
-                    return IndexScan::from((
-                        op,
-                        meta,
-                        range,
-                        covered_deserializers,
-                        cover_mapping,
-                    ))
-                    .into_executor(arena, cache, transaction);
+                if let Some(lookup) = index_info.lookup.clone() {
+                    return <IndexScan<'a, T> as ExecutorNode<'a, T>>::into_executor(
+                        (
+                            op,
+                            index_info.meta.clone(),
+                            lookup,
+                            index_info.covered_deserializers.clone(),
+                            index_info.cover_mapping.clone(),
+                        ),
+                        arena,
+                        cache,
+                        transaction,
+                    );
                 }
             }
 
-            SeqScan::from(op).into_executor(arena, cache, transaction)
+            <SeqScan<'a, T> as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
         }
         Operator::FunctionScan(op) => {
-            FunctionScan::from(op).into_executor(arena, cache, transaction)
+            <FunctionScan as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
         }
-        Operator::Sort(op) => {
-            let input = childrens.pop_only();
-
-            Sort::from((op, input)).into_executor(arena, cache, transaction)
+        Operator::Sort(op) => <Sort as ExecutorNode<'a, T>>::into_executor(
+            (op, childrens.pop_only()),
+            arena,
+            cache,
+            transaction,
+        ),
+        Operator::Limit(op) => <Limit as ExecutorNode<'a, T>>::into_executor(
+            (op, childrens.pop_only()),
+            arena,
+            cache,
+            transaction,
+        ),
+        Operator::TopK(op) => <TopK as ExecutorNode<'a, T>>::into_executor(
+            (op, childrens.pop_only()),
+            arena,
+            cache,
+            transaction,
+        ),
+        Operator::Values(op) => {
+            <Values as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
         }
-        Operator::Limit(op) => {
-            let input = childrens.pop_only();
-
-            Limit::from((op, input)).into_executor(arena, cache, transaction)
+        Operator::ShowTable => <ShowTables as ExecutorNode<'a, T>>::into_executor(
+            ShowTables { metas: None },
+            arena,
+            cache,
+            transaction,
+        ),
+        Operator::ShowView => <ShowViews as ExecutorNode<'a, T>>::into_executor(
+            ShowViews { metas: None },
+            arena,
+            cache,
+            transaction,
+        ),
+        Operator::Explain => <Explain as ExecutorNode<'a, T>>::into_executor(
+            childrens.pop_only(),
+            arena,
+            cache,
+            transaction,
+        ),
+        Operator::Describe(op) => {
+            <Describe as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
         }
-        Operator::TopK(op) => {
-            let input = childrens.pop_only();
-
-            TopK::from((op, input)).into_executor(arena, cache, transaction)
-        }
-        Operator::Values(op) => Values::from(op).into_executor(arena, cache, transaction),
-        Operator::ShowTable => arena.push(ExecNode::ShowTables(ShowTables { metas: None })),
-        Operator::ShowView => arena.push(ExecNode::ShowViews(ShowViews { metas: None })),
-        Operator::Explain => {
-            let input = childrens.pop_only();
-
-            Explain::from(input).into_executor(arena, cache, transaction)
-        }
-        Operator::Describe(op) => Describe::from(op).into_executor(arena, cache, transaction),
-        Operator::Union(_) => {
-            let (left_input, right_input) = childrens.pop_twins();
-
-            Union::from((left_input, right_input)).into_executor(arena, cache, transaction)
-        }
-        Operator::Except(_) => {
-            let (left_input, right_input) = childrens.pop_twins();
-
-            Except::from((left_input, right_input)).into_executor(arena, cache, transaction)
-        }
+        Operator::Union(_) => <Union as ExecutorNode<'a, T>>::into_executor(
+            childrens.pop_twins(),
+            arena,
+            cache,
+            transaction,
+        ),
+        Operator::Except(_) => <Except as ExecutorNode<'a, T>>::into_executor(
+            childrens.pop_twins(),
+            arena,
+            cache,
+            transaction,
+        ),
         _ => unreachable!(),
     }
 }
@@ -537,58 +794,82 @@ pub(crate) fn build_write<'a, T: Transaction + 'a>(
         Operator::Insert(op) => {
             let input = childrens.pop_only();
 
-            Insert::from((op, input)).into_executor(arena, cache, transaction)
+            <Insert as ExecutorNode<'a, T>>::into_executor((op, input), arena, cache, transaction)
         }
         Operator::Update(op) => {
             let input = childrens.pop_only();
 
-            Update::from((op, input)).into_executor(arena, cache, transaction)
+            <Update as ExecutorNode<'a, T>>::into_executor((op, input), arena, cache, transaction)
         }
         Operator::Delete(op) => {
             let input = childrens.pop_only();
 
-            Delete::from((op, input)).into_executor(arena, cache, transaction)
+            <Delete as ExecutorNode<'a, T>>::into_executor((op, input), arena, cache, transaction)
         }
-        Operator::AddColumn(op) => AddColumn::from(op).into_executor(arena, cache, transaction),
+        Operator::AddColumn(op) => {
+            <AddColumn as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
+        }
         Operator::ChangeColumn(op) => {
-            ChangeColumn::from(op).into_executor(arena, cache, transaction)
+            <ChangeColumn as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
         }
-        Operator::DropColumn(op) => DropColumn::from(op).into_executor(arena, cache, transaction),
-        Operator::CreateTable(op) => CreateTable::from(op).into_executor(arena, cache, transaction),
+        Operator::DropColumn(op) => {
+            <DropColumn as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
+        }
+        Operator::CreateTable(op) => {
+            <CreateTable as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
+        }
         Operator::CreateIndex(op) => {
             let input = childrens.pop_only();
 
-            CreateIndex::from((op, input)).into_executor(arena, cache, transaction)
+            <CreateIndex as ExecutorNode<'a, T>>::into_executor(
+                (op, input),
+                arena,
+                cache,
+                transaction,
+            )
         }
-        Operator::CreateView(op) => CreateView::from(op).into_executor(arena, cache, transaction),
-        Operator::DropTable(op) => DropTable::from(op).into_executor(arena, cache, transaction),
-        Operator::DropView(op) => DropView::from(op).into_executor(arena, cache, transaction),
-        Operator::DropIndex(op) => DropIndex::from(op).into_executor(arena, cache, transaction),
-        Operator::Truncate(op) => Truncate::from(op).into_executor(arena, cache, transaction),
+        Operator::CreateView(op) => {
+            <CreateView as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
+        }
+        Operator::DropTable(op) => {
+            <DropTable as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
+        }
+        Operator::DropView(op) => {
+            <DropView as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
+        }
+        Operator::DropIndex(op) => {
+            <DropIndex as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
+        }
+        Operator::Truncate(op) => {
+            <Truncate as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
+        }
         Operator::CopyFromFile(op) => {
-            CopyFromFile::from(op).into_executor(arena, cache, transaction)
+            <CopyFromFile as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
         }
         Operator::CopyToFile(op) => {
             let input = childrens.pop_only();
 
-            CopyToFile::from((op, input)).into_executor(arena, cache, transaction)
+            <CopyToFile as ExecutorNode<'a, T>>::into_executor(
+                (op, input),
+                arena,
+                cache,
+                transaction,
+            )
         }
         Operator::Analyze(op) => {
             let input = childrens.pop_only();
 
-            Analyze::from((op, input)).into_executor(arena, cache, transaction)
+            <Analyze as ExecutorNode<'a, T>>::into_executor((op, input), arena, cache, transaction)
         }
-        operator => build_read(
-            arena,
-            LogicalPlan {
+        operator => {
+            let plan = LogicalPlan {
                 operator,
                 childrens,
                 physical_option,
                 _output_schema_ref,
-            },
-            cache,
-            transaction,
-        ),
+            };
+            build_read(arena, plan, cache, transaction)
+        }
     }
 }
 
@@ -621,6 +902,39 @@ where
     let mut arena = ExecArena::default();
     arena.init_context(cache, transaction);
     let root = executor.into_executor(&mut arena, cache, transaction);
+    Executor::new(arena, root)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn execute_input<'a, T, E>(
+    input: E::Input,
+    cache: ExecutionCaches<'a>,
+    transaction: *mut T,
+) -> Executor<'a, T>
+where
+    T: Transaction + 'a,
+    E: ExecutorNode<'a, T>,
+{
+    let mut arena = ExecArena::default();
+    arena.init_context(cache, transaction);
+    let root = E::into_executor(input, &mut arena, cache, transaction);
+    Executor::new(arena, root)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[allow(dead_code)]
+pub(crate) fn execute_input_mut<'a, T, E>(
+    input: E::Input,
+    cache: ExecutionCaches<'a>,
+    transaction: *mut T,
+) -> Executor<'a, T>
+where
+    T: Transaction + 'a,
+    E: ExecutorNode<'a, T>,
+{
+    let mut arena = ExecArena::default();
+    arena.init_context(cache, transaction);
+    let root = E::into_executor(input, &mut arena, cache, transaction);
     Executor::new(arena, root)
 }
 

@@ -28,7 +28,7 @@ use crate::types::ColumnId;
 pub struct CreateIndex {
     op: Option<CreateIndexOperator>,
     input_schema: SchemaRef,
-    input_plan: Option<LogicalPlan>,
+    input_plan: LogicalPlan,
     input: ExecId,
 }
 
@@ -37,7 +37,7 @@ impl From<(CreateIndexOperator, LogicalPlan)> for CreateIndex {
         Self {
             op: Some(op),
             input_schema: input.output_schema().clone(),
-            input_plan: Some(input),
+            input_plan: input,
             input: 0,
         }
     }
@@ -50,14 +50,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateIndex {
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        self.input = build_read(
-            arena,
-            self.input_plan
-                .take()
-                .expect("create index input plan initialized"),
-            cache,
-            transaction,
-        );
+        self.input = build_read(arena, self.input_plan.take(), cache, transaction);
         arena.push(ExecNode::CreateIndex(self))
     }
 }

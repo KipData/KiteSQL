@@ -14,58 +14,37 @@
 
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::project::ProjectOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
-use crate::types::tuple::SchemaRef;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 pub struct Projection {
     exprs: Vec<ScalarExpression>,
-    input_schema: SchemaRef,
-    input_plan: Option<LogicalPlan>,
     input: ExecId,
     scratch: Tuple,
 }
 
-impl From<(ProjectOperator, LogicalPlan)> for Projection {
-    fn from((ProjectOperator { exprs }, mut input): (ProjectOperator, LogicalPlan)) -> Self {
-        Projection {
-            exprs,
-            input_schema: input.output_schema().clone(),
-            input_plan: Some(input),
-            input: 0,
-            scratch: Tuple::default(),
-        }
-    }
-}
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection {
+    type Input = (ProjectOperator, LogicalPlan);
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Projection {
     fn into_executor(
-        mut self,
+        (ProjectOperator { exprs }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        self.input = build_read(
-            arena,
-            self.input_plan
-                .take()
-                .expect("projection input plan initialized"),
-            cache,
-            transaction,
-        );
-        arena.push(ExecNode::Projection(self))
+        let input = build_read(arena, input, cache, transaction);
+        arena.push(ExecNode::Projection(Projection {
+            exprs,
+            input,
+            scratch: Tuple::default(),
+        }))
     }
-}
 
-impl Projection {
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-    ) -> Result<(), DatabaseError> {
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
         if !arena.next_tuple(self.input)? {
             arena.finish();
             return Ok(());
@@ -78,23 +57,23 @@ impl Projection {
         output.values.clear();
         output.values.reserve(self.exprs.len());
         for expr in self.exprs.iter() {
-            output
-                .values
-                .push(expr.eval(Some((tuple, &self.input_schema)))?);
+            output.values.push(expr.eval(Some(tuple))?);
         }
         arena.resume();
         Ok(())
     }
+}
 
+impl Projection {
     pub fn projection(
         tuple: &Tuple,
         exprs: &[ScalarExpression],
-        schema: &[ColumnRef],
+        _schema: &[ColumnRef],
     ) -> Result<Vec<DataValue>, DatabaseError> {
         let mut values = Vec::with_capacity(exprs.len());
 
         for expr in exprs.iter() {
-            values.push(expr.eval(Some((tuple, schema)))?);
+            values.push(expr.eval(Some(tuple))?);
         }
         Ok(values)
     }

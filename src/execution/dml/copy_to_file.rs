@@ -22,7 +22,7 @@ use crate::types::tuple_builder::TupleBuilder;
 
 pub struct CopyToFile {
     op: CopyToFileOperator,
-    input_plan: Option<LogicalPlan>,
+    input_plan: LogicalPlan,
     input: Option<ExecId>,
 }
 
@@ -30,7 +30,7 @@ impl From<(CopyToFileOperator, LogicalPlan)> for CopyToFile {
     fn from((op, input): (CopyToFileOperator, LogicalPlan)) -> Self {
         CopyToFile {
             op,
-            input_plan: Some(input),
+            input_plan: input,
             input: None,
         }
     }
@@ -45,9 +45,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for CopyToFile {
     ) -> ExecId {
         self.input = Some(build_read(
             arena,
-            self.input_plan
-                .take()
-                .expect("copy to file input plan initialized"),
+            self.input_plan.take(),
             cache,
             transaction,
         ));
@@ -207,11 +205,7 @@ mod tests {
 
         let executor = CopyToFile {
             op: op.clone(),
-            input_plan: Some(TableScanOperator::build(
-                "t1".to_string().into(),
-                table,
-                true,
-            )?),
+            input_plan: TableScanOperator::build("t1".to_string().into(), table, true)?,
             input: None,
         };
         let mut executor = crate::execution::execute(

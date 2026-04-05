@@ -392,6 +392,11 @@ fn default_optimizer_pipeline() -> HepOptimizerPipeline {
             ],
         )
         .after_batch(
+            "Parameterize Mark Apply".to_string(),
+            HepBatchStrategy::once_topdown(),
+            vec![NormalizationRuleImpl::ParameterizeMarkApply],
+        )
+        .after_batch(
             "Expression Remapper".to_string(),
             HepBatchStrategy::once_topdown(),
             vec![NormalizationRuleImpl::EvaluatorBind],
@@ -458,25 +463,19 @@ impl<S: Storage> State<S> {
         &self.view_cache
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn build_plan<A: AsRef<[(&'static str, DataValue)]>>(
+    fn build_plan<A: AsRef<[(&'static str, DataValue)]>>(
         &self,
         stmt: &Statement,
         params: A,
-        table_cache: &TableCache,
-        view_cache: &ViewCache,
-        meta_cache: &StatisticsMetaCache,
         transaction: &<S as Storage>::TransactionType<'_>,
-        scala_functions: &ScalaFunctions,
-        table_functions: &TableFunctions,
     ) -> Result<LogicalPlan, DatabaseError> {
         let mut binder = Binder::new(
             BinderContext::new(
-                table_cache,
-                view_cache,
+                self.table_cache(),
+                self.view_cache(),
                 transaction,
-                scala_functions,
-                table_functions,
+                self.scala_functions(),
+                self.table_functions(),
                 Arc::new(AtomicUsize::new(0)),
             ),
             &params,
@@ -493,7 +492,7 @@ impl<S: Storage> State<S> {
         let mut best_plan = self
             .optimizer_pipeline
             .instantiate(source_plan)
-            .find_best(Some(&transaction.meta_loader(meta_cache)))?;
+            .find_best(Some(&transaction.meta_loader(self.meta_cache())))?;
 
         if let Operator::Analyze(op) = &mut best_plan.operator {
             if op.histogram_buckets.is_none() {
@@ -513,16 +512,7 @@ impl<S: Storage> State<S> {
     where
         S: 'txn,
     {
-        let mut plan = self.build_plan(
-            stmt,
-            params,
-            self.table_cache(),
-            self.view_cache(),
-            self.meta_cache(),
-            transaction,
-            self.scala_functions(),
-            self.table_functions(),
-        )?;
+        let mut plan = self.build_plan(stmt, params, transaction)?;
         let schema = plan.output_schema().clone();
         let mut arena = ExecArena::default();
         let root = build_write(
@@ -1173,16 +1163,7 @@ pub(crate) mod test {
             None,
         );
         let source_plan = binder.bind(&stmt)?;
-        let best_plan = kite_sql.state.build_plan(
-            &stmt,
-            [],
-            kite_sql.state.table_cache(),
-            kite_sql.state.view_cache(),
-            kite_sql.state.meta_cache(),
-            &transaction,
-            kite_sql.state.scala_functions(),
-            kite_sql.state.table_functions(),
-        )?;
+        let best_plan = kite_sql.state.build_plan(&stmt, [], &transaction)?;
 
         let join_plan = match source_plan.operator {
             Operator::Project(_) => source_plan.childrens.pop_only(),
@@ -1266,16 +1247,7 @@ pub(crate) mod test {
             None,
         );
         let source_plan = binder.bind(&stmt)?;
-        let best_plan = kite_sql.state.build_plan(
-            &stmt,
-            [],
-            kite_sql.state.table_cache(),
-            kite_sql.state.view_cache(),
-            kite_sql.state.meta_cache(),
-            &transaction,
-            kite_sql.state.scala_functions(),
-            kite_sql.state.table_functions(),
-        )?;
+        let best_plan = kite_sql.state.build_plan(&stmt, [], &transaction)?;
 
         let join_plan = match source_plan.operator {
             Operator::Project(_) => source_plan.childrens.pop_only(),
@@ -1373,16 +1345,7 @@ pub(crate) mod test {
             "SELECT o.x, t.y FROM onecolumn o INNER JOIN twocolumn t ON (o.x=t.x AND t.y=53)",
         )?;
         let transaction = kite_sql.storage.transaction()?;
-        let best_plan = kite_sql.state.build_plan(
-            &stmt,
-            [],
-            kite_sql.state.table_cache(),
-            kite_sql.state.view_cache(),
-            kite_sql.state.meta_cache(),
-            &transaction,
-            kite_sql.state.scala_functions(),
-            kite_sql.state.table_functions(),
-        )?;
+        let best_plan = kite_sql.state.build_plan(&stmt, [], &transaction)?;
         let join_plan = match best_plan.operator {
             Operator::Project(_) => best_plan.childrens.pop_only(),
             Operator::Join(_) => best_plan,
@@ -1512,6 +1475,272 @@ pub(crate) mod test {
         TableScan t1 -> [a, b] [SeqScan => (Sort Option: None)]"
             )
         }
+
+        Ok(())
+    }
+
+    // FIXME: keep this as a unit test instead of SLT for now. The current
+    // sqllogictest runner does not reliably match the pretty-printed multi-line
+    // EXPLAIN output produced by correlated IN, even though the plan itself is stable.
+    #[test]
+    fn test_subquery_explain_uses_parameterized_index_for_in() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+
+        kite_sql
+            .run("create table in_outer(id int primary key, a int)")?
+            .done()?;
+        kite_sql
+            .run("create table in_inner(id int primary key, v int)")?
+            .done()?;
+        kite_sql
+            .run("create table in_inner_nn(id int primary key, v int)")?
+            .done()?;
+        kite_sql
+            .run("create index in_inner_v_index on in_inner(v)")?
+            .done()?;
+        kite_sql
+            .run("create index in_inner_nn_v_index on in_inner_nn(v)")?
+            .done()?;
+
+        kite_sql
+            .run("insert into in_outer values (0, null), (1, 1), (2, 2), (3, 3)")?
+            .done()?;
+        kite_sql
+            .run("insert into in_inner values (0, 2), (1, null)")?
+            .done()?;
+        kite_sql
+            .run("insert into in_inner_nn values (0, 2)")?
+            .done()?;
+
+        let collect_plan = |sql: &str| -> Result<String, DatabaseError> {
+            let mut iter = kite_sql.run(sql)?;
+            let rows = iter.by_ref().collect::<Result<Vec<_>, _>>()?;
+            iter.done()?;
+            Ok(rows
+                .iter()
+                .filter_map(|row| match row.values.first() {
+                    Some(DataValue::Utf8 { value, .. }) => Some(value.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"))
+        };
+        let collect_ids = |sql: &str| -> Result<Vec<i32>, DatabaseError> {
+            let mut iter = kite_sql.run(sql)?;
+            let mut ids = Vec::new();
+            while let Some(row) = iter.next() {
+                let row = row?;
+                ids.push(row.values[0].i32().unwrap());
+            }
+            iter.done()?;
+            Ok(ids)
+        };
+
+        let assert_mark_in_uses_parameterized_index =
+            |sql: &str, index_name: &str| -> Result<(), DatabaseError> {
+                let explain_plan = collect_plan(sql)?;
+                assert!(
+                    explain_plan.contains("MarkInApply"),
+                    "unexpected explain plan: {explain_plan}"
+                );
+                assert!(
+                    explain_plan.contains(&format!("IndexScan By {index_name} => Probe")),
+                    "unexpected explain plan: {explain_plan}"
+                );
+                Ok(())
+            };
+
+        assert_mark_in_uses_parameterized_index(
+            "explain select id from in_outer where a in (select v from in_inner where in_inner.v = in_outer.a)",
+            "in_inner_v_index",
+        )?;
+        assert_mark_in_uses_parameterized_index(
+            "explain select id from in_outer where a not in (select v from in_inner where in_inner.v = in_outer.a)",
+            "in_inner_v_index",
+        )?;
+        assert_mark_in_uses_parameterized_index(
+            "explain select id from in_outer where a in (select v from in_inner_nn where in_inner_nn.v = in_outer.a)",
+            "in_inner_nn_v_index",
+        )?;
+        assert_mark_in_uses_parameterized_index(
+            "explain select id from in_outer where a not in (select v from in_inner_nn where in_inner_nn.v = in_outer.a)",
+            "in_inner_nn_v_index",
+        )?;
+
+        assert_eq!(
+            collect_ids(
+                "select id from in_outer where a in (select v from in_inner where in_inner.v = in_outer.a) order by id",
+            )?,
+            vec![2]
+        );
+        assert_eq!(
+            collect_ids(
+                "select id from in_outer where a not in (select v from in_inner where in_inner.v = in_outer.a) order by id",
+            )?,
+            vec![0, 1, 3]
+        );
+        assert_eq!(
+            collect_ids(
+                "select id from in_outer where a in (select v from in_inner_nn where in_inner_nn.v = in_outer.a) order by id",
+            )?,
+            vec![2]
+        );
+        assert_eq!(
+            collect_ids(
+                "select id from in_outer where a not in (select v from in_inner_nn where in_inner_nn.v = in_outer.a) order by id",
+            )?,
+            vec![0, 1, 3]
+        );
+
+        kite_sql
+            .run("create table in_outer_flag(id int primary key, a int, b int)")?
+            .done()?;
+        kite_sql
+            .run("create table in_inner_flag(id int primary key, v int, flag int)")?
+            .done()?;
+        kite_sql
+            .run("create table in_inner_flag_nn(id int primary key, v int, flag int)")?
+            .done()?;
+        kite_sql
+            .run("create index in_inner_flag_v_index on in_inner_flag(v)")?
+            .done()?;
+        kite_sql
+            .run("create index in_inner_flag_nn_v_index on in_inner_flag_nn(v)")?
+            .done()?;
+
+        kite_sql
+            .run("insert into in_outer_flag values (0, null, 1), (1, 1, 1), (2, 2, 1), (3, 3, 1)")?
+            .done()?;
+        kite_sql
+            .run("insert into in_inner_flag values (0, 2, 1), (1, null, 1)")?
+            .done()?;
+        kite_sql
+            .run("insert into in_inner_flag_nn values (0, 2, 1)")?
+            .done()?;
+
+        assert_mark_in_uses_parameterized_index(
+            "explain select id from in_outer_flag where a in (select v from in_inner_flag where in_inner_flag.flag = in_outer_flag.b)",
+            "in_inner_flag_v_index",
+        )?;
+        assert_mark_in_uses_parameterized_index(
+            "explain select id from in_outer_flag where a not in (select v from in_inner_flag where in_inner_flag.flag = in_outer_flag.b)",
+            "in_inner_flag_v_index",
+        )?;
+        assert_mark_in_uses_parameterized_index(
+            "explain select id from in_outer_flag where a in (select v from in_inner_flag_nn where in_inner_flag_nn.flag = in_outer_flag.b)",
+            "in_inner_flag_nn_v_index",
+        )?;
+        assert_mark_in_uses_parameterized_index(
+            "explain select id from in_outer_flag where a not in (select v from in_inner_flag_nn where in_inner_flag_nn.flag = in_outer_flag.b)",
+            "in_inner_flag_nn_v_index",
+        )?;
+
+        assert_eq!(
+            collect_ids(
+                "select id from in_outer_flag where a in (select v from in_inner_flag where in_inner_flag.flag = in_outer_flag.b) order by id",
+            )?,
+            vec![2]
+        );
+        assert_eq!(
+            collect_ids(
+                "select id from in_outer_flag where a not in (select v from in_inner_flag where in_inner_flag.flag = in_outer_flag.b) order by id",
+            )?,
+            Vec::<i32>::new()
+        );
+        assert_eq!(
+            collect_ids(
+                "select id from in_outer_flag where a in (select v from in_inner_flag_nn where in_inner_flag_nn.flag = in_outer_flag.b) order by id",
+            )?,
+            vec![2]
+        );
+        assert_eq!(
+            collect_ids(
+                "select id from in_outer_flag where a not in (select v from in_inner_flag_nn where in_inner_flag_nn.flag = in_outer_flag.b) order by id",
+            )?,
+            vec![1, 3]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_subquery_explain_uses_parameterized_index_for_exists() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+
+        kite_sql
+            .run("create table exists_outer(id int primary key, a int, b int)")?
+            .done()?;
+        kite_sql
+            .run("create table exists_inner(id int primary key, v int, flag int)")?
+            .done()?;
+        kite_sql
+            .run("create index exists_inner_v_index on exists_inner(v)")?
+            .done()?;
+
+        kite_sql
+            .run("insert into exists_outer values (0, 1, 1), (1, 1, 2), (2, 2, null), (3, 3, 1)")?
+            .done()?;
+        kite_sql
+            .run("insert into exists_inner values (0, 1, 1), (1, 1, null), (2, 2, 1)")?
+            .done()?;
+
+        let collect_plan = |sql: &str| -> Result<String, DatabaseError> {
+            let mut iter = kite_sql.run(sql)?;
+            let rows = iter.by_ref().collect::<Result<Vec<_>, _>>()?;
+            iter.done()?;
+            Ok(rows
+                .iter()
+                .filter_map(|row| match row.values.first() {
+                    Some(DataValue::Utf8 { value, .. }) => Some(value.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"))
+        };
+        let collect_ids = |sql: &str| -> Result<Vec<i32>, DatabaseError> {
+            let mut iter = kite_sql.run(sql)?;
+            let mut ids = Vec::new();
+            while let Some(row) = iter.next() {
+                let row = row?;
+                ids.push(row.values[0].i32().unwrap());
+            }
+            iter.done()?;
+            Ok(ids)
+        };
+        let assert_mark_exists_uses_parameterized_index = |sql: &str| -> Result<(), DatabaseError> {
+            let explain_plan = collect_plan(sql)?;
+            assert!(
+                explain_plan.contains("MarkExistsApply"),
+                "unexpected explain plan: {explain_plan}"
+            );
+            assert!(
+                explain_plan.contains("IndexScan By exists_inner_v_index => Probe"),
+                "unexpected explain plan: {explain_plan}"
+            );
+            Ok(())
+        };
+
+        assert_mark_exists_uses_parameterized_index(
+            "explain select id from exists_outer where exists (select 1 from exists_inner where exists_inner.v = exists_outer.a and exists_inner.flag = exists_outer.b)",
+        )?;
+        assert_mark_exists_uses_parameterized_index(
+            "explain select id from exists_outer where not exists (select 1 from exists_inner where exists_inner.v = exists_outer.a and exists_inner.flag = exists_outer.b)",
+        )?;
+
+        assert_eq!(
+            collect_ids(
+                "select id from exists_outer where exists (select 1 from exists_inner where exists_inner.v = exists_outer.a and exists_inner.flag = exists_outer.b) order by id",
+            )?,
+            vec![0]
+        );
+        assert_eq!(
+            collect_ids(
+                "select id from exists_outer where not exists (select 1 from exists_inner where exists_inner.v = exists_outer.a and exists_inner.flag = exists_outer.b) order by id",
+            )?,
+            vec![1, 2, 3]
+        );
 
         Ok(())
     }

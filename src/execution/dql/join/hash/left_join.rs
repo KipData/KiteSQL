@@ -14,10 +14,11 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::hash::{
-    filter, FilterArgs, JoinProbeState, LeftDropState, LeftDropTuples, ProbeState,
+    filter, JoinProbeState, LeftDropState, LeftDropTuples, ProbeState,
 };
 use crate::execution::dql::join::hash_join::BuildState;
-use crate::types::tuple::Tuple;
+use crate::expression::ScalarExpression;
+use crate::types::tuple::{SplitTupleRef, Tuple};
 use crate::types::value::DataValue;
 use fixedbitset::FixedBitSet;
 
@@ -32,7 +33,7 @@ impl JoinProbeState for LeftJoinState {
         &mut self,
         probe_state: &mut ProbeState,
         build_state: Option<&mut BuildState>,
-        filter_args: Option<&FilterArgs>,
+        filter_expr: Option<&ScalarExpression>,
     ) -> Result<Option<Tuple>, DatabaseError> {
         if probe_state.is_keys_has_null {
             probe_state.finished = true;
@@ -47,20 +48,22 @@ impl JoinProbeState for LeftJoinState {
         while probe_state.index < build_state.tuples.len() {
             let (i, Tuple { values, pk }) = &build_state.tuples[probe_state.index];
             probe_state.index += 1;
+
+            if let Some(filter_expr) = filter_expr {
+                let full_values =
+                    SplitTupleRef::from_slices(values, &probe_state.probe_tuple.values);
+                if !filter(&full_values, filter_expr)? {
+                    probe_state.has_filtered = true;
+                    self.bits.set(*i, true);
+                    continue;
+                }
+            }
             let full_values = Vec::from_iter(
                 values
                     .iter()
                     .chain(probe_state.probe_tuple.values.iter())
                     .cloned(),
             );
-
-            if let Some(filter_args) = filter_args {
-                if !filter(&full_values, filter_args)? {
-                    probe_state.has_filtered = true;
-                    self.bits.set(*i, true);
-                    continue;
-                }
-            }
             build_state.is_used = true;
             return Ok(Some(Tuple::new(pk.clone(), full_values)));
         }
@@ -74,7 +77,7 @@ impl JoinProbeState for LeftJoinState {
     fn left_drop_next(
         &mut self,
         left_drop_state: &mut LeftDropState,
-        _filter_args: Option<&FilterArgs>,
+        _filter_expr: Option<&ScalarExpression>,
     ) -> Result<Option<Tuple>, DatabaseError> {
         let full_schema_len = self.right_schema_len + self.left_schema_len;
 

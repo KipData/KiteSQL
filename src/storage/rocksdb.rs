@@ -715,8 +715,8 @@ mod test {
     use crate::expression::range_detacher::Range;
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::{
-        IndexImplEnum, IndexImplParams, IndexIter, IndexIterState, PrimaryKeyIndexImpl, Storage,
-        Transaction,
+        IndexImplEnum, IndexImplParams, IndexIter, IndexIterState, IterBounds, PrimaryKeyIndexImpl,
+        Storage, Transaction,
     };
     use crate::types::index::{IndexMeta, IndexType};
     use crate::types::tuple::Tuple;
@@ -868,9 +868,8 @@ mod test {
             .columns()
             .map(|column| column.datatype().serializable())
             .collect_vec();
-        let mut iter = IndexIter {
-            offset: 0,
-            limit: None,
+        let mut iter: IndexIter<'_, _> = IndexIter {
+            bounds: IterBounds::new(0, None),
             params: IndexImplParams {
                 index_meta: Arc::new(IndexMeta {
                     id: 0,
@@ -895,7 +894,7 @@ mod test {
                     max: Bound::Included(DataValue::Int32(4)),
                 },
             ]
-            .into_iter(),
+            .into(),
             state: IndexIterState::Init,
             inner: IndexImplEnum::PrimaryKey(PrimaryKeyIndexImpl),
             encode_min_buffer: Vec::new(),

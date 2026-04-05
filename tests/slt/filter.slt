@@ -149,6 +149,11 @@ select * from t1 where id in (1, null)
 1 KipDB
 
 query IT
+select * from t1 where id in (null, 1)
+----
+1 KipDB
+
+query IT
 select * from t1 where null in (1, 2)
 ----
 
@@ -158,6 +163,10 @@ select * from t1 where null in (1, null)
 
 query IT
 select * from t1 where id not in (1, null)
+----
+
+query IT
+select * from t1 where id not in (null, 1)
 ----
 
 query IT

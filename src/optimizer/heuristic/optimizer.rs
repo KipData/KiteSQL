@@ -368,7 +368,8 @@ impl<'a> HepOptimizer<'a> {
             if applied_rules[idx] {
                 continue;
             }
-            if rule.apply(plan)? {
+            let applied_rule = rule.apply(plan)?;
+            if applied_rule {
                 plan.reset_output_schema_cache_recursive();
                 applied_rules[idx] = true;
                 applied = true;
@@ -454,9 +455,15 @@ impl ImplementationRuleIndex {
             Operator::Limit(_) if self.contains(ImplementationRuleImpl::Limit) => {
                 Some(PhysicalOption::new(PlanImpl::Limit, SortOption::Follow))
             }
+            Operator::MarkApply(_) if self.contains(ImplementationRuleImpl::MarkApply) => {
+                Some(PhysicalOption::new(PlanImpl::MarkApply, SortOption::Follow))
+            }
             Operator::Project(_) if self.contains(ImplementationRuleImpl::Projection) => {
                 Some(PhysicalOption::new(PlanImpl::Project, SortOption::Follow))
             }
+            Operator::ScalarApply(_) if self.contains(ImplementationRuleImpl::ScalarApply) => Some(
+                PhysicalOption::new(PlanImpl::ScalarApply, SortOption::Follow),
+            ),
             Operator::ScalarSubquery(_)
                 if self.contains(ImplementationRuleImpl::ScalarSubquery) =>
             {
@@ -563,7 +570,7 @@ mod tests {
     use crate::planner::operator::sort::SortField;
     use crate::planner::operator::{PhysicalOption, PlanImpl, SortOption};
     use crate::storage::{Storage, Transaction};
-    use crate::types::index::{IndexInfo, IndexMeta, IndexType};
+    use crate::types::index::{IndexInfo, IndexLookup, IndexMeta, IndexType};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::ops::Bound;
@@ -671,13 +678,13 @@ mod tests {
                         fields: sort_fields.clone(),
                         ignore_prefix_len: 0,
                     },
-                    range: Some(Range::SortedRanges(vec![
+                    lookup: Some(IndexLookup::Static(Range::SortedRanges(vec![
                         Range::Eq(DataValue::Int32(2)),
                         Range::Scope {
                             min: Bound::Excluded(DataValue::Int32(40)),
                             max: Bound::Unbounded,
                         }
-                    ])),
+                    ]))),
                     covered_deserializers: None,
                     cover_mapping: None,
                     sort_elimination_hint: None,

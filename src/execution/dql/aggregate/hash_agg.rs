@@ -14,12 +14,11 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::{create_accumulators, Accumulator};
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
-use crate::types::tuple::SchemaRef;
 use crate::types::value::DataValue;
 use ahash::{HashMap, HashMapExt};
 use itertools::Itertools;
@@ -30,58 +29,36 @@ type HashAggOutput = HashMapIntoIter<Vec<DataValue>, Vec<Box<dyn Accumulator>>>;
 pub struct HashAggExecutor {
     agg_calls: Vec<ScalarExpression>,
     groupby_exprs: Vec<ScalarExpression>,
-    input_schema: SchemaRef,
-    input_plan: Option<LogicalPlan>,
     input: ExecId,
     output: Option<HashAggOutput>,
 }
 
-impl From<(AggregateOperator, LogicalPlan)> for HashAggExecutor {
-    fn from(
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
+    type Input = (AggregateOperator, LogicalPlan);
+
+    fn into_executor(
         (
             AggregateOperator {
                 agg_calls,
                 groupby_exprs,
                 ..
             },
-            mut input,
-        ): (AggregateOperator, LogicalPlan),
-    ) -> Self {
-        HashAggExecutor {
-            agg_calls,
-            groupby_exprs,
-            input_schema: input.output_schema().clone(),
-            input_plan: Some(input),
-            input: 0,
-            output: None,
-        }
-    }
-}
-
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashAggExecutor {
-    fn into_executor(
-        mut self,
+            input,
+        ): Self::Input,
         arena: &mut ExecArena<'a, T>,
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        self.input = build_read(
-            arena,
-            self.input_plan
-                .take()
-                .expect("hash aggregate input plan initialized"),
-            cache,
-            transaction,
-        );
-        arena.push(ExecNode::HashAgg(self))
+        let input = build_read(arena, input, cache, transaction);
+        arena.push(ExecNode::HashAgg(HashAggExecutor {
+            agg_calls,
+            groupby_exprs,
+            input,
+            output: None,
+        }))
     }
-}
 
-impl HashAggExecutor {
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-    ) -> Result<(), DatabaseError> {
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
         if self.output.is_none() {
             let mut group_hash_accs: HashMap<Vec<DataValue>, Vec<Box<dyn Accumulator>>> =
                 HashMap::new();
@@ -91,7 +68,7 @@ impl HashAggExecutor {
                 let group_keys = self
                     .groupby_exprs
                     .iter()
-                    .map(|expr| expr.eval(Some((tuple, &self.input_schema))))
+                    .map(|expr| expr.eval(Some(tuple)))
                     .try_collect()?;
 
                 let entry = match group_hash_accs.entry(group_keys) {
@@ -109,7 +86,7 @@ impl HashAggExecutor {
                                 .to_string(),
                         ));
                     }
-                    let value = args[0].eval(Some((tuple, &self.input_schema)))?;
+                    let value = args[0].eval(Some(tuple))?;
                     acc.update_value(&value)?;
                 }
             }
@@ -143,7 +120,7 @@ mod test {
     use crate::errors::DatabaseError;
     use crate::execution::dql::aggregate::hash_agg::HashAggExecutor;
     use crate::execution::dql::test::build_integers;
-    use crate::execution::try_collect;
+    use crate::execution::{execute_input, try_collect};
     use crate::expression::agg::AggKind;
     use crate::expression::ScalarExpression;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
@@ -238,8 +215,8 @@ mod test {
         let Operator::Aggregate(op) = plan.operator else {
             unreachable!()
         };
-        let tuples = try_collect(crate::execution::execute(
-            HashAggExecutor::from((op, plan.childrens.pop_only())),
+        let tuples = try_collect(execute_input::<_, HashAggExecutor>(
+            (op, plan.childrens.pop_only()),
             (&table_cache, &view_cache, &meta_cache),
             &mut transaction,
         ))?;

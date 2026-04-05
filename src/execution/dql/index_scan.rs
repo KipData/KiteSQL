@@ -13,17 +13,17 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor};
 use crate::expression::range_detacher::Range;
 use crate::planner::operator::table_scan::TableScanOperator;
-use crate::storage::{IndexIter, Iter, Transaction};
-use crate::types::index::IndexMetaRef;
+use crate::storage::{IndexIter, IndexRanges, Iter, Transaction};
+use crate::types::index::{IndexLookup, IndexMetaRef, RuntimeIndexProbe};
 use crate::types::serialize::TupleValueSerializableImpl;
 
 pub(crate) struct IndexScan<'a, T: Transaction + 'a> {
     op: Option<TableScanOperator>,
     index_by: IndexMetaRef,
-    ranges: Vec<Range>,
+    lookup: Option<IndexLookup>,
     covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
     cover_mapping: Option<Vec<usize>>,
     iter: Option<IndexIter<'a, T>>,
@@ -33,29 +33,24 @@ impl<'a, T: Transaction + 'a>
     From<(
         TableScanOperator,
         IndexMetaRef,
-        Range,
+        IndexLookup,
         Option<Vec<TupleValueSerializableImpl>>,
         Option<Vec<usize>>,
     )> for IndexScan<'a, T>
 {
     fn from(
-        (op, index_by, range, covered_deserializers, cover_mapping): (
+        (op, index_by, lookup, covered_deserializers, cover_mapping): (
             TableScanOperator,
             IndexMetaRef,
-            Range,
+            IndexLookup,
             Option<Vec<TupleValueSerializableImpl>>,
             Option<Vec<usize>>,
         ),
     ) -> Self {
-        let ranges = match range {
-            Range::SortedRanges(ranges) => ranges,
-            range => vec![range],
-        };
-
         IndexScan {
             op: Some(op),
             index_by,
-            ranges,
+            lookup: Some(lookup),
             covered_deserializers,
             cover_mapping,
             iter: None,
@@ -74,7 +69,41 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for IndexScan<'a, T> {
     }
 }
 
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for IndexScan<'a, T> {
+    type Input = (
+        TableScanOperator,
+        IndexMetaRef,
+        IndexLookup,
+        Option<Vec<TupleValueSerializableImpl>>,
+        Option<Vec<usize>>,
+    );
+
+    fn into_executor(
+        input: Self::Input,
+        arena: &mut ExecArena<'a, T>,
+        _: ExecutionCaches<'a>,
+        _: *mut T,
+    ) -> ExecId {
+        arena.push(ExecNode::IndexScan(IndexScan::from(input)))
+    }
+
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+        IndexScan::next_tuple(self, arena)
+    }
+}
+
 impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
+    fn ranges_from_lookup(lookup: IndexLookup, arena: &mut ExecArena<'a, T>) -> IndexRanges {
+        match lookup {
+            IndexLookup::Static(Range::SortedRanges(ranges)) => ranges.into(),
+            IndexLookup::Static(range) => range.into(),
+            IndexLookup::Probe => match arena.pop_runtime_probe() {
+                RuntimeIndexProbe::Eq(value) => Range::Eq(value).into(),
+                RuntimeIndexProbe::Scope { min, max } => Range::Scope { min, max }.into(),
+            },
+        }
+    }
+
     pub(crate) fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
         if self.iter.is_none() {
             let Some(TableScanOperator {
@@ -88,13 +117,17 @@ impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
                 arena.finish();
                 return Ok(());
             };
+            let ranges = Self::ranges_from_lookup(
+                self.lookup.take().expect("index scan lookup initialized"),
+                arena,
+            );
             self.iter = Some(arena.transaction().read_by_index(
                 arena.table_cache(),
                 table_name,
                 limit,
                 columns,
                 self.index_by.clone(),
-                std::mem::take(&mut self.ranges),
+                ranges,
                 with_pk,
                 self.covered_deserializers.take(),
                 self.cover_mapping.take(),

@@ -30,10 +30,142 @@ pub type TupleId = DataValue;
 pub type Schema = Vec<ColumnRef>;
 pub type SchemaRef = Arc<Schema>;
 
+pub trait TupleLike {
+    fn len(&self) -> usize;
+    fn value_at(&self, index: usize) -> &DataValue;
+
+    #[inline]
+    fn as_slice(&self) -> Option<&[DataValue]> {
+        None
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct SplitTupleRef<'a> {
+    left: &'a [DataValue],
+    right: &'a [DataValue],
+    left_len: usize,
+}
+
+impl<'a> SplitTupleRef<'a> {
+    pub fn new(left: &'a Tuple, right: &'a Tuple) -> Self {
+        Self::from_slices(left.values.as_slice(), right.values.as_slice())
+    }
+
+    pub fn from_slices(left: &'a [DataValue], right: &'a [DataValue]) -> Self {
+        SplitTupleRef {
+            left,
+            right,
+            left_len: left.len(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub struct Tuple {
     pub pk: Option<TupleId>,
     pub values: Vec<DataValue>,
+}
+
+impl TupleLike for Tuple {
+    #[inline]
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    #[inline]
+    fn value_at(&self, index: usize) -> &DataValue {
+        &self.values[index]
+    }
+
+    #[inline]
+    fn as_slice(&self) -> Option<&[DataValue]> {
+        Some(self.values.as_slice())
+    }
+}
+
+impl TupleLike for [DataValue] {
+    #[inline]
+    fn len(&self) -> usize {
+        <[DataValue]>::len(self)
+    }
+
+    #[inline]
+    fn value_at(&self, index: usize) -> &DataValue {
+        &self[index]
+    }
+
+    #[inline]
+    fn as_slice(&self) -> Option<&[DataValue]> {
+        Some(self)
+    }
+}
+
+impl TupleLike for &Tuple {
+    #[inline]
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    #[inline]
+    fn value_at(&self, index: usize) -> &DataValue {
+        &self.values[index]
+    }
+
+    #[inline]
+    fn as_slice(&self) -> Option<&[DataValue]> {
+        Some(self.values.as_slice())
+    }
+}
+
+impl TupleLike for &[DataValue] {
+    #[inline]
+    fn len(&self) -> usize {
+        <[DataValue]>::len(self)
+    }
+
+    #[inline]
+    fn value_at(&self, index: usize) -> &DataValue {
+        &self[index]
+    }
+
+    #[inline]
+    fn as_slice(&self) -> Option<&[DataValue]> {
+        Some(self)
+    }
+}
+
+impl TupleLike for &dyn TupleLike {
+    #[inline]
+    fn len(&self) -> usize {
+        (*self).len()
+    }
+
+    #[inline]
+    fn value_at(&self, index: usize) -> &DataValue {
+        (*self).value_at(index)
+    }
+
+    #[inline]
+    fn as_slice(&self) -> Option<&[DataValue]> {
+        (*self).as_slice()
+    }
+}
+
+impl TupleLike for SplitTupleRef<'_> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.left_len + self.right.len()
+    }
+
+    #[inline]
+    fn value_at(&self, index: usize) -> &DataValue {
+        if index < self.left_len {
+            &self.left[index]
+        } else {
+            &self.right[index - self.left_len]
+        }
+    }
 }
 
 impl<'a> From<&'a Tuple> for &'a [DataValue] {

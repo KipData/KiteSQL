@@ -31,7 +31,7 @@ use std::collections::HashMap;
 pub struct Insert {
     table_name: TableName,
     input_schema: SchemaRef,
-    input_plan: Option<LogicalPlan>,
+    input_plan: LogicalPlan,
     input: Option<ExecId>,
     is_overwrite: bool,
     is_mapping_by_name: bool,
@@ -51,7 +51,7 @@ impl From<(InsertOperator, LogicalPlan)> for Insert {
         Insert {
             table_name,
             input_schema: input.output_schema().clone(),
-            input_plan: Some(input),
+            input_plan: input,
             input: None,
             is_overwrite,
             is_mapping_by_name,
@@ -84,9 +84,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert {
     ) -> ExecId {
         self.input = Some(build_read(
             arena,
-            self.input_plan
-                .take()
-                .expect("insert input plan initialized"),
+            self.input_plan.take(),
             cache,
             transaction,
         ));

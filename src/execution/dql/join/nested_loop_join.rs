@@ -13,18 +13,18 @@
 // limitations under the License.
 
 //! Defines the nested loop join executor, it supports [`JoinType::Inner`], [`JoinType::LeftOuter`],
-//! [`JoinType::LeftSemi`], [`JoinType::LeftAnti`], [`JoinType::RightOuter`], [`JoinType::Cross`], [`JoinType::Full`].
+//! [`JoinType::RightOuter`], [`JoinType::Cross`], [`JoinType::Full`].
 
-use super::joins_nullable;
-use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{
+    build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor,
+};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
-use crate::types::tuple::{Schema, SchemaRef, Tuple};
+use crate::types::tuple::{Schema, SchemaRef, SplitTupleRef, Tuple};
 use crate::types::value::DataValue;
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
@@ -79,15 +79,14 @@ impl EqualCondition {
 /// One input will be selected to be the inner table and the other will be the outer
 /// | JoinType                       |  Inner-table   |   Outer-table  |
 /// |--------------------------------|----------------|----------------|
-/// | Inner/Left/LeftSemi/LeftAnti   |    right       |      left      |
+/// | Inner/Left                     |    right       |      left      |
 /// |--------------------------------|----------------|----------------|
 /// | Right/RightSemi/RightAnti/Full |    left        |      right     |
 /// |--------------------------------|----------------|----------------|
 /// | Full                           |    left        |      right     |
 pub struct NestedLoopJoin {
-    left_input_plan: Option<LogicalPlan>,
+    left_input_plan: LogicalPlan,
     right_input_plan: LogicalPlan,
-    output_schema_ref: SchemaRef,
     ty: JoinType,
     filter: Option<ScalarExpression>,
     eq_cond: EqualCondition,
@@ -135,7 +134,6 @@ impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for NestedLoopJoin {
         let (mut left_input, mut right_input) = (left_input, right_input);
         let mut left_schema = left_input.output_schema().clone();
         let mut right_schema = right_input.output_schema().clone();
-        let output_schema_ref = Self::merge_schema(&left_schema, &right_schema, join_type);
 
         if matches!(join_type, JoinType::RightOuter) {
             std::mem::swap(&mut left_input, &mut right_input);
@@ -151,9 +149,8 @@ impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for NestedLoopJoin {
         );
 
         NestedLoopJoin {
-            left_input_plan: Some(left_input),
+            left_input_plan: left_input,
             right_input_plan: right_input,
-            output_schema_ref,
             ty: join_type,
             filter,
             eq_cond,
@@ -170,22 +167,36 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        self.left_input = build_read(
-            arena,
-            self.left_input_plan
-                .take()
-                .expect("nested loop join left input plan initialized"),
-            cache,
-            transaction,
-        );
+        self.left_input = build_read(arena, self.left_input_plan.take(), cache, transaction);
         arena.push(ExecNode::NestedLoopJoin(self))
     }
 }
 
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
+    type Input = (JoinOperator, LogicalPlan, LogicalPlan);
+
+    fn into_executor(
+        input: Self::Input,
+        arena: &mut ExecArena<'a, T>,
+        cache: ExecutionCaches<'a>,
+        transaction: *mut T,
+    ) -> ExecId {
+        <Self as ReadExecutor<'a, T>>::into_executor(Self::from(input), arena, cache, transaction)
+    }
+
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+        NestedLoopJoin::next_tuple(self, arena)
+    }
+}
+
 impl NestedLoopJoin {
-    fn build_right_input<'a, T: Transaction + 'a>(&self, arena: &mut ExecArena<'a, T>) -> ExecId {
+    fn build_right_input<'a, T: Transaction + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+    ) -> ExecId {
         let cache = (arena.table_cache(), arena.view_cache(), arena.meta_cache());
         let transaction = arena.transaction_mut() as *mut T;
+        // Fixme: Executor reset
         build_read(arena, self.right_input_plan.clone(), cache, transaction)
     }
 
@@ -256,18 +267,15 @@ impl NestedLoopJoin {
                                 )
                             }
                             (Some(filter), true) => {
-                                let new_tuple = Self::merge_tuple(
-                                    &active_left.left_tuple,
-                                    &right_tuple,
-                                    &self.ty,
-                                );
-                                let value =
-                                    filter.eval(Some((&new_tuple, &self.output_schema_ref)))?;
+                                let values = if matches!(self.ty, JoinType::RightOuter) {
+                                    SplitTupleRef::new(&right_tuple, &active_left.left_tuple)
+                                } else {
+                                    SplitTupleRef::new(&active_left.left_tuple, &right_tuple)
+                                };
+                                let value = filter.eval(Some(values))?;
                                 match &value {
                                     DataValue::Boolean(true) => {
                                         let tuple = match self.ty {
-                                            JoinType::LeftAnti => None,
-                                            JoinType::LeftSemi if active_left.has_matched => None,
                                             JoinType::RightOuter => Self::emit_tuple(
                                                 &right_tuple,
                                                 &active_left.left_tuple,
@@ -300,20 +308,12 @@ impl NestedLoopJoin {
                                 }
                             }
 
-                            self.state = if matches!(self.ty, JoinType::LeftSemi) {
-                                NestedLoopJoinState::PullLeft { right_bitmap }
-                            } else {
-                                NestedLoopJoinState::ScanRight {
-                                    active_left,
-                                    right_bitmap,
-                                }
+                            self.state = NestedLoopJoinState::ScanRight {
+                                active_left,
+                                right_bitmap,
                             };
                             arena.produce_tuple(tuple);
                             return Ok(());
-                        }
-
-                        if matches!(self.ty, JoinType::LeftAnti) && active_left.has_matched {
-                            break;
                         }
                     }
 
@@ -332,13 +332,7 @@ impl NestedLoopJoin {
                     }
                     let right_schema_len = self.eq_cond.right_schema.len();
                     let tuple = match self.ty {
-                        JoinType::LeftAnti if !active_left.has_matched => {
-                            Some(active_left.left_tuple)
-                        }
-                        JoinType::LeftOuter
-                        | JoinType::LeftSemi
-                        | JoinType::RightOuter
-                        | JoinType::Full
+                        JoinType::LeftOuter | JoinType::RightOuter | JoinType::Full
                             if !active_left.has_matched =>
                         {
                             let right_tuple =
@@ -425,7 +419,7 @@ impl NestedLoopJoin {
             .chain(right_tuple.values.clone())
             .collect_vec();
         match ty {
-            JoinType::Inner | JoinType::Cross | JoinType::LeftSemi if !is_matched => values.clear(),
+            JoinType::Inner | JoinType::Cross if !is_matched => values.clear(),
             JoinType::LeftOuter | JoinType::Full if !is_matched => {
                 values
                     .iter_mut()
@@ -436,14 +430,6 @@ impl NestedLoopJoin {
                 (0..left_len).for_each(|i| {
                     values[i] = DataValue::Null;
                 });
-            }
-            JoinType::LeftSemi => values.truncate(left_len),
-            JoinType::LeftAnti => {
-                if is_matched {
-                    values.clear();
-                } else {
-                    values.truncate(left_len);
-                }
             }
             _ => (),
         };
@@ -457,64 +443,12 @@ impl NestedLoopJoin {
             values,
         ))
     }
-
-    /// Merge the two tuples.
-    /// `left_tuple` must be from the `NestedLoopJoin.left_input`
-    /// `right_tuple` must be from the `NestedLoopJoin.right_input`
-    fn merge_tuple(left_tuple: &Tuple, right_tuple: &Tuple, ty: &JoinType) -> Tuple {
-        let pk = left_tuple.pk.as_ref().or(right_tuple.pk.as_ref()).cloned();
-        match ty {
-            JoinType::RightOuter => Tuple::new(
-                pk,
-                right_tuple
-                    .values
-                    .iter()
-                    .chain(left_tuple.values.iter())
-                    .cloned()
-                    .collect_vec(),
-            ),
-            _ => Tuple::new(
-                pk,
-                left_tuple
-                    .values
-                    .iter()
-                    .chain(right_tuple.values.iter())
-                    .cloned()
-                    .collect_vec(),
-            ),
-        }
-    }
-
-    fn merge_schema(
-        left_schema: &[ColumnRef],
-        right_schema: &[ColumnRef],
-        ty: JoinType,
-    ) -> Arc<Vec<ColumnRef>> {
-        let (left_force_nullable, right_force_nullable) = joins_nullable(&ty);
-
-        let mut join_schema = vec![];
-        for column in left_schema.iter() {
-            join_schema.push(
-                column
-                    .nullable_for_join(left_force_nullable)
-                    .unwrap_or_else(|| column.clone()),
-            );
-        }
-        for column in right_schema.iter() {
-            join_schema.push(
-                column
-                    .nullable_for_join(right_force_nullable)
-                    .unwrap_or_else(|| column.clone()),
-            );
-        }
-        Arc::new(join_schema)
-    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
-    use crate::catalog::{ColumnCatalog, ColumnDesc};
+    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
     use crate::db::DataBaseBuilder;
     use crate::execution::dql::test::build_integers;
     use crate::execution::try_collect;
@@ -964,92 +898,6 @@ mod test {
         let tuples = try_collect(executor)?;
 
         assert_eq!(tuples.len(), 16);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_nested_left_semi_join() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let (keys, left, right, filter) = build_join_values(true);
-        let plan = LogicalPlan::new(
-            Operator::Join(JoinOperator {
-                on: JoinCondition::On {
-                    on: keys,
-                    filter: Some(filter),
-                },
-                join_type: JoinType::LeftSemi,
-            }),
-            Childrens::Twins {
-                left: Box::new(left),
-                right: Box::new(right),
-            },
-        );
-        let plan = optimize_exprs(plan)?;
-        let Operator::Join(op) = plan.operator else {
-            unreachable!()
-        };
-        let (left, right) = plan.childrens.pop_twins();
-        let executor = crate::execution::execute(
-            NestedLoopJoin::from((op, left, right)),
-            (&table_cache, &view_cache, &meta_cache),
-            &mut transaction,
-        );
-        let tuples = try_collect(executor)?;
-
-        let mut expected_set = HashSet::with_capacity(1);
-        expected_set.insert(build_integers(vec![Some(1), Some(2), Some(5)]));
-
-        valid_result(&mut expected_set, &tuples);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_nested_left_anti_join() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let (keys, left, right, filter) = build_join_values(true);
-        let plan = LogicalPlan::new(
-            Operator::Join(JoinOperator {
-                on: JoinCondition::On {
-                    on: keys,
-                    filter: Some(filter),
-                },
-                join_type: JoinType::LeftAnti,
-            }),
-            Childrens::Twins {
-                left: Box::new(left),
-                right: Box::new(right),
-            },
-        );
-        let plan = optimize_exprs(plan)?;
-        let Operator::Join(op) = plan.operator else {
-            unreachable!()
-        };
-        let (left, right) = plan.childrens.pop_twins();
-        let executor = crate::execution::execute(
-            NestedLoopJoin::from((op, left, right)),
-            (&table_cache, &view_cache, &meta_cache),
-            &mut transaction,
-        );
-        let tuples = try_collect(executor)?;
-
-        let mut expected_set = HashSet::with_capacity(3);
-        expected_set.insert(build_integers(vec![Some(0), Some(2), Some(4)]));
-        expected_set.insert(build_integers(vec![Some(1), Some(3), Some(5)]));
-        expected_set.insert(build_integers(vec![Some(3), Some(5), Some(7)]));
-
-        valid_result(&mut expected_set, &tuples);
 
         Ok(())
     }

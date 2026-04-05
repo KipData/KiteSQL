@@ -56,6 +56,12 @@ pub(crate) fn evaluator_bind_current(plan: &mut LogicalPlan) -> Result<(), Datab
                 BindEvaluator.visit(expr)?;
             }
         }
+        Operator::MarkApply(op) => {
+            for predicate in op.predicates_mut().iter_mut() {
+                BindEvaluator.visit(predicate)?;
+            }
+        }
+        Operator::ScalarApply(_) => {}
         Operator::Sort(op) => {
             for sort_field in op.sort_fields.iter_mut() {
                 BindEvaluator.visit(&mut sort_field.expr)?;
@@ -115,7 +121,11 @@ impl EvaluatorBind {
                 Self::_apply(left)?;
                 if matches!(
                     plan.operator,
-                    Operator::Join(_) | Operator::Union(_) | Operator::Except(_)
+                    Operator::ScalarApply(_)
+                        | Operator::MarkApply(_)
+                        | Operator::Join(_)
+                        | Operator::Union(_)
+                        | Operator::Except(_)
                 ) {
                     Self::_apply(right)?;
                 }

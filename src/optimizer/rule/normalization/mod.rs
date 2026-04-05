@@ -39,6 +39,7 @@ mod column_pruning;
 mod combine_operators;
 mod compilation_in_advance;
 mod min_max_top_k;
+mod parameterized_index;
 mod pushdown_limit;
 mod pushdown_predicates;
 mod simplification;
@@ -47,6 +48,7 @@ pub(crate) use agg_elimination::{
     apply_annotated_post_rules, apply_scan_order_hint, OrderHintKind, ScanOrderHint,
 };
 pub(crate) use compilation_in_advance::evaluator_bind_current;
+pub(crate) use parameterized_index::ParameterizeMarkApply;
 pub(crate) use simplification::constant_calculation_current;
 
 #[derive(Debug, Copy, Clone)]
@@ -72,6 +74,7 @@ pub enum NormalizationRuleImpl {
     EvaluatorBind,
     MinMaxToTopK,
     TopK,
+    ParameterizeMarkApply,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -88,6 +91,7 @@ pub enum NormalizationRuleRootTag {
     Filter,
     Join,
     Limit,
+    MarkApply,
     Project,
     SortLike,
 }
@@ -98,6 +102,8 @@ impl NormalizationRuleRootTag {
     pub fn from_operator(operator: &Operator) -> Option<Self> {
         match operator {
             Operator::Aggregate(_) => Some(Self::Aggregate),
+            Operator::MarkApply(_) => Some(Self::MarkApply),
+            Operator::ScalarApply(_) => Some(Self::Any),
             Operator::Filter(_) => Some(Self::Filter),
             Operator::Join(_) => Some(Self::Join),
             Operator::Limit(_) => Some(Self::Limit),
@@ -170,6 +176,7 @@ impl NormalizationRuleImpl {
             NormalizationRuleImpl::ConstantCalculation => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::EvaluatorBind => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::MinMaxToTopK => NormalizationRuleRootTag::Aggregate,
+            NormalizationRuleImpl::ParameterizeMarkApply => NormalizationRuleRootTag::MarkApply,
         }
     }
 }
@@ -194,6 +201,7 @@ impl NormalizationRule for NormalizationRuleImpl {
             NormalizationRuleImpl::EvaluatorBind => EvaluatorBind.apply(plan),
             NormalizationRuleImpl::MinMaxToTopK => MinMaxToTopK.apply(plan),
             NormalizationRuleImpl::TopK => TopK.apply(plan),
+            NormalizationRuleImpl::ParameterizeMarkApply => ParameterizeMarkApply.apply(plan),
         }
     }
 }

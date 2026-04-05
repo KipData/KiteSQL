@@ -13,56 +13,38 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
 use crate::planner::operator::limit::LimitOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 pub struct Limit {
     offset: Option<usize>,
     limit: Option<usize>,
-    input_plan: Option<LogicalPlan>,
     input: ExecId,
     skipped: usize,
     emitted: usize,
 }
 
-impl From<(LimitOperator, LogicalPlan)> for Limit {
-    fn from((LimitOperator { offset, limit }, input): (LimitOperator, LogicalPlan)) -> Self {
-        Limit {
-            offset,
-            limit,
-            input_plan: Some(input),
-            input: 0,
-            skipped: 0,
-            emitted: 0,
-        }
-    }
-}
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Limit {
+    type Input = (LimitOperator, LogicalPlan);
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Limit {
     fn into_executor(
-        mut self,
+        (LimitOperator { offset, limit }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        self.input = build_read(
-            arena,
-            self.input_plan
-                .take()
-                .expect("limit input plan initialized"),
-            cache,
-            transaction,
-        );
-        arena.push(ExecNode::Limit(self))
+        let input = build_read(arena, input, cache, transaction);
+        arena.push(ExecNode::Limit(Limit {
+            offset,
+            limit,
+            input,
+            skipped: 0,
+            emitted: 0,
+        }))
     }
-}
 
-impl Limit {
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-    ) -> Result<(), DatabaseError> {
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
         let offset = self.offset.unwrap_or(0);
         let limit = self.limit.unwrap_or(usize::MAX);
 

@@ -244,18 +244,24 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 })
             }
             Expr::Exists { subquery, negated } => {
-                let (sub_query, column, correlated) = self.bind_subquery(None, subquery)?;
-                let (_, sub_query) = if !self.context.is_step(&QueryBindStep::Where) {
-                    self.bind_temp_table(column, sub_query)?
-                } else {
-                    (column, sub_query)
-                };
+                let (sub_query, _column, correlated) = self.bind_subquery(None, subquery)?;
+                let (_, marker_ref) = self
+                    .bind_temp_table_alias(ScalarExpression::Constant(DataValue::Boolean(true)), 0);
                 self.context.sub_query(SubQueryType::ExistsSubQuery {
-                    negated: *negated,
                     plan: sub_query,
                     correlated,
+                    output_column: marker_ref.output_column(),
                 });
-                Ok(ScalarExpression::Constant(DataValue::Boolean(true)))
+                if *negated {
+                    Ok(ScalarExpression::Unary {
+                        op: expression::UnaryOperator::Not,
+                        expr: Box::new(marker_ref),
+                        evaluator: None,
+                        ty: LogicalType::Boolean,
+                    })
+                } else {
+                    Ok(marker_ref)
+                }
             }
             Expr::Subquery(subquery) => {
                 let (sub_query, column, correlated) = self.bind_subquery(None, subquery)?;
@@ -276,7 +282,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 subquery,
                 negated,
             } => {
-                let left_expr = Box::new(self.bind_expr(expr)?);
+                let left_expr = self.bind_expr(expr)?;
                 let (sub_query, column, correlated) =
                     self.bind_subquery(Some(left_expr.return_type()), subquery)?;
 
@@ -287,19 +293,33 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 }
 
                 let (alias_expr, sub_query) = self.bind_temp_table(column, sub_query)?;
+                let predicate = ScalarExpression::Binary {
+                    op: expression::BinaryOperator::Eq,
+                    left_expr: Box::new(left_expr),
+                    right_expr: Box::new(alias_expr),
+                    evaluator: None,
+                    ty: LogicalType::Boolean,
+                };
+                let (_, marker_ref) = self
+                    .bind_temp_table_alias(ScalarExpression::Constant(DataValue::Boolean(true)), 0);
                 self.context.sub_query(SubQueryType::InSubQuery {
                     negated: *negated,
                     plan: sub_query,
                     correlated,
+                    output_column: marker_ref.output_column(),
+                    predicate,
                 });
 
-                Ok(ScalarExpression::Binary {
-                    op: expression::BinaryOperator::Eq,
-                    left_expr,
-                    right_expr: Box::new(alias_expr),
-                    evaluator: None,
-                    ty: LogicalType::Boolean,
-                })
+                if *negated {
+                    Ok(ScalarExpression::Unary {
+                        op: expression::UnaryOperator::Not,
+                        expr: Box::new(marker_ref),
+                        evaluator: None,
+                        ty: LogicalType::Boolean,
+                    })
+                } else {
+                    Ok(marker_ref)
+                }
             }
             Expr::Tuple(exprs) => {
                 let mut bond_exprs = Vec::with_capacity(exprs.len());

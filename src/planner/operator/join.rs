@@ -24,8 +24,6 @@ use std::fmt::Formatter;
 pub enum JoinType {
     Inner,
     LeftOuter,
-    LeftSemi,
-    LeftAnti,
     RightOuter,
     Full,
     Cross,
@@ -76,8 +74,6 @@ impl fmt::Display for JoinType {
         match self {
             JoinType::Inner => write!(f, "Inner")?,
             JoinType::LeftOuter => write!(f, "LeftOuter")?,
-            JoinType::LeftSemi => write!(f, "LeftSemi")?,
-            JoinType::LeftAnti => write!(f, "LeftAnti")?,
             JoinType::RightOuter => write!(f, "RightOuter")?,
             JoinType::Full => write!(f, "Full")?,
             JoinType::Cross => write!(f, "Cross")?,

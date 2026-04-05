@@ -13,58 +13,44 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
 use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
 
 pub struct ScalarSubquery {
-    input_plan: Option<LogicalPlan>,
-    input: Option<ExecId>,
+    input: ExecId,
     value_count: usize,
+    returned: bool,
 }
 
-impl From<(ScalarSubqueryOperator, LogicalPlan)> for ScalarSubquery {
-    fn from((_, mut input): (ScalarSubqueryOperator, LogicalPlan)) -> Self {
-        Self {
-            value_count: input.output_schema().len(),
-            input_plan: Some(input),
-            input: None,
-        }
-    }
-}
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarSubquery {
+    type Input = (ScalarSubqueryOperator, LogicalPlan);
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ScalarSubquery {
     fn into_executor(
-        mut self,
+        (_, mut input): Self::Input,
         arena: &mut ExecArena<'a, T>,
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        self.input = Some(build_read(
-            arena,
-            self.input_plan
-                .take()
-                .expect("scalar subquery input plan initialized"),
-            cache,
-            transaction,
-        ));
-        arena.push(ExecNode::ScalarSubquery(self))
+        let value_count = input.output_schema().len();
+        let input = build_read(arena, input, cache, transaction);
+        arena.push(ExecNode::ScalarSubquery(Self {
+            input,
+            value_count,
+            returned: false,
+        }))
     }
-}
 
-impl ScalarSubquery {
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-    ) -> Result<(), DatabaseError> {
-        let Some(input) = self.input.take() else {
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+        if self.returned {
             arena.finish();
             return Ok(());
-        };
+        }
+        self.returned = true;
 
-        let has_first = arena.next_tuple(input)?;
+        let has_first = arena.next_tuple(self.input)?;
         if !has_first {
             let output = arena.result_tuple_mut();
             output.pk = None;
@@ -76,7 +62,7 @@ impl ScalarSubquery {
             return Ok(());
         }
 
-        if arena.next_tuple(input)? {
+        if arena.next_tuple(self.input)? {
             return Err(DatabaseError::InvalidValue(
                 "scalar subquery returned more than one row".to_string(),
             ));

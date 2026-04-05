@@ -13,19 +13,23 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor};
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::value::{DataValue, Utf8Type};
 use sqlparser::ast::CharLengthUnits;
 
 pub struct Explain {
-    plan: Option<LogicalPlan>,
+    plan: LogicalPlan,
+    emitted: bool,
 }
 
 impl From<LogicalPlan> for Explain {
     fn from(plan: LogicalPlan) -> Self {
-        Explain { plan: Some(plan) }
+        Explain {
+            plan,
+            emitted: false,
+        }
     }
 }
 
@@ -40,25 +44,46 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Explain {
     }
 }
 
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Explain {
+    type Input = LogicalPlan;
+
+    fn into_executor(
+        input: Self::Input,
+        arena: &mut ExecArena<'a, T>,
+        _: ExecutionCaches<'a>,
+        _: *mut T,
+    ) -> ExecId {
+        arena.push(ExecNode::Explain(Explain {
+            plan: input,
+            emitted: false,
+        }))
+    }
+
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+        Explain::next_tuple(self, arena)
+    }
+}
+
 impl Explain {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
     ) -> Result<(), DatabaseError> {
-        let Some(plan) = self.plan.take() else {
+        if self.emitted {
             arena.finish();
             return Ok(());
-        };
+        }
 
         let output = arena.result_tuple_mut();
         output.pk = None;
         output.values.clear();
         output.values.push(DataValue::Utf8 {
-            value: plan.explain(0),
+            value: self.plan.explain(0),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         });
 
+        self.emitted = true;
         arena.resume();
         Ok(())
     }

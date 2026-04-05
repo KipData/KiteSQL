@@ -14,7 +14,7 @@
 
 use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor};
 use crate::planner::operator::describe::DescribeOperator;
 use crate::storage::Transaction;
 use crate::types::value::{DataValue, Utf8Type};
@@ -63,6 +63,23 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Describe {
         _: *mut T,
     ) -> ExecId {
         arena.push(ExecNode::Describe(self))
+    }
+}
+
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Describe {
+    type Input = DescribeOperator;
+
+    fn into_executor(
+        input: Self::Input,
+        arena: &mut ExecArena<'a, T>,
+        _: ExecutionCaches<'a>,
+        _: *mut T,
+    ) -> ExecId {
+        arena.push(ExecNode::Describe(Describe::from(input)))
+    }
+
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+        Describe::next_tuple(self, arena)
     }
 }
 

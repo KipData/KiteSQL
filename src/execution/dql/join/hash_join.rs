@@ -16,39 +16,37 @@ use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::hash::full_join::FullJoinState;
 use crate::execution::dql::join::hash::inner_join::InnerJoinState;
-use crate::execution::dql::join::hash::left_anti_join::LeftAntiJoinState;
 use crate::execution::dql::join::hash::left_join::LeftJoinState;
-use crate::execution::dql::join::hash::left_semi_join::LeftSemiJoinState;
 use crate::execution::dql::join::hash::right_join::RightJoinState;
 use crate::execution::dql::join::hash::{
-    FilterArgs, JoinProbeState, JoinProbeStateImpl, LeftDropState, ProbeState,
+    JoinProbeState, JoinProbeStateImpl, LeftDropState, ProbeState,
 };
 use crate::execution::dql::join::joins_nullable;
 use crate::execution::dql::sort::BumpVec;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{
+    build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor,
+};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
-use crate::types::tuple::{SchemaRef, Tuple};
+use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use ahash::{HashMap, HashMapExt};
 use bumpalo::Bump;
 use fixedbitset::FixedBitSet;
 use std::mem::transmute;
-use std::sync::Arc;
 
 pub struct HashJoin {
     state: HashJoinState,
     ty: JoinType,
     on_left_keys: Vec<ScalarExpression>,
     on_right_keys: Vec<ScalarExpression>,
-    full_schema: SchemaRef,
-    filter: Option<FilterArgs>,
+    filter: Option<ScalarExpression>,
     left_schema_len: usize,
     right_schema_len: usize,
-    left_input_plan: Option<LogicalPlan>,
-    right_input_plan: Option<LogicalPlan>,
+    left_input_plan: LogicalPlan,
+    right_input_plan: LogicalPlan,
     left_input: ExecId,
     right_input: ExecId,
     bump: Box<Bump>,
@@ -113,15 +111,11 @@ impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for HashJoin {
             ty: join_type,
             on_left_keys,
             on_right_keys,
-            full_schema: Arc::new(full_schema_ref.clone()),
-            filter: filter_expr.map(|filter_expr| FilterArgs {
-                full_schema: Arc::new(full_schema_ref),
-                filter_expr,
-            }),
+            filter: filter_expr,
             left_schema_len,
             right_schema_len,
-            left_input_plan: Some(left_input),
-            right_input_plan: Some(right_input),
+            left_input_plan: left_input,
+            right_input_plan: right_input,
             left_input: 0,
             right_input: 0,
             bump: Box::<Bump>::default(),
@@ -159,12 +153,11 @@ impl HashJoin {
     fn eval_keys(
         on_keys: &[ScalarExpression],
         tuple: &Tuple,
-        schema: &[ColumnRef],
         build_buf: &mut BumpVec<'_, DataValue>,
     ) -> Result<(), DatabaseError> {
         build_buf.clear();
         for expr in on_keys {
-            build_buf.push(expr.eval(Some((tuple, schema)))?);
+            build_buf.push(expr.eval(Some(tuple))?);
         }
         Ok(())
     }
@@ -187,12 +180,7 @@ impl HashJoin {
 
         while arena.next_tuple(self.left_input)? {
             let tuple = arena.result_tuple().clone();
-            Self::eval_keys(
-                &self.on_left_keys,
-                &tuple,
-                &self.full_schema[0..self.left_schema_len],
-                &mut build_buf,
-            )?;
+            Self::eval_keys(&self.on_left_keys, &tuple, &mut build_buf)?;
 
             match build_map.get_mut(&build_buf) {
                 None => {
@@ -239,15 +227,6 @@ impl HashJoin {
                 right_schema_len,
                 bits: FixedBitSet::with_capacity(build_count),
             }),
-            JoinType::LeftSemi => JoinProbeStateImpl::LeftSemi(LeftSemiJoinState {
-                bits: FixedBitSet::with_capacity(build_count),
-            }),
-            JoinType::LeftAnti => JoinProbeStateImpl::LeftAnti(LeftAntiJoinState {
-                right_schema_len,
-                inner: LeftSemiJoinState {
-                    bits: FixedBitSet::with_capacity(build_count),
-                },
-            }),
             JoinType::RightOuter => JoinProbeStateImpl::Right(RightJoinState { left_schema_len }),
             JoinType::Full => JoinProbeStateImpl::Full(FullJoinState {
                 left_schema_len,
@@ -273,23 +252,26 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
         cache: ExecutionCaches<'a>,
         transaction: *mut T,
     ) -> ExecId {
-        self.left_input = build_read(
-            arena,
-            self.left_input_plan
-                .take()
-                .expect("hash join left input plan initialized"),
-            cache,
-            transaction,
-        );
-        self.right_input = build_read(
-            arena,
-            self.right_input_plan
-                .take()
-                .expect("hash join right input plan initialized"),
-            cache,
-            transaction,
-        );
+        self.left_input = build_read(arena, self.left_input_plan.take(), cache, transaction);
+        self.right_input = build_read(arena, self.right_input_plan.take(), cache, transaction);
         arena.push(ExecNode::HashJoin(self))
+    }
+}
+
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashJoin {
+    type Input = (JoinOperator, LogicalPlan, LogicalPlan);
+
+    fn into_executor(
+        input: Self::Input,
+        arena: &mut ExecArena<'a, T>,
+        cache: ExecutionCaches<'a>,
+        transaction: *mut T,
+    ) -> ExecId {
+        <Self as ReadExecutor<'a, T>>::into_executor(Self::from(input), arena, cache, transaction)
+    }
+
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+        HashJoin::next_tuple(self, arena)
     }
 }
 
@@ -320,12 +302,7 @@ impl HashJoin {
                                 break true;
                             }
                             let tuple = arena.result_tuple().clone();
-                            Self::eval_keys(
-                                &self.on_right_keys,
-                                &tuple,
-                                &self.full_schema[self.left_schema_len..],
-                                &mut probe_buf,
-                            )?;
+                            Self::eval_keys(&self.on_right_keys, &tuple, &mut probe_buf)?;
                             probe_state = Some(ProbeState {
                                 is_keys_has_null: probe_buf.iter().any(DataValue::is_null),
                                 probe_tuple: tuple,
@@ -418,12 +395,10 @@ mod test {
     use crate::planner::operator::Operator;
     use crate::planner::{Childrens, LogicalPlan};
     use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
-    use crate::storage::table_codec::BumpBytes;
     use crate::storage::Storage;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use crate::utils::lru::SharedLruCache;
-    use bumpalo::Bump;
     use std::hash::RandomState;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -632,47 +607,6 @@ mod test {
             assert_eq!(
                 tuples[3].values,
                 build_integers(vec![Some(3), Some(5), Some(7), None, None, None])
-            );
-        }
-        {
-            let mut executor = HashJoin::from((op.clone(), left.clone(), right.clone()));
-            executor.ty = JoinType::LeftSemi;
-            let mut tuples = try_collect(crate::execution::execute(
-                executor,
-                (&table_cache, &view_cache, &meta_cache),
-                &mut transaction,
-            ))?;
-
-            let arena = Bump::new();
-            assert_eq!(tuples.len(), 2);
-            tuples.sort_by_key(|tuple| {
-                let mut bytes = BumpBytes::new_in(&arena);
-                tuple.values[0].memcomparable_encode(&mut bytes).unwrap();
-                bytes
-            });
-
-            assert_eq!(
-                tuples[0].values,
-                build_integers(vec![Some(0), Some(2), Some(4)])
-            );
-            assert_eq!(
-                tuples[1].values,
-                build_integers(vec![Some(1), Some(3), Some(5)])
-            );
-        }
-        {
-            let mut executor = HashJoin::from((op, left, right));
-            executor.ty = JoinType::LeftAnti;
-            let tuples = try_collect(crate::execution::execute(
-                executor,
-                (&table_cache, &view_cache, &meta_cache),
-                &mut transaction,
-            ))?;
-
-            assert_eq!(tuples.len(), 1);
-            assert_eq!(
-                tuples[0].values,
-                build_integers(vec![Some(3), Some(5), Some(7)])
             );
         }
 

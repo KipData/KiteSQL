@@ -348,7 +348,7 @@ mod tests {
     use crate::planner::operator::top_k::TopKOperator;
     use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
     use crate::planner::{Childrens, LogicalPlan};
-    use crate::types::index::{IndexInfo, IndexMeta, IndexType};
+    use crate::types::index::{IndexInfo, IndexLookup, IndexMeta, IndexType};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::collections::BTreeMap;
@@ -421,7 +421,7 @@ mod tests {
         let index_info = IndexInfo {
             meta,
             sort_option: sort_option.clone(),
-            range: None,
+            lookup: None,
             covered_deserializers: None,
             cover_mapping: None,
             sort_elimination_hint: None,
@@ -457,7 +457,7 @@ mod tests {
                 ty: IndexType::PrimaryKey { is_multiple: false },
             }),
             sort_option: sort_option.clone(),
-            range: None,
+            lookup: None,
             covered_deserializers: None,
             cover_mapping: None,
             sort_elimination_hint: None,
@@ -683,10 +683,10 @@ mod tests {
             false,
         );
         let (mut index_info, _) = build_index_info(vec![sort_field.clone()], 0);
-        index_info.range = Some(Range::Scope {
+        index_info.lookup = Some(IndexLookup::Static(Range::Scope {
             min: Bound::Unbounded,
             max: Bound::Unbounded,
-        });
+        }));
 
         let mut columns = BTreeMap::new();
         columns.insert(0, column);

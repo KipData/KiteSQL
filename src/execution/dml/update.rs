@@ -32,7 +32,7 @@ pub struct Update {
     table_name: TableName,
     value_exprs: Vec<(ColumnRef, ScalarExpression)>,
     input_schema: SchemaRef,
-    input_plan: Option<LogicalPlan>,
+    input_plan: LogicalPlan,
     input: Option<ExecId>,
 }
 
@@ -50,7 +50,7 @@ impl From<(UpdateOperator, LogicalPlan)> for Update {
             table_name,
             value_exprs,
             input_schema: input.output_schema().clone(),
-            input_plan: Some(input),
+            input_plan: input,
             input: None,
         }
     }
@@ -65,9 +65,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Update {
     ) -> ExecId {
         self.input = Some(build_read(
             arena,
-            self.input_plan
-                .take()
-                .expect("update input plan initialized"),
+            self.input_plan.take(),
             cache,
             transaction,
         ));
@@ -125,7 +123,7 @@ impl Update {
                 }
                 for (i, column) in self.input_schema.iter().enumerate() {
                     if let Some(expr) = exprs_map.get(&column.id()) {
-                        let value = expr.eval(Some((&tuple, &self.input_schema)))?;
+                        let value = expr.eval(Some(&tuple))?;
                         tuple.values[i] = value;
                     }
                 }

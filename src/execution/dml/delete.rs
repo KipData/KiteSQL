@@ -29,7 +29,7 @@ use std::collections::HashMap;
 pub struct Delete {
     table_name: TableName,
     input_schema: SchemaRef,
-    input_plan: Option<LogicalPlan>,
+    input_plan: LogicalPlan,
     input: Option<ExecId>,
 }
 
@@ -38,7 +38,7 @@ impl From<(DeleteOperator, LogicalPlan)> for Delete {
         Delete {
             table_name,
             input_schema: input.output_schema().clone(),
-            input_plan: Some(input),
+            input_plan: input,
             input: None,
         }
     }
@@ -53,9 +53,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Delete {
     ) -> ExecId {
         self.input = Some(build_read(
             arena,
-            self.input_plan
-                .take()
-                .expect("delete input plan initialized"),
+            self.input_plan.take(),
             cache,
             transaction,
         ));

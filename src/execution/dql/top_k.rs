@@ -14,13 +14,13 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::sort::BumpVec;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::top_k::TopKOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::table_codec::BumpBytes;
 use crate::storage::Transaction;
-use crate::types::tuple::{Schema, SchemaRef, Tuple};
+use crate::types::tuple::Tuple;
 use bumpalo::Bump;
 use std::cmp::Ordering;
 use std::collections::{btree_set::IntoIter as BTreeSetIntoIter, BTreeSet};
@@ -47,7 +47,6 @@ impl PartialOrd for CmpItem<'_> {
 #[allow(clippy::mutable_key_type)]
 fn top_sort<'a>(
     arena: &'a Bump,
-    schema: &Schema,
     sort_fields: &[SortField],
     heap: &mut BTreeSet<CmpItem<'a>>,
     tuple: Tuple,
@@ -61,7 +60,7 @@ fn top_sort<'a>(
     } in sort_fields
     {
         let mut key = BumpBytes::new_in(arena);
-        expr.eval(Some((&tuple, &**schema)))?
+        expr.eval(Some(&tuple))?
             .memcomparable_encode_with_null_order(&mut key, *nulls_first)?;
         if !asc && key.len() > 1 {
             for byte in key.iter_mut().skip(1) {
@@ -94,60 +93,38 @@ pub struct TopK {
     sort_fields: Vec<SortField>,
     limit: usize,
     offset: Option<usize>,
-    input_schema: SchemaRef,
-    input_plan: Option<LogicalPlan>,
     input: ExecId,
 }
 
-impl From<(TopKOperator, LogicalPlan)> for TopK {
-    fn from(
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for TopK {
+    type Input = (TopKOperator, LogicalPlan);
+
+    fn into_executor(
         (
             TopKOperator {
                 sort_fields,
                 limit,
                 offset,
             },
-            mut input,
-        ): (TopKOperator, LogicalPlan),
-    ) -> Self {
-        TopK {
+            input,
+        ): Self::Input,
+        arena: &mut ExecArena<'a, T>,
+        cache: ExecutionCaches<'a>,
+        transaction: *mut T,
+    ) -> ExecId {
+        let input = build_read(arena, input, cache, transaction);
+        arena.push(ExecNode::TopK(TopK {
             output: None,
             arena: Box::<Bump>::default(),
             sort_fields,
             limit,
             offset,
-            input_schema: input.output_schema().clone(),
-            input_plan: Some(input),
-            input: 0,
-        }
+            input,
+        }))
     }
-}
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for TopK {
-    fn into_executor(
-        mut self,
-        arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
-    ) -> ExecId {
-        self.input = build_read(
-            arena,
-            self.input_plan
-                .take()
-                .expect("top-k input plan initialized"),
-            cache,
-            transaction,
-        );
-        arena.push(ExecNode::TopK(self))
-    }
-}
-
-impl TopK {
     #[allow(clippy::mutable_key_type)]
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-    ) -> Result<(), DatabaseError> {
+    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
         if self.output.is_none() {
             let keep_count = self.offset.unwrap_or(0) + self.limit;
             let mut set = BTreeSet::new();
@@ -155,7 +132,6 @@ impl TopK {
             while arena.next_tuple(self.input)? {
                 top_sort(
                     &self.arena,
-                    &self.input_schema,
                     &self.sort_fields,
                     &mut set,
                     arena.result_tuple().clone(),
@@ -215,12 +191,6 @@ mod test {
                 nulls_first,
             }]
         };
-        let schema = Arc::new(vec![ColumnRef::from(ColumnCatalog::new(
-            "c1".to_string(),
-            true,
-            ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
-        ))]);
-
         let arena = Bump::new();
 
         let fn_asc_and_nulls_last_eq = |mut heap: BTreeSet<CmpItem<'_>>| {
@@ -276,7 +246,6 @@ mod test {
 
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Null]),
@@ -284,7 +253,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0)]),
@@ -292,7 +260,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1)]),
@@ -304,7 +271,6 @@ mod test {
 
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(true, false),
             &mut indices,
             Tuple::new(None, vec![DataValue::Null]),
@@ -312,7 +278,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(true, false),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0)]),
@@ -320,7 +285,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(true, false),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1)]),
@@ -332,7 +296,6 @@ mod test {
 
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(false, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Null]),
@@ -340,7 +303,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(false, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0)]),
@@ -348,7 +310,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(false, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1)]),
@@ -360,7 +321,6 @@ mod test {
 
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(false, false),
             &mut indices,
             Tuple::new(None, vec![DataValue::Null]),
@@ -368,7 +328,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(false, false),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0)]),
@@ -376,7 +335,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(false, false),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1)]),
@@ -420,18 +378,6 @@ mod test {
                 },
             ]
         };
-        let schema = Arc::new(vec![
-            ColumnRef::from(ColumnCatalog::new(
-                "c1".to_string(),
-                true,
-                ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
-                "c2".to_string(),
-                true,
-                ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
-            )),
-        ]);
         let arena = Bump::new();
 
         let fn_asc_1_and_nulls_first_1_and_asc_2_and_nulls_first_2_eq =
@@ -573,7 +519,6 @@ mod test {
 
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(true, true, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Null, DataValue::Null]),
@@ -581,7 +526,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(true, true, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0), DataValue::Null]),
@@ -589,7 +533,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(true, true, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1), DataValue::Null]),
@@ -597,7 +540,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(true, true, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Null, DataValue::Int32(0)]),
@@ -605,7 +547,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(true, true, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)]),
@@ -613,7 +554,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(true, true, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(0)]),
@@ -625,7 +565,6 @@ mod test {
 
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(true, false, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Null, DataValue::Null]),
@@ -633,7 +572,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(true, false, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0), DataValue::Null]),
@@ -641,7 +579,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(true, false, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1), DataValue::Null]),
@@ -649,7 +586,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(true, false, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Null, DataValue::Int32(0)]),
@@ -657,7 +593,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(true, false, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)]),
@@ -665,7 +600,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(true, false, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(0)]),
@@ -677,7 +611,6 @@ mod test {
 
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(false, true, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Null, DataValue::Null]),
@@ -685,7 +618,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(false, true, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0), DataValue::Null]),
@@ -693,7 +625,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(false, true, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1), DataValue::Null]),
@@ -701,7 +632,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(false, true, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Null, DataValue::Int32(0)]),
@@ -709,7 +639,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(false, true, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)]),
@@ -717,7 +646,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(false, true, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(0)]),
@@ -729,7 +657,6 @@ mod test {
 
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(false, false, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Null, DataValue::Null]),
@@ -737,7 +664,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(false, false, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0), DataValue::Null]),
@@ -745,7 +671,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(false, false, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1), DataValue::Null]),
@@ -753,7 +678,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(false, false, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Null, DataValue::Int32(0)]),
@@ -761,7 +685,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(false, false, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)]),
@@ -769,7 +692,6 @@ mod test {
         )?;
         top_sort(
             &arena,
-            &schema,
             &fn_sort_fields(false, false, true, true),
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(0)]),

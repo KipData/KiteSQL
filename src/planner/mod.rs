@@ -16,7 +16,6 @@ pub mod operator;
 
 use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
 use crate::planner::operator::except::ExceptOperator;
-use crate::planner::operator::join::JoinType;
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::operator::{Operator, PhysicalOption};
@@ -125,6 +124,10 @@ impl LogicalPlan {
         }
     }
 
+    pub(crate) fn take(&mut self) -> Self {
+        std::mem::replace(self, Self::new(Operator::Dummy, Childrens::None))
+    }
+
     pub(crate) fn reset_output_schema_cache(&mut self) {
         self._output_schema_ref = None;
     }
@@ -166,17 +169,7 @@ impl LogicalPlan {
             | Operator::Limit(_)
             | Operator::TopK(_)
             | Operator::ScalarSubquery(_) => childrens_iter.next().unwrap().output_schema_direct(),
-            Operator::Aggregate(op) => SchemaOutput::Schema(
-                op.agg_calls
-                    .iter()
-                    .chain(op.groupby_exprs.iter())
-                    .map(|expr| expr.output_column())
-                    .collect_vec(),
-            ),
-            Operator::Join(op) => {
-                if matches!(op.join_type, JoinType::LeftSemi | JoinType::LeftAnti) {
-                    return childrens_iter.next().unwrap().output_schema_direct();
-                }
+            Operator::ScalarApply(_) | Operator::Join(_) => {
                 let mut columns = Vec::new();
 
                 for plan in childrens_iter {
@@ -186,6 +179,25 @@ impl LogicalPlan {
                 }
                 SchemaOutput::Schema(columns)
             }
+            Operator::MarkApply(op) => {
+                let mut columns = Vec::new();
+
+                if let Some(left) = childrens_iter.next() {
+                    for column in left.output_schema_direct().columns() {
+                        columns.push(column.clone());
+                    }
+                }
+                columns.push(op.output_column().clone());
+
+                SchemaOutput::Schema(columns)
+            }
+            Operator::Aggregate(op) => SchemaOutput::Schema(
+                op.agg_calls
+                    .iter()
+                    .chain(op.groupby_exprs.iter())
+                    .map(|expr| expr.output_column())
+                    .collect_vec(),
+            ),
             Operator::Project(op) => SchemaOutput::Schema(
                 op.exprs
                     .iter()

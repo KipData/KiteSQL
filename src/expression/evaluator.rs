@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::function::scala::ScalarFunction;
 use crate::expression::{AliasType, BinaryOperator, ScalarExpression};
 use crate::types::evaluator::EvaluatorFactory;
+use crate::types::tuple::TupleLike;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::LogicalType;
 use regex::Regex;
@@ -35,10 +35,7 @@ macro_rules! eval_to_num {
 }
 
 impl ScalarExpression {
-    pub fn eval<'a, T: Into<&'a [DataValue]> + Copy>(
-        &self,
-        tuple: Option<(T, &[ColumnRef])>,
-    ) -> Result<DataValue, DatabaseError> {
+    pub fn eval<T: TupleLike + Copy>(&self, tuple: Option<T>) -> Result<DataValue, DatabaseError> {
         let check_cast = |value: DataValue, return_type: &LogicalType| {
             if value.logical_type() != *return_type {
                 return value.cast(return_type);
@@ -49,24 +46,22 @@ impl ScalarExpression {
         match self {
             ScalarExpression::Constant(val) => Ok(val.clone()),
             ScalarExpression::ColumnRef { position, .. } => {
-                let Some((tuple, _)) = tuple else {
+                let Some(tuple) = tuple else {
                     return Ok(DataValue::Null);
                 };
-                Ok(tuple.into()[*position].clone())
+                Ok(tuple.value_at(*position).clone())
             }
             ScalarExpression::Alias { expr, alias } => {
-                let Some((tuple, schema)) = tuple else {
+                let Some(tuple) = tuple else {
                     return Ok(DataValue::Null);
                 };
                 if let AliasType::Expr(inner_expr) = alias {
-                    match inner_expr.eval(Some((tuple, schema))) {
-                        Err(DatabaseError::UnbindExpressionPosition(_)) => {
-                            expr.eval(Some((tuple, schema)))
-                        }
+                    match inner_expr.eval(Some(tuple)) {
+                        Err(DatabaseError::UnbindExpressionPosition(_)) => expr.eval(Some(tuple)),
                         res => res,
                     }
                 } else {
-                    expr.eval(Some((tuple, schema)))
+                    expr.eval(Some(tuple))
                 }
             }
             ScalarExpression::TypeCast { expr, ty, .. } => Ok(expr.eval(tuple)?.cast(ty)?),
@@ -101,22 +96,29 @@ impl ScalarExpression {
                 if value.is_null() {
                     return Ok(DataValue::Null);
                 }
-                let mut is_in = false;
+
+                let mut matched = false;
+                let mut saw_null = false;
                 for arg in args {
                     let arg_value = arg.eval(tuple)?;
 
                     if arg_value.is_null() {
-                        return Ok(DataValue::Null);
+                        saw_null = true;
+                        continue;
                     }
                     if arg_value == value {
-                        is_in = true;
+                        matched = true;
                         break;
                     }
                 }
-                if *negated {
-                    is_in = !is_in;
+
+                if matched {
+                    Ok(DataValue::Boolean(!negated))
+                } else if saw_null {
+                    Ok(DataValue::Null)
+                } else {
+                    Ok(DataValue::Boolean(*negated))
                 }
-                Ok(DataValue::Boolean(is_in))
             }
             ScalarExpression::Unary {
                 expr, evaluator, ..
@@ -260,9 +262,13 @@ impl ScalarExpression {
                 }
                 Ok(DataValue::Tuple(values, false))
             }
-            ScalarExpression::ScalaFunction(ScalarFunction { inner, args, .. }) => inner
-                .eval(args, tuple.map(|(a, b)| (a.into(), b)))?
-                .cast(inner.return_type()),
+            ScalarExpression::ScalaFunction(ScalarFunction { inner, args, .. }) => {
+                let value = match tuple {
+                    Some(tuple) => inner.eval(args, Some(&tuple as &dyn TupleLike))?,
+                    None => inner.eval(args, None)?,
+                };
+                value.cast(inner.return_type())
+            }
             ScalarExpression::Empty => unreachable!(),
             ScalarExpression::If {
                 condition,
@@ -356,5 +362,54 @@ impl ScalarExpression {
             }
             ScalarExpression::TableFunction(_) => unreachable!(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn const_in(expr: DataValue, args: Vec<DataValue>, negated: bool) -> ScalarExpression {
+        ScalarExpression::In {
+            negated,
+            expr: Box::new(ScalarExpression::Constant(expr)),
+            args: args.into_iter().map(ScalarExpression::Constant).collect(),
+        }
+    }
+
+    #[test]
+    fn in_eval_matches_even_if_null_appears_first() -> Result<(), DatabaseError> {
+        let expr = const_in(
+            DataValue::Int32(1),
+            vec![DataValue::Null, DataValue::Int32(1)],
+            false,
+        );
+
+        assert_eq!(expr.eval::<&[DataValue]>(None)?, DataValue::Boolean(true));
+        Ok(())
+    }
+
+    #[test]
+    fn in_eval_returns_null_when_only_null_blocks_non_match() -> Result<(), DatabaseError> {
+        let expr = const_in(
+            DataValue::Int32(2),
+            vec![DataValue::Null, DataValue::Int32(1)],
+            false,
+        );
+
+        assert_eq!(expr.eval::<&[DataValue]>(None)?, DataValue::Null);
+        Ok(())
+    }
+
+    #[test]
+    fn not_in_eval_matches_even_if_null_appears_first() -> Result<(), DatabaseError> {
+        let expr = const_in(
+            DataValue::Int32(1),
+            vec![DataValue::Null, DataValue::Int32(1)],
+            true,
+        );
+
+        assert_eq!(expr.eval::<&[DataValue]>(None)?, DataValue::Boolean(false));
+        Ok(())
     }
 }

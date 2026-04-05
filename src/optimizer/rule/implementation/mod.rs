@@ -41,7 +41,9 @@ use crate::optimizer::rule::implementation::dql::filter::FilterImplementation;
 use crate::optimizer::rule::implementation::dql::function_scan::FunctionScanImplementation;
 use crate::optimizer::rule::implementation::dql::join::JoinImplementation;
 use crate::optimizer::rule::implementation::dql::limit::LimitImplementation;
+use crate::optimizer::rule::implementation::dql::mark_apply::MarkApplyImplementation;
 use crate::optimizer::rule::implementation::dql::projection::ProjectionImplementation;
+use crate::optimizer::rule::implementation::dql::scalar_apply::ScalarApplyImplementation;
 use crate::optimizer::rule::implementation::dql::scalar_subquery::ScalarSubqueryImplementation;
 use crate::optimizer::rule::implementation::dql::sort::SortImplementation;
 use crate::optimizer::rule::implementation::dql::table_scan::{
@@ -60,7 +62,9 @@ pub enum ImplementationRuleRootTag {
     Filter,
     Join,
     Limit,
+    MarkApply,
     Project,
+    ScalarApply,
     ScalarSubquery,
     TableScan,
     FunctionScan,
@@ -91,7 +95,9 @@ impl ImplementationRuleRootTag {
             Operator::Filter(_) => Some(Self::Filter),
             Operator::Join(_) => Some(Self::Join),
             Operator::Limit(_) => Some(Self::Limit),
+            Operator::MarkApply(_) => Some(Self::MarkApply),
             Operator::Project(_) => Some(Self::Project),
+            Operator::ScalarApply(_) => Some(Self::ScalarApply),
             Operator::ScalarSubquery(_) => Some(Self::ScalarSubquery),
             Operator::TableScan(_) => Some(Self::TableScan),
             Operator::FunctionScan(_) => Some(Self::FunctionScan),
@@ -133,7 +139,9 @@ pub enum ImplementationRuleImpl {
     Filter,
     HashJoin,
     Limit,
+    MarkApply,
     Projection,
+    ScalarApply,
     ScalarSubquery,
     SeqScan,
     FunctionScan,
@@ -166,7 +174,9 @@ impl MatchPattern for ImplementationRuleImpl {
             ImplementationRuleImpl::Filter => FilterImplementation.pattern(),
             ImplementationRuleImpl::HashJoin => JoinImplementation.pattern(),
             ImplementationRuleImpl::Limit => LimitImplementation.pattern(),
+            ImplementationRuleImpl::MarkApply => MarkApplyImplementation.pattern(),
             ImplementationRuleImpl::Projection => ProjectionImplementation.pattern(),
+            ImplementationRuleImpl::ScalarApply => ScalarApplyImplementation.pattern(),
             ImplementationRuleImpl::ScalarSubquery => ScalarSubqueryImplementation.pattern(),
             ImplementationRuleImpl::SeqScan => SeqScanImplementation.pattern(),
             ImplementationRuleImpl::IndexScan => IndexScanImplementation.pattern(),
@@ -200,7 +210,9 @@ impl ImplementationRuleImpl {
             ImplementationRuleImpl::Filter => ImplementationRuleRootTag::Filter,
             ImplementationRuleImpl::HashJoin => ImplementationRuleRootTag::Join,
             ImplementationRuleImpl::Limit => ImplementationRuleRootTag::Limit,
+            ImplementationRuleImpl::MarkApply => ImplementationRuleRootTag::MarkApply,
             ImplementationRuleImpl::Projection => ImplementationRuleRootTag::Project,
+            ImplementationRuleImpl::ScalarApply => ImplementationRuleRootTag::ScalarApply,
             ImplementationRuleImpl::ScalarSubquery => ImplementationRuleRootTag::ScalarSubquery,
             ImplementationRuleImpl::SeqScan | ImplementationRuleImpl::IndexScan => {
                 ImplementationRuleRootTag::TableScan
@@ -249,7 +261,17 @@ impl<T: Transaction> ImplementationRule<T> for ImplementationRuleImpl {
             ImplementationRuleImpl::Limit => {
                 LimitImplementation.update_best_option(operator, loader, best_physical_option)?
             }
+            ImplementationRuleImpl::MarkApply => MarkApplyImplementation.update_best_option(
+                operator,
+                loader,
+                best_physical_option,
+            )?,
             ImplementationRuleImpl::Projection => ProjectionImplementation.update_best_option(
+                operator,
+                loader,
+                best_physical_option,
+            )?,
+            ImplementationRuleImpl::ScalarApply => ScalarApplyImplementation.update_best_option(
                 operator,
                 loader,
                 best_physical_option,
