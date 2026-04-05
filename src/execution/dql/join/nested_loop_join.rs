@@ -16,7 +16,6 @@
 //! [`JoinType::RightOuter`], [`JoinType::Cross`], [`JoinType::Full`].
 
 use crate::errors::DatabaseError;
-use crate::execution::dql::projection::Projection;
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor,
 };
@@ -65,10 +64,14 @@ impl EqualCondition {
         if self.on_left_keys.is_empty() {
             return Ok(true);
         }
-        let left_values = Projection::projection(left_tuple, &self.on_left_keys)?;
-        let right_values = Projection::projection(right_tuple, &self.on_right_keys)?;
 
-        Ok(left_values == right_values)
+        for (left_expr, right_expr) in self.on_left_keys.iter().zip(self.on_right_keys.iter()) {
+            if left_expr.eval(Some(left_tuple))? != right_expr.eval(Some(right_tuple))? {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
     }
 }
 
@@ -458,6 +461,7 @@ mod test {
     use crate::utils::lru::SharedLruCache;
     use std::collections::HashSet;
     use std::hash::RandomState;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     fn optimize_exprs(plan: LogicalPlan) -> Result<LogicalPlan, DatabaseError> {

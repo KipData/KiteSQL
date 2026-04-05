@@ -20,10 +20,10 @@ use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
+
 pub struct Projection {
     exprs: Vec<ScalarExpression>,
     input: ExecId,
-    scratch: Tuple,
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection {
@@ -36,11 +36,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection {
         transaction: *mut T,
     ) -> ExecId {
         let input = build_read(arena, input, cache, transaction);
-        arena.push(ExecNode::Projection(Projection {
-            exprs,
-            input,
-            scratch: Tuple::default(),
-        }))
+        arena.push(ExecNode::Projection(Projection { exprs, input }))
     }
 
     fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
@@ -49,15 +45,14 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection {
             return Ok(());
         }
 
-        std::mem::swap(&mut self.scratch, arena.result_tuple_mut());
-        let tuple = &self.scratch;
-        let output = arena.result_tuple_mut();
-        output.pk.clone_from(&tuple.pk);
-        output.values.clear();
-        output.values.reserve(self.exprs.len());
-        for expr in self.exprs.iter() {
-            output.values.push(expr.eval(Some(tuple))?);
-        }
+        arena.with_projection_tmp(|tuple, projection_tmp| {
+            projection_tmp.clear();
+            projection_tmp.reserve(self.exprs.len());
+            for expr in self.exprs.iter() {
+                projection_tmp.push(expr.eval(Some(tuple))?);
+            }
+            Ok::<_, DatabaseError>(())
+        })?;
         arena.resume();
         Ok(())
     }
