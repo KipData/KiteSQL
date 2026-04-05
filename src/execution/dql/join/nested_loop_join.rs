@@ -24,18 +24,17 @@ use crate::expression::ScalarExpression;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
-use crate::types::tuple::{Schema, SchemaRef, SplitTupleRef, Tuple};
+use crate::types::tuple::{Schema, SplitTupleRef, Tuple};
 use crate::types::value::DataValue;
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
-use std::sync::Arc;
 
 /// Equivalent condition
 struct EqualCondition {
     on_left_keys: Vec<ScalarExpression>,
     on_right_keys: Vec<ScalarExpression>,
-    left_schema: SchemaRef,
-    right_schema: SchemaRef,
+    left_len: usize,
+    right_len: usize,
 }
 
 impl EqualCondition {
@@ -45,8 +44,8 @@ impl EqualCondition {
     fn new(
         on_left_keys: Vec<ScalarExpression>,
         on_right_keys: Vec<ScalarExpression>,
-        left_schema: Arc<Schema>,
-        right_schema: Arc<Schema>,
+        left_schema: &Schema,
+        right_schema: &Schema,
     ) -> EqualCondition {
         if !on_left_keys.is_empty() && on_left_keys.len() != on_right_keys.len() {
             unreachable!("Unexpected join on condition.")
@@ -54,8 +53,8 @@ impl EqualCondition {
         EqualCondition {
             on_left_keys,
             on_right_keys,
-            left_schema,
-            right_schema,
+            left_len: left_schema.len(),
+            right_len: right_schema.len(),
         }
     }
 
@@ -66,10 +65,8 @@ impl EqualCondition {
         if self.on_left_keys.is_empty() {
             return Ok(true);
         }
-        let left_values =
-            Projection::projection(left_tuple, &self.on_left_keys, &self.left_schema)?;
-        let right_values =
-            Projection::projection(right_tuple, &self.on_right_keys, &self.right_schema)?;
+        let left_values = Projection::projection(left_tuple, &self.on_left_keys)?;
+        let right_values = Projection::projection(right_tuple, &self.on_right_keys)?;
 
         Ok(left_values == right_values)
     }
@@ -141,12 +138,7 @@ impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for NestedLoopJoin {
             std::mem::swap(&mut left_schema, &mut right_schema);
         }
 
-        let eq_cond = EqualCondition::new(
-            on_left_keys,
-            on_right_keys,
-            left_schema.clone(),
-            right_schema.clone(),
-        );
+        let eq_cond = EqualCondition::new(on_left_keys, on_right_keys, &left_schema, &right_schema);
 
         NestedLoopJoin {
             left_input_plan: left_input,
@@ -330,7 +322,7 @@ impl NestedLoopJoin {
                             right_bitmap = Some(bits);
                         }
                     }
-                    let right_schema_len = self.eq_cond.right_schema.len();
+                    let right_schema_len = self.eq_cond.right_len;
                     let tuple = match self.ty {
                         JoinType::LeftOuter | JoinType::RightOuter | JoinType::Full
                             if !active_left.has_matched =>
@@ -374,7 +366,7 @@ impl NestedLoopJoin {
                         right_emit_index += 1;
 
                         if !right_bitmap.contains(idx) {
-                            let mut values = vec![DataValue::Null; self.eq_cond.left_schema.len()];
+                            let mut values = vec![DataValue::Null; self.eq_cond.left_len];
                             values.append(&mut right_tuple.values);
                             self.state = NestedLoopJoinState::EmitRightUnmatched {
                                 right_input,

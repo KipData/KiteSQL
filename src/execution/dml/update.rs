@@ -112,7 +112,7 @@ impl Update {
 
                 let old_pk = tuple.pk.clone().ok_or(DatabaseError::PrimaryKeyNotFound)?;
                 for (index_meta, exprs) in index_metas.iter() {
-                    let values = Projection::projection(&tuple, exprs, &self.input_schema)?;
+                    let values = Projection::projection(&tuple, exprs)?;
                     let Some(value) = DataValue::values_to_tuple(values) else {
                         continue;
                     };
@@ -141,7 +141,7 @@ impl Update {
                     is_overwrite = false;
                 }
                 for (index_meta, exprs) in index_metas.iter() {
-                    let values = Projection::projection(&tuple, exprs, &self.input_schema)?;
+                    let values = Projection::projection(&tuple, exprs)?;
                     let Some(value) = DataValue::values_to_tuple(values) else {
                         continue;
                     };

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
 use crate::expression::ScalarExpression;
@@ -68,7 +67,6 @@ impl Projection {
     pub fn projection(
         tuple: &Tuple,
         exprs: &[ScalarExpression],
-        _schema: &[ColumnRef],
     ) -> Result<Vec<DataValue>, DatabaseError> {
         let mut values = Vec::with_capacity(exprs.len());
 

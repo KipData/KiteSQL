@@ -107,11 +107,9 @@ impl CreateIndex {
         while arena.next_tuple(self.input)? {
             let (value, tuple_pk) = {
                 let tuple = arena.result_tuple();
-                let Some(value) = DataValue::values_to_tuple(Projection::projection(
-                    tuple,
-                    &column_exprs,
-                    &self.input_schema,
-                )?) else {
+                let Some(value) =
+                    DataValue::values_to_tuple(Projection::projection(tuple, &column_exprs)?)
+                else {
                     continue;
                 };
                 let Some(tuple_pk) = tuple.pk.clone() else {

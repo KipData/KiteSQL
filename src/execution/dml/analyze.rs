@@ -23,7 +23,6 @@ use crate::planner::operator::analyze::AnalyzeOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, Transaction};
 use crate::types::index::IndexId;
-use crate::types::tuple::SchemaRef;
 use crate::types::value::{DataValue, Utf8Type};
 use itertools::Itertools;
 use sqlparser::ast::CharLengthUnits;
@@ -34,7 +33,6 @@ const DEFAULT_NUM_OF_BUCKETS: usize = 100;
 
 pub struct Analyze {
     table_name: TableName,
-    input_schema: SchemaRef,
     input_plan: LogicalPlan,
     input: Option<ExecId>,
     histogram_buckets: Option<usize>,
@@ -48,13 +46,12 @@ impl From<(AnalyzeOperator, LogicalPlan)> for Analyze {
                 index_metas,
                 histogram_buckets,
             },
-            mut input,
+            input,
         ): (AnalyzeOperator, LogicalPlan),
     ) -> Self {
         let _ = index_metas;
         Analyze {
             table_name,
-            input_schema: input.output_schema().clone(),
             input_plan: input,
             input: None,
             histogram_buckets,
@@ -108,7 +105,7 @@ impl Analyze {
         while arena.next_tuple(input)? {
             let tuple = arena.result_tuple();
             for State { exprs, builder, .. } in builders.iter_mut() {
-                let values = Projection::projection(tuple, exprs, &self.input_schema)?;
+                let values = Projection::projection(tuple, exprs)?;
 
                 if values.len() == 1 {
                     builder.append(&values[0])?;

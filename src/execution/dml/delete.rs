@@ -21,23 +21,20 @@ use crate::planner::operator::delete::DeleteOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::index::{Index, IndexId, IndexType};
-use crate::types::tuple::SchemaRef;
 use crate::types::tuple_builder::TupleBuilder;
 use crate::types::value::DataValue;
 use std::collections::HashMap;
 
 pub struct Delete {
     table_name: TableName,
-    input_schema: SchemaRef,
     input_plan: LogicalPlan,
     input: Option<ExecId>,
 }
 
 impl From<(DeleteOperator, LogicalPlan)> for Delete {
-    fn from((DeleteOperator { table_name, .. }, mut input): (DeleteOperator, LogicalPlan)) -> Self {
+    fn from((DeleteOperator { table_name, .. }, input): (DeleteOperator, LogicalPlan)) -> Self {
         Delete {
             table_name,
-            input_schema: input.output_schema().clone(),
             input_plan: input,
             input: None,
         }
@@ -83,22 +80,18 @@ impl Delete {
             let tuple = arena.result_tuple().clone();
             for index_meta in table.indexes() {
                 if let Some(Value { exprs, values, .. }) = indexes.get_mut(&index_meta.id) {
-                    let Some(data_value) = DataValue::values_to_tuple(Projection::projection(
-                        &tuple,
-                        exprs,
-                        &self.input_schema,
-                    )?) else {
+                    let Some(data_value) =
+                        DataValue::values_to_tuple(Projection::projection(&tuple, exprs)?)
+                    else {
                         continue;
                     };
                     values.push(data_value);
                 } else {
                     let mut values = Vec::with_capacity(table.indexes().len());
                     let exprs = index_meta.column_exprs(table)?;
-                    let Some(data_value) = DataValue::values_to_tuple(Projection::projection(
-                        &tuple,
-                        &exprs,
-                        &self.input_schema,
-                    )?) else {
+                    let Some(data_value) =
+                        DataValue::values_to_tuple(Projection::projection(&tuple, &exprs)?)
+                    else {
                         continue;
                     };
                     values.push(data_value);
