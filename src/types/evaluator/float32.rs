@@ -15,6 +15,8 @@
 use crate::errors::DatabaseError;
 use crate::types::evaluator::DataValue;
 use crate::types::evaluator::{BinaryEvaluator, UnaryEvaluator};
+use crate::types::LogicalType;
+use rust_decimal::prelude::FromPrimitive;
 use serde::{Deserialize, Serialize};
 use std::hint;
 
@@ -87,6 +89,8 @@ impl BinaryEvaluator for Float32MinusBinaryEvaluator {
         })
     }
 }
+
+crate::define_float_cast_evaluators!(Float32, Float32, f32, LogicalType::Float, from_f32);
 #[typetag::serde]
 impl BinaryEvaluator for Float32MultiplyBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
@@ -195,5 +199,75 @@ impl BinaryEvaluator for Float32ModBinaryEvaluator {
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
         })
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod test {
+    use super::*;
+    use crate::types::evaluator::CastEvaluator;
+    use crate::types::value::Utf8Type;
+    use ordered_float::OrderedFloat;
+    use rust_decimal::Decimal;
+    use sqlparser::ast::CharLengthUnits;
+
+    #[test]
+    fn test_float32_cast_evaluators() {
+        let value = DataValue::Float32(OrderedFloat(1.5));
+
+        assert_eq!(
+            Float32ToFloatCastEvaluator.eval_cast(&value).unwrap(),
+            DataValue::Float32(OrderedFloat(1.5))
+        );
+        assert_eq!(
+            Float32ToDoubleCastEvaluator.eval_cast(&value).unwrap(),
+            DataValue::Float64(OrderedFloat(1.5))
+        );
+        assert_eq!(Float32ToTinyintCastEvaluator.eval_cast(&value).unwrap(), DataValue::Int8(1));
+        assert_eq!(Float32ToSmallintCastEvaluator.eval_cast(&value).unwrap(), DataValue::Int16(1));
+        assert_eq!(Float32ToIntegerCastEvaluator.eval_cast(&value).unwrap(), DataValue::Int32(1));
+        assert_eq!(Float32ToBigintCastEvaluator.eval_cast(&value).unwrap(), DataValue::Int64(1));
+        assert_eq!(Float32ToUTinyintCastEvaluator.eval_cast(&value).unwrap(), DataValue::UInt8(1));
+        assert_eq!(
+            Float32ToUSmallintCastEvaluator.eval_cast(&value).unwrap(),
+            DataValue::UInt16(1)
+        );
+        assert_eq!(Float32ToUIntegerCastEvaluator.eval_cast(&value).unwrap(), DataValue::UInt32(1));
+        assert_eq!(Float32ToUBigintCastEvaluator.eval_cast(&value).unwrap(), DataValue::UInt64(1));
+        assert_eq!(
+            Float32ToCharCastEvaluator {
+                len: 3,
+                unit: CharLengthUnits::Characters,
+            }
+            .eval_cast(&value)
+            .unwrap(),
+            DataValue::Utf8 {
+                value: "1.5".to_string(),
+                ty: Utf8Type::Fixed(3),
+                unit: CharLengthUnits::Characters,
+            }
+        );
+        assert_eq!(
+            Float32ToVarcharCastEvaluator {
+                len: Some(3),
+                unit: CharLengthUnits::Characters,
+            }
+            .eval_cast(&value)
+            .unwrap(),
+            DataValue::Utf8 {
+                value: "1.5".to_string(),
+                ty: Utf8Type::Variable(Some(3)),
+                unit: CharLengthUnits::Characters,
+            }
+        );
+        assert_eq!(
+            Float32ToDecimalCastEvaluator {
+                scale: Some(1),
+                to: LogicalType::Decimal(None, Some(1)),
+            }
+            .eval_cast(&value)
+            .unwrap(),
+            DataValue::Decimal(Decimal::new(15, 1))
+        );
     }
 }

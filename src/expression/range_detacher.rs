@@ -727,9 +727,7 @@ impl<'a> RangeDetacher<'a> {
         if !Self::_is_belong(self.table_name, &col) || col.id() != Some(*self.column_id) {
             return Ok(None);
         }
-        if &val.logical_type() != col.datatype() {
-            val = val.cast(col.datatype())?
-        }
+        val = val.cast(col.datatype())?;
         if is_flip {
             op = match op {
                 BinaryOperator::Gt => BinaryOperator::Lt,

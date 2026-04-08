@@ -142,9 +142,7 @@ impl Insert {
                         }
                         value.unwrap_or(DataValue::Null)
                     };
-                    if !value.is_null() && &value.logical_type() != col.datatype() {
-                        value = value.cast(col.datatype())?;
-                    }
+                    value = value.cast(col.datatype())?;
                     value.check_len(col.datatype())?;
                     if value.is_null() && !col.nullable() {
                         return Err(DatabaseError::not_null_column(col.name().to_string()));

@@ -18,6 +18,7 @@ use crate::types::LogicalType;
 use chrono::ParseError;
 use sqlparser::parser::ParserError;
 use std::num::{ParseFloatError, ParseIntError, TryFromIntError};
+use std::convert::Infallible;
 use std::str::{ParseBoolError, Utf8Error};
 use std::string::FromUtf8Error;
 
@@ -266,6 +267,12 @@ pub enum DatabaseError {
     ViewExists,
     #[error("the view not found")]
     ViewNotFound,
+}
+
+impl From<Infallible> for DatabaseError {
+    fn from(value: Infallible) -> Self {
+        match value {}
+    }
 }
 
 impl DatabaseError {

@@ -25,6 +25,7 @@ use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use itertools::Itertools;
 use sqlparser::ast::{ColumnDef, ColumnOption, Expr, IndexColumn, ObjectName, TableConstraint};
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -161,12 +162,10 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                             "column is not allowed to exist in `default`".to_string(),
                         ));
                     }
-                    if expr.return_type() != column_desc.column_datatype {
-                        expr = ScalarExpression::TypeCast {
-                            expr: Box::new(expr),
-                            ty: column_desc.column_datatype.clone(),
-                        }
-                    }
+                    expr = ScalarExpression::type_cast(
+                        expr,
+                        Cow::Borrowed(&column_desc.column_datatype),
+                    )?;
                     column_desc.default = Some(expr);
                 }
                 option => {

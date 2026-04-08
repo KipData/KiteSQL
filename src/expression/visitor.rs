@@ -18,7 +18,7 @@ use crate::expression::agg::AggKind;
 use crate::expression::function::scala::ScalarFunction;
 use crate::expression::function::table::TableFunction;
 use crate::expression::{AliasType, BinaryOperator, ScalarExpression, UnaryOperator};
-use crate::types::evaluator::{BinaryEvaluatorBox, UnaryEvaluatorBox};
+use crate::types::evaluator::{BinaryEvaluatorBox, CastEvaluatorBox, UnaryEvaluatorBox};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use sqlparser::ast::TrimWhereField;
@@ -51,6 +51,7 @@ pub trait Visitor<'a>: Sized {
         &mut self,
         expr: &'a ScalarExpression,
         _ty: &'a LogicalType,
+        _evaluator: Option<&'a CastEvaluatorBox>,
     ) -> Result<(), DatabaseError> {
         self.visit(expr)
     }
@@ -273,7 +274,9 @@ pub fn walk_expr<'a, V: Visitor<'a>>(
         ScalarExpression::Constant(value) => visitor.visit_constant(value),
         ScalarExpression::ColumnRef { column, .. } => visitor.visit_column_ref(column),
         ScalarExpression::Alias { expr, alias } => visitor.visit_alias(expr, alias),
-        ScalarExpression::TypeCast { expr, ty } => visitor.visit_type_cast(expr, ty),
+        ScalarExpression::TypeCast { expr, ty, evaluator } => {
+            visitor.visit_type_cast(expr, ty, evaluator.as_ref())
+        }
         ScalarExpression::IsNull { negated, expr } => visitor.visit_is_null(*negated, expr),
         ScalarExpression::Unary {
             op,

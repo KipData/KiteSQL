@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::types::evaluator::BinaryEvaluator;
+use crate::types::evaluator::{BinaryEvaluator, CastEvaluator};
 use crate::types::evaluator::DataValue;
 use serde::{Deserialize, Serialize};
 
@@ -26,5 +26,36 @@ pub struct NullBinaryEvaluator;
 impl BinaryEvaluator for NullBinaryEvaluator {
     fn binary_eval(&self, _: &DataValue, _: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(DataValue::Null)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+pub struct ToSqlNullCastEvaluator;
+
+#[typetag::serde]
+impl CastEvaluator for ToSqlNullCastEvaluator {
+    fn eval_cast(&self, _value: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(DataValue::Null)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+pub struct NullCastEvaluator;
+
+#[typetag::serde]
+impl CastEvaluator for NullCastEvaluator {
+    fn eval_cast(&self, _value: &DataValue) -> Result<DataValue, DatabaseError> {
+        Ok(DataValue::Null)
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_null_cast_evaluators() {
+        assert_eq!(ToSqlNullCastEvaluator.eval_cast(&DataValue::Int32(1)).unwrap(), DataValue::Null);
+        assert_eq!(NullCastEvaluator.eval_cast(&DataValue::Null).unwrap(), DataValue::Null);
     }
 }

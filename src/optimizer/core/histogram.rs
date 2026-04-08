@@ -25,6 +25,7 @@ use crate::types::LogicalType;
 use bumpalo::Bump;
 use kite_sql_serde_macros::ReferenceSerialization;
 use ordered_float::OrderedFloat;
+use std::borrow::Cow;
 use std::collections::Bound;
 use std::{cmp, mem};
 
@@ -232,10 +233,10 @@ impl HistogramBuilder {
 impl BoundComparator {
     fn new(ty: LogicalType) -> Result<Self, DatabaseError> {
         Ok(Self {
-            lt: EvaluatorFactory::binary_create(ty.clone(), BinaryOperator::Lt)?,
-            lte: EvaluatorFactory::binary_create(ty.clone(), BinaryOperator::LtEq)?,
-            gt: EvaluatorFactory::binary_create(ty.clone(), BinaryOperator::Gt)?,
-            gte: EvaluatorFactory::binary_create(ty, BinaryOperator::GtEq)?,
+            lt: EvaluatorFactory::binary_create(Cow::Borrowed(&ty), BinaryOperator::Lt)?,
+            lte: EvaluatorFactory::binary_create(Cow::Borrowed(&ty), BinaryOperator::LtEq)?,
+            gt: EvaluatorFactory::binary_create(Cow::Borrowed(&ty), BinaryOperator::Gt)?,
+            gte: EvaluatorFactory::binary_create(Cow::Owned(ty), BinaryOperator::GtEq)?,
         })
     }
 

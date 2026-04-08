@@ -19,6 +19,7 @@ use crate::types::evaluator::{BinaryEvaluatorBox, EvaluatorFactory};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use ahash::RandomState;
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 pub struct SumAccumulator {
@@ -27,12 +28,12 @@ pub struct SumAccumulator {
 }
 
 impl SumAccumulator {
-    pub fn new(ty: &LogicalType) -> Result<Self, DatabaseError> {
+    pub fn new(ty: Cow<'_, LogicalType>) -> Result<Self, DatabaseError> {
         debug_assert!(ty.is_numeric());
 
         Ok(Self {
             result: DataValue::Null,
-            evaluator: EvaluatorFactory::binary_create(ty.clone(), BinaryOperator::Plus)?,
+            evaluator: EvaluatorFactory::binary_create(ty, BinaryOperator::Plus)?,
         })
     }
 }
@@ -64,7 +65,7 @@ impl DistinctSumAccumulator {
     pub fn new(ty: &LogicalType) -> Result<Self, DatabaseError> {
         Ok(Self {
             distinct_values: HashSet::default(),
-            inner: SumAccumulator::new(ty)?,
+            inner: SumAccumulator::new(Cow::Borrowed(ty))?,
         })
     }
 }

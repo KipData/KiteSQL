@@ -1917,7 +1917,7 @@ mod test {
     }
 
     scala_function!(MyScalaFunction::SUM(LogicalType::Integer, LogicalType::Integer) -> LogicalType::Integer => (|v1: DataValue, v2: DataValue| {
-        EvaluatorFactory::binary_create(LogicalType::Integer, BinaryOperator::Plus)?.binary_eval(&v1, &v2)
+        EvaluatorFactory::binary_create(std::borrow::Cow::Owned(LogicalType::Integer), BinaryOperator::Plus)?.binary_eval(&v1, &v2)
     }));
 
     scala_function!(MyOrmFunction::ADD_ONE(LogicalType::Integer) -> LogicalType::Integer => (|v1: DataValue| {
