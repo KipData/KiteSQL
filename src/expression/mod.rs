@@ -193,10 +193,7 @@ impl VisitorMut<'_> for BindEvaluator {
                 Cow::Owned(target_ty),
             )?;
         }
-        *evaluator = Some(EvaluatorFactory::unary_create(
-            expr.return_type(),
-            *op,
-        )?);
+        *evaluator = Some(EvaluatorFactory::unary_create(expr.return_type(), *op)?);
 
         Ok(())
     }
@@ -215,13 +212,14 @@ impl VisitorMut<'_> for BindEvaluator {
         let left_ty = left_expr.return_type().into_owned();
         let right_ty = right_expr.return_type().into_owned();
         let ty = LogicalType::max_logical_type(&left_ty, &right_ty)?;
-        let fn_cast = |expr: &mut ScalarExpression, ty: &LogicalType| -> Result<(), DatabaseError> {
-            *expr = ScalarExpression::type_cast(
-                mem::replace(expr, ScalarExpression::Empty),
-                Cow::Borrowed(ty),
-            )?;
-            Ok(())
-        };
+        let fn_cast =
+            |expr: &mut ScalarExpression, ty: &LogicalType| -> Result<(), DatabaseError> {
+                *expr = ScalarExpression::type_cast(
+                    mem::replace(expr, ScalarExpression::Empty),
+                    Cow::Borrowed(ty),
+                )?;
+                Ok(())
+            };
         fn_cast(left_expr, ty.as_ref())?;
         fn_cast(right_expr, ty.as_ref())?;
 
@@ -358,15 +356,13 @@ impl ScalarExpression {
             ScalarExpression::IsNull { .. }
             | ScalarExpression::In { .. }
             | ScalarExpression::Between { .. } => Cow::Owned(LogicalType::Boolean),
-            ScalarExpression::SubString { .. } => Cow::Owned(LogicalType::Varchar(
-                None,
-                CharLengthUnits::Characters,
-            )),
+            ScalarExpression::SubString { .. } => {
+                Cow::Owned(LogicalType::Varchar(None, CharLengthUnits::Characters))
+            }
             ScalarExpression::Position { .. } => Cow::Owned(LogicalType::Integer),
-            ScalarExpression::Trim { .. } => Cow::Owned(LogicalType::Varchar(
-                None,
-                CharLengthUnits::Characters,
-            )),
+            ScalarExpression::Trim { .. } => {
+                Cow::Owned(LogicalType::Varchar(None, CharLengthUnits::Characters))
+            }
             ScalarExpression::Alias { expr, .. } => expr.return_type(),
             ScalarExpression::Empty | ScalarExpression::TableFunction(_) => unreachable!(),
             ScalarExpression::Tuple(exprs) => {

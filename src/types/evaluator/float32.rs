@@ -223,17 +223,38 @@ mod test {
             Float32ToDoubleCastEvaluator.eval_cast(&value).unwrap(),
             DataValue::Float64(OrderedFloat(1.5))
         );
-        assert_eq!(Float32ToTinyintCastEvaluator.eval_cast(&value).unwrap(), DataValue::Int8(1));
-        assert_eq!(Float32ToSmallintCastEvaluator.eval_cast(&value).unwrap(), DataValue::Int16(1));
-        assert_eq!(Float32ToIntegerCastEvaluator.eval_cast(&value).unwrap(), DataValue::Int32(1));
-        assert_eq!(Float32ToBigintCastEvaluator.eval_cast(&value).unwrap(), DataValue::Int64(1));
-        assert_eq!(Float32ToUTinyintCastEvaluator.eval_cast(&value).unwrap(), DataValue::UInt8(1));
+        assert_eq!(
+            Float32ToTinyintCastEvaluator.eval_cast(&value).unwrap(),
+            DataValue::Int8(1)
+        );
+        assert_eq!(
+            Float32ToSmallintCastEvaluator.eval_cast(&value).unwrap(),
+            DataValue::Int16(1)
+        );
+        assert_eq!(
+            Float32ToIntegerCastEvaluator.eval_cast(&value).unwrap(),
+            DataValue::Int32(1)
+        );
+        assert_eq!(
+            Float32ToBigintCastEvaluator.eval_cast(&value).unwrap(),
+            DataValue::Int64(1)
+        );
+        assert_eq!(
+            Float32ToUTinyintCastEvaluator.eval_cast(&value).unwrap(),
+            DataValue::UInt8(1)
+        );
         assert_eq!(
             Float32ToUSmallintCastEvaluator.eval_cast(&value).unwrap(),
             DataValue::UInt16(1)
         );
-        assert_eq!(Float32ToUIntegerCastEvaluator.eval_cast(&value).unwrap(), DataValue::UInt32(1));
-        assert_eq!(Float32ToUBigintCastEvaluator.eval_cast(&value).unwrap(), DataValue::UInt64(1));
+        assert_eq!(
+            Float32ToUIntegerCastEvaluator.eval_cast(&value).unwrap(),
+            DataValue::UInt32(1)
+        );
+        assert_eq!(
+            Float32ToUBigintCastEvaluator.eval_cast(&value).unwrap(),
+            DataValue::UInt64(1)
+        );
         assert_eq!(
             Float32ToCharCastEvaluator {
                 len: 3,

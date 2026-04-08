@@ -439,7 +439,9 @@ pub fn create_cast_evaluator(
         (LogicalType::Boolean, LogicalType::Tinyint) => box_cast!(BooleanToTinyintCastEvaluator),
         (LogicalType::Boolean, LogicalType::UTinyint) => box_cast!(BooleanToUTinyintCastEvaluator),
         (LogicalType::Boolean, LogicalType::Smallint) => box_cast!(BooleanToSmallintCastEvaluator),
-        (LogicalType::Boolean, LogicalType::USmallint) => box_cast!(BooleanToUSmallintCastEvaluator),
+        (LogicalType::Boolean, LogicalType::USmallint) => {
+            box_cast!(BooleanToUSmallintCastEvaluator)
+        }
         (LogicalType::Boolean, LogicalType::Integer) => box_cast!(BooleanToIntegerCastEvaluator),
         (LogicalType::Boolean, LogicalType::UInteger) => box_cast!(BooleanToUIntegerCastEvaluator),
         (LogicalType::Boolean, LogicalType::Bigint) => box_cast!(BooleanToBigintCastEvaluator),
@@ -447,10 +449,16 @@ pub fn create_cast_evaluator(
         (LogicalType::Boolean, LogicalType::Float) => box_cast!(BooleanToFloatCastEvaluator),
         (LogicalType::Boolean, LogicalType::Double) => box_cast!(BooleanToDoubleCastEvaluator),
         (LogicalType::Boolean, LogicalType::Char(len, unit)) => {
-            box_cast!(BooleanToCharCastEvaluator { len: *len, unit: *unit })
+            box_cast!(BooleanToCharCastEvaluator {
+                len: *len,
+                unit: *unit
+            })
         }
         (LogicalType::Boolean, LogicalType::Varchar(len, unit)) => {
-            box_cast!(BooleanToVarcharCastEvaluator { len: *len, unit: *unit })
+            box_cast!(BooleanToVarcharCastEvaluator {
+                len: *len,
+                unit: *unit
+            })
         }
         (LogicalType::Tinyint, _) => build_integer_cast!(Int8, to, from),
         (LogicalType::Smallint, _) => build_integer_cast!(Int16, to, from),
@@ -470,13 +478,22 @@ pub fn create_cast_evaluator(
         (LogicalType::Float, LogicalType::UBigint) => box_cast!(Float32ToUBigintCastEvaluator),
         (LogicalType::Float, LogicalType::Double) => box_cast!(Float32ToDoubleCastEvaluator),
         (LogicalType::Float, LogicalType::Char(len, unit)) => {
-            box_cast!(Float32ToCharCastEvaluator { len: *len, unit: *unit })
+            box_cast!(Float32ToCharCastEvaluator {
+                len: *len,
+                unit: *unit
+            })
         }
         (LogicalType::Float, LogicalType::Varchar(len, unit)) => {
-            box_cast!(Float32ToVarcharCastEvaluator { len: *len, unit: *unit })
+            box_cast!(Float32ToVarcharCastEvaluator {
+                len: *len,
+                unit: *unit
+            })
         }
         (LogicalType::Float, LogicalType::Decimal(_, scale)) => {
-            box_cast!(Float32ToDecimalCastEvaluator { scale: *scale, to: to.clone() })
+            box_cast!(Float32ToDecimalCastEvaluator {
+                scale: *scale,
+                to: to.clone()
+            })
         }
         (LogicalType::Double, LogicalType::Float) => box_cast!(Float64ToFloatCastEvaluator),
         (LogicalType::Double, LogicalType::Tinyint) => box_cast!(Float64ToTinyintCastEvaluator),
@@ -488,115 +505,248 @@ pub fn create_cast_evaluator(
         (LogicalType::Double, LogicalType::Bigint) => box_cast!(Float64ToBigintCastEvaluator),
         (LogicalType::Double, LogicalType::UBigint) => box_cast!(Float64ToUBigintCastEvaluator),
         (LogicalType::Double, LogicalType::Char(len, unit)) => {
-            box_cast!(Float64ToCharCastEvaluator { len: *len, unit: *unit })
+            box_cast!(Float64ToCharCastEvaluator {
+                len: *len,
+                unit: *unit
+            })
         }
         (LogicalType::Double, LogicalType::Varchar(len, unit)) => {
-            box_cast!(Float64ToVarcharCastEvaluator { len: *len, unit: *unit })
+            box_cast!(Float64ToVarcharCastEvaluator {
+                len: *len,
+                unit: *unit
+            })
         }
         (LogicalType::Double, LogicalType::Decimal(_, scale)) => {
-            box_cast!(Float64ToDecimalCastEvaluator { scale: *scale, to: to.clone() })
+            box_cast!(Float64ToDecimalCastEvaluator {
+                scale: *scale,
+                to: to.clone()
+            })
         }
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Boolean) => {
             box_cast!(Utf8ToBooleanCastEvaluator { from: from.clone() })
         }
-        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Tinyint) => box_cast!(Utf8ToTinyintCastEvaluator),
-        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::UTinyint) => box_cast!(Utf8ToUTinyintCastEvaluator),
-        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Smallint) => box_cast!(Utf8ToSmallintCastEvaluator),
-        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::USmallint) => box_cast!(Utf8ToUSmallintCastEvaluator),
-        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Integer) => box_cast!(Utf8ToIntegerCastEvaluator),
-        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::UInteger) => box_cast!(Utf8ToUIntegerCastEvaluator),
-        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Bigint) => box_cast!(Utf8ToBigintCastEvaluator),
-        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::UBigint) => box_cast!(Utf8ToUBigintCastEvaluator),
-        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Float) => box_cast!(Utf8ToFloatCastEvaluator),
-        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Double) => box_cast!(Utf8ToDoubleCastEvaluator),
+        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Tinyint) => {
+            box_cast!(Utf8ToTinyintCastEvaluator)
+        }
+        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::UTinyint) => {
+            box_cast!(Utf8ToUTinyintCastEvaluator)
+        }
+        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Smallint) => {
+            box_cast!(Utf8ToSmallintCastEvaluator)
+        }
+        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::USmallint) => {
+            box_cast!(Utf8ToUSmallintCastEvaluator)
+        }
+        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Integer) => {
+            box_cast!(Utf8ToIntegerCastEvaluator)
+        }
+        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::UInteger) => {
+            box_cast!(Utf8ToUIntegerCastEvaluator)
+        }
+        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Bigint) => {
+            box_cast!(Utf8ToBigintCastEvaluator)
+        }
+        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::UBigint) => {
+            box_cast!(Utf8ToUBigintCastEvaluator)
+        }
+        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Float) => {
+            box_cast!(Utf8ToFloatCastEvaluator)
+        }
+        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Double) => {
+            box_cast!(Utf8ToDoubleCastEvaluator)
+        }
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Char(len, unit)) => {
-            box_cast!(Utf8ToCharCastEvaluator { len: *len, unit: *unit })
+            box_cast!(Utf8ToCharCastEvaluator {
+                len: *len,
+                unit: *unit
+            })
         }
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Varchar(len, unit)) => {
-            box_cast!(Utf8ToVarcharCastEvaluator { len: *len, unit: *unit })
+            box_cast!(Utf8ToVarcharCastEvaluator {
+                len: *len,
+                unit: *unit
+            })
         }
-        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Date) => box_cast!(Utf8ToDateCastEvaluator),
-        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::DateTime) => box_cast!(Utf8ToDatetimeCastEvaluator),
+        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Date) => {
+            box_cast!(Utf8ToDateCastEvaluator)
+        }
+        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::DateTime) => {
+            box_cast!(Utf8ToDatetimeCastEvaluator)
+        }
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Time(precision)) => {
-            box_cast!(Utf8ToTimeCastEvaluator { precision: *precision })
+            box_cast!(Utf8ToTimeCastEvaluator {
+                precision: *precision
+            })
         }
-        (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::TimeStamp(precision, zone)) => {
-            box_cast!(Utf8ToTimestampCastEvaluator { precision: *precision, zone: *zone, to: to.clone() })
+        (
+            LogicalType::Char(_, _) | LogicalType::Varchar(_, _),
+            LogicalType::TimeStamp(precision, zone),
+        ) => {
+            box_cast!(Utf8ToTimestampCastEvaluator {
+                precision: *precision,
+                zone: *zone,
+                to: to.clone()
+            })
         }
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Decimal(_, _)) => {
             box_cast!(Utf8ToDecimalCastEvaluator)
         }
         (LogicalType::Date, LogicalType::Char(len, unit)) => {
-            box_cast!(Date32ToCharCastEvaluator { len: *len, unit: *unit, to: to.clone() })
+            box_cast!(Date32ToCharCastEvaluator {
+                len: *len,
+                unit: *unit,
+                to: to.clone()
+            })
         }
         (LogicalType::Date, LogicalType::Varchar(len, unit)) => {
-            box_cast!(Date32ToVarcharCastEvaluator { len: *len, unit: *unit, to: to.clone() })
+            box_cast!(Date32ToVarcharCastEvaluator {
+                len: *len,
+                unit: *unit,
+                to: to.clone()
+            })
         }
-        (LogicalType::Date, LogicalType::DateTime) => box_cast!(Date32ToDatetimeCastEvaluator { to: to.clone() }),
+        (LogicalType::Date, LogicalType::DateTime) => {
+            box_cast!(Date32ToDatetimeCastEvaluator { to: to.clone() })
+        }
         (LogicalType::DateTime, LogicalType::Char(len, unit)) => {
-            box_cast!(Date64ToCharCastEvaluator { len: *len, unit: *unit, to: to.clone() })
+            box_cast!(Date64ToCharCastEvaluator {
+                len: *len,
+                unit: *unit,
+                to: to.clone()
+            })
         }
         (LogicalType::DateTime, LogicalType::Varchar(len, unit)) => {
-            box_cast!(Date64ToVarcharCastEvaluator { len: *len, unit: *unit, to: to.clone() })
+            box_cast!(Date64ToVarcharCastEvaluator {
+                len: *len,
+                unit: *unit,
+                to: to.clone()
+            })
         }
-        (LogicalType::DateTime, LogicalType::Date) => box_cast!(Date64ToDateCastEvaluator { to: to.clone() }),
+        (LogicalType::DateTime, LogicalType::Date) => {
+            box_cast!(Date64ToDateCastEvaluator { to: to.clone() })
+        }
         (LogicalType::DateTime, LogicalType::Time(precision)) => {
-            box_cast!(Date64ToTimeCastEvaluator { precision: *precision, to: to.clone() })
+            box_cast!(Date64ToTimeCastEvaluator {
+                precision: *precision,
+                to: to.clone()
+            })
         }
         (LogicalType::DateTime, LogicalType::TimeStamp(precision, zone)) => {
-            box_cast!(Date64ToTimestampCastEvaluator { precision: *precision, zone: *zone })
+            box_cast!(Date64ToTimestampCastEvaluator {
+                precision: *precision,
+                zone: *zone
+            })
         }
         (LogicalType::Time(_), LogicalType::Char(len, unit)) => {
-            box_cast!(Time32ToCharCastEvaluator { len: *len, unit: *unit, to: to.clone() })
+            box_cast!(Time32ToCharCastEvaluator {
+                len: *len,
+                unit: *unit,
+                to: to.clone()
+            })
         }
         (LogicalType::Time(_), LogicalType::Varchar(len, unit)) => {
-            box_cast!(Time32ToVarcharCastEvaluator { len: *len, unit: *unit, to: to.clone() })
+            box_cast!(Time32ToVarcharCastEvaluator {
+                len: *len,
+                unit: *unit,
+                to: to.clone()
+            })
         }
         (LogicalType::Time(_), LogicalType::Time(precision)) => {
-            box_cast!(Time32ToTimeCastEvaluator { precision: *precision })
+            box_cast!(Time32ToTimeCastEvaluator {
+                precision: *precision
+            })
         }
         (LogicalType::TimeStamp(_, _), LogicalType::Char(len, unit)) => {
-            box_cast!(Time64ToCharCastEvaluator { len: *len, unit: *unit, to: to.clone() })
+            box_cast!(Time64ToCharCastEvaluator {
+                len: *len,
+                unit: *unit,
+                to: to.clone()
+            })
         }
         (LogicalType::TimeStamp(_, _), LogicalType::Varchar(len, unit)) => {
-            box_cast!(Time64ToVarcharCastEvaluator { len: *len, unit: *unit, to: to.clone() })
+            box_cast!(Time64ToVarcharCastEvaluator {
+                len: *len,
+                unit: *unit,
+                to: to.clone()
+            })
         }
         (LogicalType::TimeStamp(_, _), LogicalType::Date) => {
-            box_cast!(Time64ToDateCastEvaluator { from: from.clone(), to: to.clone() })
+            box_cast!(Time64ToDateCastEvaluator {
+                from: from.clone(),
+                to: to.clone()
+            })
         }
         (LogicalType::TimeStamp(_, _), LogicalType::DateTime) => {
-            box_cast!(Time64ToDatetimeCastEvaluator { from: from.clone(), to: to.clone() })
+            box_cast!(Time64ToDatetimeCastEvaluator {
+                from: from.clone(),
+                to: to.clone()
+            })
         }
         (LogicalType::TimeStamp(_, _), LogicalType::Time(precision)) => {
-            box_cast!(Time64ToTimeCastEvaluator { precision: *precision, from: from.clone(), to: to.clone() })
+            box_cast!(Time64ToTimeCastEvaluator {
+                precision: *precision,
+                from: from.clone(),
+                to: to.clone()
+            })
         }
         (LogicalType::TimeStamp(_, _), LogicalType::TimeStamp(precision, zone)) => {
-            box_cast!(Time64ToTimestampCastEvaluator { precision: *precision, zone: *zone })
+            box_cast!(Time64ToTimestampCastEvaluator {
+                precision: *precision,
+                zone: *zone
+            })
         }
         (LogicalType::Decimal(_, _), LogicalType::Float) => box_cast!(DecimalToFloatCastEvaluator),
-        (LogicalType::Decimal(_, _), LogicalType::Double) => box_cast!(DecimalToDoubleCastEvaluator),
-        (LogicalType::Decimal(_, _), LogicalType::Decimal(_, _)) => box_cast!(DecimalToDecimalCastEvaluator),
+        (LogicalType::Decimal(_, _), LogicalType::Double) => {
+            box_cast!(DecimalToDoubleCastEvaluator)
+        }
+        (LogicalType::Decimal(_, _), LogicalType::Decimal(_, _)) => {
+            box_cast!(DecimalToDecimalCastEvaluator)
+        }
         (LogicalType::Decimal(_, _), LogicalType::Char(len, unit)) => {
-            box_cast!(DecimalToCharCastEvaluator { len: *len, unit: *unit })
+            box_cast!(DecimalToCharCastEvaluator {
+                len: *len,
+                unit: *unit
+            })
         }
         (LogicalType::Decimal(_, _), LogicalType::Varchar(len, unit)) => {
-            box_cast!(DecimalToVarcharCastEvaluator { len: *len, unit: *unit })
+            box_cast!(DecimalToVarcharCastEvaluator {
+                len: *len,
+                unit: *unit
+            })
         }
-        (LogicalType::Decimal(_, _), LogicalType::Tinyint) => box_cast!(DecimalToTinyintCastEvaluator),
-        (LogicalType::Decimal(_, _), LogicalType::Smallint) => box_cast!(DecimalToSmallintCastEvaluator),
-        (LogicalType::Decimal(_, _), LogicalType::Integer) => box_cast!(DecimalToIntegerCastEvaluator),
-        (LogicalType::Decimal(_, _), LogicalType::Bigint) => box_cast!(DecimalToBigintCastEvaluator),
-        (LogicalType::Decimal(_, _), LogicalType::UTinyint) => box_cast!(DecimalToUTinyintCastEvaluator),
-        (LogicalType::Decimal(_, _), LogicalType::USmallint) => box_cast!(DecimalToUSmallintCastEvaluator),
-        (LogicalType::Decimal(_, _), LogicalType::UInteger) => box_cast!(DecimalToUIntegerCastEvaluator),
-        (LogicalType::Decimal(_, _), LogicalType::UBigint) => box_cast!(DecimalToUBigintCastEvaluator),
+        (LogicalType::Decimal(_, _), LogicalType::Tinyint) => {
+            box_cast!(DecimalToTinyintCastEvaluator)
+        }
+        (LogicalType::Decimal(_, _), LogicalType::Smallint) => {
+            box_cast!(DecimalToSmallintCastEvaluator)
+        }
+        (LogicalType::Decimal(_, _), LogicalType::Integer) => {
+            box_cast!(DecimalToIntegerCastEvaluator)
+        }
+        (LogicalType::Decimal(_, _), LogicalType::Bigint) => {
+            box_cast!(DecimalToBigintCastEvaluator)
+        }
+        (LogicalType::Decimal(_, _), LogicalType::UTinyint) => {
+            box_cast!(DecimalToUTinyintCastEvaluator)
+        }
+        (LogicalType::Decimal(_, _), LogicalType::USmallint) => {
+            box_cast!(DecimalToUSmallintCastEvaluator)
+        }
+        (LogicalType::Decimal(_, _), LogicalType::UInteger) => {
+            box_cast!(DecimalToUIntegerCastEvaluator)
+        }
+        (LogicalType::Decimal(_, _), LogicalType::UBigint) => {
+            box_cast!(DecimalToUBigintCastEvaluator)
+        }
         (LogicalType::Tuple(from_types), LogicalType::Tuple(to_types)) => {
             let evaluators = from_types
                 .iter()
                 .zip(to_types.iter())
                 .map(|(from, to)| create_cast_evaluator(Cow::Borrowed(from), Cow::Borrowed(to)))
                 .collect::<Result<Vec<_>, _>>()?;
-            box_cast!(TupleCastEvaluator { element_evaluators: evaluators })
+            box_cast!(TupleCastEvaluator {
+                element_evaluators: evaluators
+            })
         }
         _ => Err(cast_fail(from.clone(), to.clone())),
     }

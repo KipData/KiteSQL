@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::types::evaluator::{BinaryEvaluator, CastEvaluator};
 use crate::types::evaluator::DataValue;
+use crate::types::evaluator::{BinaryEvaluator, CastEvaluator};
 use serde::{Deserialize, Serialize};
 
 /// Tips:
@@ -55,7 +55,15 @@ mod test {
 
     #[test]
     fn test_null_cast_evaluators() {
-        assert_eq!(ToSqlNullCastEvaluator.eval_cast(&DataValue::Int32(1)).unwrap(), DataValue::Null);
-        assert_eq!(NullCastEvaluator.eval_cast(&DataValue::Null).unwrap(), DataValue::Null);
+        assert_eq!(
+            ToSqlNullCastEvaluator
+                .eval_cast(&DataValue::Int32(1))
+                .unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            NullCastEvaluator.eval_cast(&DataValue::Null).unwrap(),
+            DataValue::Null
+        );
     }
 }

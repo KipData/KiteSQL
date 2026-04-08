@@ -107,7 +107,10 @@ pub(crate) fn create_binary_evaluator(
             BinaryOperator::Or => Ok(BinaryEvaluatorBox(Arc::new(BooleanOrBinaryEvaluator))),
             BinaryOperator::Eq => Ok(BinaryEvaluatorBox(Arc::new(BooleanEqBinaryEvaluator))),
             BinaryOperator::NotEq => Ok(BinaryEvaluatorBox(Arc::new(BooleanNotEqBinaryEvaluator))),
-            _ => Err(DatabaseError::UnsupportedBinaryOperator(LogicalType::Boolean, op)),
+            _ => Err(DatabaseError::UnsupportedBinaryOperator(
+                LogicalType::Boolean,
+                op,
+            )),
         },
         LogicalType::Varchar(_, _) | LogicalType::Char(_, _) => match op {
             BinaryOperator::Gt => Ok(BinaryEvaluatorBox(Arc::new(Utf8GtBinaryEvaluator))),
@@ -377,7 +380,11 @@ mod test {
         cursor.seek(SeekFrom::Start(0))?;
 
         assert_eq!(
-            BinaryEvaluatorBox::decode::<RocksTransaction, _>(&mut cursor, None, &reference_tables)?,
+            BinaryEvaluatorBox::decode::<RocksTransaction, _>(
+                &mut cursor,
+                None,
+                &reference_tables
+            )?,
             evaluator
         );
 

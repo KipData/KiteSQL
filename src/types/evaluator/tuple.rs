@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::types::evaluator::{BinaryEvaluator, CastEvaluator, CastEvaluatorBox};
 use crate::types::evaluator::DataValue;
+use crate::types::evaluator::{BinaryEvaluator, CastEvaluator, CastEvaluatorBox};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::hint;

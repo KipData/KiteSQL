@@ -32,15 +32,42 @@ mod test {
     fn test_uint64_cast_evaluators() {
         let value = DataValue::UInt64(1);
 
-        assert_eq!(UInt64ToBooleanCastEvaluator.eval_cast(&value).unwrap(), DataValue::Boolean(true));
-        assert_eq!(UInt64ToTinyintCastEvaluator.eval_cast(&value).unwrap(), DataValue::Int8(1));
-        assert_eq!(UInt64ToUTinyintCastEvaluator.eval_cast(&value).unwrap(), DataValue::UInt8(1));
-        assert_eq!(UInt64ToSmallintCastEvaluator.eval_cast(&value).unwrap(), DataValue::Int16(1));
-        assert_eq!(UInt64ToUSmallintCastEvaluator.eval_cast(&value).unwrap(), DataValue::UInt16(1));
-        assert_eq!(UInt64ToIntegerCastEvaluator.eval_cast(&value).unwrap(), DataValue::Int32(1));
-        assert_eq!(UInt64ToUIntegerCastEvaluator.eval_cast(&value).unwrap(), DataValue::UInt32(1));
-        assert_eq!(UInt64ToBigintCastEvaluator.eval_cast(&value).unwrap(), DataValue::Int64(1));
-        assert_eq!(UInt64ToUBigintCastEvaluator.eval_cast(&value).unwrap(), DataValue::UInt64(1));
+        assert_eq!(
+            UInt64ToBooleanCastEvaluator.eval_cast(&value).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            UInt64ToTinyintCastEvaluator.eval_cast(&value).unwrap(),
+            DataValue::Int8(1)
+        );
+        assert_eq!(
+            UInt64ToUTinyintCastEvaluator.eval_cast(&value).unwrap(),
+            DataValue::UInt8(1)
+        );
+        assert_eq!(
+            UInt64ToSmallintCastEvaluator.eval_cast(&value).unwrap(),
+            DataValue::Int16(1)
+        );
+        assert_eq!(
+            UInt64ToUSmallintCastEvaluator.eval_cast(&value).unwrap(),
+            DataValue::UInt16(1)
+        );
+        assert_eq!(
+            UInt64ToIntegerCastEvaluator.eval_cast(&value).unwrap(),
+            DataValue::Int32(1)
+        );
+        assert_eq!(
+            UInt64ToUIntegerCastEvaluator.eval_cast(&value).unwrap(),
+            DataValue::UInt32(1)
+        );
+        assert_eq!(
+            UInt64ToBigintCastEvaluator.eval_cast(&value).unwrap(),
+            DataValue::Int64(1)
+        );
+        assert_eq!(
+            UInt64ToUBigintCastEvaluator.eval_cast(&value).unwrap(),
+            DataValue::UInt64(1)
+        );
         assert_eq!(
             UInt64ToFloatCastEvaluator.eval_cast(&value).unwrap(),
             DataValue::Float32(OrderedFloat(1.0))

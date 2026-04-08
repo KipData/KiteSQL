@@ -74,7 +74,6 @@ impl VisitorMut<'_> for ConstantCalculator {
                 right_expr,
                 ..
             } => {
-                
                 let left_ty = left_expr.return_type();
                 let right_ty = right_expr.return_type();
                 let ty = LogicalType::max_logical_type(&left_ty, &right_ty)?.into_owned();

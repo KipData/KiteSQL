@@ -31,7 +31,6 @@ pub type Schema = Vec<ColumnRef>;
 pub type SchemaRef = Arc<Schema>;
 
 pub trait TupleLike {
-    fn len(&self) -> usize;
     fn value_at(&self, index: usize) -> &DataValue;
 
     #[inline]
@@ -69,11 +68,6 @@ pub struct Tuple {
 
 impl TupleLike for Tuple {
     #[inline]
-    fn len(&self) -> usize {
-        self.values.len()
-    }
-
-    #[inline]
     fn value_at(&self, index: usize) -> &DataValue {
         &self.values[index]
     }
@@ -85,11 +79,6 @@ impl TupleLike for Tuple {
 }
 
 impl TupleLike for [DataValue] {
-    #[inline]
-    fn len(&self) -> usize {
-        <[DataValue]>::len(self)
-    }
-
     #[inline]
     fn value_at(&self, index: usize) -> &DataValue {
         &self[index]
@@ -103,11 +92,6 @@ impl TupleLike for [DataValue] {
 
 impl TupleLike for &Tuple {
     #[inline]
-    fn len(&self) -> usize {
-        self.values.len()
-    }
-
-    #[inline]
     fn value_at(&self, index: usize) -> &DataValue {
         &self.values[index]
     }
@@ -119,11 +103,6 @@ impl TupleLike for &Tuple {
 }
 
 impl TupleLike for &[DataValue] {
-    #[inline]
-    fn len(&self) -> usize {
-        <[DataValue]>::len(self)
-    }
-
     #[inline]
     fn value_at(&self, index: usize) -> &DataValue {
         &self[index]
@@ -137,11 +116,6 @@ impl TupleLike for &[DataValue] {
 
 impl TupleLike for &dyn TupleLike {
     #[inline]
-    fn len(&self) -> usize {
-        (*self).len()
-    }
-
-    #[inline]
     fn value_at(&self, index: usize) -> &DataValue {
         (*self).value_at(index)
     }
@@ -153,11 +127,6 @@ impl TupleLike for &dyn TupleLike {
 }
 
 impl TupleLike for SplitTupleRef<'_> {
-    #[inline]
-    fn len(&self) -> usize {
-        self.left_len + self.right.len()
-    }
-
     #[inline]
     fn value_at(&self, index: usize) -> &DataValue {
         if index < self.left_len {

@@ -16,12 +16,12 @@ use crate::errors::DatabaseError;
 use crate::types::evaluator::cast::{cast_fail, to_char, to_varchar};
 use crate::types::evaluator::BinaryEvaluator;
 use crate::types::evaluator::DataValue;
+use crate::types::value::Utf8Type;
 use crate::types::LogicalType;
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use ordered_float::OrderedFloat;
-use crate::types::value::Utf8Type;
-use rust_decimal::Decimal;
 use regex::Regex;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlparser::ast::CharLengthUnits;
 use std::hint;
@@ -395,17 +395,38 @@ mod test {
             .unwrap(),
             DataValue::Boolean(true)
         );
-        assert_eq!(Utf8ToTinyintCastEvaluator.eval_cast(&utf8("1")).unwrap(), DataValue::Int8(1));
-        assert_eq!(Utf8ToUTinyintCastEvaluator.eval_cast(&utf8("1")).unwrap(), DataValue::UInt8(1));
-        assert_eq!(Utf8ToSmallintCastEvaluator.eval_cast(&utf8("1")).unwrap(), DataValue::Int16(1));
-        assert_eq!(Utf8ToUSmallintCastEvaluator.eval_cast(&utf8("1")).unwrap(), DataValue::UInt16(1));
+        assert_eq!(
+            Utf8ToTinyintCastEvaluator.eval_cast(&utf8("1")).unwrap(),
+            DataValue::Int8(1)
+        );
+        assert_eq!(
+            Utf8ToUTinyintCastEvaluator.eval_cast(&utf8("1")).unwrap(),
+            DataValue::UInt8(1)
+        );
+        assert_eq!(
+            Utf8ToSmallintCastEvaluator.eval_cast(&utf8("1")).unwrap(),
+            DataValue::Int16(1)
+        );
+        assert_eq!(
+            Utf8ToUSmallintCastEvaluator.eval_cast(&utf8("1")).unwrap(),
+            DataValue::UInt16(1)
+        );
         assert_eq!(
             Utf8ToIntegerCastEvaluator.eval_cast(&utf8("1")).unwrap(),
             DataValue::Int32(1)
         );
-        assert_eq!(Utf8ToUIntegerCastEvaluator.eval_cast(&utf8("1")).unwrap(), DataValue::UInt32(1));
-        assert_eq!(Utf8ToBigintCastEvaluator.eval_cast(&utf8("1")).unwrap(), DataValue::Int64(1));
-        assert_eq!(Utf8ToUBigintCastEvaluator.eval_cast(&utf8("1")).unwrap(), DataValue::UInt64(1));
+        assert_eq!(
+            Utf8ToUIntegerCastEvaluator.eval_cast(&utf8("1")).unwrap(),
+            DataValue::UInt32(1)
+        );
+        assert_eq!(
+            Utf8ToBigintCastEvaluator.eval_cast(&utf8("1")).unwrap(),
+            DataValue::Int64(1)
+        );
+        assert_eq!(
+            Utf8ToUBigintCastEvaluator.eval_cast(&utf8("1")).unwrap(),
+            DataValue::UInt64(1)
+        );
         assert_eq!(
             Utf8ToFloatCastEvaluator.eval_cast(&utf8("1.5")).unwrap(),
             DataValue::Float32(OrderedFloat(1.5))
@@ -444,7 +465,11 @@ mod test {
             Utf8ToDateCastEvaluator
                 .eval_cast(&utf8("2024-01-02"))
                 .unwrap(),
-            DataValue::Date32(chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap().num_days_from_ce())
+            DataValue::Date32(
+                chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
+                    .unwrap()
+                    .num_days_from_ce()
+            )
         );
         assert_eq!(
             Utf8ToDatetimeCastEvaluator
@@ -520,7 +545,9 @@ mod test {
             )
         );
         assert_eq!(
-            Utf8ToDecimalCastEvaluator.eval_cast(&utf8("12.34")).unwrap(),
+            Utf8ToDecimalCastEvaluator
+                .eval_cast(&utf8("12.34"))
+                .unwrap(),
             DataValue::Decimal(Decimal::from_str("12.34").unwrap())
         );
     }

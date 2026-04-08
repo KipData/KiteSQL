@@ -274,9 +274,11 @@ pub fn walk_expr<'a, V: Visitor<'a>>(
         ScalarExpression::Constant(value) => visitor.visit_constant(value),
         ScalarExpression::ColumnRef { column, .. } => visitor.visit_column_ref(column),
         ScalarExpression::Alias { expr, alias } => visitor.visit_alias(expr, alias),
-        ScalarExpression::TypeCast { expr, ty, evaluator } => {
-            visitor.visit_type_cast(expr, ty, evaluator.as_ref())
-        }
+        ScalarExpression::TypeCast {
+            expr,
+            ty,
+            evaluator,
+        } => visitor.visit_type_cast(expr, ty, evaluator.as_ref()),
         ScalarExpression::IsNull { negated, expr } => visitor.visit_is_null(*negated, expr),
         ScalarExpression::Unary {
             op,

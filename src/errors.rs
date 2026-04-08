@@ -17,8 +17,8 @@ use crate::types::tuple::TupleId;
 use crate::types::LogicalType;
 use chrono::ParseError;
 use sqlparser::parser::ParserError;
-use std::num::{ParseFloatError, ParseIntError, TryFromIntError};
 use std::convert::Infallible;
+use std::num::{ParseFloatError, ParseIntError, TryFromIntError};
 use std::str::{ParseBoolError, Utf8Error};
 use std::string::FromUtf8Error;
 

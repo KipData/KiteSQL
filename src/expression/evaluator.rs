@@ -58,7 +58,9 @@ impl ScalarExpression {
                     expr.eval(Some(tuple))
                 }
             }
-            ScalarExpression::TypeCast { expr, evaluator, .. } => {
+            ScalarExpression::TypeCast {
+                expr, evaluator, ..
+            } => {
                 let value = expr.eval(tuple)?;
                 if let Some(evaluator) = evaluator {
                     evaluator.eval_cast(&value)

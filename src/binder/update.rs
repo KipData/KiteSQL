@@ -92,8 +92,10 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                             } else {
                                 expression.clone()
                             };
-                            expr =
-                                ScalarExpression::type_cast(expr, Cow::Borrowed(column.datatype()))?;
+                            expr = ScalarExpression::type_cast(
+                                expr,
+                                Cow::Borrowed(column.datatype()),
+                            )?;
                             value_exprs.push((column, expr));
                         }
                         _ => {

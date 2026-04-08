@@ -192,9 +192,7 @@ mod test {
             DataValue::UInt16(1)
         );
         assert_eq!(
-            BooleanToIntegerCastEvaluator
-                .eval_cast(&value)
-                .unwrap(),
+            BooleanToIntegerCastEvaluator.eval_cast(&value).unwrap(),
             DataValue::Int32(1)
         );
         assert_eq!(

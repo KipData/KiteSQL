@@ -304,7 +304,10 @@ mod test {
             Float64ToIntegerCastEvaluator.eval_cast(&value).unwrap(),
             DataValue::Int32(1)
         );
-        assert_eq!(Float64ToBigintCastEvaluator.eval_cast(&value).unwrap(), DataValue::Int64(1));
+        assert_eq!(
+            Float64ToBigintCastEvaluator.eval_cast(&value).unwrap(),
+            DataValue::Int64(1)
+        );
         assert_eq!(
             Float64ToUTinyintCastEvaluator.eval_cast(&value).unwrap(),
             DataValue::UInt8(1)
@@ -317,7 +320,10 @@ mod test {
             Float64ToUIntegerCastEvaluator.eval_cast(&value).unwrap(),
             DataValue::UInt32(1)
         );
-        assert_eq!(Float64ToUBigintCastEvaluator.eval_cast(&value).unwrap(), DataValue::UInt64(1));
+        assert_eq!(
+            Float64ToUBigintCastEvaluator.eval_cast(&value).unwrap(),
+            DataValue::UInt64(1)
+        );
         assert_eq!(
             Float64ToCharCastEvaluator {
                 len: 3,

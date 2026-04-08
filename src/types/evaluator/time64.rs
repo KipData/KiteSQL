@@ -344,7 +344,11 @@ mod test {
             }
             .eval_cast(&value)
             .unwrap(),
-            DataValue::Date32(chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap().num_days_from_ce())
+            DataValue::Date32(
+                chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
+                    .unwrap()
+                    .num_days_from_ce()
+            )
         );
         assert_eq!(
             Time64ToDatetimeCastEvaluator {

@@ -73,7 +73,11 @@ mod test {
 
     #[test]
     fn test_date_cast_evaluators() {
-        let value = DataValue::Date32(NaiveDate::from_ymd_opt(2024, 1, 2).unwrap().num_days_from_ce());
+        let value = DataValue::Date32(
+            NaiveDate::from_ymd_opt(2024, 1, 2)
+                .unwrap()
+                .num_days_from_ce(),
+        );
         assert_eq!(
             Date32ToCharCastEvaluator {
                 len: 10,

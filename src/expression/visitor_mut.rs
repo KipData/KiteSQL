@@ -299,9 +299,11 @@ pub fn walk_mut_expr<'a, V: VisitorMut<'a>>(
             visitor.visit_column_ref(column, position)
         }
         ScalarExpression::Alias { expr, alias } => visitor.visit_alias(expr, alias),
-        ScalarExpression::TypeCast { expr, ty, evaluator } => {
-            visitor.visit_type_cast(expr, ty, evaluator)
-        }
+        ScalarExpression::TypeCast {
+            expr,
+            ty,
+            evaluator,
+        } => visitor.visit_type_cast(expr, ty, evaluator),
         ScalarExpression::IsNull { negated, expr } => visitor.visit_is_null(*negated, expr),
         ScalarExpression::Unary {
             op,

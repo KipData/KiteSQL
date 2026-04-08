@@ -413,9 +413,9 @@ pub trait Transaction: Sized {
                     DefaultChange::NoChange => {
                         if let Some(default_expr) = new_column.desc().default.clone() {
                             new_column.desc_mut().default = Some(ScalarExpression::type_cast(
-                                    default_expr,
-                                    Cow::Borrowed(new_data_type),
-                                )?);
+                                default_expr,
+                                Cow::Borrowed(new_data_type),
+                            )?);
                         }
                     }
                     DefaultChange::Set(default_expr) => {
@@ -1124,11 +1124,11 @@ fn encode_bound<'a>(
 ) -> Result<Bound<&'a [u8]>, DatabaseError> {
     match bound {
         Bound::Included(val) => {
-            inner.bound_key(params, &val, is_upper, buffer)?;
+            inner.bound_key(params, val, is_upper, buffer)?;
             Ok(Bound::Included(buffer.as_slice()))
         }
         Bound::Excluded(val) => {
-            inner.bound_key(params, &val, is_upper, buffer)?;
+            inner.bound_key(params, val, is_upper, buffer)?;
             Ok(Bound::Excluded(buffer.as_slice()))
         }
         Bound::Unbounded => Ok(Bound::Unbounded),

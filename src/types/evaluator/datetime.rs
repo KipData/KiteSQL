@@ -132,10 +132,16 @@ mod test {
             }
         );
         assert_eq!(
-            Date64ToDateCastEvaluator { to: LogicalType::Date }
-                .eval_cast(&value)
-                .unwrap(),
-            DataValue::Date32(chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap().num_days_from_ce())
+            Date64ToDateCastEvaluator {
+                to: LogicalType::Date
+            }
+            .eval_cast(&value)
+            .unwrap(),
+            DataValue::Date32(
+                chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
+                    .unwrap()
+                    .num_days_from_ce()
+            )
         );
         assert_eq!(
             Date64ToTimeCastEvaluator {
