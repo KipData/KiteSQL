@@ -339,8 +339,7 @@ impl ScalarExpression {
                     let is_true = if let Some(operand_value) = &operand_value {
                         let ty = operand_value.logical_type();
                         when_value = when_value.cast(&ty)?;
-                        let evaluator =
-                            binary_create(Cow::Owned(ty), BinaryOperator::Eq)?;
+                        let evaluator = binary_create(Cow::Owned(ty), BinaryOperator::Eq)?;
                         evaluator
                             .0
                             .binary_eval(operand_value, &when_value)?

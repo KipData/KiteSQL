@@ -70,8 +70,7 @@ impl Accumulator for AvgAccumulator {
         if value_ty != quantity_ty {
             value = value.cast(&quantity_ty)?
         }
-        let evaluator =
-            binary_create(Cow::Owned(quantity_ty), BinaryOperator::Divide)?;
+        let evaluator = binary_create(Cow::Owned(quantity_ty), BinaryOperator::Divide)?;
         evaluator.0.binary_eval(&value, &quantity)
     }
 }
