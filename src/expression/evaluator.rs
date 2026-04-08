@@ -15,12 +15,13 @@
 use crate::errors::DatabaseError;
 use crate::expression::function::scala::ScalarFunction;
 use crate::expression::{AliasType, BinaryOperator, ScalarExpression};
-use crate::types::evaluator::EvaluatorFactory;
+use crate::types::evaluator::binary_create;
 use crate::types::tuple::TupleLike;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::LogicalType;
 use regex::Regex;
 use sqlparser::ast::{CharLengthUnits, TrimWhereField};
+use std::borrow::Cow;
 use std::cmp;
 use std::cmp::Ordering;
 
@@ -36,13 +37,6 @@ macro_rules! eval_to_num {
 
 impl ScalarExpression {
     pub fn eval<T: TupleLike + Copy>(&self, tuple: Option<T>) -> Result<DataValue, DatabaseError> {
-        let check_cast = |value: DataValue, return_type: &LogicalType| {
-            if value.logical_type() != *return_type {
-                return value.cast(return_type);
-            }
-            Ok(value)
-        };
-
         match self {
             ScalarExpression::Constant(val) => Ok(val.clone()),
             ScalarExpression::ColumnRef { position, .. } => {
@@ -64,7 +58,16 @@ impl ScalarExpression {
                     expr.eval(Some(tuple))
                 }
             }
-            ScalarExpression::TypeCast { expr, ty, .. } => Ok(expr.eval(tuple)?.cast(ty)?),
+            ScalarExpression::TypeCast {
+                expr, evaluator, ..
+            } => {
+                let value = expr.eval(tuple)?;
+                if let Some(evaluator) = evaluator {
+                    evaluator.eval_cast(&value)
+                } else {
+                    Ok(value)
+                }
+            }
             ScalarExpression::Binary {
                 left_expr,
                 right_expr,
@@ -277,9 +280,9 @@ impl ScalarExpression {
                 ty,
             } => {
                 if condition.eval(tuple)?.is_true()? {
-                    check_cast(left_expr.eval(tuple)?, ty)
+                    left_expr.eval(tuple)?.cast(ty)
                 } else {
-                    check_cast(right_expr.eval(tuple)?, ty)
+                    right_expr.eval(tuple)?.cast(ty)
                 }
             }
             ScalarExpression::IfNull {
@@ -292,7 +295,7 @@ impl ScalarExpression {
                 if value.is_null() {
                     value = right_expr.eval(tuple)?;
                 }
-                check_cast(value, ty)
+                value.cast(ty)
             }
             ScalarExpression::NullIf {
                 left_expr,
@@ -304,7 +307,7 @@ impl ScalarExpression {
                 if right_expr.eval(tuple)? == value {
                     value = DataValue::Null;
                 }
-                check_cast(value, ty)
+                value.cast(ty)
             }
             ScalarExpression::Coalesce { exprs, ty } => {
                 let mut value = None;
@@ -317,7 +320,7 @@ impl ScalarExpression {
                         break;
                     }
                 }
-                check_cast(value.unwrap_or(DataValue::Null), ty)
+                value.unwrap_or(DataValue::Null).cast(ty)
             }
             ScalarExpression::CaseWhen {
                 operand_expr,
@@ -335,12 +338,8 @@ impl ScalarExpression {
                     let mut when_value = when_expr.eval(tuple)?;
                     let is_true = if let Some(operand_value) = &operand_value {
                         let ty = operand_value.logical_type();
-                        let evaluator =
-                            EvaluatorFactory::binary_create(ty.clone(), BinaryOperator::Eq)?;
-
-                        if when_value.logical_type() != ty {
-                            when_value = when_value.cast(&ty)?;
-                        }
+                        when_value = when_value.cast(&ty)?;
+                        let evaluator = binary_create(Cow::Owned(ty), BinaryOperator::Eq)?;
                         evaluator
                             .0
                             .binary_eval(operand_value, &when_value)?
@@ -358,7 +357,7 @@ impl ScalarExpression {
                         result = Some(expr.eval(tuple)?);
                     }
                 }
-                check_cast(result.unwrap_or(DataValue::Null), ty)
+                result.unwrap_or(DataValue::Null).cast(ty)
             }
             ScalarExpression::TableFunction(_) => unreachable!(),
         }

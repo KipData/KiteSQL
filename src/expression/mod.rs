@@ -19,7 +19,10 @@ use crate::expression::function::scala::ScalarFunction;
 use crate::expression::function::table::TableFunction;
 use crate::expression::visitor::{walk_expr, Visitor};
 use crate::expression::visitor_mut::VisitorMut;
-use crate::types::evaluator::{BinaryEvaluatorBox, EvaluatorFactory, UnaryEvaluatorBox};
+use crate::types::evaluator::{
+    binary_create, cast_create, unary_create, BinaryEvaluatorBox, CastEvaluatorBox,
+    UnaryEvaluatorBox,
+};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use itertools::Itertools;
@@ -28,6 +31,7 @@ use sqlparser::ast::TrimWhereField;
 use sqlparser::ast::{
     BinaryOperator as SqlBinaryOperator, CharLengthUnits, UnaryOperator as SqlUnaryOperator,
 };
+use std::borrow::Cow;
 use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
 use std::{fmt, mem};
@@ -64,6 +68,7 @@ pub enum ScalarExpression {
     TypeCast {
         expr: Box<ScalarExpression>,
         ty: LogicalType,
+        evaluator: Option<CastEvaluatorBox>,
     },
     IsNull {
         negated: bool,
@@ -149,6 +154,23 @@ pub enum ScalarExpression {
 pub struct BindEvaluator;
 
 impl VisitorMut<'_> for BindEvaluator {
+    fn visit_type_cast(
+        &mut self,
+        expr: &'_ mut ScalarExpression,
+        ty: &'_ mut LogicalType,
+        evaluator: &'_ mut Option<CastEvaluatorBox>,
+    ) -> Result<(), DatabaseError> {
+        self.visit(expr)?;
+        let from = expr.return_type();
+        *evaluator = if from.as_ref() == ty {
+            None
+        } else {
+            Some(cast_create(from, Cow::Borrowed(ty))?)
+        };
+
+        Ok(())
+    }
+
     fn visit_unary(
         &mut self,
         op: &'_ mut UnaryOperator,
@@ -160,18 +182,19 @@ impl VisitorMut<'_> for BindEvaluator {
 
         let ty = expr.return_type();
         if ty.is_unsigned_numeric() {
-            *expr = ScalarExpression::TypeCast {
-                expr: Box::new(mem::replace(expr, ScalarExpression::Empty)),
-                ty: match ty {
-                    LogicalType::UTinyint => LogicalType::Tinyint,
-                    LogicalType::USmallint => LogicalType::Smallint,
-                    LogicalType::UInteger => LogicalType::Integer,
-                    LogicalType::UBigint => LogicalType::Bigint,
-                    _ => unreachable!(),
-                },
-            }
+            let target_ty = match ty.as_ref() {
+                LogicalType::UTinyint => LogicalType::Tinyint,
+                LogicalType::USmallint => LogicalType::Smallint,
+                LogicalType::UInteger => LogicalType::Integer,
+                LogicalType::UBigint => LogicalType::Bigint,
+                _ => unreachable!(),
+            };
+            *expr = ScalarExpression::type_cast(
+                mem::replace(expr, ScalarExpression::Empty),
+                Cow::Owned(target_ty),
+            )?;
         }
-        *evaluator = Some(EvaluatorFactory::unary_create(ty, *op)?);
+        *evaluator = Some(unary_create(expr.return_type(), *op)?);
 
         Ok(())
     }
@@ -187,20 +210,21 @@ impl VisitorMut<'_> for BindEvaluator {
         self.visit(left_expr)?;
         self.visit(right_expr)?;
 
-        let ty =
-            LogicalType::max_logical_type(&left_expr.return_type(), &right_expr.return_type())?;
-        let fn_cast = |expr: &mut ScalarExpression, ty: LogicalType| {
-            if expr.return_type() != ty {
-                *expr = ScalarExpression::TypeCast {
-                    expr: Box::new(mem::replace(expr, ScalarExpression::Empty)),
-                    ty,
-                }
-            }
-        };
-        fn_cast(left_expr, ty.clone());
-        fn_cast(right_expr, ty.clone());
+        let left_ty = left_expr.return_type().into_owned();
+        let right_ty = right_expr.return_type().into_owned();
+        let ty = LogicalType::max_logical_type(&left_ty, &right_ty)?;
+        let fn_cast =
+            |expr: &mut ScalarExpression, ty: &LogicalType| -> Result<(), DatabaseError> {
+                *expr = ScalarExpression::type_cast(
+                    mem::replace(expr, ScalarExpression::Empty),
+                    Cow::Borrowed(ty),
+                )?;
+                Ok(())
+            };
+        fn_cast(left_expr, ty.as_ref())?;
+        fn_cast(right_expr, ty.as_ref())?;
 
-        *evaluator = Some(EvaluatorFactory::binary_create(ty, *op)?);
+        *evaluator = Some(binary_create(ty, *op)?);
 
         Ok(())
     }
@@ -238,6 +262,23 @@ impl Visitor<'_> for HasCountStar {
 impl ScalarExpression {
     pub fn column_expr(column: ColumnRef, position: usize) -> ScalarExpression {
         ScalarExpression::ColumnRef { column, position }
+    }
+
+    pub fn type_cast(
+        expr: ScalarExpression,
+        ty: Cow<'_, LogicalType>,
+    ) -> Result<ScalarExpression, DatabaseError> {
+        let from = expr.return_type();
+        if from.as_ref() == ty.as_ref() {
+            return Ok(expr);
+        }
+        let evaluator = Some(cast_create(from, ty.clone())?);
+
+        Ok(ScalarExpression::TypeCast {
+            expr: Box::new(expr),
+            ty: ty.into_owned(),
+            evaluator,
+        })
     }
 
     pub(crate) fn eq_ignore_colref_pos(&self, other: &ScalarExpression) -> bool {
@@ -282,10 +323,10 @@ impl ScalarExpression {
         }
     }
 
-    pub fn return_type(&self) -> LogicalType {
+    pub fn return_type(&self) -> Cow<'_, LogicalType> {
         match self {
-            ScalarExpression::Constant(v) => v.logical_type(),
-            ScalarExpression::ColumnRef { column, .. } => column.datatype().clone(),
+            ScalarExpression::Constant(v) => Cow::Owned(v.logical_type()),
+            ScalarExpression::ColumnRef { column, .. } => Cow::Borrowed(column.datatype()),
             ScalarExpression::Binary {
                 ty: return_type, ..
             }
@@ -312,26 +353,29 @@ impl ScalarExpression {
             }
             | ScalarExpression::CaseWhen {
                 ty: return_type, ..
-            } => return_type.clone(),
+            } => Cow::Borrowed(return_type),
             ScalarExpression::IsNull { .. }
             | ScalarExpression::In { .. }
-            | ScalarExpression::Between { .. } => LogicalType::Boolean,
+            | ScalarExpression::Between { .. } => Cow::Owned(LogicalType::Boolean),
             ScalarExpression::SubString { .. } => {
-                LogicalType::Varchar(None, CharLengthUnits::Characters)
+                Cow::Owned(LogicalType::Varchar(None, CharLengthUnits::Characters))
             }
-            ScalarExpression::Position { .. } => LogicalType::Integer,
+            ScalarExpression::Position { .. } => Cow::Owned(LogicalType::Integer),
             ScalarExpression::Trim { .. } => {
-                LogicalType::Varchar(None, CharLengthUnits::Characters)
+                Cow::Owned(LogicalType::Varchar(None, CharLengthUnits::Characters))
             }
             ScalarExpression::Alias { expr, .. } => expr.return_type(),
             ScalarExpression::Empty | ScalarExpression::TableFunction(_) => unreachable!(),
             ScalarExpression::Tuple(exprs) => {
-                let types = exprs.iter().map(|expr| expr.return_type()).collect_vec();
+                let types = exprs
+                    .iter()
+                    .map(|expr| expr.return_type().into_owned())
+                    .collect_vec();
 
-                LogicalType::Tuple(types)
+                Cow::Owned(LogicalType::Tuple(types))
             }
             ScalarExpression::ScalaFunction(ScalarFunction { inner, .. }) => {
-                inner.return_type().clone()
+                Cow::Borrowed(inner.return_type())
             }
         }
     }
@@ -477,7 +521,7 @@ impl ScalarExpression {
                     format!("({}) as ({})", expr, alias_expr.output_name())
                 }
             },
-            ScalarExpression::TypeCast { expr, ty } => {
+            ScalarExpression::TypeCast { expr, ty, .. } => {
                 format!("cast ({} as {})", expr.output_name(), ty)
             }
             ScalarExpression::IsNull { expr, negated } => {
@@ -669,7 +713,7 @@ impl ScalarExpression {
                 self.output_name(),
                 true,
                 // SAFETY: default expr must not be [`ScalarExpression::ColumnRef`]
-                ColumnDesc::new(self.return_type(), None, false, None).unwrap(),
+                ColumnDesc::new(self.return_type().into_owned(), None, false, None).unwrap(),
             )),
         }
     }
@@ -813,11 +857,12 @@ mod test {
     use crate::storage::{Storage, TableCache, Transaction};
     use crate::types::evaluator::boolean::BooleanNotUnaryEvaluator;
     use crate::types::evaluator::int32::Int32PlusBinaryEvaluator;
-    use crate::types::evaluator::{BinaryEvaluatorBox, UnaryEvaluatorBox};
+    use crate::types::evaluator::{cast_create, BinaryEvaluatorBox, UnaryEvaluatorBox};
     use crate::types::value::{DataValue, Utf8Type};
     use crate::types::LogicalType;
     use crate::utils::lru::SharedLruCache;
     use sqlparser::ast::{CharLengthUnits, TrimWhereField};
+    use std::borrow::Cow;
     use std::hash::RandomState;
     use std::io::{Cursor, Seek, SeekFrom};
     use std::sync::Arc;
@@ -974,6 +1019,10 @@ mod test {
             ScalarExpression::TypeCast {
                 expr: Box::new(ScalarExpression::Empty),
                 ty: LogicalType::Integer,
+                evaluator: Some(cast_create(
+                    Cow::Owned(LogicalType::Integer),
+                    Cow::Owned(LogicalType::Integer),
+                )?),
             },
             Some((&transaction, &table_cache)),
             &mut reference_tables,

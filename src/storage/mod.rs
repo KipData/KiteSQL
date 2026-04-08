@@ -40,6 +40,7 @@ use crate::types::value::{DataValue, TupleMappingRef};
 use crate::types::{ColumnId, LogicalType};
 use crate::utils::lru::SharedLruCache;
 use itertools::Itertools;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, Bound};
 use std::fmt::{self, Display, Formatter};
 use std::io::Cursor;
@@ -411,12 +412,10 @@ pub trait Transaction: Sized {
                 match default_change {
                     DefaultChange::NoChange => {
                         if let Some(default_expr) = new_column.desc().default.clone() {
-                            if default_expr.return_type() != *new_data_type {
-                                new_column.desc_mut().default = Some(ScalarExpression::TypeCast {
-                                    expr: Box::new(default_expr),
-                                    ty: new_data_type.clone(),
-                                });
-                            }
+                            new_column.desc_mut().default = Some(ScalarExpression::type_cast(
+                                default_expr,
+                                Cow::Borrowed(new_data_type),
+                            )?);
                         }
                     }
                     DefaultChange::Set(default_expr) => {
@@ -1125,11 +1124,11 @@ fn encode_bound<'a>(
 ) -> Result<Bound<&'a [u8]>, DatabaseError> {
     match bound {
         Bound::Included(val) => {
-            inner.bound_key(params, &val, is_upper, buffer)?;
+            inner.bound_key(params, val, is_upper, buffer)?;
             Ok(Bound::Included(buffer.as_slice()))
         }
         Bound::Excluded(val) => {
-            inner.bound_key(params, &val, is_upper, buffer)?;
+            inner.bound_key(params, val, is_upper, buffer)?;
             Ok(Bound::Excluded(buffer.as_slice()))
         }
         Bound::Unbounded => Ok(Bound::Unbounded),

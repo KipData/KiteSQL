@@ -23,6 +23,7 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::any::TypeId;
+use std::borrow::Cow;
 use std::cmp;
 
 use crate::errors::DatabaseError;
@@ -196,22 +197,22 @@ impl LogicalType {
         matches!(self, LogicalType::Float | LogicalType::Double)
     }
 
-    pub fn max_logical_type(
-        left: &LogicalType,
-        right: &LogicalType,
-    ) -> Result<LogicalType, DatabaseError> {
+    pub fn max_logical_type<'a>(
+        left: &'a LogicalType,
+        right: &'a LogicalType,
+    ) -> Result<Cow<'a, LogicalType>, DatabaseError> {
         if left == right {
-            return Ok(left.clone());
+            return Ok(Cow::Borrowed(left));
         }
         match (left, right) {
             // SqlNull type can be cast to anything
-            (LogicalType::SqlNull, _) => return Ok(right.clone()),
-            (_, LogicalType::SqlNull) => return Ok(left.clone()),
+            (LogicalType::SqlNull, _) => return Ok(Cow::Borrowed(right)),
+            (_, LogicalType::SqlNull) => return Ok(Cow::Borrowed(left)),
             (LogicalType::Tuple(types_0), LogicalType::Tuple(types_1)) => {
                 if types_0.len() > types_1.len() {
-                    return Ok(left.clone());
+                    return Ok(Cow::Borrowed(left));
                 } else {
-                    return Ok(right.clone());
+                    return Ok(Cow::Borrowed(right));
                 }
             }
             _ => {}
@@ -224,37 +225,40 @@ impl LogicalType {
             (LogicalType::Date, LogicalType::Varchar(..))
                 | (LogicalType::Varchar(..), LogicalType::Date)
         ) {
-            return Ok(LogicalType::Date);
+            return Ok(Cow::Owned(LogicalType::Date));
         }
         if matches!(
             (left, right),
             (LogicalType::Date, LogicalType::DateTime) | (LogicalType::DateTime, LogicalType::Date)
         ) {
-            return Ok(LogicalType::DateTime);
+            return Ok(Cow::Owned(LogicalType::DateTime));
         }
         if matches!(
             (left, right),
             (LogicalType::DateTime, LogicalType::Varchar(..))
                 | (LogicalType::Varchar(..), LogicalType::DateTime)
         ) {
-            return Ok(LogicalType::DateTime);
+            return Ok(Cow::Owned(LogicalType::DateTime));
         }
         if let (LogicalType::Char(..), LogicalType::Varchar(..))
         | (LogicalType::Varchar(..), LogicalType::Char(..))
         | (LogicalType::Char(..), LogicalType::Char(..))
         | (LogicalType::Varchar(..), LogicalType::Varchar(..)) = (left, right)
         {
-            return Ok(LogicalType::Varchar(None, CharLengthUnits::Characters));
+            return Ok(Cow::Owned(LogicalType::Varchar(
+                None,
+                CharLengthUnits::Characters,
+            )));
         }
         Err(DatabaseError::Incomparable(left.clone(), right.clone()))
     }
 
-    fn combine_numeric_types(
-        left: &LogicalType,
-        right: &LogicalType,
-    ) -> Result<LogicalType, DatabaseError> {
+    fn combine_numeric_types<'a>(
+        left: &'a LogicalType,
+        right: &'a LogicalType,
+    ) -> Result<Cow<'a, LogicalType>, DatabaseError> {
         if left == right {
-            return Ok(left.clone());
+            return Ok(Cow::Borrowed(left));
         }
         if left.is_signed_numeric() && right.is_unsigned_numeric() {
             // this method is symmetric
@@ -264,20 +268,28 @@ impl LogicalType {
         }
 
         if LogicalType::can_implicit_cast(left, right) {
-            return Ok(right.clone());
+            return Ok(Cow::Borrowed(right));
         }
         if LogicalType::can_implicit_cast(right, left) {
-            return Ok(left.clone());
+            return Ok(Cow::Borrowed(left));
         }
         // we can't cast implicitly either way and types are not equal
         // this happens when left is signed and right is unsigned
         // e.g. INTEGER and UINTEGER
         // in this case we need to upcast to make sure the types fit
         match (left, right) {
-            (LogicalType::Bigint, _) | (_, LogicalType::UBigint) => Ok(LogicalType::Double),
-            (LogicalType::Integer, _) | (_, LogicalType::UInteger) => Ok(LogicalType::Bigint),
-            (LogicalType::Smallint, _) | (_, LogicalType::USmallint) => Ok(LogicalType::Integer),
-            (LogicalType::Tinyint, _) | (_, LogicalType::UTinyint) => Ok(LogicalType::Smallint),
+            (LogicalType::Bigint, _) | (_, LogicalType::UBigint) => {
+                Ok(Cow::Owned(LogicalType::Double))
+            }
+            (LogicalType::Integer, _) | (_, LogicalType::UInteger) => {
+                Ok(Cow::Owned(LogicalType::Bigint))
+            }
+            (LogicalType::Smallint, _) | (_, LogicalType::USmallint) => {
+                Ok(Cow::Owned(LogicalType::Integer))
+            }
+            (LogicalType::Tinyint, _) | (_, LogicalType::UTinyint) => {
+                Ok(Cow::Owned(LogicalType::Smallint))
+            }
             (
                 LogicalType::Decimal(precision_0, scale_0),
                 LogicalType::Decimal(precision_1, scale_1),
@@ -287,10 +299,10 @@ impl LogicalType {
                     (Some(num), None) | (None, Some(num)) => Some(*num),
                     (None, None) => None,
                 };
-                Ok(LogicalType::Decimal(
+                Ok(Cow::Owned(LogicalType::Decimal(
                     fn_option(precision_0, precision_1),
                     fn_option(scale_0, scale_1),
-                ))
+                )))
             }
             _ => Err(DatabaseError::Incomparable(left.clone(), right.clone())),
         }

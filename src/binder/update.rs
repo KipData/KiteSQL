@@ -25,6 +25,7 @@ use crate::types::value::DataValue;
 use sqlparser::ast::{
     Assignment, AssignmentTarget, Expr, Ident, ObjectName, TableFactor, TableWithJoins,
 };
+use std::borrow::Cow;
 use std::slice;
 use std::sync::Arc;
 
@@ -91,12 +92,10 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                             } else {
                                 expression.clone()
                             };
-                            if &expr.return_type() != column.datatype() {
-                                expr = ScalarExpression::TypeCast {
-                                    expr: Box::new(expr),
-                                    ty: column.datatype().clone(),
-                                }
-                            }
+                            expr = ScalarExpression::type_cast(
+                                expr,
+                                Cow::Borrowed(column.datatype()),
+                            )?;
                             value_exprs.push((column, expr));
                         }
                         _ => {

@@ -29,6 +29,7 @@ use crate::expression::agg::AggKind;
 use crate::expression::ScalarExpression;
 use crate::types::value::DataValue;
 use itertools::Itertools;
+use std::borrow::Cow;
 
 /// Tips: Idea for sqlrs
 /// An accumulator represents a stateful object that lives throughout the evaluation of multiple
@@ -49,7 +50,7 @@ fn create_accumulator(expr: &ScalarExpression) -> Result<Box<dyn Accumulator>, D
         Ok(match (kind, distinct) {
             (AggKind::Count, false) => Box::new(CountAccumulator::new()),
             (AggKind::Count, true) => Box::new(DistinctCountAccumulator::new()),
-            (AggKind::Sum, false) => Box::new(SumAccumulator::new(ty)?),
+            (AggKind::Sum, false) => Box::new(SumAccumulator::new(Cow::Borrowed(ty))?),
             (AggKind::Sum, true) => Box::new(DistinctSumAccumulator::new(ty)?),
             (AggKind::Min, _) => Box::new(MinMaxAccumulator::new(false)),
             (AggKind::Max, _) => Box::new(MinMaxAccumulator::new(true)),

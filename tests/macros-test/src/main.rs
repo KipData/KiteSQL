@@ -26,7 +26,7 @@ mod test {
     use kite_sql::expression::ScalarExpression;
     use kite_sql::orm::{case_when, count_all, func, max, min, sum, QueryValue};
     use kite_sql::storage::rocksdb::RocksStorage;
-    use kite_sql::types::evaluator::EvaluatorFactory;
+    use kite_sql::types::evaluator::binary_create;
     use kite_sql::types::tuple::{SchemaRef, Tuple};
     use kite_sql::types::value::{DataValue, Utf8Type};
     use kite_sql::types::LogicalType;
@@ -1917,7 +1917,7 @@ mod test {
     }
 
     scala_function!(MyScalaFunction::SUM(LogicalType::Integer, LogicalType::Integer) -> LogicalType::Integer => (|v1: DataValue, v2: DataValue| {
-        EvaluatorFactory::binary_create(LogicalType::Integer, BinaryOperator::Plus)?.binary_eval(&v1, &v2)
+        binary_create(std::borrow::Cow::Owned(LogicalType::Integer), BinaryOperator::Plus)?.binary_eval(&v1, &v2)
     }));
 
     scala_function!(MyOrmFunction::ADD_ONE(LogicalType::Integer) -> LogicalType::Integer => (|v1: DataValue| {

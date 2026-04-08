@@ -275,11 +275,12 @@ mod tests {
     use crate::planner::{Childrens, LogicalPlan};
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
-    use crate::types::evaluator::EvaluatorFactory;
+    use crate::types::evaluator::binary_create;
     use crate::types::index::RuntimeIndexProbe;
     use crate::types::tuple::Tuple;
     use crate::types::LogicalType;
     use crate::utils::lru::SharedLruCache;
+    use std::borrow::Cow;
     use std::hash::RandomState;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -349,8 +350,8 @@ mod tests {
             op: BinaryOperator::Eq,
             left_expr: Box::new(ScalarExpression::column_expr(left_column, left_position)),
             right_expr: Box::new(ScalarExpression::column_expr(right_column, right_position)),
-            evaluator: Some(EvaluatorFactory::binary_create(
-                LogicalType::Integer,
+            evaluator: Some(binary_create(
+                Cow::Owned(LogicalType::Integer),
                 BinaryOperator::Eq,
             )?),
             ty: LogicalType::Boolean,
@@ -680,8 +681,8 @@ mod tests {
             op: BinaryOperator::Eq,
             left_expr: Box::new(ScalarExpression::column_expr(right_flag_column, 2)),
             right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(1))),
-            evaluator: Some(EvaluatorFactory::binary_create(
-                LogicalType::Integer,
+            evaluator: Some(binary_create(
+                std::borrow::Cow::Owned(LogicalType::Integer),
                 BinaryOperator::Eq,
             )?),
             ty: LogicalType::Boolean,

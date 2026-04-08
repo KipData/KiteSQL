@@ -16,8 +16,9 @@ use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::sum::SumAccumulator;
 use crate::execution::dql::aggregate::Accumulator;
 use crate::expression::BinaryOperator;
-use crate::types::evaluator::EvaluatorFactory;
+use crate::types::evaluator::binary_create;
 use crate::types::value::DataValue;
+use std::borrow::Cow;
 
 pub struct AvgAccumulator {
     inner: Option<SumAccumulator>,
@@ -40,7 +41,7 @@ impl Accumulator for AvgAccumulator {
                 inner
             } else {
                 self.inner
-                    .get_or_insert(SumAccumulator::new(&value.logical_type())?)
+                    .get_or_insert(SumAccumulator::new(Cow::Owned(value.logical_type()))?)
             };
             acc.update_value(value)?;
             self.count += 1;
@@ -69,7 +70,7 @@ impl Accumulator for AvgAccumulator {
         if value_ty != quantity_ty {
             value = value.cast(&quantity_ty)?
         }
-        let evaluator = EvaluatorFactory::binary_create(quantity_ty, BinaryOperator::Divide)?;
+        let evaluator = binary_create(Cow::Owned(quantity_ty), BinaryOperator::Divide)?;
         evaluator.0.binary_eval(&value, &quantity)
     }
 }

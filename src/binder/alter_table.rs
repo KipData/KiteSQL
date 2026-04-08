@@ -14,6 +14,7 @@
 
 use sqlparser::ast::{AlterColumnOperation, AlterTableOperation, ObjectName};
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use super::{attach_span_if_absent, is_valid_identifier, Binder};
@@ -44,12 +45,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 "column is not allowed to exist in default".to_string(),
             ));
         }
-        if expr.return_type() != *ty {
-            expr = ScalarExpression::TypeCast {
-                expr: Box::new(expr),
-                ty: ty.clone(),
-            };
-        }
+        expr = ScalarExpression::type_cast(expr, Cow::Borrowed(ty))?;
 
         Ok(expr)
     }

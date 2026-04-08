@@ -111,7 +111,6 @@ impl Insert {
                 return Err(DatabaseError::not_null());
             }
 
-            let table_schema = table_catalog.schema_ref();
             let mut index_metas = Vec::new();
             for index_meta in table_catalog.indexes() {
                 let exprs = index_meta.column_exprs(&table_catalog)?;
@@ -143,9 +142,7 @@ impl Insert {
                         }
                         value.unwrap_or(DataValue::Null)
                     };
-                    if !value.is_null() && &value.logical_type() != col.datatype() {
-                        value = value.cast(col.datatype())?;
-                    }
+                    value = value.cast(col.datatype())?;
                     value.check_len(col.datatype())?;
                     if value.is_null() && !col.nullable() {
                         return Err(DatabaseError::not_null_column(col.name().to_string()));
@@ -156,7 +153,7 @@ impl Insert {
                 let tuple = Tuple::new(Some(pk), values);
 
                 for (index_meta, exprs) in index_metas.iter() {
-                    let values = Projection::projection(&tuple, exprs, table_schema.as_slice())?;
+                    let values = Projection::projection(&tuple, exprs)?;
                     let Some(value) = DataValue::values_to_tuple(values) else {
                         continue;
                     };

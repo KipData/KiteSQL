@@ -63,6 +63,7 @@ use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::types::index::RuntimeIndexProbe;
 use crate::types::tuple::Tuple;
+use crate::types::value::DataValue;
 
 pub(crate) type ExecutionCaches<'a> = (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache);
 pub(crate) type ExecId = usize;
@@ -264,6 +265,7 @@ impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
 pub(crate) struct ExecArena<'a, T: Transaction + 'a> {
     nodes: Vec<ExecNode<'a, T>>,
     result: ExecResult,
+    projection_tmp: Vec<DataValue>,
     cache: Option<ExecutionCaches<'a>>,
     transaction: *mut T,
     runtime_probe_stack: Vec<RuntimeIndexProbe>,
@@ -274,6 +276,7 @@ impl<'a, T: Transaction + 'a> Default for ExecArena<'a, T> {
         Self {
             nodes: Vec::new(),
             result: ExecResult::default(),
+            projection_tmp: Vec::new(),
             cache: None,
             transaction: std::ptr::null_mut(),
             runtime_probe_stack: Vec::new(),
@@ -342,6 +345,21 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
     #[inline]
     pub(crate) fn result_tuple_mut(&mut self) -> &mut Tuple {
         &mut self.result.tuple
+    }
+
+    #[inline]
+    pub(crate) fn with_projection_tmp<R, E>(
+        &mut self,
+        f: impl FnOnce(&Tuple, &mut Vec<DataValue>) -> Result<R, E>,
+    ) -> Result<R, E> {
+        let ExecArena {
+            result,
+            projection_tmp,
+            ..
+        } = self;
+        let ret = f(&result.tuple, projection_tmp)?;
+        std::mem::swap(&mut result.tuple.values, projection_tmp);
+        Ok(ret)
     }
 
     #[inline]

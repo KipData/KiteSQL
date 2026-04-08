@@ -560,7 +560,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
                     inferred_types[col_index] = match &inferred_types[col_index] {
                         Some(existing) => {
-                            Some(LogicalType::max_logical_type(existing, &value_type)?)
+                            Some(LogicalType::max_logical_type(existing, &value_type)?.into_owned())
                         }
                         None => Some(value_type),
                     };
@@ -609,22 +609,19 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         {
             let cast_type =
                 LogicalType::max_logical_type(left_schema.datatype(), right_schema.datatype())?;
-            if &cast_type != left_schema.datatype() {
-                left_cast.push(ScalarExpression::TypeCast {
-                    expr: Box::new(ScalarExpression::column_expr(left_schema.clone(), position)),
-                    ty: cast_type.clone(),
-                });
+            if cast_type.as_ref() != left_schema.datatype() {
+                left_cast.push(ScalarExpression::type_cast(
+                    ScalarExpression::column_expr(left_schema.clone(), position),
+                    cast_type.clone(),
+                )?);
             } else {
                 left_cast.push(ScalarExpression::column_expr(left_schema.clone(), position));
             }
-            if &cast_type != right_schema.datatype() {
-                right_cast.push(ScalarExpression::TypeCast {
-                    expr: Box::new(ScalarExpression::column_expr(
-                        right_schema.clone(),
-                        position,
-                    )),
-                    ty: cast_type.clone(),
-                });
+            if cast_type.as_ref() != right_schema.datatype() {
+                right_cast.push(ScalarExpression::type_cast(
+                    ScalarExpression::column_expr(right_schema.clone(), position),
+                    cast_type.clone(),
+                )?);
             } else {
                 right_cast.push(ScalarExpression::column_expr(
                     right_schema.clone(),

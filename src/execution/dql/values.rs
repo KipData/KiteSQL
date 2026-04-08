@@ -75,9 +75,7 @@ impl Values {
         for (i, value) in values.iter_mut().enumerate() {
             let ty = self.schema_ref[i].datatype().clone();
 
-            if value.logical_type() != ty {
-                *value = mem::replace(value, DataValue::Null).cast(&ty)?;
-            }
+            *value = mem::replace(value, DataValue::Null).cast(&ty)?;
         }
 
         let output = arena.result_tuple_mut();

@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::types::evaluator::BinaryEvaluator;
 use crate::types::evaluator::DataValue;
+use crate::types::evaluator::{BinaryEvaluator, CastEvaluator, CastEvaluatorBox};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::hint;
@@ -87,6 +87,31 @@ impl BinaryEvaluator for TupleNotEqBinaryEvaluator {
         })
     }
 }
+
+#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+pub struct TupleCastEvaluator {
+    pub element_evaluators: Vec<CastEvaluatorBox>,
+}
+
+#[typetag::serde]
+impl CastEvaluator for TupleCastEvaluator {
+    fn eval_cast(&self, value: &DataValue) -> Result<DataValue, DatabaseError> {
+        match value {
+            DataValue::Null => Ok(DataValue::Null),
+            DataValue::Tuple(values, is_upper) => {
+                let mut casted = Vec::with_capacity(values.len());
+
+                for (value, evaluator) in values.iter().zip(self.element_evaluators.iter()) {
+                    casted.push(evaluator.eval_cast(value)?);
+                }
+
+                Ok(DataValue::Tuple(casted, *is_upper))
+            }
+            _ => unsafe { hint::unreachable_unchecked() },
+        }
+    }
+}
+
 #[typetag::serde]
 impl BinaryEvaluator for TupleGtBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
@@ -149,5 +174,46 @@ impl BinaryEvaluator for TupleLtEqBinaryEvaluator {
             | (DataValue::Null, DataValue::Null) => DataValue::Null,
             _ => unsafe { hint::unreachable_unchecked() },
         })
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod test {
+    use super::*;
+    use crate::types::evaluator::cast_create;
+    use crate::types::LogicalType;
+    use sqlparser::ast::CharLengthUnits;
+    use std::borrow::Cow;
+
+    #[test]
+    fn test_tuple_cast_evaluator() {
+        let evaluator = cast_create(
+            Cow::Owned(LogicalType::Tuple(vec![
+                LogicalType::Integer,
+                LogicalType::Varchar(None, CharLengthUnits::Characters),
+            ])),
+            Cow::Owned(LogicalType::Tuple(vec![
+                LogicalType::Bigint,
+                LogicalType::Integer,
+            ])),
+        )
+        .unwrap();
+
+        assert_eq!(
+            evaluator
+                .eval_cast(&DataValue::Tuple(
+                    vec![
+                        DataValue::Int32(1),
+                        DataValue::Utf8 {
+                            value: "2".to_string(),
+                            ty: crate::types::value::Utf8Type::Variable(None),
+                            unit: CharLengthUnits::Characters,
+                        },
+                    ],
+                    false,
+                ))
+                .unwrap(),
+            DataValue::Tuple(vec![DataValue::Int64(1), DataValue::Int32(2)], false)
+        );
     }
 }

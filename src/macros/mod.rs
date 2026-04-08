@@ -114,9 +114,7 @@ macro_rules! scala_function {
                     let mut value = args[_index].eval(tuple)?;
                     _index += 1;
 
-                    if value.logical_type() != $arg_ty {
-                        value = value.cast(&$arg_ty)?;
-                    }
+                    value = value.cast(&$arg_ty)?;
                     value
                 }, )*)
             }
@@ -201,9 +199,7 @@ macro_rules! table_function {
                     let mut value = args[_index].eval::<&::kite_sql::types::tuple::Tuple>(None)?;
                     _index += 1;
 
-                    if value.logical_type() != $arg_ty {
-                        value = value.cast(&$arg_ty)?;
-                    }
+                    value = value.cast(&$arg_ty)?;
                     value
                 }, )*)
             }

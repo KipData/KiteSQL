@@ -68,9 +68,7 @@ impl TableFunctionImpl for Numbers {
     ) -> Result<Box<dyn Iterator<Item = Result<Tuple, DatabaseError>>>, DatabaseError> {
         let mut value = args[0].eval::<&Tuple>(None)?;
 
-        if value.logical_type() != LogicalType::Integer {
-            value = value.cast(&LogicalType::Integer)?;
-        }
+        value = value.cast(&LogicalType::Integer)?;
         let num = value
             .i32()
             .ok_or_else(|| DatabaseError::not_null_column("numbers() arg"))?;

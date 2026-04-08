@@ -96,9 +96,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                     ScalarExpression::Constant(mut value) => {
                         let ty = schema_ref[i].datatype();
 
-                        if &value.logical_type() != ty {
-                            value = value.cast(ty)?;
-                        }
+                        value = value.cast(ty)?;
                         // Check if the value length is too long
                         value.check_len(ty)?;
                         if value.is_null() && !schema_ref[i].nullable() {

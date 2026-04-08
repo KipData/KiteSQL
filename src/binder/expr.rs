@@ -21,6 +21,7 @@ use sqlparser::ast::{
     BinaryOperator, CharLengthUnits, DataType, DuplicateTreatment, Expr, Function, FunctionArg,
     FunctionArgExpr, FunctionArguments, Ident, Query, TypedString, UnaryOperator, Value,
 };
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::slice;
 
@@ -284,7 +285,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             } => {
                 let left_expr = self.bind_expr(expr)?;
                 let (sub_query, column, correlated) =
-                    self.bind_subquery(Some(left_expr.return_type()), subquery)?;
+                    self.bind_subquery(Some(left_expr.return_type().as_ref()), subquery)?;
 
                 if !self.context.is_step(&QueryBindStep::Where) {
                     return Err(DatabaseError::UnsupportedStmt(
@@ -354,7 +355,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 let mut expr_pairs = Vec::with_capacity(conditions.len());
                 for when in conditions {
                     let result = self.bind_expr(&when.result)?;
-                    let result_ty = result.return_type();
+                    let result_ty = result.return_type().into_owned();
 
                     fn_check_ty(&mut ty, result_ty)?;
                     expr_pairs.push((self.bind_expr(&when.condition)?, result))
@@ -363,7 +364,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 let mut else_expr = None;
                 if let Some(expr) = else_result {
                     let temp_expr = Box::new(self.bind_expr(expr)?);
-                    let else_ty = temp_expr.return_type();
+                    let else_ty = temp_expr.return_type().into_owned();
 
                     fn_check_ty(&mut ty, else_ty)?;
                     else_expr = Some(temp_expr);
@@ -426,7 +427,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
 
     fn bind_subquery(
         &mut self,
-        in_ty: Option<LogicalType>,
+        in_ty: Option<&LogicalType>,
         subquery: &Query,
     ) -> Result<(LogicalPlan, ScalarExpression, bool), DatabaseError> {
         let BinderContext {
@@ -606,18 +607,19 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         let left_expr = Box::new(self.bind_expr(left)?);
         let right_expr = Box::new(self.bind_expr(right)?);
 
+        let left_ty = left_expr.return_type();
+        let right_ty = right_expr.return_type();
         let ty = match op {
             BinaryOperator::Plus
             | BinaryOperator::Minus
             | BinaryOperator::Multiply
             | BinaryOperator::Modulo => {
-                LogicalType::max_logical_type(&left_expr.return_type(), &right_expr.return_type())?
+                LogicalType::max_logical_type(&left_ty, &right_ty)?.into_owned()
             }
             BinaryOperator::Divide => {
-                if let LogicalType::Decimal(precision, scale) = LogicalType::max_logical_type(
-                    &left_expr.return_type(),
-                    &right_expr.return_type(),
-                )? {
+                if let LogicalType::Decimal(precision, scale) =
+                    LogicalType::max_logical_type(&left_ty, &right_ty)?.into_owned()
+                {
                     LogicalType::Decimal(precision, scale)
                 } else {
                     LogicalType::Double
@@ -654,7 +656,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         let ty = if let UnaryOperator::Not = op {
             LogicalType::Boolean
         } else {
-            expr.return_type()
+            expr.return_type().into_owned()
         };
 
         Ok(ScalarExpression::Unary {
@@ -714,7 +716,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 if args.len() != 1 {
                     return Err(DatabaseError::MisMatch("number of sum() parameters", "1"));
                 }
-                let ty = args[0].return_type();
+                let ty = args[0].return_type().into_owned();
 
                 return Ok(ScalarExpression::AggCall {
                     distinct: is_distinct,
@@ -727,7 +729,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 if args.len() != 1 {
                     return Err(DatabaseError::MisMatch("number of min() parameters", "1"));
                 }
-                let ty = args[0].return_type();
+                let ty = args[0].return_type().into_owned();
 
                 return Ok(ScalarExpression::AggCall {
                     distinct: is_distinct,
@@ -740,7 +742,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 if args.len() != 1 {
                     return Err(DatabaseError::MisMatch("number of max() parameters", "1"));
                 }
-                let ty = args[0].return_type();
+                let ty = args[0].return_type().into_owned();
 
                 return Ok(ScalarExpression::AggCall {
                     distinct: is_distinct,
@@ -815,10 +817,10 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 let mut ty = LogicalType::SqlNull;
 
                 if !args.is_empty() {
-                    ty = args[0].return_type();
+                    ty = args[0].return_type().into_owned();
 
                     for arg in args.iter_mut() {
-                        let temp_ty = arg.return_type();
+                        let temp_ty = arg.return_type().into_owned();
 
                         if temp_ty == LogicalType::SqlNull {
                             continue;
@@ -826,7 +828,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                         if ty == LogicalType::SqlNull && temp_ty != LogicalType::SqlNull {
                             ty = temp_ty;
                         } else if ty != temp_ty {
-                            ty = LogicalType::max_logical_type(&ty, &temp_ty)?;
+                            ty = LogicalType::max_logical_type(&ty, &temp_ty)?.into_owned();
                         }
                     }
                 }
@@ -834,7 +836,10 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             }
             _ => (),
         }
-        let arg_types = args.iter().map(ScalarExpression::return_type).collect_vec();
+        let arg_types = args
+            .iter()
+            .map(|arg| arg.return_type().into_owned())
+            .collect_vec();
         let summary = FunctionSummary {
             name: function_name.into(),
             arg_types,
@@ -870,10 +875,10 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         let temp_ty_1 = expr_1.return_type();
         let temp_ty_2 = expr_2.return_type();
 
-        match (temp_ty_1, temp_ty_2) {
+        match (temp_ty_1.as_ref(), temp_ty_2.as_ref()) {
             (LogicalType::SqlNull, LogicalType::SqlNull) => Ok(LogicalType::SqlNull),
-            (ty, LogicalType::SqlNull) | (LogicalType::SqlNull, ty) => Ok(ty),
-            (ty_1, ty_2) => LogicalType::max_logical_type(&ty_1, &ty_2),
+            (ty, LogicalType::SqlNull) | (LogicalType::SqlNull, ty) => Ok(ty.clone()),
+            (ty_1, ty_2) => Ok(LogicalType::max_logical_type(ty_1, ty_2)?.into_owned()),
         }
     }
 
@@ -904,10 +909,10 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
     }
 
     fn bind_cast(&mut self, expr: &Expr, ty: &DataType) -> Result<ScalarExpression, DatabaseError> {
-        Ok(ScalarExpression::TypeCast {
-            expr: Box::new(self.bind_expr(expr)?),
-            ty: LogicalType::try_from(ty.clone())?,
-        })
+        ScalarExpression::type_cast(
+            self.bind_expr(expr)?,
+            Cow::Owned(LogicalType::try_from(ty.clone())?),
+        )
     }
 
     fn wildcard_expr() -> ScalarExpression {

@@ -16,9 +16,10 @@ use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::{walk_mut_expr, VisitorMut};
 use crate::expression::{BinaryOperator, ScalarExpression, UnaryOperator};
-use crate::types::evaluator::EvaluatorFactory;
+use crate::types::evaluator::{binary_create, unary_create};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
+use std::borrow::Cow;
 use std::mem;
 
 #[derive(Debug)]
@@ -60,7 +61,7 @@ impl VisitorMut<'_> for ConstantCalculator {
                     let value = if let Some(evaluator) = evaluator {
                         evaluator.0.unary_eval(unary_val)
                     } else {
-                        EvaluatorFactory::unary_create(ty.clone(), *op)?
+                        unary_create(Cow::Borrowed(ty), *op)?
                             .0
                             .unary_eval(unary_val)
                     };
@@ -73,10 +74,9 @@ impl VisitorMut<'_> for ConstantCalculator {
                 right_expr,
                 ..
             } => {
-                let ty = LogicalType::max_logical_type(
-                    &left_expr.return_type(),
-                    &right_expr.return_type(),
-                )?;
+                let left_ty = left_expr.return_type();
+                let right_ty = right_expr.return_type();
+                let ty = LogicalType::max_logical_type(&left_ty, &right_ty)?.into_owned();
                 self.visit(left_expr)?;
                 self.visit(right_expr)?;
 
@@ -85,19 +85,17 @@ impl VisitorMut<'_> for ConstantCalculator {
                     ScalarExpression::Constant(right_val),
                 ) = (left_expr.as_mut(), right_expr.as_mut())
                 {
-                    let evaluator = EvaluatorFactory::binary_create(ty.clone(), *op)?;
+                    let evaluator = binary_create(Cow::Borrowed(&ty), *op)?;
 
-                    if left_val.logical_type() != ty {
-                        *left_val = left_val.clone().cast(&ty)?;
-                    }
-                    if right_val.logical_type() != ty {
-                        *right_val = right_val.clone().cast(&ty)?;
-                    }
+                    *left_val = mem::replace(left_val, DataValue::Null).cast(&ty)?;
+                    *right_val = mem::replace(right_val, DataValue::Null).cast(&ty)?;
                     let value = evaluator.0.binary_eval(left_val, right_val)?;
                     let _ = mem::replace(expr, ScalarExpression::Constant(value));
                 }
             }
-            ScalarExpression::TypeCast { expr: arg_expr, ty } => {
+            ScalarExpression::TypeCast {
+                expr: arg_expr, ty, ..
+            } => {
                 self.visit(arg_expr)?;
 
                 if let ScalarExpression::Constant(value) = arg_expr.as_mut() {
@@ -472,7 +470,7 @@ impl ScalarExpression {
                 let unary_value = if let Some(evaluator) = evaluator {
                     evaluator.0.unary_eval(&value)
                 } else {
-                    EvaluatorFactory::unary_create(ty.clone(), *op)
+                    unary_create(Cow::Borrowed(ty), *op)
                         .ok()?
                         .0
                         .unary_eval(&value)
@@ -489,16 +487,12 @@ impl ScalarExpression {
             } => {
                 let mut left = left_expr.unpack_val()?;
                 let mut right = right_expr.unpack_val()?;
-                if &left.logical_type() != ty {
-                    left = left.cast(ty).ok()?;
-                }
-                if &right.logical_type() != ty {
-                    right = right.cast(ty).ok()?;
-                }
+                left = left.cast(ty).ok()?;
+                right = right.cast(ty).ok()?;
                 if let Some(evaluator) = evaluator {
                     evaluator.0.binary_eval(&left, &right)
                 } else {
-                    EvaluatorFactory::binary_create(ty.clone(), *op)
+                    binary_create(Cow::Borrowed(ty), *op)
                         .ok()?
                         .0
                         .binary_eval(&left, &right)

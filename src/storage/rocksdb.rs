@@ -361,9 +361,9 @@ fn cleanup_failed_checkpoint_dir(path: &Path) -> Result<(), DatabaseError> {
 
 #[cfg(not(feature = "unsafe_txdb_checkpoint"))]
 fn unsupported_transactiondb_checkpoint_error() -> DatabaseError {
-    DatabaseError::UnsupportedStmt(format!(
-        "rocksdb TransactionDB checkpoint is disabled; enable the `unsafe_txdb_checkpoint` feature to opt in to the current implementation",
-    ))
+    DatabaseError::UnsupportedStmt(
+        "rocksdb TransactionDB checkpoint is disabled; enable the `unsafe_txdb_checkpoint` feature to opt in to the current implementation".to_string()
+    )
 }
 
 #[cfg(feature = "unsafe_txdb_checkpoint")]
@@ -510,7 +510,7 @@ impl CheckpointableStorage for RocksStorage {
 
         #[cfg(not(feature = "unsafe_txdb_checkpoint"))]
         {
-            return Err(unsupported_transactiondb_checkpoint_error());
+            Err(unsupported_transactiondb_checkpoint_error())
         }
     }
 }
