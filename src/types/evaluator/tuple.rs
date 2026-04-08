@@ -180,14 +180,14 @@ impl BinaryEvaluator for TupleLtEqBinaryEvaluator {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
-    use crate::types::evaluator::cast::create_cast_evaluator;
+    use crate::types::evaluator::cast_create;
     use crate::types::LogicalType;
     use sqlparser::ast::CharLengthUnits;
     use std::borrow::Cow;
 
     #[test]
     fn test_tuple_cast_evaluator() {
-        let evaluator = create_cast_evaluator(
+        let evaluator = cast_create(
             Cow::Owned(LogicalType::Tuple(vec![
                 LogicalType::Integer,
                 LogicalType::Varchar(None, CharLengthUnits::Characters),

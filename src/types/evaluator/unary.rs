@@ -39,7 +39,7 @@ macro_rules! numeric_unary_evaluator {
     };
 }
 
-pub(crate) fn create_unary_evaluator(
+pub fn unary_create(
     ty: Cow<'_, LogicalType>,
     op: UnaryOperator,
 ) -> Result<UnaryEvaluatorBox, DatabaseError> {
@@ -90,7 +90,7 @@ macro_rules! numeric_unary_evaluator_definition {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
-    use super::create_unary_evaluator;
+    use super::unary_create;
     use crate::errors::DatabaseError;
     use crate::expression::UnaryOperator;
     use crate::serdes::{ReferenceSerialization, ReferenceTables};
@@ -103,7 +103,7 @@ mod test {
     use std::io::{Cursor, Seek, SeekFrom};
 
     fn create(ty: LogicalType, op: UnaryOperator) -> Result<UnaryEvaluatorBox, DatabaseError> {
-        create_unary_evaluator(Cow::Owned(ty), op)
+        unary_create(Cow::Owned(ty), op)
     }
 
     #[test]

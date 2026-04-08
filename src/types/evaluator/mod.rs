@@ -35,15 +35,13 @@ pub mod uint8;
 pub mod unary;
 pub mod utf8;
 
+pub use self::binary::binary_create;
+pub use self::cast::cast_create;
+pub use self::unary::unary_create;
+
 use crate::errors::DatabaseError;
-use crate::expression::{BinaryOperator, UnaryOperator};
-use crate::types::evaluator::binary::create_binary_evaluator;
-use crate::types::evaluator::cast::create_cast_evaluator;
-use crate::types::evaluator::unary::create_unary_evaluator;
 use crate::types::value::DataValue;
-use crate::types::LogicalType;
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
@@ -153,30 +151,5 @@ impl Eq for CastEvaluatorBox {}
 impl Hash for CastEvaluatorBox {
     fn hash<H: Hasher>(&self, state: &mut H) {
         state.write_i8(42)
-    }
-}
-
-pub struct EvaluatorFactory;
-
-impl EvaluatorFactory {
-    pub fn cast_create(
-        from: Cow<'_, LogicalType>,
-        to: Cow<'_, LogicalType>,
-    ) -> Result<CastEvaluatorBox, DatabaseError> {
-        create_cast_evaluator(from, to)
-    }
-
-    pub fn unary_create(
-        ty: Cow<'_, LogicalType>,
-        op: UnaryOperator,
-    ) -> Result<UnaryEvaluatorBox, DatabaseError> {
-        create_unary_evaluator(ty, op)
-    }
-
-    pub fn binary_create(
-        ty: Cow<'_, LogicalType>,
-        op: BinaryOperator,
-    ) -> Result<BinaryEvaluatorBox, DatabaseError> {
-        create_binary_evaluator(ty, op)
     }
 }

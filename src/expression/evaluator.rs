@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::expression::function::scala::ScalarFunction;
 use crate::expression::{AliasType, BinaryOperator, ScalarExpression};
-use crate::types::evaluator::EvaluatorFactory;
+use crate::types::evaluator::binary_create;
 use crate::types::tuple::TupleLike;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::LogicalType;
@@ -340,7 +340,7 @@ impl ScalarExpression {
                         let ty = operand_value.logical_type();
                         when_value = when_value.cast(&ty)?;
                         let evaluator =
-                            EvaluatorFactory::binary_create(Cow::Owned(ty), BinaryOperator::Eq)?;
+                            binary_create(Cow::Owned(ty), BinaryOperator::Eq)?;
                         evaluator
                             .0
                             .binary_eval(operand_value, &when_value)?

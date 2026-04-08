@@ -423,7 +423,7 @@ macro_rules! build_integer_cast {
     }};
 }
 
-pub fn create_cast_evaluator(
+pub fn cast_create(
     from: Cow<'_, LogicalType>,
     to: Cow<'_, LogicalType>,
 ) -> Result<CastEvaluatorBox, DatabaseError> {
@@ -742,7 +742,7 @@ pub fn create_cast_evaluator(
             let evaluators = from_types
                 .iter()
                 .zip(to_types.iter())
-                .map(|(from, to)| create_cast_evaluator(Cow::Borrowed(from), Cow::Borrowed(to)))
+                .map(|(from, to)| cast_create(Cow::Borrowed(from), Cow::Borrowed(to)))
                 .collect::<Result<Vec<_>, _>>()?;
             box_cast!(TupleCastEvaluator {
                 element_evaluators: evaluators
@@ -754,7 +754,7 @@ pub fn create_cast_evaluator(
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
-    use super::create_cast_evaluator;
+    use super::cast_create;
     use crate::errors::DatabaseError;
     use crate::serdes::{ReferenceSerialization, ReferenceTables};
     use crate::storage::rocksdb::RocksTransaction;
@@ -764,7 +764,7 @@ mod test {
     use std::io::{Cursor, Seek, SeekFrom};
 
     fn create(from: LogicalType, to: LogicalType) -> Result<CastEvaluatorBox, DatabaseError> {
-        create_cast_evaluator(Cow::Owned(from), Cow::Owned(to))
+        cast_create(Cow::Owned(from), Cow::Owned(to))
     }
 
     #[test]

@@ -16,7 +16,7 @@ use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::{walk_mut_expr, VisitorMut};
 use crate::expression::{BinaryOperator, ScalarExpression, UnaryOperator};
-use crate::types::evaluator::EvaluatorFactory;
+use crate::types::evaluator::{binary_create, unary_create};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use std::borrow::Cow;
@@ -61,7 +61,7 @@ impl VisitorMut<'_> for ConstantCalculator {
                     let value = if let Some(evaluator) = evaluator {
                         evaluator.0.unary_eval(unary_val)
                     } else {
-                        EvaluatorFactory::unary_create(Cow::Borrowed(ty), *op)?
+                        unary_create(Cow::Borrowed(ty), *op)?
                             .0
                             .unary_eval(unary_val)
                     };
@@ -85,7 +85,7 @@ impl VisitorMut<'_> for ConstantCalculator {
                     ScalarExpression::Constant(right_val),
                 ) = (left_expr.as_mut(), right_expr.as_mut())
                 {
-                    let evaluator = EvaluatorFactory::binary_create(Cow::Borrowed(&ty), *op)?;
+                    let evaluator = binary_create(Cow::Borrowed(&ty), *op)?;
 
                     *left_val = mem::replace(left_val, DataValue::Null).cast(&ty)?;
                     *right_val = mem::replace(right_val, DataValue::Null).cast(&ty)?;
@@ -470,7 +470,7 @@ impl ScalarExpression {
                 let unary_value = if let Some(evaluator) = evaluator {
                     evaluator.0.unary_eval(&value)
                 } else {
-                    EvaluatorFactory::unary_create(Cow::Borrowed(ty), *op)
+                    unary_create(Cow::Borrowed(ty), *op)
                         .ok()?
                         .0
                         .unary_eval(&value)
@@ -492,7 +492,7 @@ impl ScalarExpression {
                 if let Some(evaluator) = evaluator {
                     evaluator.0.binary_eval(&left, &right)
                 } else {
-                    EvaluatorFactory::binary_create(Cow::Borrowed(ty), *op)
+                    binary_create(Cow::Borrowed(ty), *op)
                         .ok()?
                         .0
                         .binary_eval(&left, &right)

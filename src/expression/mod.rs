@@ -20,7 +20,8 @@ use crate::expression::function::table::TableFunction;
 use crate::expression::visitor::{walk_expr, Visitor};
 use crate::expression::visitor_mut::VisitorMut;
 use crate::types::evaluator::{
-    BinaryEvaluatorBox, CastEvaluatorBox, EvaluatorFactory, UnaryEvaluatorBox,
+    binary_create, cast_create, unary_create, BinaryEvaluatorBox, CastEvaluatorBox,
+    UnaryEvaluatorBox,
 };
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
@@ -164,7 +165,7 @@ impl VisitorMut<'_> for BindEvaluator {
         *evaluator = if from.as_ref() == ty {
             None
         } else {
-            Some(EvaluatorFactory::cast_create(from, Cow::Borrowed(ty))?)
+            Some(cast_create(from, Cow::Borrowed(ty))?)
         };
 
         Ok(())
@@ -193,7 +194,7 @@ impl VisitorMut<'_> for BindEvaluator {
                 Cow::Owned(target_ty),
             )?;
         }
-        *evaluator = Some(EvaluatorFactory::unary_create(expr.return_type(), *op)?);
+        *evaluator = Some(unary_create(expr.return_type(), *op)?);
 
         Ok(())
     }
@@ -223,7 +224,7 @@ impl VisitorMut<'_> for BindEvaluator {
         fn_cast(left_expr, ty.as_ref())?;
         fn_cast(right_expr, ty.as_ref())?;
 
-        *evaluator = Some(EvaluatorFactory::binary_create(ty, *op)?);
+        *evaluator = Some(binary_create(ty, *op)?);
 
         Ok(())
     }
@@ -271,7 +272,7 @@ impl ScalarExpression {
         if from.as_ref() == ty.as_ref() {
             return Ok(expr);
         }
-        let evaluator = Some(EvaluatorFactory::cast_create(from, ty.clone())?);
+        let evaluator = Some(cast_create(from, ty.clone())?);
 
         Ok(ScalarExpression::TypeCast {
             expr: Box::new(expr),
@@ -856,7 +857,7 @@ mod test {
     use crate::storage::{Storage, TableCache, Transaction};
     use crate::types::evaluator::boolean::BooleanNotUnaryEvaluator;
     use crate::types::evaluator::int32::Int32PlusBinaryEvaluator;
-    use crate::types::evaluator::{BinaryEvaluatorBox, EvaluatorFactory, UnaryEvaluatorBox};
+    use crate::types::evaluator::{cast_create, BinaryEvaluatorBox, UnaryEvaluatorBox};
     use crate::types::value::{DataValue, Utf8Type};
     use crate::types::LogicalType;
     use crate::utils::lru::SharedLruCache;
@@ -1018,7 +1019,7 @@ mod test {
             ScalarExpression::TypeCast {
                 expr: Box::new(ScalarExpression::Empty),
                 ty: LogicalType::Integer,
-                evaluator: Some(EvaluatorFactory::cast_create(
+                evaluator: Some(cast_create(
                     Cow::Owned(LogicalType::Integer),
                     Cow::Owned(LogicalType::Integer),
                 )?),

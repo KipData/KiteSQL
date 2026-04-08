@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::Accumulator;
 use crate::expression::BinaryOperator;
-use crate::types::evaluator::{BinaryEvaluatorBox, EvaluatorFactory};
+use crate::types::evaluator::{binary_create, BinaryEvaluatorBox};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use ahash::RandomState;
@@ -33,7 +33,7 @@ impl SumAccumulator {
 
         Ok(Self {
             result: DataValue::Null,
-            evaluator: EvaluatorFactory::binary_create(ty, BinaryOperator::Plus)?,
+            evaluator: binary_create(ty, BinaryOperator::Plus)?,
         })
     }
 }

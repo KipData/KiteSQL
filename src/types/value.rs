@@ -15,7 +15,7 @@
 use super::LogicalType;
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::{BumpBytes, BOUND_MAX_TAG, NOTNULL_TAG, NULL_TAG};
-use crate::types::evaluator::EvaluatorFactory;
+use crate::types::evaluator::cast_create;
 use byteorder::ReadBytesExt;
 use chrono::format::{DelayedFormat, StrftimeItems};
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
@@ -1090,7 +1090,7 @@ impl DataValue {
         if &from == to {
             return Ok(self);
         }
-        let evaluator = EvaluatorFactory::cast_create(Cow::Owned(from), Cow::Borrowed(to))?;
+        let evaluator = cast_create(Cow::Owned(from), Cow::Borrowed(to))?;
 
         evaluator.eval_cast(&self)
     }

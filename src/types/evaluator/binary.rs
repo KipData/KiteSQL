@@ -63,7 +63,7 @@ macro_rules! numeric_binary_evaluator {
     };
 }
 
-pub(crate) fn create_binary_evaluator(
+pub fn binary_create(
     ty: Cow<'_, LogicalType>,
     op: BinaryOperator,
 ) -> Result<BinaryEvaluatorBox, DatabaseError> {
@@ -356,7 +356,7 @@ macro_rules! numeric_binary_evaluator_definition {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
-    use super::create_binary_evaluator;
+    use super::binary_create;
     use crate::errors::DatabaseError;
     use crate::expression::BinaryOperator;
     use crate::serdes::{ReferenceSerialization, ReferenceTables};
@@ -367,7 +367,7 @@ mod test {
     use std::io::{Cursor, Seek, SeekFrom};
 
     fn create(ty: LogicalType, op: BinaryOperator) -> Result<BinaryEvaluatorBox, DatabaseError> {
-        create_binary_evaluator(Cow::Owned(ty), op)
+        binary_create(Cow::Owned(ty), op)
     }
 
     #[test]
