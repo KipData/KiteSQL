@@ -135,6 +135,7 @@ fn main() -> Result<(), DatabaseError> {
 - `build_in_memory()` opens an in-memory database for tests, examples, and temporary workloads.
 - `build_optimistic()` is available on native targets when you specifically want optimistic transactions on top of RocksDB.
 - `Database::checkpoint(path)` creates a local consistent snapshot when the selected storage backend supports it.
+- Transaction isolation is documented in [`docs/transaction-isolation.md`](docs/transaction-isolation.md).
 - Cargo features:
   - `rocksdb` is enabled by default
   - `lmdb` is optional

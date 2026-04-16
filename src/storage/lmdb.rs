@@ -14,7 +14,10 @@
 
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::{Bytes, TableCodec};
-use crate::storage::{reuse_bound_as_excluded, InnerIter, KeyValueRef, Storage, Transaction};
+use crate::storage::{
+    reuse_bound_as_excluded, InnerIter, KeyValueRef, Storage, Transaction,
+    TransactionIsolationLevel,
+};
 use lmdb::{
     Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, RoCursor, RwTransaction,
     Transaction as _, WriteFlags,
@@ -125,7 +128,11 @@ impl Storage for LmdbStorage {
     where
         Self: 'a;
 
-    fn transaction(&self) -> Result<Self::TransactionType<'_>, DatabaseError> {
+    fn transaction_with_isolation(
+        &self,
+        isolation: TransactionIsolationLevel,
+    ) -> Result<Self::TransactionType<'_>, DatabaseError> {
+        self.validate_transaction_isolation(isolation)?;
         let tx = self.env.begin_rw_txn().map_err(map_lmdb_err)?;
 
         Ok(LmdbTransaction {
@@ -133,6 +140,10 @@ impl Storage for LmdbStorage {
             db: self.db,
             table_codec: Default::default(),
         })
+    }
+
+    fn default_transaction_isolation(&self) -> TransactionIsolationLevel {
+        TransactionIsolationLevel::RepeatableRead
     }
 
     fn metrics(&self) -> Option<Self::Metrics> {

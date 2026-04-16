@@ -38,7 +38,8 @@ use crate::storage::memory::MemoryStorage;
 #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
 use crate::storage::rocksdb::{OptimisticRocksStorage, RocksStorage, StorageConfig};
 use crate::storage::{
-    CheckpointableStorage, StatisticsMetaCache, Storage, TableCache, Transaction, ViewCache,
+    CheckpointableStorage, StatisticsMetaCache, Storage, TableCache, Transaction,
+    TransactionIsolationLevel, ViewCache,
 };
 use crate::types::tuple::{SchemaRef, Tuple};
 use crate::types::value::DataValue;
@@ -120,6 +121,7 @@ pub struct DataBaseBuilder {
     scala_functions: ScalaFunctions,
     table_functions: TableFunctions,
     histogram_buckets: Option<usize>,
+    transaction_isolation: Option<TransactionIsolationLevel>,
     #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
     storage_config: StorageConfig,
     #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
@@ -137,6 +139,7 @@ impl DataBaseBuilder {
             scala_functions: Default::default(),
             table_functions: Default::default(),
             histogram_buckets: None,
+            transaction_isolation: None,
             #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
             storage_config: Default::default(),
             #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
@@ -157,6 +160,12 @@ impl DataBaseBuilder {
     /// Sets the default histogram bucket count used by `ANALYZE`.
     pub fn histogram_buckets(mut self, buckets: usize) -> Self {
         self.histogram_buckets = Some(buckets);
+        self
+    }
+
+    /// Sets the transaction isolation level used by database-created transactions.
+    pub fn transaction_isolation(mut self, isolation: TransactionIsolationLevel) -> Self {
+        self.transaction_isolation = Some(isolation);
         self
     }
 
@@ -237,6 +246,7 @@ impl DataBaseBuilder {
             self.scala_functions,
             self.table_functions,
             self.histogram_buckets,
+            self.transaction_isolation,
         )
     }
 
@@ -250,6 +260,7 @@ impl DataBaseBuilder {
             self.scala_functions,
             self.table_functions,
             self.histogram_buckets,
+            self.transaction_isolation,
         )
     }
 
@@ -263,6 +274,7 @@ impl DataBaseBuilder {
             self.scala_functions,
             self.table_functions,
             self.histogram_buckets,
+            self.transaction_isolation,
         )
     }
 
@@ -277,6 +289,7 @@ impl DataBaseBuilder {
             self.scala_functions,
             self.table_functions,
             self.histogram_buckets,
+            self.transaction_isolation,
         )
     }
 
@@ -290,6 +303,7 @@ impl DataBaseBuilder {
             self.scala_functions,
             self.table_functions,
             self.histogram_buckets,
+            self.transaction_isolation,
         )
     }
 
@@ -304,6 +318,7 @@ impl DataBaseBuilder {
             self.scala_functions,
             self.table_functions,
             self.histogram_buckets,
+            self.transaction_isolation,
         )
     }
 
@@ -312,18 +327,23 @@ impl DataBaseBuilder {
         scala_functions: ScalaFunctions,
         table_functions: TableFunctions,
         histogram_buckets: Option<usize>,
+        transaction_isolation: Option<TransactionIsolationLevel>,
     ) -> Result<Database<T>, DatabaseError> {
         if matches!(histogram_buckets, Some(0)) {
             return Err(DatabaseError::InvalidValue(
                 "histogram buckets must be >= 1".to_string(),
             ));
         }
+        let transaction_isolation =
+            transaction_isolation.unwrap_or_else(|| storage.default_transaction_isolation());
+        storage.validate_transaction_isolation(transaction_isolation)?;
         let meta_cache = SharedLruCache::new(256, 8, RandomState::new())?;
         let table_cache = SharedLruCache::new(48, 4, RandomState::new())?;
         let view_cache = SharedLruCache::new(12, 4, RandomState::new())?;
 
         Ok(Database {
             storage,
+            transaction_isolation,
             mdl: Default::default(),
             state: Arc::new(State {
                 scala_functions,
@@ -512,24 +532,34 @@ impl<S: Storage> State<S> {
     where
         S: 'txn,
     {
-        let mut plan = self.build_plan(stmt, params, transaction)?;
-        let schema = plan.output_schema().clone();
-        let mut arena = ExecArena::default();
-        let root = build_write(
-            &mut arena,
-            plan,
-            (&self.table_cache, &self.view_cache, &self.meta_cache),
-            transaction,
-        );
-        let executor = Executor::new(arena, root);
+        transaction.begin_statement_scope()?;
+        match (|| {
+            let mut plan = self.build_plan(stmt, params, transaction)?;
+            let schema = plan.output_schema().clone();
+            let mut arena = ExecArena::default();
+            let root = build_write(
+                &mut arena,
+                plan,
+                (&self.table_cache, &self.view_cache, &self.meta_cache),
+                transaction,
+            );
+            let executor = Executor::new(arena, root);
 
-        Ok((schema, executor))
+            Ok((schema, executor))
+        })() {
+            Ok(result) => Ok(result),
+            Err(err) => {
+                transaction.end_statement_scope()?;
+                Err(err)
+            }
+        }
     }
 }
 
 /// Main database handle for executing SQL and creating transactions.
 pub struct Database<S: Storage> {
     pub(crate) storage: S,
+    transaction_isolation: TransactionIsolationLevel,
     mdl: Arc<RwLock<()>>,
     pub(crate) state: Arc<State<S>>,
 }
@@ -574,29 +604,30 @@ impl<S: Storage> Database<S> {
             MetaDataLock::Read(self.mdl.read_arc())
         };
 
-        let transaction = Box::into_raw(Box::new(self.storage.transaction()?));
+        let transaction = Box::into_raw(Box::new(
+            self.storage
+                .transaction_with_isolation(self.transaction_isolation)?,
+        ));
         let mut statements = statements.into_iter().peekable();
 
         while let Some(statement) = statements.next() {
             let (schema, executor) =
-                match self
-                    .state
-                    .execute(unsafe { &mut (*transaction) }, &statement, &[])
-                {
-                    Ok(result) => result,
-                    Err(err) => {
-                        unsafe { drop(Box::from_raw(transaction)) };
-                        return Err(err.with_sql_context(sql));
-                    }
+                match self.state.execute(unsafe { &mut *transaction }, &statement, &[]) {
+                Ok(result) => result,
+                Err(err) => {
+                    unsafe { drop(Box::from_raw(transaction)) };
+                    return Err(err.with_sql_context(sql));
+                }
                 };
 
             if statements.peek().is_some() {
-                if let Err(err) = TransactionIter::new(schema, executor).done() {
+                if let Err(err) = TransactionIter::new(schema, executor, transaction).done() {
                     unsafe { drop(Box::from_raw(transaction)) };
                     return Err(err.with_sql_context(sql));
                 }
             } else {
-                let inner = Box::into_raw(Box::new(TransactionIter::new(schema, executor)));
+                let inner =
+                    Box::into_raw(Box::new(TransactionIter::new(schema, executor, transaction)));
                 return Ok(DatabaseIter {
                     transaction,
                     inner,
@@ -620,19 +651,23 @@ impl<S: Storage> Database<S> {
         } else {
             MetaDataLock::Read(self.mdl.read_arc())
         };
-        let transaction = Box::into_raw(Box::new(self.storage.transaction()?));
+        let transaction = Box::into_raw(Box::new(
+            self.storage
+                .transaction_with_isolation(self.transaction_isolation)?,
+        ));
         let (schema, executor) =
-            match self
-                .state
-                .execute(unsafe { &mut (*transaction) }, statement, params)
-            {
-                Ok(result) => result,
-                Err(err) => {
-                    unsafe { drop(Box::from_raw(transaction)) };
-                    return Err(err);
-                }
+            match self.state.execute(unsafe { &mut *transaction }, statement, params) {
+            Ok(result) => result,
+            Err(err) => {
+                unsafe { drop(Box::from_raw(transaction)) };
+                return Err(err);
+            }
             };
-        let inner = Box::into_raw(Box::new(TransactionIter::new(schema, executor)));
+        let inner = Box::into_raw(Box::new(TransactionIter::new(
+            schema,
+            executor,
+            transaction,
+        )));
         Ok(DatabaseIter {
             transaction,
             inner,
@@ -646,7 +681,9 @@ impl<S: Storage> Database<S> {
     /// transactional context until [`DBTransaction::commit`] is called.
     pub fn new_transaction(&self) -> Result<DBTransaction<'_, S>, DatabaseError> {
         let guard = self.mdl.read_arc();
-        let transaction = self.storage.transaction()?;
+        let transaction = self
+            .storage
+            .transaction_with_isolation(self.transaction_isolation)?;
         let state = self.state.clone();
 
         Ok(DBTransaction {
@@ -665,6 +702,11 @@ impl<S: Storage> Database<S> {
     #[inline]
     pub fn storage_metrics(&self) -> Option<S::Metrics> {
         self.storage.metrics()
+    }
+
+    #[inline]
+    pub fn transaction_isolation(&self) -> TransactionIsolationLevel {
+        self.transaction_isolation
     }
 }
 
@@ -930,8 +972,10 @@ impl<'txn, S: Storage> DBTransaction<'txn, S> {
                 "`DDL` is not allowed to execute within a transaction".to_string(),
             ));
         }
-        let (schema, executor) = self.state.execute(&mut self.inner, statement, params)?;
-        Ok(TransactionIter::new(schema, executor))
+        let transaction = std::ptr::from_mut(&mut self.inner);
+        let (schema, executor) =
+            self.state.execute(unsafe { &mut *transaction }, statement, params)?;
+        Ok(TransactionIter::new(schema, executor, transaction))
     }
 
     /// Commits the current transaction.
@@ -944,13 +988,31 @@ impl<'txn, S: Storage> DBTransaction<'txn, S> {
 
 /// Raw result iterator returned by [`DBTransaction::run`] and [`DBTransaction::execute`].
 pub struct TransactionIter<'a, T: Transaction + 'a> {
-    executor: Executor<'a, T>,
+    executor: Option<Executor<'a, T>>,
     schema: SchemaRef,
+    transaction: *mut T,
+    statement_scope_active: bool,
 }
 
 impl<'a, T: Transaction + 'a> TransactionIter<'a, T> {
-    fn new(schema: SchemaRef, executor: Executor<'a, T>) -> Self {
-        Self { executor, schema }
+    fn new(schema: SchemaRef, executor: Executor<'a, T>, transaction: *mut T) -> Self {
+        Self {
+            executor: Some(executor),
+            schema,
+            transaction,
+            statement_scope_active: true,
+        }
+    }
+
+    #[inline]
+    fn finish_statement_scope(&mut self) -> Result<(), DatabaseError> {
+        if !self.statement_scope_active {
+            return Ok(());
+        }
+
+        self.executor.take();
+        self.statement_scope_active = false;
+        unsafe { (*self.transaction).end_statement_scope() }
     }
 
     #[inline]
@@ -960,7 +1022,21 @@ impl<'a, T: Transaction + 'a> TransactionIter<'a, T> {
 
     #[inline]
     pub fn next_borrowed_tuple(&mut self) -> Result<Option<&Tuple>, DatabaseError> {
-        self.executor.next_tuple()
+        let Some(executor) = self.executor.as_mut() else {
+            return Ok(None);
+        };
+        let executor_ptr = std::ptr::from_mut(executor);
+        match unsafe { (*executor_ptr).next_tuple() } {
+            Ok(Some(tuple)) => Ok(Some(tuple)),
+            Ok(None) => {
+                self.finish_statement_scope()?;
+                Ok(None)
+            }
+            Err(err) => {
+                self.finish_statement_scope()?;
+                Err(err)
+            }
+        }
     }
 
     #[inline]
@@ -970,14 +1046,30 @@ impl<'a, T: Transaction + 'a> TransactionIter<'a, T> {
     }
 }
 
+impl<T: Transaction> Drop for TransactionIter<'_, T> {
+    fn drop(&mut self) {
+        let _ = self.finish_statement_scope();
+    }
+}
+
 impl<T: Transaction> Iterator for TransactionIter<'_, T> {
     type Item = Result<Tuple, DatabaseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.executor.next_tuple() {
+        let result = {
+            let executor = self.executor.as_mut()?;
+            executor.next_tuple()
+        };
+        match result {
             Ok(Some(tuple)) => Some(Ok(tuple.clone())),
-            Ok(None) => None,
-            Err(err) => Some(Err(err)),
+            Ok(None) => match self.finish_statement_scope() {
+                Ok(()) => None,
+                Err(err) => Some(Err(err)),
+            },
+            Err(err) => match self.finish_statement_scope() {
+                Ok(()) => Some(Err(err)),
+                Err(scope_err) => Some(Err(scope_err)),
+            },
         }
     }
 }
@@ -1000,11 +1092,11 @@ impl<T: Transaction> BorrowResultIter for TransactionIter<'_, T> {
 pub(crate) mod test {
     use crate::binder::{Binder, BinderContext};
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
-    use crate::db::{DataBaseBuilder, DatabaseError};
+    use crate::db::{BorrowResultIter, DataBaseBuilder, DatabaseError};
     use crate::expression::ScalarExpression;
     use crate::planner::operator::join::JoinCondition;
     use crate::planner::operator::Operator;
-    use crate::storage::{Storage, TableCache, Transaction};
+    use crate::storage::{Storage, TableCache, Transaction, TransactionIsolationLevel};
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -1044,6 +1136,21 @@ pub(crate) mod test {
         let _ = transaction.create_table(table_cache, "t1".to_string().into(), columns, false)?;
 
         Ok(())
+    }
+
+    fn read_single_i32<I>(mut iter: I) -> Result<i32, DatabaseError>
+    where
+        I: BorrowResultIter + Iterator<Item = Result<Tuple, DatabaseError>>,
+    {
+        let value = match iter.next().transpose()?.map(|tuple| tuple.values) {
+            Some(values) => match values.as_slice() {
+                [DataValue::Int32(value)] => *value,
+                other => panic!("expected a single Int32 column, got {other:?}"),
+            },
+            None => panic!("expected one result row"),
+        };
+        iter.done()?;
+        Ok(value)
     }
 
     #[cfg(feature = "unsafe_txdb_checkpoint")]
@@ -1986,6 +2093,70 @@ pub(crate) mod test {
     }
 
     #[test]
+    fn test_read_committed_refreshes_snapshot_each_statement() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path())
+            .transaction_isolation(TransactionIsolationLevel::ReadCommitted)
+            .build_rocksdb()?;
+
+        kite_sql
+            .run("create table t_rc (a int primary key, b int)")?
+            .done()?;
+        kite_sql.run("insert into t_rc values (1, 10)")?.done()?;
+
+        let mut reader = kite_sql.new_transaction()?;
+        let mut writer = kite_sql.new_transaction()?;
+
+        assert_eq!(
+            read_single_i32(reader.run("select b from t_rc where a = 1")?)?,
+            10
+        );
+
+        writer.run("update t_rc set b = 20 where a = 1")?.done()?;
+        writer.commit()?;
+
+        assert_eq!(
+            read_single_i32(reader.run("select b from t_rc where a = 1")?)?,
+            20
+        );
+        reader.commit()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_repeatable_read_keeps_transaction_snapshot() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path())
+            .transaction_isolation(TransactionIsolationLevel::RepeatableRead)
+            .build_rocksdb()?;
+
+        kite_sql
+            .run("create table t_rr (a int primary key, b int)")?
+            .done()?;
+        kite_sql.run("insert into t_rr values (1, 10)")?.done()?;
+
+        let mut reader = kite_sql.new_transaction()?;
+        let mut writer = kite_sql.new_transaction()?;
+
+        assert_eq!(
+            read_single_i32(reader.run("select b from t_rr where a = 1")?)?,
+            10
+        );
+
+        writer.run("update t_rr set b = 20 where a = 1")?.done()?;
+        writer.commit()?;
+
+        assert_eq!(
+            read_single_i32(reader.run("select b from t_rr where a = 1")?)?,
+            10
+        );
+        reader.commit()?;
+
+        Ok(())
+    }
+
+    #[test]
     fn test_optimistic_transaction_sql() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_optimistic()?;
@@ -2048,6 +2219,24 @@ pub(crate) mod test {
             result,
             Err(DatabaseError::InvalidValue(message)) if message == "histogram buckets must be >= 1"
         ));
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn test_lmdb_rejects_read_committed_isolation() {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let db_path = temp_dir.path().join("kite_sql.lmdb");
+        let result = DataBaseBuilder::path(db_path)
+            .transaction_isolation(TransactionIsolationLevel::ReadCommitted)
+            .build_lmdb();
+
+        match result {
+            Err(DatabaseError::UnsupportedStmt(message)) => {
+                assert!(message.contains("read committed"));
+            }
+            Ok(_) => panic!("lmdb should reject read committed isolation"),
+            Err(err) => panic!("unexpected error: {err}"),
+        }
     }
 
     #[cfg(feature = "unsafe_txdb_checkpoint")]

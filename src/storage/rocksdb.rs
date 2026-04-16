@@ -14,14 +14,16 @@
 
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::{Bytes, TableCodec};
-use crate::storage::{CheckpointableStorage, InnerIter, Storage, Transaction};
+use crate::storage::{
+    CheckpointableStorage, InnerIter, Storage, Transaction, TransactionIsolationLevel,
+};
 #[cfg(feature = "unsafe_txdb_checkpoint")]
 use librocksdb_sys as ffi;
 use rocksdb::{
     checkpoint::Checkpoint,
     statistics::{StatsLevel, Ticker},
-    DBPinnableSlice, DBRawIteratorWithThreadMode, OptimisticTransactionDB, Options, ReadOptions,
-    SliceTransform, TransactionDB,
+    DBPinnableSlice, DBRawIteratorWithThreadMode, OptimisticTransactionDB,
+    Options, ReadOptions, SliceTransform, SnapshotWithThreadMode, TransactionDB,
 };
 use std::collections::Bound;
 #[cfg(feature = "unsafe_txdb_checkpoint")]
@@ -434,11 +436,33 @@ impl Storage for OptimisticRocksStorage {
     where
         Self: 'a;
 
-    fn transaction(&self) -> Result<Self::TransactionType<'_>, DatabaseError> {
+    fn transaction_with_isolation(
+        &self,
+        isolation: TransactionIsolationLevel,
+    ) -> Result<Self::TransactionType<'_>, DatabaseError> {
+        self.validate_transaction_isolation(isolation)?;
         Ok(OptimisticRocksTransaction {
+            db: self.inner.as_ref(),
             tx: self.inner.transaction(),
+            isolation,
+            current_snapshot: matches!(isolation, TransactionIsolationLevel::RepeatableRead)
+                .then(|| self.inner.snapshot()),
             table_codec: Default::default(),
         })
+    }
+
+    fn default_transaction_isolation(&self) -> TransactionIsolationLevel {
+        TransactionIsolationLevel::ReadCommitted
+    }
+
+    fn validate_transaction_isolation(
+        &self,
+        isolation: TransactionIsolationLevel,
+    ) -> Result<(), DatabaseError> {
+        match isolation {
+            TransactionIsolationLevel::ReadCommitted
+            | TransactionIsolationLevel::RepeatableRead => Ok(()),
+        }
     }
 
     fn metrics(&self) -> Option<Self::Metrics> {
@@ -460,11 +484,33 @@ impl Storage for RocksStorage {
     where
         Self: 'a;
 
-    fn transaction(&self) -> Result<Self::TransactionType<'_>, DatabaseError> {
+    fn transaction_with_isolation(
+        &self,
+        isolation: TransactionIsolationLevel,
+    ) -> Result<Self::TransactionType<'_>, DatabaseError> {
+        self.validate_transaction_isolation(isolation)?;
         Ok(RocksTransaction {
+            db: self.inner.as_ref(),
             tx: self.inner.transaction(),
+            isolation,
+            current_snapshot: matches!(isolation, TransactionIsolationLevel::RepeatableRead)
+                .then(|| self.inner.snapshot()),
             table_codec: Default::default(),
         })
+    }
+
+    fn default_transaction_isolation(&self) -> TransactionIsolationLevel {
+        TransactionIsolationLevel::ReadCommitted
+    }
+
+    fn validate_transaction_isolation(
+        &self,
+        isolation: TransactionIsolationLevel,
+    ) -> Result<(), DatabaseError> {
+        match isolation {
+            TransactionIsolationLevel::ReadCommitted
+            | TransactionIsolationLevel::RepeatableRead => Ok(()),
+        }
     }
 
     fn metrics(&self) -> Option<Self::Metrics> {
@@ -516,13 +562,29 @@ impl CheckpointableStorage for RocksStorage {
 }
 
 pub struct OptimisticRocksTransaction<'db> {
+    db: &'db OptimisticTransactionDB,
     tx: rocksdb::Transaction<'db, OptimisticTransactionDB>,
+    isolation: TransactionIsolationLevel,
+    current_snapshot: Option<SnapshotWithThreadMode<'db, OptimisticTransactionDB>>,
     table_codec: TableCodec,
 }
 
 pub struct RocksTransaction<'db> {
+    db: &'db TransactionDB<rocksdb::MultiThreaded>,
     tx: rocksdb::Transaction<'db, TransactionDB<rocksdb::MultiThreaded>>,
+    isolation: TransactionIsolationLevel,
+    current_snapshot: Option<SnapshotWithThreadMode<'db, TransactionDB<rocksdb::MultiThreaded>>>,
     table_codec: TableCodec,
+}
+
+fn build_read_options<D: rocksdb::DBAccess>(
+    snapshot: Option<&SnapshotWithThreadMode<'_, D>>,
+) -> ReadOptions {
+    let mut read_opts = ReadOptions::default();
+    if let Some(snapshot) = snapshot {
+        read_opts.set_snapshot(snapshot);
+    }
+    read_opts
 }
 
 #[macro_export]
@@ -544,12 +606,27 @@ macro_rules! impl_transaction {
                 &self.table_codec
             }
 
+            fn begin_statement_scope(&mut self) -> Result<(), DatabaseError> {
+                if self.isolation == TransactionIsolationLevel::ReadCommitted {
+                    self.current_snapshot = Some(self.db.snapshot());
+                }
+                Ok(())
+            }
+
+            fn end_statement_scope(&mut self) -> Result<(), DatabaseError> {
+                if self.isolation == TransactionIsolationLevel::ReadCommitted {
+                    self.current_snapshot = None;
+                }
+                Ok(())
+            }
+
             #[inline]
             fn get_borrowed<'a>(
                 &'a self,
                 key: &[u8],
             ) -> Result<Option<Self::BorrowedBytes<'a>>, DatabaseError> {
-                Ok(self.tx.get_pinned(key)?)
+                let read_opts = build_read_options(self.current_snapshot.as_ref());
+                Ok(self.tx.get_pinned_opt(key, &read_opts)?)
             }
 
             #[inline]
@@ -573,7 +650,7 @@ macro_rules! impl_transaction {
                 min: Bound<&'key [u8]>,
                 max: Bound<&'key [u8]>,
             ) -> Result<Self::IterType<'a>, DatabaseError> {
-                let mut read_opts = ReadOptions::default();
+                let mut read_opts = build_read_options(self.current_snapshot.as_ref());
                 if let (
                     Bound::Included(min_bytes) | Bound::Excluded(min_bytes),
                     Bound::Included(max_bytes) | Bound::Excluded(max_bytes),
