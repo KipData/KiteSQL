@@ -133,6 +133,35 @@ The in-memory storage currently exposes only `ReadCommitted`.
 This backend mainly exists for tests, examples, and temporary workloads, so the
 implementation stays intentionally simple.
 
+## Conflict Detection in Current KiteSQL
+
+KiteSQL's current conflict detection is primarily key-based.
+
+In the RocksDB-backed implementation, table rows are stored under concrete KV
+keys derived from the primary key, and write operations such as `INSERT`,
+`UPDATE`, and `DELETE` ultimately modify those concrete keys through the storage
+transaction.
+
+That means KiteSQL already has a solid baseline conflict detection capability
+for cases like:
+
+- two transactions writing the same primary-key row
+- two transactions rewriting the same concrete storage entry
+
+This is the most important transactional conflict detection foundation in the
+current design: conflicts are naturally detected at the physical key level by
+the underlying storage transaction mechanism.
+
+What KiteSQL does not currently provide is predicate-level or range-level
+conflict detection such as:
+
+- "I read `a > 10`, so inserts into that range must now conflict"
+- "I evaluated this SQL predicate, so future writes matching the predicate must
+  be blocked or rejected"
+
+Those stronger behaviors require explicit range locking, predicate locking, or
+other higher-level concurrency control beyond today's key-based model.
+
 ## Why This Matches RC and RR
 
 For ordinary SQL reads, the difference between `ReadCommitted` and
@@ -153,6 +182,16 @@ As a result:
   the same snapshot
 - `RepeatableRead` also keeps repeated range reads stable because the visible
   key space is evaluated against the same snapshot
+
+This is why KiteSQL's current key-level conflict detection is sufficient for
+its present `ReadCommitted` and `RepeatableRead` support:
+
+- the basic write/write correctness still comes from the storage transaction's
+  concrete key conflict handling
+- the `RC` / `RR` distinction itself comes from snapshot lifetime, not from
+  extra predicate conflict detection
+- ordinary `RC` / `RR` reads do not require "I read this range, therefore other
+  transactions may not insert into it" semantics
 
 In other words, KiteSQL's current implementation satisfies the normal MVCC
 definition of RC and RR for plain reads.
