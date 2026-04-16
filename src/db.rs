@@ -612,12 +612,15 @@ impl<S: Storage> Database<S> {
 
         while let Some(statement) = statements.next() {
             let (schema, executor) =
-                match self.state.execute(unsafe { &mut *transaction }, &statement, &[]) {
-                Ok(result) => result,
-                Err(err) => {
-                    unsafe { drop(Box::from_raw(transaction)) };
-                    return Err(err.with_sql_context(sql));
-                }
+                match self
+                    .state
+                    .execute(unsafe { &mut *transaction }, &statement, &[])
+                {
+                    Ok(result) => result,
+                    Err(err) => {
+                        unsafe { drop(Box::from_raw(transaction)) };
+                        return Err(err.with_sql_context(sql));
+                    }
                 };
 
             if statements.peek().is_some() {
@@ -626,8 +629,11 @@ impl<S: Storage> Database<S> {
                     return Err(err.with_sql_context(sql));
                 }
             } else {
-                let inner =
-                    Box::into_raw(Box::new(TransactionIter::new(schema, executor, transaction)));
+                let inner = Box::into_raw(Box::new(TransactionIter::new(
+                    schema,
+                    executor,
+                    transaction,
+                )));
                 return Ok(DatabaseIter {
                     transaction,
                     inner,
@@ -656,12 +662,15 @@ impl<S: Storage> Database<S> {
                 .transaction_with_isolation(self.transaction_isolation)?,
         ));
         let (schema, executor) =
-            match self.state.execute(unsafe { &mut *transaction }, statement, params) {
-            Ok(result) => result,
-            Err(err) => {
-                unsafe { drop(Box::from_raw(transaction)) };
-                return Err(err);
-            }
+            match self
+                .state
+                .execute(unsafe { &mut *transaction }, statement, params)
+            {
+                Ok(result) => result,
+                Err(err) => {
+                    unsafe { drop(Box::from_raw(transaction)) };
+                    return Err(err);
+                }
             };
         let inner = Box::into_raw(Box::new(TransactionIter::new(
             schema,
@@ -974,7 +983,8 @@ impl<'txn, S: Storage> DBTransaction<'txn, S> {
         }
         let transaction = std::ptr::from_mut(&mut self.inner);
         let (schema, executor) =
-            self.state.execute(unsafe { &mut *transaction }, statement, params)?;
+            self.state
+                .execute(unsafe { &mut *transaction }, statement, params)?;
         Ok(TransactionIter::new(schema, executor, transaction))
     }
 

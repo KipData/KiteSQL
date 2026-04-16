@@ -22,8 +22,8 @@ use librocksdb_sys as ffi;
 use rocksdb::{
     checkpoint::Checkpoint,
     statistics::{StatsLevel, Ticker},
-    DBPinnableSlice, DBRawIteratorWithThreadMode, OptimisticTransactionDB,
-    Options, ReadOptions, SliceTransform, SnapshotWithThreadMode, TransactionDB,
+    DBPinnableSlice, DBRawIteratorWithThreadMode, OptimisticTransactionDB, Options, ReadOptions,
+    SliceTransform, SnapshotWithThreadMode, TransactionDB,
 };
 use std::collections::Bound;
 #[cfg(feature = "unsafe_txdb_checkpoint")]
