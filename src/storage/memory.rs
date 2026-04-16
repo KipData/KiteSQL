@@ -14,7 +14,9 @@
 
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::{Bytes, TableCodec};
-use crate::storage::{EmptyStorageMetrics, InnerIter, Storage, Transaction};
+use crate::storage::{
+    EmptyStorageMetrics, InnerIter, Storage, Transaction, TransactionIsolationLevel,
+};
 use std::cell::{Ref, RefCell};
 use std::collections::{BTreeMap, Bound, VecDeque};
 use std::rc::Rc;
@@ -38,11 +40,19 @@ impl Storage for MemoryStorage {
     where
         Self: 'a;
 
-    fn transaction(&self) -> Result<Self::TransactionType<'_>, DatabaseError> {
+    fn transaction_with_isolation(
+        &self,
+        isolation: TransactionIsolationLevel,
+    ) -> Result<Self::TransactionType<'_>, DatabaseError> {
+        self.validate_transaction_isolation(isolation)?;
         Ok(MemoryTransaction {
             inner: self.inner.clone(),
             table_codec: Default::default(),
         })
+    }
+
+    fn default_transaction_isolation(&self) -> TransactionIsolationLevel {
+        TransactionIsolationLevel::ReadCommitted
     }
 }
 
