@@ -1,0 +1,175 @@
+statement ok
+create table joined_dml_target(id int primary key, v int)
+
+statement ok
+create table joined_dml_source(id int primary key, v int)
+
+statement ok
+insert into joined_dml_target values
+    (1, 10), (2, 20),
+    (3, 30), (4, 40),
+    (5, 50), (6, 60),
+    (7, 70)
+
+statement ok
+insert into joined_dml_source values
+    (1, 100), (2, 200),
+    (5, 500), (6, 600),
+    (8, 800), (9, 900)
+
+# Regression for issue 321: joined UPDATE/DELETE should affect only target rows.
+statement ok
+update joined_dml_target
+inner join joined_dml_source on joined_dml_target.id = joined_dml_source.id
+set v = 101
+where joined_dml_source.id = 1
+
+query II rowsort
+select * from joined_dml_target
+----
+1 101
+2 20
+3 30
+4 40
+5 50
+6 60
+7 70
+
+statement ok
+delete from joined_dml_target
+inner join joined_dml_source on joined_dml_target.id = joined_dml_source.id
+where joined_dml_source.id = 2
+
+query II rowsort
+select * from joined_dml_target
+----
+1 101
+3 30
+4 40
+5 50
+6 60
+7 70
+
+statement ok
+update joined_dml_target
+left join joined_dml_source on joined_dml_target.id = joined_dml_source.id
+set v = 303
+where joined_dml_source.id is null and joined_dml_target.id = 3
+
+query II rowsort
+select * from joined_dml_target
+----
+1 101
+3 303
+4 40
+5 50
+6 60
+7 70
+
+statement ok
+delete from joined_dml_target
+left join joined_dml_source on joined_dml_target.id = joined_dml_source.id
+where joined_dml_source.id is null and joined_dml_target.id = 4
+
+query II rowsort
+select * from joined_dml_target
+----
+1 101
+3 303
+5 50
+6 60
+7 70
+
+statement ok
+update joined_dml_target
+right join joined_dml_source on joined_dml_target.id = joined_dml_source.id
+set v = 505
+where joined_dml_source.id in (5, 8)
+
+query II rowsort
+select * from joined_dml_target
+----
+1 101
+3 303
+5 505
+6 60
+7 70
+
+statement ok
+delete from joined_dml_target
+right join joined_dml_source on joined_dml_target.id = joined_dml_source.id
+where joined_dml_source.id in (6, 9)
+
+query II rowsort
+select * from joined_dml_target
+----
+1 101
+3 303
+5 505
+7 70
+
+statement ok
+update joined_dml_target
+full join joined_dml_source on joined_dml_target.id = joined_dml_source.id
+set v = 707
+where joined_dml_source.id is null and joined_dml_target.id = 7
+
+query II rowsort
+select * from joined_dml_target
+----
+1 101
+3 303
+5 505
+7 707
+
+statement ok
+delete from joined_dml_target
+full join joined_dml_source on joined_dml_target.id = joined_dml_source.id
+where joined_dml_source.id in (1, 8)
+
+query II rowsort
+select * from joined_dml_target
+----
+3 303
+5 505
+7 707
+
+statement ok
+update joined_dml_target
+cross join joined_dml_source
+set v = 909
+where joined_dml_target.id = 7 and joined_dml_source.id = 9
+
+query II rowsort
+select * from joined_dml_target
+----
+3 303
+5 505
+7 909
+
+statement ok
+delete from joined_dml_target
+cross join joined_dml_source
+where joined_dml_target.id = 3 and joined_dml_source.id = 8
+
+query II rowsort
+select * from joined_dml_target
+----
+5 505
+7 909
+
+query II rowsort
+select * from joined_dml_source
+----
+1 100
+2 200
+5 500
+6 600
+8 800
+9 900
+
+statement ok
+drop table joined_dml_target
+
+statement ok
+drop table joined_dml_source

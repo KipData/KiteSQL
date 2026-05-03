@@ -73,6 +73,23 @@ fn plan_output_columns(plan: &LogicalPlan) -> Vec<ColumnRef> {
     }
 }
 
+fn localize_right_filters(
+    filters: &mut [ScalarExpression],
+    left_len: usize,
+) -> Result<(), DatabaseError> {
+    if filters.is_empty() {
+        return Ok(());
+    }
+
+    let mut localizer = PositionShift {
+        delta: -(left_len as isize),
+    };
+    for expr in filters {
+        localizer.visit(expr)?;
+    }
+    Ok(())
+}
+
 /// Comments copied from Spark Catalyst PushPredicateThroughJoin
 ///
 /// Pushes down `Filter` operators where the `condition` can be
@@ -138,6 +155,8 @@ impl NormalizationRule for PushPredicateThroughJoin {
                         new_ops.0 = Some(Operator::Filter(left_filter_op));
                     }
 
+                    let mut right_filters = right_filters;
+                    localize_right_filters(&mut right_filters, left_columns.len())?;
                     if let Some(right_filter_op) = reduce_filters(right_filters, filter_op.having) {
                         new_ops.1 = Some(Operator::Filter(right_filter_op));
                     }
@@ -155,6 +174,8 @@ impl NormalizationRule for PushPredicateThroughJoin {
                         .collect_vec()
                 }
                 JoinType::RightOuter => {
+                    let mut right_filters = right_filters;
+                    localize_right_filters(&mut right_filters, left_columns.len())?;
                     if let Some(right_filter_op) = reduce_filters(right_filters, filter_op.having) {
                         new_ops.1 = Some(Operator::Filter(right_filter_op));
                     }
@@ -415,14 +436,7 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
         } else {
             (Vec::new(), right_filters)
         };
-        if !right_push.is_empty() {
-            let mut localizer = PositionShift {
-                delta: -(left_columns.len() as isize),
-            };
-            for expr in &mut right_push {
-                localizer.visit(expr)?;
-            }
-        }
+        localize_right_filters(&mut right_push, left_columns.len())?;
         if let Some(filter_op) = reduce_filters(right_push, false) {
             new_ops.1 = Some(Operator::Filter(filter_op));
         } else {

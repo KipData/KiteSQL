@@ -55,7 +55,10 @@ impl JoinProbeState for InnerJoinState {
                     .chain(probe_state.probe_tuple.values.iter())
                     .cloned(),
             );
-            return Ok(Some(Tuple::new(pk.clone(), full_values)));
+            return Ok(Some(Tuple::new(
+                pk.as_ref().or(probe_state.probe_tuple.pk.as_ref()).cloned(),
+                full_values,
+            )));
         }
 
         probe_state.finished = true;
