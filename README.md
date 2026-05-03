@@ -145,6 +145,13 @@ fn main() -> Result<(), DatabaseError> {
 On native targets, `LMDB` shines when reads dominate, while `RocksDB` is usually the stronger choice when writes do.
 Checkpoint support and feature-gating details are documented in [docs/features.md](docs/features.md).
 
+## Shell
+- Run `cargo run --bin kitesql-shell` to open the local interactive shell.
+- Use `cargo run --bin kitesql-shell -- --path ./tmp/kitesql-shell-data` to point to a custom RocksDB directory.
+- Use `cargo run --bin kitesql-shell -- -e "select current_timestamp"` for a quick one-shot check.
+- In interactive mode, end SQL statements with `;`; an empty line also executes the buffered statement.
+- Supported metacommands include `.help`, `.quit`, `.tables`, `.views`, and `.schema <name>`.
+
 👉**more examples**
 - [hello_world](examples/hello_world.rs)
 - [transaction](examples/transaction.rs)

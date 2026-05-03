@@ -1,4 +1,34 @@
 ## Features
+### Shell
+
+Run the local interactive shell with:
+
+```bash
+cargo run --bin kitesql-shell
+```
+
+Use a custom data directory:
+
+```bash
+cargo run --bin kitesql-shell -- --path ./tmp/kitesql-shell-data
+```
+
+Run a one-shot SQL check:
+
+```bash
+cargo run --bin kitesql-shell -- -e "select current_timestamp"
+```
+
+In interactive mode, end SQL statements with `;`; an empty line also executes the buffered statement.
+
+Built-in metacommands:
+
+- `.help`
+- `.quit`
+- `.tables`
+- `.views`
+- `.schema <name>`
+
 ### PG Wire: 
 
 run `cargo run --features="net"` to start service
