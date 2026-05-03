@@ -16,7 +16,9 @@ use crate::binder::{
     attach_span_from_sqlparser_span_if_absent, attach_span_if_absent, lower_case_name, Binder,
 };
 use crate::errors::DatabaseError;
+use crate::expression::visitor_mut::VisitorMut;
 use crate::expression::ScalarExpression;
+use crate::planner::operator::project::ProjectOperator;
 use crate::planner::operator::update::UpdateOperator;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
@@ -28,6 +30,30 @@ use sqlparser::ast::{
 use std::borrow::Cow;
 use std::slice;
 use std::sync::Arc;
+
+struct UpdateExprTargetRemapper<'a> {
+    target_schema: &'a [crate::catalog::ColumnRef],
+}
+
+impl VisitorMut<'_> for UpdateExprTargetRemapper<'_> {
+    fn visit_column_ref(
+        &mut self,
+        column: &mut crate::catalog::ColumnRef,
+        position: &mut usize,
+    ) -> Result<(), DatabaseError> {
+        let Some(target_position) = self
+            .target_schema
+            .iter()
+            .position(|target_column| target_column.same_column(column))
+        else {
+            return Err(DatabaseError::UnsupportedStmt(
+                "joined UPDATE SET expressions can only reference target table columns".to_string(),
+            ));
+        };
+        *position = target_position;
+        Ok(())
+    }
+}
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     fn single_ident_from_object_name(name: &ObjectName) -> Result<&Ident, DatabaseError> {
@@ -51,10 +77,16 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         // FIXME: Make it better to detect the current BindStep
         self.context.allow_default = true;
         if let TableFactor::Table { name, .. } = &to.relation {
+            let is_joined_update = !to.joins.is_empty();
             let table_name: Arc<str> = lower_case_name(name)?.into();
             self.with_pk(table_name.clone());
 
             let mut plan = self.bind_table_ref(to)?;
+            let (target_schema, target_offset) = Self::resolve_source_columns_in_scope(
+                &self.context,
+                &mut self.table_schema_buf,
+                &table_name,
+            )?;
 
             if let Some(predicate) = selection {
                 plan = self.bind_where(plan, predicate)?;
@@ -96,6 +128,12 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                                 expr,
                                 Cow::Borrowed(column.datatype()),
                             )?;
+                            if is_joined_update {
+                                UpdateExprTargetRemapper {
+                                    target_schema: &target_schema,
+                                }
+                                .visit(&mut expr)?;
+                            }
                             value_exprs.push((column, expr));
                         }
                         _ => {
@@ -108,6 +146,19 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 }
             }
             self.context.allow_default = false;
+            if is_joined_update {
+                let exprs = target_schema
+                    .iter()
+                    .enumerate()
+                    .map(|(index, column)| {
+                        ScalarExpression::column_expr(column.clone(), target_offset + index)
+                    })
+                    .collect();
+                plan = LogicalPlan::new(
+                    Operator::Project(ProjectOperator { exprs }),
+                    Childrens::Only(Box::new(plan)),
+                );
+            }
             Ok(LogicalPlan::new(
                 Operator::Update(UpdateOperator {
                     table_name,

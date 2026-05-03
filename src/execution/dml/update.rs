@@ -110,7 +110,9 @@ impl Update {
                 let mut tuple = arena.result_tuple().clone();
                 let mut is_overwrite = true;
 
-                let old_pk = tuple.pk.clone().ok_or(DatabaseError::PrimaryKeyNotFound)?;
+                let Some(old_pk) = tuple.pk.clone() else {
+                    continue;
+                };
                 for (index_meta, exprs) in index_metas.iter() {
                     let values = Projection::projection(&tuple, exprs)?;
                     let Some(value) = DataValue::values_to_tuple(values) else {

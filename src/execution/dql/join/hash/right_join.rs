@@ -77,7 +77,10 @@ impl JoinProbeState for RightJoinState {
             probe_state.produced = true;
             build_state.is_used = true;
             build_state.has_filted = probe_state.has_filtered;
-            return Ok(Some(Tuple::new(pk.clone(), full_values)));
+            return Ok(Some(Tuple::new(
+                pk.as_ref().or(probe_state.probe_tuple.pk.as_ref()).cloned(),
+                full_values,
+            )));
         }
 
         build_state.is_used = probe_state.produced;

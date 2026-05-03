@@ -120,7 +120,7 @@ struct ActiveLeftState {
 
 impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for NestedLoopJoin {
     fn from(
-        (JoinOperator { on, join_type, .. }, left_input, right_input): (
+        (JoinOperator { on, join_type }, left_input, right_input): (
             JoinOperator,
             LogicalPlan,
             LogicalPlan,

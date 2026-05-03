@@ -573,11 +573,7 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
             }
             Statement::Update(update) => {
                 let table = &update.table;
-                if !table.joins.is_empty() {
-                    unimplemented!()
-                } else {
-                    self.bind_update(table, &update.selection, &update.assignments)?
-                }
+                self.bind_update(table, &update.selection, &update.assignments)?
             }
             Statement::Delete(delete) => {
                 let from = match &delete.from {
@@ -585,11 +581,7 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
                 };
                 let table = &from[0];
 
-                if !table.joins.is_empty() {
-                    unimplemented!()
-                } else {
-                    self.bind_delete(table, &delete.selection)?
-                }
+                self.bind_delete(table, &delete.selection)?
             }
             Statement::Analyze(analyze) => {
                 let table_name = analyze.table_name.as_ref().ok_or_else(|| {

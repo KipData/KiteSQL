@@ -70,7 +70,7 @@ enum HashJoinState {
 
 impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for HashJoin {
     fn from(
-        (JoinOperator { on, join_type, .. }, mut left_input, mut right_input): (
+        (JoinOperator { on, join_type }, mut left_input, mut right_input): (
             JoinOperator,
             LogicalPlan,
             LogicalPlan,
