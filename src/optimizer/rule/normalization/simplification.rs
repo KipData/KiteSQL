@@ -307,6 +307,29 @@ mod test {
     }
 
     #[test]
+    fn test_simplify_filter_boolean_wrapped_range_comparison() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table()?;
+        let expected = Some(Range::Scope {
+            min: Bound::Unbounded,
+            max: Bound::Included(DataValue::Int32(10)),
+        });
+
+        for sql in [
+            "select * from t1 where (c1 > 10) = false",
+            "select * from t1 where (c1 > 10) != true",
+            "select * from t1 where not (c1 > 10)",
+        ] {
+            let plan = table_state.plan(sql)?;
+            assert_eq!(
+                plan_filter(&plan, table_state.column_id_by_name("c1"))?,
+                expected
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn test_simplify_filter_repeating_column() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
         let plan = table_state.plan("select * from t1 where -(c1 + 1) > c2")?;

@@ -221,16 +221,11 @@ impl<'a> RangeDetacher<'a> {
 
                     None
                 }
-                (Some(binary), None) | (None, Some(binary)) => self.check_or(op, binary),
+                (Some(binary), None) | (None, Some(binary)) => self.check_and(op, binary),
             },
-            ScalarExpression::Alias { expr, .. }
-            | ScalarExpression::TypeCast { expr, .. }
-            | ScalarExpression::Unary { expr, .. }
-            | ScalarExpression::In { expr, .. }
-            | ScalarExpression::Between { expr, .. }
-            | ScalarExpression::SubString { expr, .. } => self.detach(expr)?,
-            ScalarExpression::Position { expr, .. } => self.detach(expr)?,
-            ScalarExpression::Trim { expr, .. } => self.detach(expr)?,
+            ScalarExpression::Alias { expr, .. } | ScalarExpression::TypeCast { expr, .. } => {
+                self.detach(expr)?
+            }
             ScalarExpression::IsNull { expr, negated, .. } => match expr.as_ref() {
                 ScalarExpression::ColumnRef { column, .. } => {
                     if let (Some(col_id), Some(col_table)) = (column.id(), column.table_name()) {
@@ -263,14 +258,20 @@ impl<'a> RangeDetacher<'a> {
                 | ScalarExpression::IfNull { .. }
                 | ScalarExpression::NullIf { .. }
                 | ScalarExpression::Coalesce { .. }
-                | ScalarExpression::CaseWhen { .. } => self.detach(expr)?,
+                | ScalarExpression::CaseWhen { .. } => None,
                 ScalarExpression::Tuple(_)
                 | ScalarExpression::TableFunction(_)
                 | ScalarExpression::Empty => unreachable!(),
             },
             ScalarExpression::Constant(_) | ScalarExpression::ColumnRef { .. } => None,
             // FIXME: support [RangeDetacher::_detach]
-            ScalarExpression::Tuple(_)
+            ScalarExpression::Unary { .. }
+            | ScalarExpression::In { .. }
+            | ScalarExpression::Between { .. }
+            | ScalarExpression::SubString { .. }
+            | ScalarExpression::Position { .. }
+            | ScalarExpression::Trim { .. }
+            | ScalarExpression::Tuple(_)
             | ScalarExpression::AggCall { .. }
             | ScalarExpression::ScalaFunction(_)
             | ScalarExpression::If { .. }
@@ -759,14 +760,13 @@ impl<'a> RangeDetacher<'a> {
         })
     }
 
-    /// check if: `c1 > c2 or c1 > 1` or `c2 > 1 or c1 > 1`
-    /// this case it makes no sense to just extract c1 > 1
-    fn check_or(&mut self, op: &BinaryOperator, binary: Range) -> Option<Range> {
-        if matches!(op, BinaryOperator::Or) {
-            return None;
+    /// Only conjunction can safely keep a range detached from one side of a binary expression.
+    fn check_and(&mut self, op: &BinaryOperator, binary: Range) -> Option<Range> {
+        if matches!(op, BinaryOperator::And) {
+            return Some(binary);
         }
 
-        Some(binary)
+        None
     }
 }
 
@@ -1308,6 +1308,47 @@ mod test {
                 ])
             )
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_detach_only_conjunction_can_keep_partial_range() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table()?;
+        let detach_c1 = |sql: &str| -> Result<Option<Range>, DatabaseError> {
+            let plan = table_state.plan(sql)?;
+            let op = plan_filter(plan)?.unwrap();
+            RangeDetacher::new("t1", table_state.column_id_by_name("c1")).detach(&op.predicate)
+        };
+
+        assert_eq!(
+            detach_c1("select * from t1 where c2 = 1 and c1 > 10")?,
+            Some(Range::Scope {
+                min: Bound::Excluded(DataValue::Int32(10)),
+                max: Bound::Unbounded,
+            })
+        );
+        let negated_range = Some(Range::Scope {
+            min: Bound::Unbounded,
+            max: Bound::Included(DataValue::Int32(10)),
+        });
+        assert_eq!(
+            detach_c1("select * from t1 where (c1 > 10) = false")?,
+            negated_range.clone()
+        );
+        assert_eq!(
+            detach_c1("select * from t1 where (c1 > 10) != true")?,
+            negated_range.clone()
+        );
+        assert_eq!(
+            detach_c1("select * from t1 where not (c1 > 10)")?,
+            negated_range
+        );
+        assert_eq!(
+            detach_c1("select * from t1 where (c1 > 10) = (c2 > 0)")?,
+            None
+        );
+        assert_eq!(detach_c1("select * from t1 where (c1 > 10) is null")?, None);
 
         Ok(())
     }

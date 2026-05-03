@@ -85,6 +85,30 @@ select * from t1 where id <= 0 and id >= 3;
 ----
 
 query IIT
+select * from t1 where (id > 10) = false;
+----
+0 1 2
+3 4 5
+6 7 8
+9 10 11
+
+query IIT
+select * from t1 where (id > 10) != true;
+----
+0 1 2
+3 4 5
+6 7 8
+9 10 11
+
+query IIT
+select * from t1 where not (id > 10);
+----
+0 1 2
+3 4 5
+6 7 8
+9 10 11
+
+query IIT
 select * from t1 where id >= 3 or id <= 9 limit 10;
 ----
 0 1 2
