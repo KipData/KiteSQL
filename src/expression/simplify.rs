@@ -121,20 +121,35 @@ impl VisitorMut<'_> for Simplify {
             ScalarExpression::Unary {
                 op,
                 expr: arg_expr,
+                evaluator,
                 ty,
-                ..
             } => {
                 let op = *op;
                 let ty = ty.clone();
-                let arg_expr = arg_expr.as_ref().clone();
-                if let Some(value) = expr.unpack_val() {
-                    let _ = mem::replace(expr, ScalarExpression::Constant(value));
+                let child_expr = arg_expr.as_ref().clone();
+                let value = if let Some(value) = arg_expr.unpack_val() {
+                    Some(if let Some(evaluator) = evaluator {
+                        evaluator.0.unary_eval(&value)
+                    } else {
+                        unary_create(Cow::Borrowed(&ty), op)?.0.unary_eval(&value)
+                    })
                 } else {
-                    self.replaces.push(Replace::Unary(ReplaceUnary {
-                        child_expr: arg_expr,
-                        op,
-                        ty,
-                    }));
+                    None
+                };
+
+                if let Some(value) = value {
+                    let _ = mem::replace(expr, ScalarExpression::Constant(value));
+                } else if matches!(op, UnaryOperator::Not) {
+                    if let Some(new_expr) = Self::take_negated_range_comparison(arg_expr) {
+                        let _ = mem::replace(expr, new_expr);
+                        self.visit(expr)?;
+                    } else {
+                        self.replaces
+                            .push(Replace::Unary(ReplaceUnary { child_expr, op, ty }));
+                    }
+                } else {
+                    self.replaces
+                        .push(Replace::Unary(ReplaceUnary { child_expr, op, ty }));
                 }
             }
             ScalarExpression::Binary {
@@ -148,6 +163,14 @@ impl VisitorMut<'_> for Simplify {
 
                 // `(c1 - 1) and (c1 + 2)` cannot fix!
                 self.fix_expr(right_expr, left_expr, op)?;
+
+                if let Some(new_expr) =
+                    Self::take_bool_normalized_range_comparison(*op, left_expr, right_expr)
+                {
+                    let _ = mem::replace(expr, new_expr);
+                    self.visit(expr)?;
+                    return Ok(());
+                }
 
                 if Self::is_arithmetic(op) {
                     match (
@@ -315,6 +338,80 @@ impl Simplify {
                 | BinaryOperator::Minus
                 | BinaryOperator::Multiply
         )
+    }
+
+    fn negate_range_comparison(op: BinaryOperator) -> Option<BinaryOperator> {
+        match op {
+            BinaryOperator::Gt => Some(BinaryOperator::LtEq),
+            BinaryOperator::GtEq => Some(BinaryOperator::Lt),
+            BinaryOperator::Lt => Some(BinaryOperator::GtEq),
+            BinaryOperator::LtEq => Some(BinaryOperator::Gt),
+            _ => None,
+        }
+    }
+
+    fn take_range_comparison(expr: &mut Box<ScalarExpression>) -> Option<ScalarExpression> {
+        match expr.as_ref() {
+            ScalarExpression::Binary { op, .. } if Self::negate_range_comparison(*op).is_some() => {
+                Some(mem::replace(expr.as_mut(), ScalarExpression::Empty))
+            }
+            _ => None,
+        }
+    }
+
+    fn take_negated_range_comparison(expr: &mut Box<ScalarExpression>) -> Option<ScalarExpression> {
+        match expr.as_mut() {
+            ScalarExpression::Binary { op, .. } => {
+                *op = Self::negate_range_comparison(*op)?;
+                Some(mem::replace(expr.as_mut(), ScalarExpression::Empty))
+            }
+            _ => None,
+        }
+    }
+
+    fn boolean_constant(expr: &ScalarExpression) -> Option<bool> {
+        match expr {
+            ScalarExpression::Constant(DataValue::Boolean(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    fn take_range_comparison_with_polarity(
+        expr: &mut Box<ScalarExpression>,
+        positive: bool,
+    ) -> Option<ScalarExpression> {
+        if positive {
+            Self::take_range_comparison(expr)
+        } else {
+            Self::take_negated_range_comparison(expr)
+        }
+    }
+
+    fn take_bool_normalized_range_comparison(
+        op: BinaryOperator,
+        left_expr: &mut Box<ScalarExpression>,
+        right_expr: &mut Box<ScalarExpression>,
+    ) -> Option<ScalarExpression> {
+        let is_eq = matches!(op, BinaryOperator::Eq);
+        let is_not_eq = matches!(op, BinaryOperator::NotEq);
+        if !is_eq && !is_not_eq {
+            return None;
+        }
+
+        if let Some(value) = Self::boolean_constant(right_expr) {
+            return Self::take_range_comparison_with_polarity(
+                left_expr,
+                if is_eq { value } else { !value },
+            );
+        }
+        if let Some(value) = Self::boolean_constant(left_expr) {
+            return Self::take_range_comparison_with_polarity(
+                right_expr,
+                if is_eq { value } else { !value },
+            );
+        }
+
+        None
     }
 
     fn fix_expr(
