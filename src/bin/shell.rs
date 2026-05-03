@@ -52,20 +52,30 @@ Transaction commands:
   ROLLBACK
 ";
 
+    #[derive(Debug, PartialEq, Eq)]
     enum Mode {
         Continue,
         Exit,
     }
 
+    #[derive(Debug)]
     struct Args {
         path: String,
         execute: Option<String>,
     }
 
     fn parse_args() -> Result<Args, String> {
+        parse_args_from(env::args().skip(1))
+    }
+
+    fn parse_args_from<I, S>(args: I) -> Result<Args, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
         let mut path = DEFAULT_PATH.to_string();
         let mut execute = None;
-        let mut args = env::args().skip(1);
+        let mut args = args.into_iter().map(Into::into);
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -100,6 +110,10 @@ Transaction commands:
             (false, true) => " ...> ",
             (true, true) => " ...(tx)> ",
         }
+    }
+
+    fn should_execute_line(trimmed_line: &str) -> bool {
+        trimmed_line.is_empty() || trimmed_line.ends_with(';')
     }
 
     enum Input {
@@ -337,7 +351,7 @@ Transaction commands:
 
             buffer.push_str(&line);
 
-            let should_execute = trimmed.is_empty() || trimmed.ends_with(';');
+            let should_execute = should_execute_line(trimmed);
             if !should_execute {
                 continue;
             }
@@ -394,6 +408,145 @@ Transaction commands:
                 eprintln!("{err}");
                 ExitCode::FAILURE
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use tempfile::TempDir;
+
+        fn test_database() -> (TempDir, Database<RocksStorage>) {
+            let temp_dir = TempDir::new().expect("failed to create temp dir");
+            let database = DataBaseBuilder::path(temp_dir.path())
+                .build_rocksdb()
+                .expect("failed to create test database");
+            (temp_dir, database)
+        }
+
+        #[test]
+        fn parse_args_uses_defaults() {
+            let args = parse_args_from(Vec::<String>::new()).expect("args should parse");
+
+            assert_eq!(args.path, DEFAULT_PATH);
+            assert_eq!(args.execute, None);
+        }
+
+        #[test]
+        fn parse_args_accepts_path_and_execute_sql() {
+            let args = parse_args_from(["--path", "/tmp/kite", "-e", "select 1;"])
+                .expect("args should parse");
+
+            assert_eq!(args.path, "/tmp/kite");
+            assert_eq!(args.execute.as_deref(), Some("select 1;"));
+        }
+
+        #[test]
+        fn parse_args_rejects_missing_values_and_unknown_flags() {
+            assert_eq!(
+                parse_args_from(["--path"]).expect_err("--path should require a value"),
+                "--path expects a value"
+            );
+            assert_eq!(
+                parse_args_from(["--execute"]).expect_err("--execute should require a value"),
+                "--execute expects a value"
+            );
+            assert!(parse_args_from(["--unknown"])
+                .expect_err("unknown flags should be rejected")
+                .starts_with("unknown argument: --unknown"));
+        }
+
+        #[test]
+        fn prompt_reflects_transaction_and_continuation_state() {
+            assert_eq!(prompt(false, false), "kite> ");
+            assert_eq!(prompt(true, false), "kite(tx)> ");
+            assert_eq!(prompt(false, true), " ...> ");
+            assert_eq!(prompt(true, true), " ...(tx)> ");
+        }
+
+        #[test]
+        fn should_execute_line_matches_repl_completion_rules() {
+            assert!(should_execute_line(""));
+            assert!(should_execute_line("select 1;"));
+            assert!(should_execute_line("   ;"));
+            assert!(!should_execute_line("select 1"));
+            assert!(!should_execute_line("select 1; -- comment"));
+        }
+
+        #[test]
+        fn meta_command_exit_aliases_stop_the_shell() {
+            let (_temp_dir, database) = test_database();
+            let mut tx = None;
+
+            assert_eq!(
+                handle_meta_command(".quit", &database, &mut tx).expect(".quit should parse"),
+                Mode::Exit
+            );
+            assert_eq!(
+                handle_meta_command(".exit", &database, &mut tx).expect(".exit should parse"),
+                Mode::Exit
+            );
+        }
+
+        #[test]
+        fn transaction_commands_update_shell_transaction_state() {
+            let (_temp_dir, database) = test_database();
+            let mut tx = None;
+
+            assert_eq!(
+                handle_command("BEGIN", &database, &mut tx).expect("begin should succeed"),
+                Mode::Continue
+            );
+            assert!(tx.is_some());
+
+            assert_eq!(
+                handle_command("COMMIT", &database, &mut tx).expect("commit should succeed"),
+                Mode::Continue
+            );
+            assert!(tx.is_none());
+
+            assert_eq!(
+                handle_command("start transaction", &database, &mut tx)
+                    .expect("start transaction should succeed"),
+                Mode::Continue
+            );
+            assert!(tx.is_some());
+
+            assert_eq!(
+                handle_command("ROLLBACK", &database, &mut tx).expect("rollback should succeed"),
+                Mode::Continue
+            );
+            assert!(tx.is_none());
+        }
+
+        #[test]
+        fn sql_and_schema_metacommands_run_against_database() {
+            let (_temp_dir, database) = test_database();
+            let mut tx = None;
+
+            handle_command(
+                "create table users (id int primary key, name varchar);",
+                &database,
+                &mut tx,
+            )
+            .expect("create table should succeed");
+            handle_command("insert into users values (1, 'alice');", &database, &mut tx)
+                .expect("insert should succeed");
+
+            assert_eq!(
+                handle_meta_command(".tables", &database, &mut tx).expect(".tables should succeed"),
+                Mode::Continue
+            );
+            assert_eq!(
+                handle_meta_command(".schema users", &database, &mut tx)
+                    .expect(".schema should succeed"),
+                Mode::Continue
+            );
+            assert_eq!(
+                handle_command("select * from users;", &database, &mut tx)
+                    .expect("select should succeed"),
+                Mode::Continue
+            );
         }
     }
 }
