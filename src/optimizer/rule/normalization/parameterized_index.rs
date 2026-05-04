@@ -16,7 +16,7 @@ use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::{BinaryOperator, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
-use crate::planner::operator::mark_apply::MarkApplyKind;
+use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyQuantifier};
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
 use crate::planner::{Childrens, LogicalPlan};
@@ -59,9 +59,12 @@ fn find_parameterized_probe(
         MarkApplyKind::Exists => predicates.iter().find_map(|predicate| {
             extract_parameterized_probe(predicate, left_schema, right_schema)
         }),
-        MarkApplyKind::In => predicates.first().and_then(|predicate| {
-            extract_parameterized_probe(predicate, left_schema, right_schema)
-        }),
+        MarkApplyKind::Quantified(MarkApplyQuantifier::Any) => {
+            predicates.first().and_then(|predicate| {
+                extract_parameterized_probe(predicate, left_schema, right_schema)
+            })
+        }
+        MarkApplyKind::Quantified(MarkApplyQuantifier::All) => None,
     }
 }
 

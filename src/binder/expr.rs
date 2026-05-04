@@ -33,6 +33,7 @@ use crate::expression::function::scala::{ArcScalarFunctionImpl, ScalarFunction};
 use crate::expression::function::table::{ArcTableFunctionImpl, TableFunction};
 use crate::expression::function::FunctionSummary;
 use crate::expression::{AliasType, ScalarExpression};
+use crate::planner::operator::mark_apply::MarkApplyQuantifier;
 use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
 use crate::planner::{LogicalPlan, SchemaOutput};
 use crate::storage::Transaction;
@@ -245,7 +246,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 })
             }
             Expr::Exists { subquery, negated } => {
-                let (sub_query, _column, correlated) = self.bind_subquery(None, subquery)?;
+                let (sub_query, correlated) = self.bind_subquery(subquery)?;
                 let (_, marker_ref) = self
                     .bind_temp_table_alias(ScalarExpression::Constant(DataValue::Boolean(true)), 0);
                 self.context.sub_query(SubQueryType::ExistsSubQuery {
@@ -265,7 +266,8 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 }
             }
             Expr::Subquery(subquery) => {
-                let (sub_query, column, correlated) = self.bind_subquery(None, subquery)?;
+                let (sub_query, column, correlated) =
+                    self.bind_subquery_with_output(None, subquery)?;
                 let sub_query = ScalarSubqueryOperator::build(sub_query);
                 let (expr, sub_query) = if !self.context.is_step(&QueryBindStep::Where) {
                     self.bind_temp_table(column, sub_query)?
@@ -282,46 +284,13 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 expr,
                 subquery,
                 negated,
-            } => {
-                let left_expr = self.bind_expr(expr)?;
-                let (sub_query, column, correlated) =
-                    self.bind_subquery(Some(left_expr.return_type().as_ref()), subquery)?;
-
-                if !self.context.is_step(&QueryBindStep::Where) {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "'IN (SUBQUERY)' can only appear in `WHERE`".to_string(),
-                    ));
-                }
-
-                let (alias_expr, sub_query) = self.bind_temp_table(column, sub_query)?;
-                let predicate = ScalarExpression::Binary {
-                    op: expression::BinaryOperator::Eq,
-                    left_expr: Box::new(left_expr),
-                    right_expr: Box::new(alias_expr),
-                    evaluator: None,
-                    ty: LogicalType::Boolean,
-                };
-                let (_, marker_ref) = self
-                    .bind_temp_table_alias(ScalarExpression::Constant(DataValue::Boolean(true)), 0);
-                self.context.sub_query(SubQueryType::InSubQuery {
-                    negated: *negated,
-                    plan: sub_query,
-                    correlated,
-                    output_column: marker_ref.output_column(),
-                    predicate,
-                });
-
-                if *negated {
-                    Ok(ScalarExpression::Unary {
-                        op: expression::UnaryOperator::Not,
-                        expr: Box::new(marker_ref),
-                        evaluator: None,
-                        ty: LogicalType::Boolean,
-                    })
-                } else {
-                    Ok(marker_ref)
-                }
-            }
+            } => self.bind_quantified_subquery(
+                MarkApplyQuantifier::Any,
+                *negated,
+                expr,
+                &BinaryOperator::Eq,
+                subquery,
+            ),
             Expr::Tuple(exprs) => {
                 let mut bond_exprs = Vec::with_capacity(exprs.len());
 
@@ -377,7 +346,83 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                     ty,
                 })
             }
+            Expr::AnyOp {
+                left,
+                compare_op,
+                right,
+                ..
+            } => self.bind_quantified_op(MarkApplyQuantifier::Any, left, compare_op, right),
+            Expr::AllOp {
+                left,
+                compare_op,
+                right,
+            } => self.bind_quantified_op(MarkApplyQuantifier::All, left, compare_op, right),
             expr => Err(DatabaseError::UnsupportedStmt(expr.to_string())),
+        }
+    }
+
+    fn bind_quantified_op(
+        &mut self,
+        quantifier: MarkApplyQuantifier,
+        left: &Expr,
+        compare_op: &BinaryOperator,
+        right: &Expr,
+    ) -> Result<ScalarExpression, DatabaseError> {
+        let Expr::Subquery(subquery) = right else {
+            return Err(DatabaseError::UnsupportedStmt(format!(
+                "{quantifier:?} only supports subquery operands"
+            )));
+        };
+
+        self.bind_quantified_subquery(quantifier, false, left, compare_op, subquery)
+    }
+
+    fn bind_quantified_subquery(
+        &mut self,
+        quantifier: MarkApplyQuantifier,
+        negated: bool,
+        expr: &Expr,
+        compare_op: &BinaryOperator,
+        subquery: &Query,
+    ) -> Result<ScalarExpression, DatabaseError> {
+        let left_expr = self.bind_expr(expr)?;
+        let (sub_query, column, correlated) =
+            self.bind_subquery_with_output(Some(left_expr.return_type().as_ref()), subquery)?;
+
+        if !self.context.is_step(&QueryBindStep::Where) {
+            return Err(DatabaseError::UnsupportedStmt(
+                "quantified subqueries can only appear in `WHERE`".to_string(),
+            ));
+        }
+
+        let (alias_expr, sub_query) = self.bind_temp_table(column, sub_query)?;
+        let predicate = ScalarExpression::Binary {
+            op: (*compare_op).clone().try_into()?,
+            left_expr: Box::new(left_expr),
+            right_expr: Box::new(alias_expr),
+            evaluator: None,
+            ty: LogicalType::Boolean,
+        };
+        let (_, marker_ref) =
+            self.bind_temp_table_alias(ScalarExpression::Constant(DataValue::Boolean(true)), 0);
+        self.context.sub_query(SubQueryType::QuantifiedSubQuery {
+            quantifier,
+            negated,
+            plan: sub_query,
+            correlated,
+            output_column: marker_ref.output_column(),
+            predicate,
+        });
+
+        if negated {
+            Ok(ScalarExpression::Unary {
+                op: expression::UnaryOperator::Not,
+                expr: Box::new(marker_ref),
+                evaluator: None,
+                ty: LogicalType::Boolean,
+            })
+        } else {
+            Ok(marker_ref)
         }
     }
 
@@ -425,11 +470,42 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         )
     }
 
-    fn bind_subquery(
+    fn bind_subquery_with_output(
         &mut self,
-        in_ty: Option<&LogicalType>,
+        value_ty: Option<&LogicalType>,
         subquery: &Query,
     ) -> Result<(LogicalPlan, ScalarExpression, bool), DatabaseError> {
+        let (mut sub_query, correlated) = self.bind_subquery(subquery)?;
+        let sub_query_schema = sub_query.output_schema();
+
+        let fn_check = |len: usize| {
+            if sub_query_schema.len() != len {
+                return Err(DatabaseError::MisMatch(
+                    "expects only one expression to be returned",
+                    "the expression returned by the subquery",
+                ));
+            }
+            Ok(())
+        };
+
+        let expr = if let Some(LogicalType::Tuple(tys)) = value_ty {
+            fn_check(tys.len())?;
+
+            let columns = sub_query_schema
+                .iter()
+                .enumerate()
+                .map(|(position, column)| ScalarExpression::column_expr(column.clone(), position))
+                .collect::<Vec<_>>();
+            ScalarExpression::Tuple(columns)
+        } else {
+            fn_check(1)?;
+
+            ScalarExpression::column_expr(sub_query_schema[0].clone(), 0)
+        };
+        Ok((sub_query, expr, correlated))
+    }
+
+    fn bind_subquery(&mut self, subquery: &Query) -> Result<(LogicalPlan, bool), DatabaseError> {
         let BinderContext {
             table_cache,
             view_cache,
@@ -451,35 +527,9 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             self.args,
             Some(self),
         );
-        let mut sub_query = binder.bind_query(subquery)?;
+        let sub_query = binder.bind_query(subquery)?;
         let correlated = binder.context.has_outer_refs();
-        let sub_query_schema = sub_query.output_schema();
-
-        let fn_check = |len: usize| {
-            if sub_query_schema.len() != len {
-                return Err(DatabaseError::MisMatch(
-                    "expects only one expression to be returned",
-                    "the expression returned by the subquery",
-                ));
-            }
-            Ok(())
-        };
-
-        let expr = if let Some(LogicalType::Tuple(tys)) = in_ty {
-            fn_check(tys.len())?;
-
-            let columns = sub_query_schema
-                .iter()
-                .enumerate()
-                .map(|(position, column)| ScalarExpression::column_expr(column.clone(), position))
-                .collect::<Vec<_>>();
-            ScalarExpression::Tuple(columns)
-        } else {
-            fn_check(1)?;
-
-            ScalarExpression::column_expr(sub_query_schema[0].clone(), 0)
-        };
-        Ok((sub_query, expr, correlated))
+        Ok((sub_query, correlated))
     }
 
     pub fn bind_like(

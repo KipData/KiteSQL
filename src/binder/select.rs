@@ -1314,11 +1314,12 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                             predicates,
                         );
                     }
-                    SubQueryType::InSubQuery {
+                    SubQueryType::QuantifiedSubQuery {
+                        quantifier,
                         plan,
                         correlated,
                         output_column,
-                        predicate: mut in_predicate,
+                        predicate: mut quantified_predicate,
                         ..
                     } => {
                         if matches!(uses_mark_apply, Some(false)) {
@@ -1329,7 +1330,8 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         }
                         uses_mark_apply = Some(true);
                         if correlated {
-                            in_predicate = Self::rewrite_correlated_in_predicate(in_predicate);
+                            quantified_predicate =
+                                Self::rewrite_correlated_quantified_predicate(quantified_predicate);
                         }
                         let (plan, predicates) = Self::prepare_mark_apply(
                             &mut predicate,
@@ -1338,10 +1340,15 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                             plan,
                             correlated,
                             true,
-                            vec![in_predicate],
+                            vec![quantified_predicate],
                         )?;
-                        children =
-                            MarkApplyOperator::build_in(children, plan, output_column, predicates);
+                        children = MarkApplyOperator::build_quantified(
+                            children,
+                            plan,
+                            quantifier,
+                            output_column,
+                            predicates,
+                        );
                     }
                     SubQueryType::SubQuery { plan, correlated } => {
                         if matches!(uses_mark_apply, Some(true)) {
@@ -1480,7 +1487,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         Ok((plan, apply_predicates))
     }
 
-    fn rewrite_correlated_in_predicate(predicate: ScalarExpression) -> ScalarExpression {
+    fn rewrite_correlated_quantified_predicate(predicate: ScalarExpression) -> ScalarExpression {
         let strip_projection_alias = |expr: Box<ScalarExpression>| match *expr {
             ScalarExpression::Alias {
                 expr,
@@ -1496,7 +1503,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 right_expr,
                 ty,
                 ..
-            } if op == BinaryOperator::Eq => ScalarExpression::Binary {
+            } => ScalarExpression::Binary {
                 op,
                 left_expr: strip_projection_alias(left_expr),
                 right_expr: strip_projection_alias(right_expr),
@@ -2115,7 +2122,9 @@ mod tests {
     use crate::expression::visitor_mut::VisitorMut;
     use crate::expression::{AliasType, ScalarExpression};
     use crate::planner::operator::join::{JoinCondition, JoinType};
-    use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyOperator};
+    use crate::planner::operator::mark_apply::{
+        MarkApplyKind, MarkApplyOperator, MarkApplyQuantifier,
+    };
     use crate::planner::operator::Operator;
     use crate::planner::{Childrens, LogicalPlan};
     use crate::types::LogicalType;
@@ -2262,6 +2271,19 @@ mod tests {
         }
     }
 
+    fn assert_quantified_mark_apply(
+        plan: &LogicalPlan,
+        quantifier: MarkApplyQuantifier,
+        predicate_len: usize,
+    ) {
+        let Some(mark_apply) = find_mark_apply(plan) else {
+            panic!("expected quantified subquery to introduce a mark apply")
+        };
+
+        assert_eq!(mark_apply.kind, MarkApplyKind::Quantified(quantifier));
+        assert_eq!(mark_apply.predicates().len(), predicate_len);
+    }
+
     #[test]
     fn test_scalar_subquery_in_where_binds_as_inner_join() -> Result<(), DatabaseError> {
         let table_states = build_t1_table()?;
@@ -2280,12 +2302,34 @@ mod tests {
     fn test_in_subquery_in_where_binds_as_mark_apply() -> Result<(), DatabaseError> {
         let table_states = build_t1_table()?;
         let plan = table_states.plan("select * from t1 where c1 in (select c3 from t2)")?;
-        let Some(mark_apply) = find_mark_apply(&plan) else {
-            panic!("expected IN subquery to introduce a mark apply")
-        };
+        assert_quantified_mark_apply(&plan, MarkApplyQuantifier::Any, 1);
 
-        assert_eq!(mark_apply.kind, MarkApplyKind::In);
-        assert_eq!(mark_apply.predicates().len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_any_subquery_in_where_binds_as_mark_apply() -> Result<(), DatabaseError> {
+        let table_states = build_t1_table()?;
+        let plan = table_states.plan("select * from t1 where c1 < any(select c3 from t2)")?;
+        assert_quantified_mark_apply(&plan, MarkApplyQuantifier::Any, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_some_subquery_in_where_binds_as_mark_apply() -> Result<(), DatabaseError> {
+        let table_states = build_t1_table()?;
+        let plan = table_states.plan("select * from t1 where c1 = some(select c3 from t2)")?;
+        assert_quantified_mark_apply(&plan, MarkApplyQuantifier::Any, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_all_subquery_in_where_binds_as_mark_apply() -> Result<(), DatabaseError> {
+        let table_states = build_t1_table()?;
+        let plan = table_states.plan("select * from t1 where c1 > all(select c3 from t2)")?;
+        assert_quantified_mark_apply(&plan, MarkApplyQuantifier::All, 1);
 
         Ok(())
     }
@@ -2295,12 +2339,27 @@ mod tests {
         let table_states = build_t1_table()?;
         let plan =
             table_states.plan("select * from t1 where c1 in (select c3 from t2 where c4 = c2)")?;
-        let Some(mark_apply) = find_mark_apply(&plan) else {
-            panic!("expected correlated IN subquery to introduce a mark apply")
-        };
+        assert_quantified_mark_apply(&plan, MarkApplyQuantifier::Any, 2);
 
-        assert_eq!(mark_apply.kind, MarkApplyKind::In);
-        assert_eq!(mark_apply.predicates().len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn test_correlated_any_subquery_in_where_binds_as_mark_apply() -> Result<(), DatabaseError> {
+        let table_states = build_t1_table()?;
+        let plan = table_states
+            .plan("select * from t1 where c1 < any(select c3 from t2 where c4 = c2)")?;
+        assert_quantified_mark_apply(&plan, MarkApplyQuantifier::Any, 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_correlated_all_subquery_in_where_binds_as_mark_apply() -> Result<(), DatabaseError> {
+        let table_states = build_t1_table()?;
+        let plan = table_states
+            .plan("select * from t1 where c1 > all(select c3 from t2 where c4 = c2)")?;
+        assert_quantified_mark_apply(&plan, MarkApplyQuantifier::All, 2);
 
         Ok(())
     }

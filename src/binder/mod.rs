@@ -49,6 +49,7 @@ use crate::db::{ScalaFunctions, TableFunctions};
 use crate::errors::{DatabaseError, SqlErrorSpan};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::JoinType;
+use crate::planner::operator::mark_apply::MarkApplyQuantifier;
 use crate::planner::{LogicalPlan, SchemaOutput};
 use crate::storage::{TableCache, Transaction, ViewCache};
 use crate::types::tuple::SchemaRef;
@@ -156,7 +157,8 @@ pub enum SubQueryType {
         correlated: bool,
         output_column: ColumnRef,
     },
-    InSubQuery {
+    QuantifiedSubQuery {
+        quantifier: MarkApplyQuantifier,
         negated: bool,
         plan: LogicalPlan,
         correlated: bool,

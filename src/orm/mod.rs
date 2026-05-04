@@ -304,6 +304,17 @@ trait ValueExpressionOps: Sized {
         })
     }
 
+    fn quantified_subquery_expr<S: SubquerySource>(
+        self,
+        compare_op: CompareOp,
+        quantifier: QuantifiedSubquery,
+        subquery: S,
+    ) -> QueryExpr {
+        let left = self.into_query_value().into_expr();
+        let right = Expr::Subquery(Box::new(subquery.into_subquery()));
+        QueryExpr::from_expr(quantifier.into_ast(left, compare_op.as_ast(), right))
+    }
+
     #[allow(clippy::wrong_self_convention)]
     fn is_null_expr(self) -> QueryExpr {
         QueryExpr::from_expr(Expr::IsNull(Box::new(self.into_query_value().into_expr())))
@@ -651,6 +662,58 @@ enum CompareOp {
     Gte,
     Lt,
     Lte,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuantifiedSubquery {
+    Any,
+    Some,
+    All,
+}
+
+macro_rules! quantified_value_methods {
+    ($(($method:ident, $op:ident, $quantifier:ident, $symbol:literal, $keyword:literal)),+ $(,)?) => {
+        $(
+            #[doc = concat!("Builds `expr ", $symbol, " ", $keyword, " (subquery)`.")]
+            pub fn $method<S: SubquerySource>(self, subquery: S) -> QueryExpr {
+                ValueExpressionOps::quantified_subquery_expr(
+                    self,
+                    CompareOp::$op,
+                    QuantifiedSubquery::$quantifier,
+                    subquery,
+                )
+            }
+        )+
+    };
+}
+
+macro_rules! quantified_methods {
+    () => {
+        quantified_value_methods!(
+            (eq_any, Eq, Any, "=", "ANY"),
+            (ne_any, Ne, Any, "<>", "ANY"),
+            (gt_any, Gt, Any, ">", "ANY"),
+            (gte_any, Gte, Any, ">=", "ANY"),
+            (lt_any, Lt, Any, "<", "ANY"),
+            (lte_any, Lte, Any, "<=", "ANY"),
+            (eq_some, Eq, Some, "=", "SOME"),
+            (ne_some, Ne, Some, "<>", "SOME"),
+            (gt_some, Gt, Some, ">", "SOME"),
+            (gte_some, Gte, Some, ">=", "SOME"),
+            (lt_some, Lt, Some, "<", "SOME"),
+            (lte_some, Lte, Some, "<=", "SOME"),
+            (eq_all, Eq, All, "=", "ALL"),
+            (ne_all, Ne, All, "<>", "ALL"),
+            (gt_all, Gt, All, ">", "ALL"),
+            (gte_all, Gte, All, ">=", "ALL"),
+            (lt_all, Lt, All, "<", "ALL"),
+            (lte_all, Lte, All, "<=", "ALL"),
+        );
+    };
+}
+
+impl<M, T> Field<M, T> {
+    quantified_methods!();
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1113,6 +1176,8 @@ impl QueryValue {
         ValueExpressionOps::lte_expr(self, value)
     }
 
+    quantified_methods!();
+
     /// Builds `expr IS NULL`.
     pub fn is_null(self) -> QueryExpr {
         ValueExpressionOps::is_null_expr(self)
@@ -1350,6 +1415,24 @@ impl CompareOp {
             CompareOp::Gte => SqlBinaryOperator::GtEq,
             CompareOp::Lt => SqlBinaryOperator::Lt,
             CompareOp::Lte => SqlBinaryOperator::LtEq,
+        }
+    }
+}
+
+impl QuantifiedSubquery {
+    fn into_ast(self, left: Expr, compare_op: SqlBinaryOperator, right: Expr) -> Expr {
+        match self {
+            QuantifiedSubquery::Any | QuantifiedSubquery::Some => Expr::AnyOp {
+                left: Box::new(left),
+                compare_op,
+                right: Box::new(right),
+                is_some: matches!(self, QuantifiedSubquery::Some),
+            },
+            QuantifiedSubquery::All => Expr::AllOp {
+                left: Box::new(left),
+                compare_op,
+                right: Box::new(right),
+            },
         }
     }
 }

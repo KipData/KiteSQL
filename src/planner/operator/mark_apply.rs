@@ -20,10 +20,16 @@ use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::fmt::Formatter;
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash, ReferenceSerialization)]
+pub enum MarkApplyQuantifier {
+    Any,
+    All,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash, ReferenceSerialization)]
 pub enum MarkApplyKind {
     Exists,
-    In,
+    Quantified(MarkApplyQuantifier),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
@@ -60,8 +66,16 @@ impl MarkApplyOperator {
     }
 
     pub fn new_in(output_column: ColumnRef, predicates: Vec<ScalarExpression>) -> Self {
+        Self::new_quantified(MarkApplyQuantifier::Any, output_column, predicates)
+    }
+
+    pub fn new_quantified(
+        quantifier: MarkApplyQuantifier,
+        output_column: ColumnRef,
+        predicates: Vec<ScalarExpression>,
+    ) -> Self {
         Self {
-            kind: MarkApplyKind::In,
+            kind: MarkApplyKind::Quantified(quantifier),
             predicates,
             output_column,
             parameterized_probe: None,
@@ -74,8 +88,28 @@ impl MarkApplyOperator {
         output_column: ColumnRef,
         predicates: Vec<ScalarExpression>,
     ) -> LogicalPlan {
+        Self::build_quantified(
+            left,
+            right,
+            MarkApplyQuantifier::Any,
+            output_column,
+            predicates,
+        )
+    }
+
+    pub fn build_quantified(
+        left: LogicalPlan,
+        right: LogicalPlan,
+        quantifier: MarkApplyQuantifier,
+        output_column: ColumnRef,
+        predicates: Vec<ScalarExpression>,
+    ) -> LogicalPlan {
         LogicalPlan::new(
-            Operator::MarkApply(MarkApplyOperator::new_in(output_column, predicates)),
+            Operator::MarkApply(MarkApplyOperator::new_quantified(
+                quantifier,
+                output_column,
+                predicates,
+            )),
             Childrens::Twins {
                 left: Box::new(left),
                 right: Box::new(right),
@@ -108,7 +142,8 @@ impl fmt::Display for MarkApplyOperator {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self.kind {
             MarkApplyKind::Exists => write!(f, "MarkExistsApply"),
-            MarkApplyKind::In => write!(f, "MarkInApply"),
+            MarkApplyKind::Quantified(MarkApplyQuantifier::Any) => write!(f, "MarkAnyApply"),
+            MarkApplyKind::Quantified(MarkApplyQuantifier::All) => write!(f, "MarkAllApply"),
         }
     }
 }
