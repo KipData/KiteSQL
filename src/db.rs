@@ -1658,7 +1658,7 @@ pub(crate) mod test {
             |sql: &str, index_name: &str| -> Result<(), DatabaseError> {
                 let explain_plan = collect_plan(sql)?;
                 assert!(
-                    explain_plan.contains("MarkInApply"),
+                    explain_plan.contains("MarkAnyApply"),
                     "unexpected explain plan: {explain_plan}"
                 );
                 assert!(

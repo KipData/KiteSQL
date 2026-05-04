@@ -1,0 +1,50 @@
+statement ok
+create table any_all_outer(id int primary key, a int not null);
+
+statement ok
+create table any_all_inner(id int primary key, b int not null);
+
+statement ok
+insert into any_all_outer values (1, 1), (2, 2), (3, 3), (4, 4);
+
+statement ok
+insert into any_all_inner values (1, 2), (2, 3);
+
+query I rowsort
+select id from any_all_outer
+where a = any(select b from any_all_inner);
+----
+2
+3
+
+query I rowsort
+select id from any_all_outer
+where a = some(select b from any_all_inner);
+----
+2
+3
+
+query I rowsort
+select id from any_all_outer
+where a < any(select b from any_all_inner);
+----
+1
+2
+
+query I rowsort
+select id from any_all_outer
+where a > all(select b from any_all_inner);
+----
+4
+
+query I rowsort
+select id from any_all_outer
+where a = all(select b from any_all_inner where b = 2);
+----
+2
+
+statement ok
+drop table any_all_outer;
+
+statement ok
+drop table any_all_inner;

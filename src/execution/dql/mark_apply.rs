@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
-use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyOperator};
+use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyOperator, MarkApplyQuantifier};
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::index::RuntimeIndexProbe;
@@ -23,10 +23,11 @@ use crate::types::value::DataValue;
 use std::mem;
 
 #[derive(PartialEq, Eq)]
-enum InPredicateOutcome {
-    Match,
+enum QuantifiedPredicateOutcome {
+    True,
+    False,
     Null,
-    Continue,
+    Skip,
 }
 
 pub struct MarkApply {
@@ -76,10 +77,16 @@ impl MarkApply {
 
         match param_value {
             Some(value) => Some(RuntimeIndexProbe::Eq(value)),
-            None if matches!(self.op.kind, MarkApplyKind::In) => Some(RuntimeIndexProbe::Scope {
-                min: std::collections::Bound::Unbounded,
-                max: std::collections::Bound::Unbounded,
-            }),
+            None if matches!(
+                self.op.kind,
+                MarkApplyKind::Quantified(MarkApplyQuantifier::Any)
+            ) =>
+            {
+                Some(RuntimeIndexProbe::Scope {
+                    min: std::collections::Bound::Unbounded,
+                    max: std::collections::Bound::Unbounded,
+                })
+            }
             None => None,
         }
     }
@@ -141,7 +148,7 @@ impl MarkApply {
                     Ok(DataValue::Boolean(false))
                 },
             ),
-            MarkApplyKind::In => {
+            MarkApplyKind::Quantified(MarkApplyQuantifier::Any) => {
                 if let Some(probe_value) = self.parameterized_probe_value()? {
                     if !probe_value.is_null() {
                         if self.with_right_input(
@@ -150,8 +157,10 @@ impl MarkApply {
                             |arena, right_input| {
                                 while arena.next_tuple(right_input)? {
                                     let right_tuple = arena.result_tuple();
-                                    if self.in_predicate_outcome(&self.left_tuple, right_tuple)?
-                                        == InPredicateOutcome::Match
+                                    if self.quantified_predicate_outcome(
+                                        &self.left_tuple,
+                                        right_tuple,
+                                    )? == QuantifiedPredicateOutcome::True
                                     {
                                         return Ok(true);
                                     }
@@ -169,8 +178,10 @@ impl MarkApply {
                             |arena, right_input| {
                                 while arena.next_tuple(right_input)? {
                                     let right_tuple = arena.result_tuple();
-                                    if self.in_predicate_outcome(&self.left_tuple, right_tuple)?
-                                        == InPredicateOutcome::Null
+                                    if self.quantified_predicate_outcome(
+                                        &self.left_tuple,
+                                        right_tuple,
+                                    )? == QuantifiedPredicateOutcome::Null
                                     {
                                         return Ok(true);
                                     }
@@ -187,24 +198,50 @@ impl MarkApply {
                 }
 
                 self.with_right_input(arena, None, |arena, right_input| {
-                    let mut saw_null = false;
-
-                    while arena.next_tuple(right_input)? {
-                        let right_tuple = arena.result_tuple();
-                        match self.in_predicate_outcome(&self.left_tuple, right_tuple)? {
-                            InPredicateOutcome::Match => return Ok(DataValue::Boolean(true)),
-                            InPredicateOutcome::Null => saw_null = true,
-                            InPredicateOutcome::Continue => {}
-                        }
-                    }
-
-                    if saw_null {
-                        Ok(DataValue::Null)
-                    } else {
-                        Ok(DataValue::Boolean(false))
-                    }
+                    self.scan_quantified_right_input(arena, right_input, MarkApplyQuantifier::Any)
                 })
             }
+            MarkApplyKind::Quantified(MarkApplyQuantifier::All) => {
+                self.with_right_input(arena, None, |arena, right_input| {
+                    self.scan_quantified_right_input(arena, right_input, MarkApplyQuantifier::All)
+                })
+            }
+        }
+    }
+
+    fn scan_quantified_right_input<'a, T: Transaction + 'a>(
+        &self,
+        arena: &mut ExecArena<'a, T>,
+        right_input: ExecId,
+        quantifier: MarkApplyQuantifier,
+    ) -> Result<DataValue, DatabaseError> {
+        let mut saw_null = false;
+
+        while arena.next_tuple(right_input)? {
+            let right_tuple = arena.result_tuple();
+            match self.quantified_predicate_outcome(&self.left_tuple, right_tuple)? {
+                QuantifiedPredicateOutcome::True => {
+                    if matches!(quantifier, MarkApplyQuantifier::Any) {
+                        return Ok(DataValue::Boolean(true));
+                    }
+                }
+                QuantifiedPredicateOutcome::False => {
+                    if matches!(quantifier, MarkApplyQuantifier::All) {
+                        return Ok(DataValue::Boolean(false));
+                    }
+                }
+                QuantifiedPredicateOutcome::Null => saw_null = true,
+                QuantifiedPredicateOutcome::Skip => {}
+            }
+        }
+
+        if saw_null {
+            Ok(DataValue::Null)
+        } else {
+            Ok(DataValue::Boolean(matches!(
+                quantifier,
+                MarkApplyQuantifier::All
+            )))
         }
     }
 
@@ -226,20 +263,21 @@ impl MarkApply {
         Ok(true)
     }
 
-    fn in_predicate_outcome(
+    fn quantified_predicate_outcome(
         &self,
         left_tuple: &Tuple,
         right_tuple: &Tuple,
-    ) -> Result<InPredicateOutcome, DatabaseError> {
-        match self.in_predicate_value(left_tuple, right_tuple)? {
-            Some(DataValue::Boolean(true)) => Ok(InPredicateOutcome::Match),
-            Some(DataValue::Null) => Ok(InPredicateOutcome::Null),
-            Some(DataValue::Boolean(false)) | None => Ok(InPredicateOutcome::Continue),
+    ) -> Result<QuantifiedPredicateOutcome, DatabaseError> {
+        match self.eval_predicates(left_tuple, right_tuple)? {
+            Some(DataValue::Boolean(true)) => Ok(QuantifiedPredicateOutcome::True),
+            Some(DataValue::Boolean(false)) => Ok(QuantifiedPredicateOutcome::False),
+            Some(DataValue::Null) => Ok(QuantifiedPredicateOutcome::Null),
+            None => Ok(QuantifiedPredicateOutcome::Skip),
             Some(_) => Err(DatabaseError::InvalidType),
         }
     }
 
-    fn in_predicate_value(
+    fn eval_predicates(
         &self,
         left_tuple: &Tuple,
         right_tuple: &Tuple,
