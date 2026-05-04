@@ -190,6 +190,7 @@ If `unsafe_txdb_checkpoint` is not enabled, `build_rocksdb()` returns an explici
 - [x] Describe
 - [x] Union
 - [x] EXCEPT
+- [x] INTERSECT
 
 ### DML
 - [x] Insert

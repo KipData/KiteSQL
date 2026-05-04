@@ -20,22 +20,40 @@ use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::fmt::Formatter;
 
+#[derive(Debug, PartialEq, Eq, Copy, Clone, Hash, ReferenceSerialization)]
+pub enum SetMembershipKind {
+    Except,
+    Intersect,
+}
+
+impl SetMembershipKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Except => "Except",
+            Self::Intersect => "Intersect",
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
-pub struct ExceptOperator {
+pub struct SetMembershipOperator {
+    pub kind: SetMembershipKind,
     pub left_schema_ref: SchemaRef,
     // mainly use `left_schema` as output and `right_schema` for `column pruning`
     pub _right_schema_ref: SchemaRef,
 }
 
-impl ExceptOperator {
+impl SetMembershipOperator {
     pub fn build(
+        kind: SetMembershipKind,
         left_schema_ref: SchemaRef,
         right_schema_ref: SchemaRef,
         left_plan: LogicalPlan,
         right_plan: LogicalPlan,
     ) -> LogicalPlan {
         LogicalPlan::new(
-            Operator::Except(ExceptOperator {
+            Operator::SetMembership(SetMembershipOperator {
+                kind,
                 left_schema_ref,
                 _right_schema_ref: right_schema_ref,
             }),
@@ -47,7 +65,7 @@ impl ExceptOperator {
     }
 }
 
-impl fmt::Display for ExceptOperator {
+impl fmt::Display for SetMembershipOperator {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         let schema = self
             .left_schema_ref
@@ -55,7 +73,7 @@ impl fmt::Display for ExceptOperator {
             .map(|column| column.name().to_string())
             .join(", ");
 
-        write!(f, "Except: [{schema}]")?;
+        write!(f, "{}: [{schema}]", self.kind.name())?;
 
         Ok(())
     }

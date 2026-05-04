@@ -15,7 +15,6 @@
 pub(crate) mod aggregate;
 pub(crate) mod describe;
 pub(crate) mod dummy;
-pub(crate) mod except;
 pub(crate) mod explain;
 pub(crate) mod filter;
 pub(crate) mod function_scan;
@@ -27,6 +26,7 @@ pub(crate) mod projection;
 pub(crate) mod scalar_apply;
 pub(crate) mod scalar_subquery;
 pub(crate) mod seq_scan;
+pub(crate) mod set_membership;
 pub(crate) mod show_table;
 pub(crate) mod show_view;
 pub(crate) mod sort;

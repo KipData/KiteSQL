@@ -41,7 +41,6 @@ use crate::execution::dql::aggregate::simple_agg::SimpleAggExecutor;
 use crate::execution::dql::aggregate::stream_distinct::StreamDistinctExecutor;
 use crate::execution::dql::describe::Describe;
 use crate::execution::dql::dummy::Dummy;
-use crate::execution::dql::except::Except;
 use crate::execution::dql::explain::Explain;
 use crate::execution::dql::filter::Filter;
 use crate::execution::dql::function_scan::FunctionScan;
@@ -51,6 +50,7 @@ use crate::execution::dql::limit::Limit;
 use crate::execution::dql::projection::Projection;
 use crate::execution::dql::scalar_subquery::ScalarSubquery;
 use crate::execution::dql::seq_scan::SeqScan;
+use crate::execution::dql::set_membership::SetMembership;
 use crate::execution::dql::show_table::ShowTables;
 use crate::execution::dql::show_view::ShowViews;
 use crate::execution::dql::sort::Sort;
@@ -127,7 +127,6 @@ pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
     DropTable(DropTable),
     DropView(DropView),
     Dummy(Dummy),
-    Except(Except),
     Explain(Explain),
     Filter(Filter),
     FunctionScan(FunctionScan),
@@ -141,6 +140,7 @@ pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
     Projection(Projection),
     ScalarApply(ScalarApply),
     ScalarSubquery(ScalarSubquery),
+    SetMembership(SetMembership),
     SeqScan(SeqScan<'a, T>),
     ShowTables(ShowTables),
     ShowViews(ShowViews),
@@ -206,7 +206,6 @@ impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
             }
             ExecNode::DropView(exec) => <DropView as ExecutorNode<'a, T>>::next_tuple(exec, arena),
             ExecNode::Dummy(exec) => <Dummy as ExecutorNode<'a, T>>::next_tuple(exec, arena),
-            ExecNode::Except(exec) => <Except as ExecutorNode<'a, T>>::next_tuple(exec, arena),
             ExecNode::Explain(exec) => <Explain as ExecutorNode<'a, T>>::next_tuple(exec, arena),
             ExecNode::Filter(exec) => <Filter as ExecutorNode<'a, T>>::next_tuple(exec, arena),
             ExecNode::FunctionScan(exec) => {
@@ -235,6 +234,9 @@ impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
             }
             ExecNode::ScalarSubquery(exec) => {
                 <ScalarSubquery as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+            }
+            ExecNode::SetMembership(exec) => {
+                <SetMembership as ExecutorNode<'a, T>>::next_tuple(exec, arena)
             }
             ExecNode::SeqScan(exec) => {
                 <SeqScan<'a, T> as ExecutorNode<'a, T>>::next_tuple(exec, arena)
@@ -783,12 +785,15 @@ pub(crate) fn build_read<'a, T: Transaction + 'a>(
             cache,
             transaction,
         ),
-        Operator::Except(_) => <Except as ExecutorNode<'a, T>>::into_executor(
-            childrens.pop_twins(),
-            arena,
-            cache,
-            transaction,
-        ),
+        Operator::SetMembership(op) => {
+            let (left, right) = childrens.pop_twins();
+            <SetMembership as ExecutorNode<'a, T>>::into_executor(
+                (op.kind, left, right),
+                arena,
+                cache,
+                transaction,
+            )
+        }
         _ => unreachable!(),
     }
 }

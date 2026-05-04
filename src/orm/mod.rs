@@ -1739,6 +1739,22 @@ pub trait QueryOperand: private::Sealed + Sized {
             ),
         )
     }
+
+    fn intersect<R>(self, rhs: R) -> SetQueryBuilder<Self::Source, Self::Model, Self::Projection>
+    where
+        R: QueryOperand<Source = Self::Source, Projection = Self::Projection, Shape = Self::Shape>,
+    {
+        let (source, left_query) = self.into_query_parts();
+        SetQueryBuilder::new(
+            source,
+            set_operation_query(
+                left_query,
+                rhs.into_query(),
+                SetOperator::Intersect,
+                SetQuantifier::Distinct,
+            ),
+        )
+    }
 }
 
 impl<M, T> IntoJoinColumns for Field<M, T> {
@@ -1967,6 +1983,24 @@ impl<Q: StatementSource, M: Model, P> FromBuilder<Q, M, P> {
         R: QueryOperand<Source = Q, Projection = P, Shape = <Self as QueryOperand>::Shape>,
     {
         QueryOperand::except(self, rhs)
+    }
+
+    /// Builds an `INTERSECT` set query with another query of the same shape.
+    ///
+    /// ```rust,ignore
+    /// let ordered_user_ids = database
+    ///     .from::<User>()
+    ///     .project_value(User::id())
+    ///     .intersect(database.from::<Order>().project_value(Order::user_id()))
+    ///     .fetch::<i32>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
+    pub fn intersect<R>(self, rhs: R) -> SetQueryBuilder<Q, M, P>
+    where
+        Self: QueryOperand<Source = Q, Model = M, Projection = P>,
+        R: QueryOperand<Source = Q, Projection = P, Shape = <Self as QueryOperand>::Shape>,
+    {
+        QueryOperand::intersect(self, rhs)
     }
 
     /// Inserts the current query result into a target model table.
@@ -2250,6 +2284,25 @@ impl<Q: StatementSource, M: Model, P> SetQueryBuilder<Q, M, P> {
         R: QueryOperand<Source = Q, Projection = P, Shape = <Self as QueryOperand>::Shape>,
     {
         QueryOperand::except(self, rhs)
+    }
+
+    /// Appends `INTERSECT` to the current set query.
+    ///
+    /// ```rust,ignore
+    /// let ids = database
+    ///     .from::<User>()
+    ///     .project_value(User::id())
+    ///     .union(database.from::<Order>().project_value(Order::user_id()))
+    ///     .intersect(database.from::<Wallet>().project_value(Wallet::id()))
+    ///     .fetch::<i32>()?;
+    /// # Ok::<(), kite_sql::errors::DatabaseError>(())
+    /// ```
+    pub fn intersect<R>(self, rhs: R) -> Self
+    where
+        Self: QueryOperand<Source = Q, Model = M, Projection = P>,
+        R: QueryOperand<Source = Q, Projection = P, Shape = <Self as QueryOperand>::Shape>,
+    {
+        QueryOperand::intersect(self, rhs)
     }
 
     /// Inserts the current query result into a target model table.

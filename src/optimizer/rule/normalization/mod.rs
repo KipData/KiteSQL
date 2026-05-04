@@ -135,7 +135,7 @@ impl NormalizationRuleRootTag {
             | Operator::FunctionScan(_)
             | Operator::Update(_)
             | Operator::Union(_)
-            | Operator::Except(_) => None,
+            | Operator::SetMembership(_) => None,
         }
     }
 }
