@@ -1037,6 +1037,78 @@ mod test {
             amount: 300,
         })?;
 
+        let eq_any_users = database
+            .from::<User>()
+            .filter(
+                User::id().eq_any(
+                    database
+                        .from::<Order>()
+                        .project_value(Order::user_id())
+                        .eq(Order::amount(), 300),
+                ),
+            )
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            eq_any_users.iter().map(|user| user.id).collect::<Vec<_>>(),
+            vec![2]
+        );
+
+        let eq_some_users = database
+            .from::<User>()
+            .filter(
+                User::id().eq_some(
+                    database
+                        .from::<Order>()
+                        .project_value(Order::user_id())
+                        .eq(Order::amount(), 100),
+                ),
+            )
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            eq_some_users.iter().map(|user| user.id).collect::<Vec<_>>(),
+            vec![1]
+        );
+
+        let gt_all_users = database
+            .from::<User>()
+            .filter(User::id().gt_all(database.from::<Order>().project_value(Order::user_id())))
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            gt_all_users.iter().map(|user| user.id).collect::<Vec<_>>(),
+            vec![3]
+        );
+
+        let lt_any_users = database
+            .from::<User>()
+            .filter(User::id().lt_any(database.from::<Order>().project_value(Order::user_id())))
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            lt_any_users.iter().map(|user| user.id).collect::<Vec<_>>(),
+            vec![1]
+        );
+
+        let query_value_gt_all_users = database
+            .from::<User>()
+            .filter(
+                User::id()
+                    .add(1)
+                    .gt_all(database.from::<Order>().project_value(Order::user_id())),
+            )
+            .asc(User::id())
+            .fetch()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            query_value_gt_all_users
+                .iter()
+                .map(|user| user.id)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+
         let exists_count = database
             .from::<User>()
             .filter(kite_sql::orm::QueryExpr::exists(
