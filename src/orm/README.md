@@ -101,7 +101,7 @@ The usual flow is:
 - keep full-model output, or switch into `project::<P>()`,
   `project_value(...)`, or `project_tuple(...)`
 - once the output shape is fixed, compose set queries with `union(...)`,
-  `except(...)`, and optional `.all()`
+  `except(...)`, `intersect(...)`, and optional `.all()`
 
 If you need an explicit relation alias, call `.alias("name")` on a source or
 pending join, and re-qualify fields with `Field::qualify("name")` where
@@ -143,9 +143,10 @@ Set operations are available after the output shape is fixed:
 - model rows: `from::<User>().union(...)`
 - single values: `project_value(...).union(...)`
 - tuples: `project_tuple(...).except(...)`
+- intersections: `project_value(...).intersect(...)`
 - struct projections: `project::<P>().union(...)`
 
-Call `.all()` after `union(...)` or `except(...)` when you want multiset
+Call `.all()` after `union(...)`, `except(...)`, or `intersect(...)` when you want multiset
 semantics instead of the default distinct result.
 
 After a set query is formed, you can still apply result-level methods such as

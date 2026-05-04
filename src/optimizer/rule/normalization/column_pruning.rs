@@ -139,7 +139,7 @@ impl ColumnPruning {
                         .map(|column| column.summary()),
                 );
             }
-            Operator::Except(op) => {
+            Operator::SetMembership(op) => {
                 referenced_columns.extend(
                     op.left_schema_ref
                         .iter()
@@ -281,7 +281,7 @@ impl ColumnPruning {
             | Operator::ShowView
             | Operator::Describe(_)
             | Operator::Union(_)
-            | Operator::Except(_)
+            | Operator::SetMembership(_)
             | Operator::AddColumn(_)
             | Operator::ChangeColumn(_)
             | Operator::DropColumn(_)
@@ -503,7 +503,7 @@ impl ColumnPruning {
             | Operator::Join(_)
             | Operator::Filter(_)
             | Operator::Union(_)
-            | Operator::Except(_)
+            | Operator::SetMembership(_)
             | Operator::TopK(_) => {
                 if matches!(
                     operator,
@@ -582,7 +582,7 @@ impl ColumnPruning {
                         }
                         changed = true;
                     }
-                } else if matches!(operator, Operator::Union(_) | Operator::Except(_)) {
+                } else if matches!(operator, Operator::Union(_) | Operator::SetMembership(_)) {
                     let mut child_required = required_columns;
                     Self::extend_operator_referenced_columns(operator, &mut child_required);
                     changed |= Self::apply_twins(child_required, all_referenced, childrens, arena)?;

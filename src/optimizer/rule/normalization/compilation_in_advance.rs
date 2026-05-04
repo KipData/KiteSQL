@@ -107,7 +107,7 @@ pub(crate) fn evaluator_bind_current(plan: &mut LogicalPlan) -> Result<(), Datab
         | Operator::CopyFromFile(_)
         | Operator::CopyToFile(_)
         | Operator::Union(_)
-        | Operator::Except(_) => (),
+        | Operator::SetMembership(_) => (),
     }
 
     Ok(())
@@ -125,7 +125,7 @@ impl EvaluatorBind {
                         | Operator::MarkApply(_)
                         | Operator::Join(_)
                         | Operator::Union(_)
-                        | Operator::Except(_)
+                        | Operator::SetMembership(_)
                 ) {
                     Self::_apply(right)?;
                 }

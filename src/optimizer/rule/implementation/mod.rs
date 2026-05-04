@@ -120,7 +120,7 @@ impl ImplementationRuleRootTag {
             | Operator::ShowView
             | Operator::Explain
             | Operator::Describe(_)
-            | Operator::Except(_)
+            | Operator::SetMembership(_)
             | Operator::Union(_)
             | Operator::CreateIndex(_)
             | Operator::CreateView(_)

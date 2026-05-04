@@ -25,7 +25,6 @@ pub mod describe;
 pub mod drop_index;
 pub mod drop_table;
 pub mod drop_view;
-pub mod except;
 pub mod filter;
 pub mod function_scan;
 pub mod insert;
@@ -35,6 +34,7 @@ pub mod mark_apply;
 pub mod project;
 pub mod scalar_apply;
 pub mod scalar_subquery;
+pub mod set_membership;
 pub mod sort;
 pub mod table_scan;
 pub mod top_k;
@@ -64,10 +64,10 @@ use crate::planner::operator::describe::DescribeOperator;
 use crate::planner::operator::drop_index::DropIndexOperator;
 use crate::planner::operator::drop_table::DropTableOperator;
 use crate::planner::operator::drop_view::DropViewOperator;
-use crate::planner::operator::except::ExceptOperator;
 use crate::planner::operator::function_scan::FunctionScanOperator;
 use crate::planner::operator::insert::InsertOperator;
 use crate::planner::operator::join::JoinCondition;
+use crate::planner::operator::set_membership::SetMembershipOperator;
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::top_k::TopKOperator;
 use crate::planner::operator::truncate::TruncateOperator;
@@ -100,7 +100,7 @@ pub enum Operator {
     ShowView,
     Explain,
     Describe(DescribeOperator),
-    Except(ExceptOperator),
+    SetMembership(SetMembershipOperator),
     Union(UnionOperator),
     // DML
     Insert(InsertOperator),
@@ -219,7 +219,7 @@ impl Operator {
                 left_schema_ref: schema_ref,
                 ..
             })
-            | Operator::Except(ExceptOperator {
+            | Operator::SetMembership(SetMembershipOperator {
                 left_schema_ref: schema_ref,
                 ..
             }) => {
@@ -329,9 +329,10 @@ impl Operator {
                 left_schema_ref,
                 _right_schema_ref,
             })
-            | Operator::Except(ExceptOperator {
+            | Operator::SetMembership(SetMembershipOperator {
                 left_schema_ref,
                 _right_schema_ref,
+                ..
             }) => left_schema_ref
                 .iter()
                 .chain(_right_schema_ref.iter())
@@ -426,7 +427,7 @@ impl fmt::Display for Operator {
             Operator::CopyFromFile(op) => write!(f, "{op}"),
             Operator::CopyToFile(op) => write!(f, "{op}"),
             Operator::Union(op) => write!(f, "{op}"),
-            Operator::Except(op) => write!(f, "{op}"),
+            Operator::SetMembership(op) => write!(f, "{op}"),
         }
     }
 }

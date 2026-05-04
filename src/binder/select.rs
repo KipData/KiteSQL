@@ -41,10 +41,10 @@ use crate::execution::dql::join::joins_nullable;
 use crate::expression::simplify::ConstantCalculator;
 use crate::expression::visitor_mut::{walk_mut_expr, PositionShift, VisitorMut};
 use crate::expression::{AliasType, BinaryOperator};
-use crate::planner::operator::except::ExceptOperator;
 use crate::planner::operator::function_scan::FunctionScanOperator;
 use crate::planner::operator::insert::InsertOperator;
 use crate::planner::operator::join::JoinCondition;
+use crate::planner::operator::set_membership::{SetMembershipKind, SetMembershipOperator};
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::{Childrens, LogicalPlan, SchemaOutput};
@@ -756,15 +756,14 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     )?)
                 }
             }
-            SetOperator::Except => {
-                if is_all {
-                    Ok(ExceptOperator::build(
-                        left_schema.clone(),
-                        right_schema.clone(),
-                        left_plan,
-                        right_plan,
-                    ))
-                } else {
+            SetOperator::Except | SetOperator::Intersect => {
+                let kind = match op {
+                    SetOperator::Except => SetMembershipKind::Except,
+                    SetOperator::Intersect => SetMembershipKind::Intersect,
+                    _ => unreachable!(),
+                };
+
+                if !is_all {
                     let left_distinct_exprs = left_schema
                         .iter()
                         .cloned()
@@ -782,14 +781,15 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     right_plan = self.bind_distinct(right_plan, right_distinct_exprs)?;
                     left_schema = left_plan.output_schema();
                     right_schema = right_plan.output_schema();
-
-                    Ok(ExceptOperator::build(
-                        left_schema.clone(),
-                        right_schema.clone(),
-                        left_plan,
-                        right_plan,
-                    ))
                 }
+
+                Ok(SetMembershipOperator::build(
+                    kind,
+                    left_schema.clone(),
+                    right_schema.clone(),
+                    left_plan,
+                    right_plan,
+                ))
             }
             set_operator => Err(DatabaseError::UnsupportedStmt(format!(
                 "set operator: {set_operator:?}"

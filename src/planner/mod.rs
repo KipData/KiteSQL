@@ -15,7 +15,7 @@
 pub mod operator;
 
 use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
-use crate::planner::operator::except::ExceptOperator;
+use crate::planner::operator::set_membership::SetMembershipOperator;
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::operator::{Operator, PhysicalOption};
@@ -215,7 +215,7 @@ impl LogicalPlan {
                 left_schema_ref: schema_ref,
                 ..
             })
-            | Operator::Except(ExceptOperator {
+            | Operator::SetMembership(SetMembershipOperator {
                 left_schema_ref: schema_ref,
                 ..
             }) => SchemaOutput::SchemaRef(schema_ref.clone()),

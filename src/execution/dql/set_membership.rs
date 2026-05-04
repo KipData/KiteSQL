@@ -16,33 +16,39 @@ use crate::errors::DatabaseError;
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor,
 };
+use crate::planner::operator::set_membership::SetMembershipKind;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use ahash::{HashMap, HashMapExt};
-pub struct Except {
+
+pub struct SetMembership {
+    kind: SetMembershipKind,
     left_plan: LogicalPlan,
     right_plan: LogicalPlan,
     left_input: ExecId,
     right_input: ExecId,
-    except_col: HashMap<Tuple, usize>,
+    right_counts: HashMap<Tuple, usize>,
     built: bool,
 }
 
-impl From<(LogicalPlan, LogicalPlan)> for Except {
-    fn from((left_input, right_input): (LogicalPlan, LogicalPlan)) -> Self {
-        Except {
+impl From<(SetMembershipKind, LogicalPlan, LogicalPlan)> for SetMembership {
+    fn from(
+        (kind, left_input, right_input): (SetMembershipKind, LogicalPlan, LogicalPlan),
+    ) -> Self {
+        SetMembership {
+            kind,
             left_plan: left_input,
             right_plan: right_input,
             left_input: 0,
             right_input: 0,
-            except_col: HashMap::new(),
+            right_counts: HashMap::new(),
             built: false,
         }
     }
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Except {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SetMembership {
     fn into_executor(
         mut self,
         arena: &mut ExecArena<'a, T>,
@@ -51,12 +57,12 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Except {
     ) -> ExecId {
         self.left_input = build_read(arena, self.left_plan.take(), cache, transaction);
         self.right_input = build_read(arena, self.right_plan.take(), cache, transaction);
-        arena.push(ExecNode::Except(self))
+        arena.push(ExecNode::SetMembership(self))
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Except {
-    type Input = (LogicalPlan, LogicalPlan);
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SetMembership {
+    type Input = (SetMembershipKind, LogicalPlan, LogicalPlan);
 
     fn into_executor(
         input: Self::Input,
@@ -68,11 +74,11 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Except {
     }
 
     fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
-        Except::next_tuple(self, arena)
+        SetMembership::next_tuple(self, arena)
     }
 }
 
-impl Except {
+impl SetMembership {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -80,7 +86,7 @@ impl Except {
         if !self.built {
             while arena.next_tuple(self.right_input)? {
                 *self
-                    .except_col
+                    .right_counts
                     .entry(arena.result_tuple().clone())
                     .or_insert(0) += 1;
             }
@@ -92,17 +98,28 @@ impl Except {
                 arena.finish();
                 return Ok(());
             }
-            let tuple = arena.result_tuple();
 
-            if let Some(count) = self.except_col.get_mut(tuple) {
-                if *count > 0 {
-                    *count -= 1;
-                    continue;
-                }
+            let matched = self.consume_right_match(arena.result_tuple());
+            let should_emit = match self.kind {
+                SetMembershipKind::Except => !matched,
+                SetMembershipKind::Intersect => matched,
+            };
+
+            if should_emit {
+                arena.resume();
+                return Ok(());
             }
-
-            arena.resume();
-            return Ok(());
         }
+    }
+
+    fn consume_right_match(&mut self, tuple: &Tuple) -> bool {
+        if let Some(count) = self.right_counts.get_mut(tuple) {
+            if *count > 0 {
+                *count -= 1;
+                return true;
+            }
+        }
+
+        false
     }
 }

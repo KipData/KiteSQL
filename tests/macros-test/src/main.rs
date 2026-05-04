@@ -946,6 +946,15 @@ mod test {
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(ordered_union_ids, vec![1, 1, 2]);
 
+        let ordered_customer_ids = database
+            .from::<User>()
+            .project_value(User::id())
+            .intersect(database.from::<Order>().project_value(Order::user_id()))
+            .asc(User::id())
+            .fetch::<i32>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(ordered_customer_ids, vec![1, 2]);
+
         let users_without_orders = database
             .from::<User>()
             .in_subquery(
