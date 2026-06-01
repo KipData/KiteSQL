@@ -43,8 +43,6 @@ impl CurrentDate {
         })
     }
 }
-
-#[typetag::serde]
 impl ScalarFunctionImpl for CurrentDate {
     #[allow(unused_variables, clippy::redundant_closure_call)]
     fn eval(

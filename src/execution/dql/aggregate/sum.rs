@@ -44,7 +44,7 @@ impl Accumulator for SumAccumulator {
             if self.result.is_null() {
                 self.result = value.clone();
             } else {
-                self.result = self.evaluator.0.binary_eval(&self.result, value)?;
+                self.result = self.evaluator.binary_eval(&self.result, value)?;
             }
         }
 

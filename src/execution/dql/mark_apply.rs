@@ -103,7 +103,13 @@ impl MarkApply {
             arena.push_runtime_probe(runtime_probe);
         }
 
-        let cache = (arena.table_cache(), arena.view_cache(), arena.meta_cache());
+        let cache = (
+            arena.table_cache(),
+            arena.view_cache(),
+            arena.meta_cache(),
+            arena.scala_functions(),
+            arena.table_functions(),
+        );
         let transaction = arena.transaction_mut() as *mut T;
         let result = {
             let right_input = build_read(arena, self.right_input_plan.clone(), cache, transaction);

@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::Range;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
-use crate::storage::{TableCache, Transaction};
+use crate::storage::Transaction;
 use crate::types::value::DataValue;
 use kite_sql_serde_macros::ReferenceSerialization;
 use siphasher::sip::SipHasher13;
@@ -352,7 +352,7 @@ impl<K> ReferenceSerialization for CountMinSketch<K> {
 
     fn decode<T: Transaction, R: Read>(
         reader: &mut R,
-        drive: Option<(&T, &TableCache)>,
+        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
     ) -> Result<Self, DatabaseError> {
         let counters = Vec::<Vec<usize>>::decode(reader, drive, reference_tables)?;

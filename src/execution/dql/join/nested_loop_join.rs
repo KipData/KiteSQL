@@ -189,7 +189,13 @@ impl NestedLoopJoin {
         &mut self,
         arena: &mut ExecArena<'a, T>,
     ) -> ExecId {
-        let cache = (arena.table_cache(), arena.view_cache(), arena.meta_cache());
+        let cache = (
+            arena.table_cache(),
+            arena.view_cache(),
+            arena.meta_cache(),
+            arena.scala_functions(),
+            arena.table_functions(),
+        );
         let transaction = arena.transaction_mut() as *mut T;
         // Fixme: Executor reset
         build_read(arena, self.right_input_plan.clone(), cache, transaction)
@@ -447,6 +453,7 @@ mod test {
     use crate::db::DataBaseBuilder;
     use crate::execution::dql::test::build_integers;
     use crate::execution::try_collect;
+    use crate::expression::BinaryOperator;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
     use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
@@ -591,7 +598,11 @@ mod test {
                 ColumnRef::from(ColumnCatalog::new("c4".to_owned(), true, desc.clone())),
                 3,
             )),
-            evaluator: Some(BinaryEvaluatorBox(Arc::new(Int32GtBinaryEvaluator))),
+            evaluator: Some(BinaryEvaluatorBox::new(
+                Arc::new(Int32GtBinaryEvaluator),
+                LogicalType::Integer,
+                BinaryOperator::Gt,
+            )),
             ty: LogicalType::Boolean,
         };
 

@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
-use crate::storage::{TableCache, Transaction};
+use crate::storage::Transaction;
 use std::io::{Read, Write};
 
 impl ReferenceSerialization for bool {
@@ -29,7 +29,7 @@ impl ReferenceSerialization for bool {
 
     fn decode<T: Transaction, R: Read>(
         reader: &mut R,
-        drive: Option<(&T, &TableCache)>,
+        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
     ) -> Result<Self, DatabaseError> {
         Ok(u8::decode(reader, drive, reference_tables)? == 1u8)

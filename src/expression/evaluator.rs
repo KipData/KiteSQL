@@ -79,7 +79,6 @@ impl ScalarExpression {
                 evaluator
                     .as_ref()
                     .ok_or(DatabaseError::EvaluatorNotFound)?
-                    .0
                     .binary_eval(&left, &right)
             }
             ScalarExpression::IsNull { expr, negated } => {
@@ -130,7 +129,6 @@ impl ScalarExpression {
                 Ok(evaluator
                     .as_ref()
                     .ok_or(DatabaseError::EvaluatorNotFound)?
-                    .0
                     .unary_eval(&value))
             }
             ScalarExpression::AggCall { .. } => {
@@ -340,7 +338,6 @@ impl ScalarExpression {
                         when_value = when_value.cast(&ty)?;
                         let evaluator = binary_create(Cow::Owned(ty), BinaryOperator::Eq)?;
                         evaluator
-                            .0
                             .binary_eval(operand_value, &when_value)?
                             .is_true()?
                     } else {

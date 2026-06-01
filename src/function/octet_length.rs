@@ -42,8 +42,6 @@ impl OctetLength {
         })
     }
 }
-
-#[typetag::serde]
 impl ScalarFunctionImpl for OctetLength {
     #[allow(unused_variables, clippy::redundant_closure_call)]
     fn eval(

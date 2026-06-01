@@ -21,8 +21,6 @@ use serde::{Deserialize, Serialize};
 /// - Null values operate as null values
 #[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
 pub struct NullBinaryEvaluator;
-
-#[typetag::serde]
 impl BinaryEvaluator for NullBinaryEvaluator {
     fn binary_eval(&self, _: &DataValue, _: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(DataValue::Null)
@@ -31,8 +29,6 @@ impl BinaryEvaluator for NullBinaryEvaluator {
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
 pub struct ToSqlNullCastEvaluator;
-
-#[typetag::serde]
 impl CastEvaluator for ToSqlNullCastEvaluator {
     fn eval_cast(&self, _value: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(DataValue::Null)
@@ -41,8 +37,6 @@ impl CastEvaluator for ToSqlNullCastEvaluator {
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
 pub struct NullCastEvaluator;
-
-#[typetag::serde]
 impl CastEvaluator for NullCastEvaluator {
     fn eval_cast(&self, _value: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(DataValue::Null)

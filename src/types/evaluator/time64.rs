@@ -34,8 +34,6 @@ pub struct Time64LtEqBinaryEvaluator;
 pub struct Time64EqBinaryEvaluator;
 #[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
 pub struct Time64NotEqBinaryEvaluator;
-
-#[typetag::serde]
 impl BinaryEvaluator for Time64GtBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -60,7 +58,6 @@ impl BinaryEvaluator for Time64GtBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for Time64GtEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -178,8 +175,6 @@ crate::define_cast_evaluator!(
         Ok(DataValue::Time64(*value, this.precision.unwrap_or(0), this.zone))
     }
 );
-
-#[typetag::serde]
 impl BinaryEvaluator for Time64LtBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -204,7 +199,6 @@ impl BinaryEvaluator for Time64LtBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for Time64LtEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -229,7 +223,6 @@ impl BinaryEvaluator for Time64LtEqBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for Time64EqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -254,7 +247,6 @@ impl BinaryEvaluator for Time64EqBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for Time64NotEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {

@@ -43,8 +43,6 @@ impl Upper {
         })
     }
 }
-
-#[typetag::serde]
 impl ScalarFunctionImpl for Upper {
     #[allow(unused_variables, clippy::redundant_closure_call)]
     fn eval(

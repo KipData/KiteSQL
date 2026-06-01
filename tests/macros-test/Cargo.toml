@@ -10,4 +10,3 @@ serde       = { version = "1", features = ["derive", "rc"] }
 rust_decimal = { version = "1" }
 sqlparser   = { version = "0.61", default-features = false, features = ["std"] }
 tempfile    = { version = "3.10" }
-typetag     = { version = "0.2" }

@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
-use crate::storage::{TableCache, Transaction};
+use crate::storage::Transaction;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 
@@ -39,7 +39,7 @@ where
 
     fn decode<T: Transaction, R: Read>(
         reader: &mut R,
-        drive: Option<(&T, &TableCache)>,
+        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
     ) -> Result<Self, DatabaseError> {
         let len = <usize as ReferenceSerialization>::decode(reader, drive, reference_tables)?;

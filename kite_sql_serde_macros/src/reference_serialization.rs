@@ -142,7 +142,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 
                     fn decode<T: crate::storage::Transaction, R: std::io::Read>(
                         reader: &mut R,
-                        drive: Option<(&T, &crate::storage::TableCache)>,
+                        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
                         reference_tables: &crate::serdes::ReferenceTables,
                     ) -> Result<Self, crate::errors::DatabaseError> {
                         #(#decode_fields)*
@@ -221,7 +221,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 
                     fn decode<T: crate::storage::Transaction, R: std::io::Read>(
                         reader: &mut R,
-                        drive: Option<(&T, &crate::storage::TableCache)>,
+                        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
                         reference_tables: &crate::serdes::ReferenceTables,
                     ) -> Result<Self, crate::errors::DatabaseError> {
                         let mut type_bytes = [0u8; 1];

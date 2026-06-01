@@ -58,8 +58,6 @@ impl Numbers {
         })
     }
 }
-
-#[typetag::serde]
 impl TableFunctionImpl for Numbers {
     #[allow(unused_variables, clippy::redundant_closure_call)]
     fn eval(

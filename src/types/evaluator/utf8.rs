@@ -49,8 +49,6 @@ pub struct Utf8LikeBinaryEvaluator {
 pub struct Utf8NotLikeBinaryEvaluator {
     pub(crate) escape_char: Option<char>,
 }
-
-#[typetag::serde]
 impl BinaryEvaluator for Utf8GtBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -64,7 +62,6 @@ impl BinaryEvaluator for Utf8GtBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for Utf8GtEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -78,7 +75,6 @@ impl BinaryEvaluator for Utf8GtEqBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for Utf8LtBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -241,8 +237,6 @@ crate::define_cast_evaluator!(
 crate::define_cast_evaluator!(Utf8ToDecimalCastEvaluator, DataValue::Utf8 { value, .. } => {
     Ok(DataValue::Decimal(Decimal::from_str(value)?))
 });
-
-#[typetag::serde]
 impl BinaryEvaluator for Utf8LtEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -256,7 +250,6 @@ impl BinaryEvaluator for Utf8LtEqBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for Utf8EqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -270,7 +263,6 @@ impl BinaryEvaluator for Utf8EqBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for Utf8NotEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -284,7 +276,6 @@ impl BinaryEvaluator for Utf8NotEqBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for Utf8StringConcatBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -302,7 +293,6 @@ impl BinaryEvaluator for Utf8StringConcatBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for Utf8LikeBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -316,7 +306,6 @@ impl BinaryEvaluator for Utf8LikeBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for Utf8NotLikeBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {

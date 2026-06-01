@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::implement_serialization_by_bincode;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
-use crate::storage::{TableCache, Transaction};
+use crate::storage::Transaction;
 use std::sync::Arc;
 
 implement_serialization_by_bincode!(String);
@@ -34,7 +34,7 @@ impl ReferenceSerialization for Arc<str> {
 
     fn decode<T: Transaction, R: std::io::Read>(
         reader: &mut R,
-        _: Option<(&T, &TableCache)>,
+        _: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         _: &ReferenceTables,
     ) -> Result<Self, DatabaseError> {
         let str: String = bincode::deserialize_from(reader)?;

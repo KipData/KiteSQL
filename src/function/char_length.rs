@@ -41,8 +41,6 @@ impl CharLength {
         })
     }
 }
-
-#[typetag::serde]
 impl ScalarFunctionImpl for CharLength {
     #[allow(unused_variables, clippy::redundant_closure_call)]
     fn eval(

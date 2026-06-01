@@ -21,6 +21,7 @@ pub(crate) mod table_codec;
 
 use crate::catalog::view::View;
 use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog, TableMeta, TableName};
+use crate::db::{ScalaFunctions, TableFunctions};
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::Range;
 use crate::expression::ScalarExpression;
@@ -684,15 +685,13 @@ pub trait Transaction: Sized {
     fn drop_view(
         &mut self,
         view_cache: &ViewCache,
-        table_cache: &TableCache,
         view_name: TableName,
         if_exists: bool,
     ) -> Result<(), DatabaseError> {
         self.drop_name_hash(&view_name)?;
-        if self
-            .view(table_cache, view_cache, view_name.clone())?
-            .is_none()
-        {
+        let exists =
+            unsafe { &*self.table_codec() }.with_view_key(&view_name, |key| self.exists(key))?;
+        if !exists {
             if if_exists {
                 return Ok(());
             } else {
@@ -800,6 +799,8 @@ pub trait Transaction: Sized {
         &'a self,
         table_cache: &'a TableCache,
         view_cache: &'a ViewCache,
+        scala_functions: &'a ScalaFunctions,
+        table_functions: &'a TableFunctions,
         view_name: TableName,
     ) -> Result<Option<&'a View>, DatabaseError> {
         if let Some(view) = view_cache.get(&view_name) {
@@ -810,23 +811,30 @@ pub trait Transaction: Sized {
                 return Ok(None);
             };
             Ok(Some(view_cache.get_or_insert(view_name.clone(), |_| {
-                TableCodec::decode_view(bytes.as_ref(), (self, table_cache))
+                TableCodec::decode_view(
+                    bytes.as_ref(),
+                    (self, table_cache),
+                    scala_functions,
+                    table_functions,
+                )
             })?))
         })
     }
 
-    fn views(&self, table_cache: &TableCache) -> Result<Vec<View>, DatabaseError> {
-        let mut metas = vec![];
+    fn views<'a>(
+        &'a self,
+        table_cache: &'a TableCache,
+        scala_functions: &'a ScalaFunctions,
+        table_functions: &'a TableFunctions,
+    ) -> Result<ViewIter<'a, Self>, DatabaseError> {
         unsafe { &*self.table_codec() }.with_view_bound(|min, max| {
-            let mut iter = self.range(Bound::Included(min), Bound::Included(max))?;
-
-            while let Some((_, value)) = iter.try_next().ok().flatten() {
-                let meta = TableCodec::decode_view(value, (self, table_cache))?;
-
-                metas.push(meta);
-            }
-
-            Ok(metas)
+            Ok(ViewIter {
+                iter: self.range(Bound::Included(min), Bound::Included(max))?,
+                transaction: self,
+                table_cache,
+                scala_functions,
+                table_functions,
+            })
         })
     }
 
@@ -849,18 +857,11 @@ pub trait Transaction: Sized {
             .transpose()
     }
 
-    fn table_metas(&self) -> Result<Vec<TableMeta>, DatabaseError> {
-        let mut metas = vec![];
+    fn tables<'a>(&'a self) -> Result<TableIter<'a, Self>, DatabaseError> {
         unsafe { &*self.table_codec() }.with_root_table_bound(|min, max| {
-            let mut iter = self.range(Bound::Included(min), Bound::Included(max))?;
-
-            while let Some((_, value)) = iter.try_next().ok().flatten() {
-                let meta = TableCodec::decode_root_table::<Self>(value)?;
-
-                metas.push(meta);
-            }
-
-            Ok(metas)
+            Ok(TableIter {
+                iter: self.range(Bound::Included(min), Bound::Included(max))?,
+            })
         })
     }
 
@@ -1893,6 +1894,43 @@ pub trait Iter {
     fn next_tuple_into(&mut self, tuple: &mut Tuple) -> Result<bool, DatabaseError>;
 }
 
+pub struct TableIter<'a, T: Transaction + 'a> {
+    iter: T::IterType<'a>,
+}
+
+impl<T: Transaction> TableIter<'_, T> {
+    pub fn try_next(&mut self) -> Result<Option<TableMeta>, DatabaseError> {
+        let Some((_, value)) = self.iter.try_next()? else {
+            return Ok(None);
+        };
+
+        Ok(Some(TableCodec::decode_root_table::<T>(value)?))
+    }
+}
+
+pub struct ViewIter<'a, T: Transaction + 'a> {
+    iter: T::IterType<'a>,
+    transaction: &'a T,
+    table_cache: &'a TableCache,
+    scala_functions: &'a ScalaFunctions,
+    table_functions: &'a TableFunctions,
+}
+
+impl<T: Transaction> ViewIter<'_, T> {
+    pub fn try_next(&mut self) -> Result<Option<View>, DatabaseError> {
+        let Some((_, value)) = self.iter.try_next()? else {
+            return Ok(None);
+        };
+
+        Ok(Some(TableCodec::decode_view(
+            value,
+            (self.transaction, self.table_cache),
+            self.scala_functions,
+            self.table_functions,
+        )?))
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn next_tuple_for_test<I: Iter>(iter: &mut I) -> Result<Option<Tuple>, DatabaseError> {
     let mut tuple = Tuple::default();
@@ -2612,6 +2650,8 @@ mod test {
     #[test]
     fn test_view_create_drop() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
+        let scala_functions = Default::default();
+        let table_functions = Default::default();
 
         let view_name: TableName = "v1".to_string().into();
         let view = View {
@@ -2629,6 +2669,8 @@ mod test {
                 .view(
                     &table_state.table_cache,
                     &table_state.view_cache,
+                    &scala_functions,
+                    &table_functions,
                     view_name.clone(),
                 )?
                 .unwrap()
@@ -2639,25 +2681,23 @@ mod test {
                 .view(
                     &Arc::new(SharedLruCache::new(4, 1, RandomState::new())?),
                     &table_state.view_cache,
+                    &scala_functions,
+                    &table_functions,
                     view_name.clone(),
                 )?
                 .unwrap()
         );
 
-        transaction.drop_view(
-            &table_state.view_cache,
-            &table_state.table_cache,
-            view_name.clone(),
-            false,
-        )?;
-        transaction.drop_view(
-            &table_state.view_cache,
-            &table_state.table_cache,
-            view_name.clone(),
-            true,
-        )?;
+        transaction.drop_view(&table_state.view_cache, view_name.clone(), false)?;
+        transaction.drop_view(&table_state.view_cache, view_name.clone(), true)?;
         assert!(transaction
-            .view(&table_state.table_cache, &table_state.view_cache, view_name)?
+            .view(
+                &table_state.table_cache,
+                &table_state.view_cache,
+                &scala_functions,
+                &table_functions,
+                view_name,
+            )?
             .is_none());
 
         Ok(())

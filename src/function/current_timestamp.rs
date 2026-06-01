@@ -43,8 +43,6 @@ impl CurrentTimeStamp {
         })
     }
 }
-
-#[typetag::serde]
 impl ScalarFunctionImpl for CurrentTimeStamp {
     #[allow(unused_variables, clippy::redundant_closure_call)]
     fn eval(

@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
-use crate::storage::{TableCache, Transaction};
+use crate::storage::Transaction;
 use crate::types::CharLengthUnits;
 use std::io::{Read, Write};
 
@@ -36,7 +36,7 @@ impl ReferenceSerialization for CharLengthUnits {
 
     fn decode<T: Transaction, R: Read>(
         reader: &mut R,
-        _: Option<(&T, &TableCache)>,
+        _: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         _: &ReferenceTables,
     ) -> Result<Self, DatabaseError> {
         let mut one_byte = [0u8; 1];

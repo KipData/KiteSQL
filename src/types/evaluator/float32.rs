@@ -24,14 +24,11 @@ use std::hint;
 pub struct Float32PlusUnaryEvaluator;
 #[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
 pub struct Float32MinusUnaryEvaluator;
-
-#[typetag::serde]
 impl UnaryEvaluator for Float32PlusUnaryEvaluator {
     fn unary_eval(&self, value: &DataValue) -> DataValue {
         value.clone()
     }
 }
-#[typetag::serde]
 impl UnaryEvaluator for Float32MinusUnaryEvaluator {
     fn unary_eval(&self, value: &DataValue) -> DataValue {
         match value {
@@ -64,8 +61,6 @@ pub struct Float32EqBinaryEvaluator;
 pub struct Float32NotEqBinaryEvaluator;
 #[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
 pub struct Float32ModBinaryEvaluator;
-
-#[typetag::serde]
 impl BinaryEvaluator for Float32PlusBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -77,7 +72,6 @@ impl BinaryEvaluator for Float32PlusBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for Float32MinusBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -91,7 +85,6 @@ impl BinaryEvaluator for Float32MinusBinaryEvaluator {
 }
 
 crate::define_float_cast_evaluators!(Float32, Float32, f32, LogicalType::Float, from_f32);
-#[typetag::serde]
 impl BinaryEvaluator for Float32MultiplyBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -103,7 +96,6 @@ impl BinaryEvaluator for Float32MultiplyBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for Float32DivideBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -117,7 +109,6 @@ impl BinaryEvaluator for Float32DivideBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for Float32GtBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -129,7 +120,6 @@ impl BinaryEvaluator for Float32GtBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for Float32GtEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -141,7 +131,6 @@ impl BinaryEvaluator for Float32GtEqBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for Float32LtBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -153,7 +142,6 @@ impl BinaryEvaluator for Float32LtBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for Float32LtEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -165,7 +153,6 @@ impl BinaryEvaluator for Float32LtEqBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for Float32EqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -177,7 +164,6 @@ impl BinaryEvaluator for Float32EqBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for Float32NotEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -189,7 +175,6 @@ impl BinaryEvaluator for Float32NotEqBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for Float32ModBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {

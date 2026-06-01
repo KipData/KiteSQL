@@ -859,17 +859,22 @@ impl TryFrom<SqlBinaryOperator> for BinaryOperator {
 mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation, ColumnSummary};
     use crate::db::test::build_table;
+    use crate::db::{ScalaFunctions, TableFunctions};
     use crate::errors::DatabaseError;
     use crate::expression::agg::AggKind;
-    use crate::expression::function::scala::{ArcScalarFunctionImpl, ScalarFunction};
-    use crate::expression::function::table::{ArcTableFunctionImpl, TableFunction};
+    use crate::expression::function::scala::{
+        ArcScalarFunctionImpl, ScalarFunction, ScalarFunctionImpl,
+    };
+    use crate::expression::function::table::{
+        ArcTableFunctionImpl, TableFunction, TableFunctionImpl,
+    };
     use crate::expression::TrimWhereField;
     use crate::expression::{AliasType, BinaryOperator, ScalarExpression, UnaryOperator};
     use crate::function::current_date::CurrentDate;
     use crate::function::numbers::Numbers;
-    use crate::serdes::{ReferenceSerialization, ReferenceTables};
+    use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
     use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
-    use crate::storage::{Storage, TableCache, Transaction};
+    use crate::storage::{Storage, Transaction};
     use crate::types::evaluator::boolean::BooleanNotUnaryEvaluator;
     use crate::types::evaluator::int32::Int32PlusBinaryEvaluator;
     use crate::types::evaluator::{cast_create, BinaryEvaluatorBox, UnaryEvaluatorBox};
@@ -920,7 +925,7 @@ mod test {
         fn fn_assert(
             cursor: &mut Cursor<Vec<u8>>,
             expr: ScalarExpression,
-            drive: Option<(&RocksTransaction, &TableCache)>,
+            drive: Option<&ReferenceDecodeContext<'_, RocksTransaction>>,
             reference_tables: &mut ReferenceTables,
         ) -> Result<(), DatabaseError> {
             expr.encode(cursor, false, reference_tables)?;
@@ -939,7 +944,12 @@ mod test {
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
         let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-
+        let mut scala_functions = ScalaFunctions::default();
+        let current_date = CurrentDate::new();
+        scala_functions.insert(current_date.summary().clone(), current_date);
+        let mut table_functions = TableFunctions::default();
+        let numbers = Numbers::new();
+        table_functions.insert(numbers.summary().clone(), numbers);
         build_table(&table_cache, &mut transaction)?;
 
         let mut cursor = Cursor::new(Vec::new());
@@ -950,17 +960,22 @@ mod test {
                 .unwrap();
             *table.get_column_id_by_name("c3").unwrap()
         };
+        let context = ReferenceDecodeContext::with_functions(
+            Some((&transaction, &table_cache)),
+            &scala_functions,
+            &table_functions,
+        );
 
         fn_assert(
             &mut cursor,
             ScalarExpression::Constant(DataValue::Null),
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
             &mut cursor,
             ScalarExpression::Constant(DataValue::Int32(42)),
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -970,7 +985,7 @@ mod test {
                 ty: Utf8Type::Variable(None),
                 unit: CharLengthUnits::Characters,
             }),
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -991,7 +1006,7 @@ mod test {
                 )),
                 0,
             ),
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1008,7 +1023,7 @@ mod test {
                 )),
                 1,
             ),
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1017,7 +1032,7 @@ mod test {
                 expr: Box::new(ScalarExpression::Empty),
                 alias: AliasType::Name("Hello".to_string()),
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1026,7 +1041,7 @@ mod test {
                 expr: Box::new(ScalarExpression::Empty),
                 alias: AliasType::Expr(Box::new(ScalarExpression::Empty)),
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1039,7 +1054,7 @@ mod test {
                     Cow::Owned(LogicalType::Integer),
                 )?),
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1048,7 +1063,7 @@ mod test {
                 negated: true,
                 expr: Box::new(ScalarExpression::Empty),
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1056,10 +1071,14 @@ mod test {
             ScalarExpression::Unary {
                 op: UnaryOperator::Plus,
                 expr: Box::new(ScalarExpression::Empty),
-                evaluator: Some(UnaryEvaluatorBox(Arc::new(BooleanNotUnaryEvaluator))),
+                evaluator: Some(UnaryEvaluatorBox::new(
+                    Arc::new(BooleanNotUnaryEvaluator),
+                    LogicalType::Boolean,
+                    UnaryOperator::Not,
+                )),
                 ty: LogicalType::Integer,
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1070,7 +1089,7 @@ mod test {
                 evaluator: None,
                 ty: LogicalType::Integer,
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1079,10 +1098,14 @@ mod test {
                 op: BinaryOperator::Plus,
                 left_expr: Box::new(ScalarExpression::Empty),
                 right_expr: Box::new(ScalarExpression::Empty),
-                evaluator: Some(BinaryEvaluatorBox(Arc::new(Int32PlusBinaryEvaluator))),
+                evaluator: Some(BinaryEvaluatorBox::new(
+                    Arc::new(Int32PlusBinaryEvaluator),
+                    LogicalType::Integer,
+                    BinaryOperator::Plus,
+                )),
                 ty: LogicalType::Integer,
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1094,7 +1117,7 @@ mod test {
                 evaluator: None,
                 ty: LogicalType::Integer,
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1105,7 +1128,7 @@ mod test {
                 args: vec![ScalarExpression::Empty],
                 ty: LogicalType::Double,
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1115,7 +1138,7 @@ mod test {
                 expr: Box::new(ScalarExpression::Empty),
                 args: vec![ScalarExpression::Empty],
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1126,7 +1149,7 @@ mod test {
                 left_expr: Box::new(ScalarExpression::Empty),
                 right_expr: Box::new(ScalarExpression::Empty),
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1136,7 +1159,7 @@ mod test {
                 for_expr: Some(Box::new(ScalarExpression::Empty)),
                 from_expr: Some(Box::new(ScalarExpression::Empty)),
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1146,7 +1169,7 @@ mod test {
                 for_expr: None,
                 from_expr: Some(Box::new(ScalarExpression::Empty)),
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1156,7 +1179,7 @@ mod test {
                 for_expr: None,
                 from_expr: None,
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1165,7 +1188,7 @@ mod test {
                 expr: Box::new(ScalarExpression::Empty),
                 in_expr: Box::new(ScalarExpression::Empty),
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1175,7 +1198,7 @@ mod test {
                 trim_what_expr: Some(Box::new(ScalarExpression::Empty)),
                 trim_where: Some(TrimWhereField::Both),
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1185,7 +1208,7 @@ mod test {
                 trim_what_expr: None,
                 trim_where: Some(TrimWhereField::Both),
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1195,19 +1218,19 @@ mod test {
                 trim_what_expr: None,
                 trim_where: None,
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
             &mut cursor,
             ScalarExpression::Empty,
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
             &mut cursor,
             ScalarExpression::Tuple(vec![ScalarExpression::Empty]),
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1216,7 +1239,7 @@ mod test {
                 args: vec![ScalarExpression::Empty],
                 inner: ArcScalarFunctionImpl(CurrentDate::new()),
             }),
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1225,7 +1248,7 @@ mod test {
                 args: vec![ScalarExpression::Empty],
                 inner: ArcTableFunctionImpl(Numbers::new()),
             }),
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1236,7 +1259,7 @@ mod test {
                 right_expr: Box::new(ScalarExpression::Empty),
                 ty: LogicalType::Integer,
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1246,7 +1269,7 @@ mod test {
                 right_expr: Box::new(ScalarExpression::Empty),
                 ty: LogicalType::Integer,
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1256,7 +1279,7 @@ mod test {
                 right_expr: Box::new(ScalarExpression::Empty),
                 ty: LogicalType::Integer,
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1265,7 +1288,7 @@ mod test {
                 exprs: vec![ScalarExpression::Empty],
                 ty: LogicalType::Integer,
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1276,7 +1299,7 @@ mod test {
                 else_expr: Some(Box::new(ScalarExpression::Empty)),
                 ty: LogicalType::Integer,
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1287,7 +1310,7 @@ mod test {
                 else_expr: Some(Box::new(ScalarExpression::Empty)),
                 ty: LogicalType::Integer,
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
         fn_assert(
@@ -1298,7 +1321,7 @@ mod test {
                 else_expr: None,
                 ty: LogicalType::Integer,
             },
-            Some((&transaction, &table_cache)),
+            Some(&context),
             &mut reference_tables,
         )?;
 

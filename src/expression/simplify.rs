@@ -59,11 +59,9 @@ impl VisitorMut<'_> for ConstantCalculator {
 
                 if let ScalarExpression::Constant(unary_val) = arg_expr.as_ref() {
                     let value = if let Some(evaluator) = evaluator {
-                        evaluator.0.unary_eval(unary_val)
+                        evaluator.unary_eval(unary_val)
                     } else {
-                        unary_create(Cow::Borrowed(ty), *op)?
-                            .0
-                            .unary_eval(unary_val)
+                        unary_create(Cow::Borrowed(ty), *op)?.unary_eval(unary_val)
                     };
                     let _ = mem::replace(expr, ScalarExpression::Constant(value));
                 }
@@ -89,7 +87,7 @@ impl VisitorMut<'_> for ConstantCalculator {
 
                     *left_val = mem::replace(left_val, DataValue::Null).cast(&ty)?;
                     *right_val = mem::replace(right_val, DataValue::Null).cast(&ty)?;
-                    let value = evaluator.0.binary_eval(left_val, right_val)?;
+                    let value = evaluator.binary_eval(left_val, right_val)?;
                     let _ = mem::replace(expr, ScalarExpression::Constant(value));
                 }
             }
@@ -129,9 +127,9 @@ impl VisitorMut<'_> for Simplify {
                 let child_expr = arg_expr.as_ref().clone();
                 let value = if let Some(value) = arg_expr.unpack_val() {
                     Some(if let Some(evaluator) = evaluator {
-                        evaluator.0.unary_eval(&value)
+                        evaluator.unary_eval(&value)
                     } else {
-                        unary_create(Cow::Borrowed(&ty), op)?.0.unary_eval(&value)
+                        unary_create(Cow::Borrowed(&ty), op)?.unary_eval(&value)
                     })
                 } else {
                     None
@@ -565,11 +563,10 @@ impl ScalarExpression {
             } => {
                 let value = expr.unpack_val()?;
                 let unary_value = if let Some(evaluator) = evaluator {
-                    evaluator.0.unary_eval(&value)
+                    evaluator.unary_eval(&value)
                 } else {
                     unary_create(Cow::Borrowed(ty), *op)
                         .ok()?
-                        .0
                         .unary_eval(&value)
                 };
                 Some(unary_value)
@@ -587,11 +584,10 @@ impl ScalarExpression {
                 left = left.cast(ty).ok()?;
                 right = right.cast(ty).ok()?;
                 if let Some(evaluator) = evaluator {
-                    evaluator.0.binary_eval(&left, &right)
+                    evaluator.binary_eval(&left, &right)
                 } else {
                     binary_create(Cow::Borrowed(ty), *op)
                         .ok()?
-                        .0
                         .binary_eval(&left, &right)
                 }
                 .ok()

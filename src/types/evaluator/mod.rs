@@ -40,72 +40,98 @@ pub use self::cast::cast_create;
 pub use self::unary::unary_create;
 
 use crate::errors::DatabaseError;
+use crate::expression::{BinaryOperator, UnaryOperator};
 use crate::types::value::DataValue;
-use serde::{Deserialize, Serialize};
+use crate::types::LogicalType;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::Arc;
 
-#[typetag::serde(tag = "binary")]
 pub trait BinaryEvaluator: Send + Sync + Debug {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError>;
 }
 
-#[typetag::serde(tag = "unary")]
 pub trait UnaryEvaluator: Send + Sync + Debug {
     fn unary_eval(&self, value: &DataValue) -> DataValue;
 }
 
-#[typetag::serde(tag = "cast")]
 pub trait CastEvaluator: Send + Sync + Debug {
     fn eval_cast(&self, value: &DataValue) -> Result<DataValue, DatabaseError>;
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct BinaryEvaluatorBox(pub Arc<dyn BinaryEvaluator>);
+#[derive(Clone, Debug)]
+pub struct BinaryEvaluatorBox {
+    pub evaluator: Arc<dyn BinaryEvaluator>,
+    pub ty: LogicalType,
+    pub op: BinaryOperator,
+}
 
 impl Deref for BinaryEvaluatorBox {
-    type Target = Arc<dyn BinaryEvaluator>;
+    type Target = dyn BinaryEvaluator;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        self.evaluator.as_ref()
     }
 }
 
 impl BinaryEvaluatorBox {
+    pub fn new(evaluator: Arc<dyn BinaryEvaluator>, ty: LogicalType, op: BinaryOperator) -> Self {
+        Self { evaluator, ty, op }
+    }
+
     pub fn binary_eval(
         &self,
         left: &DataValue,
         right: &DataValue,
     ) -> Result<DataValue, DatabaseError> {
-        self.0.binary_eval(left, right)
+        self.evaluator.binary_eval(left, right)
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct UnaryEvaluatorBox(pub Arc<dyn UnaryEvaluator>);
+#[derive(Clone, Debug)]
+pub struct UnaryEvaluatorBox {
+    pub evaluator: Arc<dyn UnaryEvaluator>,
+    pub ty: LogicalType,
+    pub op: UnaryOperator,
+}
 
 impl UnaryEvaluatorBox {
+    pub fn new(evaluator: Arc<dyn UnaryEvaluator>, ty: LogicalType, op: UnaryOperator) -> Self {
+        Self { evaluator, ty, op }
+    }
+
     pub fn unary_eval(&self, value: &DataValue) -> DataValue {
-        self.0.unary_eval(value)
+        self.evaluator.unary_eval(value)
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CastEvaluatorBox(pub Arc<dyn CastEvaluator>);
+#[derive(Clone, Debug)]
+pub struct CastEvaluatorBox {
+    pub evaluator: Arc<dyn CastEvaluator>,
+    pub from: LogicalType,
+    pub to: LogicalType,
+}
 
 impl Deref for CastEvaluatorBox {
-    type Target = Arc<dyn CastEvaluator>;
+    type Target = dyn CastEvaluator;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        self.evaluator.as_ref()
     }
 }
 
 impl CastEvaluatorBox {
+    pub fn new(evaluator: Arc<dyn CastEvaluator>, from: LogicalType, to: LogicalType) -> Self {
+        Self {
+            evaluator,
+            from,
+            to,
+        }
+    }
+
     pub fn eval_cast(&self, value: &DataValue) -> Result<DataValue, DatabaseError> {
-        self.0.eval_cast(value)
+        self.evaluator.eval_cast(value)
     }
 }
 

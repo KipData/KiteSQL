@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::expression::TrimWhereField;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
-use crate::storage::{TableCache, Transaction};
+use crate::storage::Transaction;
 use std::io::{Read, Write};
 
 impl ReferenceSerialization for TrimWhereField {
@@ -37,7 +37,7 @@ impl ReferenceSerialization for TrimWhereField {
 
     fn decode<T: Transaction, R: Read>(
         reader: &mut R,
-        _: Option<(&T, &TableCache)>,
+        _: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         _: &ReferenceTables,
     ) -> Result<Self, DatabaseError> {
         let mut one_byte = [0u8; 1];

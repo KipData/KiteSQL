@@ -68,7 +68,6 @@ kite_sql_serde_macros = { version = "0.2.0", path = "kite_sql_serde_macros" }
 siphasher             = { version = "1", features = ["serde"] }
 sqlparser             = { version = "0.61", default-features = false, features = ["std"] }
 thiserror             = { version = "1" }
-typetag               = { version = "0.2" }
 ulid                  = { version = "1", features = ["serde"] }
 
 # Feature: net

@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
-use crate::storage::{TableCache, Transaction};
+use crate::storage::Transaction;
 use std::io::Read;
 use std::io::Write;
 use std::mem::size_of;
@@ -36,7 +36,7 @@ macro_rules! implement_num_serialization {
 
             fn decode<T: Transaction, R: Read>(
                 reader: &mut R,
-                _: Option<(&T, &TableCache)>,
+                _: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
                 _: &ReferenceTables,
             ) -> Result<Self, DatabaseError> {
                 let mut bytes = [0u8; size_of::<Self>()];
@@ -72,7 +72,7 @@ impl ReferenceSerialization for usize {
 
     fn decode<T: Transaction, R: Read>(
         reader: &mut R,
-        drive: Option<(&T, &TableCache)>,
+        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
     ) -> Result<Self, DatabaseError> {
         Ok(u32::decode(reader, drive, reference_tables)? as usize)

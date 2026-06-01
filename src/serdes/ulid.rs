@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
-use crate::storage::{TableCache, Transaction};
+use crate::storage::Transaction;
 use std::io::{Read, Write};
 use ulid::Ulid;
 
@@ -32,7 +32,7 @@ impl ReferenceSerialization for Ulid {
 
     fn decode<T: Transaction, R: Read>(
         reader: &mut R,
-        _: Option<(&T, &TableCache)>,
+        _: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         _: &ReferenceTables,
     ) -> Result<Self, DatabaseError> {
         let mut buf = [0u8; 16];

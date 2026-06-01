@@ -43,8 +43,6 @@ impl Lower {
         })
     }
 }
-
-#[typetag::serde]
 impl ScalarFunctionImpl for Lower {
     #[allow(unused_variables, clippy::redundant_closure_call)]
     fn eval(

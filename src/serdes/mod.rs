@@ -35,6 +35,7 @@ mod ulid;
 mod vec;
 
 use crate::catalog::TableName;
+use crate::db::{ScalaFunctions, TableFunctions};
 use crate::errors::DatabaseError;
 use crate::storage::{TableCache, Transaction};
 use std::io;
@@ -57,7 +58,7 @@ macro_rules! implement_serialization_by_bincode {
 
             fn decode<T: $crate::storage::Transaction, R: std::io::Read>(
                 reader: &mut R,
-                _: Option<(&T, &$crate::storage::TableCache)>,
+                _: Option<&$crate::serdes::ReferenceDecodeContext<'_, T>>,
                 _: &$crate::serdes::ReferenceTables,
             ) -> Result<Self, $crate::errors::DatabaseError> {
                 Ok(bincode::deserialize_from(reader)?)
@@ -76,11 +77,51 @@ pub trait ReferenceSerialization {
 
     fn decode<T: Transaction, R: Read>(
         reader: &mut R,
-        drive: Option<(&T, &TableCache)>,
+        context: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
     ) -> Result<Self, DatabaseError>
     where
         Self: Sized;
+}
+
+pub struct ReferenceDecodeContext<'a, T: Transaction> {
+    drive: Option<(&'a T, &'a TableCache)>,
+    scala_functions: Option<&'a ScalaFunctions>,
+    table_functions: Option<&'a TableFunctions>,
+}
+
+impl<'a, T: Transaction> ReferenceDecodeContext<'a, T> {
+    pub fn new(drive: Option<(&'a T, &'a TableCache)>) -> Self {
+        Self {
+            drive,
+            scala_functions: None,
+            table_functions: None,
+        }
+    }
+
+    pub fn with_functions(
+        drive: Option<(&'a T, &'a TableCache)>,
+        scala_functions: &'a ScalaFunctions,
+        table_functions: &'a TableFunctions,
+    ) -> Self {
+        Self {
+            drive,
+            scala_functions: Some(scala_functions),
+            table_functions: Some(table_functions),
+        }
+    }
+
+    pub fn drive(&self) -> Option<(&'a T, &'a TableCache)> {
+        self.drive
+    }
+
+    pub(crate) fn scala_functions(&self) -> Option<&'a ScalaFunctions> {
+        self.scala_functions
+    }
+
+    pub(crate) fn table_functions(&self) -> Option<&'a TableFunctions> {
+        self.table_functions
+    }
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]

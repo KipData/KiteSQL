@@ -14,8 +14,8 @@
 
 use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation, ColumnSummary};
 use crate::errors::DatabaseError;
-use crate::serdes::{ReferenceSerialization, ReferenceTables};
-use crate::storage::{TableCache, Transaction};
+use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
+use crate::storage::Transaction;
 use crate::types::ColumnId;
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -48,7 +48,7 @@ impl ReferenceSerialization for ColumnRef {
 
     fn decode<T: Transaction, R: Read>(
         reader: &mut R,
-        drive: Option<(&T, &TableCache)>,
+        drive: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
     ) -> Result<Self, DatabaseError> {
         let summary = ColumnSummary::decode(reader, drive, reference_tables)?;
@@ -61,8 +61,10 @@ impl ReferenceSerialization for ColumnRef {
                 is_temp: false,
             },
             Some((transaction, table_cache)),
-        ) = (&summary.relation, drive)
-        {
+        ) = (
+            &summary.relation,
+            drive.and_then(ReferenceDecodeContext::drive),
+        ) {
             let table = transaction
                 .table(table_cache, table_name.clone())?
                 .ok_or(DatabaseError::TableNotFound)?;
@@ -123,7 +125,7 @@ impl ReferenceSerialization for ColumnRelation {
 
     fn decode<T: Transaction, R: Read>(
         reader: &mut R,
-        drive: Option<(&T, &TableCache)>,
+        drive: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
     ) -> Result<Self, DatabaseError> {
         let mut type_bytes = [0u8; 1];
@@ -161,8 +163,7 @@ pub(crate) mod test {
     use crate::db::test::build_table;
     use crate::errors::DatabaseError;
     use crate::expression::ScalarExpression;
-    use crate::serdes::ReferenceSerialization;
-    use crate::serdes::ReferenceTables;
+    use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
     use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
     use crate::storage::{StatisticsMetaCache, Storage, Transaction};
     use crate::types::value::DataValue;
@@ -213,19 +214,23 @@ pub(crate) mod test {
             cursor.seek(SeekFrom::Start(0))?;
 
             assert_eq!(
-                ColumnRef::decode::<RocksTransaction, Cursor<Vec<u8>>>(
-                    &mut cursor,
-                    Some((&transaction, &table_cache)),
-                    &reference_tables
-                )?,
+                {
+                    let context = ReferenceDecodeContext::new(Some((&transaction, &table_cache)));
+                    ColumnRef::decode::<RocksTransaction, Cursor<Vec<u8>>>(
+                        &mut cursor,
+                        Some(&context),
+                        &reference_tables,
+                    )?
+                },
                 ref_column
             );
             cursor.seek(SeekFrom::Start(0))?;
 
             transaction.drop_column(&table_cache, &meta_cache, &table_name, "c3")?;
+            let context = ReferenceDecodeContext::new(Some((&transaction, &table_cache)));
             assert!(ColumnRef::decode::<RocksTransaction, Cursor<Vec<u8>>>(
                 &mut cursor,
-                Some((&transaction, &table_cache)),
+                Some(&context),
                 &reference_tables
             )
             .is_err());

@@ -27,12 +27,22 @@ use paste::paste;
 use std::borrow::Cow;
 use std::sync::Arc;
 
+macro_rules! box_unary {
+    ($ty:expr, $op:expr, $evaluator:expr) => {
+        Ok(UnaryEvaluatorBox::new(
+            Arc::new($evaluator),
+            $ty.clone(),
+            $op,
+        ))
+    };
+}
+
 macro_rules! numeric_unary_evaluator {
     ($value_type:ident, $op:expr, $ty:expr) => {
         paste! {
             match $op {
-                UnaryOperator::Plus => Ok(UnaryEvaluatorBox(Arc::new([<$value_type PlusUnaryEvaluator>]))),
-                UnaryOperator::Minus => Ok(UnaryEvaluatorBox(Arc::new([<$value_type MinusUnaryEvaluator>]))),
+                UnaryOperator::Plus => box_unary!($ty, $op, [<$value_type PlusUnaryEvaluator>]),
+                UnaryOperator::Minus => box_unary!($ty, $op, [<$value_type MinusUnaryEvaluator>]),
                 _ => Err(DatabaseError::UnsupportedUnaryOperator($ty.clone(), $op)),
             }
         }
@@ -50,7 +60,7 @@ pub fn unary_create(
         LogicalType::Integer => numeric_unary_evaluator!(Int32, op, ty),
         LogicalType::Bigint => numeric_unary_evaluator!(Int64, op, ty),
         LogicalType::Boolean => match op {
-            UnaryOperator::Not => Ok(UnaryEvaluatorBox(Arc::new(BooleanNotUnaryEvaluator))),
+            UnaryOperator::Not => box_unary!(ty, op, BooleanNotUnaryEvaluator),
             _ => Err(DatabaseError::UnsupportedUnaryOperator(ty.clone(), op)),
         },
         LogicalType::Float => numeric_unary_evaluator!(Float32, op, ty),
@@ -66,16 +76,11 @@ macro_rules! numeric_unary_evaluator_definition {
             #[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
             pub struct [<$value_type PlusUnaryEvaluator>];
             #[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
-            pub struct [<$value_type MinusUnaryEvaluator>];
-
-            #[typetag::serde]
-            impl $crate::types::evaluator::UnaryEvaluator for [<$value_type PlusUnaryEvaluator>] {
+            pub struct [<$value_type MinusUnaryEvaluator>];            impl $crate::types::evaluator::UnaryEvaluator for [<$value_type PlusUnaryEvaluator>] {
                 fn unary_eval(&self, value: &$crate::types::value::DataValue) -> $crate::types::value::DataValue {
                     value.clone()
                 }
-            }
-            #[typetag::serde]
-            impl $crate::types::evaluator::UnaryEvaluator for [<$value_type MinusUnaryEvaluator>] {
+            }            impl $crate::types::evaluator::UnaryEvaluator for [<$value_type MinusUnaryEvaluator>] {
                 fn unary_eval(&self, value: &$crate::types::value::DataValue) -> $crate::types::value::DataValue {
                     match value {
                         $compute_type(value) => $compute_type(-value),
