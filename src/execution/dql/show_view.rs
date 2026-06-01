@@ -17,7 +17,7 @@ use crate::errors::DatabaseError;
 use crate::execution::ExecArena;
 use crate::storage::Transaction;
 use crate::types::value::{DataValue, Utf8Type};
-use sqlparser::ast::CharLengthUnits;
+use crate::types::CharLengthUnits;
 
 pub struct ShowViews {
     pub(crate) metas: Option<std::vec::IntoIter<View>>,

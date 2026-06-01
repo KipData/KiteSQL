@@ -28,10 +28,34 @@ use std::cmp;
 
 use crate::errors::DatabaseError;
 use kite_sql_serde_macros::ReferenceSerialization;
-use sqlparser::ast::{CharLengthUnits, ExactNumberInfo, TimezoneInfo};
+use sqlparser::ast::{ExactNumberInfo, TimezoneInfo};
 use ulid::Ulid;
 
 pub type ColumnId = Ulid;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum CharLengthUnits {
+    Characters,
+    Octets,
+}
+
+impl From<sqlparser::ast::CharLengthUnits> for CharLengthUnits {
+    fn from(value: sqlparser::ast::CharLengthUnits) -> Self {
+        match value {
+            sqlparser::ast::CharLengthUnits::Characters => Self::Characters,
+            sqlparser::ast::CharLengthUnits::Octets => Self::Octets,
+        }
+    }
+}
+
+impl std::fmt::Display for CharLengthUnits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Characters => write!(f, "CHARACTERS"),
+            Self::Octets => write!(f, "OCTETS"),
+        }
+    }
+}
 
 /// Sqlrs type conversion:
 /// sqlparser::ast::DataType -> LogicalType -> arrow::datatypes::DataType
@@ -425,7 +449,9 @@ impl TryFrom<sqlparser::ast::DataType> for LogicalType {
                 }
                 Ok(LogicalType::Char(
                     len as u32,
-                    char_unit.unwrap_or(CharLengthUnits::Characters),
+                    char_unit
+                        .map(Into::into)
+                        .unwrap_or(CharLengthUnits::Characters),
                 ))
             }
             sqlparser::ast::DataType::CharVarying(varchar_len)
@@ -448,7 +474,9 @@ impl TryFrom<sqlparser::ast::DataType> for LogicalType {
                 }
                 Ok(LogicalType::Varchar(
                     len,
-                    char_unit.unwrap_or(CharLengthUnits::Characters),
+                    char_unit
+                        .map(Into::into)
+                        .unwrap_or(CharLengthUnits::Characters),
                 ))
             }
             sqlparser::ast::DataType::String(_) | sqlparser::ast::DataType::Text => {
@@ -597,8 +625,8 @@ pub(crate) mod test {
     use crate::errors::DatabaseError;
     use crate::serdes::{ReferenceSerialization, ReferenceTables};
     use crate::storage::rocksdb::RocksTransaction;
+    use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
-    use sqlparser::ast::CharLengthUnits;
     use std::io::{Cursor, Seek, SeekFrom};
 
     #[test]

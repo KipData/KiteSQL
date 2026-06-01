@@ -250,12 +250,12 @@ mod tests {
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
     use crate::types::tuple::Tuple;
     use crate::types::value::{DataValue, Utf8Type};
+    use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
     use bumpalo::Bump;
     use itertools::Itertools;
     use ordered_float::OrderedFloat;
     use rust_decimal::Decimal;
-    use sqlparser::ast::CharLengthUnits;
     use std::sync::Arc;
 
     #[test]

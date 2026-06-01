@@ -16,13 +16,13 @@ use super::LogicalType;
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::{BumpBytes, BOUND_MAX_TAG, NOTNULL_TAG, NULL_TAG};
 use crate::types::evaluator::cast_create;
+use crate::types::CharLengthUnits;
 use byteorder::ReadBytesExt;
 use chrono::format::{DelayedFormat, StrftimeItems};
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use itertools::Itertools;
 use ordered_float::OrderedFloat;
 use rust_decimal::Decimal;
-use sqlparser::ast::CharLengthUnits;
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::fmt::Formatter;
@@ -1464,11 +1464,11 @@ mod test {
     use crate::errors::DatabaseError;
     use crate::storage::table_codec::BumpBytes;
     use crate::types::value::{DataValue, TupleMappingRef, Utf8Type};
+    use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
     use bumpalo::Bump;
     use ordered_float::OrderedFloat;
     use rust_decimal::Decimal;
-    use sqlparser::ast::CharLengthUnits;
     use std::io::Cursor;
 
     #[test]

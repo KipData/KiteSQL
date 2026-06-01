@@ -34,10 +34,10 @@ use crate::types::evaluator::uint8::*;
 use crate::types::evaluator::utf8::*;
 use crate::types::evaluator::{CastEvaluator, CastEvaluatorBox};
 use crate::types::value::{DataValue, Utf8Type};
+use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
 use paste::paste;
 use serde::{Deserialize, Serialize};
-use sqlparser::ast::CharLengthUnits;
 use std::borrow::Cow;
 use std::sync::Arc;
 
@@ -284,7 +284,7 @@ macro_rules! define_integer_cast_evaluators {
             $crate::define_cast_evaluator!(
                 [<$prefix ToCharCastEvaluator>] {
                     len: u32,
-                    unit: sqlparser::ast::CharLengthUnits
+                    unit: crate::types::CharLengthUnits
                 },
                 $crate::types::value::DataValue::$variant(value) => |this| {
                     $crate::types::evaluator::cast::to_char(value.to_string(), this.len, this.unit)
@@ -293,7 +293,7 @@ macro_rules! define_integer_cast_evaluators {
             $crate::define_cast_evaluator!(
                 [<$prefix ToVarcharCastEvaluator>] {
                     len: Option<u32>,
-                    unit: sqlparser::ast::CharLengthUnits
+                    unit: crate::types::CharLengthUnits
                 },
                 $crate::types::value::DataValue::$variant(value) => |this| {
                     $crate::types::evaluator::cast::to_varchar(value.to_string(), this.len, this.unit)
@@ -350,7 +350,7 @@ macro_rules! define_float_cast_evaluators {
             $crate::define_cast_evaluator!(
                 [<$prefix ToCharCastEvaluator>] {
                     len: u32,
-                    unit: sqlparser::ast::CharLengthUnits
+                    unit: crate::types::CharLengthUnits
                 },
                 $crate::types::value::DataValue::$variant(value) => |this| {
                     $crate::types::evaluator::cast::to_char(value.to_string(), this.len, this.unit)
@@ -359,7 +359,7 @@ macro_rules! define_float_cast_evaluators {
             $crate::define_cast_evaluator!(
                 [<$prefix ToVarcharCastEvaluator>] {
                     len: Option<u32>,
-                    unit: sqlparser::ast::CharLengthUnits
+                    unit: crate::types::CharLengthUnits
                 },
                 $crate::types::value::DataValue::$variant(value) => |this| {
                     $crate::types::evaluator::cast::to_varchar(value.to_string(), this.len, this.unit)

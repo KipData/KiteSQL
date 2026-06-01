@@ -181,8 +181,8 @@ impl BinaryEvaluator for TupleLtEqBinaryEvaluator {
 mod test {
     use super::*;
     use crate::types::evaluator::cast_create;
+    use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
-    use sqlparser::ast::CharLengthUnits;
     use std::borrow::Cow;
 
     #[test]

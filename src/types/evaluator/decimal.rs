@@ -16,10 +16,10 @@ use crate::errors::DatabaseError;
 use crate::types::evaluator::cast::{to_char, to_varchar};
 use crate::types::evaluator::BinaryEvaluator;
 use crate::types::evaluator::DataValue;
+use crate::types::CharLengthUnits;
 use ordered_float::OrderedFloat;
 use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
-use sqlparser::ast::CharLengthUnits;
 use std::hint;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
@@ -242,8 +242,8 @@ mod test {
     use super::*;
     use crate::types::evaluator::CastEvaluator;
     use crate::types::value::Utf8Type;
+    use crate::types::CharLengthUnits;
     use rust_decimal::Decimal;
-    use sqlparser::ast::CharLengthUnits;
 
     #[test]
     fn test_decimal_cast_evaluators() {

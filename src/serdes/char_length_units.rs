@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use crate::storage::{TableCache, Transaction};
-use sqlparser::ast::CharLengthUnits;
+use crate::types::CharLengthUnits;
 use std::io::{Read, Write};
 
 impl ReferenceSerialization for CharLengthUnits {
@@ -55,7 +55,7 @@ pub(crate) mod test {
     use crate::errors::DatabaseError;
     use crate::serdes::{ReferenceSerialization, ReferenceTables};
     use crate::storage::rocksdb::RocksTransaction;
-    use sqlparser::ast::CharLengthUnits;
+    use crate::types::CharLengthUnits;
     use std::io::{Cursor, Seek, SeekFrom};
 
     #[test]

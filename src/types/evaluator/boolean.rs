@@ -16,9 +16,9 @@ use crate::errors::DatabaseError;
 use crate::types::evaluator::cast::{to_char, to_varchar};
 use crate::types::evaluator::DataValue;
 use crate::types::evaluator::{BinaryEvaluator, UnaryEvaluator};
+use crate::types::CharLengthUnits;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
-use sqlparser::ast::CharLengthUnits;
 use std::hint;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]

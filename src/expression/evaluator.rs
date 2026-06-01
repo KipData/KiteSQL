@@ -14,13 +14,12 @@
 
 use crate::errors::DatabaseError;
 use crate::expression::function::scala::ScalarFunction;
-use crate::expression::{AliasType, BinaryOperator, ScalarExpression};
+use crate::expression::{AliasType, BinaryOperator, ScalarExpression, TrimWhereField};
 use crate::types::evaluator::binary_create;
 use crate::types::tuple::TupleLike;
 use crate::types::value::{DataValue, Utf8Type};
-use crate::types::LogicalType;
+use crate::types::{CharLengthUnits, LogicalType};
 use regex::Regex;
-use sqlparser::ast::{CharLengthUnits, TrimWhereField};
 use std::borrow::Cow;
 use std::cmp;
 use std::cmp::Ordering;

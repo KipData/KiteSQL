@@ -2659,8 +2659,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dbf5ea8d4d7c808e1af1cbabebca9a2abe603bcefc22294c5b95018d53200cb7"
 dependencies = [
  "log",
- "recursive",
- "serde",
 ]
 
 [[package]]
@@ -2948,7 +2946,6 @@ dependencies = [
  "rand 0.8.5",
  "rust_decimal",
  "sqlite",
- "sqlparser",
  "thiserror 1.0.69",
 ]
 

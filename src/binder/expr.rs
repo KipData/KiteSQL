@@ -18,8 +18,8 @@ use crate::expression;
 use crate::expression::agg::AggKind;
 use itertools::Itertools;
 use sqlparser::ast::{
-    BinaryOperator, CharLengthUnits, DataType, DuplicateTreatment, Expr, Function, FunctionArg,
-    FunctionArgExpr, FunctionArguments, Ident, Query, TypedString, UnaryOperator, Value,
+    BinaryOperator, DataType, DuplicateTreatment, Expr, Function, FunctionArg, FunctionArgExpr,
+    FunctionArguments, Ident, Query, TypedString, UnaryOperator, Value,
 };
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -39,7 +39,7 @@ use crate::planner::{LogicalPlan, SchemaOutput};
 use crate::storage::Transaction;
 use crate::types::tuple::SchemaRef;
 use crate::types::value::{DataValue, Utf8Type};
-use crate::types::{ColumnId, LogicalType};
+use crate::types::{CharLengthUnits, ColumnId, LogicalType};
 
 macro_rules! try_alias {
     ($context:expr, $full_name:expr) => {
@@ -242,7 +242,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 Ok(ScalarExpression::Trim {
                     expr: Box::new(self.bind_expr(expr)?),
                     trim_what_expr,
-                    trim_where: *trim_where,
+                    trim_where: trim_where.map(Into::into),
                 })
             }
             Expr::Exists { subquery, negated } => {

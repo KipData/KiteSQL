@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+use crate::expression::TrimWhereField;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use crate::storage::{TableCache, Transaction};
-use sqlparser::ast::TrimWhereField;
 use std::io::{Read, Write};
 
 impl ReferenceSerialization for TrimWhereField {

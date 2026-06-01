@@ -21,9 +21,9 @@ use chrono::{NaiveDateTime, TimeZone, Utc};
 use clap::ValueEnum;
 use kite_sql::types::tuple::Tuple;
 use kite_sql::types::value::{DataValue, Utf8Type};
+use kite_sql::types::CharLengthUnits;
 use rust_decimal::Decimal;
 use sqlite::{Connection, CursorWithOwnership, Row, Statement as SqliteStatement, Value};
-use sqlparser::ast::CharLengthUnits;
 
 pub struct SqliteBackend {
     connection: Connection,

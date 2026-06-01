@@ -16,7 +16,6 @@ rand            = { version = "0.8" }
 rust_decimal    = { version = "1" }
 thiserror       = { version = "1" }
 sqlite          = { version = "0.34" }
-sqlparser       = { version = "0.61" }
 
 [target.'cfg(unix)'.dependencies]
 pprof = { version = "0.15", features = ["flamegraph"], optional = true }

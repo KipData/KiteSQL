@@ -24,13 +24,10 @@ use crate::types::evaluator::{
     UnaryEvaluatorBox,
 };
 use crate::types::value::DataValue;
-use crate::types::LogicalType;
+use crate::types::{CharLengthUnits, LogicalType};
 use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
-use sqlparser::ast::TrimWhereField;
-use sqlparser::ast::{
-    BinaryOperator as SqlBinaryOperator, CharLengthUnits, UnaryOperator as SqlUnaryOperator,
-};
+use sqlparser::ast::{BinaryOperator as SqlBinaryOperator, UnaryOperator as SqlUnaryOperator};
 use std::borrow::Cow;
 use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
@@ -43,6 +40,23 @@ pub mod range_detacher;
 pub mod simplify;
 pub mod visitor;
 pub mod visitor_mut;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum TrimWhereField {
+    Both,
+    Leading,
+    Trailing,
+}
+
+impl From<sqlparser::ast::TrimWhereField> for TrimWhereField {
+    fn from(value: sqlparser::ast::TrimWhereField) -> Self {
+        match value {
+            sqlparser::ast::TrimWhereField::Both => Self::Both,
+            sqlparser::ast::TrimWhereField::Leading => Self::Leading,
+            sqlparser::ast::TrimWhereField::Trailing => Self::Trailing,
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub enum AliasType {
@@ -849,6 +863,7 @@ mod test {
     use crate::expression::agg::AggKind;
     use crate::expression::function::scala::{ArcScalarFunctionImpl, ScalarFunction};
     use crate::expression::function::table::{ArcTableFunctionImpl, TableFunction};
+    use crate::expression::TrimWhereField;
     use crate::expression::{AliasType, BinaryOperator, ScalarExpression, UnaryOperator};
     use crate::function::current_date::CurrentDate;
     use crate::function::numbers::Numbers;
@@ -859,9 +874,9 @@ mod test {
     use crate::types::evaluator::int32::Int32PlusBinaryEvaluator;
     use crate::types::evaluator::{cast_create, BinaryEvaluatorBox, UnaryEvaluatorBox};
     use crate::types::value::{DataValue, Utf8Type};
+    use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
     use crate::utils::lru::SharedLruCache;
-    use sqlparser::ast::{CharLengthUnits, TrimWhereField};
     use std::borrow::Cow;
     use std::hash::RandomState;
     use std::io::{Cursor, Seek, SeekFrom};

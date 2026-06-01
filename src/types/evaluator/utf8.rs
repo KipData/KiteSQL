@@ -17,13 +17,13 @@ use crate::types::evaluator::cast::{cast_fail, to_char, to_varchar};
 use crate::types::evaluator::BinaryEvaluator;
 use crate::types::evaluator::DataValue;
 use crate::types::value::Utf8Type;
+use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use ordered_float::OrderedFloat;
 use regex::Regex;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlparser::ast::CharLengthUnits;
 use std::hint;
 use std::str::FromStr;
 

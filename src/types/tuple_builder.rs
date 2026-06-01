@@ -16,7 +16,7 @@ use crate::catalog::PrimaryKeyIndices;
 use crate::errors::DatabaseError;
 use crate::types::tuple::{Schema, Tuple};
 use crate::types::value::{DataValue, Utf8Type};
-use sqlparser::ast::CharLengthUnits;
+use crate::types::CharLengthUnits;
 
 pub struct TupleBuilder<'a> {
     schema: &'a Schema,
