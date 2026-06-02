@@ -62,3 +62,59 @@ drop table t1
 
 statement ok
 drop table t2
+
+statement ok
+create table t3(id int primary key, v int)
+
+statement ok
+insert into t3 values (1, 10), (2, 20)
+
+query TTTTI
+describe t3
+----
+id Integer 4 false PRIMARY null
+v Integer 4 true EMPTY null
+
+statement ok
+insert into t3 values (3, 10)
+
+statement error
+alter table t3 alter column v type bigint using v + 1
+
+statement error
+alter table t3 rename to t3_new
+
+statement error
+alter table t3 drop column id, v
+
+statement ok
+insert into t3 values (4, 10)
+
+statement error
+alter table t3 modify column v int unique
+
+statement error
+alter table t3 change column v v2 int unique
+
+query III rowsort
+select * from t3
+----
+1 10
+2 20
+3 10
+4 10
+
+query TTTTI
+describe t3
+----
+id Integer 4 false PRIMARY null
+v Integer 4 true EMPTY null
+
+statement error
+alter table t3 modify column v int first
+
+statement error
+alter table t3 change column v v int after id
+
+statement ok
+drop table t3

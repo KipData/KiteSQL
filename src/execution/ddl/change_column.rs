@@ -116,7 +116,6 @@ impl ChangeColumn {
                 &pk_ty,
                 &old_deserializers,
                 schema.len(),
-                schema.len(),
                 &serializers,
                 |tuple| {
                     tuple.values[column_index] =
@@ -135,7 +134,6 @@ impl ChangeColumn {
                 &table_name,
                 &pk_ty,
                 &old_deserializers,
-                schema.len(),
                 schema.len(),
                 |tuple| {
                     if tuple.values[column_index].is_null() {

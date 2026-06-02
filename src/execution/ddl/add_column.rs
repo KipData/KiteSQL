@@ -107,7 +107,6 @@ impl AddColumn {
             &pk_ty,
             &old_deserializers,
             schema.len(),
-            schema.len(),
             &serializers,
             |tuple| {
                 if let Some(value) = &default_value {
