@@ -9,6 +9,7 @@ use crate::errors::DatabaseError;
 use crate::storage::{Storage, Transaction};
 use crate::types::tuple::{SchemaRef, Tuple};
 use crate::types::value::DataValue;
+use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use rust_decimal::Decimal;
@@ -16,11 +17,11 @@ use sqlparser::ast::helpers::attached_token::AttachedToken;
 use sqlparser::ast::TruncateTableTarget;
 use sqlparser::ast::{
     AlterColumnOperation, AlterTable, AlterTableOperation, Analyze, Assignment, AssignmentTarget,
-    BinaryOperator as SqlBinaryOperator, CaseWhen, CastKind, CharLengthUnits, ColumnDef,
-    ColumnOption, ColumnOptionDef, CreateIndex, CreateTable, CreateTableOptions, CreateView,
-    DataType, Delete, DescribeAlias, Distinct, Expr, FromTable, Function, FunctionArg,
-    FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr, HiveDistributionStyle,
-    Ident, IndexColumn, Insert, Join, JoinConstraint, JoinOperator, KeyOrIndexDisplay, LimitClause,
+    BinaryOperator as SqlBinaryOperator, CaseWhen, CastKind, ColumnDef, ColumnOption,
+    ColumnOptionDef, CreateIndex, CreateTable, CreateTableOptions, CreateView, DataType, Delete,
+    DescribeAlias, Distinct, Expr, FromTable, Function, FunctionArg, FunctionArgExpr,
+    FunctionArgumentList, FunctionArguments, GroupByExpr, HiveDistributionStyle, Ident,
+    IndexColumn, Insert, Join, JoinConstraint, JoinOperator, KeyOrIndexDisplay, LimitClause,
     NullsDistinctOption, ObjectName, ObjectType, Offset, OffsetRows, OrderBy, OrderByExpr,
     OrderByKind, OrderByOptions, PrimaryKeyConstraint, Query, Select, SelectFlavor, SelectItem,
     SetExpr, SetOperator, SetQuantifier, ShowStatementOptions, TableAlias, TableFactor,

@@ -158,8 +158,8 @@ mod tests {
     use crate::db::DataBaseBuilder;
     use crate::errors::DatabaseError;
     use crate::storage::Storage;
+    use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
-    use sqlparser::ast::CharLengthUnits;
     use std::io::Write;
     use std::sync::Arc;
     use tempfile::TempDir;

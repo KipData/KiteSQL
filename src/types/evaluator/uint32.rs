@@ -24,9 +24,9 @@ mod test {
     use super::*;
     use crate::types::evaluator::CastEvaluator;
     use crate::types::value::Utf8Type;
+    use crate::types::CharLengthUnits;
     use ordered_float::OrderedFloat;
     use rust_decimal::Decimal;
-    use sqlparser::ast::CharLengthUnits;
 
     #[test]
     fn test_uint32_cast_evaluators() {

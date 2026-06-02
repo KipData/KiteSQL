@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use crate::serdes::DatabaseError;
-use crate::serdes::TableCache;
 use crate::serdes::Transaction;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use std::io::{Read, Write};
@@ -37,7 +36,7 @@ macro_rules! implement_ptr_serialization {
 
             fn decode<T: Transaction, R: Read>(
                 reader: &mut R,
-                drive: Option<(&T, &TableCache)>,
+                drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
                 reference_tables: &ReferenceTables,
             ) -> Result<Self, DatabaseError>
             where

@@ -12,27 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::TableMeta;
 use crate::errors::DatabaseError;
 use crate::execution::ExecArena;
-use crate::storage::Transaction;
+use crate::storage::{TableIter, Transaction};
 use crate::types::value::{DataValue, Utf8Type};
-use sqlparser::ast::CharLengthUnits;
+use crate::types::CharLengthUnits;
 
-pub struct ShowTables {
-    pub(crate) metas: Option<std::vec::IntoIter<TableMeta>>,
+pub struct ShowTables<'a, T: Transaction + 'a> {
+    pub(crate) metas: Option<TableIter<'a, T>>,
 }
 
-impl ShowTables {
-    pub(crate) fn next_tuple<'a, T: Transaction>(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-    ) -> Result<(), DatabaseError> {
+impl<'a, T: Transaction + 'a> ShowTables<'a, T> {
+    pub(crate) fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
         if self.metas.is_none() {
-            self.metas = Some(arena.transaction_mut().table_metas()?.into_iter());
+            self.metas = Some(arena.transaction().tables()?);
         }
 
-        let Some(TableMeta { table_name }) = self.metas.as_mut().and_then(|metas| metas.next())
+        let Some(table) = self
+            .metas
+            .as_mut()
+            .expect("show tables iterator initialized")
+            .try_next()?
         else {
             arena.finish();
             return Ok(());
@@ -42,7 +42,7 @@ impl ShowTables {
         output.pk = None;
         output.values.clear();
         output.values.push(DataValue::Utf8 {
-            value: table_name.to_string(),
+            value: table.table_name.to_string(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         });

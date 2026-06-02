@@ -62,8 +62,6 @@ fn tuple_cmp(
     }
     Some(order)
 }
-
-#[typetag::serde]
 impl BinaryEvaluator for TupleEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -75,7 +73,6 @@ impl BinaryEvaluator for TupleEqBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for TupleNotEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -88,12 +85,11 @@ impl BinaryEvaluator for TupleNotEqBinaryEvaluator {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub struct TupleCastEvaluator {
     pub element_evaluators: Vec<CastEvaluatorBox>,
 }
 
-#[typetag::serde]
 impl CastEvaluator for TupleCastEvaluator {
     fn eval_cast(&self, value: &DataValue) -> Result<DataValue, DatabaseError> {
         match value {
@@ -111,8 +107,6 @@ impl CastEvaluator for TupleCastEvaluator {
         }
     }
 }
-
-#[typetag::serde]
 impl BinaryEvaluator for TupleGtBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -128,7 +122,6 @@ impl BinaryEvaluator for TupleGtBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for TupleGtEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -144,7 +137,6 @@ impl BinaryEvaluator for TupleGtEqBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for TupleLtBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -160,7 +152,6 @@ impl BinaryEvaluator for TupleLtBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for TupleLtEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -181,8 +172,8 @@ impl BinaryEvaluator for TupleLtEqBinaryEvaluator {
 mod test {
     use super::*;
     use crate::types::evaluator::cast_create;
+    use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
-    use sqlparser::ast::CharLengthUnits;
     use std::borrow::Cow;
 
     #[test]

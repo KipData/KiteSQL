@@ -41,7 +41,7 @@ impl Accumulator for MinMaxAccumulator {
         if !value.is_null() {
             if let Some(inner_value) = &self.inner {
                 let evaluator = binary_create(Cow::Owned(value.logical_type()), self.op)?;
-                if let DataValue::Boolean(result) = evaluator.0.binary_eval(inner_value, value)? {
+                if let DataValue::Boolean(result) = evaluator.binary_eval(inner_value, value)? {
                     result
                 } else {
                     return Err(DatabaseError::InvalidType);

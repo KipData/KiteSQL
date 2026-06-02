@@ -53,11 +53,10 @@ impl DropView {
             return Ok(());
         };
 
-        let table_cache = arena.table_cache();
         let view_cache = arena.view_cache();
         arena
             .transaction_mut()
-            .drop_view(view_cache, table_cache, view_name.clone(), if_exists)?;
+            .drop_view(view_cache, view_name.clone(), if_exists)?;
 
         TupleBuilder::build_result_into(arena.result_tuple_mut(), format!("{view_name}"));
         arena.resume();

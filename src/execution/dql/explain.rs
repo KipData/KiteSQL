@@ -17,7 +17,7 @@ use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNod
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::value::{DataValue, Utf8Type};
-use sqlparser::ast::CharLengthUnits;
+use crate::types::CharLengthUnits;
 
 pub struct Explain {
     plan: LogicalPlan,

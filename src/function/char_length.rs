@@ -19,10 +19,10 @@ use crate::expression::function::FunctionSummary;
 use crate::expression::ScalarExpression;
 use crate::types::tuple::TupleLike;
 use crate::types::value::DataValue;
+use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
 use serde::Deserialize;
 use serde::Serialize;
-use sqlparser::ast::CharLengthUnits;
 use std::sync::Arc;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -41,8 +41,6 @@ impl CharLength {
         })
     }
 }
-
-#[typetag::serde]
 impl ScalarFunctionImpl for CharLength {
     #[allow(unused_variables, clippy::redundant_closure_call)]
     fn eval(

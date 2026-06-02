@@ -17,9 +17,9 @@ use crate::types::evaluator::cast::{cast_fail, to_char, to_varchar};
 use crate::types::evaluator::BinaryEvaluator;
 use crate::types::evaluator::DataValue;
 use crate::types::value::{ONE_DAY_TO_SEC, ONE_SEC_TO_NANO};
+use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
 use serde::{Deserialize, Serialize};
-use sqlparser::ast::CharLengthUnits;
 use std::hint;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
@@ -38,8 +38,6 @@ pub struct TimeLtEqBinaryEvaluator;
 pub struct TimeEqBinaryEvaluator;
 #[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
 pub struct TimeNotEqBinaryEvaluator;
-
-#[typetag::serde]
 impl BinaryEvaluator for TimePlusBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -64,7 +62,6 @@ impl BinaryEvaluator for TimePlusBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for TimeMinusBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -88,8 +85,6 @@ impl BinaryEvaluator for TimeMinusBinaryEvaluator {
         })
     }
 }
-
-#[typetag::serde]
 impl BinaryEvaluator for TimeGtBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -105,7 +100,6 @@ impl BinaryEvaluator for TimeGtBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for TimeGtEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -162,8 +156,6 @@ crate::define_cast_evaluator!(
         Ok(DataValue::Time32(*value, this.precision.unwrap_or(0)))
     }
 );
-
-#[typetag::serde]
 impl BinaryEvaluator for TimeLtBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -179,7 +171,6 @@ impl BinaryEvaluator for TimeLtBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for TimeLtEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -195,7 +186,6 @@ impl BinaryEvaluator for TimeLtEqBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for TimeEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -211,7 +201,6 @@ impl BinaryEvaluator for TimeEqBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for TimeNotEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {

@@ -15,9 +15,9 @@
 use crate::numeric_binary_evaluator_definition;
 use crate::types::evaluator::cast::{cast_fail, to_char, to_varchar};
 use crate::types::evaluator::DataValue;
+use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
 use chrono::{DateTime, Datelike, Timelike};
-use sqlparser::ast::CharLengthUnits;
 
 numeric_binary_evaluator_definition!(DateTime, DataValue::Date64);
 crate::define_cast_evaluator!(
@@ -91,7 +91,7 @@ mod test {
     use super::*;
     use crate::types::evaluator::CastEvaluator;
     use crate::types::value::Utf8Type;
-    use sqlparser::ast::CharLengthUnits;
+    use crate::types::CharLengthUnits;
 
     #[test]
     fn test_datetime_cast_evaluators() {

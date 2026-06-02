@@ -14,13 +14,12 @@
 
 use crate::errors::DatabaseError;
 use crate::expression::function::scala::ScalarFunction;
-use crate::expression::{AliasType, BinaryOperator, ScalarExpression};
+use crate::expression::{AliasType, BinaryOperator, ScalarExpression, TrimWhereField};
 use crate::types::evaluator::binary_create;
 use crate::types::tuple::TupleLike;
 use crate::types::value::{DataValue, Utf8Type};
-use crate::types::LogicalType;
+use crate::types::{CharLengthUnits, LogicalType};
 use regex::Regex;
-use sqlparser::ast::{CharLengthUnits, TrimWhereField};
 use std::borrow::Cow;
 use std::cmp;
 use std::cmp::Ordering;
@@ -80,7 +79,6 @@ impl ScalarExpression {
                 evaluator
                     .as_ref()
                     .ok_or(DatabaseError::EvaluatorNotFound)?
-                    .0
                     .binary_eval(&left, &right)
             }
             ScalarExpression::IsNull { expr, negated } => {
@@ -131,7 +129,6 @@ impl ScalarExpression {
                 Ok(evaluator
                     .as_ref()
                     .ok_or(DatabaseError::EvaluatorNotFound)?
-                    .0
                     .unary_eval(&value))
             }
             ScalarExpression::AggCall { .. } => {
@@ -341,7 +338,6 @@ impl ScalarExpression {
                         when_value = when_value.cast(&ty)?;
                         let evaluator = binary_create(Cow::Owned(ty), BinaryOperator::Eq)?;
                         evaluator
-                            .0
                             .binary_eval(operand_value, &when_value)?
                             .is_true()?
                     } else {

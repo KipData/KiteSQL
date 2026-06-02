@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
-use crate::storage::{TableCache, Transaction};
+use crate::storage::Transaction;
 use std::io::{Read, Write};
 use std::marker::PhantomData;
 
@@ -30,7 +30,7 @@ impl<V> ReferenceSerialization for PhantomData<V> {
 
     fn decode<T: Transaction, R: Read>(
         _: &mut R,
-        _: Option<(&T, &TableCache)>,
+        _: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         _: &ReferenceTables,
     ) -> Result<Self, DatabaseError> {
         Ok(PhantomData)

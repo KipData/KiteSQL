@@ -13,13 +13,14 @@
 // limitations under the License.
 
 use crate::types::LogicalType;
+use kite_sql_serde_macros::ReferenceSerialization;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 pub mod scala;
 pub mod table;
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Serialize, Deserialize)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Serialize, Deserialize, ReferenceSerialization)]
 pub struct FunctionSummary {
     pub name: Arc<str>,
     pub arg_types: Vec<LogicalType>,

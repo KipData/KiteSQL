@@ -42,21 +42,31 @@ use paste::paste;
 use std::borrow::Cow;
 use std::sync::Arc;
 
+macro_rules! box_binary {
+    ($ty:expr, $op:expr, $evaluator:expr) => {
+        Ok(BinaryEvaluatorBox::new(
+            Arc::new($evaluator),
+            $ty.clone(),
+            $op,
+        ))
+    };
+}
+
 macro_rules! numeric_binary_evaluator {
     ($value_type:ident, $op:expr, $ty:expr) => {
         paste! {
             match $op {
-                BinaryOperator::Plus => Ok(BinaryEvaluatorBox(Arc::new([<$value_type PlusBinaryEvaluator>]))),
-                BinaryOperator::Minus => Ok(BinaryEvaluatorBox(Arc::new([<$value_type MinusBinaryEvaluator>]))),
-                BinaryOperator::Multiply => Ok(BinaryEvaluatorBox(Arc::new([<$value_type MultiplyBinaryEvaluator>]))),
-                BinaryOperator::Divide => Ok(BinaryEvaluatorBox(Arc::new([<$value_type DivideBinaryEvaluator>]))),
-                BinaryOperator::Gt => Ok(BinaryEvaluatorBox(Arc::new([<$value_type GtBinaryEvaluator>]))),
-                BinaryOperator::GtEq => Ok(BinaryEvaluatorBox(Arc::new([<$value_type GtEqBinaryEvaluator>]))),
-                BinaryOperator::Lt => Ok(BinaryEvaluatorBox(Arc::new([<$value_type LtBinaryEvaluator>]))),
-                BinaryOperator::LtEq => Ok(BinaryEvaluatorBox(Arc::new([<$value_type LtEqBinaryEvaluator>]))),
-                BinaryOperator::Eq => Ok(BinaryEvaluatorBox(Arc::new([<$value_type EqBinaryEvaluator>]))),
-                BinaryOperator::NotEq => Ok(BinaryEvaluatorBox(Arc::new([<$value_type NotEqBinaryEvaluator>]))),
-                BinaryOperator::Modulo => Ok(BinaryEvaluatorBox(Arc::new([<$value_type ModBinaryEvaluator>]))),
+                BinaryOperator::Plus => box_binary!($ty, $op, [<$value_type PlusBinaryEvaluator>]),
+                BinaryOperator::Minus => box_binary!($ty, $op, [<$value_type MinusBinaryEvaluator>]),
+                BinaryOperator::Multiply => box_binary!($ty, $op, [<$value_type MultiplyBinaryEvaluator>]),
+                BinaryOperator::Divide => box_binary!($ty, $op, [<$value_type DivideBinaryEvaluator>]),
+                BinaryOperator::Gt => box_binary!($ty, $op, [<$value_type GtBinaryEvaluator>]),
+                BinaryOperator::GtEq => box_binary!($ty, $op, [<$value_type GtEqBinaryEvaluator>]),
+                BinaryOperator::Lt => box_binary!($ty, $op, [<$value_type LtBinaryEvaluator>]),
+                BinaryOperator::LtEq => box_binary!($ty, $op, [<$value_type LtEqBinaryEvaluator>]),
+                BinaryOperator::Eq => box_binary!($ty, $op, [<$value_type EqBinaryEvaluator>]),
+                BinaryOperator::NotEq => box_binary!($ty, $op, [<$value_type NotEqBinaryEvaluator>]),
+                BinaryOperator::Modulo => box_binary!($ty, $op, [<$value_type ModBinaryEvaluator>]),
                 _ => Err(DatabaseError::UnsupportedBinaryOperator($ty.clone(), $op)),
             }
         }
@@ -82,66 +92,60 @@ pub fn binary_create(
         LogicalType::Date => numeric_binary_evaluator!(Date, op, ty),
         LogicalType::DateTime => numeric_binary_evaluator!(DateTime, op, ty),
         LogicalType::Time(_) => match op {
-            BinaryOperator::Plus => Ok(BinaryEvaluatorBox(Arc::new(TimePlusBinaryEvaluator))),
-            BinaryOperator::Minus => Ok(BinaryEvaluatorBox(Arc::new(TimeMinusBinaryEvaluator))),
-            BinaryOperator::Gt => Ok(BinaryEvaluatorBox(Arc::new(TimeGtBinaryEvaluator))),
-            BinaryOperator::GtEq => Ok(BinaryEvaluatorBox(Arc::new(TimeGtEqBinaryEvaluator))),
-            BinaryOperator::Lt => Ok(BinaryEvaluatorBox(Arc::new(TimeLtBinaryEvaluator))),
-            BinaryOperator::LtEq => Ok(BinaryEvaluatorBox(Arc::new(TimeLtEqBinaryEvaluator))),
-            BinaryOperator::Eq => Ok(BinaryEvaluatorBox(Arc::new(TimeEqBinaryEvaluator))),
-            BinaryOperator::NotEq => Ok(BinaryEvaluatorBox(Arc::new(TimeNotEqBinaryEvaluator))),
+            BinaryOperator::Plus => box_binary!(ty, op, TimePlusBinaryEvaluator),
+            BinaryOperator::Minus => box_binary!(ty, op, TimeMinusBinaryEvaluator),
+            BinaryOperator::Gt => box_binary!(ty, op, TimeGtBinaryEvaluator),
+            BinaryOperator::GtEq => box_binary!(ty, op, TimeGtEqBinaryEvaluator),
+            BinaryOperator::Lt => box_binary!(ty, op, TimeLtBinaryEvaluator),
+            BinaryOperator::LtEq => box_binary!(ty, op, TimeLtEqBinaryEvaluator),
+            BinaryOperator::Eq => box_binary!(ty, op, TimeEqBinaryEvaluator),
+            BinaryOperator::NotEq => box_binary!(ty, op, TimeNotEqBinaryEvaluator),
             _ => Err(DatabaseError::UnsupportedBinaryOperator(ty.clone(), op)),
         },
         LogicalType::TimeStamp(_, _) => match op {
-            BinaryOperator::Gt => Ok(BinaryEvaluatorBox(Arc::new(Time64GtBinaryEvaluator))),
-            BinaryOperator::GtEq => Ok(BinaryEvaluatorBox(Arc::new(Time64GtEqBinaryEvaluator))),
-            BinaryOperator::Lt => Ok(BinaryEvaluatorBox(Arc::new(Time64LtBinaryEvaluator))),
-            BinaryOperator::LtEq => Ok(BinaryEvaluatorBox(Arc::new(Time64LtEqBinaryEvaluator))),
-            BinaryOperator::Eq => Ok(BinaryEvaluatorBox(Arc::new(Time64EqBinaryEvaluator))),
-            BinaryOperator::NotEq => Ok(BinaryEvaluatorBox(Arc::new(Time64NotEqBinaryEvaluator))),
+            BinaryOperator::Gt => box_binary!(ty, op, Time64GtBinaryEvaluator),
+            BinaryOperator::GtEq => box_binary!(ty, op, Time64GtEqBinaryEvaluator),
+            BinaryOperator::Lt => box_binary!(ty, op, Time64LtBinaryEvaluator),
+            BinaryOperator::LtEq => box_binary!(ty, op, Time64LtEqBinaryEvaluator),
+            BinaryOperator::Eq => box_binary!(ty, op, Time64EqBinaryEvaluator),
+            BinaryOperator::NotEq => box_binary!(ty, op, Time64NotEqBinaryEvaluator),
             _ => Err(DatabaseError::UnsupportedBinaryOperator(ty.clone(), op)),
         },
         LogicalType::Decimal(_, _) => numeric_binary_evaluator!(Decimal, op, ty),
         LogicalType::Boolean => match op {
-            BinaryOperator::And => Ok(BinaryEvaluatorBox(Arc::new(BooleanAndBinaryEvaluator))),
-            BinaryOperator::Or => Ok(BinaryEvaluatorBox(Arc::new(BooleanOrBinaryEvaluator))),
-            BinaryOperator::Eq => Ok(BinaryEvaluatorBox(Arc::new(BooleanEqBinaryEvaluator))),
-            BinaryOperator::NotEq => Ok(BinaryEvaluatorBox(Arc::new(BooleanNotEqBinaryEvaluator))),
+            BinaryOperator::And => box_binary!(ty, op, BooleanAndBinaryEvaluator),
+            BinaryOperator::Or => box_binary!(ty, op, BooleanOrBinaryEvaluator),
+            BinaryOperator::Eq => box_binary!(ty, op, BooleanEqBinaryEvaluator),
+            BinaryOperator::NotEq => box_binary!(ty, op, BooleanNotEqBinaryEvaluator),
             _ => Err(DatabaseError::UnsupportedBinaryOperator(
                 LogicalType::Boolean,
                 op,
             )),
         },
         LogicalType::Varchar(_, _) | LogicalType::Char(_, _) => match op {
-            BinaryOperator::Gt => Ok(BinaryEvaluatorBox(Arc::new(Utf8GtBinaryEvaluator))),
-            BinaryOperator::Lt => Ok(BinaryEvaluatorBox(Arc::new(Utf8LtBinaryEvaluator))),
-            BinaryOperator::GtEq => Ok(BinaryEvaluatorBox(Arc::new(Utf8GtEqBinaryEvaluator))),
-            BinaryOperator::LtEq => Ok(BinaryEvaluatorBox(Arc::new(Utf8LtEqBinaryEvaluator))),
-            BinaryOperator::Eq => Ok(BinaryEvaluatorBox(Arc::new(Utf8EqBinaryEvaluator))),
-            BinaryOperator::NotEq => Ok(BinaryEvaluatorBox(Arc::new(Utf8NotEqBinaryEvaluator))),
-            BinaryOperator::StringConcat => Ok(BinaryEvaluatorBox(Arc::new(
-                Utf8StringConcatBinaryEvaluator,
-            ))),
+            BinaryOperator::Gt => box_binary!(ty, op, Utf8GtBinaryEvaluator),
+            BinaryOperator::Lt => box_binary!(ty, op, Utf8LtBinaryEvaluator),
+            BinaryOperator::GtEq => box_binary!(ty, op, Utf8GtEqBinaryEvaluator),
+            BinaryOperator::LtEq => box_binary!(ty, op, Utf8LtEqBinaryEvaluator),
+            BinaryOperator::Eq => box_binary!(ty, op, Utf8EqBinaryEvaluator),
+            BinaryOperator::NotEq => box_binary!(ty, op, Utf8NotEqBinaryEvaluator),
+            BinaryOperator::StringConcat => box_binary!(ty, op, Utf8StringConcatBinaryEvaluator),
             BinaryOperator::Like(escape_char) => {
-                Ok(BinaryEvaluatorBox(Arc::new(Utf8LikeBinaryEvaluator {
-                    escape_char,
-                })))
+                box_binary!(ty, op, Utf8LikeBinaryEvaluator { escape_char })
             }
             BinaryOperator::NotLike(escape_char) => {
-                Ok(BinaryEvaluatorBox(Arc::new(Utf8NotLikeBinaryEvaluator {
-                    escape_char,
-                })))
+                box_binary!(ty, op, Utf8NotLikeBinaryEvaluator { escape_char })
             }
             _ => Err(DatabaseError::UnsupportedBinaryOperator(ty.clone(), op)),
         },
-        LogicalType::SqlNull => Ok(BinaryEvaluatorBox(Arc::new(NullBinaryEvaluator))),
+        LogicalType::SqlNull => box_binary!(ty, op, NullBinaryEvaluator),
         LogicalType::Tuple(_) => match op {
-            BinaryOperator::Eq => Ok(BinaryEvaluatorBox(Arc::new(TupleEqBinaryEvaluator))),
-            BinaryOperator::NotEq => Ok(BinaryEvaluatorBox(Arc::new(TupleNotEqBinaryEvaluator))),
-            BinaryOperator::Gt => Ok(BinaryEvaluatorBox(Arc::new(TupleGtBinaryEvaluator))),
-            BinaryOperator::GtEq => Ok(BinaryEvaluatorBox(Arc::new(TupleGtEqBinaryEvaluator))),
-            BinaryOperator::Lt => Ok(BinaryEvaluatorBox(Arc::new(TupleLtBinaryEvaluator))),
-            BinaryOperator::LtEq => Ok(BinaryEvaluatorBox(Arc::new(TupleLtEqBinaryEvaluator))),
+            BinaryOperator::Eq => box_binary!(ty, op, TupleEqBinaryEvaluator),
+            BinaryOperator::NotEq => box_binary!(ty, op, TupleNotEqBinaryEvaluator),
+            BinaryOperator::Gt => box_binary!(ty, op, TupleGtBinaryEvaluator),
+            BinaryOperator::GtEq => box_binary!(ty, op, TupleGtEqBinaryEvaluator),
+            BinaryOperator::Lt => box_binary!(ty, op, TupleLtBinaryEvaluator),
+            BinaryOperator::LtEq => box_binary!(ty, op, TupleLtEqBinaryEvaluator),
             _ => Err(DatabaseError::UnsupportedBinaryOperator(ty.clone(), op)),
         },
     }
@@ -172,10 +176,7 @@ macro_rules! numeric_binary_evaluator_definition {
             #[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
             pub struct [<$value_type NotEqBinaryEvaluator>];
             #[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
-            pub struct [<$value_type ModBinaryEvaluator>];
-
-            #[typetag::serde]
-            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type PlusBinaryEvaluator>] {
+            pub struct [<$value_type ModBinaryEvaluator>];            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type PlusBinaryEvaluator>] {
                 fn binary_eval(
                     &self,
                     left: &$crate::types::value::DataValue,
@@ -189,9 +190,7 @@ macro_rules! numeric_binary_evaluator_definition {
                         _ => unsafe { std::hint::unreachable_unchecked() },
                     })
                 }
-            }
-            #[typetag::serde]
-            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type MinusBinaryEvaluator>] {
+            }            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type MinusBinaryEvaluator>] {
                 fn binary_eval(
                     &self,
                     left: &$crate::types::value::DataValue,
@@ -205,9 +204,7 @@ macro_rules! numeric_binary_evaluator_definition {
                         _ => unsafe { std::hint::unreachable_unchecked() },
                     })
                 }
-            }
-            #[typetag::serde]
-            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type MultiplyBinaryEvaluator>] {
+            }            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type MultiplyBinaryEvaluator>] {
                 fn binary_eval(
                     &self,
                     left: &$crate::types::value::DataValue,
@@ -221,9 +218,7 @@ macro_rules! numeric_binary_evaluator_definition {
                         _ => unsafe { std::hint::unreachable_unchecked() },
                     })
                 }
-            }
-            #[typetag::serde]
-            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type DivideBinaryEvaluator>] {
+            }            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type DivideBinaryEvaluator>] {
                 fn binary_eval(
                     &self,
                     left: &$crate::types::value::DataValue,
@@ -237,9 +232,7 @@ macro_rules! numeric_binary_evaluator_definition {
                         _ => unsafe { std::hint::unreachable_unchecked() },
                     })
                 }
-            }
-            #[typetag::serde]
-            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type GtBinaryEvaluator>] {
+            }            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type GtBinaryEvaluator>] {
                 fn binary_eval(
                     &self,
                     left: &$crate::types::value::DataValue,
@@ -253,9 +246,7 @@ macro_rules! numeric_binary_evaluator_definition {
                         _ => unsafe { std::hint::unreachable_unchecked() },
                     })
                 }
-            }
-            #[typetag::serde]
-            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type GtEqBinaryEvaluator>] {
+            }            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type GtEqBinaryEvaluator>] {
                 fn binary_eval(
                     &self,
                     left: &$crate::types::value::DataValue,
@@ -269,9 +260,7 @@ macro_rules! numeric_binary_evaluator_definition {
                         _ => unsafe { std::hint::unreachable_unchecked() },
                     })
                 }
-            }
-            #[typetag::serde]
-            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type LtBinaryEvaluator>] {
+            }            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type LtBinaryEvaluator>] {
                 fn binary_eval(
                     &self,
                     left: &$crate::types::value::DataValue,
@@ -285,9 +274,7 @@ macro_rules! numeric_binary_evaluator_definition {
                         _ => unsafe { std::hint::unreachable_unchecked() },
                     })
                 }
-            }
-            #[typetag::serde]
-            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type LtEqBinaryEvaluator>] {
+            }            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type LtEqBinaryEvaluator>] {
                 fn binary_eval(
                     &self,
                     left: &$crate::types::value::DataValue,
@@ -301,9 +288,7 @@ macro_rules! numeric_binary_evaluator_definition {
                         _ => unsafe { std::hint::unreachable_unchecked() },
                     })
                 }
-            }
-            #[typetag::serde]
-            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type EqBinaryEvaluator>] {
+            }            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type EqBinaryEvaluator>] {
                 fn binary_eval(
                     &self,
                     left: &$crate::types::value::DataValue,
@@ -317,9 +302,7 @@ macro_rules! numeric_binary_evaluator_definition {
                         _ => unsafe { std::hint::unreachable_unchecked() },
                     })
                 }
-            }
-            #[typetag::serde]
-            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type NotEqBinaryEvaluator>] {
+            }            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type NotEqBinaryEvaluator>] {
                 fn binary_eval(
                     &self,
                     left: &$crate::types::value::DataValue,
@@ -333,9 +316,7 @@ macro_rules! numeric_binary_evaluator_definition {
                         _ => unsafe { std::hint::unreachable_unchecked() },
                     })
                 }
-            }
-            #[typetag::serde]
-            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type ModBinaryEvaluator>] {
+            }            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type ModBinaryEvaluator>] {
                 fn binary_eval(
                     &self,
                     left: &$crate::types::value::DataValue,

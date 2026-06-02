@@ -24,8 +24,8 @@ use crate::planner::LogicalPlan;
 use crate::storage::{StatisticsMetaCache, Transaction};
 use crate::types::index::IndexId;
 use crate::types::value::{DataValue, Utf8Type};
+use crate::types::CharLengthUnits;
 use itertools::Itertools;
-use sqlparser::ast::CharLengthUnits;
 use std::fmt::{self, Formatter};
 use std::sync::Arc;
 

@@ -23,9 +23,9 @@ use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::types::value::{DataValue, Utf8Type};
+use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
 use bumpalo::Bump;
-use sqlparser::ast::CharLengthUnits;
 use std::collections::HashSet;
 
 #[derive(Clone)]

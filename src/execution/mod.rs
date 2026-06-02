@@ -21,6 +21,7 @@ use self::ddl::change_column::ChangeColumn;
 use self::dql::join::nested_loop_join::NestedLoopJoin;
 use self::dql::mark_apply::MarkApply;
 use self::dql::scalar_apply::ScalarApply;
+use crate::db::{ScalaFunctions, TableFunctions};
 use crate::errors::DatabaseError;
 use crate::execution::ddl::create_index::CreateIndex;
 use crate::execution::ddl::create_table::CreateTable;
@@ -65,7 +66,23 @@ use crate::types::index::RuntimeIndexProbe;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 
-pub(crate) type ExecutionCaches<'a> = (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache);
+pub(crate) type ExecutionCaches<'a> = (
+    &'a TableCache,
+    &'a ViewCache,
+    &'a StatisticsMetaCache,
+    &'a ScalaFunctions,
+    &'a TableFunctions,
+);
+
+pub(crate) trait IntoExecutionCaches<'a> {
+    fn into_execution_caches(self) -> ExecutionCaches<'a>;
+}
+
+impl<'a> IntoExecutionCaches<'a> for ExecutionCaches<'a> {
+    fn into_execution_caches(self) -> ExecutionCaches<'a> {
+        self
+    }
+}
 pub(crate) type ExecId = usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,8 +159,8 @@ pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
     ScalarSubquery(ScalarSubquery),
     SetMembership(SetMembership),
     SeqScan(SeqScan<'a, T>),
-    ShowTables(ShowTables),
-    ShowViews(ShowViews),
+    ShowTables(ShowTables<'a, T>),
+    ShowViews(ShowViews<'a, T>),
     SimpleAgg(SimpleAggExecutor),
     Sort(Sort),
     StreamDistinct(StreamDistinctExecutor),
@@ -242,10 +259,10 @@ impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
                 <SeqScan<'a, T> as ExecutorNode<'a, T>>::next_tuple(exec, arena)
             }
             ExecNode::ShowTables(exec) => {
-                <ShowTables as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+                <ShowTables<'a, T> as ExecutorNode<'a, T>>::next_tuple(exec, arena)
             }
             ExecNode::ShowViews(exec) => {
-                <ShowViews as ExecutorNode<'a, T>>::next_tuple(exec, arena)
+                <ShowViews<'a, T> as ExecutorNode<'a, T>>::next_tuple(exec, arena)
             }
             ExecNode::SimpleAgg(exec) => {
                 <SimpleAggExecutor as ExecutorNode<'a, T>>::next_tuple(exec, arena)
@@ -287,11 +304,17 @@ impl<'a, T: Transaction + 'a> Default for ExecArena<'a, T> {
 }
 
 impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
-    pub(crate) fn init_context(&mut self, cache: ExecutionCaches<'a>, transaction: *mut T) {
+    pub(crate) fn init_context<C>(&mut self, cache: C, transaction: *mut T)
+    where
+        C: IntoExecutionCaches<'a>,
+    {
+        let cache = cache.into_execution_caches();
         if let Some(current) = self.cache {
             debug_assert!(std::ptr::eq(current.0, cache.0));
             debug_assert!(std::ptr::eq(current.1, cache.1));
             debug_assert!(std::ptr::eq(current.2, cache.2));
+            debug_assert!(std::ptr::eq(current.3, cache.3));
+            debug_assert!(std::ptr::eq(current.4, cache.4));
             debug_assert_eq!(self.transaction, transaction);
         } else {
             self.cache = Some(cache);
@@ -315,6 +338,14 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
 
     pub(crate) fn meta_cache(&self) -> &'a StatisticsMetaCache {
         self.cache.expect("execution arena context initialized").2
+    }
+
+    pub(crate) fn scala_functions(&self) -> &'a ScalaFunctions {
+        self.cache.expect("execution arena context initialized").3
+    }
+
+    pub(crate) fn table_functions(&self) -> &'a TableFunctions {
+        self.cache.expect("execution arena context initialized").4
     }
 
     pub(crate) fn transaction(&self) -> &'a T {
@@ -554,7 +585,7 @@ impl_write_executor_node_via_from!(
     )
 );
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowTables {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowTables<'a, T> {
     type Input = Self;
 
     fn into_executor(
@@ -571,7 +602,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowTables {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowViews {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowViews<'a, T> {
     type Input = Self;
 
     fn into_executor(
@@ -758,13 +789,13 @@ pub(crate) fn build_read<'a, T: Transaction + 'a>(
         Operator::Values(op) => {
             <Values as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
         }
-        Operator::ShowTable => <ShowTables as ExecutorNode<'a, T>>::into_executor(
+        Operator::ShowTable => <ShowTables<'a, T> as ExecutorNode<'a, T>>::into_executor(
             ShowTables { metas: None },
             arena,
             cache,
             transaction,
         ),
-        Operator::ShowView => <ShowViews as ExecutorNode<'a, T>>::into_executor(
+        Operator::ShowView => <ShowViews<'a, T> as ExecutorNode<'a, T>>::into_executor(
             ShowViews { metas: None },
             arena,
             cache,
@@ -897,77 +928,122 @@ pub(crate) fn build_write<'a, T: Transaction + 'a>(
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-pub(crate) fn execute<'a, T, E>(
-    executor: E,
-    cache: ExecutionCaches<'a>,
-    transaction: *mut T,
-) -> Executor<'a, T>
-where
-    T: Transaction + 'a,
-    E: ReadExecutor<'a, T>,
-{
-    let mut arena = ExecArena::default();
-    arena.init_context(cache, transaction);
-    let root = executor.into_executor(&mut arena, cache, transaction);
-    Executor::new(arena, root)
-}
+mod test_utils {
+    use super::*;
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
-pub(crate) fn execute_mut<'a, T, E>(
-    executor: E,
-    cache: ExecutionCaches<'a>,
-    transaction: *mut T,
-) -> Executor<'a, T>
-where
-    T: Transaction + 'a,
-    E: WriteExecutor<'a, T>,
-{
-    let mut arena = ExecArena::default();
-    arena.init_context(cache, transaction);
-    let root = executor.into_executor(&mut arena, cache, transaction);
-    Executor::new(arena, root)
-}
+    static EMPTY_SCALA_FUNCTIONS: std::sync::LazyLock<ScalaFunctions> =
+        std::sync::LazyLock::new(ScalaFunctions::default);
+    static EMPTY_TABLE_FUNCTIONS: std::sync::LazyLock<TableFunctions> =
+        std::sync::LazyLock::new(TableFunctions::default);
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
-pub(crate) fn execute_input<'a, T, E>(
-    input: E::Input,
-    cache: ExecutionCaches<'a>,
-    transaction: *mut T,
-) -> Executor<'a, T>
-where
-    T: Transaction + 'a,
-    E: ExecutorNode<'a, T>,
-{
-    let mut arena = ExecArena::default();
-    arena.init_context(cache, transaction);
-    let root = E::into_executor(input, &mut arena, cache, transaction);
-    Executor::new(arena, root)
-}
-
-#[cfg(all(test, not(target_arch = "wasm32")))]
-#[allow(dead_code)]
-pub(crate) fn execute_input_mut<'a, T, E>(
-    input: E::Input,
-    cache: ExecutionCaches<'a>,
-    transaction: *mut T,
-) -> Executor<'a, T>
-where
-    T: Transaction + 'a,
-    E: ExecutorNode<'a, T>,
-{
-    let mut arena = ExecArena::default();
-    arena.init_context(cache, transaction);
-    let root = E::into_executor(input, &mut arena, cache, transaction);
-    Executor::new(arena, root)
-}
-
-#[cfg(all(test, not(target_arch = "wasm32")))]
-pub fn try_collect<T: Transaction>(executor: Executor<'_, T>) -> Result<Vec<Tuple>, DatabaseError> {
-    let mut executor = executor;
-    let mut tuples = Vec::new();
-
-    while let Some(tuple) = executor.next_tuple()? {
-        tuples.push(tuple.clone());
+    impl<'a> IntoExecutionCaches<'a> for (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache) {
+        fn into_execution_caches(self) -> ExecutionCaches<'a> {
+            (
+                self.0,
+                self.1,
+                self.2,
+                &EMPTY_SCALA_FUNCTIONS,
+                &EMPTY_TABLE_FUNCTIONS,
+            )
+        }
     }
-    Ok(tuples)
+
+    impl<'a> IntoExecutionCaches<'a>
+        for (
+            &'a std::sync::Arc<TableCache>,
+            &'a std::sync::Arc<ViewCache>,
+            &'a std::sync::Arc<StatisticsMetaCache>,
+        )
+    {
+        fn into_execution_caches(self) -> ExecutionCaches<'a> {
+            (
+                self.0.as_ref(),
+                self.1.as_ref(),
+                self.2.as_ref(),
+                &EMPTY_SCALA_FUNCTIONS,
+                &EMPTY_TABLE_FUNCTIONS,
+            )
+        }
+    }
+
+    pub(crate) fn execute<'a, T, E>(
+        executor: E,
+        cache: impl IntoExecutionCaches<'a>,
+        transaction: *mut T,
+    ) -> Executor<'a, T>
+    where
+        T: Transaction + 'a,
+        E: ReadExecutor<'a, T>,
+    {
+        let cache = cache.into_execution_caches();
+        let mut arena = ExecArena::default();
+        arena.init_context(cache, transaction);
+        let root = executor.into_executor(&mut arena, cache, transaction);
+        Executor::new(arena, root)
+    }
+
+    pub(crate) fn execute_mut<'a, T, E>(
+        executor: E,
+        cache: impl IntoExecutionCaches<'a>,
+        transaction: *mut T,
+    ) -> Executor<'a, T>
+    where
+        T: Transaction + 'a,
+        E: WriteExecutor<'a, T>,
+    {
+        let cache = cache.into_execution_caches();
+        let mut arena = ExecArena::default();
+        arena.init_context(cache, transaction);
+        let root = executor.into_executor(&mut arena, cache, transaction);
+        Executor::new(arena, root)
+    }
+
+    pub(crate) fn execute_input<'a, T, E>(
+        input: E::Input,
+        cache: impl IntoExecutionCaches<'a>,
+        transaction: *mut T,
+    ) -> Executor<'a, T>
+    where
+        T: Transaction + 'a,
+        E: ExecutorNode<'a, T>,
+    {
+        let cache = cache.into_execution_caches();
+        let mut arena = ExecArena::default();
+        arena.init_context(cache, transaction);
+        let root = E::into_executor(input, &mut arena, cache, transaction);
+        Executor::new(arena, root)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn execute_input_mut<'a, T, E>(
+        input: E::Input,
+        cache: impl IntoExecutionCaches<'a>,
+        transaction: *mut T,
+    ) -> Executor<'a, T>
+    where
+        T: Transaction + 'a,
+        E: ExecutorNode<'a, T>,
+    {
+        let cache = cache.into_execution_caches();
+        let mut arena = ExecArena::default();
+        arena.init_context(cache, transaction);
+        let root = E::into_executor(input, &mut arena, cache, transaction);
+        Executor::new(arena, root)
+    }
+
+    pub fn try_collect<T: Transaction>(
+        executor: Executor<'_, T>,
+    ) -> Result<Vec<Tuple>, DatabaseError> {
+        let mut executor = executor;
+        let mut tuples = Vec::new();
+
+        while let Some(tuple) = executor.next_tuple()? {
+            tuples.push(tuple.clone());
+        }
+        Ok(tuples)
+    }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[allow(unused_imports)]
+pub(crate) use test_utils::{execute, execute_input, execute_input_mut, execute_mut, try_collect};

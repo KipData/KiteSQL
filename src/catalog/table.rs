@@ -349,7 +349,7 @@ mod tests {
                         "name".into(),
                         true,
                         ColumnDesc::new(
-                            LogicalType::Varchar(None, sqlparser::ast::CharLengthUnits::Characters),
+                            LogicalType::Varchar(None, crate::types::CharLengthUnits::Characters),
                             None,
                             false,
                             None,

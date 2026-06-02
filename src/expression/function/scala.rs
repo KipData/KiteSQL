@@ -19,7 +19,6 @@ use crate::types::tuple::TupleLike;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use kite_sql_serde_macros::ReferenceSerialization;
-use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
@@ -31,7 +30,7 @@ use std::sync::Arc;
 /// - `Some(false)` monotonically decreasing
 pub type FuncMonotonicity = Vec<Option<bool>>;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ArcScalarFunctionImpl(pub Arc<dyn ScalarFunctionImpl>);
 
 impl Deref for ArcScalarFunctionImpl {
@@ -61,8 +60,6 @@ impl Hash for ScalarFunction {
         self.summary().hash(state);
     }
 }
-
-#[typetag::serde(tag = "scala")]
 pub trait ScalarFunctionImpl: Debug + Send + Sync {
     fn eval(
         &self,

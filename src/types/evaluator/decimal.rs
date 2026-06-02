@@ -16,10 +16,10 @@ use crate::errors::DatabaseError;
 use crate::types::evaluator::cast::{to_char, to_varchar};
 use crate::types::evaluator::BinaryEvaluator;
 use crate::types::evaluator::DataValue;
+use crate::types::CharLengthUnits;
 use ordered_float::OrderedFloat;
 use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
-use sqlparser::ast::CharLengthUnits;
 use std::hint;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
@@ -44,8 +44,6 @@ pub struct DecimalEqBinaryEvaluator;
 pub struct DecimalNotEqBinaryEvaluator;
 #[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
 pub struct DecimalModBinaryEvaluator;
-
-#[typetag::serde]
 impl BinaryEvaluator for DecimalPlusBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -57,7 +55,6 @@ impl BinaryEvaluator for DecimalPlusBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for DecimalMinusBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -127,8 +124,6 @@ crate::define_cast_evaluator!(DecimalToUIntegerCastEvaluator, DataValue::Decimal
 crate::define_cast_evaluator!(DecimalToUBigintCastEvaluator, DataValue::Decimal(value) => {
     Ok(DataValue::UInt64(crate::decimal_to_int_cast!(*value, u64)))
 });
-
-#[typetag::serde]
 impl BinaryEvaluator for DecimalMultiplyBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -140,7 +135,6 @@ impl BinaryEvaluator for DecimalMultiplyBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for DecimalDivideBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -152,7 +146,6 @@ impl BinaryEvaluator for DecimalDivideBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for DecimalGtBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -164,7 +157,6 @@ impl BinaryEvaluator for DecimalGtBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for DecimalGtEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -176,7 +168,6 @@ impl BinaryEvaluator for DecimalGtEqBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for DecimalLtBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -188,7 +179,6 @@ impl BinaryEvaluator for DecimalLtBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for DecimalLtEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -200,7 +190,6 @@ impl BinaryEvaluator for DecimalLtEqBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for DecimalEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -212,7 +201,6 @@ impl BinaryEvaluator for DecimalEqBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for DecimalNotEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -224,7 +212,6 @@ impl BinaryEvaluator for DecimalNotEqBinaryEvaluator {
         })
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for DecimalModBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -242,8 +229,8 @@ mod test {
     use super::*;
     use crate::types::evaluator::CastEvaluator;
     use crate::types::value::Utf8Type;
+    use crate::types::CharLengthUnits;
     use rust_decimal::Decimal;
-    use sqlparser::ast::CharLengthUnits;
 
     #[test]
     fn test_decimal_cast_evaluators() {

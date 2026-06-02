@@ -16,9 +16,9 @@ use crate::errors::DatabaseError;
 use crate::types::evaluator::cast::{to_char, to_varchar};
 use crate::types::evaluator::DataValue;
 use crate::types::evaluator::{BinaryEvaluator, UnaryEvaluator};
+use crate::types::CharLengthUnits;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
-use sqlparser::ast::CharLengthUnits;
 use std::hint;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
@@ -31,8 +31,6 @@ pub struct BooleanOrBinaryEvaluator;
 pub struct BooleanEqBinaryEvaluator;
 #[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
 pub struct BooleanNotEqBinaryEvaluator;
-
-#[typetag::serde]
 impl UnaryEvaluator for BooleanNotUnaryEvaluator {
     fn unary_eval(&self, value: &DataValue) -> DataValue {
         match value {
@@ -42,7 +40,6 @@ impl UnaryEvaluator for BooleanNotUnaryEvaluator {
         }
     }
 }
-#[typetag::serde]
 impl BinaryEvaluator for BooleanAndBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -56,8 +53,6 @@ impl BinaryEvaluator for BooleanAndBinaryEvaluator {
         })
     }
 }
-
-#[typetag::serde]
 impl BinaryEvaluator for BooleanOrBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -71,8 +66,6 @@ impl BinaryEvaluator for BooleanOrBinaryEvaluator {
         })
     }
 }
-
-#[typetag::serde]
 impl BinaryEvaluator for BooleanEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {
@@ -129,8 +122,6 @@ crate::define_cast_evaluator!(
     },
     DataValue::Boolean(value) => |this| to_varchar(value.to_string(), this.len, this.unit)
 );
-
-#[typetag::serde]
 impl BinaryEvaluator for BooleanNotEqBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
         Ok(match (left, right) {

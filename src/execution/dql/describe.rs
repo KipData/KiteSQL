@@ -18,7 +18,7 @@ use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNod
 use crate::planner::operator::describe::DescribeOperator;
 use crate::storage::Transaction;
 use crate::types::value::{DataValue, Utf8Type};
-use sqlparser::ast::CharLengthUnits;
+use crate::types::CharLengthUnits;
 use std::sync::LazyLock;
 
 static PRIMARY_KEY_TYPE: LazyLock<DataValue> = LazyLock::new(|| DataValue::Utf8 {

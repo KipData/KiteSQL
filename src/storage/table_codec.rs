@@ -14,11 +14,12 @@
 
 use crate::catalog::view::View;
 use crate::catalog::{ColumnRef, ColumnRelation, TableMeta};
+use crate::db::{ScalaFunctions, TableFunctions};
 use crate::errors::DatabaseError;
 use crate::optimizer::core::cm_sketch::{CountMinSketchMeta, CountMinSketchPage};
 use crate::optimizer::core::histogram::Bucket;
 use crate::optimizer::core::statistics_meta::StatisticsMetaRoot;
-use crate::serdes::{ReferenceSerialization, ReferenceTables};
+use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
 use crate::storage::{TableCache, Transaction};
 use crate::types::index::{Index, IndexId, IndexMeta, IndexType, INDEX_ID_LEN};
 use crate::types::serialize::TupleValueSerializableImpl;
@@ -817,6 +818,8 @@ impl TableCodec {
     pub fn decode_view<T: Transaction>(
         bytes: &[u8],
         drive: (&T, &TableCache),
+        scala_functions: &ScalaFunctions,
+        table_functions: &TableFunctions,
     ) -> Result<View, DatabaseError> {
         let mut cursor = Cursor::new(bytes);
         let reference_tables_pos = {
@@ -828,7 +831,9 @@ impl TableCodec {
         let reference_tables = ReferenceTables::from_raw(&mut cursor)?;
         cursor.seek(SeekFrom::Start(4))?;
 
-        View::decode(&mut cursor, Some(drive), &reference_tables)
+        let context =
+            ReferenceDecodeContext::with_functions(Some(drive), scala_functions, table_functions);
+        View::decode(&mut cursor, Some(&context), &reference_tables)
     }
 
     pub fn encode_root_table_value(
@@ -1078,6 +1083,8 @@ mod tests {
     fn test_table_codec_view() -> Result<(), DatabaseError> {
         let table_codec = TableCodec::default();
         let table_state = build_t1_table()?;
+        let scala_functions = Default::default();
+        let table_functions = Default::default();
         // Subquery
         {
             println!("==== Subquery");
@@ -1093,7 +1100,12 @@ mod tests {
 
             assert_eq!(
                 view,
-                TableCodec::decode_view(&bytes, (&transaction, &table_state.table_cache))?
+                TableCodec::decode_view(
+                    &bytes,
+                    (&transaction, &table_state.table_cache),
+                    &scala_functions,
+                    &table_functions,
+                )?
             );
         }
         // No Join
@@ -1109,7 +1121,12 @@ mod tests {
 
             assert_eq!(
                 view,
-                TableCodec::decode_view(&bytes, (&transaction, &table_state.table_cache))?
+                TableCodec::decode_view(
+                    &bytes,
+                    (&transaction, &table_state.table_cache),
+                    &scala_functions,
+                    &table_functions,
+                )?
             );
         }
         // Join
@@ -1125,7 +1142,12 @@ mod tests {
 
             assert_eq!(
                 view,
-                TableCodec::decode_view(&bytes, (&transaction, &table_state.table_cache))?
+                TableCodec::decode_view(
+                    &bytes,
+                    (&transaction, &table_state.table_cache),
+                    &scala_functions,
+                    &table_functions,
+                )?
             );
         }
 

@@ -17,11 +17,11 @@ use crate::errors::DatabaseError;
 use crate::expression::agg::AggKind;
 use crate::expression::function::scala::ScalarFunction;
 use crate::expression::function::table::TableFunction;
+use crate::expression::TrimWhereField;
 use crate::expression::{AliasType, BinaryOperator, ScalarExpression, UnaryOperator};
 use crate::types::evaluator::{BinaryEvaluatorBox, CastEvaluatorBox, UnaryEvaluatorBox};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
-use sqlparser::ast::TrimWhereField;
 
 pub trait Visitor<'a>: Sized {
     fn visit(&mut self, expr: &'a ScalarExpression) -> Result<(), DatabaseError> {

@@ -29,10 +29,10 @@ mod test {
     use kite_sql::types::evaluator::binary_create;
     use kite_sql::types::tuple::{SchemaRef, Tuple};
     use kite_sql::types::value::{DataValue, Utf8Type};
-    use kite_sql::types::LogicalType;
+    use kite_sql::types::{CharLengthUnits, LogicalType};
     use kite_sql::{from_tuple, scala_function, table_function, Model, Projection};
     use rust_decimal::Decimal;
-    use sqlparser::ast::{CharLengthUnits, DataType as SqlDataType};
+    use sqlparser::ast::DataType as SqlDataType;
     use std::sync::Arc;
     use tempfile::TempDir;
 

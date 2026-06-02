@@ -12,32 +12,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::view::View;
 use crate::errors::DatabaseError;
 use crate::execution::ExecArena;
-use crate::storage::Transaction;
+use crate::storage::{Transaction, ViewIter};
 use crate::types::value::{DataValue, Utf8Type};
-use sqlparser::ast::CharLengthUnits;
+use crate::types::CharLengthUnits;
 
-pub struct ShowViews {
-    pub(crate) metas: Option<std::vec::IntoIter<View>>,
+pub struct ShowViews<'a, T: Transaction + 'a> {
+    pub(crate) metas: Option<ViewIter<'a, T>>,
 }
 
-impl ShowViews {
-    pub(crate) fn next_tuple<'a, T: Transaction>(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-    ) -> Result<(), DatabaseError> {
+impl<'a, T: Transaction + 'a> ShowViews<'a, T> {
+    pub(crate) fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
         if self.metas.is_none() {
-            self.metas = Some(
-                arena
-                    .transaction_mut()
-                    .views(arena.table_cache())?
-                    .into_iter(),
-            );
+            self.metas = Some(arena.transaction().views(
+                arena.table_cache(),
+                arena.scala_functions(),
+                arena.table_functions(),
+            )?);
         }
 
-        let Some(View { name, .. }) = self.metas.as_mut().and_then(|metas| metas.next()) else {
+        let Some(view) = self
+            .metas
+            .as_mut()
+            .expect("show views iterator initialized")
+            .try_next()?
+        else {
             arena.finish();
             return Ok(());
         };
@@ -46,7 +46,7 @@ impl ShowViews {
         output.pk = None;
         output.values.clear();
         output.values.push(DataValue::Utf8 {
-            value: name.to_string(),
+            value: view.name.to_string(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         });

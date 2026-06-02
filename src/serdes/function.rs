@@ -12,9 +12,76 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::errors::DatabaseError;
 use crate::expression::function::scala::ArcScalarFunctionImpl;
 use crate::expression::function::table::ArcTableFunctionImpl;
-use crate::implement_serialization_by_bincode;
+use crate::expression::function::FunctionSummary;
+use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
+use crate::storage::Transaction;
+use std::io::{Read, Write};
 
-implement_serialization_by_bincode!(ArcScalarFunctionImpl);
-implement_serialization_by_bincode!(ArcTableFunctionImpl);
+impl ReferenceSerialization for ArcScalarFunctionImpl {
+    fn encode<W: Write>(
+        &self,
+        writer: &mut W,
+        is_direct: bool,
+        reference_tables: &mut ReferenceTables,
+    ) -> Result<(), DatabaseError> {
+        self.summary().encode(writer, is_direct, reference_tables)
+    }
+
+    fn decode<T: Transaction, R: Read>(
+        reader: &mut R,
+        context: Option<&ReferenceDecodeContext<'_, T>>,
+        reference_tables: &ReferenceTables,
+    ) -> Result<Self, DatabaseError> {
+        let summary = FunctionSummary::decode(reader, context, reference_tables)?;
+        let Some(functions) = context.and_then(ReferenceDecodeContext::scala_functions) else {
+            return Err(DatabaseError::InvalidValue(format!(
+                "scalar function decode context missing for {}",
+                summary.name
+            )));
+        };
+        let Some(function) = functions.get(&summary) else {
+            return Err(DatabaseError::InvalidValue(format!(
+                "scalar function not found when decoding: {}",
+                summary.name
+            )));
+        };
+
+        Ok(Self(function.clone()))
+    }
+}
+
+impl ReferenceSerialization for ArcTableFunctionImpl {
+    fn encode<W: Write>(
+        &self,
+        writer: &mut W,
+        is_direct: bool,
+        reference_tables: &mut ReferenceTables,
+    ) -> Result<(), DatabaseError> {
+        self.summary().encode(writer, is_direct, reference_tables)
+    }
+
+    fn decode<T: Transaction, R: Read>(
+        reader: &mut R,
+        context: Option<&ReferenceDecodeContext<'_, T>>,
+        reference_tables: &ReferenceTables,
+    ) -> Result<Self, DatabaseError> {
+        let summary = FunctionSummary::decode(reader, context, reference_tables)?;
+        let Some(functions) = context.and_then(ReferenceDecodeContext::table_functions) else {
+            return Err(DatabaseError::InvalidValue(format!(
+                "table function decode context missing for {}",
+                summary.name
+            )));
+        };
+        let Some(function) = functions.get(&summary) else {
+            return Err(DatabaseError::InvalidValue(format!(
+                "table function not found when decoding: {}",
+                summary.name
+            )));
+        };
+
+        Ok(Self(function.clone()))
+    }
+}

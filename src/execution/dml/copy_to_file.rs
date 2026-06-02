@@ -118,8 +118,8 @@ mod tests {
     use crate::errors::DatabaseError;
     use crate::planner::operator::table_scan::TableScanOperator;
     use crate::storage::Storage;
+    use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
-    use sqlparser::ast::CharLengthUnits;
     use std::sync::Arc;
     use tempfile::TempDir;
     use ulid::Ulid;

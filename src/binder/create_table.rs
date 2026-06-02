@@ -187,9 +187,9 @@ mod tests {
     use crate::catalog::ColumnDesc;
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::Storage;
+    use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
     use crate::utils::lru::SharedLruCache;
-    use sqlparser::ast::CharLengthUnits;
     use std::hash::RandomState;
     use std::sync::atomic::AtomicUsize;
     use tempfile::TempDir;

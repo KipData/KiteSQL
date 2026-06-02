@@ -540,7 +540,13 @@ impl<S: Storage> State<S> {
             let root = build_write(
                 &mut arena,
                 plan,
-                (&self.table_cache, &self.view_cache, &self.meta_cache),
+                (
+                    &self.table_cache,
+                    &self.view_cache,
+                    &self.meta_cache,
+                    &self.scala_functions,
+                    &self.table_functions,
+                ),
                 transaction,
             );
             let executor = Executor::new(arena, root);
