@@ -17,3 +17,21 @@ query I
 COPY test_copy TO './copy.csv' ( DELIMITER ',' );
 ----
 Copy To ./copy.csv [a, b, c]
+
+query I
+COPY (SELECT a, c FROM test_copy WHERE a = 1) TO './copy_query.csv' ( DELIMITER ',', HEADER true );
+----
+Copy To ./copy_query.csv [a, c]
+
+statement ok
+create table test_copy_query (a int primary key, c varchar(10))
+
+query I
+COPY test_copy_query FROM './copy_query.csv' ( DELIMITER ',', HEADER true );
+----
+1
+
+query I
+SELECT * FROM test_copy_query
+----
+1 two

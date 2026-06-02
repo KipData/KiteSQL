@@ -86,30 +86,34 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         target: CopyTarget,
         options: &[CopyOption],
     ) -> Result<LogicalPlan, DatabaseError> {
+        let ext_source = copy_ext_source(target, options)?;
+
         let (table_name, ..) = match source {
             CopySource::Table {
                 table_name,
                 columns,
             } => (table_name, columns),
-            CopySource::Query(_) => {
-                return Err(DatabaseError::UnsupportedStmt("'COPY SOURCE'".to_string()));
+            CopySource::Query(query) => {
+                if !to {
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "'COPY FROM query'".to_string(),
+                    ));
+                }
+                let mut input_plan = self.bind_query(&query)?;
+                let schema_ref = input_plan.output_schema().clone();
+                return Ok(LogicalPlan::new(
+                    Operator::CopyToFile(CopyToFileOperator {
+                        target: ext_source,
+                        schema_ref,
+                    }),
+                    Childrens::Only(Box::new(input_plan)),
+                ));
             }
         };
         let table_name: Arc<str> = lower_case_name(&table_name)?.into();
 
         if let Some(table) = self.context.table(table_name.clone())? {
             let schema_ref = table.schema_ref().clone();
-            let ext_source = ExtSource {
-                path: match target {
-                    CopyTarget::File { filename } => filename.into(),
-                    t => {
-                        return Err(DatabaseError::UnsupportedStmt(format!(
-                            "copy target: {t:?}"
-                        )))
-                    }
-                },
-                format: FileFormat::from_options(options),
-            };
 
             if to {
                 // COPY <source_table> TO <dest_file>
@@ -137,6 +141,20 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             Err(DatabaseError::TableNotFound)
         }
     }
+}
+
+fn copy_ext_source(target: CopyTarget, options: &[CopyOption]) -> Result<ExtSource, DatabaseError> {
+    Ok(ExtSource {
+        path: match target {
+            CopyTarget::File { filename } => filename.into(),
+            t => {
+                return Err(DatabaseError::UnsupportedStmt(format!(
+                    "copy target: {t:?}"
+                )))
+            }
+        },
+        format: FileFormat::from_options(options),
+    })
 }
 
 impl FileFormat {
