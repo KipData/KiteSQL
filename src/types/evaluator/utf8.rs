@@ -21,7 +21,6 @@ use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use ordered_float::OrderedFloat;
-use regex::Regex;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::hint;
@@ -321,22 +320,89 @@ impl BinaryEvaluator for Utf8NotLikeBinaryEvaluator {
 }
 
 fn string_like(value: &str, pattern: &str, escape_char: Option<char>) -> bool {
-    let mut regex_pattern = String::new();
-    let mut chars = pattern.chars().peekable();
-    while let Some(c) = chars.next() {
-        if matches!(escape_char.map(|escape_c| escape_c == c), Some(true)) {
-            if let Some(next_char) = chars.next() {
-                regex_pattern.push(next_char);
+    let mut value_idx = 0;
+    let mut pattern_idx = 0;
+    let mut last_many = None;
+
+    while value_idx < value.len() {
+        match next_like_pattern_token(pattern, pattern_idx, escape_char) {
+            Some((LikePatternToken::Literal(pattern_ch), next_pattern_idx)) => {
+                if let Some((value_ch, next_value_idx)) = next_char_at(value, value_idx) {
+                    if value_ch == pattern_ch {
+                        value_idx = next_value_idx;
+                        pattern_idx = next_pattern_idx;
+                        continue;
+                    }
+                }
             }
-        } else if c == '%' {
-            regex_pattern.push_str(".*");
-        } else if c == '_' {
-            regex_pattern.push('.');
-        } else {
-            regex_pattern.push(c);
+            Some((LikePatternToken::AnyOne, next_pattern_idx)) => {
+                if let Some((_, next_value_idx)) = next_char_at(value, value_idx) {
+                    value_idx = next_value_idx;
+                    pattern_idx = next_pattern_idx;
+                    continue;
+                }
+            }
+            Some((LikePatternToken::AnyMany, next_pattern_idx)) => {
+                pattern_idx = next_pattern_idx;
+                last_many = Some((pattern_idx, value_idx));
+                continue;
+            }
+            None => {}
         }
+
+        let Some((after_many_pattern_idx, many_value_idx)) = last_many else {
+            return false;
+        };
+        let Some((_, next_many_value_idx)) = next_char_at(value, many_value_idx) else {
+            return false;
+        };
+        value_idx = next_many_value_idx;
+        pattern_idx = after_many_pattern_idx;
+        last_many = Some((after_many_pattern_idx, value_idx));
     }
-    Regex::new(&regex_pattern).unwrap().is_match(value)
+
+    while let Some((token, next_pattern_idx)) =
+        next_like_pattern_token(pattern, pattern_idx, escape_char)
+    {
+        if token != LikePatternToken::AnyMany {
+            return false;
+        }
+        pattern_idx = next_pattern_idx;
+    }
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LikePatternToken {
+    Literal(char),
+    AnyOne,
+    AnyMany,
+}
+
+fn next_like_pattern_token(
+    pattern: &str,
+    index: usize,
+    escape_char: Option<char>,
+) -> Option<(LikePatternToken, usize)> {
+    let (ch, next_index) = next_char_at(pattern, index)?;
+    if escape_char.is_some_and(|escape_ch| escape_ch == ch) {
+        if let Some((escaped_ch, escaped_next_index)) = next_char_at(pattern, next_index) {
+            Some((LikePatternToken::Literal(escaped_ch), escaped_next_index))
+        } else {
+            Some((LikePatternToken::Literal(ch), next_index))
+        }
+    } else if ch == '%' {
+        Some((LikePatternToken::AnyMany, next_index))
+    } else if ch == '_' {
+        Some((LikePatternToken::AnyOne, next_index))
+    } else {
+        Some((LikePatternToken::Literal(ch), next_index))
+    }
+}
+
+fn next_char_at(input: &str, index: usize) -> Option<(char, usize)> {
+    let ch = input.get(index..)?.chars().next()?;
+    Some((ch, index + ch.len_utf8()))
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -372,6 +438,60 @@ mod test {
                 .unwrap(),
             DataValue::Boolean(true)
         );
+        assert_eq!(
+            Utf8NotLikeBinaryEvaluator { escape_char: None }
+                .binary_eval(&utf8("kite"), &utf8("ki%"))
+                .unwrap(),
+            DataValue::Boolean(false)
+        );
+    }
+
+    #[test]
+    fn test_string_like_patterns() {
+        let cases = [
+            ("", "", None, true),
+            ("", "%", None, true),
+            ("", "_", None, false),
+            ("a", "", None, false),
+            ("a", "a", None, true),
+            ("a", "_", None, true),
+            ("ab", "_", None, false),
+            ("ab", "__", None, true),
+            ("abc", "a%", None, true),
+            ("abc", "%c", None, true),
+            ("abc", "%b%", None, true),
+            ("abc", "a%c", None, true),
+            ("abc", "a%d", None, false),
+            ("abc", "%a", None, false),
+            ("abc", "%%", None, true),
+            ("abc", "a%%c", None, true),
+            ("abc", "a%c%", None, true),
+            ("abbbc", "a%bc", None, true),
+            ("abXc", "a%bc", None, false),
+            ("skite", "ki%", None, false),
+            ("ki.e", "ki.e", None, true),
+            ("kite", "ki.e", None, false),
+            ("ki*e", "ki*e", None, true),
+            ("F%ck", "F@%ck", Some('@'), true),
+            ("Fack", "F@%ck", Some('@'), false),
+            ("F_ck", "F@_ck", Some('@'), true),
+            ("Fack", "F@_ck", Some('@'), false),
+            ("@", "@", Some('@'), true),
+            ("%", "\\%", Some('\\'), true),
+            ("好", "_", None, true),
+            ("好a", "好_", None, true),
+            ("好a", "__", None, true),
+            ("好a", "_", None, false),
+            ("你好", "你%", None, true),
+        ];
+
+        for (value, pattern, escape_char, expected) in cases {
+            assert_eq!(
+                string_like(value, pattern, escape_char),
+                expected,
+                "value={value:?}, pattern={pattern:?}, escape_char={escape_char:?}"
+            );
+        }
     }
 
     #[test]

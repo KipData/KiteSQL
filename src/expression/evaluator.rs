@@ -19,7 +19,6 @@ use crate::types::evaluator::binary_create;
 use crate::types::tuple::TupleLike;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, LogicalType};
-use regex::Regex;
 use std::borrow::Cow;
 use std::cmp;
 use std::cmp::Ordering;
@@ -228,22 +227,7 @@ impl ScalarExpression {
                             .map(String::from)
                             .unwrap_or_default();
                     }
-                    let trim_regex = match trim_where {
-                        Some(TrimWhereField::Both) | None => Regex::new(&format!(
-                            r"^(?:{0})*([\w\W]*?)(?:{0})*$",
-                            regex::escape(&trim_what)
-                        ))
-                        .unwrap(),
-                        Some(TrimWhereField::Leading) => {
-                            Regex::new(&format!(r"^(?:{0})*([\w\W]*?)", regex::escape(&trim_what)))
-                                .unwrap()
-                        }
-                        Some(TrimWhereField::Trailing) => {
-                            Regex::new(&format!(r"([\w\W]*?)(?:{0})*$", regex::escape(&trim_what)))
-                                .unwrap()
-                        }
-                    };
-                    let string_trimmed = trim_regex.replace_all(string, "$1").to_string();
+                    let string_trimmed = trim_string(string, &trim_what, *trim_where);
 
                     Ok(DataValue::Utf8 {
                         value: string_trimmed,
@@ -360,6 +344,31 @@ impl ScalarExpression {
     }
 }
 
+fn trim_string(value: &str, trim_what: &str, trim_where: Option<TrimWhereField>) -> String {
+    if trim_what.is_empty() {
+        return value.to_string();
+    }
+
+    let mut trimmed = value;
+    if matches!(
+        trim_where,
+        Some(TrimWhereField::Leading | TrimWhereField::Both) | None
+    ) {
+        while let Some(rest) = trimmed.strip_prefix(trim_what) {
+            trimmed = rest;
+        }
+    }
+    if matches!(
+        trim_where,
+        Some(TrimWhereField::Trailing | TrimWhereField::Both) | None
+    ) {
+        while let Some(rest) = trimmed.strip_suffix(trim_what) {
+            trimmed = rest;
+        }
+    }
+    trimmed.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,5 +415,24 @@ mod tests {
 
         assert_eq!(expr.eval::<&[DataValue]>(None)?, DataValue::Boolean(false));
         Ok(())
+    }
+
+    #[test]
+    fn trim_string_removes_requested_sides() {
+        assert_eq!(trim_string("xxhelloxx", "x", None), "hello");
+        assert_eq!(
+            trim_string("xxhelloxx", "x", Some(TrimWhereField::Both)),
+            "hello"
+        );
+        assert_eq!(
+            trim_string("xxhelloxx", "x", Some(TrimWhereField::Leading)),
+            "helloxx"
+        );
+        assert_eq!(
+            trim_string("xxhelloxx", "x", Some(TrimWhereField::Trailing)),
+            "xxhello"
+        );
+        assert_eq!(trim_string("ababhelloab", "ab", None), "hello");
+        assert_eq!(trim_string("hello", "", None), "hello");
     }
 }
