@@ -863,6 +863,31 @@ statement ok
 INSERT INTO r VALUES (2, 1), (3, 1), (4, 1)
 
 query III
+SELECT a, l.a, r.a FROM l INNER JOIN r USING(a) WHERE a = 2
+----
+2 2 2
+
+query III
+SELECT a, l.a, r.a FROM l LEFT OUTER JOIN r USING(a) WHERE a = 1
+----
+1 1 null
+
+query III
+SELECT a, l.a, r.a FROM l RIGHT OUTER JOIN r USING(a) WHERE a = 4
+----
+4 null 4
+
+query III
+SELECT a, l.a, r.a FROM l FULL OUTER JOIN r USING(a) WHERE a = 1
+----
+1 1 null
+
+query III
+SELECT a, l.a, r.a FROM l FULL OUTER JOIN r USING(a) WHERE a = 4
+----
+4 null 4
+
+query III
 SELECT * FROM l LEFT OUTER JOIN r USING(a) WHERE a = 1
 ----
 1 1 null
