@@ -1178,7 +1178,7 @@ mod test {
     }
 
     #[test]
-    fn test_right_join_using_keeps_left_visible_column_binding() -> Result<(), DatabaseError> {
+    fn test_right_join_using_binds_visible_column_to_right_side() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let db = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
 
@@ -1216,9 +1216,9 @@ mod test {
                     Some("A".to_string()),
                     Some("A".to_string())
                 ],
-                vec![None, None, Some("B".to_string())],
-                vec![None, None, Some("C".to_string())],
-                vec![None, None, Some("E".to_string())],
+                vec![Some("B".to_string()), None, Some("B".to_string())],
+                vec![Some("C".to_string()), None, Some("C".to_string())],
+                vec![Some("E".to_string()), None, Some("E".to_string())],
             ]
         );
 
