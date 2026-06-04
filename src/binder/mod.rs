@@ -39,7 +39,7 @@ use sqlparser::ast::{
     Statement, TableObject,
 };
 use sqlparser::tokenizer::Span;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -54,6 +54,7 @@ use crate::planner::{LogicalPlan, SchemaOutput};
 use crate::storage::{TableCache, Transaction, ViewCache};
 use crate::types::tuple::SchemaRef;
 use crate::types::value::DataValue;
+use crate::types::LogicalType;
 
 pub enum InputRefType {
     AggCall,
@@ -205,6 +206,69 @@ impl BoundSource<'_> {
 }
 
 #[derive(Clone)]
+pub(crate) struct UsingColumn {
+    join_type: JoinType,
+    left_column: ColumnRef,
+    left_position: usize,
+    right_column: ColumnRef,
+    right_position: usize,
+}
+
+impl UsingColumn {
+    fn new(
+        join_type: JoinType,
+        left_column: ColumnRef,
+        left_position: usize,
+        right_column: ColumnRef,
+        right_position: usize,
+    ) -> Self {
+        Self {
+            join_type,
+            left_column,
+            left_position,
+            right_column,
+            right_position,
+        }
+    }
+
+    fn left_expr(&self) -> ScalarExpression {
+        ScalarExpression::column_expr(self.left_column.clone(), self.left_position)
+    }
+
+    fn right_expr(&self) -> ScalarExpression {
+        ScalarExpression::column_expr(self.right_column.clone(), self.right_position)
+    }
+
+    pub(crate) fn visible_expr(&self) -> Result<ScalarExpression, DatabaseError> {
+        match self.join_type {
+            JoinType::RightOuter => Ok(self.right_expr()),
+            JoinType::Full => {
+                let left_expr = self.left_expr();
+                let right_expr = self.right_expr();
+                let left_ty = left_expr.return_type();
+                let right_ty = right_expr.return_type();
+                let ty = LogicalType::max_logical_type(&left_ty, &right_ty)?.into_owned();
+
+                Ok(ScalarExpression::Coalesce {
+                    exprs: vec![left_expr, right_expr],
+                    ty,
+                })
+            }
+            JoinType::Inner | JoinType::LeftOuter | JoinType::Cross => Ok(self.left_expr()),
+        }
+    }
+
+    pub(crate) fn hides_column(&self, column: &ColumnRef) -> bool {
+        let hidden_column = if self.join_type.is_right() {
+            &self.left_column
+        } else {
+            &self.right_column
+        };
+        hidden_column.same_column(column)
+    }
+}
+
+#[derive(Clone)]
 pub struct BinderContext<'a, T: Transaction> {
     pub(crate) scala_functions: &'a ScalaFunctions,
     pub(crate) table_functions: &'a TableFunctions,
@@ -221,7 +285,7 @@ pub struct BinderContext<'a, T: Transaction> {
     group_by_exprs: Vec<ScalarExpression>,
     pub(crate) agg_calls: Vec<ScalarExpression>,
     // join
-    using: HashSet<ColumnRef>,
+    using: HashMap<String, UsingColumn>,
 
     bind_step: QueryBindStep,
     sub_queries: HashMap<QueryBindStep, Vec<SubQueryType>>,
@@ -471,15 +535,27 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
 
     pub fn add_using(
         &mut self,
+        name: String,
         join_type: JoinType,
-        left_expr: &ColumnRef,
-        right_expr: &ColumnRef,
-    ) {
-        self.using.insert(if join_type.is_right() {
-            left_expr.clone()
-        } else {
-            right_expr.clone()
-        });
+        left_column: &ColumnRef,
+        left_position: usize,
+        right_column: &ColumnRef,
+        right_position: usize,
+    ) -> Result<(), DatabaseError> {
+        if self.using.contains_key(&name) {
+            return Err(DatabaseError::UnsupportedStmt(format!(
+                "duplicate `USING({name})` across joins is not supported"
+            )));
+        }
+        let using_column = UsingColumn::new(
+            join_type,
+            left_column.clone(),
+            left_position,
+            right_column.clone(),
+            right_position,
+        );
+        self.using.insert(name, using_column);
+        Ok(())
     }
 
     pub fn add_alias(
