@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use sqlparser::ast::{AlterColumnOperation, AlterTableOperation, ObjectName};
+use sqlparser::ast::{AlterColumnOperation, AlterTableOperation, ColumnOption, ObjectName};
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -27,7 +27,8 @@ use crate::planner::operator::alter_table::change_column::{
 };
 use crate::planner::operator::alter_table::drop_column::DropColumnOperator;
 use crate::planner::operator::Operator;
-use crate::planner::{Childrens, LogicalPlan};
+use crate::planner::Childrens;
+use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
@@ -48,6 +49,33 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         expr = ScalarExpression::type_cast(expr, Cow::Borrowed(ty))?;
 
         Ok(expr)
+    }
+
+    fn bind_change_column_options(
+        &mut self,
+        options: &[ColumnOption],
+        data_type: &LogicalType,
+    ) -> Result<(DefaultChange, NotNullChange), DatabaseError> {
+        let mut default_change = DefaultChange::NoChange;
+        let mut not_null_change = NotNullChange::NoChange;
+
+        for option in options {
+            match option {
+                ColumnOption::Null => not_null_change = NotNullChange::Drop,
+                ColumnOption::NotNull => not_null_change = NotNullChange::Set,
+                ColumnOption::Default(expr) => {
+                    default_change =
+                        DefaultChange::Set(self.bind_alter_default_expr(expr, data_type)?);
+                }
+                option => {
+                    return Err(DatabaseError::UnsupportedStmt(format!(
+                        "CHANGE/MODIFY COLUMN does not currently support this option: {option:?}"
+                    )))
+                }
+            }
+        }
+
+        Ok((default_change, not_null_change))
     }
 
     pub(crate) fn bind_alter_table(
@@ -200,24 +228,27 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 options,
                 column_position,
             } => {
-                if !options.is_empty() || column_position.is_some() {
+                if column_position.is_some() {
                     return Err(DatabaseError::UnsupportedStmt(
-                        "MODIFY COLUMN currently only supports changing the data type".to_string(),
+                        "MODIFY COLUMN does not currently support column positions".to_string(),
                     ));
                 }
                 let old_column_name = col_name.value.to_lowercase();
                 let _ = table
                     .get_column_by_name(&old_column_name)
                     .ok_or_else(|| DatabaseError::column_not_found(old_column_name.clone()))?;
+                let data_type = LogicalType::try_from(data_type.clone())?;
+                let (default_change, not_null_change) =
+                    self.bind_change_column_options(options, &data_type)?;
 
                 LogicalPlan::new(
                     Operator::ChangeColumn(ChangeColumnOperator {
                         table_name,
                         new_column_name: old_column_name.clone(),
                         old_column_name,
-                        data_type: LogicalType::try_from(data_type.clone())?,
-                        default_change: DefaultChange::NoChange,
-                        not_null_change: NotNullChange::NoChange,
+                        data_type,
+                        default_change,
+                        not_null_change,
                     }),
                     Childrens::None,
                 )
@@ -229,10 +260,9 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 options,
                 column_position,
             } => {
-                if !options.is_empty() || column_position.is_some() {
+                if column_position.is_some() {
                     return Err(DatabaseError::UnsupportedStmt(
-                        "CHANGE COLUMN currently only supports renaming and changing the data type"
-                            .to_string(),
+                        "CHANGE COLUMN does not currently support column positions".to_string(),
                     ));
                 }
                 let old_column_name = old_name.value.to_lowercase();
@@ -246,15 +276,18 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         "illegal column naming".to_string(),
                     ));
                 }
+                let data_type = LogicalType::try_from(data_type.clone())?;
+                let (default_change, not_null_change) =
+                    self.bind_change_column_options(options, &data_type)?;
 
                 LogicalPlan::new(
                     Operator::ChangeColumn(ChangeColumnOperator {
                         table_name,
                         old_column_name,
                         new_column_name,
-                        data_type: LogicalType::try_from(data_type.clone())?,
-                        default_change: DefaultChange::NoChange,
-                        not_null_change: NotNullChange::NoChange,
+                        data_type,
+                        default_change,
+                        not_null_change,
                     }),
                     Childrens::None,
                 )

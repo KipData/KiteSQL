@@ -116,4 +116,84 @@ select value2 from alter_users where value2 is not null order by id
 404
 
 statement ok
+update alter_users set value2 = 606 where id = 6
+
+statement ok
+alter table alter_users change column value2 value2 int not null
+
+query TTTTI
+describe alter_users
+----
+id Integer 4 false PRIMARY null
+value1 Integer 4 true UNIQUE null
+value2 Integer 4 false EMPTY null
+
+statement error
+insert into alter_users (id, value1) values (7, 77)
+
+statement ok
+alter table alter_users change column value2 value2 int default 707
+
+statement ok
+insert into alter_users (id, value1) values (7, 77)
+
+query I
+select value2 from alter_users where id = 7
+----
+707
+
+query TTTTI
+describe alter_users
+----
+id Integer 4 false PRIMARY null
+value1 Integer 4 true UNIQUE null
+value2 Integer 4 false EMPTY 707
+
+statement ok
+alter table alter_users modify column value2 int null
+
+statement ok
+insert into alter_users (id, value1) values (8, 88)
+
+query I
+select value2 from alter_users where id = 8
+----
+707
+
+query TTTTI
+describe alter_users
+----
+id Integer 4 false PRIMARY null
+value1 Integer 4 true UNIQUE null
+value2 Integer 4 true EMPTY 707
+
+statement ok
+alter table alter_users modify column value2 int not null
+
+query TTTTI
+describe alter_users
+----
+id Integer 4 false PRIMARY null
+value1 Integer 4 true UNIQUE null
+value2 Integer 4 false EMPTY 707
+
+statement ok
+alter table alter_users modify column value2 int default 808
+
+statement ok
+insert into alter_users (id, value1) values (9, 99)
+
+query I
+select value2 from alter_users where id = 9
+----
+808
+
+query TTTTI
+describe alter_users
+----
+id Integer 4 false PRIMARY null
+value1 Integer 4 true UNIQUE null
+value2 Integer 4 false EMPTY 808
+
+statement ok
 drop table alter_users

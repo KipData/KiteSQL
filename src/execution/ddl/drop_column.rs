@@ -92,7 +92,6 @@ impl DropColumn {
                 &pk_ty,
                 &old_deserializers,
                 tuple_columns.len(),
-                tuple_columns.len(),
                 &serializers,
                 |tuple| {
                     let _ = tuple.values.remove(column_index);

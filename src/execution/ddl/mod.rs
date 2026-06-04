@@ -41,7 +41,6 @@ fn read_tuple_batch<T: Transaction>(
     pk_ty: &LogicalType,
     old_deserializers: &[TupleValueSerializableImpl],
     old_values_len: usize,
-    old_total_len: usize,
     start_after: Option<&TupleId>,
     batch: &mut Vec<Tuple>,
     batch_size: usize,
@@ -85,7 +84,7 @@ fn read_tuple_batch<T: Transaction>(
                 old_deserializers,
                 Some(tuple_id),
                 value,
-                old_total_len,
+                old_values_len,
             )?;
             len += 1;
         }
@@ -100,7 +99,6 @@ pub(crate) fn visit_table_in_batches<T, F>(
     pk_ty: &LogicalType,
     old_deserializers: &[TupleValueSerializableImpl],
     old_values_len: usize,
-    old_total_len: usize,
     mut visit: F,
 ) -> Result<(), DatabaseError>
 where
@@ -117,7 +115,6 @@ where
             pk_ty,
             old_deserializers,
             old_values_len,
-            old_total_len,
             last_pk.as_ref(),
             &mut batch,
             REWRITE_BATCH_SIZE,
@@ -146,7 +143,6 @@ pub(crate) fn rewrite_table_in_batches<T, F, G>(
     pk_ty: &LogicalType,
     old_deserializers: &[TupleValueSerializableImpl],
     old_values_len: usize,
-    old_total_len: usize,
     new_serializers: &[TupleValueSerializableImpl],
     mut rewrite: F,
     mut after_write: G,
@@ -166,7 +162,6 @@ where
             pk_ty,
             old_deserializers,
             old_values_len,
-            old_total_len,
             last_pk.as_ref(),
             &mut batch,
             REWRITE_BATCH_SIZE,
