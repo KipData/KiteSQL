@@ -623,19 +623,26 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             ))
         } else {
             // handle col syntax
-            let mut got_column = Self::find_column_in_scope(
-                &self.context,
-                &mut self.table_schema_buf,
-                full_name.1.as_str(),
-            );
+            let mut find_visible_column =
+                |context: &BinderContext<'a, T>| -> Result<Option<ScalarExpression>, DatabaseError> {
+                    Ok(context
+                        .using
+                        .get(full_name.1.as_str())
+                        .map(|using_column| using_column.visible_expr())
+                        .transpose()?
+                        .or_else(|| {
+                            Self::find_column_in_scope(
+                                context,
+                                &mut self.table_schema_buf,
+                                full_name.1.as_str(),
+                            )
+                        }))
+                };
+            let mut got_column = find_visible_column(&self.context)?;
             if got_column.is_none() {
                 if let Some(parent) = self.parent {
                     self.context.mark_outer_ref();
-                    got_column = Self::find_column_in_scope(
-                        &parent.context,
-                        &mut self.table_schema_buf,
-                        full_name.1.as_str(),
-                    );
+                    got_column = find_visible_column(&parent.context)?;
                 }
             }
             match got_column {

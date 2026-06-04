@@ -1152,7 +1152,11 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 return Some(&table_name) == column.table_name();
             }
             is_qualified_wildcard
-                || Some(&table_name) == column.table_name() && !context.using.contains(column)
+                || Some(&table_name) == column.table_name()
+                    && !context
+                        .using
+                        .values()
+                        .any(|using_column| using_column.hides_column(column))
         };
 
         let (schema_ref, position_offset) =
@@ -1909,7 +1913,14 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                             ident,
                         ));
                     };
-                    self.context.add_using(join_type, left_column, right_column);
+                    self.context.add_using(
+                        name.clone(),
+                        join_type,
+                        left_column,
+                        left_position,
+                        right_column,
+                        left_schema.len() + right_position,
+                    )?;
                     on_keys.push((
                         ScalarExpression::column_expr(left_column.clone(), left_position),
                         ScalarExpression::column_expr(
@@ -1951,7 +1962,14 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                             left_schema.len() + right_position,
                         );
 
-                        self.context.add_using(join_type, left_column, right_column);
+                        self.context.add_using(
+                            name.to_string(),
+                            join_type,
+                            left_column,
+                            left_position,
+                            right_column,
+                            left_schema.len() + right_position,
+                        )?;
                         on_keys.push((left_expr, right_expr));
                     }
                 }
