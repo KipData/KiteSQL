@@ -80,7 +80,7 @@ impl ColumnPruning {
                 referenced_columns.insert(op.output_column().summary());
             }
             Operator::TableScan(op) => {
-                referenced_columns.extend(op.columns.values().map(|column| column.summary()));
+                referenced_columns.extend(op.columns.iter().map(|column| column.summary()));
             }
             Operator::FunctionScan(op) => {
                 Self::extend_expr_referenced_columns(
@@ -459,10 +459,13 @@ impl ColumnPruning {
             Operator::TableScan(op) => {
                 if !all_referenced {
                     outcome.removed_positions.truncate(output_start);
-                    op.columns.retain(|position, column| {
+                    let mut position = 0;
+                    op.columns.retain(|column| {
+                        let current_position = position;
+                        position += 1;
                         let keep = required_columns.contains(column.summary());
                         if !keep {
-                            outcome.removed_positions.push(*position);
+                            outcome.removed_positions.push(current_position);
                         }
                         keep
                     });
@@ -736,7 +739,7 @@ mod tests {
             if op.table_name.to_string() == table_name {
                 scans.push(
                     op.columns
-                        .values()
+                        .iter()
                         .map(|column| column.name().to_string())
                         .collect(),
                 );

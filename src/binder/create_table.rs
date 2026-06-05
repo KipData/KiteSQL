@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::{attach_span_if_absent, is_valid_identifier, Binder};
-use crate::binder::lower_case_name;
+use crate::binder::{lower_case_name, lower_ident};
 use crate::catalog::{ColumnCatalog, ColumnDesc, TableName};
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
@@ -116,11 +116,11 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                     "only identifier columns are supported in `PRIMARY KEY/UNIQUE`".to_string(),
                 ));
             };
-            let column_name = ident.value.to_lowercase();
+            let column_name = lower_ident(ident);
 
             if let Some(column) = table_columns
                 .iter_mut()
-                .find(|column| column.name() == column_name)
+                .find(|column| column.name() == column_name.as_ref())
             {
                 fn_constraint(i, column.desc_mut())
             }
@@ -133,7 +133,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         column_def: &ColumnDef,
         column_index: Option<usize>,
     ) -> Result<ColumnCatalog, DatabaseError> {
-        let column_name = column_def.name.value.to_lowercase();
+        let column_name = lower_ident(&column_def.name).into_owned();
         let mut column_desc = ColumnDesc::new(
             LogicalType::try_from(column_def.data_type.clone())?,
             None,

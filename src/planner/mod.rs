@@ -205,7 +205,7 @@ impl LogicalPlan {
                     .collect_vec(),
             ),
             Operator::TableScan(op) => {
-                SchemaOutput::Schema(op.columns.values().cloned().collect_vec())
+                SchemaOutput::Schema(op.columns.iter().cloned().collect_vec())
             }
             Operator::FunctionScan(op) => {
                 SchemaOutput::SchemaRef(op.table_function.output_schema().clone())

@@ -801,7 +801,7 @@ mod test {
     use crate::types::LogicalType;
     use crate::utils::lru::SharedLruCache;
     use itertools::Itertools;
-    use std::collections::{BTreeMap, Bound};
+    use std::collections::Bound;
     use std::hash::RandomState;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -896,8 +896,7 @@ mod test {
             false,
         )?;
 
-        let mut read_columns = BTreeMap::new();
-        read_columns.insert(0, columns[0].clone());
+        let read_columns = vec![columns[0].clone()];
 
         let mut iter = transaction.read(
             &table_cache,
@@ -1010,7 +1009,7 @@ mod test {
                     kite_sql.state.table_cache(),
                     "t1".to_string().into(),
                     (Some(0), Some(1)),
-                    table.columns().cloned().enumerate().collect(),
+                    table.columns().cloned().collect(),
                     table.indexes[0].clone(),
                     vec![Range::Scope {
                         min: Bound::Excluded(DataValue::Int32(0)),
@@ -1029,8 +1028,8 @@ mod test {
         }
         // projection
         {
-            let mut columns: BTreeMap<_, _> = table.columns().cloned().enumerate().collect();
-            let _ = columns.pop_last();
+            let mut columns: Vec<_> = table.columns().cloned().collect();
+            let _ = columns.pop();
 
             let mut iter = transaction
                 .read_by_index(
@@ -1092,14 +1091,12 @@ mod test {
             .find(|index| matches!(index.ty, IndexType::Unique))
             .unwrap()
             .clone();
-        let (b_pos, b_column) = table
+        let b_column = table
             .columns()
             .cloned()
-            .enumerate()
-            .find(|(_, column)| column.name() == "b")
+            .find(|column| column.name() == "b")
             .unwrap();
-        let mut columns = BTreeMap::new();
-        columns.insert(b_pos, b_column.clone());
+        let columns = vec![b_column.clone()];
         let covered_deserializers = vec![b_column.datatype().serializable()];
 
         // ensure cover mapping can reorder index values to match scan order
@@ -1109,9 +1106,7 @@ mod test {
             .find(|index| index.name == "idx_b_a")
             .unwrap()
             .clone();
-        let mut reordered_columns = BTreeMap::new();
-        reordered_columns.insert(0, a_cover_column.clone());
-        reordered_columns.insert(1, b_cover_column.clone());
+        let reordered_columns = vec![a_cover_column.clone(), b_cover_column.clone()];
         let reordered_deserializers = vec![
             a_cover_column.datatype().serializable(),
             b_cover_column.datatype().serializable(),
@@ -1184,8 +1179,7 @@ mod test {
             .find(|index| index.name == "pk_index")
             .unwrap()
             .clone();
-        let mut pk_columns = BTreeMap::new();
-        pk_columns.insert(0, a_cover_column.clone());
+        let pk_columns = vec![a_cover_column.clone()];
         let pk_deserializers = vec![a_cover_column.datatype().serializable()];
         let mut iter = transaction.read_by_index(
             kite_sql.state.table_cache(),

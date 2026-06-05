@@ -78,7 +78,9 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             projection_exprs(
                 &view_name,
                 mapping_schema,
-                columns.iter().map(|column| lower_ident(&column.name)),
+                columns
+                    .iter()
+                    .map(|column| lower_ident(&column.name).into_owned()),
             )
         };
         plan = self.bind_project(plan, exprs)?;

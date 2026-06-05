@@ -27,6 +27,7 @@ use kite_sql_serde_macros::ReferenceSerialization;
 use ordered_float::OrderedFloat;
 use std::borrow::Cow;
 use std::collections::Bound;
+use std::sync::OnceLock;
 use std::{cmp, mem};
 
 pub struct HistogramBuilder {
@@ -42,6 +43,7 @@ pub struct HistogramBuilder {
     value_index: usize,
 }
 
+#[derive(Debug)]
 struct BoundComparator {
     lt: BinaryEvaluatorBox,
     lte: BinaryEvaluatorBox,
@@ -63,10 +65,27 @@ pub struct HistogramMeta {
 }
 
 // Equal depth histogram
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub struct Histogram {
     meta: HistogramMeta,
     buckets: Vec<Bucket>,
+    comparator: OnceLock<BoundComparator>,
+}
+
+impl Clone for Histogram {
+    fn clone(&self) -> Self {
+        Self {
+            meta: self.meta.clone(),
+            buckets: self.buckets.clone(),
+            comparator: OnceLock::new(),
+        }
+    }
+}
+
+impl PartialEq for Histogram {
+    fn eq(&self, other: &Self) -> bool {
+        self.meta == other.meta && self.buckets == other.buckets
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, ReferenceSerialization)]
@@ -212,6 +231,7 @@ impl HistogramBuilder {
                     correlation: Self::calc_correlation(corr_xy_sum, values_len),
                 },
                 buckets,
+                comparator: OnceLock::new(),
             },
             sketch,
         ))
@@ -320,11 +340,27 @@ impl Histogram {
             )));
         }
 
-        Ok(Self { meta, buckets })
+        Ok(Self {
+            meta,
+            buckets,
+            comparator: OnceLock::new(),
+        })
     }
 
     pub fn into_parts(self) -> (HistogramMeta, Vec<Bucket>) {
         (self.meta, self.buckets)
+    }
+
+    fn comparator(&self) -> Result<&BoundComparator, DatabaseError> {
+        if let Some(comparator) = self.comparator.get() {
+            return Ok(comparator);
+        }
+
+        let comparator = BoundComparator::new(self.buckets[0].upper.logical_type())?;
+        let _ = self.comparator.set(comparator);
+        self.comparator
+            .get()
+            .ok_or(DatabaseError::EvaluatorNotFound)
     }
 
     pub fn meta(&self) -> &HistogramMeta {
@@ -363,7 +399,7 @@ impl Histogram {
         if self.buckets.is_empty() || ranges.is_empty() {
             return Ok(0);
         }
-        let comparator = BoundComparator::new(self.buckets[0].upper.logical_type())?;
+        let comparator = self.comparator()?;
 
         let mut count = 0;
         let mut binary_i = 0;

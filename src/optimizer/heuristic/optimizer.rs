@@ -39,6 +39,7 @@ pub struct HepOptimizer<'a> {
     before_batches: &'a [HepBatch],
     after_batches: &'a [HepBatch],
     implementation_index: &'a ImplementationRuleIndex,
+    max_local_rules_len: usize,
     plan: LogicalPlan,
 }
 
@@ -48,11 +49,13 @@ impl<'a> HepOptimizer<'a> {
         before_batches: &'a [HepBatch],
         after_batches: &'a [HepBatch],
         implementation_index: &'a ImplementationRuleIndex,
+        max_local_rules_len: usize,
     ) -> Self {
         Self {
             before_batches,
             after_batches,
             implementation_index,
+            max_local_rules_len,
             plan,
         }
     }
@@ -61,7 +64,8 @@ impl<'a> HepOptimizer<'a> {
         mut self,
         loader: Option<&StatisticMetaLoader<'_, T>>,
     ) -> Result<LogicalPlan, DatabaseError> {
-        Self::apply_batches(&mut self.plan, self.before_batches)?;
+        let mut applied_rules = Vec::with_capacity(self.max_local_rules_len);
+        Self::apply_batches(&mut self.plan, self.before_batches, &mut applied_rules)?;
 
         if let Some(loader) = loader {
             if self.implementation_index.is_empty().not() {
@@ -76,30 +80,40 @@ impl<'a> HepOptimizer<'a> {
                 )?;
             }
         }
-        Self::apply_batches(&mut self.plan, self.after_batches)?;
+        Self::apply_batches(&mut self.plan, self.after_batches, &mut applied_rules)?;
 
         Ok(self.plan)
     }
 
     #[inline]
-    fn apply_batches(plan: &mut LogicalPlan, batches: &[HepBatch]) -> Result<(), DatabaseError> {
+    fn apply_batches(
+        plan: &mut LogicalPlan,
+        batches: &[HepBatch],
+        applied_rules: &mut Vec<bool>,
+    ) -> Result<(), DatabaseError> {
         for batch in batches {
             match batch.strategy {
                 HepBatchStrategy::MaxTimes(max_iteration) => {
                     for _ in 0..max_iteration {
-                        if !Self::apply_batch(plan, batch)? {
+                        if !Self::apply_batch(plan, batch, applied_rules)? {
                             break;
                         }
                     }
                 }
-                HepBatchStrategy::LoopIfApplied => while Self::apply_batch(plan, batch)? {},
+                HepBatchStrategy::LoopIfApplied => {
+                    while Self::apply_batch(plan, batch, applied_rules)? {}
+                }
             }
         }
         Ok(())
     }
 
     #[inline]
-    fn apply_batch(plan: &mut LogicalPlan, batch: &HepBatch) -> Result<bool, DatabaseError> {
+    fn apply_batch(
+        plan: &mut LogicalPlan,
+        batch: &HepBatch,
+        applied_rules: &mut Vec<bool>,
+    ) -> Result<bool, DatabaseError> {
         let mut applied = false;
         for step in &batch.steps {
             match step {
@@ -110,7 +124,7 @@ impl<'a> HepOptimizer<'a> {
                     }
                 }
                 HepBatchStep::LocalRewrite(rules) => {
-                    if Self::apply_local_rules(plan, rules)? {
+                    if Self::apply_local_rules(plan, rules, applied_rules)? {
                         applied = true;
                     }
                 }
@@ -349,9 +363,11 @@ impl<'a> HepOptimizer<'a> {
     fn apply_local_rules(
         plan: &mut LogicalPlan,
         rules: &HepLocalRewriteBatch,
+        applied_rules: &mut Vec<bool>,
     ) -> Result<bool, DatabaseError> {
-        let mut applied_rules = vec![false; rules.len()];
-        Self::apply_local_rules_inner(plan, rules, &mut applied_rules)
+        applied_rules.clear();
+        applied_rules.resize(rules.len(), false);
+        Self::apply_local_rules_inner(plan, rules, applied_rules)
     }
 
     fn apply_local_rules_inner(
@@ -706,6 +722,7 @@ pub struct HepOptimizerPipeline {
     before_batches: Vec<HepBatch>,
     after_batches: Vec<HepBatch>,
     implementation_index: ImplementationRuleIndex,
+    max_local_rules_len: usize,
 }
 
 impl HepOptimizerPipeline {
@@ -722,10 +739,22 @@ impl HepOptimizerPipeline {
         after_batches: Vec<HepBatch>,
         implementations: Vec<ImplementationRuleImpl>,
     ) -> Self {
+        let max_local_rules_len = before_batches
+            .iter()
+            .chain(after_batches.iter())
+            .flat_map(|batch| batch.steps.iter())
+            .filter_map(|step| match step {
+                HepBatchStep::LocalRewrite(rules) => Some(rules.len()),
+                HepBatchStep::WholeTree(_) => None,
+            })
+            .max()
+            .unwrap_or(0);
+
         Self {
             before_batches,
             after_batches,
             implementation_index: ImplementationRuleIndex::new(implementations),
+            max_local_rules_len,
         }
     }
 
@@ -735,6 +764,7 @@ impl HepOptimizerPipeline {
             &self.before_batches,
             &self.after_batches,
             &self.implementation_index,
+            self.max_local_rules_len,
         )
     }
 }

@@ -289,7 +289,7 @@ impl NormalizationRule for PushPredicateIntoScan {
             for (idx, column_id) in meta.column_ids.iter().enumerate() {
                 if let Some((scan_idx, column)) = scan_op
                     .columns
-                    .values()
+                    .iter()
                     .enumerate()
                     .find(|(_, column)| column.id().map(|id| id == *column_id).unwrap_or(false))
                 {
@@ -495,7 +495,7 @@ mod tests {
     use crate::types::index::{IndexInfo, IndexLookup, IndexMeta, IndexType};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
-    use std::collections::{BTreeMap, Bound};
+    use std::collections::Bound;
     use std::sync::Arc;
     use ulid::Ulid;
 
@@ -578,9 +578,7 @@ mod tests {
         );
         c3.set_ref_table(table_name.clone(), c3_id, false);
 
-        let mut columns = BTreeMap::new();
-        columns.insert(0, c1_ref.clone());
-        columns.insert(1, c2_ref.clone());
+        let columns = vec![c1_ref.clone(), c2_ref.clone()];
 
         let index_meta_reordered = Arc::new(IndexMeta {
             id: 0,
@@ -608,7 +606,6 @@ mod tests {
         let scan_plan = LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
                 table_name: table_name.clone(),
-                primary_keys: vec![c1_id],
                 columns,
                 limit: (None, None),
                 index_infos: vec![

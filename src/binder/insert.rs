@@ -69,7 +69,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             for ident in idents {
                 match self.bind_column_ref_from_identifiers(
                     slice::from_ref(ident),
-                    Some(table_name.to_string()),
+                    Some(table_name.as_ref()),
                 )? {
                     ScalarExpression::ColumnRef { column, .. } => columns.push(column),
                     _ => return Err(DatabaseError::UnsupportedStmt(ident.to_string())),

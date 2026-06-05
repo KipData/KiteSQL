@@ -117,7 +117,7 @@ pub(crate) fn apply_scan_order_hint(
             field.expr.all_referenced_columns(true, |column| {
                 scan_op
                     .columns
-                    .values()
+                    .iter()
                     .any(|table_column| table_column == column)
             })
         }),
@@ -125,7 +125,7 @@ pub(crate) fn apply_scan_order_hint(
             expr.all_referenced_columns(true, |column| {
                 scan_op
                     .columns
-                    .values()
+                    .iter()
                     .any(|table_column| table_column == column)
             })
         }),
@@ -351,7 +351,6 @@ mod tests {
     use crate::types::index::{IndexInfo, IndexLookup, IndexMeta, IndexType};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
-    use std::collections::BTreeMap;
     use std::ops::Bound;
     use std::sync::Arc;
     use ulid::Ulid;
@@ -434,8 +433,7 @@ mod tests {
         let table_name: TableName = ::std::sync::Arc::from("t1");
         let c1 = ColumnRef::from(ColumnCatalog::new_dummy("c1".to_string()));
         let c1_id = Ulid::new();
-        let mut columns = BTreeMap::new();
-        columns.insert(0, c1.clone());
+        let columns = vec![c1.clone()];
 
         let sort_fields = vec![SortField::new(
             ScalarExpression::column_expr(c1.clone(), 0),
@@ -467,7 +465,6 @@ mod tests {
         let scan = LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
                 table_name,
-                primary_keys: vec![c1_id],
                 columns,
                 limit: (None, None),
                 index_infos: vec![index_info],
@@ -568,13 +565,11 @@ mod tests {
         );
         let (index_info, _) = build_index_info(vec![sort_field.clone()], 0);
 
-        let mut columns = BTreeMap::new();
-        columns.insert(0, column);
+        let columns = vec![column];
         let table_name: TableName = ::std::sync::Arc::from("t");
         let table_scan = LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
                 table_name: table_name.clone(),
-                primary_keys: vec![],
                 columns,
                 limit: (None, None),
                 index_infos: vec![index_info],
@@ -688,13 +683,11 @@ mod tests {
             max: Bound::Unbounded,
         }));
 
-        let mut columns = BTreeMap::new();
-        columns.insert(0, column);
+        let columns = vec![column];
 
         let mut scan_plan = LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
                 table_name: ::std::sync::Arc::from("t"),
-                primary_keys: vec![],
                 columns,
                 limit: (None, None),
                 index_infos: vec![index_info],

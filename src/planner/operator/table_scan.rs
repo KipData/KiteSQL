@@ -20,19 +20,15 @@ use crate::planner::operator::sort::SortField;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Bounds;
 use crate::types::index::IndexInfo;
-use crate::types::ColumnId;
 use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
-use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::Formatter;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct TableScanOperator {
     pub(crate) table_name: TableName,
-    pub(crate) primary_keys: Vec<ColumnId>,
-    #[rustfmt::skip]
-    pub(crate) columns: BTreeMap::<usize, ColumnRef>,
+    pub(crate) columns: Vec<ColumnRef>,
     // Support push down limit.
     pub(crate) limit: Bounds,
 
@@ -48,17 +44,8 @@ impl TableScanOperator {
         table_catalog: &TableCatalog,
         with_pk: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let primary_keys = table_catalog
-            .primary_keys()
-            .iter()
-            .filter_map(|(_, column)| column.id())
-            .collect_vec();
         // Fill all Columns in TableCatalog by default
-        let columns = table_catalog
-            .columns()
-            .enumerate()
-            .map(|(i, column)| (i, column.clone()))
-            .collect();
+        let columns = table_catalog.columns().cloned().collect();
         let mut index_infos = Vec::with_capacity(table_catalog.indexes.len());
 
         for index_meta in table_catalog.indexes.iter() {
@@ -92,7 +79,6 @@ impl TableScanOperator {
             Operator::TableScan(TableScanOperator {
                 index_infos,
                 table_name,
-                primary_keys,
                 columns,
                 limit: (None, None),
                 with_pk,
@@ -106,7 +92,7 @@ impl fmt::Display for TableScanOperator {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         let projection_columns = self
             .columns
-            .values()
+            .iter()
             .map(|column| column.name().to_string())
             .join(", ");
         let (offset, limit) = self.limit;

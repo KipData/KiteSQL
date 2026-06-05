@@ -208,7 +208,7 @@ impl Operator {
             }
             Operator::TableScan(op) => {
                 output_exprs.clear();
-                output_exprs.extend(op.columns.values().enumerate().map(|(position, column)| {
+                output_exprs.extend(op.columns.iter().enumerate().map(|(position, column)| {
                     ScalarExpression::column_expr(column.clone(), position)
                 }));
                 true
@@ -308,7 +308,7 @@ impl Operator {
                 .iter()
                 .all(|expr| expr.visit_referenced_columns(only_column_ref, f)),
             Operator::ScalarSubquery(_) => true,
-            Operator::TableScan(op) => op.columns.values().all(f),
+            Operator::TableScan(op) => op.columns.iter().all(f),
             Operator::FunctionScan(op) => op
                 .table_function
                 .args

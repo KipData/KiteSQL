@@ -102,26 +102,21 @@ impl Insert {
             return Ok(());
         };
 
-        if let Some(table_catalog) = arena
-            .transaction_mut()
+        if let Some(table_snapshot) = arena
+            .transaction()
             .table(arena.table_cache(), self.table_name.clone())?
-            .cloned()
+            .map(|table| table.dml_snapshot())
+            .transpose()?
         {
-            if table_catalog.primary_keys().is_empty() {
+            if table_snapshot.primary_key_indices.is_empty() {
                 return Err(DatabaseError::not_null());
             }
 
-            let mut index_metas = Vec::new();
-            for index_meta in table_catalog.indexes() {
-                let exprs = index_meta.column_exprs(&table_catalog)?;
-                index_metas.push((index_meta, exprs));
-            }
-
-            let serializers = table_catalog
-                .columns()
+            let serializers = table_snapshot
+                .schema_ref
+                .iter()
                 .map(|column| column.datatype().serializable())
                 .collect_vec();
-            let pk_indices = table_catalog.primary_keys_indices();
             let mut inserted_count = 0;
 
             while arena.next_tuple(input)? {
@@ -131,9 +126,9 @@ impl Insert {
                 for (i, value) in values.into_iter().enumerate() {
                     tuple_map.insert(self.input_schema[i].key(self.is_mapping_by_name), value);
                 }
-                let mut values = Vec::with_capacity(table_catalog.columns_len());
+                let mut values = Vec::with_capacity(table_snapshot.columns_len);
 
-                for col in table_catalog.columns() {
+                for col in table_snapshot.schema_ref.iter() {
                     let mut value = {
                         let mut value = tuple_map.remove(&col.key(self.is_mapping_by_name));
 
@@ -149,10 +144,10 @@ impl Insert {
                     }
                     values.push(value)
                 }
-                let pk = Tuple::primary_projection(pk_indices, &values);
+                let pk = Tuple::primary_projection(&table_snapshot.primary_key_indices, &values);
                 let tuple = Tuple::new(Some(pk), values);
 
-                for (index_meta, exprs) in index_metas.iter() {
+                for (index_meta, exprs) in table_snapshot.index_metas.iter() {
                     let values = Projection::projection(&tuple, exprs)?;
                     let Some(value) = DataValue::values_to_tuple(values) else {
                         continue;

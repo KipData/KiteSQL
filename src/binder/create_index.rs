@@ -77,7 +77,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             Operator::CreateIndex(CreateIndexOperator {
                 table_name,
                 columns,
-                index_name,
+                index_name: index_name.into_owned(),
                 if_not_exists,
                 ty,
             }),
