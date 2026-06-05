@@ -15,21 +15,20 @@
 use crate::errors::DatabaseError;
 use crate::types::evaluator::DataValue;
 use crate::types::evaluator::{BinaryEvaluator, CastEvaluator, CastEvaluatorBox};
-use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::hint;
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct TupleEqBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct TupleNotEqBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct TupleGtBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct TupleGtEqBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct TupleLtBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct TupleLtEqBinaryEvaluator;
 
 fn tuple_cmp(
@@ -85,7 +84,7 @@ impl BinaryEvaluator for TupleNotEqBinaryEvaluator {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+#[derive(Debug)]
 pub struct TupleCastEvaluator {
     pub element_evaluators: Vec<CastEvaluatorBox>,
 }

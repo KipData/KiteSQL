@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::binder::{lower_case_name, Binder};
+use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::planner::operator::drop_table::DropTableOperator;
 use crate::planner::operator::Operator;
@@ -20,7 +21,6 @@ use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
 use sqlparser::ast::ObjectName;
-use std::sync::Arc;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_drop_table(
@@ -28,7 +28,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         name: &ObjectName,
         if_exists: &bool,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name: Arc<str> = lower_case_name(name)?.into();
+        let table_name: TableName = lower_case_name(name)?.into();
 
         Ok(LogicalPlan::new(
             Operator::DropTable(DropTableOperator {

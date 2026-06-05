@@ -406,7 +406,7 @@ mod tests {
             fields: index_fields,
             ignore_prefix_len,
         };
-        let table_name: TableName = Arc::from("t1");
+        let table_name: TableName = ::std::sync::Arc::from("t1");
         let meta = Arc::new(IndexMeta {
             id: 1,
             column_ids: (0..len).map(|_| Ulid::new()).collect(),
@@ -431,7 +431,7 @@ mod tests {
     }
 
     fn build_distinct_scan_plan() -> (LogicalPlan, SortOption) {
-        let table_name: TableName = Arc::from("t1");
+        let table_name: TableName = ::std::sync::Arc::from("t1");
         let c1 = ColumnRef::from(ColumnCatalog::new_dummy("c1".to_string()));
         let c1_id = Ulid::new();
         let mut columns = BTreeMap::new();
@@ -570,7 +570,7 @@ mod tests {
 
         let mut columns = BTreeMap::new();
         columns.insert(0, column);
-        let table_name: TableName = Arc::from("t");
+        let table_name: TableName = ::std::sync::Arc::from("t");
         let table_scan = LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
                 table_name: table_name.clone(),
@@ -693,7 +693,7 @@ mod tests {
 
         let mut scan_plan = LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
-                table_name: Arc::from("t"),
+                table_name: ::std::sync::Arc::from("t"),
                 primary_keys: vec![],
                 columns,
                 limit: (None, None),

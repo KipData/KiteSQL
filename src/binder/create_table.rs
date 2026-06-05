@@ -14,7 +14,7 @@
 
 use super::{attach_span_if_absent, is_valid_identifier, Binder};
 use crate::binder::lower_case_name;
-use crate::catalog::{ColumnCatalog, ColumnDesc};
+use crate::catalog::{ColumnCatalog, ColumnDesc, TableName};
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::create_table::CreateTableOperator;
@@ -27,7 +27,6 @@ use itertools::Itertools;
 use sqlparser::ast::{ColumnDef, ColumnOption, Expr, IndexColumn, ObjectName, TableConstraint};
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::sync::Arc;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     // TODO: TableConstraint
@@ -38,7 +37,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         constraints: &[TableConstraint],
         if_not_exists: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name: Arc<str> = lower_case_name(name)?.into();
+        let table_name: TableName = lower_case_name(name)?.into();
 
         if !is_valid_identifier(&table_name) {
             return Err(attach_span_if_absent(
@@ -192,6 +191,7 @@ mod tests {
     use crate::utils::lru::SharedLruCache;
     use std::hash::RandomState;
     use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     #[test]

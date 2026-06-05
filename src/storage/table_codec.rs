@@ -47,7 +47,6 @@ const STATISTICS_BUCKET_ORD_LEN: usize = 4;
 static ROOT_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"Root".to_vec());
 static VIEW_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"View".to_vec());
 static HASH_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"Hash".to_vec());
-static EMPTY_REFERENCE_TABLES: LazyLock<ReferenceTables> = LazyLock::new(ReferenceTables::new);
 
 pub type Bytes = Vec<u8>;
 pub type BumpBytes<'bump> = bumpalo::collections::Vec<'bump, u8>;
@@ -681,7 +680,7 @@ impl TableCodec {
     }
 
     pub fn decode_index_meta<T: Transaction>(bytes: &[u8]) -> Result<IndexMeta, DatabaseError> {
-        IndexMeta::decode::<T, _>(&mut Cursor::new(bytes), None, &EMPTY_REFERENCE_TABLES)
+        IndexMeta::decode::<T, _>(&mut Cursor::new(bytes), None, &ReferenceTables::new())
     }
 
     pub fn decode_index_key(
@@ -848,7 +847,7 @@ impl TableCodec {
     pub fn decode_root_table<T: Transaction>(bytes: &[u8]) -> Result<TableMeta, DatabaseError> {
         let mut bytes = Cursor::new(bytes);
 
-        TableMeta::decode::<T, _>(&mut bytes, None, &EMPTY_REFERENCE_TABLES)
+        TableMeta::decode::<T, _>(&mut bytes, None, &ReferenceTables::new())
     }
 }
 

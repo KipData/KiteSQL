@@ -15,10 +15,10 @@
 use sqlparser::ast::{AlterColumnOperation, AlterTableOperation, ColumnOption, ObjectName};
 
 use std::borrow::Cow;
-use std::sync::Arc;
 
 use super::{attach_span_if_absent, is_valid_identifier, Binder};
 use crate::binder::lower_case_name;
+use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::alter_table::add_column::AddColumnOperator;
@@ -83,7 +83,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         name: &ObjectName,
         operation: &AlterTableOperation,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name: Arc<str> = lower_case_name(name)?.into();
+        let table_name: TableName = lower_case_name(name)?.into();
         let table = self
             .context
             .table(table_name.clone())?

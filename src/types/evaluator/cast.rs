@@ -37,7 +37,6 @@ use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
 use paste::paste;
-use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::sync::Arc;
 
@@ -140,7 +139,7 @@ macro_rules! decimal_to_int_cast {
 #[macro_export]
 macro_rules! define_cast_evaluator {
     ($name:ident, $pattern:pat => $body:block) => {
-        #[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
+        #[derive(Debug)]
         pub struct $name;
         impl $crate::types::evaluator::CastEvaluator for $name {
             fn eval_cast(
@@ -156,7 +155,7 @@ macro_rules! define_cast_evaluator {
         }
     };
     ($name:ident, $pattern:pat => |$this:ident| $body:expr) => {
-        #[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
+        #[derive(Debug)]
         pub struct $name;
         impl $crate::types::evaluator::CastEvaluator for $name {
             fn eval_cast(
@@ -175,7 +174,7 @@ macro_rules! define_cast_evaluator {
         }
     };
     ($name:ident, $pattern:pat => |$this:ident| $body:block) => {
-        #[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
+        #[derive(Debug)]
         pub struct $name;
         impl $crate::types::evaluator::CastEvaluator for $name {
             fn eval_cast(
@@ -194,7 +193,7 @@ macro_rules! define_cast_evaluator {
         }
     };
     ($name:ident { $($field:ident : $field_ty:ty),+ $(,)? }, $pattern:pat => |$this:ident| $body:expr) => {
-        #[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
+        #[derive(Debug)]
         pub struct $name {
             $(pub $field: $field_ty),+
         }
@@ -215,7 +214,7 @@ macro_rules! define_cast_evaluator {
         }
     };
     ($name:ident { $($field:ident : $field_ty:ty),+ $(,)? }, $pattern:pat => $body:block) => {
-        #[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
+        #[derive(Debug)]
         pub struct $name {
             $(pub $field: $field_ty),+
         }
@@ -372,7 +371,7 @@ macro_rules! define_float_cast_evaluators {
     };
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct IdentityCastEvaluator;
 impl CastEvaluator for IdentityCastEvaluator {
     fn eval_cast(&self, value: &DataValue) -> Result<DataValue, DatabaseError> {

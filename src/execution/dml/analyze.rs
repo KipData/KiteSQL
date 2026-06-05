@@ -27,7 +27,6 @@ use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
 use itertools::Itertools;
 use std::fmt::{self, Formatter};
-use std::sync::Arc;
 
 const DEFAULT_NUM_OF_BUCKETS: usize = 100;
 
@@ -110,7 +109,7 @@ impl Analyze {
                 if values.len() == 1 {
                     builder.append(&values[0])?;
                 } else {
-                    builder.append(&Arc::new(DataValue::Tuple(values, false)))?;
+                    builder.append(&DataValue::Tuple(values, false))?;
                 }
             }
         }

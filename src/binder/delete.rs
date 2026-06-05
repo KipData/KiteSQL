@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::binder::{lower_case_name, Binder};
+use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::planner::operator::delete::DeleteOperator;
 use crate::planner::operator::Operator;
@@ -21,7 +22,6 @@ use crate::storage::Transaction;
 use crate::types::value::DataValue;
 use itertools::Itertools;
 use sqlparser::ast::{Expr, TableFactor, TableWithJoins};
-use std::sync::Arc;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_delete(
@@ -30,7 +30,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         selection: &Option<Expr>,
     ) -> Result<LogicalPlan, DatabaseError> {
         if let TableFactor::Table { name, .. } = &from.relation {
-            let table_name: Arc<str> = lower_case_name(name)?.into();
+            let table_name: TableName = lower_case_name(name)?.into();
             let table = self
                 .context
                 .table(table_name.clone())?

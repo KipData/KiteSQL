@@ -806,6 +806,7 @@ mod test {
     use crate::binder::test::build_t1_table;
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::{Range, RangeDetacher};
+    use crate::expression::BinaryOperator;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
     use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
@@ -813,9 +814,9 @@ mod test {
     use crate::planner::operator::Operator;
     use crate::planner::LogicalPlan;
     use crate::storage::rocksdb::RocksTransaction;
-    use crate::types::evaluator::tuple::TupleLtBinaryEvaluator;
-    use crate::types::evaluator::BinaryEvaluator;
+    use crate::types::evaluator::binary_create;
     use crate::types::value::DataValue;
+    use crate::types::LogicalType;
     use std::ops::Bound;
 
     fn plan_filter(plan: LogicalPlan) -> Result<Option<FilterOperator>, DatabaseError> {
@@ -1975,7 +1976,7 @@ mod test {
     }
 
     #[test]
-    fn test_to_tuple_range_none() {
+    fn test_to_tuple_range_none() -> Result<(), DatabaseError> {
         let range = Range::Scope {
             min: Bound::Included(DataValue::Int32(2)),
             max: Bound::Unbounded,
@@ -2009,8 +2010,13 @@ mod test {
             unreachable!()
         };
         assert_eq!(
-            TupleLtBinaryEvaluator.binary_eval(&min, &max).unwrap(),
+            binary_create(
+                std::borrow::Cow::Owned(LogicalType::Tuple(vec![])),
+                BinaryOperator::Lt
+            )?
+            .binary_eval(&min, &max)?,
             DataValue::Boolean(true)
-        )
+        );
+        Ok(())
     }
 }

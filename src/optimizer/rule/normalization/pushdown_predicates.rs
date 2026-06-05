@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn test_cover_mapping_matches_scan_order() -> Result<(), DatabaseError> {
-        let table_name: TableName = Arc::from("mock_table");
+        let table_name: TableName = ::std::sync::Arc::from("mock_table");
         let c1_id = Ulid::new();
         let c2_id = Ulid::new();
         let c3_id = Ulid::new();

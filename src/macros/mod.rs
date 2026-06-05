@@ -80,14 +80,14 @@ macro_rules! from_tuple {
 #[macro_export]
 macro_rules! scala_function {
     ($struct_name:ident::$function_name:ident($($arg_ty:expr),*) -> $return_ty:expr => $closure:expr) => {
-        #[derive(Debug, ::serde::Serialize, ::serde::Deserialize)]
+        #[derive(Debug)]
         pub(crate) struct $struct_name {
             summary: ::kite_sql::expression::function::FunctionSummary
         }
 
         impl $struct_name {
             #[allow(unused_mut)]
-            pub(crate) fn new() -> Arc<Self> {
+            pub(crate) fn new() -> ::std::sync::Arc<Self> {
                 let function_name = stringify!($function_name).to_lowercase();
 
                 let mut arg_types = Vec::new();
@@ -95,7 +95,7 @@ macro_rules! scala_function {
                     arg_types.push($arg_ty);
                 })*
 
-                Arc::new(Self {
+                ::std::sync::Arc::new(Self {
                     summary: ::kite_sql::expression::function::FunctionSummary {
                         name: function_name.into(),
                         arg_types
@@ -159,17 +159,18 @@ macro_rules! table_function {
             $({
                 columns.push(::kite_sql::catalog::column::ColumnCatalog::new(stringify!($output_name).to_lowercase(), true, ::kite_sql::catalog::column::ColumnDesc::new($output_ty, None, false, None).unwrap()));
             })*
+
             ::kite_sql::catalog::table::TableCatalog::new(stringify!($function_name).to_lowercase().into(), columns).unwrap()
         });
 
-        #[derive(Debug, ::serde::Serialize, ::serde::Deserialize)]
+        #[derive(Debug)]
         pub(crate) struct $struct_name {
-            summary: ::kite_sql::expression::function::FunctionSummary
+            summary: ::kite_sql::expression::function::FunctionSummary,
         }
 
         impl $struct_name {
             #[allow(unused_mut)]
-            pub(crate) fn new() -> Arc<Self> {
+            pub(crate) fn new() -> ::std::sync::Arc<Self> {
                 let function_name = stringify!($function_name).to_lowercase();
 
                 let mut arg_types = Vec::new();
@@ -177,14 +178,16 @@ macro_rules! table_function {
                     arg_types.push($arg_ty);
                 })*
 
-                Arc::new(Self {
+                ::std::sync::Arc::new(Self {
                     summary: ::kite_sql::expression::function::FunctionSummary {
                         name: function_name.into(),
                         arg_types
-                    }
+                    },
                 })
             }
-        }        impl ::kite_sql::expression::function::table::TableFunctionImpl for $struct_name {
+        }
+
+        impl ::kite_sql::expression::function::table::TableFunctionImpl for $struct_name {
             #[allow(unused_variables, clippy::redundant_closure_call)]
             fn eval(&self, args: &[::kite_sql::expression::ScalarExpression]) -> Result<Box<dyn Iterator<Item=Result<::kite_sql::types::tuple::Tuple, ::kite_sql::errors::DatabaseError>>>, ::kite_sql::errors::DatabaseError> {
                 let mut _index = 0;
@@ -206,7 +209,7 @@ macro_rules! table_function {
                 &self.summary
             }
 
-            fn table(&self) -> &'static ::kite_sql::catalog::table::TableCatalog {
+            fn table(&self) -> &::kite_sql::catalog::table::TableCatalog {
                 &$function_name
             }
         }

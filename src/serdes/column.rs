@@ -18,7 +18,6 @@ use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTab
 use crate::storage::Transaction;
 use crate::types::ColumnId;
 use std::io::{Read, Write};
-use std::sync::Arc;
 
 impl ReferenceSerialization for ColumnRef {
     fn encode<W: Write>(
@@ -85,9 +84,9 @@ impl ReferenceSerialization for ColumnRef {
                 nullable = nullable_for_join;
             }
 
-            Ok(Self(Arc::new(ColumnCatalog::direct_new(
+            Ok(Self::from(ColumnCatalog::direct_new(
                 summary, nullable, desc, in_join,
-            ))))
+            )))
         }
     }
 }
@@ -196,7 +195,7 @@ pub(crate) mod test {
         };
 
         {
-            let ref_column = ColumnRef(Arc::new(ColumnCatalog::direct_new(
+            let ref_column = ColumnRef::from(ColumnCatalog::direct_new(
                 ColumnSummary {
                     name: "c3".to_string(),
                     relation: ColumnRelation::Table {
@@ -208,7 +207,7 @@ pub(crate) mod test {
                 false,
                 ColumnDesc::new(LogicalType::Integer, None, false, None)?,
                 false,
-            )));
+            ));
 
             ref_column.encode(&mut cursor, false, &mut reference_tables)?;
             cursor.seek(SeekFrom::Start(0))?;
@@ -237,7 +236,7 @@ pub(crate) mod test {
             cursor.seek(SeekFrom::Start(0))?;
         }
         {
-            let not_ref_column = ColumnRef(Arc::new(ColumnCatalog::direct_new(
+            let not_ref_column = ColumnRef::from(ColumnCatalog::direct_new(
                 ColumnSummary {
                     name: "c3".to_string(),
                     relation: ColumnRelation::None,
@@ -250,7 +249,7 @@ pub(crate) mod test {
                     Some(ScalarExpression::Constant(DataValue::UInt64(42))),
                 )?,
                 false,
-            )));
+            ));
             not_ref_column.encode(&mut cursor, false, &mut reference_tables)?;
             cursor.seek(SeekFrom::Start(0))?;
 

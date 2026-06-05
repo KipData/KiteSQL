@@ -16,6 +16,7 @@ use crate::binder::{
     attach_span_from_sqlparser_span_if_absent, attach_span_if_absent, lower_case_name, lower_ident,
     Binder,
 };
+use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::expression::simplify::ConstantCalculator;
 use crate::expression::visitor_mut::VisitorMut;
@@ -44,7 +45,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
     ) -> Result<LogicalPlan, DatabaseError> {
         // FIXME: Make it better to detect the current BindStep
         self.context.allow_default = true;
-        let table_name: Arc<str> = lower_case_name(name)?.into();
+        let table_name: TableName = lower_case_name(name)?.into();
 
         let source = self
             .context
@@ -145,7 +146,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         query: &Query,
         is_overwrite: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name: Arc<str> = lower_case_name(name)?.into();
+        let table_name: TableName = lower_case_name(name)?.into();
         let table_schema = {
             let source = self
                 .context
