@@ -14,7 +14,7 @@
 
 use crate::binder::{lower_case_name, lower_ident, Binder};
 use crate::catalog::view::View;
-use crate::catalog::{ColumnCatalog, ColumnRef};
+use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
 use crate::errors::DatabaseError;
 use crate::expression::{AliasType, ScalarExpression};
 use crate::planner::operator::create_view::CreateViewOperator;
@@ -24,7 +24,6 @@ use crate::storage::Transaction;
 use crate::types::value::DataValue;
 use itertools::Itertools;
 use sqlparser::ast::{ObjectName, Query, ViewColumnDef};
-use std::sync::Arc;
 use ulid::Ulid;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
@@ -36,7 +35,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         query: &Query,
     ) -> Result<LogicalPlan, DatabaseError> {
         fn projection_exprs(
-            view_name: &Arc<str>,
+            view_name: &TableName,
             mapping_schema: &[ColumnRef],
             column_names: impl Iterator<Item = String>,
         ) -> Vec<ScalarExpression> {
@@ -62,7 +61,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 .collect_vec()
         }
 
-        let view_name: Arc<str> = lower_case_name(name)?.into();
+        let view_name: TableName = lower_case_name(name)?.into();
         let mut plan = self.bind_query(query)?;
 
         let mapping_schema = plan.output_schema();
@@ -79,7 +78,9 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             projection_exprs(
                 &view_name,
                 mapping_schema,
-                columns.iter().map(|column| lower_ident(&column.name)),
+                columns
+                    .iter()
+                    .map(|column| lower_ident(&column.name).into_owned()),
             )
         };
         plan = self.bind_project(plan, exprs)?;

@@ -88,21 +88,17 @@ impl Update {
             exprs_map.insert(column.id(), expr);
         }
 
-        if let Some(table_catalog) = arena
-            .transaction_mut()
+        if let Some(table_snapshot) = arena
+            .transaction()
             .table(arena.table_cache(), self.table_name.clone())?
-            .cloned()
+            .map(|table| table.dml_snapshot())
+            .transpose()?
         {
             let serializers = self
                 .input_schema
                 .iter()
                 .map(|column| column.datatype().serializable())
                 .collect_vec();
-            let mut index_metas = Vec::new();
-            for index_meta in table_catalog.indexes() {
-                let exprs = index_meta.column_exprs(&table_catalog)?;
-                index_metas.push((index_meta, exprs));
-            }
 
             let mut updated_count = 0;
 
@@ -113,7 +109,7 @@ impl Update {
                 let Some(old_pk) = tuple.pk.clone() else {
                     continue;
                 };
-                for (index_meta, exprs) in index_metas.iter() {
+                for (index_meta, exprs) in table_snapshot.index_metas.iter() {
                     let values = Projection::projection(&tuple, exprs)?;
                     let Some(value) = DataValue::values_to_tuple(values) else {
                         continue;
@@ -131,7 +127,7 @@ impl Update {
                 }
 
                 tuple.pk = Some(Tuple::primary_projection(
-                    table_catalog.primary_keys_indices(),
+                    &table_snapshot.primary_key_indices,
                     &tuple.values,
                 ));
                 let new_pk = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
@@ -142,7 +138,7 @@ impl Update {
                         .remove_tuple(&self.table_name, &old_pk)?;
                     is_overwrite = false;
                 }
-                for (index_meta, exprs) in index_metas.iter() {
+                for (index_meta, exprs) in table_snapshot.index_metas.iter() {
                     let values = Projection::projection(&tuple, exprs)?;
                     let Some(value) = DataValue::values_to_tuple(values) else {
                         continue;

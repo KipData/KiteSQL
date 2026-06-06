@@ -20,12 +20,11 @@ use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
 use std::hint;
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float64PlusUnaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float64MinusUnaryEvaluator;
 impl UnaryEvaluator for Float64PlusUnaryEvaluator {
     fn unary_eval(&self, value: &DataValue) -> DataValue {
@@ -42,27 +41,27 @@ impl UnaryEvaluator for Float64MinusUnaryEvaluator {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float64PlusBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float64MinusBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float64MultiplyBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float64DivideBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float64GtBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float64GtEqBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float64LtBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float64LtEqBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float64EqBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float64NotEqBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float64ModBinaryEvaluator;
 impl BinaryEvaluator for Float64PlusBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {

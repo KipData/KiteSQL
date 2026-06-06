@@ -34,7 +34,7 @@ use std::borrow::Cow;
 /// Tips: Idea for sqlrs
 /// An accumulator represents a stateful object that lives throughout the evaluation of multiple
 /// rows and generically accumulates values.
-pub trait Accumulator: Send + Sync {
+pub trait Accumulator {
     /// updates the accumulator's state from a vector of arrays.
     fn update_value(&mut self, value: &DataValue) -> Result<(), DatabaseError>;
 

@@ -6,9 +6,11 @@ PYO3_PYTHON ?= /usr/bin/python3.12
 TPCC_MEASURE_TIME ?= 15
 TPCC_NUM_WARE ?= 1
 TPCC_PPROF_OUTPUT ?= /tmp/tpcc_lmdb.svg
+TPCC_HEAPTRACK_MEASURE_TIME ?= 300
+TPCC_HEAPTRACK_OUTPUT ?= /tmp/tpcc_lmdb_heaptrack
 TPCC_SQLITE_PROFILE ?= balanced
 
-.PHONY: test test-python test-wasm test-slt test-all wasm-build check tpcc tpcc-kitesql-rocksdb tpcc-kitesql-lmdb tpcc-lmdb-flamegraph tpcc-sqlite tpcc-sqlite-practical tpcc-sqlite-balanced tpcc-dual cargo-check build wasm-examples native-examples fmt clippy
+.PHONY: test test-python test-wasm test-slt test-all wasm-build check tpcc tpcc-kitesql-rocksdb tpcc-kitesql-lmdb tpcc-lmdb-flamegraph tpcc-lmdb-heaptrack tpcc-sqlite tpcc-sqlite-practical tpcc-sqlite-balanced tpcc-dual cargo-check build wasm-examples native-examples fmt clippy
 
 ## Run default Rust tests in the current environment (non-WASM).
 test:
@@ -65,6 +67,16 @@ tpcc-kitesql-lmdb:
 ## Execute TPCC on LMDB and emit a pprof flamegraph SVG.
 tpcc-lmdb-flamegraph:
 	CARGO_PROFILE_RELEASE_DEBUG=true $(CARGO) run -p tpcc --release --features pprof -- --backend kitesql-lmdb --measure-time $(TPCC_MEASURE_TIME) --num-ware $(TPCC_NUM_WARE) --pprof-output $(TPCC_PPROF_OUTPUT)
+
+## Execute TPCC on LMDB under heaptrack and emit a heap profile.
+tpcc-lmdb-heaptrack:
+	@command -v heaptrack >/dev/null || { echo "heaptrack is not installed"; exit 1; }
+	$(CARGO) build -p tpcc --release
+	@mkdir -p $(dir $(TPCC_HEAPTRACK_OUTPUT))
+	heaptrack -o $(TPCC_HEAPTRACK_OUTPUT) ./target/release/tpcc --backend kitesql-lmdb --measure-time $(TPCC_HEAPTRACK_MEASURE_TIME) --num-ware $(TPCC_NUM_WARE)
+	@echo "heaptrack output:"
+	@ls -1 $(TPCC_HEAPTRACK_OUTPUT)*
+	@echo "open gui: heaptrack_gui $$(ls -1 $(TPCC_HEAPTRACK_OUTPUT)* | tail -n 1)"
 
 ## Execute the TPCC workload on SQLite with the practical profile.
 tpcc-sqlite:

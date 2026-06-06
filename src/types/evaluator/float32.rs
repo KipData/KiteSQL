@@ -17,12 +17,11 @@ use crate::types::evaluator::DataValue;
 use crate::types::evaluator::{BinaryEvaluator, UnaryEvaluator};
 use crate::types::LogicalType;
 use rust_decimal::prelude::FromPrimitive;
-use serde::{Deserialize, Serialize};
 use std::hint;
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float32PlusUnaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float32MinusUnaryEvaluator;
 impl UnaryEvaluator for Float32PlusUnaryEvaluator {
     fn unary_eval(&self, value: &DataValue) -> DataValue {
@@ -39,27 +38,27 @@ impl UnaryEvaluator for Float32MinusUnaryEvaluator {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float32PlusBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float32MinusBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float32MultiplyBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float32DivideBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float32GtBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float32GtEqBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float32LtBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float32LtEqBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float32EqBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float32NotEqBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Float32ModBinaryEvaluator;
 impl BinaryEvaluator for Float32PlusBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {

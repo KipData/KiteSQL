@@ -18,18 +18,17 @@ use crate::types::evaluator::DataValue;
 use crate::types::evaluator::{BinaryEvaluator, UnaryEvaluator};
 use crate::types::CharLengthUnits;
 use ordered_float::OrderedFloat;
-use serde::{Deserialize, Serialize};
 use std::hint;
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct BooleanNotUnaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct BooleanAndBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct BooleanOrBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct BooleanEqBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct BooleanNotEqBinaryEvaluator;
 impl UnaryEvaluator for BooleanNotUnaryEvaluator {
     fn unary_eval(&self, value: &DataValue) -> DataValue {

@@ -462,10 +462,10 @@ mod test {
     use crate::planner::Childrens;
     use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
     use crate::storage::Storage;
-    use crate::types::evaluator::int32::Int32GtBinaryEvaluator;
-    use crate::types::evaluator::BinaryEvaluatorBox;
+    use crate::types::evaluator::binary_create;
     use crate::types::LogicalType;
     use crate::utils::lru::SharedLruCache;
+    use std::borrow::Cow;
     use std::collections::HashSet;
     use std::hash::RandomState;
     use std::sync::Arc;
@@ -598,11 +598,9 @@ mod test {
                 ColumnRef::from(ColumnCatalog::new("c4".to_owned(), true, desc.clone())),
                 3,
             )),
-            evaluator: Some(BinaryEvaluatorBox::new(
-                Arc::new(Int32GtBinaryEvaluator),
-                LogicalType::Integer,
-                BinaryOperator::Gt,
-            )),
+            evaluator: Some(
+                binary_create(Cow::Owned(LogicalType::Integer), BinaryOperator::Gt).unwrap(),
+            ),
             ty: LogicalType::Boolean,
         };
 

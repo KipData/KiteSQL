@@ -41,20 +41,9 @@ use crate::types::tuple::SchemaRef;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, ColumnId, LogicalType};
 
-macro_rules! try_alias {
-    ($context:expr, $full_name:expr) => {
-        if let Some(expr) = $context.expr_aliases.get(&$full_name) {
-            return Ok(ScalarExpression::Alias {
-                expr: Box::new(expr.clone()),
-                alias: AliasType::Name($full_name.1),
-            });
-        }
-    };
-}
-
 macro_rules! try_default {
     ($table_name:expr, $column_name:expr) => {
-        if let (None, "default") = ($table_name, $column_name.as_str()) {
+        if let (None, "default") = ($table_name, $column_name.as_ref()) {
             return Ok(ScalarExpression::Empty);
         }
     };
@@ -559,7 +548,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
     pub fn bind_column_ref_from_identifiers(
         &mut self,
         idents: &[Ident],
-        bind_table_name: Option<String>,
+        bind_table_name: Option<&str>,
     ) -> Result<ScalarExpression, DatabaseError> {
         let full_name = match idents {
             [column] => (None, lower_ident(column)),
@@ -578,12 +567,22 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             }
         };
         if full_name.0.is_none() {
-            try_alias!(self.context, full_name);
+            if let Some((_, expr)) = self
+                .context
+                .expr_aliases
+                .iter()
+                .find(|((table, column), _)| table.is_none() && column == full_name.1.as_ref())
+            {
+                return Ok(ScalarExpression::Alias {
+                    expr: Box::new(expr.clone()),
+                    alias: AliasType::Name(full_name.1.into_owned()),
+                });
+            }
         }
         if self.context.allow_default {
             try_default!(&full_name.0, full_name.1);
         }
-        if let Some(table) = full_name.0.or(bind_table_name) {
+        if let Some(table) = full_name.0.as_deref().or(bind_table_name) {
             let (schema_ref, position_offset) = match Self::resolve_source_columns_in_scope(
                 &self.context,
                 &mut self.table_schema_buf,
@@ -614,8 +613,8 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                     }
                 }
             };
-            let (position, column) = Self::find_column_in_schema(&schema_ref, full_name.1.as_str())
-                .ok_or_else(|| Self::column_not_found_with_span(idents, full_name.1.as_str()))?;
+            let (position, column) = Self::find_column_in_schema(&schema_ref, full_name.1.as_ref())
+                .ok_or_else(|| Self::column_not_found_with_span(idents, full_name.1.as_ref()))?;
 
             Ok(ScalarExpression::column_expr(
                 column.clone(),
@@ -627,14 +626,14 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 |context: &BinderContext<'a, T>| -> Result<Option<ScalarExpression>, DatabaseError> {
                     Ok(context
                         .using
-                        .get(full_name.1.as_str())
+                        .get(full_name.1.as_ref())
                         .map(|using_column| using_column.visible_expr())
                         .transpose()?
                         .or_else(|| {
                             Self::find_column_in_scope(
                                 context,
                                 &mut self.table_schema_buf,
-                                full_name.1.as_str(),
+                                full_name.1.as_ref(),
                             )
                         }))
                 };
@@ -649,7 +648,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 Some(column) => Ok(column),
                 None => Err(Self::column_not_found_with_span(
                     idents,
-                    full_name.1.as_str(),
+                    full_name.1.as_ref(),
                 )),
             }
         }

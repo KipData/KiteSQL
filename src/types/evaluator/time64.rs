@@ -19,20 +19,19 @@ use crate::types::evaluator::DataValue;
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
 use chrono::{Datelike, Timelike};
-use serde::{Deserialize, Serialize};
 use std::hint;
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Time64GtBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Time64GtEqBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Time64LtBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Time64LtEqBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Time64EqBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Time64NotEqBinaryEvaluator;
 impl BinaryEvaluator for Time64GtBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::expression::{BinaryOperator, ScalarExpression, UnaryOperator};
+use crate::expression::{BinaryOperator, UnaryOperator};
 use crate::types::tuple::TupleId;
 use crate::types::LogicalType;
 use chrono::ParseError;
@@ -247,8 +247,6 @@ pub enum DatabaseError {
     TupleIdNotFound(TupleId),
     #[error("there are more buckets: {0} than elements: {1}")]
     TooManyBuckets(usize, usize),
-    #[error("this scalar expression: '{0}' unbind position")]
-    UnbindExpressionPosition(ScalarExpression),
     #[error("unsupported unary operator: {0} cannot support {1} for calculations")]
     UnsupportedUnaryOperator(LogicalType, UnaryOperator),
     #[error("unsupported binary operator: {0} cannot support {1} for calculations")]

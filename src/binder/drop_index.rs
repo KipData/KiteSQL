@@ -38,7 +38,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         Ok(LogicalPlan::new(
             Operator::DropIndex(DropIndexOperator {
                 table_name,
-                index_name,
+                index_name: index_name.into_owned(),
                 if_exists: *if_exists,
             }),
             Childrens::None,

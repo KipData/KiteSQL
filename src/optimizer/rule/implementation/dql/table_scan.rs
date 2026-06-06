@@ -46,7 +46,7 @@ impl<T: Transaction> ImplementationRule<T> for SeqScanImplementation {
             let cost = scan_op
                 .index_infos
                 .iter()
-                .find(|index_info| index_info.meta.column_ids == scan_op.primary_keys)
+                .find(|index_info| matches!(index_info.meta.ty, IndexType::PrimaryKey { .. }))
                 .map(|index_info| loader.load(&scan_op.table_name, index_info.meta.id))
                 .transpose()?
                 .flatten()

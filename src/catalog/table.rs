@@ -14,6 +14,7 @@
 
 use crate::catalog::{ColumnCatalog, ColumnRef, ColumnRelation};
 use crate::errors::DatabaseError;
+use crate::expression::ScalarExpression;
 use crate::types::index::{IndexMeta, IndexMetaRef, IndexType};
 use crate::types::tuple::SchemaRef;
 use crate::types::{ColumnId, LogicalType};
@@ -39,6 +40,13 @@ pub struct TableCatalog {
     primary_keys: Vec<(usize, ColumnRef)>,
     primary_key_indices: PrimaryKeyIndices,
     primary_key_type: LogicalType,
+}
+
+pub(crate) struct DmlTableSnapshot {
+    pub(crate) schema_ref: SchemaRef,
+    pub(crate) primary_key_indices: PrimaryKeyIndices,
+    pub(crate) columns_len: usize,
+    pub(crate) index_metas: Vec<(IndexMetaRef, Vec<ScalarExpression>)>,
 }
 
 //TODO: can add some like Table description and other information as attributes
@@ -105,6 +113,20 @@ impl TableCatalog {
 
     pub(crate) fn primary_keys_indices(&self) -> &PrimaryKeyIndices {
         &self.primary_key_indices
+    }
+
+    pub(crate) fn dml_snapshot(&self) -> Result<DmlTableSnapshot, DatabaseError> {
+        let index_metas = self
+            .indexes()
+            .map(|index_meta| Ok((index_meta.clone(), index_meta.column_exprs(self)?)))
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
+
+        Ok(DmlTableSnapshot {
+            schema_ref: self.schema_ref.clone(),
+            primary_key_indices: self.primary_key_indices.clone(),
+            columns_len: self.columns_len(),
+            index_metas,
+        })
     }
 
     /// Add a column to the table catalog.

@@ -39,6 +39,7 @@ use sqlparser::ast::{
     Statement, TableObject,
 };
 use sqlparser::tokenizer::Span;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -783,18 +784,24 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
     }
 }
 
-fn lower_ident(ident: &Ident) -> String {
-    ident.value.to_lowercase()
+fn lower_ident(ident: &Ident) -> Cow<'_, str> {
+    let value = &ident.value;
+
+    if value.chars().any(char::is_uppercase) {
+        Cow::Owned(value.to_lowercase())
+    } else {
+        Cow::Borrowed(value)
+    }
 }
 
-fn lower_name_part(part: &ObjectNamePart) -> Result<String, DatabaseError> {
+fn lower_name_part(part: &ObjectNamePart) -> Result<Cow<'_, str>, DatabaseError> {
     part.as_ident()
         .map(lower_ident)
         .ok_or_else(|| attach_span_if_absent(DatabaseError::invalid_table(part.to_string()), part))
 }
 
 /// Convert an object name into lower case
-fn lower_case_name(name: &ObjectName) -> Result<String, DatabaseError> {
+fn lower_case_name(name: &ObjectName) -> Result<Cow<'_, str>, DatabaseError> {
     if name.0.len() == 1 {
         return lower_name_part(&name.0[0]);
     }

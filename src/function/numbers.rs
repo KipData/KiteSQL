@@ -23,8 +23,6 @@ use crate::types::tuple::SchemaRef;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
-use serde::Deserialize;
-use serde::Serialize;
 use std::sync::Arc;
 use std::sync::LazyLock;
 
@@ -40,7 +38,7 @@ static NUMBERS: LazyLock<TableCatalog> = LazyLock::new(|| {
     .unwrap()
 });
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
 pub(crate) struct Numbers {
     summary: FunctionSummary,
 }
@@ -85,7 +83,7 @@ impl TableFunctionImpl for Numbers {
         &self.summary
     }
 
-    fn table(&self) -> &'static TableCatalog {
+    fn table(&self) -> &TableCatalog {
         &NUMBERS
     }
 }

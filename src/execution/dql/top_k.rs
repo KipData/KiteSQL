@@ -173,18 +173,17 @@ mod test {
     use crate::types::LogicalType;
     use bumpalo::Bump;
     use std::collections::BTreeSet;
-    use std::sync::Arc;
 
     #[test]
     fn test_top_k_sort() -> Result<(), DatabaseError> {
         let fn_sort_fields = |asc: bool, nulls_first: bool| {
             vec![SortField {
                 expr: ScalarExpression::ColumnRef {
-                    column: ColumnRef(Arc::new(ColumnCatalog::new(
+                    column: ColumnRef::from(ColumnCatalog::new(
                         String::new(),
                         false,
                         ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
-                    ))),
+                    )),
                     position: 0,
                 },
                 asc,
@@ -354,11 +353,11 @@ mod test {
             vec![
                 SortField {
                     expr: ScalarExpression::ColumnRef {
-                        column: ColumnRef(Arc::new(ColumnCatalog::new(
+                        column: ColumnRef::from(ColumnCatalog::new(
                             String::new(),
                             false,
                             ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
-                        ))),
+                        )),
                         position: 0,
                     },
                     asc: asc_1,
@@ -366,11 +365,11 @@ mod test {
                 },
                 SortField {
                     expr: ScalarExpression::ColumnRef {
-                        column: ColumnRef(Arc::new(ColumnCatalog::new(
+                        column: ColumnRef::from(ColumnCatalog::new(
                             String::new(),
                             false,
                             ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
-                        ))),
+                        )),
                         position: 1,
                     },
                     asc: asc_2,

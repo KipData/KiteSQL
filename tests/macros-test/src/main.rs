@@ -17,6 +17,7 @@ fn main() {}
 #[cfg(test)]
 mod test {
     use kite_sql::catalog::column::{ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation};
+    use kite_sql::catalog::table::TableName;
     use kite_sql::db::{DataBaseBuilder, Database, ResultIter};
     use kite_sql::errors::DatabaseError;
     use kite_sql::expression::function::scala::ScalarFunctionImpl;
@@ -2069,7 +2070,7 @@ mod test {
         assert!(numbers.next().is_none());
 
         let function_schema = function.output_schema();
-        let table_name: Arc<str> = "test_numbers".to_string().into();
+        let table_name: TableName = "test_numbers".to_string().into();
         let mut c1 = ColumnCatalog::new(
             "c1".to_string(),
             true,

@@ -14,9 +14,9 @@
 
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
 
 use super::*;
+use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::planner::operator::copy_from_file::CopyFromFileOperator;
 use crate::planner::operator::copy_to_file::CopyToFileOperator;
@@ -110,7 +110,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 ));
             }
         };
-        let table_name: Arc<str> = lower_case_name(&table_name)?.into();
+        let table_name: TableName = lower_case_name(&table_name)?.into();
 
         if let Some(table) = self.context.table(table_name.clone())? {
             let schema_ref = table.schema_ref().clone();

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::binder::{lower_case_name, Binder, Source};
+use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::create_index::CreateIndexOperator;
@@ -23,7 +24,6 @@ use crate::storage::Transaction;
 use crate::types::index::IndexType;
 use crate::types::value::DataValue;
 use sqlparser::ast::{IndexColumn, ObjectName};
-use std::sync::Arc;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_create_index(
@@ -34,7 +34,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         if_not_exists: bool,
         is_unique: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name: Arc<str> = lower_case_name(table_name)?.into();
+        let table_name: TableName = lower_case_name(table_name)?.into();
         let index_name = name
             .ok_or(DatabaseError::InvalidIndex)
             .and_then(lower_case_name)?;
@@ -77,7 +77,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             Operator::CreateIndex(CreateIndexOperator {
                 table_name,
                 columns,
-                index_name,
+                index_name: index_name.into_owned(),
                 if_not_exists,
                 ty,
             }),

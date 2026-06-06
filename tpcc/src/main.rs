@@ -14,7 +14,7 @@
 
 use crate::backend::dual::DualBackend;
 use crate::backend::kitesql_lmdb::KiteSqlLmdbBackend;
-use crate::backend::kitesql_rocksdb::KiteSqlRocksDbBackend;
+use crate::backend::kitesql_rocksdb::{KiteSqlOptimisticRocksDbBackend, KiteSqlRocksDbBackend};
 use crate::backend::sqlite::{SqliteBackend, SqliteProfile};
 use crate::backend::{
     BackendControl, BackendTransaction, ColumnType, PreparedStatement, StatementSpec,
@@ -36,6 +36,7 @@ use rand::prelude::ThreadRng;
 use rand::Rng;
 use std::fs;
 use std::path::Path;
+#[cfg(any(feature = "pprof", test))]
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -125,6 +126,7 @@ struct Args {
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum BackendKind {
     KitesqlRocksdb,
+    KitesqlOptimisticRocksdb,
     KitesqlLmdb,
     Sqlite,
     Dual,
@@ -139,6 +141,11 @@ fn main() -> Result<(), TpccError> {
         BackendKind::KitesqlRocksdb => {
             reset_db_path(Path::new(&args.path))?;
             let backend = KiteSqlRocksDbBackend::new(&args.path, args.rocksdb_stats)?;
+            run_tpcc(&backend, &args, &mut rng)
+        }
+        BackendKind::KitesqlOptimisticRocksdb => {
+            reset_db_path(Path::new(&args.path))?;
+            let backend = KiteSqlOptimisticRocksDbBackend::new(&args.path, args.rocksdb_stats)?;
             run_tpcc(&backend, &args, &mut rng)
         }
         BackendKind::KitesqlLmdb => {

@@ -875,9 +875,7 @@ mod test {
     use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
     use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
     use crate::storage::{Storage, Transaction};
-    use crate::types::evaluator::boolean::BooleanNotUnaryEvaluator;
-    use crate::types::evaluator::int32::Int32PlusBinaryEvaluator;
-    use crate::types::evaluator::{cast_create, BinaryEvaluatorBox, UnaryEvaluatorBox};
+    use crate::types::evaluator::{binary_create, cast_create, unary_create};
     use crate::types::value::{DataValue, Utf8Type};
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
@@ -1071,11 +1069,10 @@ mod test {
             ScalarExpression::Unary {
                 op: UnaryOperator::Plus,
                 expr: Box::new(ScalarExpression::Empty),
-                evaluator: Some(UnaryEvaluatorBox::new(
-                    Arc::new(BooleanNotUnaryEvaluator),
-                    LogicalType::Boolean,
+                evaluator: Some(unary_create(
+                    Cow::Owned(LogicalType::Boolean),
                     UnaryOperator::Not,
-                )),
+                )?),
                 ty: LogicalType::Integer,
             },
             Some(&context),
@@ -1098,11 +1095,9 @@ mod test {
                 op: BinaryOperator::Plus,
                 left_expr: Box::new(ScalarExpression::Empty),
                 right_expr: Box::new(ScalarExpression::Empty),
-                evaluator: Some(BinaryEvaluatorBox::new(
-                    Arc::new(Int32PlusBinaryEvaluator),
-                    LogicalType::Integer,
-                    BinaryOperator::Plus,
-                )),
+                evaluator: Some(
+                    binary_create(Cow::Owned(LogicalType::Integer), BinaryOperator::Plus).unwrap(),
+                ),
                 ty: LogicalType::Integer,
             },
             Some(&context),

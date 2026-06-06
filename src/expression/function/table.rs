@@ -63,7 +63,7 @@ pub trait TableFunctionImpl: Debug + Send + Sync {
 
     fn output_schema(&self) -> &SchemaRef;
 
-    fn table(&self) -> &'static TableCatalog;
+    fn table(&self) -> &TableCatalog;
 }
 
 impl TableFunction {
@@ -75,7 +75,7 @@ impl TableFunction {
         self.inner.output_schema()
     }
 
-    pub fn table(&self) -> &'static TableCatalog {
+    pub fn table(&self) -> &TableCatalog {
         self.inner.table()
     }
 }

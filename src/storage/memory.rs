@@ -168,7 +168,7 @@ mod wasm_tests {
     use crate::types::LogicalType;
     use crate::utils::lru::SharedLruCache;
     use itertools::Itertools;
-    use std::collections::{BTreeMap, Bound};
+    use std::collections::Bound;
     use std::hash::RandomState;
     use std::sync::Arc;
     use wasm_bindgen_test::*;
@@ -227,8 +227,7 @@ mod wasm_tests {
             false,
         )?;
 
-        let mut read_columns = BTreeMap::new();
-        read_columns.insert(0, columns[0].clone());
+        let read_columns = vec![columns[0].clone()];
 
         let mut iter = transaction.read(
             &table_cache,
@@ -268,7 +267,7 @@ mod wasm_tests {
             kite_sql.state.table_cache(),
             table_name,
             (Some(0), None),
-            table.columns().cloned().enumerate().collect(),
+            table.columns().cloned().collect(),
             pk_index,
             vec![Range::Scope {
                 min: Bound::Excluded(DataValue::Int32(0)),
@@ -301,7 +300,7 @@ mod native_tests {
     use crate::types::LogicalType;
     use crate::utils::lru::SharedLruCache;
     use itertools::Itertools;
-    use std::collections::{BTreeMap, Bound};
+    use std::collections::Bound;
     use std::hash::RandomState;
     use std::sync::Arc;
 
@@ -359,8 +358,7 @@ mod native_tests {
             false,
         )?;
 
-        let mut read_columns = BTreeMap::new();
-        read_columns.insert(0, columns[0].clone());
+        let read_columns = vec![columns[0].clone()];
 
         let mut iter = transaction.read(
             &table_cache,
@@ -400,7 +398,7 @@ mod native_tests {
             kite_sql.state.table_cache(),
             table_name,
             (Some(0), None),
-            table.columns().cloned().enumerate().collect(),
+            table.columns().cloned().collect(),
             pk_index,
             vec![Range::Scope {
                 min: Bound::Excluded(DataValue::Int32(0)),

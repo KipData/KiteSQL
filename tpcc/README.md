@@ -12,7 +12,7 @@ Use `./scripts/run_tpcc_matrix.sh` to run the TPCC performance comparison in one
 - Outputs are written to `tpcc/results/<timestamp>/`, including `summary.md` and per-backend raw logs.
 
 Duplicate-key note:
-The occasional duplicate-primary-key failure during TPCC reruns is not treated here as a database correctness bug. In this benchmark setup, the `history` table uses `h_date` as part of its primary key; under very high `Payment` throughput, multiple transactions can hit the same timestamp bucket for the same logical history key and collide on the benchmark schema itself. That is why the matrix script simply reruns the affected backend from a fresh database when this specific condition appears.
+The benchmark stores `history.h_date` as `timestamp(6)`, so high-throughput `Payment` transactions do not collide on second-level timestamp buckets. A duplicate-primary-key failure during TPCC should be treated as a run failure and investigated or rerun from a clean database.
 
 Example:
 ```shell
@@ -22,20 +22,20 @@ TPCC_DUPLICATE_RETRY=1 ./scripts/run_tpcc_matrix.sh
 - i9-13900HX
 - 32.0 GB
 - KIOXIA-EXCERIA PLUS G3 SSD
-- Tips: Pass `--threads <n>` to run multiple worker threads (default: 8)
+- Tips: TPC-C currently runs as a single worker.
 
 ## 720s comparison
 Local 720-second comparison on the machine above:
 
 | Backend | TpmC | New-Order p90 | Payment p90 | Order-Status p90 | Delivery p90 | Stock-Level p90 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| KiteSQL LMDB | 53510 | 0.001s | 0.001s | 0.001s | 0.002s | 0.001s |
-| KiteSQL RocksDB | 32248 | 0.001s | 0.001s | 0.002s | 0.011s | 0.003s |
-| SQLite balanced | 36273 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
-| SQLite practical | 35516 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
+| KiteSQL LMDB | 68394 | 0.001s | 0.001s | 0.001s | 0.002s | 0.001s |
+| KiteSQL RocksDB | 30387 | 0.001s | 0.001s | 0.001s | 0.015s | 0.002s |
+| SQLite balanced | 41690 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
+| SQLite practical | 38861 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
 
-- `SQLite practical` keeps the previous stable README result because the latest rerun failed twice with `UNIQUE constraint failed: history...h_date`.
-- The latest rerun summary is recorded in `tpcc/results/2026-03-28_19-51-45/summary.md`.
+- All rows are from fresh 720-second reruns with `--num-ware 1` and the default `--max-retry 5`.
+- SQLite rows use the `balanced` and `practical` profiles respectively.
 
 ### SQLite practical
 ```shell
@@ -43,11 +43,11 @@ Transaction Summary (elapsed 720.0s)
 +--------------+---------+------+---------+-------+
 | Transaction  | Success | Late | Failure | Total |
 +--------------+---------+------+---------+-------+
-| New-Order    |  426196 |    0 |    4361 | 430557 |
-| Payment      |  426170 |    0 |   28459 | 454629 |
-| Order-Status |   42617 |    0 |     618 | 43235 |
-| Delivery     |   42617 |    0 |       0 | 42617 |
-| Stock-Level  |   42617 |    0 |       0 | 42617 |
+| New-Order    |  466339 |    0 |    4794 | 471133 |
+| Payment      |  466316 |    0 |       0 | 466316 |
+| Order-Status |   46632 |    0 |       0 | 46632 |
+| Delivery     |   46631 |    0 |       0 | 46631 |
+| Stock-Level  |   46632 |    0 |       0 | 46632 |
 +--------------+---------+------+---------+-------+
 <Constraint Check> (all must be [OK])
 [transaction percentage]
@@ -67,39 +67,36 @@ Transaction Summary (elapsed 720.0s)
 
 1.New-Order
 
-0.001, 425333
-0.002,    858
-0.003,      3
-0.004,      2
+0.001, 465092
+0.002,   1232
+0.003,     15
 
 2.Payment
 
-0.001, 426168
-0.002,      1
-0.003,      1
+0.001, 466316
 
 3.Order-Status
 
-0.001,  42617
+0.001,  46632
 
 4.Delivery
 
-0.001,  42284
-0.002,    331
-0.003,      2
+0.001,  46388
+0.002,    240
+0.003,      3
 
 5.Stock-Level
 
-0.001,  42617
+0.001,  46632
 
 <90th Percentile RT (MaxRT)>
-   New-Order : 0.001  (0.004)
-     Payment : 0.001  (0.003)
-Order-Status : 0.001  (0.001)
-    Delivery : 0.001  (0.003)
- Stock-Level : 0.001  (0.001)
+   New-Order : 0.001  (0.002)
+     Payment : 0.001  (0.001)
+Order-Status : 0.001  (0.000)
+    Delivery : 0.001  (0.002)
+ Stock-Level : 0.001  (0.000)
 <TpmC>
-35516 Tpmc
+38861 Tpmc
 ```
 
 ### KiteSQL LMDB
@@ -108,11 +105,11 @@ Transaction Summary (elapsed 720.0s)
 +--------------+---------+------+---------+-------+
 | Transaction  | Success | Late | Failure | Total |
 +--------------+---------+------+---------+-------+
-| New-Order    |  642115 |    0 |    6475 | 648590 |
-| Payment      |  642093 |    0 |   60782 | 702875 |
-| Order-Status |   64209 |    0 |     621 | 64830 |
-| Delivery     |   64209 |    0 |       0 | 64209 |
-| Stock-Level  |   64209 |    0 |       0 | 64209 |
+| New-Order    |  820734 |    0 |    8539 | 829273 |
+| Payment      |  820710 |    0 |       0 | 820710 |
+| Order-Status |   82071 |    0 |       0 | 82071 |
+| Delivery     |   82071 |    0 |       0 | 82071 |
+| Stock-Level  |   82071 |    0 |       0 | 82071 |
 +--------------+---------+------+---------+-------+
 <Constraint Check> (all must be [OK])
 [transaction percentage]
@@ -132,43 +129,45 @@ Transaction Summary (elapsed 720.0s)
 
 1.New-Order
 
-0.001, 640181
-0.002,   1933
-0.003,      1
+0.001, 820617
+0.002,    101
+0.003,     15
+0.005,      1
 
 2.Payment
 
-0.001, 642092
-0.002,      1
+0.001, 820710
 
 3.Order-Status
 
-0.001,  62712
-0.002,   1482
-0.003,     13
-0.004,      2
+0.001,  79893
+0.002,   2053
+0.003,    125
 
 4.Delivery
 
-0.002,  63332
-0.003,    785
-0.004,     91
-0.005,      1
+0.002,  82014
+0.003,     41
+0.004,     11
+0.005,      2
+0.006,      2
+0.007,      1
 
 5.Stock-Level
 
-0.001,  62987
-0.002,   1220
+0.001,  82041
+0.002,     27
 0.003,      2
+0.004,      1
 
 <90th Percentile RT (MaxRT)>
-   New-Order : 0.001  (0.002)
+   New-Order : 0.001  (0.005)
      Payment : 0.001  (0.001)
-Order-Status : 0.001  (0.003)
-    Delivery : 0.002  (0.004)
- Stock-Level : 0.001  (0.002)
+Order-Status : 0.001  (0.002)
+    Delivery : 0.002  (0.006)
+ Stock-Level : 0.001  (0.003)
 <TpmC>
-53510 Tpmc
+68394 Tpmc
 ```
 
 ### KiteSQL RocksDB
@@ -177,11 +176,11 @@ Transaction Summary (elapsed 720.0s)
 +--------------+---------+------+---------+-------+
 | Transaction  | Success | Late | Failure | Total |
 +--------------+---------+------+---------+-------+
-| New-Order    |  386982 |    0 |    3867 | 390849 |
-| Payment      |  386959 |    0 |   23536 | 410495 |
-| Order-Status |   38696 |    0 |     591 | 39287 |
-| Delivery     |   38696 |    0 |       0 | 38696 |
-| Stock-Level  |   38696 |    0 |       0 | 38696 |
+| New-Order    |  364643 |    0 |    3680 | 368323 |
+| Payment      |  364620 |    0 |       0 | 364620 |
+| Order-Status |   36462 |    0 |       0 | 36462 |
+| Delivery     |   36462 |    0 |       0 | 36462 |
+| Stock-Level  |   36462 |    0 |       0 | 36462 |
 +--------------+---------+------+---------+-------+
 <Constraint Check> (all must be [OK])
 [transaction percentage]
@@ -201,74 +200,65 @@ Transaction Summary (elapsed 720.0s)
 
 1.New-Order
 
-0.001, 375252
-0.002,  11525
-0.003,    202
-0.004,      2
+0.001, 364318
+0.002,    317
+0.003,      6
 
 2.Payment
 
-0.001, 386703
-0.002,    250
-0.003,      5
+0.001, 364591
+0.002,     25
 
 3.Order-Status
 
-0.001,  32982
-0.002,   4124
-0.003,   1025
-0.004,    324
-0.005,    176
-0.006,     53
-0.007,      8
-0.009,      1
+0.001,  33075
+0.002,   2697
+0.003,    507
+0.004,    139
+0.005,     17
 
 4.Delivery
 
-0.002,      6
-0.003,   8086
-0.004,  10302
-0.005,   8066
-0.006,   1217
-0.007,   1153
-0.008,   1062
-0.009,   1635
-0.010,   1907
-0.011,   2165
-0.012,   1612
-0.013,   1135
-0.014,    226
-0.015,     45
-0.016,     23
-0.017,     17
-0.018,     13
-0.019,     10
-0.020,      8
-0.021,      4
-0.022,      3
+0.002,    267
+0.003,   2720
+0.004,   3784
+0.005,   2306
+0.006,   2973
+0.007,   3023
+0.008,   2369
+0.009,   2423
+0.010,   2347
+0.011,   2531
+0.012,   2473
+0.013,   2253
+0.014,   2295
+0.015,   2402
+0.016,   1429
+0.017,    740
+0.018,    102
+0.019,     16
+0.020,      4
+0.021,      2
+0.022,      2
 0.023,      1
 
 5.Stock-Level
 
-0.001,  20753
-0.002,  13780
-0.003,   3570
-0.004,    526
-0.005,     39
-0.006,     12
-0.007,      9
-0.008,      3
-0.009,      2
-0.010,      2
+0.001,  20624
+0.002,  12335
+0.003,   3423
+0.004,     74
+0.005,      3
+0.006,      1
 
 <90th Percentile RT (MaxRT)>
-   New-Order : 0.001  (0.005)
-     Payment : 0.001  (0.006)
-Order-Status : 0.002  (0.012)
-    Delivery : 0.011  (0.023)
- Stock-Level : 0.003  (0.010)
+   New-Order : 0.001  (0.008)
+     Payment : 0.001  (0.009)
+Order-Status : 0.001  (0.006)
+    Delivery : 0.015  (0.022)
+ Stock-Level : 0.002  (0.011)
 <TpmC>
-32248 Tpmc
+30387 Tpmc
 ```
 
 ### SQLite balanced
@@ -277,11 +267,11 @@ Transaction Summary (elapsed 720.0s)
 +--------------+---------+------+---------+-------+
 | Transaction  | Success | Late | Failure | Total |
 +--------------+---------+------+---------+-------+
-| New-Order    |  435291 |    0 |    4433 | 439724 |
-| Payment      |  435265 |    0 |   33227 | 468492 |
-| Order-Status |   43527 |    0 |     566 | 44093 |
-| Delivery     |   43527 |    0 |       0 | 43527 |
-| Stock-Level  |   43527 |    0 |       0 | 43527 |
+| New-Order    |  500279 |    0 |    5039 | 505318 |
+| Payment      |  500257 |    0 |       0 | 500257 |
+| Order-Status |   50025 |    0 |       0 | 50025 |
+| Delivery     |   50026 |    0 |       0 | 50026 |
+| Stock-Level  |   50026 |    0 |       0 | 50026 |
 +--------------+---------+------+---------+-------+
 <Constraint Check> (all must be [OK])
 [transaction percentage]
@@ -301,35 +291,40 @@ Transaction Summary (elapsed 720.0s)
 
 1.New-Order
 
-0.001, 435079
-0.002,    210
-0.003,      2
+0.001, 497040
+0.002,   3214
+0.003,     20
+0.004,      4
+0.005,      1
 
 2.Payment
 
-0.001, 435265
+0.001, 500250
+0.002,      5
+0.003,      2
 
 3.Order-Status
 
-0.001,  43527
+0.001,  50025
 
 4.Delivery
 
-0.001,  43442
-0.002,     85
+0.001,  49409
+0.002,    612
+0.003,      5
 
 5.Stock-Level
 
-0.001,  43527
+0.001,  50026
 
 <90th Percentile RT (MaxRT)>
-   New-Order : 0.001  (0.003)
-     Payment : 0.001  (0.001)
+   New-Order : 0.001  (0.004)
+     Payment : 0.001  (0.002)
 Order-Status : 0.001  (0.001)
     Delivery : 0.001  (0.002)
  Stock-Level : 0.001  (0.000)
 <TpmC>
-36273 Tpmc
+41690 Tpmc
 ```
 
 ## Refer to

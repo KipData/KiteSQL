@@ -73,9 +73,9 @@ pub fn unary_create(
 macro_rules! numeric_unary_evaluator_definition {
     ($value_type:ident, $compute_type:path) => {
         paste::paste! {
-            #[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
+            #[derive(Debug)]
             pub struct [<$value_type PlusUnaryEvaluator>];
-            #[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
+            #[derive(Debug)]
             pub struct [<$value_type MinusUnaryEvaluator>];            impl $crate::types::evaluator::UnaryEvaluator for [<$value_type PlusUnaryEvaluator>] {
                 fn unary_eval(&self, value: &$crate::types::value::DataValue) -> $crate::types::value::DataValue {
                     value.clone()

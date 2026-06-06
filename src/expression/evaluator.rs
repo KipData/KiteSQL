@@ -48,10 +48,7 @@ impl ScalarExpression {
                     return Ok(DataValue::Null);
                 };
                 if let AliasType::Expr(inner_expr) = alias {
-                    match inner_expr.eval(Some(tuple)) {
-                        Err(DatabaseError::UnbindExpressionPosition(_)) => expr.eval(Some(tuple)),
-                        res => res,
-                    }
+                    inner_expr.eval(Some(tuple))
                 } else {
                     expr.eval(Some(tuple))
                 }

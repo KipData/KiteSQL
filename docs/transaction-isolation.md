@@ -32,8 +32,8 @@ Current storage support is:
 
 | Storage | Default | Supported Levels |
 | --- | --- | --- |
-| RocksDB `build_rocksdb()` | `ReadCommitted` | `ReadCommitted`, `RepeatableRead` |
-| Optimistic RocksDB `build_optimistic()` | `ReadCommitted` | `ReadCommitted`, `RepeatableRead` |
+| RocksDB `build_rocksdb()` | `RepeatableRead` | `ReadCommitted`, `RepeatableRead` |
+| Optimistic RocksDB `build_optimistic()` | `RepeatableRead` | `ReadCommitted`, `RepeatableRead` |
 | LMDB `build_lmdb()` | `RepeatableRead` | `RepeatableRead` only |
 | Memory `build_in_memory()` | `ReadCommitted` | `ReadCommitted` only |
 

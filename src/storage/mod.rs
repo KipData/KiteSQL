@@ -42,7 +42,7 @@ use crate::types::{ColumnId, LogicalType};
 use crate::utils::lru::SharedLruCache;
 use itertools::Itertools;
 use std::borrow::Cow;
-use std::collections::{BTreeMap, Bound};
+use std::collections::Bound;
 use std::fmt::{self, Display, Formatter};
 use std::io::Cursor;
 use std::mem;
@@ -182,20 +182,13 @@ pub trait Transaction: Sized {
         table_cache: &'a TableCache,
         table_name: TableName,
         bounds: Bounds,
-        mut columns: BTreeMap<usize, ColumnRef>,
+        columns: Vec<ColumnRef>,
         with_pk: bool,
     ) -> Result<TupleIter<'a, Self>, DatabaseError> {
-        debug_assert!(columns.keys().all_unique());
-
         let table = self
             .table(table_cache, table_name.clone())?
             .ok_or(DatabaseError::TableNotFound)?;
-        if with_pk {
-            for (i, column) in table.primary_keys() {
-                columns.insert(*i, column.clone());
-            }
-        }
-        let deserializers = Self::create_deserializers(&columns, table);
+        let deserializers = Self::create_deserializers(&columns, table, with_pk);
         let pk_ty = with_pk.then(|| table.primary_keys_type().clone());
         let offset = bounds.0.unwrap_or(0);
 
@@ -218,7 +211,7 @@ pub trait Transaction: Sized {
         table_cache: &'a TableCache,
         table_name: TableName,
         (offset_option, limit_option): Bounds,
-        mut columns: BTreeMap<usize, ColumnRef>,
+        columns: Vec<ColumnRef>,
         index_meta: IndexMetaRef,
         ranges: R,
         with_pk: bool,
@@ -228,18 +221,12 @@ pub trait Transaction: Sized {
     where
         R: Into<IndexRanges>,
     {
-        debug_assert!(columns.keys().all_unique());
         let table = self
             .table(table_cache, table_name.clone())?
             .ok_or(DatabaseError::TableNotFound)?;
         let table_name = table.name.as_ref();
         let offset = offset_option.unwrap_or(0);
 
-        if with_pk {
-            for (i, column) in table.primary_keys() {
-                columns.insert(*i, column.clone());
-            }
-        }
         let is_primary_index = matches!(index_meta.ty, IndexType::PrimaryKey { .. });
         let (inner, deserializers, cover_mapping) = match (
             covered_deserializers,
@@ -260,7 +247,7 @@ pub trait Transaction: Sized {
                 )
             }
             _ => {
-                let deserializers = Self::create_deserializers(&columns, table);
+                let deserializers = Self::create_deserializers(&columns, table, with_pk);
                 (IndexImplEnum::instance(index_meta.ty), deserializers, None)
             }
         };
@@ -285,25 +272,42 @@ pub trait Transaction: Sized {
     }
 
     fn create_deserializers(
-        columns: &BTreeMap<usize, ColumnRef>,
+        columns: &[ColumnRef],
         table: &TableCatalog,
+        with_pk: bool,
     ) -> Vec<TupleValueSerializableImpl> {
-        let mut deserializers = Vec::with_capacity(columns.len());
-        let mut last_projection = None;
-        for (projection, column) in columns.iter() {
-            let (start, end) = last_projection
-                .map(|last_projection| {
-                    let start = last_projection + 1;
-                    let len = projection - start;
-                    (start, start + len)
-                })
-                .unwrap_or((0, *projection));
-            for skip_column in table.schema_ref()[start..end].iter() {
-                deserializers.push(skip_column.datatype().skip_serializable());
+        let mut pk_len = if with_pk {
+            table.primary_keys().len()
+        } else {
+            0
+        };
+        let mut deserializers = Vec::with_capacity(table.columns_len());
+        let mut columns = columns.iter().peekable();
+
+        for table_column in table.columns() {
+            if columns.peek().is_none() && pk_len == 0 {
+                break;
             }
-            deserializers.push(column.datatype().serializable());
-            last_projection = Some(*projection);
+
+            let is_primary_key = with_pk && table_column.desc().primary().is_some();
+            if columns
+                .peek()
+                .is_some_and(|column| same_projection_column(column, table_column))
+            {
+                deserializers.push(table_column.datatype().serializable());
+                columns.next();
+                if is_primary_key {
+                    pk_len -= 1;
+                }
+            } else if is_primary_key {
+                deserializers.push(table_column.datatype().serializable());
+                pk_len -= 1;
+            } else {
+                deserializers.push(table_column.datatype().skip_serializable());
+            }
         }
+        debug_assert!(columns.next().is_none());
+        debug_assert_eq!(pk_len, 0);
         deserializers
     }
 
@@ -1142,6 +1146,13 @@ pub(crate) fn reuse_bound_as_excluded(bound: &mut Bound<Bytes>, key: &[u8]) {
     *bound = Bound::Excluded(bytes);
 }
 
+fn same_projection_column(left: &ColumnRef, right: &ColumnRef) -> bool {
+    match (left.id(), right.id()) {
+        (Some(left), Some(right)) => left == right,
+        _ => left.name() == right.name(),
+    }
+}
+
 fn bytes_bound_as_slice(bound: &Bound<Bytes>) -> Bound<&[u8]> {
     match bound {
         Bound::Included(bytes) => Bound::Included(bytes.as_slice()),
@@ -1955,45 +1966,36 @@ mod test {
     use crate::storage::table_codec::TableCodec;
     use crate::storage::{
         IndexIter, InnerIter, StatisticsMetaCache, Storage, TableCache, Transaction,
+        TransactionIsolationLevel,
     };
     use crate::types::index::{Index, IndexMeta, IndexType};
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::{ColumnId, LogicalType};
     use crate::utils::lru::SharedLruCache;
-    use std::collections::{BTreeMap, Bound};
+    use std::collections::Bound;
     use std::hash::RandomState;
     use std::sync::Arc;
     use tempfile::TempDir;
 
-    fn full_columns() -> BTreeMap<usize, ColumnRef> {
-        let mut columns = BTreeMap::new();
-
-        columns.insert(
-            0,
+    fn full_columns() -> Vec<ColumnRef> {
+        vec![
             ColumnRef::from(ColumnCatalog::new(
                 "c1".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
             )),
-        );
-        columns.insert(
-            1,
             ColumnRef::from(ColumnCatalog::new(
                 "c2".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::Boolean, None, false, None).unwrap(),
             )),
-        );
-        columns.insert(
-            2,
             ColumnRef::from(ColumnCatalog::new(
                 "c3".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
             )),
-        );
-        columns
+        ]
     }
 
     fn build_tuples() -> Vec<Tuple> {
@@ -2527,7 +2529,8 @@ mod test {
             index_id
         };
 
-        let reader_tx = storage.transaction()?;
+        let reader_tx =
+            storage.transaction_with_isolation(TransactionIsolationLevel::ReadCommitted)?;
         let tuple_id = {
             let mut index_iter = table_codec.with_index_bound("t1", index_id, |min, max| {
                 reader_tx.range(Bound::Included(min), Bound::Included(max))

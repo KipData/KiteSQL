@@ -19,24 +19,23 @@ use crate::types::evaluator::DataValue;
 use crate::types::value::{ONE_DAY_TO_SEC, ONE_SEC_TO_NANO};
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
-use serde::{Deserialize, Serialize};
 use std::hint;
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct TimePlusBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct TimeMinusBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct TimeGtBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct TimeGtEqBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct TimeLtBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct TimeLtEqBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct TimeEqBinaryEvaluator;
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct TimeNotEqBinaryEvaluator;
 impl BinaryEvaluator for TimePlusBinaryEvaluator {
     fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {

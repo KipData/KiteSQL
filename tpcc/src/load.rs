@@ -18,6 +18,7 @@ use chrono::Utc;
 use indicatif::{ProgressBar, ProgressStyle};
 use kite_sql::errors::DatabaseError;
 use rand::rngs::ThreadRng;
+use rand::seq::SliceRandom;
 use rand::Rng;
 use rust_decimal::Decimal;
 use std::ops::Add;
@@ -128,20 +129,11 @@ pub(crate) fn last_name(num: usize) -> String {
 
 fn init_permutation(rng: &mut ThreadRng) -> [usize; CUST_PER_DIST] {
     let mut nums = [0; CUST_PER_DIST];
-    let mut temp_nums = [0; CUST_PER_DIST];
 
-    for i in 0..ORD_PER_DIST {
+    for i in 0..CUST_PER_DIST {
         nums[i] = i + 1;
-        temp_nums[i] = i + 1;
     }
-    for i in 0..ORD_PER_DIST - 1 {
-        let j = if i + 1 >= ORD_PER_DIST - 1 {
-            i + 1
-        } else {
-            rng.gen_range(i + 1..ORD_PER_DIST - 1)
-        };
-        nums[j] = temp_nums[i];
-    }
+    nums.shuffle(rng);
     nums
 }
 
@@ -362,7 +354,7 @@ impl Load {
                          h_c_w_id smallint,
                          h_d_id tinyint,
                          h_w_id smallint,
-                         h_date datetime,
+                         h_date timestamp(6),
                          h_amount decimal(6,2),
                          h_data varchar(24),
                          PRIMARY KEY(h_c_id, h_c_d_id, h_c_w_id, h_d_id, h_w_id, h_date) );",
@@ -655,7 +647,7 @@ impl Load {
     /// h_c_w_id smallint
     /// h_d_id tinyint
     /// h_w_id smallint
-    /// h_date datetime
+    /// h_date timestamp(6)
     /// h_amount decimal(6, 2)
     /// h_data varchar(24)
     pub fn load_customers(
@@ -672,7 +664,9 @@ impl Load {
                 )
                 .unwrap(),
         );
-        let date = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let now = Utc::now();
+        let customer_since = now.format("%Y-%m-%d %H:%M:%S").to_string();
+        let history_date = now.format("%Y-%m-%d %H:%M:%S%.6f").to_string();
         let mut batch = SqlBatch::new(exec);
 
         for c_id in 1..CUST_PER_DIST + 1 {
@@ -695,7 +689,7 @@ impl Load {
             let c_zip = generate_string(rng, 9, 9);
 
             let c_phone = generate_string(rng, 16, 16);
-            let c_since = &date;
+            let c_since = &customer_since;
             let c_credit = if rng.gen_range(0..1) == 1 { "GC" } else { "BC" };
             let c_credit_lim = 50000;
             let c_discount = Decimal::from_f64_retain(rng.gen_range(0.0..0.5))
@@ -734,7 +728,7 @@ impl Load {
                 c_data,
             ))?;
 
-            let h_date = &date;
+            let h_date = &history_date;
             let h_amount = Decimal::from_f64_retain(10.0).unwrap().round_dp(2);
             let h_data = generate_string(rng, 12, 24);
 
@@ -864,7 +858,7 @@ impl Load {
 
 #[cfg(test)]
 mod tests {
-    use super::{SqlBatch, LOAD_BATCH_SIZE};
+    use super::{init_permutation, SqlBatch, CUST_PER_DIST, LOAD_BATCH_SIZE};
     use crate::backend::SimpleExecutor;
     use crate::TpccError;
     use std::cell::RefCell;
@@ -910,5 +904,20 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].split(';').count(), LOAD_BATCH_SIZE);
         assert_eq!(calls[1], format!("insert {}", LOAD_BATCH_SIZE));
+    }
+
+    #[test]
+    fn init_permutation_contains_each_customer_once() {
+        let mut rng = rand::thread_rng();
+        let nums = init_permutation(&mut rng);
+        let mut seen = vec![false; CUST_PER_DIST + 1];
+
+        for num in nums {
+            assert!((1..=CUST_PER_DIST).contains(&num));
+            assert!(!seen[num]);
+            seen[num] = true;
+        }
+
+        assert!(seen.iter().skip(1).all(|seen| *seen));
     }
 }

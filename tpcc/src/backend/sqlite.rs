@@ -213,10 +213,40 @@ fn convert_value(value: &DataValue) -> Result<Value, TpccError> {
                 .format("%Y-%m-%d %H:%M:%S")
                 .to_string(),
         ),
-        DataValue::Time32(_, _) | DataValue::Time64(_, _, _) => Value::Null,
+        DataValue::Time32(_, _) => Value::Null,
+        DataValue::Time64(value, precision, _) => Value::String(format_time64(*value, *precision)?),
         DataValue::Decimal(v) => Value::String(v.to_string()),
         DataValue::Tuple(_, _) => Value::Null,
     })
+}
+
+fn format_time64(value: i64, precision: u64) -> Result<String, TpccError> {
+    let (secs, nanos, fmt) = match precision {
+        0 => (value, 0, "%Y-%m-%d %H:%M:%S"),
+        3 => (
+            value.div_euclid(1_000),
+            value.rem_euclid(1_000) as u32 * 1_000_000,
+            "%Y-%m-%d %H:%M:%S%.3f",
+        ),
+        6 => (
+            value.div_euclid(1_000_000),
+            value.rem_euclid(1_000_000) as u32 * 1_000,
+            "%Y-%m-%d %H:%M:%S%.6f",
+        ),
+        9 => (
+            value.div_euclid(1_000_000_000),
+            value.rem_euclid(1_000_000_000) as u32,
+            "%Y-%m-%d %H:%M:%S%.9f",
+        ),
+        _ => return Err(TpccError::InvalidDateTime),
+    };
+
+    Ok(Utc
+        .timestamp_opt(secs, nanos)
+        .single()
+        .ok_or(TpccError::InvalidDateTime)?
+        .format(fmt)
+        .to_string())
 }
 
 fn configure_sqlite(connection: &Connection, profile: SqliteProfile) -> Result<(), TpccError> {

@@ -1128,6 +1128,16 @@ pub(crate) mod test {
     use std::time::Duration;
     use tempfile::TempDir;
 
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn database_handles_are_send_sync() {
+        #[cfg(feature = "rocksdb")]
+        assert_send_sync::<super::Database<crate::storage::rocksdb::RocksStorage>>();
+        #[cfg(feature = "lmdb")]
+        assert_send_sync::<super::Database<crate::storage::lmdb::LmdbStorage>>();
+    }
+
     pub(crate) fn build_table<T: Transaction>(
         table_cache: &TableCache,
         transaction: &mut T,
@@ -2136,6 +2146,19 @@ pub(crate) mod test {
             20
         );
         reader.commit()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_rocksdb_defaults_to_repeatable_read() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+
+        assert_eq!(
+            kite_sql.transaction_isolation(),
+            TransactionIsolationLevel::RepeatableRead
+        );
 
         Ok(())
     }

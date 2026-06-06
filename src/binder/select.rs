@@ -586,7 +586,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     ColumnDesc::new(typ, None, false, None)?,
                 );
                 column_ref.set_ref_table(value_name.clone(), ColumnId::default(), true);
-                Ok(ColumnRef(Arc::new(column_ref)))
+                Ok(ColumnRef::from(column_ref))
             })
             .collect::<Result<_, DatabaseError>>()?;
 
@@ -856,7 +856,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 }) = alias
                 {
                     let source_name = self.context.temp_table();
-                    let table_alias: Arc<str> = name.value.to_lowercase().into();
+                    let table_alias: TableName = lower_ident(name).into();
 
                     plan = self.bind_alias(
                         plan,
@@ -903,7 +903,6 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 if let ScalarExpression::TableFunction(function) = self.bind_expr(expr)? {
                     let mut table_alias = None;
                     let table_name: TableName = function.summary().name.clone();
-                    let table = function.table();
                     let mut plan = FunctionScanOperator::build(function);
 
                     if let Some(TableAlias {
@@ -912,7 +911,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         ..
                     }) = alias
                     {
-                        table_alias = Some(name.value.to_lowercase().into());
+                        table_alias = Some(lower_ident(name).into());
 
                         plan = self.bind_alias(
                             plan,
@@ -922,11 +921,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         )?;
                     }
 
-                    let source = if table_alias.is_some() {
-                        Source::Schema(plan.output_schema().clone())
-                    } else {
-                        Source::Table(table)
-                    };
+                    let source = Source::Schema(plan.output_schema().clone());
                     self.context
                         .add_bound_source(table_name, table_alias, joint_type, source);
                     plan
@@ -960,7 +955,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         } else {
             alias_column
                 .iter()
-                .map(|column| lower_ident(&column.name))
+                .map(|column| lower_ident(&column.name).into_owned())
                 .zip(input_schema.iter().cloned())
                 .collect_vec()
         };
@@ -1032,7 +1027,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         let mut alias_idents = None;
 
         if let Some(TableAlias { name, columns, .. }) = alias {
-            table_alias = Some(name.value.to_lowercase().into());
+            table_alias = Some(lower_ident(name).into());
             alias_idents = Some(columns);
         }
 
@@ -1080,7 +1075,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 SelectItem::UnnamedExpr(expr) => select_items.push(self.bind_expr(expr)?),
                 SelectItem::ExprWithAlias { expr, alias } => {
                     let expr = self.bind_expr(expr)?;
-                    let alias_name = alias.value.to_lowercase();
+                    let alias_name = lower_ident(alias).into_owned();
 
                     self.context
                         .add_alias(None, alias_name.clone(), expr.clone());
@@ -1115,7 +1110,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     }
                 }
                 SelectItem::QualifiedWildcard(table_name, _) => {
-                    let table_name: Arc<str> = match table_name {
+                    let table_name: TableName = match table_name {
                         SelectItemQualifiedWildcardKind::ObjectName(name) => {
                             lower_case_name(name)?.into()
                         }
@@ -1914,7 +1909,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         ));
                     };
                     self.context.add_using(
-                        name.clone(),
+                        name.clone().into_owned(),
                         join_type,
                         left_column,
                         left_position,

@@ -15,11 +15,10 @@
 use crate::errors::DatabaseError;
 use crate::types::evaluator::DataValue;
 use crate::types::evaluator::{BinaryEvaluator, CastEvaluator};
-use serde::{Deserialize, Serialize};
 
 /// Tips:
 /// - Null values operate as null values
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct NullBinaryEvaluator;
 impl BinaryEvaluator for NullBinaryEvaluator {
     fn binary_eval(&self, _: &DataValue, _: &DataValue) -> Result<DataValue, DatabaseError> {
@@ -27,7 +26,7 @@ impl BinaryEvaluator for NullBinaryEvaluator {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct ToSqlNullCastEvaluator;
 impl CastEvaluator for ToSqlNullCastEvaluator {
     fn eval_cast(&self, _value: &DataValue) -> Result<DataValue, DatabaseError> {
@@ -35,7 +34,7 @@ impl CastEvaluator for ToSqlNullCastEvaluator {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct NullCastEvaluator;
 impl CastEvaluator for NullCastEvaluator {
     fn eval_cast(&self, _value: &DataValue) -> Result<DataValue, DatabaseError> {

@@ -15,6 +15,7 @@
 use crate::binder::{
     attach_span_from_sqlparser_span_if_absent, attach_span_if_absent, lower_case_name, Binder,
 };
+use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::VisitorMut;
 use crate::expression::ScalarExpression;
@@ -29,7 +30,6 @@ use sqlparser::ast::{
 };
 use std::borrow::Cow;
 use std::slice;
-use std::sync::Arc;
 
 struct UpdateExprTargetRemapper<'a> {
     target_schema: &'a [crate::catalog::ColumnRef],
@@ -78,7 +78,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         self.context.allow_default = true;
         if let TableFactor::Table { name, .. } = &to.relation {
             let is_joined_update = !to.joins.is_empty();
-            let table_name: Arc<str> = lower_case_name(name)?.into();
+            let table_name: TableName = lower_case_name(name)?.into();
             self.with_pk(table_name.clone());
 
             let mut plan = self.bind_table_ref(to)?;
@@ -113,7 +113,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 for ident in idents {
                     match self.bind_column_ref_from_identifiers(
                         slice::from_ref(ident),
-                        Some(table_name.to_string()),
+                        Some(table_name.as_ref()),
                     )? {
                         ScalarExpression::ColumnRef { column, .. } => {
                             let mut expr = if matches!(expression, ScalarExpression::Empty) {

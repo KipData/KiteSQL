@@ -15,10 +15,10 @@
 use sqlparser::ast::{AlterColumnOperation, AlterTableOperation, ColumnOption, ObjectName};
 
 use std::borrow::Cow;
-use std::sync::Arc;
 
 use super::{attach_span_if_absent, is_valid_identifier, Binder};
-use crate::binder::lower_case_name;
+use crate::binder::{lower_case_name, lower_ident};
+use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::alter_table::add_column::AddColumnOperator;
@@ -83,7 +83,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         name: &ObjectName,
         operation: &AlterTableOperation,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name: Arc<str> = lower_case_name(name)?.into();
+        let table_name: TableName = lower_case_name(name)?.into();
         let table = self
             .context
             .table(table_name.clone())?
@@ -137,11 +137,11 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 old_column_name,
                 new_column_name,
             } => {
-                let old_column_name = old_column_name.value.to_lowercase();
-                let new_column_name = new_column_name.value.to_lowercase();
+                let old_column_name = lower_ident(old_column_name);
+                let new_column_name = lower_ident(new_column_name).into_owned();
                 let old_column = table
-                    .get_column_by_name(&old_column_name)
-                    .ok_or_else(|| DatabaseError::column_not_found(old_column_name.clone()))?;
+                    .get_column_by_name(old_column_name.as_ref())
+                    .ok_or_else(|| DatabaseError::column_not_found(old_column_name.to_string()))?;
 
                 if !is_valid_identifier(&new_column_name) {
                     return Err(DatabaseError::invalid_column(
@@ -152,7 +152,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 LogicalPlan::new(
                     Operator::ChangeColumn(ChangeColumnOperator {
                         table_name,
-                        old_column_name,
+                        old_column_name: old_column_name.into_owned(),
                         new_column_name,
                         data_type: old_column.datatype().clone(),
                         default_change: DefaultChange::NoChange,
@@ -162,10 +162,10 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 )
             }
             AlterTableOperation::AlterColumn { column_name, op } => {
-                let old_column_name = column_name.value.to_lowercase();
+                let old_column_name = lower_ident(column_name);
                 let old_column = table
-                    .get_column_by_name(&old_column_name)
-                    .ok_or_else(|| DatabaseError::column_not_found(old_column_name.clone()))?;
+                    .get_column_by_name(old_column_name.as_ref())
+                    .ok_or_else(|| DatabaseError::column_not_found(old_column_name.to_string()))?;
                 let old_data_type = old_column.datatype().clone();
 
                 let (data_type, default_change, not_null_change) = match op {
@@ -213,8 +213,8 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 LogicalPlan::new(
                     Operator::ChangeColumn(ChangeColumnOperator {
                         table_name,
-                        new_column_name: old_column_name.clone(),
-                        old_column_name,
+                        new_column_name: old_column_name.to_string(),
+                        old_column_name: old_column_name.into_owned(),
                         data_type,
                         default_change,
                         not_null_change,
@@ -233,10 +233,11 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         "MODIFY COLUMN does not currently support column positions".to_string(),
                     ));
                 }
-                let old_column_name = col_name.value.to_lowercase();
+                let old_column_name = lower_ident(col_name);
                 let _ = table
-                    .get_column_by_name(&old_column_name)
-                    .ok_or_else(|| DatabaseError::column_not_found(old_column_name.clone()))?;
+                    .get_column_by_name(old_column_name.as_ref())
+                    .ok_or_else(|| DatabaseError::column_not_found(old_column_name.to_string()))?;
+                let old_column_name = old_column_name.into_owned();
                 let data_type = LogicalType::try_from(data_type.clone())?;
                 let (default_change, not_null_change) =
                     self.bind_change_column_options(options, &data_type)?;
@@ -265,11 +266,11 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         "CHANGE COLUMN does not currently support column positions".to_string(),
                     ));
                 }
-                let old_column_name = old_name.value.to_lowercase();
-                let new_column_name = new_name.value.to_lowercase();
+                let old_column_name = lower_ident(old_name);
+                let new_column_name = lower_ident(new_name).into_owned();
                 let _ = table
-                    .get_column_by_name(&old_column_name)
-                    .ok_or_else(|| DatabaseError::column_not_found(old_column_name.clone()))?;
+                    .get_column_by_name(old_column_name.as_ref())
+                    .ok_or_else(|| DatabaseError::column_not_found(old_column_name.to_string()))?;
 
                 if !is_valid_identifier(&new_column_name) {
                     return Err(DatabaseError::invalid_column(
@@ -283,7 +284,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 LogicalPlan::new(
                     Operator::ChangeColumn(ChangeColumnOperator {
                         table_name,
-                        old_column_name,
+                        old_column_name: old_column_name.into_owned(),
                         new_column_name,
                         data_type,
                         default_change,

@@ -25,54 +25,26 @@ use crate::planner::{Childrens, LogicalPlan};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
-use bumpalo::Bump;
 use std::collections::HashSet;
 
 #[derive(Clone)]
 pub struct ColumnPruning;
 
-type BumpUsizeVec<'bump> = bumpalo::collections::Vec<'bump, usize>;
-
-struct ApplyOutcome<'bump> {
+struct ApplyOutcome {
     changed: bool,
-    removed_positions: BumpUsizeVec<'bump>,
+    removed_positions: Vec<usize>,
 }
 
-impl<'bump> ApplyOutcome<'bump> {
-    fn new(arena: &'bump Bump) -> Self {
+impl ApplyOutcome {
+    fn new() -> Self {
         Self {
             changed: false,
-            removed_positions: BumpUsizeVec::new_in(arena),
-        }
-    }
-}
-
-struct JoinChildrenOutcome<'bump> {
-    changed: bool,
-    left_removed_positions: BumpUsizeVec<'bump>,
-    right_removed_positions: BumpUsizeVec<'bump>,
-}
-
-impl<'bump> JoinChildrenOutcome<'bump> {
-    fn new(arena: &'bump Bump) -> Self {
-        Self {
-            changed: false,
-            left_removed_positions: BumpUsizeVec::new_in(arena),
-            right_removed_positions: BumpUsizeVec::new_in(arena),
+            removed_positions: Vec::new(),
         }
     }
 }
 
 impl ColumnPruning {
-    fn copy_removed_positions<'bump>(
-        removed_positions: &[usize],
-        arena: &'bump Bump,
-    ) -> BumpUsizeVec<'bump> {
-        let mut copied = BumpUsizeVec::with_capacity_in(removed_positions.len(), arena);
-        copied.extend_from_slice(removed_positions);
-        copied
-    }
-
     fn extend_operator_referenced_columns<'a>(
         operator: &'a Operator,
         referenced_columns: &mut HashSet<&'a ColumnSummary>,
@@ -108,7 +80,7 @@ impl ColumnPruning {
                 referenced_columns.insert(op.output_column().summary());
             }
             Operator::TableScan(op) => {
-                referenced_columns.extend(op.columns.values().map(|column| column.summary()));
+                referenced_columns.extend(op.columns.iter().map(|column| column.summary()));
             }
             Operator::FunctionScan(op) => {
                 Self::extend_expr_referenced_columns(
@@ -210,9 +182,10 @@ impl ColumnPruning {
     fn clear_exprs(
         column_references: &HashSet<&ColumnSummary>,
         exprs: &mut Vec<ScalarExpression>,
-        removed_positions: &mut BumpUsizeVec<'_>,
+        removed_positions: &mut Vec<usize>,
+        output_start: usize,
     ) {
-        removed_positions.clear();
+        removed_positions.truncate(output_start);
         let mut position = 0;
         exprs.retain(|expr| {
             let keep = Self::output_column_is_required(expr, column_references);
@@ -309,94 +282,77 @@ impl ColumnPruning {
         remap_exprs_positions(exprs, removed_positions)
     }
 
-    fn apply_only_child<'bump>(
+    fn apply_only_child(
         referenced_columns: HashSet<&ColumnSummary>,
         all_referenced: bool,
         childrens: &mut Childrens,
-        arena: &'bump Bump,
-    ) -> Result<ApplyOutcome<'bump>, DatabaseError> {
+        outcome: &mut ApplyOutcome,
+        output_start: usize,
+    ) -> Result<bool, DatabaseError> {
         let Childrens::Only(child) = childrens else {
-            return Ok(ApplyOutcome::new(arena));
+            outcome.changed = false;
+            outcome.removed_positions.truncate(output_start);
+            return Ok(false);
         };
-        Self::_apply(referenced_columns, all_referenced, child.as_mut(), arena)
-    }
-
-    fn apply_join_children<'bump>(
-        referenced_columns: HashSet<&ColumnSummary>,
-        all_referenced: bool,
-        childrens: &mut Childrens,
-        arena: &'bump Bump,
-    ) -> Result<JoinChildrenOutcome<'bump>, DatabaseError> {
-        let Childrens::Twins { left, right } = childrens else {
-            return Ok(JoinChildrenOutcome::new(arena));
-        };
-        let left_outcome = Self::_apply(
-            referenced_columns.clone(),
-            all_referenced,
-            left.as_mut(),
-            arena,
-        )?;
-        let right_outcome =
-            Self::_apply(referenced_columns, all_referenced, right.as_mut(), arena)?;
-
-        Ok(JoinChildrenOutcome {
-            changed: left_outcome.changed || right_outcome.changed,
-            left_removed_positions: left_outcome.removed_positions,
-            right_removed_positions: right_outcome.removed_positions,
-        })
+        Self::_apply_appending(referenced_columns, all_referenced, child.as_mut(), outcome)?;
+        Ok(outcome.changed)
     }
 
     #[allow(clippy::needless_lifetimes)]
-    fn apply_twins<'bump>(
+    fn apply_twins(
         referenced_columns: HashSet<&ColumnSummary>,
         all_referenced: bool,
         childrens: &mut Childrens,
-        arena: &'bump Bump,
+        outcome: &mut ApplyOutcome,
+        output_start: usize,
     ) -> Result<bool, DatabaseError> {
         let Childrens::Twins { left, right } = childrens else {
+            outcome.changed = false;
+            outcome.removed_positions.truncate(output_start);
             return Ok(false);
         };
 
-        let left_changed = Self::_apply(
+        Self::_apply_appending(
             referenced_columns.clone(),
             all_referenced,
             left.as_mut(),
-            arena,
-        )?
-        .changed;
-        let right_changed =
-            Self::_apply(referenced_columns, all_referenced, right.as_mut(), arena)?.changed;
+            outcome,
+        )?;
+        let left_changed = outcome.changed;
+        outcome.removed_positions.truncate(output_start);
 
-        Ok(left_changed || right_changed)
+        Self::_apply_appending(referenced_columns, all_referenced, right.as_mut(), outcome)?;
+        let right_changed = outcome.changed;
+        outcome.removed_positions.truncate(output_start);
+
+        outcome.changed = left_changed || right_changed;
+        Ok(outcome.changed)
     }
 
-    fn merge_removed_positions<'bump>(
-        left_removed_positions: &[usize],
-        right_removed_positions: &[usize],
-        right_offset: usize,
-        arena: &'bump Bump,
-    ) -> BumpUsizeVec<'bump> {
-        let mut removed_positions = BumpUsizeVec::with_capacity_in(
-            left_removed_positions.len() + right_removed_positions.len(),
-            arena,
-        );
-        removed_positions.extend_from_slice(left_removed_positions);
-        removed_positions.extend(
-            right_removed_positions
-                .iter()
-                .map(|position| position + right_offset),
-        );
-        removed_positions
+    fn offset_removed_positions(removed_positions: &mut [usize], offset: usize) {
+        for position in removed_positions {
+            *position += offset;
+        }
     }
 
-    fn _apply<'bump>(
+    fn _apply(
         required_columns: HashSet<&ColumnSummary>,
         all_referenced: bool,
         plan: &mut LogicalPlan,
-        arena: &'bump Bump,
-    ) -> Result<ApplyOutcome<'bump>, DatabaseError> {
+    ) -> Result<ApplyOutcome, DatabaseError> {
+        let mut outcome = ApplyOutcome::new();
+        Self::_apply_appending(required_columns, all_referenced, plan, &mut outcome)?;
+        Ok(outcome)
+    }
+
+    fn _apply_appending(
+        required_columns: HashSet<&ColumnSummary>,
+        all_referenced: bool,
+        plan: &mut LogicalPlan,
+        outcome: &mut ApplyOutcome,
+    ) -> Result<(), DatabaseError> {
         let mut changed = false;
-        let mut output_removed_positions = BumpUsizeVec::new_in(arena);
+        let output_start = outcome.removed_positions.len();
         let (operator, childrens) = (&mut plan.operator, plan.childrens.as_mut());
 
         match operator {
@@ -405,9 +361,10 @@ impl ColumnPruning {
                     Self::clear_exprs(
                         &required_columns,
                         &mut op.agg_calls,
-                        &mut output_removed_positions,
+                        &mut outcome.removed_positions,
+                        output_start,
                     );
-                    if !output_removed_positions.is_empty() {
+                    if outcome.removed_positions.len() > output_start {
                         changed = true;
                     }
 
@@ -427,8 +384,12 @@ impl ColumnPruning {
                         });
                         changed = true;
                     }
+                } else {
+                    outcome.removed_positions.truncate(output_start);
                 }
-                let child_outcome = {
+
+                let child_start = outcome.removed_positions.len();
+                let child_changed = {
                     let mut child_required = if op.is_distinct {
                         required_columns
                     } else {
@@ -439,15 +400,16 @@ impl ColumnPruning {
                         &mut child_required,
                     );
 
-                    Self::apply_only_child(child_required, false, childrens, arena)?
+                    Self::apply_only_child(child_required, false, childrens, outcome, child_start)?
                 };
-                if child_outcome.changed {
+                if child_changed {
                     Self::remap_operator_after_child_change(
                         operator,
-                        &child_outcome.removed_positions,
+                        &outcome.removed_positions[child_start..],
                     )?;
                     changed = true;
                 }
+                outcome.removed_positions.truncate(child_start);
             }
             Operator::Project(op) => {
                 let mut has_count_star = HasCountStar::default();
@@ -459,40 +421,59 @@ impl ColumnPruning {
                         Self::clear_exprs(
                             &required_columns,
                             &mut op.exprs,
-                            &mut output_removed_positions,
+                            &mut outcome.removed_positions,
+                            output_start,
                         );
-                        if !output_removed_positions.is_empty() {
+                        if outcome.removed_positions.len() > output_start {
                             changed = true;
                         }
+                    } else {
+                        outcome.removed_positions.truncate(output_start);
                     }
-                    let child_outcome = {
+
+                    let child_start = outcome.removed_positions.len();
+                    let child_changed = {
                         let mut child_required = HashSet::new();
                         Self::extend_expr_referenced_columns(op.exprs.iter(), &mut child_required);
 
-                        Self::apply_only_child(child_required, false, childrens, arena)?
+                        Self::apply_only_child(
+                            child_required,
+                            false,
+                            childrens,
+                            outcome,
+                            child_start,
+                        )?
                     };
-                    if child_outcome.changed {
+                    if child_changed {
                         Self::remap_operator_after_child_change(
                             operator,
-                            &child_outcome.removed_positions,
+                            &outcome.removed_positions[child_start..],
                         )?;
                         changed = true;
                     }
+                    outcome.removed_positions.truncate(child_start);
+                } else {
+                    outcome.removed_positions.truncate(output_start);
                 }
             }
             Operator::TableScan(op) => {
                 if !all_referenced {
-                    output_removed_positions.clear();
-                    op.columns.retain(|position, column| {
+                    outcome.removed_positions.truncate(output_start);
+                    let mut position = 0;
+                    op.columns.retain(|column| {
+                        let current_position = position;
+                        position += 1;
                         let keep = required_columns.contains(column.summary());
                         if !keep {
-                            output_removed_positions.push(*position);
+                            outcome.removed_positions.push(current_position);
                         }
                         keep
                     });
-                    if !output_removed_positions.is_empty() {
+                    if outcome.removed_positions.len() > output_start {
                         changed = true;
                     }
+                } else {
+                    outcome.removed_positions.truncate(output_start);
                 }
             }
             Operator::Sort(_)
@@ -509,128 +490,182 @@ impl ColumnPruning {
                     operator,
                     Operator::ScalarApply(_) | Operator::MarkApply(_) | Operator::Join(_)
                 ) {
-                    let (child_outcome, old_left_outputs_len) = {
-                        let mut child_required = required_columns.clone();
+                    let (old_left_outputs_len, left_removed_start, right_removed_start) = {
+                        let mut child_required = required_columns;
                         Self::extend_operator_referenced_columns(operator, &mut child_required);
                         let old_left_outputs_len = match childrens {
                             Childrens::Twins { left, .. } => left.output_schema().len(),
                             _ => 0,
                         };
-                        let child_outcome = Self::apply_join_children(
+                        let Childrens::Twins { left, right } = childrens else {
+                            outcome.changed = false;
+                            outcome.removed_positions.truncate(output_start);
+                            return Ok(());
+                        };
+
+                        let left_removed_start = outcome.removed_positions.len();
+                        Self::_apply_appending(
+                            child_required.clone(),
+                            all_referenced,
+                            left.as_mut(),
+                            outcome,
+                        )?;
+                        let left_changed = outcome.changed;
+                        let right_removed_start = outcome.removed_positions.len();
+                        Self::_apply_appending(
                             child_required,
                             all_referenced,
-                            childrens,
-                            arena,
+                            right.as_mut(),
+                            outcome,
                         )?;
-                        (child_outcome, old_left_outputs_len)
+                        changed = left_changed || outcome.changed;
+                        (
+                            old_left_outputs_len,
+                            left_removed_start,
+                            right_removed_start,
+                        )
                     };
-                    if child_outcome.changed {
-                        let JoinChildrenOutcome {
-                            changed: _,
-                            left_removed_positions,
-                            right_removed_positions,
-                        } = child_outcome;
+                    if changed {
+                        let right_removed_end = outcome.removed_positions.len();
+                        let left_removed_len = right_removed_start - left_removed_start;
                         if let Operator::Join(op) = operator {
                             match &mut op.on {
                                 JoinCondition::On { on, filter } => {
-                                    for (left_expr, right_expr) in on {
-                                        remap_expr_positions(left_expr, &left_removed_positions)?;
-                                        remap_expr_positions(right_expr, &right_removed_positions)?;
+                                    {
+                                        let (left_removed_positions, right_removed_positions) =
+                                            outcome.removed_positions
+                                                [left_removed_start..right_removed_end]
+                                                .split_at(left_removed_len);
+                                        for (left_expr, right_expr) in on {
+                                            remap_expr_positions(
+                                                left_expr,
+                                                left_removed_positions,
+                                            )?;
+                                            remap_expr_positions(
+                                                right_expr,
+                                                right_removed_positions,
+                                            )?;
+                                        }
                                     }
+                                    Self::offset_removed_positions(
+                                        &mut outcome.removed_positions
+                                            [right_removed_start..right_removed_end],
+                                        old_left_outputs_len,
+                                    );
                                     if let Some(filter) = filter {
-                                        if !left_removed_positions.is_empty()
-                                            || !right_removed_positions.is_empty()
-                                        {
-                                            let removed_positions = Self::merge_removed_positions(
-                                                &left_removed_positions,
-                                                &right_removed_positions,
-                                                old_left_outputs_len,
-                                                arena,
-                                            );
-                                            remap_expr_positions(filter, &removed_positions)?;
+                                        let removed_positions = &outcome.removed_positions
+                                            [left_removed_start..right_removed_end];
+                                        if !removed_positions.is_empty() {
+                                            remap_expr_positions(filter, removed_positions)?;
                                         }
                                     }
                                 }
-                                JoinCondition::None => {}
+                                JoinCondition::None => {
+                                    Self::offset_removed_positions(
+                                        &mut outcome.removed_positions
+                                            [right_removed_start..right_removed_end],
+                                        old_left_outputs_len,
+                                    );
+                                }
                             }
-                            output_removed_positions = Self::merge_removed_positions(
-                                &left_removed_positions,
-                                &right_removed_positions,
-                                old_left_outputs_len,
-                                arena,
-                            );
                         } else if let Operator::MarkApply(op) = operator {
-                            let removed_positions = Self::merge_removed_positions(
-                                &left_removed_positions,
-                                &right_removed_positions,
+                            Self::offset_removed_positions(
+                                &mut outcome.removed_positions
+                                    [right_removed_start..right_removed_end],
                                 old_left_outputs_len,
-                                arena,
                             );
+                            let removed_positions =
+                                &outcome.removed_positions[left_removed_start..right_removed_end];
                             Self::remap_exprs_after_child_change(
                                 op.predicates_mut().iter_mut(),
-                                &removed_positions,
+                                removed_positions,
                             )?;
-                            output_removed_positions =
-                                Self::copy_removed_positions(&left_removed_positions, arena);
+                            outcome.removed_positions.truncate(right_removed_start);
                         } else {
-                            output_removed_positions = Self::merge_removed_positions(
-                                &left_removed_positions,
-                                &right_removed_positions,
+                            Self::offset_removed_positions(
+                                &mut outcome.removed_positions
+                                    [right_removed_start..right_removed_end],
                                 old_left_outputs_len,
-                                arena,
                             );
                         }
-                        changed = true;
+                    } else {
+                        outcome.removed_positions.truncate(output_start);
                     }
                 } else if matches!(operator, Operator::Union(_) | Operator::SetMembership(_)) {
                     let mut child_required = required_columns;
                     Self::extend_operator_referenced_columns(operator, &mut child_required);
-                    changed |= Self::apply_twins(child_required, all_referenced, childrens, arena)?;
+                    changed |= Self::apply_twins(
+                        child_required,
+                        all_referenced,
+                        childrens,
+                        outcome,
+                        output_start,
+                    )?;
+                    outcome.removed_positions.truncate(output_start);
                 } else {
-                    let child_outcome = {
+                    let child_start = outcome.removed_positions.len();
+                    let child_changed = {
                         let mut child_required = required_columns;
                         Self::extend_operator_referenced_columns(operator, &mut child_required);
-                        Self::apply_only_child(child_required, all_referenced, childrens, arena)?
+                        Self::apply_only_child(
+                            child_required,
+                            all_referenced,
+                            childrens,
+                            outcome,
+                            child_start,
+                        )?
                     };
-                    if child_outcome.changed {
-                        let removed_positions = child_outcome.removed_positions;
-                        Self::remap_operator_after_child_change(operator, &removed_positions)?;
-                        output_removed_positions = removed_positions;
+                    if child_changed {
+                        Self::remap_operator_after_child_change(
+                            operator,
+                            &outcome.removed_positions[child_start..],
+                        )?;
                         changed = true;
                     }
                 }
             }
             // Last Operator
-            Operator::Dummy | Operator::Values(_) | Operator::FunctionScan(_) => (),
+            Operator::Dummy | Operator::Values(_) | Operator::FunctionScan(_) => {
+                outcome.removed_positions.truncate(output_start);
+            }
             Operator::Explain => {
-                let child_outcome =
-                    Self::apply_only_child(required_columns, true, childrens, arena)?;
-                if child_outcome.changed {
+                let child_start = outcome.removed_positions.len();
+                let child_changed = Self::apply_only_child(
+                    required_columns,
+                    true,
+                    childrens,
+                    outcome,
+                    child_start,
+                )?;
+                if child_changed {
                     Self::remap_operator_after_child_change(
                         operator,
-                        &child_outcome.removed_positions,
+                        &outcome.removed_positions[child_start..],
                     )?;
                     changed = true;
                 }
+                outcome.removed_positions.truncate(output_start);
             }
             // DDL Based on Other Plan
             Operator::Insert(_)
             | Operator::Update(_)
             | Operator::Delete(_)
             | Operator::Analyze(_) => {
-                let child_outcome = {
+                let child_start = outcome.removed_positions.len();
+                let child_changed = {
                     let mut child_required = HashSet::new();
                     Self::extend_operator_referenced_columns(operator, &mut child_required);
 
-                    Self::apply_only_child(child_required, true, childrens, arena)?
+                    Self::apply_only_child(child_required, true, childrens, outcome, child_start)?
                 };
-                if child_outcome.changed {
+                if child_changed {
                     Self::remap_operator_after_child_change(
                         operator,
-                        &child_outcome.removed_positions,
+                        &outcome.removed_positions[child_start..],
                     )?;
                     changed = true;
                 }
+                outcome.removed_positions.truncate(output_start);
             }
             // DDL Single Plan
             Operator::CreateTable(_)
@@ -647,20 +682,19 @@ impl ColumnPruning {
             | Operator::AddColumn(_)
             | Operator::ChangeColumn(_)
             | Operator::DropColumn(_)
-            | Operator::Describe(_) => (),
+            | Operator::Describe(_) => {
+                outcome.removed_positions.truncate(output_start);
+            }
         }
 
-        Ok(ApplyOutcome {
-            changed,
-            removed_positions: output_removed_positions,
-        })
+        outcome.changed = changed;
+        Ok(())
     }
 }
 
 impl NormalizationRule for ColumnPruning {
     fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
-        let arena = Bump::new();
-        let outcome = Self::_apply(HashSet::<&ColumnSummary>::new(), true, plan, &arena)?;
+        let outcome = Self::_apply(HashSet::<&ColumnSummary>::new(), true, plan)?;
         Ok(outcome.changed)
     }
 }
@@ -705,7 +739,7 @@ mod tests {
             if op.table_name.to_string() == table_name {
                 scans.push(
                     op.columns
-                        .values()
+                        .iter()
                         .map(|column| column.name().to_string())
                         .collect(),
                 );

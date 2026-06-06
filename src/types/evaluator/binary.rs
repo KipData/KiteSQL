@@ -155,27 +155,27 @@ pub fn binary_create(
 macro_rules! numeric_binary_evaluator_definition {
     ($value_type:ident, $compute_type:path) => {
         paste::paste! {
-            #[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
+            #[derive(Debug)]
             pub struct [<$value_type PlusBinaryEvaluator>];
-            #[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
+            #[derive(Debug)]
             pub struct [<$value_type MinusBinaryEvaluator>];
-            #[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
+            #[derive(Debug)]
             pub struct [<$value_type MultiplyBinaryEvaluator>];
-            #[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
+            #[derive(Debug)]
             pub struct [<$value_type DivideBinaryEvaluator>];
-            #[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
+            #[derive(Debug)]
             pub struct [<$value_type GtBinaryEvaluator>];
-            #[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
+            #[derive(Debug)]
             pub struct [<$value_type GtEqBinaryEvaluator>];
-            #[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
+            #[derive(Debug)]
             pub struct [<$value_type LtBinaryEvaluator>];
-            #[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
+            #[derive(Debug)]
             pub struct [<$value_type LtEqBinaryEvaluator>];
-            #[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
+            #[derive(Debug)]
             pub struct [<$value_type EqBinaryEvaluator>];
-            #[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
+            #[derive(Debug)]
             pub struct [<$value_type NotEqBinaryEvaluator>];
-            #[derive(Debug, PartialEq, Eq, Clone, Hash, serde::Serialize, serde::Deserialize)]
+            #[derive(Debug)]
             pub struct [<$value_type ModBinaryEvaluator>];            impl $crate::types::evaluator::BinaryEvaluator for [<$value_type PlusBinaryEvaluator>] {
                 fn binary_eval(
                     &self,
