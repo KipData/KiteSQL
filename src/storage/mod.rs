@@ -1966,6 +1966,7 @@ mod test {
     use crate::storage::table_codec::TableCodec;
     use crate::storage::{
         IndexIter, InnerIter, StatisticsMetaCache, Storage, TableCache, Transaction,
+        TransactionIsolationLevel,
     };
     use crate::types::index::{Index, IndexMeta, IndexType};
     use crate::types::tuple::Tuple;
@@ -2528,7 +2529,8 @@ mod test {
             index_id
         };
 
-        let reader_tx = storage.transaction()?;
+        let reader_tx =
+            storage.transaction_with_isolation(TransactionIsolationLevel::ReadCommitted)?;
         let tuple_id = {
             let mut index_iter = table_codec.with_index_bound("t1", index_id, |min, max| {
                 reader_tx.range(Bound::Included(min), Bound::Included(max))
