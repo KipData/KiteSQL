@@ -452,7 +452,7 @@ impl Storage for OptimisticRocksStorage {
     }
 
     fn default_transaction_isolation(&self) -> TransactionIsolationLevel {
-        TransactionIsolationLevel::ReadCommitted
+        TransactionIsolationLevel::RepeatableRead
     }
 
     fn validate_transaction_isolation(
@@ -500,7 +500,7 @@ impl Storage for RocksStorage {
     }
 
     fn default_transaction_isolation(&self) -> TransactionIsolationLevel {
-        TransactionIsolationLevel::ReadCommitted
+        TransactionIsolationLevel::RepeatableRead
     }
 
     fn validate_transaction_isolation(

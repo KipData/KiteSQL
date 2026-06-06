@@ -272,7 +272,7 @@ impl TpccTransaction for Payment {
                 ("$3", DataValue::Int32(c_id)),
                 ("$4", DataValue::Int8(args.d_id as i8)),
                 ("$5", DataValue::Int16(args.w_id as i16)),
-                ("$6", DataValue::from(&now.naive_utc())),
+                ("$6", DataValue::Time64(now.timestamp_micros(), 6, false)),
                 ("$7", DataValue::Decimal(args.h_amount)),
                 ("$8", DataValue::from(h_data)),
             ],

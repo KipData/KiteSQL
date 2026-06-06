@@ -2151,6 +2151,19 @@ pub(crate) mod test {
     }
 
     #[test]
+    fn test_rocksdb_defaults_to_repeatable_read() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+
+        assert_eq!(
+            kite_sql.transaction_isolation(),
+            TransactionIsolationLevel::RepeatableRead
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_repeatable_read_keeps_transaction_snapshot() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let kite_sql = DataBaseBuilder::path(temp_dir.path())
