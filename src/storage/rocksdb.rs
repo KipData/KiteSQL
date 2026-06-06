@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::storage::table_codec::{Bytes, TableCodec};
+use crate::storage::table_codec::TableCodec;
 use crate::storage::{
     CheckpointableStorage, InnerIter, Storage, Transaction, TransactionIsolationLevel,
 };
@@ -665,6 +665,7 @@ macro_rules! impl_transaction {
                         read_opts.set_prefix_same_as_start(true);
                     }
                 }
+                set_iterate_upper_bound(&mut read_opts, max);
 
                 let mut iter = self.tx.raw_iterator_opt(read_opts);
                 match &min {
@@ -679,7 +680,6 @@ macro_rules! impl_transaction {
                 }
 
                 Ok($iter {
-                    upper: owned_bound(max),
                     iter,
                     advanced: false,
                     done: false,
@@ -698,7 +698,6 @@ impl_transaction!(RocksTransaction, RocksIter);
 impl_transaction!(OptimisticRocksTransaction, OptimisticRocksIter);
 
 pub struct OptimisticRocksIter<'txn, 'iter> {
-    upper: Bound<Bytes>,
     iter: DBRawIteratorWithThreadMode<'iter, rocksdb::Transaction<'txn, OptimisticTransactionDB>>,
     advanced: bool,
     done: bool,
@@ -707,17 +706,11 @@ pub struct OptimisticRocksIter<'txn, 'iter> {
 impl InnerIter for OptimisticRocksIter<'_, '_> {
     #[inline]
     fn try_next(&mut self) -> Result<Option<crate::storage::KeyValueRef<'_>>, DatabaseError> {
-        next(
-            &mut self.iter,
-            &self.upper,
-            &mut self.advanced,
-            &mut self.done,
-        )
+        next(&mut self.iter, &mut self.advanced, &mut self.done)
     }
 }
 
 pub struct RocksIter<'txn, 'iter> {
-    upper: Bound<Bytes>,
     iter: DBRawIteratorWithThreadMode<
         'iter,
         rocksdb::Transaction<'txn, TransactionDB<rocksdb::MultiThreaded>>,
@@ -729,19 +722,27 @@ pub struct RocksIter<'txn, 'iter> {
 impl InnerIter for RocksIter<'_, '_> {
     #[inline]
     fn try_next(&mut self) -> Result<Option<crate::storage::KeyValueRef<'_>>, DatabaseError> {
-        next(
-            &mut self.iter,
-            &self.upper,
-            &mut self.advanced,
-            &mut self.done,
-        )
+        next(&mut self.iter, &mut self.advanced, &mut self.done)
+    }
+}
+
+#[inline]
+fn set_iterate_upper_bound(read_opts: &mut ReadOptions, upper: Bound<&[u8]>) {
+    match upper {
+        Bound::Included(bytes) => {
+            let mut exclusive_upper = Vec::with_capacity(bytes.len() + 1);
+            exclusive_upper.extend_from_slice(bytes);
+            exclusive_upper.push(0);
+            read_opts.set_iterate_upper_bound(exclusive_upper);
+        }
+        Bound::Excluded(bytes) => read_opts.set_iterate_upper_bound(bytes),
+        Bound::Unbounded => {}
     }
 }
 
 #[inline]
 fn next<'a, D: rocksdb::DBAccess>(
     iter: &'a mut DBRawIteratorWithThreadMode<'_, D>,
-    upper: &Bound<Bytes>,
     advanced: &mut bool,
     done: &mut bool,
 ) -> Result<Option<crate::storage::KeyValueRef<'a>>, DatabaseError> {
@@ -762,26 +763,9 @@ fn next<'a, D: rocksdb::DBAccess>(
         iter.status()?;
         return Ok(None);
     };
-    let upper_bound_check = match upper {
-        Bound::Included(upper) => key <= upper.as_slice(),
-        Bound::Excluded(upper) => key < upper.as_slice(),
-        Bound::Unbounded => true,
-    };
-    if !upper_bound_check {
-        *done = true;
-        return Ok(None);
-    }
 
     *advanced = true;
     Ok(Some((key, value)))
-}
-
-fn owned_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
-    match bound {
-        Bound::Included(bytes) => Bound::Included(bytes.to_vec()),
-        Bound::Excluded(bytes) => Bound::Excluded(bytes.to_vec()),
-        Bound::Unbounded => Bound::Unbounded,
-    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -792,8 +776,8 @@ mod test {
     use crate::expression::range_detacher::Range;
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::{
-        IndexImplEnum, IndexImplParams, IndexIter, IndexIterState, IterBounds, PrimaryKeyIndexImpl,
-        Storage, Transaction,
+        IndexImplEnum, IndexImplParams, IndexIter, IndexIterState, InnerIter, IterBounds,
+        PrimaryKeyIndexImpl, Storage, Transaction,
     };
     use crate::types::index::{IndexMeta, IndexType};
     use crate::types::tuple::Tuple;
@@ -833,6 +817,34 @@ mod test {
 
         let metrics = kite_sql.storage_metrics().unwrap();
         let _ = metrics.block_cache_hit_rate();
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_rocksdb_range_uses_iterate_upper_bound() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let storage = RocksStorage::new(temp_dir.path())?;
+        let mut transaction = storage.transaction()?;
+
+        transaction.set(b"a", b"1")?;
+        transaction.set(b"b", b"2")?;
+        transaction.set(b"b\0", b"3")?;
+        transaction.set(b"c", b"4")?;
+
+        let mut inclusive_iter = transaction.range(Bound::Included(b"a"), Bound::Included(b"b"))?;
+        let mut inclusive_keys = Vec::new();
+        while let Some((key, _)) = inclusive_iter.try_next()? {
+            inclusive_keys.push(key.to_vec());
+        }
+        assert_eq!(inclusive_keys, vec![b"a".to_vec(), b"b".to_vec()]);
+
+        let mut exclusive_iter = transaction.range(Bound::Included(b"a"), Bound::Excluded(b"b"))?;
+        let mut exclusive_keys = Vec::new();
+        while let Some((key, _)) = exclusive_iter.try_next()? {
+            exclusive_keys.push(key.to_vec());
+        }
+        assert_eq!(exclusive_keys, vec![b"a".to_vec()]);
 
         Ok(())
     }
