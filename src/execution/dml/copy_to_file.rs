@@ -169,19 +169,10 @@ mod tests {
             .table(db.state.table_cache(), "t1".to_string().into())?
             .unwrap();
 
-        let executor = CopyToFile {
-            op: op.clone(),
-            input_plan: TableScanOperator::build(
-                "t1".to_string().into(),
-                table,
-                true,
-                &plan_arena,
-            )?,
-            column_names: Default::default(),
-            input: None,
-        };
-        let mut executor = crate::execution::execute_mut(
-            executor,
+        let input_plan =
+            TableScanOperator::build("t1".to_string().into(), table, true, &plan_arena)?;
+        let mut executor = crate::execution::execute_input_mut::<_, CopyToFile>(
+            (op.clone(), input_plan),
             (
                 db.state.table_cache(),
                 db.state.view_cache(),

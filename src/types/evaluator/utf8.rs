@@ -347,6 +347,7 @@ fn next_char_at(input: &str, index: usize) -> Option<(char, usize)> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
+    use chrono::{Datelike, Timelike};
 
     fn utf8(value: &str) -> DataValue {
         DataValue::Utf8 {

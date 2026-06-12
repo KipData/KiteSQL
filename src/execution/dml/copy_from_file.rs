@@ -177,8 +177,8 @@ mod tests {
         };
 
         let mut transaction = db.storage.transaction()?;
-        let mut executor = crate::execution::execute_mut(
-            CopyFromFile::from(op),
+        let mut executor = crate::execution::execute_input_mut::<_, CopyFromFile>(
+            op,
             (
                 db.state.table_cache(),
                 db.state.view_cache(),
