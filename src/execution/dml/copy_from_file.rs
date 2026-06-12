@@ -100,9 +100,9 @@ impl CopyFromFile {
             }
 
             let chunk = tuple_builder.build_with_row(record.iter())?;
-            arena
-                .transaction_mut()
-                .append_tuple(&table_name, chunk, &serializers, false)?;
+            let mut state = arena.local_state();
+            let (transaction, table_codec) = state.transaction_codec_mut();
+            transaction.append_tuple(table_codec, &table_name, chunk, &serializers, false)?;
             size += 1;
         }
 

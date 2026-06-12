@@ -117,8 +117,11 @@ impl ChangeColumn {
                 .collect_vec();
             let target_column_name = new_column_name.clone();
             let target_data_type = data_type.clone();
+            let mut state = arena.local_state();
+            let (transaction, table_codec) = state.transaction_codec_mut();
             rewrite_table_in_batches(
-                arena.transaction_mut(),
+                transaction,
+                table_codec,
                 &table_name,
                 &pk_ty,
                 &old_deserializers,
@@ -132,12 +135,15 @@ impl ChangeColumn {
                     }
                     Ok(())
                 },
-                |_, _| Ok(()),
+                |_, _, _| Ok(()),
             )?;
         } else if needs_not_null_validation {
             let target_column_name = new_column_name.clone();
+            let mut state = arena.local_state();
+            let (transaction, table_codec) = state.transaction_codec();
             visit_table_in_batches(
-                arena.transaction(),
+                transaction,
+                table_codec,
                 &table_name,
                 &pk_ty,
                 &old_deserializers,
@@ -151,9 +157,11 @@ impl ChangeColumn {
             )?;
         }
 
-        let (transaction, context) = arena.write_context_mut();
+        let mut state = arena.local_state();
+        let (transaction, table_codec, context) = state.write_context_mut();
         let table_cache = context.table_cache_mut();
         transaction.change_column(
+            table_codec,
             table_cache,
             &table_name,
             &old_column_name,

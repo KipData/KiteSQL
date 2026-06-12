@@ -26,7 +26,10 @@ impl<'a, T: Transaction + 'a> ShowViews<'a, T> {
     pub(crate) fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
         if self.metas.is_none() {
             let context = arena.read_context();
-            self.metas = Some(arena.transaction().views(
+            let mut state = arena.local_state();
+            let (transaction, table_codec) = state.transaction_codec();
+            self.metas = Some(transaction.views(
+                table_codec,
                 context.table_cache(),
                 context.scala_functions(),
                 context.table_functions(),

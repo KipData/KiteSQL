@@ -156,11 +156,14 @@ impl Insert {
                     };
                     let tuple_id = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
                     let index = Index::new(index_meta.id, &value, index_meta.ty);
-                    arena
-                        .transaction_mut()
-                        .add_index(&self.table_name, index, tuple_id)?;
+                    let mut state = arena.local_state();
+                    let (transaction, table_codec) = state.transaction_codec_mut();
+                    transaction.add_index(table_codec, &self.table_name, index, tuple_id)?;
                 }
-                arena.transaction_mut().append_tuple(
+                let mut state = arena.local_state();
+                let (transaction, table_codec) = state.transaction_codec_mut();
+                transaction.append_tuple(
+                    table_codec,
                     &self.table_name,
                     tuple,
                     &serializers,

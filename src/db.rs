@@ -40,6 +40,7 @@ use crate::storage::lmdb::{LmdbConfig, LmdbStorage};
 use crate::storage::memory::MemoryStorage;
 #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
 use crate::storage::rocksdb::{OptimisticRocksStorage, RocksStorage, StorageConfig};
+use crate::storage::table_codec::TableCodec;
 use crate::storage::{
     CheckpointableStorage, StatisticsMetaCache, Storage, TableCache, Transaction,
     TransactionIsolationLevel, ViewCache,
@@ -773,13 +774,16 @@ impl<S: Storage> Database<S> {
         let transaction = self
             .storage
             .transaction_with_isolation(self.transaction_isolation)?;
+        let mut table_codec = TableCodec::default();
         match kind {
             CatalogKind::Table => {
                 let table = transaction
-                    .load_table(name.clone())?
+                    .load_table(&mut table_codec, name.clone())?
                     .ok_or(DatabaseError::TableNotFound)?;
                 for index in table.indexes() {
-                    if let Some(meta) = transaction.statistics_meta(name.as_ref(), index.id)? {
+                    if let Some(meta) =
+                        transaction.statistics_meta(&mut table_codec, name.as_ref(), index.id)?
+                    {
                         self.state.meta_cache.insert((name.clone(), index.id), meta);
                     }
                 }
@@ -788,6 +792,7 @@ impl<S: Storage> Database<S> {
             CatalogKind::View => {
                 let view = transaction
                     .load_view(
+                        &mut table_codec,
                         &self.state.table_cache,
                         &self.state.scala_functions,
                         &self.state.table_functions,
@@ -1250,7 +1255,9 @@ pub(crate) mod test {
     use crate::expression::ScalarExpression;
     use crate::planner::operator::join::JoinCondition;
     use crate::planner::operator::Operator;
-    use crate::storage::{Storage, TableCache, Transaction, TransactionIsolationLevel};
+    use crate::storage::{
+        table_codec::TableCodec, Storage, TableCache, Transaction, TransactionIsolationLevel,
+    };
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -1297,7 +1304,14 @@ pub(crate) mod test {
                 ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
             ),
         ];
-        let _ = transaction.create_table(table_cache, "t1".to_string().into(), columns, false)?;
+        let mut table_codec = TableCodec::default();
+        let _ = transaction.create_table(
+            &mut table_codec,
+            table_cache,
+            "t1".to_string().into(),
+            columns,
+            false,
+        )?;
 
         Ok(())
     }

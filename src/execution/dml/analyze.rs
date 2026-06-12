@@ -23,7 +23,7 @@ use crate::optimizer::core::histogram::HistogramBuilder;
 use crate::optimizer::core::statistics_meta::StatisticsMeta;
 use crate::planner::operator::analyze::AnalyzeOperator;
 use crate::planner::LogicalPlan;
-use crate::storage::{StatisticsMetaCache, Transaction};
+use crate::storage::{table_codec::TableCodec, StatisticsMetaCache, Transaction};
 use crate::types::index::IndexId;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
@@ -117,10 +117,16 @@ impl Analyze {
                 }
             }
         }
-        let (transaction, context) = arena.write_context_mut();
+        let mut state = arena.local_state();
+        let (transaction, table_codec, context) = state.write_context_mut();
         let meta_cache = context.meta_cache_mut();
-        let values =
-            Self::persist_statistics_meta(&self.table_name, builders, meta_cache, transaction)?;
+        let values = Self::persist_statistics_meta(
+            &self.table_name,
+            builders,
+            meta_cache,
+            transaction,
+            table_codec,
+        )?;
 
         let output = arena.result_tuple_mut();
         output.pk = None;
@@ -143,6 +149,7 @@ impl Analyze {
         builders: Vec<State>,
         cache: &mut StatisticsMetaCache,
         transaction: &mut U,
+        table_codec: &mut TableCodec,
     ) -> Result<Vec<DataValue>, DatabaseError> {
         let mut values = Vec::with_capacity(builders.len());
 
@@ -157,7 +164,7 @@ impl Analyze {
                 builder.build(histogram_buckets.unwrap_or(DEFAULT_NUM_OF_BUCKETS))?;
             let meta = StatisticsMeta::new(histogram, sketch);
 
-            transaction.save_statistics_meta(cache, table_name, meta)?;
+            transaction.save_statistics_meta(table_codec, cache, table_name, meta)?;
             values.push(DataValue::Utf8 {
                 value: format!("{table_name}/{index_id}"),
                 ty: Utf8Type::Variable(None),
@@ -187,7 +194,7 @@ mod test {
     use crate::expression::range_detacher::Range;
     use crate::optimizer::core::cm_sketch::COUNT_MIN_SKETCH_STORAGE_PAGE_LEN;
     use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-    use crate::storage::{InnerIter, Storage, Transaction};
+    use crate::storage::{table_codec::TableCodec, InnerIter, Storage, Transaction};
     use crate::types::value::DataValue;
     use std::ops::Bound;
     use tempfile::TempDir;
@@ -263,15 +270,15 @@ mod test {
             Some(1)
         );
         let mut transaction = kite_sql.storage.transaction()?;
-        let keys: Vec<Vec<u8>> = unsafe { &*transaction.table_codec() }
-            .with_statistics_index_bound("t1", 1, |min, max| {
-                let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
-                let mut keys = Vec::new();
-                while let Some((key, _)) = iter.try_next()? {
-                    keys.push(key.to_vec());
-                }
-                Ok(keys)
-            })?;
+        let mut table_codec = TableCodec::default();
+        let keys: Vec<Vec<u8>> = table_codec.with_statistics_index_bound("t1", 1, |min, max| {
+            let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+            let mut keys = Vec::new();
+            while let Some((key, _)) = iter.try_next()? {
+                keys.push(key.to_vec());
+            }
+            Ok(keys)
+        })?;
         for key in keys {
             transaction.remove(&key)?;
         }
@@ -319,7 +326,8 @@ mod test {
 
         let count = {
             let transaction = kite_sql.storage.transaction()?;
-            unsafe { &*transaction.table_codec() }.with_statistics_bound("t1", |min, max| {
+            let mut table_codec = TableCodec::default();
+            table_codec.with_statistics_bound("t1", |min, max| {
                 let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
                 let mut count = 0;
                 while iter.try_next()?.is_some() {
@@ -334,15 +342,15 @@ mod test {
         kite_sql.analyze("t1")?;
 
         let transaction = kite_sql.storage.transaction()?;
-        let keys =
-            unsafe { &*transaction.table_codec() }.with_statistics_bound("t1", |min, max| {
-                let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
-                let mut keys = 0;
-                while iter.try_next()?.is_some() {
-                    keys += 1;
-                }
-                Ok(keys)
-            })?;
+        let mut table_codec = TableCodec::default();
+        let keys = table_codec.with_statistics_bound("t1", |min, max| {
+            let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+            let mut keys = 0;
+            while iter.try_next()?.is_some() {
+                keys += 1;
+            }
+            Ok(keys)
+        })?;
         let table_name = "t1".to_string().into();
         let loader = StatisticMetaLoader::new(kite_sql.state.meta_cache());
         let statistics_meta = loader.load(&table_name, 0)?.unwrap();

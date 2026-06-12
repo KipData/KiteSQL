@@ -54,9 +54,17 @@ impl DropIndex {
             return Ok(());
         };
 
-        let (transaction, context) = arena.write_context_mut();
+        let mut state = arena.local_state();
+        let (transaction, table_codec, context) = state.write_context_mut();
         let (table_cache, meta_cache) = context.table_meta_cache_mut();
-        transaction.drop_index(table_cache, meta_cache, table_name, &index_name, if_exists)?;
+        transaction.drop_index(
+            table_codec,
+            table_cache,
+            meta_cache,
+            table_name,
+            &index_name,
+            if_exists,
+        )?;
 
         TupleBuilder::build_result_into(arena.result_tuple_mut(), index_name.to_string());
         arena.resume();

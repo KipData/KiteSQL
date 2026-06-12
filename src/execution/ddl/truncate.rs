@@ -48,7 +48,9 @@ impl Truncate {
             arena.finish();
             return Ok(());
         };
-        arena.transaction_mut().drop_data(&table_name)?;
+        let mut state = arena.local_state();
+        let (transaction, table_codec) = state.transaction_codec_mut();
+        transaction.drop_data(table_codec, &table_name)?;
 
         TupleBuilder::build_result_into(arena.result_tuple_mut(), format!("{table_name}"));
         arena.resume();

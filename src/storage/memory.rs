@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::storage::table_codec::{Bytes, TableCodec};
+use crate::storage::table_codec::Bytes;
 use crate::storage::{
     EmptyStorageMetrics, InnerIter, Storage, Transaction, TransactionIsolationLevel,
 };
@@ -47,7 +47,6 @@ impl Storage for MemoryStorage {
         self.validate_transaction_isolation(isolation)?;
         Ok(MemoryTransaction {
             inner: self.inner.clone(),
-            table_codec: Default::default(),
         })
     }
 
@@ -58,7 +57,6 @@ impl Storage for MemoryStorage {
 
 pub struct MemoryTransaction {
     inner: Rc<RefCell<BTreeMap<Vec<u8>, Vec<u8>>>>,
-    table_codec: TableCodec,
 }
 
 pub struct MemoryIter {
@@ -97,11 +95,6 @@ impl Transaction for MemoryTransaction {
         = MemoryIter
     where
         Self: 'a;
-
-    fn table_codec(&self) -> *const TableCodec {
-        &self.table_codec
-    }
-
     fn get_borrowed<'a>(
         &'a self,
         key: &[u8],
@@ -163,6 +156,7 @@ mod wasm_tests {
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
     use crate::db::DataBaseBuilder;
     use crate::expression::range_detacher::Range;
+    use crate::storage::table_codec::TableCodec;
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -176,6 +170,7 @@ mod wasm_tests {
         let storage = MemoryStorage::new();
         let mut transaction = storage.transaction()?;
         let mut table_cache = crate::storage::TableCache::default();
+        let mut table_codec = TableCodec::default();
         let columns = Arc::new(vec![
             ColumnRef::from(ColumnCatalog::new(
                 "c1".to_string(),
@@ -194,6 +189,7 @@ mod wasm_tests {
             .map(|col_ref| ColumnCatalog::clone(col_ref))
             .collect_vec();
         transaction.create_table(
+            &mut table_codec,
             &mut table_cache,
             "test".to_string().into(),
             source_columns,
@@ -201,6 +197,7 @@ mod wasm_tests {
         )?;
 
         transaction.append_tuple(
+            &mut table_codec,
             "test",
             Tuple::new(
                 Some(DataValue::Int32(1)),
@@ -213,6 +210,7 @@ mod wasm_tests {
             false,
         )?;
         transaction.append_tuple(
+            &mut table_codec,
             "test",
             Tuple::new(
                 Some(DataValue::Int32(2)),
@@ -228,6 +226,7 @@ mod wasm_tests {
         let read_columns = vec![columns[0].clone()];
 
         let mut iter = transaction.read(
+            &mut table_codec,
             &table_cache,
             "test".to_string().into(),
             (Some(1), Some(1)),
@@ -291,6 +290,7 @@ mod native_tests {
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
     use crate::db::DataBaseBuilder;
     use crate::expression::range_detacher::Range;
+    use crate::storage::table_codec::TableCodec;
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -303,6 +303,7 @@ mod native_tests {
         let storage = MemoryStorage::new();
         let mut transaction = storage.transaction()?;
         let mut table_cache = crate::storage::TableCache::default();
+        let mut table_codec = TableCodec::default();
         let columns = Arc::new(vec![
             ColumnRef::from(ColumnCatalog::new(
                 "c1".to_string(),
@@ -321,6 +322,7 @@ mod native_tests {
             .map(|col_ref| ColumnCatalog::clone(col_ref))
             .collect_vec();
         transaction.create_table(
+            &mut table_codec,
             &mut table_cache,
             "test".to_string().into(),
             source_columns,
@@ -328,6 +330,7 @@ mod native_tests {
         )?;
 
         transaction.append_tuple(
+            &mut table_codec,
             "test",
             Tuple::new(
                 Some(DataValue::Int32(1)),
@@ -340,6 +343,7 @@ mod native_tests {
             false,
         )?;
         transaction.append_tuple(
+            &mut table_codec,
             "test",
             Tuple::new(
                 Some(DataValue::Int32(2)),
@@ -355,6 +359,7 @@ mod native_tests {
         let read_columns = vec![columns[0].clone()];
 
         let mut iter = transaction.read(
+            &mut table_codec,
             &table_cache,
             "test".to_string().into(),
             (Some(1), Some(1)),

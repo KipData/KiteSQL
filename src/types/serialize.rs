@@ -16,7 +16,6 @@ use crate::errors::DatabaseError;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
-use bumpalo::collections::Vec;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use kite_sql_serde_macros::ReferenceSerialization;
 use ordered_float::OrderedFloat;
@@ -27,11 +26,15 @@ use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 macro_rules! impl_tuple_value_serializable {
     ($name:ident, $variant:ident, $write_fn:expr, $read_fn:expr) => {
         impl TupleValueSerializable for $name {
-            fn to_raw(&self, value: &DataValue, writer: &mut Vec<u8>) -> Result<(), DatabaseError> {
+            fn to_raw<W: Write>(
+                &self,
+                value: &DataValue,
+                writer: &mut W,
+            ) -> Result<(), DatabaseError> {
                 let DataValue::$variant(v) = value else {
                     unsafe { std::hint::unreachable_unchecked() }
                 };
-                ($write_fn)(writer, v)?;
+                ($write_fn)(&mut *writer, v)?;
                 Ok(())
             }
 
@@ -43,7 +46,7 @@ macro_rules! impl_tuple_value_serializable {
 }
 
 pub trait TupleValueSerializable: Debug {
-    fn to_raw(&self, value: &DataValue, writer: &mut Vec<u8>) -> Result<(), DatabaseError>;
+    fn to_raw<W: Write>(&self, value: &DataValue, writer: &mut W) -> Result<(), DatabaseError>;
     #[allow(clippy::wrong_self_convention)]
     fn from_raw(&self, reader: &mut Cursor<&[u8]>) -> Result<DataValue, DatabaseError>;
     fn filling_value(
@@ -92,7 +95,7 @@ pub enum TupleValueSerializableImpl {
 }
 
 impl TupleValueSerializable for TupleValueSerializableImpl {
-    fn to_raw(&self, value: &DataValue, writer: &mut Vec<u8>) -> Result<(), DatabaseError> {
+    fn to_raw<W: Write>(&self, value: &DataValue, writer: &mut W) -> Result<(), DatabaseError> {
         match self {
             TupleValueSerializableImpl::Boolean => BooleanSerializable.to_raw(value, writer),
             TupleValueSerializableImpl::Int8 => Int8Serializable.to_raw(value, writer),
@@ -293,25 +296,25 @@ struct SkipVariable;
 impl_tuple_value_serializable!(
     Int8Serializable,
     Int8,
-    |writer: &mut Vec<u8>, &value| writer.write_i8(value),
+    |writer: &mut dyn Write, &value| writer.write_i8(value),
     |reader: &mut Cursor<&[u8]>| reader.read_i8()
 );
 impl_tuple_value_serializable!(
     Int16Serializable,
     Int16,
-    |writer: &mut Vec<u8>, &value| writer.write_i16::<LittleEndian>(value),
+    |writer: &mut dyn Write, &value| writer.write_i16::<LittleEndian>(value),
     |reader: &mut Cursor<&[u8]>| reader.read_i16::<LittleEndian>()
 );
 impl_tuple_value_serializable!(
     Int32Serializable,
     Int32,
-    |writer: &mut Vec<u8>, &value| writer.write_i32::<LittleEndian>(value),
+    |writer: &mut dyn Write, &value| writer.write_i32::<LittleEndian>(value),
     |reader: &mut Cursor<&[u8]>| reader.read_i32::<LittleEndian>()
 );
 impl_tuple_value_serializable!(
     Int64Serializable,
     Int64,
-    |writer: &mut Vec<u8>, &value| writer.write_i64::<LittleEndian>(value),
+    |writer: &mut dyn Write, &value| writer.write_i64::<LittleEndian>(value),
     |reader: &mut Cursor<&[u8]>| reader.read_i64::<LittleEndian>()
 );
 
@@ -319,25 +322,25 @@ impl_tuple_value_serializable!(
 impl_tuple_value_serializable!(
     UInt8Serializable,
     UInt8,
-    |writer: &mut Vec<u8>, &value| writer.write_u8(value),
+    |writer: &mut dyn Write, &value| writer.write_u8(value),
     |reader: &mut Cursor<&[u8]>| reader.read_u8()
 );
 impl_tuple_value_serializable!(
     UInt16Serializable,
     UInt16,
-    |writer: &mut Vec<u8>, &value| writer.write_u16::<LittleEndian>(value),
+    |writer: &mut dyn Write, &value| writer.write_u16::<LittleEndian>(value),
     |reader: &mut Cursor<&[u8]>| reader.read_u16::<LittleEndian>()
 );
 impl_tuple_value_serializable!(
     UInt32Serializable,
     UInt32,
-    |writer: &mut Vec<u8>, &value| writer.write_u32::<LittleEndian>(value),
+    |writer: &mut dyn Write, &value| writer.write_u32::<LittleEndian>(value),
     |reader: &mut Cursor<&[u8]>| reader.read_u32::<LittleEndian>()
 );
 impl_tuple_value_serializable!(
     UInt64Serializable,
     UInt64,
-    |writer: &mut Vec<u8>, &value| writer.write_u64::<LittleEndian>(value),
+    |writer: &mut dyn Write, &value| writer.write_u64::<LittleEndian>(value),
     |reader: &mut Cursor<&[u8]>| reader.read_u64::<LittleEndian>()
 );
 
@@ -345,14 +348,14 @@ impl_tuple_value_serializable!(
 impl_tuple_value_serializable!(
     Float32Serializable,
     Float32,
-    |writer: &mut Vec<u8>, value: &OrderedFloat::<f32>| writer
+    |writer: &mut dyn Write, value: &OrderedFloat::<f32>| writer
         .write_f32::<LittleEndian>(value.into_inner()),
     |reader: &mut Cursor<&[u8]>| reader.read_f32::<LittleEndian>().map(OrderedFloat::<f32>)
 );
 impl_tuple_value_serializable!(
     Float64Serializable,
     Float64,
-    |writer: &mut Vec<u8>, value: &OrderedFloat::<f64>| writer
+    |writer: &mut dyn Write, value: &OrderedFloat::<f64>| writer
         .write_f64::<LittleEndian>(value.into_inner()),
     |reader: &mut Cursor<&[u8]>| reader.read_f64::<LittleEndian>().map(OrderedFloat::<f64>)
 );
@@ -360,12 +363,12 @@ impl_tuple_value_serializable!(
 impl_tuple_value_serializable!(
     BooleanSerializable,
     Boolean,
-    |writer: &mut Vec<u8>, &value| writer.write_u8(value as u8),
+    |writer: &mut dyn Write, &value| writer.write_u8(value as u8),
     |reader: &mut Cursor<&[u8]>| reader.read_u8().map(|v| v != 0)
 );
 
 impl TupleValueSerializable for CharSerializable {
-    fn to_raw(&self, value: &DataValue, writer: &mut Vec<u8>) -> Result<(), DatabaseError> {
+    fn to_raw<W: Write>(&self, value: &DataValue, writer: &mut W) -> Result<(), DatabaseError> {
         let DataValue::Utf8 {
             value,
             unit,
@@ -420,7 +423,7 @@ impl TupleValueSerializable for CharSerializable {
 }
 
 impl TupleValueSerializable for VarcharSerializable {
-    fn to_raw(&self, value: &DataValue, writer: &mut Vec<u8>) -> Result<(), DatabaseError> {
+    fn to_raw<W: Write>(&self, value: &DataValue, writer: &mut W) -> Result<(), DatabaseError> {
         let DataValue::Utf8 {
             value,
             ty: Utf8Type::Variable(_),
@@ -452,18 +455,18 @@ impl TupleValueSerializable for VarcharSerializable {
 impl_tuple_value_serializable!(
     DateSerializable,
     Date32,
-    |writer: &mut Vec<u8>, &value| writer.write_i32::<LittleEndian>(value),
+    |writer: &mut dyn Write, &value| writer.write_i32::<LittleEndian>(value),
     |reader: &mut Cursor<&[u8]>| reader.read_i32::<LittleEndian>()
 );
 impl_tuple_value_serializable!(
     DateTimeSerializable,
     Date64,
-    |writer: &mut Vec<u8>, &value| writer.write_i64::<LittleEndian>(value),
+    |writer: &mut dyn Write, &value| writer.write_i64::<LittleEndian>(value),
     |reader: &mut Cursor<&[u8]>| reader.read_i64::<LittleEndian>()
 );
 
 impl TupleValueSerializable for TimeSerializable {
-    fn to_raw(&self, value: &DataValue, writer: &mut Vec<u8>) -> Result<(), DatabaseError> {
+    fn to_raw<W: Write>(&self, value: &DataValue, writer: &mut W) -> Result<(), DatabaseError> {
         let DataValue::Time32(v, ..) = value else {
             unsafe { std::hint::unreachable_unchecked() }
         };
@@ -481,7 +484,7 @@ impl TupleValueSerializable for TimeSerializable {
 }
 
 impl TupleValueSerializable for TimeStampSerializable {
-    fn to_raw(&self, value: &DataValue, writer: &mut Vec<u8>) -> Result<(), DatabaseError> {
+    fn to_raw<W: Write>(&self, value: &DataValue, writer: &mut W) -> Result<(), DatabaseError> {
         let DataValue::Time64(v, ..) = value else {
             unsafe { std::hint::unreachable_unchecked() }
         };
@@ -502,7 +505,7 @@ impl TupleValueSerializable for TimeStampSerializable {
 impl_tuple_value_serializable!(
     DecimalSerializable,
     Decimal,
-    |writer: &mut Vec<u8>, &value: &Decimal| writer.write_all(&value.serialize()),
+    |writer: &mut dyn Write, &value: &Decimal| writer.write_all(&value.serialize()),
     |reader: &mut Cursor<&[u8]>| {
         let mut bytes = [0u8; 16];
         reader.read_exact(&mut bytes)?;
@@ -511,7 +514,7 @@ impl_tuple_value_serializable!(
 );
 
 impl TupleValueSerializable for SkipFixed {
-    fn to_raw(&self, _: &DataValue, _: &mut Vec<u8>) -> Result<(), DatabaseError> {
+    fn to_raw<W: Write>(&self, _: &DataValue, _: &mut W) -> Result<(), DatabaseError> {
         unreachable!();
     }
 
@@ -531,7 +534,7 @@ impl TupleValueSerializable for SkipFixed {
 }
 
 impl TupleValueSerializable for SkipVariable {
-    fn to_raw(&self, _: &DataValue, _: &mut Vec<u8>) -> Result<(), DatabaseError> {
+    fn to_raw<W: Write>(&self, _: &DataValue, _: &mut W) -> Result<(), DatabaseError> {
         unreachable!();
     }
 

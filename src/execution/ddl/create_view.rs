@@ -49,9 +49,10 @@ impl CreateView {
             return Ok(());
         };
         let view_name = view.name.to_string();
-        let (transaction, context) = arena.write_context_mut();
+        let mut state = arena.local_state();
+        let (transaction, table_codec, context) = state.write_context_mut();
         let view_cache = context.view_cache_mut();
-        transaction.create_view(view_cache, view, or_replace)?;
+        transaction.create_view(table_codec, view_cache, view, or_replace)?;
 
         TupleBuilder::build_result_into(arena.result_tuple_mut(), view_name);
         arena.resume();

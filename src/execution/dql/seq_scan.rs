@@ -75,8 +75,10 @@ impl<'a, T: Transaction + 'a> SeqScan<'a, T> {
                 arena.finish();
                 return Ok(());
             };
-            self.iter = Some(arena.transaction().read(
-                arena.table_cache(),
+            let state = arena.local_state();
+            self.iter = Some(state.transaction().read(
+                state.table_codec,
+                state.context.read().table_cache,
                 table_name,
                 limit,
                 columns,
@@ -84,11 +86,12 @@ impl<'a, T: Transaction + 'a> SeqScan<'a, T> {
             )?);
         }
 
+        let state = arena.local_state();
         if self
             .iter
             .as_mut()
             .expect("seq scan iterator initialized")
-            .next_tuple_into(arena.result_tuple_mut())?
+            .next_tuple_into(state.table_codec, &mut state.result.tuple)?
         {
             arena.resume();
         } else {

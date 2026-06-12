@@ -15,10 +15,8 @@
 use crate::catalog::ColumnRef;
 use crate::db::ResultIter;
 use crate::errors::DatabaseError;
-use crate::storage::table_codec::BumpBytes;
 use crate::types::serialize::{TupleValueSerializable, TupleValueSerializableImpl};
 use crate::types::value::DataValue;
-use bumpalo::Bump;
 use comfy_table::{Cell, Table};
 use itertools::Itertools;
 use std::io::Cursor;
@@ -177,11 +175,11 @@ impl Tuple {
 
     /// e.g.: bits(u8)..|data_0(len for utf8_1)|utf8_0|data_1|
     /// Tips: all len is u32
-    pub fn serialize_to<'a>(
+    pub fn serialize_to(
         &self,
         serializers: &[TupleValueSerializableImpl],
-        arena: &'a Bump,
-    ) -> Result<BumpBytes<'a>, DatabaseError> {
+        bytes: &mut Vec<u8>,
+    ) -> Result<(), DatabaseError> {
         debug_assert_eq!(self.values.len(), serializers.len());
 
         fn flip_bit(bits: u8, i: usize) -> u8 {
@@ -190,21 +188,18 @@ impl Tuple {
 
         let values_len = self.values.len();
         let bits_len = (values_len + BITS_MAX_INDEX) / BITS_MAX_INDEX;
-        let mut bytes = BumpBytes::new_in(arena);
+        bytes.clear();
         bytes.resize(bits_len, 0u8);
-        let null_bytes: *mut BumpBytes = &mut bytes;
 
-        debug_assert_eq!(self.values.len(), serializers.len());
         for (i, (value, serializer)) in self.values.iter().zip(serializers.iter()).enumerate() {
             if value.is_null() {
-                let null_bytes = unsafe { &mut *null_bytes };
-                null_bytes[i / BITS_MAX_INDEX] =
-                    flip_bit(null_bytes[i / BITS_MAX_INDEX], i % BITS_MAX_INDEX);
+                bytes[i / BITS_MAX_INDEX] = flip_bit(bytes[i / BITS_MAX_INDEX], i % BITS_MAX_INDEX);
             } else {
-                serializer.to_raw(value, &mut bytes)?;
+                serializer.to_raw(value, bytes)?;
             }
         }
-        Ok(bytes)
+
+        Ok(())
     }
 
     pub fn primary_projection(pk_indices: &[usize], values: &[DataValue]) -> TupleId {
@@ -252,7 +247,6 @@ mod tests {
     use crate::types::value::{DataValue, Utf8Type};
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
-    use bumpalo::Bump;
     use itertools::Itertools;
     use ordered_float::OrderedFloat;
     use rust_decimal::Decimal;
@@ -432,18 +426,15 @@ mod tests {
             .map(|column| column.datatype().serializable())
             .collect_vec();
         let columns = Arc::new(columns);
-        let arena = Bump::new();
+        let mut bytes = Vec::new();
         {
             let mut tuple_0 = Tuple {
                 pk: tuples[0].pk.clone(),
                 values: Vec::with_capacity(serializers.len()),
             };
+            tuples[0].serialize_to(&serializers, &mut bytes).unwrap();
             tuple_0
-                .deserialize_from_into(
-                    &serializers,
-                    &tuples[0].serialize_to(&serializers, &arena).unwrap(),
-                    columns.len(),
-                )
+                .deserialize_from_into(&serializers, &bytes, columns.len())
                 .unwrap();
 
             assert_eq!(tuples[0], tuple_0);
@@ -453,12 +444,9 @@ mod tests {
                 pk: tuples[1].pk.clone(),
                 values: Vec::with_capacity(serializers.len()),
             };
+            tuples[1].serialize_to(&serializers, &mut bytes).unwrap();
             tuple_1
-                .deserialize_from_into(
-                    &serializers,
-                    &tuples[1].serialize_to(&serializers, &arena).unwrap(),
-                    columns.len(),
-                )
+                .deserialize_from_into(&serializers, &bytes, columns.len())
                 .unwrap();
 
             assert_eq!(tuples[1], tuple_1);
@@ -475,12 +463,9 @@ mod tests {
                 pk: tuples[0].pk.clone(),
                 values: Vec::with_capacity(2),
             };
+            tuples[0].serialize_to(&serializers, &mut bytes).unwrap();
             tuple_2
-                .deserialize_from_into(
-                    &projection_serializers,
-                    &tuples[0].serialize_to(&serializers, &arena).unwrap(),
-                    columns.len(),
-                )
+                .deserialize_from_into(&projection_serializers, &bytes, columns.len())
                 .unwrap();
 
             assert_eq!(
@@ -511,12 +496,11 @@ mod tests {
                 pk: multi_pk_tuple.pk.clone(),
                 values: Vec::with_capacity(serializers.len()),
             };
+            multi_pk_tuple
+                .serialize_to(&serializers, &mut bytes)
+                .unwrap();
             tuple_3
-                .deserialize_from_into(
-                    &multiple_pk_serializers,
-                    &multi_pk_tuple.serialize_to(&serializers, &arena).unwrap(),
-                    columns.len(),
-                )
+                .deserialize_from_into(&multiple_pk_serializers, &bytes, columns.len())
                 .unwrap();
 
             assert_eq!(

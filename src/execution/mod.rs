@@ -61,6 +61,7 @@ use crate::execution::dql::values::Values;
 use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
 use crate::planner::LogicalPlan;
+use crate::storage::table_codec::TableCodec;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::types::index::RuntimeIndexProbe;
 use crate::types::tuple::Tuple;
@@ -405,10 +406,41 @@ impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
 pub(crate) struct ExecArena<'a, T: Transaction + 'a> {
     nodes: Vec<ExecNode<'a, T>>,
     result: ExecResult,
+    table_codec: TableCodec,
     projection_tmp: Vec<DataValue>,
     context: Option<ExecutionContext<'a>>,
     transaction: *mut T,
     runtime_probe_stack: Vec<RuntimeIndexProbe>,
+}
+
+pub(crate) struct ExecArenaLocalState<'b, 'a, T: Transaction + 'a> {
+    transaction: *mut T,
+    pub(crate) table_codec: &'b mut TableCodec,
+    context: &'b mut ExecutionContext<'a>,
+    pub(crate) result: &'b mut ExecResult,
+}
+
+impl<'b, 'a, T: Transaction + 'a> ExecArenaLocalState<'b, 'a, T> {
+    pub(crate) fn transaction(&self) -> &'a T {
+        unsafe { &*self.transaction }
+    }
+
+    pub(crate) fn transaction_codec_mut(&mut self) -> (&mut T, &mut TableCodec) {
+        unsafe { (&mut *self.transaction, &mut *self.table_codec) }
+    }
+
+    pub(crate) fn transaction_codec(&mut self) -> (&'a T, &mut TableCodec) {
+        unsafe { (&*self.transaction, &mut *self.table_codec) }
+    }
+
+    pub(crate) fn write_context_mut(
+        &mut self,
+    ) -> (&mut T, &mut TableCodec, &mut WriteExecutionContext<'a>) {
+        let ExecutionContext::Write(context) = self.context else {
+            panic!("write execution context required")
+        };
+        unsafe { (&mut *self.transaction, &mut *self.table_codec, context) }
+    }
 }
 
 impl<'a, T: Transaction + 'a> Default for ExecArena<'a, T> {
@@ -416,6 +448,7 @@ impl<'a, T: Transaction + 'a> Default for ExecArena<'a, T> {
         Self {
             nodes: Vec::new(),
             result: ExecResult::default(),
+            table_codec: TableCodec::default(),
             projection_tmp: Vec::new(),
             context: None,
             transaction: std::ptr::null_mut(),
@@ -484,19 +517,17 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
         unsafe { &*self.transaction }
     }
 
-    pub(crate) fn transaction_mut(&mut self) -> &mut T {
-        unsafe { &mut *self.transaction }
-    }
-
-    pub(crate) fn write_context_mut(&mut self) -> (&mut T, &mut WriteExecutionContext<'a>) {
+    pub(crate) fn local_state(&mut self) -> ExecArenaLocalState<'_, 'a, T> {
         let context = self
             .context
             .as_mut()
             .expect("execution arena context initialized");
-        let ExecutionContext::Write(context) = context else {
-            panic!("write execution context required")
-        };
-        unsafe { (&mut *self.transaction, context) }
+        ExecArenaLocalState {
+            transaction: self.transaction,
+            table_codec: &mut self.table_codec,
+            context,
+            result: &mut self.result,
+        }
     }
 
     pub(crate) fn push_runtime_probe(&mut self, value: RuntimeIndexProbe) {

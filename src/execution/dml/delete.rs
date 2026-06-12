@@ -128,7 +128,10 @@ impl Delete {
                 ) in indexes.iter_mut()
                 {
                     for value in values {
-                        arena.transaction_mut().del_index(
+                        let mut state = arena.local_state();
+                        let (transaction, table_codec) = state.transaction_codec_mut();
+                        transaction.del_index(
+                            table_codec,
                             &self.table_name,
                             &Index::new(*index_id, value, *index_ty),
                             tuple_id,
@@ -136,9 +139,9 @@ impl Delete {
                     }
                 }
 
-                arena
-                    .transaction_mut()
-                    .remove_tuple(&self.table_name, tuple_id)?;
+                let mut state = arena.local_state();
+                let (transaction, table_codec) = state.transaction_codec_mut();
+                transaction.remove_tuple(table_codec, &self.table_name, tuple_id)?;
                 deleted_count += 1;
             }
         }

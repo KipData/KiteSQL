@@ -25,7 +25,9 @@ pub struct ShowTables<'a, T: Transaction + 'a> {
 impl<'a, T: Transaction + 'a> ShowTables<'a, T> {
     pub(crate) fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
         if self.metas.is_none() {
-            self.metas = Some(arena.transaction().tables()?);
+            let mut state = arena.local_state();
+            let (transaction, table_codec) = state.transaction_codec();
+            self.metas = Some(transaction.tables(table_codec)?);
         }
 
         let Some(table) = self

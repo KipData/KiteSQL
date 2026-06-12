@@ -85,21 +85,30 @@ impl CreateIndex {
                 })
             })
             .unzip();
-        let index_id = {
-            let (transaction, context) = arena.write_context_mut();
+        let index_id_result = {
+            let mut state = arena.local_state();
+            let (transaction, table_codec, context) = state.write_context_mut();
             let table_cache = context.table_cache_mut();
-            match transaction.add_index_meta(table_cache, &table_name, index_name, column_ids, ty) {
-                Ok(index_id) => index_id,
-                Err(DatabaseError::DuplicateIndex(index_name)) => {
-                    if if_not_exists {
-                        arena.finish();
-                        return Ok(());
-                    } else {
-                        return Err(DatabaseError::DuplicateIndex(index_name));
-                    }
+            transaction.add_index_meta(
+                table_codec,
+                table_cache,
+                &table_name,
+                index_name,
+                column_ids,
+                ty,
+            )
+        };
+        let index_id = match index_id_result {
+            Ok(index_id) => index_id,
+            Err(DatabaseError::DuplicateIndex(index_name)) => {
+                if if_not_exists {
+                    arena.finish();
+                    return Ok(());
+                } else {
+                    return Err(DatabaseError::DuplicateIndex(index_name));
                 }
-                Err(err) => return Err(err),
             }
+            Err(err) => return Err(err),
         };
 
         while arena.next_tuple(self.input)? {
@@ -116,9 +125,9 @@ impl CreateIndex {
                 (value, tuple_pk)
             };
             let index = Index::new(index_id, &value, ty);
-            arena
-                .transaction_mut()
-                .add_index(table_name.as_ref(), index, &tuple_pk)?;
+            let mut state = arena.local_state();
+            let (transaction, table_codec) = state.transaction_codec_mut();
+            transaction.add_index(table_codec, table_name.as_ref(), index, &tuple_pk)?;
         }
 
         TupleBuilder::build_result_into(arena.result_tuple_mut(), "1".to_string());

@@ -824,7 +824,7 @@ pub mod test {
     use crate::errors::DatabaseError;
     use crate::planner::LogicalPlan;
     use crate::storage::rocksdb::RocksStorage;
-    use crate::storage::{Storage, TableCache, Transaction, ViewCache};
+    use crate::storage::{table_codec::TableCodec, Storage, TableCache, Transaction, ViewCache};
     use crate::types::ColumnId;
     use crate::types::LogicalType::Integer;
     use std::path::PathBuf;
@@ -893,8 +893,10 @@ pub mod test {
     ) -> Result<RocksStorage, DatabaseError> {
         let storage = RocksStorage::new(path)?;
         let mut transaction = storage.transaction()?;
+        let mut table_codec = TableCodec::default();
 
         let _ = transaction.create_table(
+            &mut table_codec,
             table_cache,
             "t1".to_string().into(),
             vec![
@@ -913,6 +915,7 @@ pub mod test {
         )?;
 
         let _ = transaction.create_table(
+            &mut table_codec,
             table_cache,
             "t2".to_string().into(),
             vec![

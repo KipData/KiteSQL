@@ -53,9 +53,10 @@ impl DropTable {
             return Ok(());
         };
 
-        let (transaction, context) = arena.write_context_mut();
+        let mut state = arena.local_state();
+        let (transaction, table_codec, context) = state.write_context_mut();
         let table_cache = context.table_cache_mut();
-        transaction.drop_table(table_cache, table_name.clone(), if_exists)?;
+        transaction.drop_table(table_codec, table_cache, table_name.clone(), if_exists)?;
 
         TupleBuilder::build_result_into(arena.result_tuple_mut(), format!("{table_name}"));
         arena.resume();

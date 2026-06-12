@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::storage::table_codec::TableCodec;
 use crate::storage::{
     CheckpointableStorage, InnerIter, Storage, Transaction, TransactionIsolationLevel,
 };
@@ -447,7 +446,6 @@ impl Storage for OptimisticRocksStorage {
             isolation,
             current_snapshot: matches!(isolation, TransactionIsolationLevel::RepeatableRead)
                 .then(|| self.inner.snapshot()),
-            table_codec: Default::default(),
         })
     }
 
@@ -495,7 +493,6 @@ impl Storage for RocksStorage {
             isolation,
             current_snapshot: matches!(isolation, TransactionIsolationLevel::RepeatableRead)
                 .then(|| self.inner.snapshot()),
-            table_codec: Default::default(),
         })
     }
 
@@ -566,7 +563,6 @@ pub struct OptimisticRocksTransaction<'db> {
     tx: rocksdb::Transaction<'db, OptimisticTransactionDB>,
     isolation: TransactionIsolationLevel,
     current_snapshot: Option<SnapshotWithThreadMode<'db, OptimisticTransactionDB>>,
-    table_codec: TableCodec,
 }
 
 pub struct RocksTransaction<'db> {
@@ -574,7 +570,6 @@ pub struct RocksTransaction<'db> {
     tx: rocksdb::Transaction<'db, TransactionDB<rocksdb::MultiThreaded>>,
     isolation: TransactionIsolationLevel,
     current_snapshot: Option<SnapshotWithThreadMode<'db, TransactionDB<rocksdb::MultiThreaded>>>,
-    table_codec: TableCodec,
 }
 
 fn build_read_options<D: rocksdb::DBAccess>(
@@ -600,12 +595,6 @@ macro_rules! impl_transaction {
                 = $iter<'storage, 'iter>
             where
                 Self: 'iter;
-
-            #[inline]
-            fn table_codec(&self) -> *const TableCodec {
-                &self.table_codec
-            }
-
             fn begin_statement_scope(&mut self) -> Result<(), DatabaseError> {
                 if self.isolation == TransactionIsolationLevel::ReadCommitted {
                     self.current_snapshot = Some(self.db.snapshot());
@@ -775,6 +764,7 @@ mod test {
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
     use crate::storage::rocksdb::RocksStorage;
+    use crate::storage::table_codec::TableCodec;
     use crate::storage::{
         IndexImplEnum, IndexImplParams, IndexIter, IndexIterState, InnerIter, IterBounds,
         PrimaryKeyIndexImpl, Storage, Transaction,
@@ -851,6 +841,7 @@ mod test {
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
         let mut table_cache = crate::storage::TableCache::default();
+        let mut table_codec = TableCodec::default();
         let columns = Arc::new(vec![
             ColumnRef::from(ColumnCatalog::new(
                 "c1".to_string(),
@@ -869,6 +860,7 @@ mod test {
             .map(|col_ref| ColumnCatalog::clone(col_ref))
             .collect_vec();
         let _ = transaction.create_table(
+            &mut table_codec,
             &mut table_cache,
             "test".to_string().into(),
             source_columns,
@@ -880,6 +872,7 @@ mod test {
         assert!(table_catalog.unwrap().get_column_id_by_name("c1").is_some());
 
         transaction.append_tuple(
+            &mut table_codec,
             "test",
             Tuple::new(
                 Some(DataValue::Int32(1)),
@@ -892,6 +885,7 @@ mod test {
             false,
         )?;
         transaction.append_tuple(
+            &mut table_codec,
             "test",
             Tuple::new(
                 Some(DataValue::Int32(2)),
@@ -907,6 +901,7 @@ mod test {
         let read_columns = vec![columns[0].clone()];
 
         let mut iter = transaction.read(
+            &mut table_codec,
             &table_cache,
             "test".to_string().into(),
             (Some(1), Some(1)),
@@ -1151,7 +1146,8 @@ mod test {
 
         let target_pk = DataValue::Int32(3);
         let covered_value = DataValue::Int32(4);
-        transaction.remove_tuple("t1", &target_pk)?;
+        let mut table_codec = TableCodec::default();
+        transaction.remove_tuple(&mut table_codec, "t1", &target_pk)?;
 
         let mut iter = transaction.read_by_index(
             kite_sql.state.table_cache(),

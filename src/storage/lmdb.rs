@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::storage::table_codec::{Bytes, TableCodec};
+use crate::storage::table_codec::Bytes;
 use crate::storage::{
     reuse_bound_as_excluded, InnerIter, KeyValueRef, Storage, Transaction,
     TransactionIsolationLevel,
@@ -135,11 +135,7 @@ impl Storage for LmdbStorage {
         self.validate_transaction_isolation(isolation)?;
         let tx = self.env.begin_rw_txn().map_err(map_lmdb_err)?;
 
-        Ok(LmdbTransaction {
-            tx,
-            db: self.db,
-            table_codec: Default::default(),
-        })
+        Ok(LmdbTransaction { tx, db: self.db })
     }
 
     fn default_transaction_isolation(&self) -> TransactionIsolationLevel {
@@ -167,7 +163,6 @@ impl Storage for LmdbStorage {
 pub struct LmdbTransaction<'env> {
     tx: RwTransaction<'env>,
     db: Database,
-    table_codec: TableCodec,
 }
 
 pub struct LmdbIter<'txn> {
@@ -220,11 +215,6 @@ impl Transaction for LmdbTransaction<'_> {
         = LmdbIter<'a>
     where
         Self: 'a;
-
-    fn table_codec(&self) -> *const TableCodec {
-        &self.table_codec
-    }
-
     fn get_borrowed<'a>(
         &'a self,
         key: &[u8],

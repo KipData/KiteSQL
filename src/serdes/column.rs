@@ -223,7 +223,14 @@ pub(crate) mod test {
             );
             cursor.seek(SeekFrom::Start(0))?;
 
-            transaction.drop_column(&mut table_cache, &mut meta_cache, &table_name, "c3")?;
+            let mut table_codec = crate::storage::table_codec::TableCodec::default();
+            transaction.drop_column(
+                &mut table_codec,
+                &mut table_cache,
+                &mut meta_cache,
+                &table_name,
+                "c3",
+            )?;
             let context = ReferenceDecodeContext::new(Some((&transaction, &table_cache)));
             assert!(ColumnRef::decode::<RocksTransaction, Cursor<Vec<u8>>>(
                 &mut cursor,

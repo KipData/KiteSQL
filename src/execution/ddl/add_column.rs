@@ -91,10 +91,16 @@ impl AddColumn {
         let default_value = column.default_value()?;
 
         let unique_meta = {
-            let (transaction, context) = arena.write_context_mut();
+            let mut state = arena.local_state();
+            let (transaction, table_codec, context) = state.write_context_mut();
             let table_cache = context.table_cache_mut();
-            let col_id =
-                transaction.add_column(table_cache, &table_name, &column, if_not_exists)?;
+            let col_id = transaction.add_column(
+                table_codec,
+                table_cache,
+                &table_name,
+                &column,
+                if_not_exists,
+            )?;
             if column.desc().is_unique() {
                 table_cache
                     .get(&table_name)
@@ -106,8 +112,11 @@ impl AddColumn {
         };
         let default_for_index = default_value.clone();
 
+        let mut state = arena.local_state();
+        let (transaction, table_codec) = state.transaction_codec_mut();
         rewrite_table_in_batches(
-            arena.transaction_mut(),
+            transaction,
+            table_codec,
             &table_name,
             &pk_ty,
             &old_deserializers,
@@ -121,14 +130,14 @@ impl AddColumn {
                 }
                 Ok(())
             },
-            |transaction, tuple| {
+            |transaction, table_codec, tuple| {
                 if let (Some(unique_meta), Some(value), Some(tuple_id)) = (
                     unique_meta.as_ref(),
                     default_for_index.as_ref(),
                     tuple.pk.as_ref(),
                 ) {
                     let index = Index::new(unique_meta.id, value, IndexType::Unique);
-                    transaction.add_index(&table_name, index, tuple_id)?;
+                    transaction.add_index(table_codec, &table_name, index, tuple_id)?;
                 }
                 Ok(())
             },

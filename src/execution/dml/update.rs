@@ -117,9 +117,9 @@ impl Update {
                         continue;
                     };
                     let index = Index::new(index_meta.id, &value, index_meta.ty);
-                    arena
-                        .transaction_mut()
-                        .del_index(&self.table_name, &index, &old_pk)?;
+                    let mut state = arena.local_state();
+                    let (transaction, table_codec) = state.transaction_codec_mut();
+                    transaction.del_index(table_codec, &self.table_name, &index, &old_pk)?;
                 }
                 for (i, column) in self.input_schema.iter().enumerate() {
                     if let Some(expr) = exprs_map.get(&column.id()) {
@@ -135,9 +135,9 @@ impl Update {
                 let new_pk = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
 
                 if new_pk != &old_pk {
-                    arena
-                        .transaction_mut()
-                        .remove_tuple(&self.table_name, &old_pk)?;
+                    let mut state = arena.local_state();
+                    let (transaction, table_codec) = state.transaction_codec_mut();
+                    transaction.remove_tuple(table_codec, &self.table_name, &old_pk)?;
                     is_overwrite = false;
                 }
                 for (index_meta, exprs) in table_snapshot.index_metas.iter() {
@@ -146,12 +146,15 @@ impl Update {
                         continue;
                     };
                     let index = Index::new(index_meta.id, &value, index_meta.ty);
-                    arena
-                        .transaction_mut()
-                        .add_index(&self.table_name, index, new_pk)?;
+                    let mut state = arena.local_state();
+                    let (transaction, table_codec) = state.transaction_codec_mut();
+                    transaction.add_index(table_codec, &self.table_name, index, new_pk)?;
                 }
 
-                arena.transaction_mut().append_tuple(
+                let mut state = arena.local_state();
+                let (transaction, table_codec) = state.transaction_codec_mut();
+                transaction.append_tuple(
+                    table_codec,
                     &self.table_name,
                     tuple,
                     &serializers,

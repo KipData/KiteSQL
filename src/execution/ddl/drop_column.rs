@@ -88,8 +88,11 @@ impl DropColumn {
                 .filter(|(i, _)| *i != column_index)
                 .map(|(_, column)| column.datatype().serializable())
                 .collect_vec();
+            let mut state = arena.local_state();
+            let (transaction, table_codec) = state.transaction_codec_mut();
             rewrite_table_in_batches(
-                arena.transaction_mut(),
+                transaction,
+                table_codec,
                 &table_name,
                 &pk_ty,
                 &old_deserializers,
@@ -99,11 +102,18 @@ impl DropColumn {
                     let _ = tuple.values.remove(column_index);
                     Ok(())
                 },
-                |_, _| Ok(()),
+                |_, _, _| Ok(()),
             )?;
-            let (transaction, context) = arena.write_context_mut();
+            let mut state = arena.local_state();
+            let (transaction, table_codec, context) = state.write_context_mut();
             let (table_cache, meta_cache) = context.table_meta_cache_mut();
-            transaction.drop_column(table_cache, meta_cache, &table_name, &column_name)?;
+            transaction.drop_column(
+                table_codec,
+                table_cache,
+                meta_cache,
+                &table_name,
+                &column_name,
+            )?;
 
             TupleBuilder::build_result_into(arena.result_tuple_mut(), "1".to_string());
             arena.resume();
