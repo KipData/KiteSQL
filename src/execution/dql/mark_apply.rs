@@ -14,7 +14,8 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext,
+    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
+    ReadExecutor,
 };
 use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyOperator, MarkApplyQuantifier};
 use crate::planner::LogicalPlan;
@@ -39,12 +40,12 @@ pub struct MarkApply {
     left_tuple: Tuple,
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for MarkApply {
     type Input = (MarkApplyOperator, LogicalPlan, LogicalPlan);
 
     fn into_executor(
         (op, left_input, right_input): Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena,
         plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
@@ -57,23 +58,25 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply {
             left_tuple: Tuple::default(),
         }))
     }
+}
 
+impl<'a> ExecutorNode<'a> for MarkApply {
     fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
-        if !arena.next_tuple(self.left_input, plan_arena)? {
-            arena.finish();
+        if !runtime.next_tuple(self.left_input, plan_arena)? {
+            runtime.finish();
             return Ok(());
         }
 
-        self.left_tuple = mem::take(arena.result_tuple_mut());
-        let marker = self.mark_value(arena, plan_arena)?;
+        self.left_tuple = mem::take(runtime.result_tuple_mut());
+        let marker = self.mark_value(runtime, plan_arena)?;
 
-        arena.produce_tuple(mem::take(&mut self.left_tuple));
-        arena.result_tuple_mut().values.push(marker);
-        arena.resume();
+        runtime.produce_tuple(mem::take(&mut self.left_tuple));
+        runtime.result_tuple_mut().values.push(marker);
+        runtime.resume();
         Ok(())
     }
 }
@@ -98,43 +101,37 @@ impl MarkApply {
         }
     }
 
-    fn with_right_input<'a, T: Transaction + 'a, R>(
+    fn with_right_input<'a, R>(
         &self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
         param_value: Option<DataValue>,
         f: impl FnOnce(
-            &mut ExecArena<'a, T>,
+            &mut dyn ExecRuntime<'a>,
             &mut crate::planner::PlanArena<'a>,
             ExecId,
         ) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         let runtime_probe = self.runtime_probe_for(param_value);
-        let depth_before = arena.runtime_probe_depth();
+        let depth_before = runtime.runtime_probe_depth();
         if let Some(runtime_probe) = runtime_probe {
-            arena.push_runtime_probe(runtime_probe);
+            runtime.push_runtime_probe(runtime_probe);
         }
 
-        let cache = arena.read_context();
-        let transaction = arena.transaction();
+        let cache = runtime.read_context();
         let result = {
-            let right_input = build_read(
-                arena,
-                plan_arena,
-                self.right_input_plan.clone(),
-                cache,
-                transaction,
-            );
-            f(arena, plan_arena, right_input)
+            let right_input =
+                runtime.build_read_plan(plan_arena, self.right_input_plan.clone(), cache);
+            f(runtime, plan_arena, right_input)
         };
 
-        let depth_after = arena.runtime_probe_depth();
+        let depth_after = runtime.runtime_probe_depth();
         debug_assert!(
             depth_after == depth_before || depth_after == depth_before + 1,
             "parameterized right input should consume at most one runtime probe"
         );
         if depth_after > depth_before {
-            let _ = arena.pop_runtime_probe();
+            let _ = runtime.pop_runtime_probe();
         }
 
         result
@@ -147,19 +144,19 @@ impl MarkApply {
             .transpose()
     }
 
-    fn mark_value<'a, T: Transaction + 'a>(
+    fn mark_value<'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<DataValue, DatabaseError> {
         match self.op.kind {
             MarkApplyKind::Exists => self.with_right_input(
-                arena,
+                runtime,
                 plan_arena,
                 self.parameterized_probe_value()?,
-                |arena, plan_arena, right_input| {
-                    while arena.next_tuple(right_input, plan_arena)? {
-                        let right_tuple = arena.result_tuple();
+                |runtime, plan_arena, right_input| {
+                    while runtime.next_tuple(right_input, plan_arena)? {
+                        let right_tuple = runtime.result_tuple();
                         if self.exists_predicate_matched(&self.left_tuple, right_tuple)? {
                             return Ok(DataValue::Boolean(true));
                         }
@@ -172,12 +169,12 @@ impl MarkApply {
                 if let Some(probe_value) = self.parameterized_probe_value()? {
                     if !probe_value.is_null() {
                         if self.with_right_input(
-                            arena,
+                            runtime,
                             plan_arena,
                             Some(probe_value),
-                            |arena, plan_arena, right_input| {
-                                while arena.next_tuple(right_input, plan_arena)? {
-                                    let right_tuple = arena.result_tuple();
+                            |runtime, plan_arena, right_input| {
+                                while runtime.next_tuple(right_input, plan_arena)? {
+                                    let right_tuple = runtime.result_tuple();
                                     if self.quantified_predicate_outcome(
                                         &self.left_tuple,
                                         right_tuple,
@@ -194,12 +191,12 @@ impl MarkApply {
                         }
 
                         if self.with_right_input(
-                            arena,
+                            runtime,
                             plan_arena,
                             Some(DataValue::Null),
-                            |arena, plan_arena, right_input| {
-                                while arena.next_tuple(right_input, plan_arena)? {
-                                    let right_tuple = arena.result_tuple();
+                            |runtime, plan_arena, right_input| {
+                                while runtime.next_tuple(right_input, plan_arena)? {
+                                    let right_tuple = runtime.result_tuple();
                                     if self.quantified_predicate_outcome(
                                         &self.left_tuple,
                                         right_tuple,
@@ -219,39 +216,47 @@ impl MarkApply {
                     }
                 }
 
-                self.with_right_input(arena, plan_arena, None, |arena, plan_arena, right_input| {
-                    self.scan_quantified_right_input(
-                        arena,
-                        plan_arena,
-                        right_input,
-                        MarkApplyQuantifier::Any,
-                    )
-                })
+                self.with_right_input(
+                    runtime,
+                    plan_arena,
+                    None,
+                    |runtime, plan_arena, right_input| {
+                        self.scan_quantified_right_input(
+                            runtime,
+                            plan_arena,
+                            right_input,
+                            MarkApplyQuantifier::Any,
+                        )
+                    },
+                )
             }
-            MarkApplyKind::Quantified(MarkApplyQuantifier::All) => {
-                self.with_right_input(arena, plan_arena, None, |arena, plan_arena, right_input| {
+            MarkApplyKind::Quantified(MarkApplyQuantifier::All) => self.with_right_input(
+                runtime,
+                plan_arena,
+                None,
+                |runtime, plan_arena, right_input| {
                     self.scan_quantified_right_input(
-                        arena,
+                        runtime,
                         plan_arena,
                         right_input,
                         MarkApplyQuantifier::All,
                     )
-                })
-            }
+                },
+            ),
         }
     }
 
-    fn scan_quantified_right_input<'a, T: Transaction + 'a>(
+    fn scan_quantified_right_input<'a>(
         &self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
         right_input: ExecId,
         quantifier: MarkApplyQuantifier,
     ) -> Result<DataValue, DatabaseError> {
         let mut saw_null = false;
 
-        while arena.next_tuple(right_input, plan_arena)? {
-            let right_tuple = arena.result_tuple();
+        while runtime.next_tuple(right_input, plan_arena)? {
+            let right_tuple = runtime.result_tuple();
             match self.quantified_predicate_outcome(&self.left_tuple, right_tuple)? {
                 QuantifiedPredicateOutcome::True => {
                     if matches!(quantifier, MarkApplyQuantifier::Any) {
@@ -339,7 +344,7 @@ impl MarkApply {
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
-    use crate::execution::{execute_input, try_collect, ExecArena};
+    use crate::execution::{execute_input, try_collect, ExecArena, ExecuteRuntime};
     use crate::expression::{BinaryOperator, ScalarExpression};
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
@@ -449,7 +454,7 @@ mod tests {
         let predicate = build_equality_predicate(left_column, 0, right_column, 1)?;
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
-        let mut transaction = storage.transaction()?;
+        let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, MarkApply>(
             (
                 MarkApplyOperator::new_exists(
@@ -461,7 +466,7 @@ mod tests {
             ),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
-            &mut transaction,
+            &transaction,
         ))?;
 
         assert_eq!(
@@ -500,7 +505,7 @@ mod tests {
         let predicate = build_equality_predicate(left_column, 0, right_column, 1)?;
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
-        let mut transaction = storage.transaction()?;
+        let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, MarkApply>(
             (
                 MarkApplyOperator::new_exists(
@@ -512,7 +517,7 @@ mod tests {
             ),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
-            &mut transaction,
+            &transaction,
         ))?;
 
         assert_eq!(
@@ -573,9 +578,10 @@ mod tests {
         op.set_parameterized_probe(Some(ScalarExpression::column_expr(left_value_column, 0)));
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
-        let mut transaction = storage.transaction()?;
-        let mut arena = ExecArena::new();
-        arena.init_context((&table_cache, &view_cache, &meta_cache), &mut transaction);
+        let transaction = storage.transaction()?;
+        let arena = ExecArena::new();
+        let mut runtime = ExecuteRuntime::new(arena);
+        runtime.init_context((&table_cache, &view_cache, &meta_cache), &transaction);
 
         let mut exec = MarkApply {
             op,
@@ -585,7 +591,7 @@ mod tests {
         };
 
         assert_eq!(
-            exec.mark_value(&mut arena, &mut plan_arena)?,
+            exec.mark_value(&mut runtime, &mut plan_arena)?,
             DataValue::Boolean(true)
         );
         assert_eq!(
@@ -619,9 +625,10 @@ mod tests {
         op.set_parameterized_probe(Some(ScalarExpression::column_expr(left_value_column, 0)));
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
-        let mut transaction = storage.transaction()?;
-        let mut arena = ExecArena::new();
-        arena.init_context((&table_cache, &view_cache, &meta_cache), &mut transaction);
+        let transaction = storage.transaction()?;
+        let arena = ExecArena::new();
+        let mut runtime = ExecuteRuntime::new(arena);
+        runtime.init_context((&table_cache, &view_cache, &meta_cache), &transaction);
 
         let mut exec = MarkApply {
             op,
@@ -631,7 +638,7 @@ mod tests {
         };
 
         assert_eq!(
-            exec.mark_value(&mut arena, &mut plan_arena)?,
+            exec.mark_value(&mut runtime, &mut plan_arena)?,
             DataValue::Boolean(true)
         );
         assert_eq!(
@@ -665,9 +672,10 @@ mod tests {
         op.set_parameterized_probe(Some(ScalarExpression::column_expr(left_value_column, 0)));
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
-        let mut transaction = storage.transaction()?;
-        let mut arena = ExecArena::new();
-        arena.init_context((&table_cache, &view_cache, &meta_cache), &mut transaction);
+        let transaction = storage.transaction()?;
+        let arena = ExecArena::new();
+        let mut runtime = ExecuteRuntime::new(arena);
+        runtime.init_context((&table_cache, &view_cache, &meta_cache), &transaction);
 
         let mut exec = MarkApply {
             op,
@@ -677,7 +685,7 @@ mod tests {
         };
 
         assert_eq!(
-            exec.mark_value(&mut arena, &mut plan_arena)?,
+            exec.mark_value(&mut runtime, &mut plan_arena)?,
             DataValue::Null
         );
         assert_eq!(

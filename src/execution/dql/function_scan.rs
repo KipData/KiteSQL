@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext, ReadExecutor,
+    ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext, ReadExecutor,
 };
 use crate::expression::function::table::TableFunction;
 use crate::planner::operator::function_scan::FunctionScanOperator;
@@ -36,43 +36,23 @@ impl From<FunctionScanOperator> for FunctionScan {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for FunctionScan {
-    fn into_executor(
-        self,
-        arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut crate::planner::PlanArena<'a>,
-        _: ReadExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
-        arena.push(ExecNode::FunctionScan(self))
-    }
-}
-
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for FunctionScan {
     type Input = FunctionScanOperator;
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena,
         _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
         arena.push(ExecNode::FunctionScan(FunctionScan::from(input)))
     }
-
-    fn next_tuple(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
-    ) -> Result<(), DatabaseError> {
-        FunctionScan::next_tuple(self, arena, plan_arena)
-    }
 }
 
-impl FunctionScan {
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+impl<'a> ExecutorNode<'a> for FunctionScan {
+    fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         _: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if self.iter.is_none() {
@@ -82,10 +62,10 @@ impl FunctionScan {
 
         let tuple = self.iter.as_mut().and_then(Iterator::next).transpose()?;
         let Some(tuple) = tuple else {
-            arena.finish();
+            runtime.finish();
             return Ok(());
         };
-        arena.produce_tuple(tuple);
+        runtime.produce_tuple(tuple);
         Ok(())
     }
 }

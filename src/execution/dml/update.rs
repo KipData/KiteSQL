@@ -16,7 +16,8 @@ use crate::catalog::{ColumnRef, TableName};
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
+    WriteExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::update::UpdateOperator;
@@ -58,33 +59,38 @@ impl From<(UpdateOperator, LogicalPlan)> for Update {
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Update {
+    type Input = (
+        crate::planner::operator::update::UpdateOperator,
+        LogicalPlan,
+    );
+
     fn into_executor(
-        mut self,
-        arena: &mut ExecArena<'a, T>,
+        input: Self::Input,
+        arena: &mut ExecArena,
         plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        self.input_schema = self.input_plan.take_schema(plan_arena);
-        self.input = Some(build_read(
+        let mut exec = Self::from(input);
+        exec.input_schema = exec.input_plan.take_schema(plan_arena);
+        exec.input = Some(build_read(
             arena,
             plan_arena,
-            self.input_plan.take(),
+            exec.input_plan.take(),
             cache,
             transaction,
         ));
-        arena.push(ExecNode::Update(self))
+        arena.push(ExecNode::Update(exec))
     }
 }
-
-impl Update {
-    pub(crate) fn next_tuple<'a, T: Transaction>(
+impl<'a> ExecutorNode<'a> for Update {
+    fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(input) = self.input.take() else {
-            arena.finish();
+            runtime.finish();
             return Ok(());
         };
 
@@ -93,11 +99,9 @@ impl Update {
             exprs_map.insert(plan_arena.column(column).id(), expr);
         }
 
-        let table_cache = arena.read_context().table_cache();
-        let transaction = arena.transaction();
         let table_snapshot = {
-            transaction
-                .table(table_cache, self.table_name.clone())?
+            runtime
+                .transaction_table(self.table_name.clone())?
                 .map(|table| table.dml_snapshot(plan_arena))
                 .transpose()?
         };
@@ -110,8 +114,8 @@ impl Update {
 
             let mut updated_count = 0;
 
-            while arena.next_tuple(input, plan_arena)? {
-                let mut tuple = arena.result_tuple().clone();
+            while runtime.next_tuple(input, plan_arena)? {
+                let mut tuple = runtime.result_tuple().clone();
                 let mut is_overwrite = true;
 
                 let Some(old_pk) = tuple.pk.clone() else {
@@ -124,9 +128,7 @@ impl Update {
                         continue;
                     };
                     let index = Index::new(index_meta.id, &value, index_meta.ty);
-                    let mut state = arena.local_state(plan_arena);
-                    let (transaction, table_codec) = state.transaction_codec_mut();
-                    transaction.del_index(table_codec, &self.table_name, &index, &old_pk)?;
+                    runtime.transaction_del_index(&self.table_name, &index, &old_pk)?;
                 }
                 for (i, column) in self.input_schema.iter().enumerate() {
                     if let Some(expr) = exprs_map.get(&plan_arena.column(*column).id()) {
@@ -142,9 +144,7 @@ impl Update {
                 let new_pk = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
 
                 if new_pk != &old_pk {
-                    let mut state = arena.local_state(plan_arena);
-                    let (transaction, table_codec) = state.transaction_codec_mut();
-                    transaction.remove_tuple(table_codec, &self.table_name, &old_pk)?;
+                    runtime.transaction_remove_tuple(&self.table_name, &old_pk)?;
                     is_overwrite = false;
                 }
                 for (index_meta, exprs) in table_snapshot.index_metas.iter() {
@@ -154,15 +154,10 @@ impl Update {
                         continue;
                     };
                     let index = Index::new(index_meta.id, &value, index_meta.ty);
-                    let mut state = arena.local_state(plan_arena);
-                    let (transaction, table_codec) = state.transaction_codec_mut();
-                    transaction.add_index(table_codec, &self.table_name, index, new_pk)?;
+                    runtime.transaction_add_index(&self.table_name, index, new_pk)?;
                 }
 
-                let mut state = arena.local_state(plan_arena);
-                let (transaction, table_codec) = state.transaction_codec_mut();
-                transaction.append_tuple(
-                    table_codec,
+                runtime.transaction_append_tuple(
                     &self.table_name,
                     tuple,
                     &serializers,
@@ -171,12 +166,12 @@ impl Update {
                 updated_count += 1;
             }
 
-            TupleBuilder::build_result_into(arena.result_tuple_mut(), updated_count.to_string());
-            arena.resume();
+            TupleBuilder::build_result_into(runtime.result_tuple_mut(), updated_count.to_string());
+            runtime.resume();
             Ok(())
         } else {
-            TupleBuilder::build_result_into(arena.result_tuple_mut(), "0".to_string());
-            arena.resume();
+            TupleBuilder::build_result_into(runtime.result_tuple_mut(), "0".to_string());
+            runtime.resume();
             Ok(())
         }
     }

@@ -19,6 +19,7 @@ pub mod tuple;
 pub mod tuple_builder;
 pub mod value;
 
+#[cfg(feature = "time")]
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 #[cfg(feature = "decimal")]
 use rust_decimal::Decimal;
@@ -98,12 +99,6 @@ impl LogicalType {
             Some(LogicalType::Float)
         } else if type_id == TypeId::of::<f64>() {
             Some(LogicalType::Double)
-        } else if type_id == TypeId::of::<NaiveDate>() {
-            Some(LogicalType::Date)
-        } else if type_id == TypeId::of::<NaiveDateTime>() {
-            Some(LogicalType::DateTime)
-        } else if type_id == TypeId::of::<NaiveTime>() {
-            Some(LogicalType::Time(Some(0)))
         } else if {
             #[cfg(feature = "decimal")]
             {
@@ -118,6 +113,18 @@ impl LogicalType {
         } else if type_id == TypeId::of::<String>() {
             Some(LogicalType::Varchar(None, CharLengthUnits::Characters))
         } else {
+            #[cfg(feature = "time")]
+            {
+                if type_id == TypeId::of::<NaiveDate>() {
+                    return Some(LogicalType::Date);
+                }
+                if type_id == TypeId::of::<NaiveDateTime>() {
+                    return Some(LogicalType::DateTime);
+                }
+                if type_id == TypeId::of::<NaiveTime>() {
+                    return Some(LogicalType::Time(Some(0)));
+                }
+            }
             None
         }
     }
@@ -230,25 +237,29 @@ impl LogicalType {
         if left.is_numeric() && right.is_numeric() {
             return LogicalType::combine_numeric_types(left, right);
         }
-        if matches!(
-            (left, right),
-            (LogicalType::Date, LogicalType::Varchar(..))
-                | (LogicalType::Varchar(..), LogicalType::Date)
-        ) {
-            return Ok(Cow::Owned(LogicalType::Date));
-        }
-        if matches!(
-            (left, right),
-            (LogicalType::Date, LogicalType::DateTime) | (LogicalType::DateTime, LogicalType::Date)
-        ) {
-            return Ok(Cow::Owned(LogicalType::DateTime));
-        }
-        if matches!(
-            (left, right),
-            (LogicalType::DateTime, LogicalType::Varchar(..))
-                | (LogicalType::Varchar(..), LogicalType::DateTime)
-        ) {
-            return Ok(Cow::Owned(LogicalType::DateTime));
+        #[cfg(feature = "time")]
+        {
+            if matches!(
+                (left, right),
+                (LogicalType::Date, LogicalType::Varchar(..))
+                    | (LogicalType::Varchar(..), LogicalType::Date)
+            ) {
+                return Ok(Cow::Owned(LogicalType::Date));
+            }
+            if matches!(
+                (left, right),
+                (LogicalType::Date, LogicalType::DateTime)
+                    | (LogicalType::DateTime, LogicalType::Date)
+            ) {
+                return Ok(Cow::Owned(LogicalType::DateTime));
+            }
+            if matches!(
+                (left, right),
+                (LogicalType::DateTime, LogicalType::Varchar(..))
+                    | (LogicalType::Varchar(..), LogicalType::DateTime)
+            ) {
+                return Ok(Cow::Owned(LogicalType::DateTime));
+            }
         }
         if let (LogicalType::Char(..), LogicalType::Varchar(..))
         | (LogicalType::Varchar(..), LogicalType::Char(..))

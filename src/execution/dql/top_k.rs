@@ -15,7 +15,8 @@
 use crate::errors::DatabaseError;
 use crate::execution::dql::sort::BumpVec;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext,
+    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
+    ReadExecutor,
 };
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::top_k::TopKOperator;
@@ -98,7 +99,7 @@ pub struct TopK {
     input: ExecId,
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for TopK {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for TopK {
     type Input = (TopKOperator, LogicalPlan);
 
     fn into_executor(
@@ -110,7 +111,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for TopK {
             },
             input,
         ): Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena,
         plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
@@ -125,23 +126,25 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for TopK {
             input,
         }))
     }
+}
 
+impl<'a> ExecutorNode<'a> for TopK {
     #[allow(clippy::mutable_key_type)]
     fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if self.output.is_none() {
             let keep_count = self.offset.unwrap_or(0) + self.limit;
             let mut set = BTreeSet::new();
 
-            while arena.next_tuple(self.input, plan_arena)? {
+            while runtime.next_tuple(self.input, plan_arena)? {
                 top_sort(
                     &self.arena,
                     &self.sort_fields,
                     &mut set,
-                    arena.result_tuple().clone(),
+                    runtime.result_tuple().clone(),
                     keep_count,
                 )?;
             }
@@ -159,9 +162,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for TopK {
         }
 
         if let Some(item) = self.output.as_mut().and_then(std::iter::Iterator::next) {
-            arena.produce_tuple(item.tuple);
+            runtime.produce_tuple(item.tuple);
         } else {
-            arena.finish();
+            runtime.finish();
         }
         Ok(())
     }

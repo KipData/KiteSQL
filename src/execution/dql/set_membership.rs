@@ -14,7 +14,8 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext, ReadExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
+    ReadExecutor,
 };
 use crate::planner::operator::set_membership::SetMembershipKind;
 use crate::planner::LogicalPlan;
@@ -49,88 +50,65 @@ impl From<(SetMembershipKind, LogicalPlan, LogicalPlan)> for SetMembership {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SetMembership {
-    fn into_executor(
-        mut self,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
-        cache: ReadExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        self.left_input = build_read(arena, plan_arena, self.left_plan.take(), cache, transaction);
-        self.right_input = build_read(
-            arena,
-            plan_arena,
-            self.right_plan.take(),
-            cache,
-            transaction,
-        );
-        arena.push(ExecNode::SetMembership(self))
-    }
-}
-
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SetMembership {
     type Input = (SetMembershipKind, LogicalPlan, LogicalPlan);
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena,
         plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        <Self as ReadExecutor<'a, T>>::into_executor(
-            Self::from(input),
+        let mut exec = Self::from(input);
+        exec.left_input = build_read(arena, plan_arena, exec.left_plan.take(), cache, transaction);
+        exec.right_input = build_read(
             arena,
             plan_arena,
+            exec.right_plan.take(),
             cache,
             transaction,
-        )
-    }
-
-    fn next_tuple(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
-    ) -> Result<(), DatabaseError> {
-        SetMembership::next_tuple(self, arena, plan_arena)
+        );
+        arena.push(ExecNode::SetMembership(exec))
     }
 }
 
-impl SetMembership {
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+impl<'a> ExecutorNode<'a> for SetMembership {
+    fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if !self.built {
-            while arena.next_tuple(self.right_input, plan_arena)? {
+            while runtime.next_tuple(self.right_input, plan_arena)? {
                 *self
                     .right_counts
-                    .entry(arena.result_tuple().clone())
+                    .entry(runtime.result_tuple().clone())
                     .or_insert(0) += 1;
             }
             self.built = true;
         }
 
         loop {
-            if !arena.next_tuple(self.left_input, plan_arena)? {
-                arena.finish();
+            if !runtime.next_tuple(self.left_input, plan_arena)? {
+                runtime.finish();
                 return Ok(());
             }
 
-            let matched = self.consume_right_match(arena.result_tuple());
+            let matched = self.consume_right_match(runtime.result_tuple());
             let should_emit = match self.kind {
                 SetMembershipKind::Except => !matched,
                 SetMembershipKind::Intersect => matched,
             };
 
             if should_emit {
-                arena.resume();
+                runtime.resume();
                 return Ok(());
             }
         }
     }
+}
 
+impl SetMembership {
     fn consume_right_match(&mut self, tuple: &Tuple) -> bool {
         if let Some(count) = self.right_counts.get_mut(tuple) {
             if *count > 0 {

@@ -16,7 +16,8 @@ use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
+    WriteExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::delete::DeleteOperator;
@@ -44,39 +45,43 @@ impl From<(DeleteOperator, LogicalPlan)> for Delete {
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Delete {
+    type Input = (
+        crate::planner::operator::delete::DeleteOperator,
+        LogicalPlan,
+    );
+
     fn into_executor(
-        mut self,
-        arena: &mut ExecArena<'a, T>,
+        input: Self::Input,
+        arena: &mut ExecArena,
         plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        self.input = Some(build_read(
+        let mut exec = Self::from(input);
+        exec.input = Some(build_read(
             arena,
             plan_arena,
-            self.input_plan.take(),
+            exec.input_plan.take(),
             cache,
             transaction,
         ));
-        arena.push(ExecNode::Delete(self))
+        arena.push(ExecNode::Delete(exec))
     }
 }
-
-impl Delete {
-    pub(crate) fn next_tuple<'a, T: Transaction>(
+impl<'a> ExecutorNode<'a> for Delete {
+    fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(input) = self.input.take() else {
-            arena.finish();
+            runtime.finish();
             return Ok(());
         };
 
         let index_templates = {
-            let table = arena
-                .transaction()
-                .table(arena.table_cache(), self.table_name.clone())?
+            let table = runtime
+                .transaction_table(self.table_name.clone())?
                 .ok_or(DatabaseError::TableNotFound)?;
             table
                 .indexes()
@@ -94,8 +99,8 @@ impl Delete {
 
         let mut deleted_count = 0;
 
-        while arena.next_tuple(input, plan_arena)? {
-            let tuple = arena.result_tuple().clone();
+        while runtime.next_tuple(input, plan_arena)? {
+            let tuple = runtime.result_tuple().clone();
             for (index_id, index_ty, exprs) in index_templates.iter() {
                 if let Some(Value { exprs, values, .. }) = indexes.get_mut(index_id) {
                     let Some(data_value) =
@@ -132,10 +137,7 @@ impl Delete {
                 ) in indexes.iter_mut()
                 {
                     for value in values {
-                        let mut state = arena.local_state(plan_arena);
-                        let (transaction, table_codec) = state.transaction_codec_mut();
-                        transaction.del_index(
-                            table_codec,
+                        runtime.transaction_del_index(
                             &self.table_name,
                             &Index::new(*index_id, value, *index_ty),
                             tuple_id,
@@ -143,15 +145,13 @@ impl Delete {
                     }
                 }
 
-                let mut state = arena.local_state(plan_arena);
-                let (transaction, table_codec) = state.transaction_codec_mut();
-                transaction.remove_tuple(table_codec, &self.table_name, tuple_id)?;
+                runtime.transaction_remove_tuple(&self.table_name, tuple_id)?;
                 deleted_count += 1;
             }
         }
 
-        TupleBuilder::build_result_into(arena.result_tuple_mut(), deleted_count.to_string());
-        arena.resume();
+        TupleBuilder::build_result_into(runtime.result_tuple_mut(), deleted_count.to_string());
+        runtime.resume();
         Ok(())
     }
 }

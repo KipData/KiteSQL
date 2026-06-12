@@ -15,6 +15,7 @@
 use crate::expression::{BinaryOperator, UnaryOperator};
 use crate::types::tuple::TupleId;
 use crate::types::LogicalType;
+#[cfg(feature = "time")]
 use chrono::ParseError;
 #[cfg(feature = "parser")]
 use sqlparser::parser::ParserError;
@@ -114,6 +115,7 @@ pub enum DatabaseError {
     },
     OverFlow,
     ParseBool(ParseBoolError),
+    #[cfg(feature = "time")]
     ParseDate(ParseError),
     ParseFloat(ParseFloatError),
     ParseInt(ParseIntError),
@@ -217,6 +219,7 @@ impl fmt::Display for DatabaseError {
             Self::NotNull { column, span } => f.write_str(&format_not_null_message(column, span)),
             Self::OverFlow => f.write_str("over flow"),
             Self::ParseBool(err) => write!(f, "parser bool: {err}"),
+            #[cfg(feature = "time")]
             Self::ParseDate(err) => write!(f, "parser date: {err}"),
             Self::ParseFloat(err) => write!(f, "parser float: {err}"),
             Self::ParseInt(err) => write!(f, "parser int: {err}"),
@@ -279,6 +282,7 @@ impl Error for DatabaseError {
             Self::FromUtf8Error(err) => Some(err),
             Self::IO(err) => Some(err),
             Self::ParseBool(err) => Some(err),
+            #[cfg(feature = "time")]
             Self::ParseDate(err) => Some(err),
             Self::ParseFloat(err) => Some(err),
             Self::ParseInt(err) => Some(err),
@@ -312,6 +316,7 @@ impl_from_database_error!(csv::Error, Csv);
 impl_from_database_error!(FromUtf8Error, FromUtf8Error);
 impl_from_database_error!(std::io::Error, IO);
 impl_from_database_error!(ParseBoolError, ParseBool);
+#[cfg(feature = "time")]
 impl_from_database_error!(ParseError, ParseDate);
 impl_from_database_error!(ParseFloatError, ParseFloat);
 impl_from_database_error!(ParseIntError, ParseInt);

@@ -14,7 +14,8 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    DDLApply, ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor,
+    DDLApply, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
+    WriteExecutor,
 };
 use crate::planner::operator::create_view::CreateViewOperator;
 use crate::storage::Transaction;
@@ -31,34 +32,34 @@ impl From<CreateViewOperator> for CreateView {
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateView {
+    type Input = crate::planner::operator::create_view::CreateViewOperator;
+
     fn into_executor(
-        self,
-        arena: &mut ExecArena<'a, T>,
+        input: Self::Input,
+        arena: &mut ExecArena,
         _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::CreateView(self))
+        arena.push(ExecNode::CreateView(Self::from(input)))
     }
 }
-
-impl CreateView {
-    pub(crate) fn next_tuple<'a, T: Transaction>(
+impl<'a> ExecutorNode<'a> for CreateView {
+    fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(CreateViewOperator { view, or_replace }) = self.op.take() else {
-            arena.finish();
+            runtime.finish();
             return Ok(());
         };
         let view_name = view.name.to_string();
-        let (transaction, table_codec) = arena.transaction_codec_mut();
-        let view = transaction.create_view(table_codec, plan_arena, view, or_replace)?;
-        arena.push_ddl_apply(DDLApply::upsert_view(view));
+        let view = runtime.transaction_create_view(plan_arena, view, or_replace)?;
+        runtime.push_ddl_apply(DDLApply::upsert_view(view));
 
-        TupleBuilder::build_result_into(arena.result_tuple_mut(), view_name);
-        arena.resume();
+        TupleBuilder::build_result_into(runtime.result_tuple_mut(), view_name);
+        runtime.resume();
         Ok(())
     }
 }

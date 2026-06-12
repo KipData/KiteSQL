@@ -14,7 +14,8 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext,
+    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
+    ReadExecutor,
 };
 use crate::planner::operator::limit::LimitOperator;
 use crate::planner::LogicalPlan;
@@ -27,12 +28,12 @@ pub struct Limit {
     emitted: usize,
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Limit {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Limit {
     type Input = (LimitOperator, LogicalPlan);
 
     fn into_executor(
         (LimitOperator { offset, limit }, input): Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena,
         plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
@@ -46,23 +47,25 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Limit {
             emitted: 0,
         }))
     }
+}
 
+impl<'a> ExecutorNode<'a> for Limit {
     fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let offset = self.offset.unwrap_or(0);
         let limit = self.limit.unwrap_or(usize::MAX);
 
         if limit == 0 || self.emitted >= limit {
-            arena.finish();
+            runtime.finish();
             return Ok(());
         }
 
         loop {
-            if !arena.next_tuple(self.input, plan_arena)? {
-                arena.finish();
+            if !runtime.next_tuple(self.input, plan_arena)? {
+                runtime.finish();
                 return Ok(());
             }
 
@@ -72,7 +75,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Limit {
             }
 
             self.emitted += 1;
-            arena.resume();
+            runtime.resume();
             return Ok(());
         }
     }

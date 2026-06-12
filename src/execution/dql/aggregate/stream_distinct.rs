@@ -14,7 +14,8 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext,
+    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
+    ReadExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
@@ -31,12 +32,12 @@ pub struct StreamDistinctExecutor {
     scratch: Tuple,
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor {
     type Input = (AggregateOperator, LogicalPlan);
 
     fn into_executor(
         (op, input): Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena,
         plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
@@ -49,18 +50,20 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor {
             scratch: Tuple::default(),
         }))
     }
+}
 
+impl<'a> ExecutorNode<'a> for StreamDistinctExecutor {
     fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         loop {
-            if !arena.next_tuple(self.input, plan_arena)? {
-                arena.finish();
+            if !runtime.next_tuple(self.input, plan_arena)? {
+                runtime.finish();
                 return Ok(());
             }
-            std::mem::swap(&mut self.scratch, arena.result_tuple_mut());
+            std::mem::swap(&mut self.scratch, runtime.result_tuple_mut());
             let tuple = &self.scratch;
             let group_keys = self
                 .groupby_exprs
@@ -70,10 +73,10 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor {
 
             if self.last_keys.as_ref() != Some(&group_keys) {
                 self.last_keys = Some(group_keys.clone());
-                let output = arena.result_tuple_mut();
+                let output = runtime.result_tuple_mut();
                 output.pk.clone_from(&tuple.pk);
                 output.values = group_keys;
-                arena.resume();
+                runtime.resume();
                 return Ok(());
             }
         }

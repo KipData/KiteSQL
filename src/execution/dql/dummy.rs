@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext, ReadExecutor,
+    ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext, ReadExecutor,
 };
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
@@ -32,50 +32,30 @@ impl Default for Dummy {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Dummy {
-    fn into_executor(
-        self,
-        arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut crate::planner::PlanArena<'a>,
-        _: ReadExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
-        arena.push(ExecNode::Dummy(self))
-    }
-}
-
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Dummy {
     type Input = Self;
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena,
         _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
         arena.push(ExecNode::Dummy(input))
     }
-
-    fn next_tuple(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
-    ) -> Result<(), DatabaseError> {
-        Dummy::next_tuple(self, arena, plan_arena)
-    }
 }
 
-impl Dummy {
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+impl<'a> ExecutorNode<'a> for Dummy {
+    fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         _: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(row) = self.row.take() else {
-            arena.finish();
+            runtime.finish();
             return Ok(());
         };
-        arena.produce_tuple(row);
+        runtime.produce_tuple(row);
         Ok(())
     }
 }

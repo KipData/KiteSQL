@@ -14,7 +14,8 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    DDLApply, ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor,
+    DDLApply, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
+    WriteExecutor,
 };
 use crate::planner::operator::drop_index::DropIndexOperator;
 use crate::storage::Transaction;
@@ -31,21 +32,22 @@ impl From<DropIndexOperator> for DropIndex {
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropIndex {
+    type Input = crate::planner::operator::drop_index::DropIndexOperator;
+
     fn into_executor(
-        self,
-        arena: &mut ExecArena<'a, T>,
+        input: Self::Input,
+        arena: &mut ExecArena,
         _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::DropIndex(self))
+        arena.push(ExecNode::DropIndex(Self::from(input)))
     }
 }
-
-impl DropIndex {
-    pub(crate) fn next_tuple<'a, T: Transaction>(
+impl<'a> ExecutorNode<'a> for DropIndex {
+    fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(DropIndexOperator {
@@ -54,30 +56,26 @@ impl DropIndex {
             if_exists,
         }) = self.op.take()
         else {
-            arena.finish();
+            runtime.finish();
             return Ok(());
         };
 
-        let dropped = {
-            let (transaction, table_codec) = arena.transaction_codec_mut();
-            transaction.drop_index(
-                table_codec,
-                plan_arena,
-                table_name.clone(),
-                &index_name,
-                if_exists,
-            )?
-        };
+        let dropped = runtime.transaction_drop_index(
+            plan_arena,
+            table_name.clone(),
+            &index_name,
+            if_exists,
+        )?;
         if let Some((table, index_id)) = dropped {
-            arena.push_ddl_apply(DDLApply::upsert_table(table, false));
-            arena.push_ddl_apply(DDLApply::RemoveStatisticsMeta {
+            runtime.push_ddl_apply(DDLApply::upsert_table(table, false));
+            runtime.push_ddl_apply(DDLApply::RemoveStatisticsMeta {
                 table_name: table_name.clone(),
                 index_id,
             });
         }
 
-        TupleBuilder::build_result_into(arena.result_tuple_mut(), index_name.to_string());
-        arena.resume();
+        TupleBuilder::build_result_into(runtime.result_tuple_mut(), index_name.to_string());
+        runtime.resume();
         Ok(())
     }
 }

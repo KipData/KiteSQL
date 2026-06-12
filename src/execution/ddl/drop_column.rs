@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::rewrite_table_in_batches;
 use crate::errors::DatabaseError;
 use crate::execution::{
-    DDLApply, ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor,
+    DDLApply, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
+    TupleValueSerializerIter, WriteExecutor,
 };
 use crate::planner::operator::alter_table::drop_column::DropColumnOperator;
 use crate::storage::Transaction;
@@ -33,38 +33,37 @@ impl From<DropColumnOperator> for DropColumn {
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropColumn {
+    type Input = crate::planner::operator::alter_table::drop_column::DropColumnOperator;
+
     fn into_executor(
-        self,
-        arena: &mut ExecArena<'a, T>,
+        input: Self::Input,
+        arena: &mut ExecArena,
         _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::DropColumn(self))
+        arena.push(ExecNode::DropColumn(Self::from(input)))
     }
 }
-
-impl DropColumn {
-    pub(crate) fn next_tuple<'a, T: Transaction>(
+impl<'a> ExecutorNode<'a> for DropColumn {
+    fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
-        let table_cache = arena.table_cache();
         let Some(DropColumnOperator {
             table_name,
             column_name,
             if_exists,
         }) = self.op.take()
         else {
-            arena.finish();
+            runtime.finish();
             return Ok(());
         };
 
         let (old_schema, pk_ty, column_info) = {
-            let table_catalog = arena
-                .transaction()
-                .table(table_cache, table_name.clone())?
+            let table_catalog = runtime
+                .transaction_table(table_name.clone())?
                 .ok_or(DatabaseError::TableNotFound)?;
             let column_info = table_catalog
                 .columns()
@@ -86,48 +85,48 @@ impl DropColumn {
                 ));
             }
             {
-                let mut state = arena.local_state(plan_arena);
-                let plan_arena = state.plan_arena;
-                let (transaction, table_codec) = state.transaction_codec_mut();
-                rewrite_table_in_batches(
-                    transaction,
-                    table_codec,
+                runtime.transaction_rewrite_table_in_batches(
                     &table_name,
                     &pk_ty,
                     old_schema.len(),
-                    || {
-                        old_schema
-                            .iter()
-                            .map(|column| plan_arena.column(*column).datatype().serializable())
+                    &mut || -> TupleValueSerializerIter<'_> {
+                        Box::new(
+                            old_schema
+                                .iter()
+                                .map(|column| plan_arena.column(*column).datatype().serializable()),
+                        )
                     },
-                    || {
-                        old_schema
-                            .iter()
-                            .enumerate()
-                            .filter(|(index, _)| *index != column_index)
-                            .map(|(_, column)| plan_arena.column(*column).datatype().serializable())
+                    &mut || -> TupleValueSerializerIter<'_> {
+                        Box::new(
+                            old_schema
+                                .iter()
+                                .enumerate()
+                                .filter(|(index, _)| *index != column_index)
+                                .map(|(_, column)| {
+                                    plan_arena.column(*column).datatype().serializable()
+                                }),
+                        )
                     },
-                    |tuple| {
+                    &mut |tuple| {
                         let _ = tuple.values.remove(column_index);
                         Ok(())
                     },
-                    |_, _, _| Ok(()),
+                    &mut |_, _| Ok(()),
                 )?;
             }
             {
-                let (transaction, table_codec) = arena.transaction_codec_mut();
                 let table =
-                    transaction.drop_column(table_codec, plan_arena, &table_name, &column_name)?;
-                arena.push_ddl_apply(DDLApply::upsert_table(table, true));
+                    runtime.transaction_drop_column(plan_arena, &table_name, &column_name)?;
+                runtime.push_ddl_apply(DDLApply::upsert_table(table, true));
             }
 
-            TupleBuilder::build_result_into(arena.result_tuple_mut(), "1".to_string());
-            arena.resume();
+            TupleBuilder::build_result_into(runtime.result_tuple_mut(), "1".to_string());
+            runtime.resume();
             Ok(())
         } else if !if_exists {
             Err(DatabaseError::column_not_found(column_name))
         } else {
-            arena.finish();
+            runtime.finish();
             Ok(())
         }
     }

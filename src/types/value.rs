@@ -18,8 +18,11 @@ use crate::storage::table_codec::{BumpBytes, BOUND_MAX_TAG, NOTNULL_TAG, NULL_TA
 use crate::types::evaluator::cast::{cast_create, to_char, to_varchar};
 use crate::types::CharLengthUnits;
 use byteorder::ReadBytesExt;
-use chrono::format::{DelayedFormat, StrftimeItems};
-use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
+#[cfg(feature = "time")]
+use chrono::{
+    format::{DelayedFormat, StrftimeItems},
+    DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc,
+};
 use itertools::Itertools;
 use ordered_float::OrderedFloat;
 #[cfg(feature = "decimal")]
@@ -31,23 +34,37 @@ use std::hash::Hash;
 use std::io::Read;
 #[cfg(feature = "decimal")]
 use std::mem;
-use std::sync::LazyLock;
 use std::{cmp, fmt};
 
-static UNIX_DATETIME: LazyLock<NaiveDateTime> =
-    LazyLock::new(|| DateTime::from_timestamp(0, 0).unwrap().naive_utc());
+#[cfg(feature = "time")]
+mod chrono_value {
+    use chrono::{DateTime, NaiveDateTime, NaiveTime};
+    use std::sync::LazyLock;
 
-static UNIX_TIME: LazyLock<NaiveTime> = LazyLock::new(|| NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+    pub(super) static UNIX_DATETIME: LazyLock<NaiveDateTime> =
+        LazyLock::new(|| DateTime::from_timestamp(0, 0).unwrap().naive_utc());
+    pub(super) static UNIX_TIME: LazyLock<NaiveTime> =
+        LazyLock::new(|| NaiveTime::from_hms_opt(0, 0, 0).unwrap());
 
-pub const DATE_FMT: &str = "%Y-%m-%d";
-pub const DATE_TIME_FMT: &str = "%Y-%m-%d %H:%M:%S";
-pub const TIME_STAMP_FMT_WITHOUT_ZONE: &str = "%Y-%m-%d %H:%M:%S%.f";
-pub const TIME_STAMP_FMT_WITH_ZONE: &str = "%Y-%m-%d %H:%M:%S%.f%z";
-pub const TIME_STAMP_FMT_WITHOUT_PRECISION: &str = "%Y-%m-%d %H:%M:%S%z";
-pub const TIME_FMT: &str = "%H:%M:%S";
-pub const TIME_FMT_WITHOUT_ZONE: &str = "%H:%M:%S%.f";
-pub const TIME_FMT_WITH_ZONE: &str = "%H:%M:%S%.f%z";
-pub const TIME_FMT_WITHOUT_PRECISION: &str = "%H:%M:%S%z";
+    pub const DATE_FMT: &str = "%Y-%m-%d";
+    pub const DATE_TIME_FMT: &str = "%Y-%m-%d %H:%M:%S";
+    pub const TIME_STAMP_FMT_WITHOUT_ZONE: &str = "%Y-%m-%d %H:%M:%S%.f";
+    pub const TIME_STAMP_FMT_WITH_ZONE: &str = "%Y-%m-%d %H:%M:%S%.f%z";
+    pub const TIME_STAMP_FMT_WITHOUT_PRECISION: &str = "%Y-%m-%d %H:%M:%S%z";
+    pub const TIME_FMT: &str = "%H:%M:%S";
+    pub const TIME_FMT_WITHOUT_ZONE: &str = "%H:%M:%S%.f";
+    pub const TIME_FMT_WITH_ZONE: &str = "%H:%M:%S%.f%z";
+    pub const TIME_FMT_WITHOUT_PRECISION: &str = "%H:%M:%S%z";
+}
+
+#[cfg(feature = "time")]
+pub use chrono_value::{
+    DATE_FMT, DATE_TIME_FMT, TIME_FMT, TIME_FMT_WITHOUT_PRECISION, TIME_FMT_WITHOUT_ZONE,
+    TIME_FMT_WITH_ZONE, TIME_STAMP_FMT_WITHOUT_PRECISION, TIME_STAMP_FMT_WITHOUT_ZONE,
+    TIME_STAMP_FMT_WITH_ZONE,
+};
+#[cfg(feature = "time")]
+use chrono_value::{UNIX_DATETIME, UNIX_TIME};
 
 pub const ONE_SEC_TO_NANO: u32 = 1_000_000_000;
 pub const ONE_DAY_TO_SEC: u32 = 86_400;
@@ -426,30 +443,6 @@ impl DataValue {
         }
     }
 
-    pub fn date(&self) -> Option<NaiveDate> {
-        if let DataValue::Date32(val) = self {
-            NaiveDate::from_num_days_from_ce_opt(*val)
-        } else {
-            None
-        }
-    }
-
-    pub fn datetime(&self) -> Option<NaiveDateTime> {
-        if let DataValue::Date64(val) = self {
-            DateTime::from_timestamp(*val, 0).map(|dt| dt.naive_utc())
-        } else {
-            None
-        }
-    }
-
-    pub fn time(&self) -> Option<NaiveTime> {
-        if let DataValue::Time32(val, ..) = self {
-            NaiveTime::from_num_seconds_from_midnight_opt(*val, 0)
-        } else {
-            None
-        }
-    }
-
     #[inline]
     pub(crate) fn check_string_len(string: &str, len: usize, unit: CharLengthUnits) -> bool {
         match unit {
@@ -547,22 +540,6 @@ impl DataValue {
         (b, scaled_a * (1000000000 / 10_u32.pow(precision as u32)))
     }
 
-    pub(crate) fn format_date(value: i32) -> Option<String> {
-        Self::date_format(value).map(|fmt| format!("{fmt}"))
-    }
-
-    pub(crate) fn format_datetime(value: i64) -> Option<String> {
-        Self::date_time_format(value).map(|fmt| format!("{fmt}"))
-    }
-
-    pub(crate) fn format_time(value: u32, precision: u64) -> Option<String> {
-        Self::time_format(value, precision).map(|fmt| format!("{fmt}"))
-    }
-
-    pub(crate) fn format_timestamp(value: i64, precision: u64) -> Option<String> {
-        Self::time_stamp_format(value, precision, false).map(|fmt| format!("{fmt}"))
-    }
-
     #[inline]
     pub fn is_null(&self) -> bool {
         matches!(self, DataValue::Null)
@@ -593,25 +570,62 @@ impl DataValue {
                 ty: Utf8Type::Variable(*len),
                 unit: *unit,
             },
-            LogicalType::Date => DataValue::Date32(UNIX_DATETIME.num_days_from_ce()),
-            LogicalType::DateTime => DataValue::Date64(UNIX_DATETIME.and_utc().timestamp()),
+            LogicalType::Date => {
+                #[cfg(feature = "time")]
+                {
+                    DataValue::Date32(UNIX_DATETIME.num_days_from_ce())
+                }
+                #[cfg(not(feature = "time"))]
+                {
+                    DataValue::Date32(0)
+                }
+            }
+            LogicalType::DateTime => {
+                #[cfg(feature = "time")]
+                {
+                    DataValue::Date64(UNIX_DATETIME.and_utc().timestamp())
+                }
+                #[cfg(not(feature = "time"))]
+                {
+                    DataValue::Date64(0)
+                }
+            }
             LogicalType::Time(precision) => match precision {
+                #[cfg(feature = "time")]
                 Some(i) => DataValue::Time32(UNIX_TIME.num_seconds_from_midnight(), *i),
+                #[cfg(feature = "time")]
                 None => DataValue::Time32(UNIX_TIME.num_seconds_from_midnight(), 0),
+                #[cfg(not(feature = "time"))]
+                Some(i) => DataValue::Time32(0, *i),
+                #[cfg(not(feature = "time"))]
+                None => DataValue::Time32(0, 0),
             },
-            LogicalType::TimeStamp(precision, zone) => match precision {
-                Some(3) => DataValue::Time64(UNIX_DATETIME.and_utc().timestamp_millis(), 3, *zone),
-                Some(6) => DataValue::Time64(UNIX_DATETIME.and_utc().timestamp_micros(), 6, *zone),
-                Some(9) => {
-                    if let Some(value) = UNIX_DATETIME.and_utc().timestamp_nanos_opt() {
-                        DataValue::Time64(value, 9, *zone)
-                    } else {
-                        unreachable!()
+            LogicalType::TimeStamp(precision, zone) => {
+                #[cfg(feature = "time")]
+                {
+                    match precision {
+                        Some(3) => {
+                            DataValue::Time64(UNIX_DATETIME.and_utc().timestamp_millis(), 3, *zone)
+                        }
+                        Some(6) => {
+                            DataValue::Time64(UNIX_DATETIME.and_utc().timestamp_micros(), 6, *zone)
+                        }
+                        Some(9) => {
+                            if let Some(value) = UNIX_DATETIME.and_utc().timestamp_nanos_opt() {
+                                DataValue::Time64(value, 9, *zone)
+                            } else {
+                                unreachable!()
+                            }
+                        }
+                        None => DataValue::Time64(UNIX_DATETIME.and_utc().timestamp(), 0, *zone),
+                        _ => unreachable!(),
                     }
                 }
-                None => DataValue::Time64(UNIX_DATETIME.and_utc().timestamp(), 0, *zone),
-                _ => unreachable!(),
-            },
+                #[cfg(not(feature = "time"))]
+                {
+                    DataValue::Time64(0, precision.unwrap_or_default(), *zone)
+                }
+            }
             #[cfg(feature = "decimal")]
             LogicalType::Decimal(_, _) => DataValue::Decimal(Decimal::new(0, 0)),
             #[cfg(not(feature = "decimal"))]
@@ -769,15 +783,16 @@ impl DataValue {
             DataValue::Null => (),
             DataValue::Int8(v) => encode_u!(b, *v as u8 ^ 0x80_u8),
             DataValue::Int16(v) => encode_u!(b, *v as u16 ^ 0x8000_u16),
-            DataValue::Int32(v) | DataValue::Date32(v) => {
-                encode_u!(b, *v as u32 ^ 0x80000000_u32)
-            }
-            DataValue::Int64(v) | DataValue::Date64(v) | DataValue::Time64(v, ..) => {
+            DataValue::Int32(v) => encode_u!(b, *v as u32 ^ 0x80000000_u32),
+            DataValue::Date32(v) => encode_u!(b, *v as u32 ^ 0x80000000_u32),
+            DataValue::Int64(v) => encode_u!(b, *v as u64 ^ 0x8000000000000000_u64),
+            DataValue::Date64(v) | DataValue::Time64(v, ..) => {
                 encode_u!(b, *v as u64 ^ 0x8000000000000000_u64)
             }
             DataValue::UInt8(v) => encode_u!(b, v),
             DataValue::UInt16(v) => encode_u!(b, v),
-            DataValue::UInt32(v) | DataValue::Time32(v, ..) => encode_u!(b, v),
+            DataValue::UInt32(v) => encode_u!(b, v),
+            DataValue::Time32(v, ..) => encode_u!(b, v),
             DataValue::UInt64(v) => encode_u!(b, v),
             DataValue::Utf8 { value: v, .. } => Self::encode_string(b, v.as_bytes()),
             DataValue::Boolean(v) => b.push_byte(if *v { b'1' } else { b'0' }),
@@ -855,13 +870,33 @@ impl DataValue {
                 let u = decode_u!(reader, u16);
                 Ok(DataValue::Int16((u ^ 0x8000) as i16))
             }
-            LogicalType::Integer | LogicalType::Date | LogicalType::Time(_) => {
+            LogicalType::Integer => {
                 let u = decode_u!(reader, u32);
                 Ok(DataValue::Int32((u ^ 0x8000_0000) as i32))
             }
-            LogicalType::Bigint | LogicalType::DateTime | LogicalType::TimeStamp(..) => {
+            LogicalType::Date => {
+                let u = decode_u!(reader, u32);
+                Ok(DataValue::Date32((u ^ 0x8000_0000) as i32))
+            }
+            LogicalType::Time(precision) => {
+                let u = decode_u!(reader, u32);
+                Ok(DataValue::Time32(u, precision.unwrap_or_default()))
+            }
+            LogicalType::Bigint => {
                 let u = decode_u!(reader, u64);
                 Ok(DataValue::Int64((u ^ 0x8000_0000_0000_0000) as i64))
+            }
+            LogicalType::DateTime => {
+                let u = decode_u!(reader, u64);
+                Ok(DataValue::Date64((u ^ 0x8000_0000_0000_0000) as i64))
+            }
+            LogicalType::TimeStamp(precision, zone) => {
+                let u = decode_u!(reader, u64);
+                Ok(DataValue::Time64(
+                    (u ^ 0x8000_0000_0000_0000) as i64,
+                    precision.unwrap_or_default(),
+                    *zone,
+                ))
             }
             LogicalType::UTinyint => Ok(DataValue::UInt8(decode_u!(reader, u8))),
             LogicalType::USmallint => Ok(DataValue::UInt16(decode_u!(reader, u16))),
@@ -1195,6 +1230,54 @@ impl DataValue {
         }
     }
 
+    #[cfg(feature = "decimal")]
+    fn decimal_format(v: &Decimal) -> String {
+        v.to_string()
+    }
+}
+
+#[cfg(feature = "time")]
+impl DataValue {
+    pub fn date(&self) -> Option<NaiveDate> {
+        if let DataValue::Date32(val) = self {
+            NaiveDate::from_num_days_from_ce_opt(*val)
+        } else {
+            None
+        }
+    }
+
+    pub fn datetime(&self) -> Option<NaiveDateTime> {
+        if let DataValue::Date64(val) = self {
+            DateTime::from_timestamp(*val, 0).map(|dt| dt.naive_utc())
+        } else {
+            None
+        }
+    }
+
+    pub fn time(&self) -> Option<NaiveTime> {
+        if let DataValue::Time32(val, ..) = self {
+            NaiveTime::from_num_seconds_from_midnight_opt(*val, 0)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn format_date(value: i32) -> Option<String> {
+        Self::date_format(value).map(|fmt| format!("{fmt}"))
+    }
+
+    pub(crate) fn format_datetime(value: i64) -> Option<String> {
+        Self::date_time_format(value).map(|fmt| format!("{fmt}"))
+    }
+
+    pub(crate) fn format_time(value: u32, precision: u64) -> Option<String> {
+        Self::time_format(value, precision).map(|fmt| format!("{fmt}"))
+    }
+
+    pub(crate) fn format_timestamp(value: i64, precision: u64) -> Option<String> {
+        Self::time_stamp_format(value, precision, false).map(|fmt| format!("{fmt}"))
+    }
+
     fn date_format<'a>(v: i32) -> Option<DelayedFormat<StrftimeItems<'a>>> {
         NaiveDate::from_num_days_from_ce_opt(v).map(|date| date.format(DATE_FMT))
     }
@@ -1216,11 +1299,6 @@ impl DataValue {
     ) -> Option<DelayedFormat<StrftimeItems<'a>>> {
         Self::from_timestamp_precision(v, precision)
             .map(|date_time| date_time.format(TIME_STAMP_FMT_WITHOUT_ZONE))
-    }
-
-    #[cfg(feature = "decimal")]
-    fn decimal_format(v: &Decimal) -> String {
-        v.to_string()
     }
 
     pub fn timestamp_precision(v: DateTime<Utc>, precision: u64) -> i64 {
@@ -1336,12 +1414,14 @@ impl From<Option<String>> for DataValue {
     }
 }
 
+#[cfg(feature = "time")]
 impl From<&NaiveDate> for DataValue {
     fn from(value: &NaiveDate) -> Self {
         DataValue::Date32(value.num_days_from_ce())
     }
 }
 
+#[cfg(feature = "time")]
 impl From<Option<&NaiveDate>> for DataValue {
     fn from(value: Option<&NaiveDate>) -> Self {
         if let Some(value) = value {
@@ -1352,12 +1432,14 @@ impl From<Option<&NaiveDate>> for DataValue {
     }
 }
 
+#[cfg(feature = "time")]
 impl From<&NaiveDateTime> for DataValue {
     fn from(value: &NaiveDateTime) -> Self {
         DataValue::Date64(value.and_utc().timestamp())
     }
 }
 
+#[cfg(feature = "time")]
 impl From<Option<&NaiveDateTime>> for DataValue {
     fn from(value: Option<&NaiveDateTime>) -> Self {
         if let Some(value) = value {
@@ -1368,6 +1450,7 @@ impl From<Option<&NaiveDateTime>> for DataValue {
     }
 }
 
+#[cfg(feature = "time")]
 impl From<&NaiveTime> for DataValue {
     fn from(value: &NaiveTime) -> Self {
         DataValue::Time32(
@@ -1377,6 +1460,7 @@ impl From<&NaiveTime> for DataValue {
     }
 }
 
+#[cfg(feature = "time")]
 impl From<Option<&NaiveTime>> for DataValue {
     fn from(value: Option<&NaiveTime>) -> Self {
         if let Some(value) = value {
@@ -1419,16 +1503,40 @@ impl fmt::Display for DataValue {
             DataValue::UInt64(e) => write!(f, "{e}")?,
             DataValue::Utf8 { value: e, .. } => write!(f, "{e}")?,
             DataValue::Null => write!(f, "null")?,
-            DataValue::Date32(e) => write!(f, "{}", DataValue::date_format(*e).unwrap())?,
-            DataValue::Date64(e) => write!(f, "{}", DataValue::date_time_format(*e).unwrap())?,
-            DataValue::Time32(e, precision) => {
-                write!(f, "{}", DataValue::time_format(*e, *precision).unwrap())?
+            DataValue::Date32(e) => {
+                #[cfg(feature = "time")]
+                write!(f, "{}", DataValue::date_format(*e).unwrap())?;
+                #[cfg(not(feature = "time"))]
+                write!(f, "{e}")?;
             }
-            DataValue::Time64(e, precision, zone) => write!(
-                f,
-                "{}",
-                DataValue::time_stamp_format(*e, *precision, *zone).unwrap()
-            )?,
+            DataValue::Date64(e) => {
+                #[cfg(feature = "time")]
+                write!(f, "{}", DataValue::date_time_format(*e).unwrap())?;
+                #[cfg(not(feature = "time"))]
+                write!(f, "{e}")?;
+            }
+            DataValue::Time32(e, precision) => {
+                #[cfg(feature = "time")]
+                write!(f, "{}", DataValue::time_format(*e, *precision).unwrap())?;
+                #[cfg(not(feature = "time"))]
+                {
+                    let _ = precision;
+                    write!(f, "{e}")?;
+                }
+            }
+            DataValue::Time64(e, precision, zone) => {
+                #[cfg(feature = "time")]
+                write!(
+                    f,
+                    "{}",
+                    DataValue::time_stamp_format(*e, *precision, *zone).unwrap()
+                )?;
+                #[cfg(not(feature = "time"))]
+                {
+                    let _ = (precision, zone);
+                    write!(f, "{e}")?;
+                }
+            }
             #[cfg(feature = "decimal")]
             DataValue::Decimal(e) => write!(f, "{}", DataValue::decimal_format(e))?,
             DataValue::Tuple(values, ..) => {

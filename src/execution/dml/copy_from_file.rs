@@ -14,7 +14,9 @@
 
 use crate::binder::copy::FileFormat;
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor};
+use crate::execution::{
+    ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext, WriteExecutor,
+};
 use crate::planner::operator::copy_from_file::CopyFromFileOperator;
 use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
@@ -33,25 +35,26 @@ impl From<CopyFromFileOperator> for CopyFromFile {
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CopyFromFile {
+    type Input = crate::planner::operator::copy_from_file::CopyFromFileOperator;
+
     fn into_executor(
-        self,
-        arena: &mut ExecArena<'a, T>,
+        input: Self::Input,
+        arena: &mut ExecArena,
         _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::CopyFromFile(self))
+        arena.push(ExecNode::CopyFromFile(Self::from(input)))
     }
 }
-
-impl CopyFromFile {
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+impl<'a> ExecutorNode<'a> for CopyFromFile {
+    fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(op) = self.op.take() else {
-            arena.finish();
+            runtime.finish();
             return Ok(());
         };
         let column_types = op
@@ -63,10 +66,8 @@ impl CopyFromFile {
             .iter()
             .map(|ty| ty.serializable())
             .collect_vec();
-        let table_cache = arena.read_context().table_cache();
-        let transaction = arena.transaction();
-        let table = transaction
-            .table(table_cache, op.table.clone())?
+        let table = runtime
+            .transaction_table(op.table.clone())?
             .ok_or(DatabaseError::TableNotFound)?;
         let table_name = table.name().to_string();
 
@@ -100,14 +101,12 @@ impl CopyFromFile {
             }
 
             let chunk = tuple_builder.build_with_row(record.iter())?;
-            let mut state = arena.local_state(plan_arena);
-            let (transaction, table_codec) = state.transaction_codec_mut();
-            transaction.append_tuple(table_codec, &table_name, chunk, &serializers, false)?;
+            runtime.transaction_append_tuple(&table_name, chunk, &serializers, false)?;
             size += 1;
         }
 
-        TupleBuilder::build_result_into(arena.result_tuple_mut(), size.to_string());
-        arena.resume();
+        TupleBuilder::build_result_into(runtime.result_tuple_mut(), size.to_string());
+        runtime.resume();
         Ok(())
     }
 }

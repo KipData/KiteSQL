@@ -1672,45 +1672,86 @@ impl TryFrom<DataType> for LogicalType {
             | DataType::UBigInt
             | DataType::UInt64 => Ok(Self::UBigint),
             DataType::Boolean => Ok(Self::Boolean),
-            DataType::Date => Ok(Self::Date),
-            DataType::Datetime(precision) => {
-                if precision.is_some() {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "time's precision".to_string(),
-                    ));
+            DataType::Date => {
+                #[cfg(feature = "time")]
+                {
+                    Ok(Self::Date)
                 }
-                Ok(Self::DateTime)
+                #[cfg(not(feature = "time"))]
+                {
+                    Err(DatabaseError::UnsupportedStmt(
+                        "time types require the `time` feature".to_string(),
+                    ))
+                }
+            }
+            DataType::Datetime(precision) => {
+                #[cfg(feature = "time")]
+                {
+                    if precision.is_some() {
+                        return Err(DatabaseError::UnsupportedStmt(
+                            "time's precision".to_string(),
+                        ));
+                    }
+                    Ok(Self::DateTime)
+                }
+                #[cfg(not(feature = "time"))]
+                {
+                    let _ = precision;
+                    Err(DatabaseError::UnsupportedStmt(
+                        "time types require the `time` feature".to_string(),
+                    ))
+                }
             }
             DataType::Time(precision, info) => {
-                match precision {
-                    Some(0..5) | None => (),
-                    _ => {
-                        return Err(DatabaseError::UnsupportedStmt(
-                            "time's precision must be less than 5".to_string(),
-                        ))
+                #[cfg(feature = "time")]
+                {
+                    match precision {
+                        Some(0..5) | None => (),
+                        _ => {
+                            return Err(DatabaseError::UnsupportedStmt(
+                                "time's precision must be less than 5".to_string(),
+                            ))
+                        }
                     }
+                    if !matches!(info, sqlparser::ast::TimezoneInfo::None) {
+                        return Err(DatabaseError::UnsupportedStmt(
+                            "time's zone is not supported".to_string(),
+                        ));
+                    }
+                    Ok(Self::Time(precision))
                 }
-                if !matches!(info, sqlparser::ast::TimezoneInfo::None) {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "time's zone is not supported".to_string(),
-                    ));
+                #[cfg(not(feature = "time"))]
+                {
+                    let _ = (precision, info);
+                    Err(DatabaseError::UnsupportedStmt(
+                        "time types require the `time` feature".to_string(),
+                    ))
                 }
-                Ok(Self::Time(precision))
             }
             DataType::Timestamp(precision, info) => {
-                let mut zone = false;
-                match precision {
-                    Some(3 | 6 | 9) | None => (),
-                    _ => {
-                        return Err(DatabaseError::UnsupportedStmt(
-                            "timestamp's precision must be 3,6,9".to_string(),
-                        ))
+                #[cfg(feature = "time")]
+                {
+                    let mut zone = false;
+                    match precision {
+                        Some(3 | 6 | 9) | None => (),
+                        _ => {
+                            return Err(DatabaseError::UnsupportedStmt(
+                                "timestamp's precision must be 3,6,9".to_string(),
+                            ))
+                        }
                     }
+                    if matches!(info, sqlparser::ast::TimezoneInfo::WithTimeZone) {
+                        zone = true;
+                    }
+                    Ok(Self::TimeStamp(precision, zone))
                 }
-                if matches!(info, sqlparser::ast::TimezoneInfo::WithTimeZone) {
-                    zone = true;
+                #[cfg(not(feature = "time"))]
+                {
+                    let _ = (precision, info);
+                    Err(DatabaseError::UnsupportedStmt(
+                        "time types require the `time` feature".to_string(),
+                    ))
                 }
-                Ok(Self::TimeStamp(precision, zone))
             }
             DataType::Decimal(info)
             | DataType::DecimalUnsigned(info)

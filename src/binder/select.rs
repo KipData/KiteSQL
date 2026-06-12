@@ -395,15 +395,13 @@ where
     }
 
     pub fn distinct(mut self) -> Result<Self, DatabaseError> {
-        self.plan = self
-            .binder
-            .bind_distinct(self.plan, self.select_list.clone())?;
         let distinct_outputs = self.select_list.clone();
         self.binder.bind_distinct_output_exprs(
             &distinct_outputs,
             self.select_list.iter_mut(),
             self.arena,
         )?;
+        self.plan = self.binder.bind_distinct(self.plan, distinct_outputs)?;
         Ok(self)
     }
 
@@ -510,19 +508,25 @@ where
         if !self.binder.context.agg_calls.is_empty()
             || !self.binder.context.group_by_exprs.is_empty()
         {
-            self.plan = self.binder.bind_aggregate(
-                self.plan,
-                self.binder.context.agg_calls.clone(),
-                self.binder.context.group_by_exprs.clone(),
+            let agg_calls = std::mem::take(&mut self.binder.context.agg_calls);
+            let group_by_exprs = std::mem::take(&mut self.binder.context.group_by_exprs);
+            self.binder.bind_aggregate_output_exprs_with_outputs(
+                &agg_calls,
+                &group_by_exprs,
+                self.select_list.iter_mut(),
+                self.arena,
             )?;
-            self.binder
-                .bind_aggregate_output_exprs(self.select_list.iter_mut(), self.arena)?;
             if let Some(orderby) = having_orderby.1.as_mut() {
-                self.binder.bind_aggregate_output_exprs(
+                self.binder.bind_aggregate_output_exprs_with_outputs(
+                    &agg_calls,
+                    &group_by_exprs,
                     orderby.iter_mut().map(|field| &mut field.expr),
                     self.arena,
                 )?;
             }
+            self.plan = self
+                .binder
+                .bind_aggregate(self.plan, agg_calls, group_by_exprs)?;
         }
 
         Ok(BindPlanAggregated {
@@ -568,9 +572,6 @@ where
         distinct: bool,
     ) -> Result<BindPlanDistinct<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
         if distinct {
-            self.plan = self
-                .binder
-                .bind_distinct(self.plan, self.select_list.clone())?;
             let distinct_outputs = self.select_list.clone();
             self.binder.bind_distinct_output_exprs(
                 &distinct_outputs,
@@ -581,6 +582,7 @@ where
                 self.binder
                     .bind_distinct_orderby_exprs(&distinct_outputs, orderby, self.arena)?;
             }
+            self.plan = self.binder.bind_distinct(self.plan, distinct_outputs)?;
         }
 
         Ok(BindPlanDistinct {

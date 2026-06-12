@@ -13,7 +13,9 @@
 // limitations under the License.
 
 pub(crate) mod char_length;
+#[cfg(feature = "time")]
 pub(crate) mod current_date;
+#[cfg(feature = "time")]
 pub(crate) mod current_timestamp;
 pub(crate) mod lower;
 pub(crate) mod numbers;

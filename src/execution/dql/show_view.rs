@@ -13,54 +13,58 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::ExecArena;
-use crate::storage::{Transaction, ViewIter};
+use crate::execution::{
+    ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext, ReadExecutor,
+    RuntimeCursorId,
+};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
 
-pub struct ShowViews<'a, T: Transaction + 'a> {
-    pub(crate) metas: Option<ViewIter<'a, T>>,
+pub struct ShowViews {
+    pub(crate) cursor: Option<RuntimeCursorId>,
 }
 
-impl<'a, T: Transaction + 'a> ShowViews<'a, T> {
-    pub(crate) fn next_tuple(
+impl<'a, T: crate::storage::Transaction + 'a> ReadExecutor<'a, T> for ShowViews {
+    type Input = Self;
+
+    fn into_executor(
+        input: Self::Input,
+        arena: &mut ExecArena,
+        _: &mut crate::planner::PlanArena<'a>,
+        _: ReadExecutionContext<'_>,
+        _: &T,
+    ) -> ExecId {
+        arena.push(ExecNode::ShowViews(input))
+    }
+}
+
+impl<'a> ExecutorNode<'a> for ShowViews {
+    fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
-        if self.metas.is_none() {
-            let context = arena.read_context();
-            let mut state = arena.local_state(plan_arena);
-            let (transaction, table_codec) = state.transaction_codec();
-            self.metas = Some(transaction.views(
-                table_codec,
-                context.table_cache(),
-                plan_arena.table_arena_cell(),
-                context.scala_functions(),
-                context.table_functions(),
-            )?);
+        if self.cursor.is_none() {
+            self.cursor = Some(runtime.open_view_iter(plan_arena)?);
         }
 
-        let Some(view) = self
-            .metas
-            .as_mut()
-            .expect("show views iterator initialized")
-            .try_next()?
+        let Some(view_name) =
+            runtime.next_view_name(self.cursor.expect("view cursor initialized"))?
         else {
-            arena.finish();
+            runtime.finish();
             return Ok(());
         };
 
-        let output = arena.result_tuple_mut();
+        let output = runtime.result_tuple_mut();
         output.pk = None;
         output.values.clear();
         output.values.push(DataValue::Utf8 {
-            value: view.name.to_string(),
+            value: view_name,
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         });
 
-        arena.resume();
+        runtime.resume();
         Ok(())
     }
 }

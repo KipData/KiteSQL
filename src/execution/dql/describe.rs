@@ -15,7 +15,7 @@
 use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
 use crate::errors::DatabaseError;
 use crate::execution::{
-    ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext, ReadExecutor,
+    ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext, ReadExecutor,
 };
 use crate::planner::operator::describe::DescribeOperator;
 use crate::storage::Transaction;
@@ -58,49 +58,28 @@ impl From<DescribeOperator> for Describe {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Describe {
-    fn into_executor(
-        self,
-        arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut crate::planner::PlanArena<'a>,
-        _: ReadExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
-        arena.push(ExecNode::Describe(self))
-    }
-}
-
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Describe {
     type Input = DescribeOperator;
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena,
         _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
         arena.push(ExecNode::Describe(Describe::from(input)))
     }
-
-    fn next_tuple(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
-    ) -> Result<(), DatabaseError> {
-        Describe::next_tuple(self, arena, plan_arena)
-    }
 }
 
-impl Describe {
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+impl<'a> ExecutorNode<'a> for Describe {
+    fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if self.columns.is_none() {
-            let table = arena
-                .transaction()
-                .table(arena.table_cache(), self.table_name.clone())?
+            let table = runtime
+                .transaction_table(self.table_name.clone())?
                 .ok_or(DatabaseError::TableNotFound)?;
             self.columns = Some(table.columns().copied().collect());
         }
@@ -111,7 +90,7 @@ impl Describe {
             .and_then(|columns| columns.get(self.cursor))
             .copied()
         else {
-            arena.finish();
+            runtime.finish();
             return Ok(());
         };
 
@@ -120,12 +99,12 @@ impl Describe {
         let default = describe_default(&column, plan_arena);
         let mapping = column_ref.to_string();
 
-        let output = arena.result_tuple_mut();
+        let output = runtime.result_tuple_mut();
         output.pk = None;
         output.values.clear();
         fill_describe_row(&mut output.values, column, default, mapping);
 
-        arena.resume();
+        runtime.resume();
         Ok(())
     }
 }

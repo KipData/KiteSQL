@@ -14,7 +14,8 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    DDLApply, ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor,
+    DDLApply, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
+    WriteExecutor,
 };
 use crate::planner::operator::drop_view::DropViewOperator;
 use crate::storage::Transaction;
@@ -31,21 +32,22 @@ impl From<DropViewOperator> for DropView {
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropView {
+    type Input = crate::planner::operator::drop_view::DropViewOperator;
+
     fn into_executor(
-        self,
-        arena: &mut ExecArena<'a, T>,
+        input: Self::Input,
+        arena: &mut ExecArena,
         _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::DropView(self))
+        arena.push(ExecNode::DropView(Self::from(input)))
     }
 }
-
-impl DropView {
-    pub(crate) fn next_tuple<'a, T: Transaction>(
+impl<'a> ExecutorNode<'a> for DropView {
+    fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         _: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(DropViewOperator {
@@ -53,19 +55,18 @@ impl DropView {
             if_exists,
         }) = self.op.take()
         else {
-            arena.finish();
+            runtime.finish();
             return Ok(());
         };
 
-        let (transaction, table_codec) = arena.transaction_codec_mut();
-        if transaction.drop_view(table_codec, view_name.clone(), if_exists)? {
-            arena.push_ddl_apply(DDLApply::DropView {
+        if runtime.transaction_drop_view(view_name.clone(), if_exists)? {
+            runtime.push_ddl_apply(DDLApply::DropView {
                 name: view_name.clone(),
             });
         }
 
-        TupleBuilder::build_result_into(arena.result_tuple_mut(), format!("{view_name}"));
-        arena.resume();
+        TupleBuilder::build_result_into(runtime.result_tuple_mut(), format!("{view_name}"));
+        runtime.resume();
         Ok(())
     }
 }

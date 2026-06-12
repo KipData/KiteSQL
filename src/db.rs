@@ -18,7 +18,8 @@ use crate::binder::{Binder, BinderContext};
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_write, build_write_read_context, DDLApply, ExecArena, Executor, WriteExecutionContext,
+    build_write, build_write_read_context, DDLApply, ExecArena, ExecuteRuntime, Executor,
+    WriteExecutionContext,
 };
 use crate::expression::function::scala::ScalarFunctionImpl;
 use crate::expression::function::table::{
@@ -26,7 +27,9 @@ use crate::expression::function::table::{
 };
 use crate::expression::function::FunctionSummary;
 use crate::function::char_length::CharLength;
+#[cfg(feature = "time")]
 use crate::function::current_date::CurrentDate;
+#[cfg(feature = "time")]
 use crate::function::current_timestamp::CurrentTimeStamp;
 use crate::function::lower::Lower;
 use crate::function::numbers::Numbers;
@@ -289,7 +292,9 @@ impl DataBaseBuilder {
 
         state.load_scalar_function(CharLength::new("char_length".to_lowercase()));
         state.load_scalar_function(CharLength::new("character_length".to_lowercase()));
+        #[cfg(feature = "time")]
         state.load_scalar_function(CurrentDate::new());
+        #[cfg(feature = "time")]
         state.load_scalar_function(CurrentTimeStamp::new());
         state.load_scalar_function(Lower::new());
         state.load_scalar_function(OctetLength::new());
@@ -503,7 +508,7 @@ impl<S: Storage> State<S> {
             BinderContext::new(
                 self.table_cache(),
                 self.view_cache(),
-                transaction,
+                &*transaction,
                 self.scala_functions(),
                 self.table_functions(),
             ),
@@ -552,20 +557,23 @@ impl<S: Storage> State<S> {
             let (mut plan, mut plan_arena) = self.build_plan(params, transaction, build)?;
             let schema = plan.take_schema(&mut plan_arena);
             let mut arena = ExecArena::new();
+            let read_context = (
+                &self.table_cache,
+                &self.view_cache,
+                &self.meta_cache,
+                &self.scala_functions,
+                &self.table_functions,
+            );
             let root = build_write_read_context(
                 &mut arena,
                 &mut plan_arena,
                 plan,
-                (
-                    &self.table_cache,
-                    &self.view_cache,
-                    &self.meta_cache,
-                    &self.scala_functions,
-                    &self.table_functions,
-                ),
+                read_context,
                 transaction,
             );
-            let executor = Executor::new(arena, root);
+            let mut runtime = ExecuteRuntime::new(arena);
+            runtime.init_context(read_context, transaction);
+            let executor = Executor::new(runtime, root);
 
             Ok((schema, plan_arena, executor))
         })() {
@@ -640,8 +648,10 @@ impl<S: Storage> State<S> {
             scala_functions,
             table_functions,
         );
-        let root = build_write(&mut arena, &mut plan_arena, plan, cache, transaction);
-        let executor = Executor::new(arena, root);
+        let root = build_write(&mut arena, &mut plan_arena, plan, &cache, &*transaction);
+        let mut runtime = ExecuteRuntime::new(arena);
+        runtime.init_context_mut(cache, transaction);
+        let executor = Executor::new(runtime, root);
 
         Ok((schema, plan_arena, executor))
     }

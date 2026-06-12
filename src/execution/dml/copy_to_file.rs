@@ -15,7 +15,8 @@
 use crate::binder::copy::FileFormat;
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ReadExecutionContext, ReadExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
+    WriteExecutor,
 };
 use crate::planner::operator::copy_to_file::CopyToFileOperator;
 use crate::planner::LogicalPlan;
@@ -41,45 +42,48 @@ impl From<(CopyToFileOperator, LogicalPlan)> for CopyToFile {
     }
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for CopyToFile {
+impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CopyToFile {
+    type Input = (CopyToFileOperator, LogicalPlan);
+
     fn into_executor(
-        mut self,
-        arena: &mut ExecArena<'a, T>,
+        input: Self::Input,
+        arena: &mut ExecArena,
         plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        self.column_names = self
+        let mut exec = Self::from(input);
+        exec.column_names = exec
             .input_plan
             .take_schema(plan_arena)
             .into_iter()
             .map(|column| plan_arena.column(column).name().to_string())
             .collect_vec();
-        self.input = Some(build_read(
+        exec.input = Some(build_read(
             arena,
             plan_arena,
-            self.input_plan.take(),
+            exec.input_plan.take(),
             cache,
             transaction,
         ));
-        arena.push(ExecNode::CopyToFile(self))
+        arena.push(ExecNode::CopyToFile(exec))
     }
 }
 
-impl CopyToFile {
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+impl<'a> ExecutorNode<'a> for CopyToFile {
+    fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(input) = self.input.take() else {
-            arena.finish();
+            runtime.finish();
             return Ok(());
         };
 
         let mut writer = self.create_writer()?;
-        while arena.next_tuple(input, plan_arena)? {
-            let tuple = arena.result_tuple();
+        while runtime.next_tuple(input, plan_arena)? {
+            let tuple = runtime.result_tuple();
             writer.write_record(
                 tuple
                     .values
@@ -95,11 +99,13 @@ impl CopyToFile {
         } else {
             format!("{} [{}]", self.op, self.column_names.iter().format(", "))
         };
-        TupleBuilder::build_result_into(arena.result_tuple_mut(), message);
-        arena.resume();
+        TupleBuilder::build_result_into(runtime.result_tuple_mut(), message);
+        runtime.resume();
         Ok(())
     }
+}
 
+impl CopyToFile {
     fn create_writer(&self) -> Result<csv::Writer<std::fs::File>, DatabaseError> {
         let mut writer = match self.op.target.format {
             FileFormat::Csv {
@@ -174,7 +180,7 @@ mod tests {
             column_names: Default::default(),
             input: None,
         };
-        let mut executor = crate::execution::execute(
+        let mut executor = crate::execution::execute_mut(
             executor,
             (
                 db.state.table_cache(),

@@ -27,7 +27,6 @@ use crate::types::evaluator::{
 };
 use crate::types::value::DataValue;
 use crate::types::{CharLengthUnits, LogicalType};
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
 #[cfg(feature = "decimal")]
@@ -231,39 +230,46 @@ impl From<Option<Arc<str>>> for ScalarExpression {
     }
 }
 
-impl From<NaiveDate> for ScalarExpression {
-    fn from(value: NaiveDate) -> Self {
-        ScalarExpression::Constant(DataValue::from(&value))
-    }
-}
+#[cfg(feature = "time")]
+mod chrono_scalar_expression {
+    use super::ScalarExpression;
+    use crate::types::value::DataValue;
+    use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 
-impl From<Option<NaiveDate>> for ScalarExpression {
-    fn from(value: Option<NaiveDate>) -> Self {
-        ScalarExpression::Constant(DataValue::from(value.as_ref()))
+    impl From<NaiveDate> for ScalarExpression {
+        fn from(value: NaiveDate) -> Self {
+            ScalarExpression::Constant(DataValue::from(&value))
+        }
     }
-}
 
-impl From<NaiveDateTime> for ScalarExpression {
-    fn from(value: NaiveDateTime) -> Self {
-        ScalarExpression::Constant(DataValue::from(&value))
+    impl From<Option<NaiveDate>> for ScalarExpression {
+        fn from(value: Option<NaiveDate>) -> Self {
+            ScalarExpression::Constant(DataValue::from(value.as_ref()))
+        }
     }
-}
 
-impl From<Option<NaiveDateTime>> for ScalarExpression {
-    fn from(value: Option<NaiveDateTime>) -> Self {
-        ScalarExpression::Constant(DataValue::from(value.as_ref()))
+    impl From<NaiveDateTime> for ScalarExpression {
+        fn from(value: NaiveDateTime) -> Self {
+            ScalarExpression::Constant(DataValue::from(&value))
+        }
     }
-}
 
-impl From<NaiveTime> for ScalarExpression {
-    fn from(value: NaiveTime) -> Self {
-        ScalarExpression::Constant(DataValue::from(&value))
+    impl From<Option<NaiveDateTime>> for ScalarExpression {
+        fn from(value: Option<NaiveDateTime>) -> Self {
+            ScalarExpression::Constant(DataValue::from(value.as_ref()))
+        }
     }
-}
 
-impl From<Option<NaiveTime>> for ScalarExpression {
-    fn from(value: Option<NaiveTime>) -> Self {
-        ScalarExpression::Constant(DataValue::from(value.as_ref()))
+    impl From<NaiveTime> for ScalarExpression {
+        fn from(value: NaiveTime) -> Self {
+            ScalarExpression::Constant(DataValue::from(&value))
+        }
+    }
+
+    impl From<Option<NaiveTime>> for ScalarExpression {
+        fn from(value: Option<NaiveTime>) -> Self {
+            ScalarExpression::Constant(DataValue::from(value.as_ref()))
+        }
     }
 }
 

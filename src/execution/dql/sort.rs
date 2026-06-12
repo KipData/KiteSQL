@@ -14,7 +14,8 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext,
+    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
+    ReadExecutor,
 };
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::LogicalPlan;
@@ -283,12 +284,12 @@ pub struct Sort {
     input: ExecId,
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Sort {
     type Input = (SortOperator, LogicalPlan);
 
     fn into_executor(
         (SortOperator { sort_fields, limit }, input): Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena,
         plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
@@ -302,18 +303,20 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort {
             input,
         }))
     }
+}
 
+impl<'a> ExecutorNode<'a> for Sort {
     fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if self.output.is_none() {
             let mut tuples = NullableVec::new(&self.arena);
 
-            while arena.next_tuple(self.input, plan_arena)? {
+            while runtime.next_tuple(self.input, plan_arena)? {
                 let offset = tuples.len();
-                tuples.put((offset, arena.result_tuple().clone()));
+                tuples.put((offset, runtime.result_tuple().clone()));
             }
 
             let sort_by = if tuples.len() > 256 {
@@ -334,9 +337,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort {
         }
 
         if let Some(tuple) = self.output.as_mut().and_then(std::iter::Iterator::next) {
-            arena.produce_tuple(tuple);
+            runtime.produce_tuple(tuple);
         } else {
-            arena.finish();
+            runtime.finish();
         }
         Ok(())
     }

@@ -15,7 +15,8 @@
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::{create_accumulators, Accumulator};
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext,
+    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
+    ReadExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
@@ -35,7 +36,7 @@ pub struct HashAggExecutor {
     output: Option<HashAggOutput>,
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashAggExecutor {
     type Input = (AggregateOperator, LogicalPlan);
 
     fn into_executor(
@@ -47,7 +48,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
             },
             input,
         ): Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena,
         plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
@@ -60,18 +61,20 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
             output: None,
         }))
     }
+}
 
+impl<'a> ExecutorNode<'a> for HashAggExecutor {
     fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if self.output.is_none() {
             let mut group_hash_accs: HashMap<Vec<DataValue>, Vec<Box<dyn Accumulator>>> =
                 HashMap::new();
 
-            while arena.next_tuple(self.input, plan_arena)? {
-                let tuple = arena.result_tuple();
+            while runtime.next_tuple(self.input, plan_arena)? {
+                let tuple = runtime.result_tuple();
                 let group_keys = self
                     .groupby_exprs
                     .iter()
@@ -102,11 +105,11 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
         }
 
         let Some((group_keys, accs)) = self.output.as_mut().and_then(Iterator::next) else {
-            arena.finish();
+            runtime.finish();
             return Ok(());
         };
 
-        let output = arena.result_tuple_mut();
+        let output = runtime.result_tuple_mut();
 
         output.pk = None;
         output.values.clear();
@@ -116,7 +119,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
             output.values.push(acc.evaluate()?);
         }
         output.values.extend(group_keys);
-        arena.resume();
+        runtime.resume();
         Ok(())
     }
 }

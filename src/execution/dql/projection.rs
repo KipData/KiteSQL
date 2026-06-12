@@ -14,7 +14,8 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext,
+    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
+    ReadExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::project::ProjectOperator;
@@ -28,12 +29,12 @@ pub struct Projection {
     input: ExecId,
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Projection {
     type Input = (ProjectOperator, LogicalPlan);
 
     fn into_executor(
         (ProjectOperator { exprs }, input): Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena,
         plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
@@ -41,26 +42,21 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection {
         let input = build_read(arena, plan_arena, input, cache, transaction);
         arena.push(ExecNode::Projection(Projection { exprs, input }))
     }
+}
 
+impl<'a> ExecutorNode<'a> for Projection {
     fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
-        if !arena.next_tuple(self.input, plan_arena)? {
-            arena.finish();
+        if !runtime.next_tuple(self.input, plan_arena)? {
+            runtime.finish();
             return Ok(());
         }
 
-        arena.with_projection_tmp(|tuple, projection_tmp| {
-            projection_tmp.clear();
-            projection_tmp.reserve(self.exprs.len());
-            for expr in self.exprs.iter() {
-                projection_tmp.push(expr.eval(Some(tuple))?);
-            }
-            Ok::<_, DatabaseError>(())
-        })?;
-        arena.resume();
+        runtime.project_tuple(&self.exprs)?;
+        runtime.resume();
         Ok(())
     }
 }

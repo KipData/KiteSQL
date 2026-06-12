@@ -14,31 +14,32 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext, ReadExecutor,
+    ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext, ReadExecutor,
+    RuntimeCursorId,
 };
 use crate::expression::range_detacher::Range;
 use crate::planner::operator::table_scan::TableScanOperator;
-use crate::storage::{IndexIter, IndexRanges, Iter, Transaction};
+use crate::storage::{IndexRanges, Transaction};
 use crate::types::index::{IndexLookup, IndexMetaRef, RuntimeIndexProbe};
 use crate::types::serialize::TupleValueSerializableImpl;
 
-pub(crate) struct IndexScan<'a, T: Transaction + 'a> {
+pub(crate) struct IndexScan {
     op: Option<TableScanOperator>,
     index_by: IndexMetaRef,
     lookup: Option<IndexLookup>,
     covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
     cover_mapping: Option<Vec<usize>>,
-    iter: Option<IndexIter<'a, T>>,
+    cursor: Option<RuntimeCursorId>,
 }
 
-impl<'a, T: Transaction + 'a>
+impl
     From<(
         TableScanOperator,
         IndexMetaRef,
         IndexLookup,
         Option<Vec<TupleValueSerializableImpl>>,
         Option<Vec<usize>>,
-    )> for IndexScan<'a, T>
+    )> for IndexScan
 {
     fn from(
         (op, index_by, lookup, covered_deserializers, cover_mapping): (
@@ -49,30 +50,18 @@ impl<'a, T: Transaction + 'a>
             Option<Vec<usize>>,
         ),
     ) -> Self {
-        IndexScan {
+        Self {
             op: Some(op),
             index_by,
             lookup: Some(lookup),
             covered_deserializers,
             cover_mapping,
-            iter: None,
+            cursor: None,
         }
     }
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for IndexScan<'a, T> {
-    fn into_executor(
-        self,
-        arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut crate::planner::PlanArena<'a>,
-        _: ReadExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
-        arena.push(ExecNode::IndexScan(self))
-    }
-}
-
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for IndexScan<'a, T> {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for IndexScan {
     type Input = (
         TableScanOperator,
         IndexMetaRef,
@@ -83,83 +72,56 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for IndexScan<'a, T> {
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena,
         _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
         arena.push(ExecNode::IndexScan(IndexScan::from(input)))
     }
-
-    fn next_tuple(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
-    ) -> Result<(), DatabaseError> {
-        IndexScan::next_tuple(self, arena, plan_arena)
-    }
 }
 
-impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
-    fn ranges_from_lookup(lookup: IndexLookup, arena: &mut ExecArena<'a, T>) -> IndexRanges {
-        match lookup {
-            IndexLookup::Static(Range::SortedRanges(ranges)) => ranges.into(),
-            IndexLookup::Static(range) => range.into(),
-            IndexLookup::Probe => match arena.pop_runtime_probe() {
-                RuntimeIndexProbe::Eq(value) => Range::Eq(value).into(),
-                RuntimeIndexProbe::Scope { min, max } => Range::Scope { min, max }.into(),
-            },
-        }
-    }
-
-    pub(crate) fn next_tuple(
+impl<'a> ExecutorNode<'a> for IndexScan {
+    fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
-        if self.iter.is_none() {
-            let Some(TableScanOperator {
-                table_name,
-                columns,
-                limit,
-                with_pk,
-                ..
-            }) = self.op.take()
-            else {
-                arena.finish();
+        if self.cursor.is_none() {
+            let Some(op) = self.op.take() else {
+                runtime.finish();
                 return Ok(());
             };
-            let ranges = Self::ranges_from_lookup(
+            let ranges = ranges_from_lookup(
                 self.lookup.take().expect("index scan lookup initialized"),
-                arena,
+                runtime,
             );
-            let state = arena.local_state(plan_arena);
-            let context = state.context.read();
-            self.iter = Some(state.transaction().read_by_index(
-                context.table_cache,
-                state.plan_arena,
-                table_name,
-                limit,
-                columns,
+            self.cursor = Some(runtime.open_index_scan(
+                plan_arena,
+                op,
                 self.index_by.clone(),
                 ranges,
-                with_pk,
                 self.covered_deserializers.take(),
                 self.cover_mapping.take(),
             )?);
         }
 
-        let state = arena.local_state(plan_arena);
-        if self
-            .iter
-            .as_mut()
-            .expect("index scan iterator initialized")
-            .next_tuple_into(state.table_codec, &mut state.result.tuple)?
-        {
-            arena.resume();
+        if runtime.next_scan_tuple(self.cursor.expect("index scan cursor initialized"))? {
+            runtime.resume();
         } else {
-            arena.finish();
+            runtime.finish();
         }
         Ok(())
+    }
+}
+
+fn ranges_from_lookup<'a>(lookup: IndexLookup, runtime: &mut dyn ExecRuntime<'a>) -> IndexRanges {
+    match lookup {
+        IndexLookup::Static(Range::SortedRanges(ranges)) => ranges.into(),
+        IndexLookup::Static(range) => range.into(),
+        IndexLookup::Probe => match runtime.pop_runtime_probe() {
+            RuntimeIndexProbe::Eq(value) => Range::Eq(value).into(),
+            RuntimeIndexProbe::Scope { min, max } => Range::Scope { min, max }.into(),
+        },
     }
 }

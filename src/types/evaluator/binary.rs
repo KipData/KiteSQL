@@ -15,7 +15,9 @@
 use crate::errors::DatabaseError;
 use crate::expression::BinaryOperator;
 use crate::types::evaluator::boolean::*;
+#[cfg(feature = "time")]
 use crate::types::evaluator::date::*;
+#[cfg(feature = "time")]
 use crate::types::evaluator::datetime::*;
 #[cfg(feature = "decimal")]
 use crate::types::evaluator::decimal::*;
@@ -26,7 +28,9 @@ use crate::types::evaluator::int32::*;
 use crate::types::evaluator::int64::*;
 use crate::types::evaluator::int8::*;
 use crate::types::evaluator::null::*;
+#[cfg(feature = "time")]
 use crate::types::evaluator::time32::*;
+#[cfg(feature = "time")]
 use crate::types::evaluator::time64::*;
 use crate::types::evaluator::tuple::*;
 use crate::types::evaluator::uint16::*;
@@ -52,23 +56,37 @@ const NUMERIC_NOT_EQ_OFFSET: u16 = 9;
 const NUMERIC_MODULO_OFFSET: u16 = 10;
 const NUMERIC_OPS_LEN: u16 = NUMERIC_MODULO_OFFSET + 1;
 
+#[cfg(feature = "time")]
 const TIME_PLUS_OFFSET: u16 = 0;
+#[cfg(feature = "time")]
 const TIME_MINUS_OFFSET: u16 = 1;
+#[cfg(feature = "time")]
 const TIME_GT_OFFSET: u16 = 2;
+#[cfg(feature = "time")]
 const TIME_GT_EQ_OFFSET: u16 = 3;
+#[cfg(feature = "time")]
 const TIME_LT_OFFSET: u16 = 4;
+#[cfg(feature = "time")]
 const TIME_LT_EQ_OFFSET: u16 = 5;
+#[cfg(feature = "time")]
 const TIME_EQ_OFFSET: u16 = 6;
+#[cfg(feature = "time")]
 const TIME_NOT_EQ_OFFSET: u16 = 7;
-const TIME_OPS_LEN: u16 = TIME_NOT_EQ_OFFSET + 1;
+const TIME_OPS_LEN: u16 = 8;
 
+#[cfg(feature = "time")]
 const TIMESTAMP_GT_OFFSET: u16 = 0;
+#[cfg(feature = "time")]
 const TIMESTAMP_GT_EQ_OFFSET: u16 = 1;
+#[cfg(feature = "time")]
 const TIMESTAMP_LT_OFFSET: u16 = 2;
+#[cfg(feature = "time")]
 const TIMESTAMP_LT_EQ_OFFSET: u16 = 3;
+#[cfg(feature = "time")]
 const TIMESTAMP_EQ_OFFSET: u16 = 4;
+#[cfg(feature = "time")]
 const TIMESTAMP_NOT_EQ_OFFSET: u16 = 5;
-const TIMESTAMP_OPS_LEN: u16 = TIMESTAMP_NOT_EQ_OFFSET + 1;
+const TIMESTAMP_OPS_LEN: u16 = 6;
 
 const BOOLEAN_AND_OFFSET: u16 = 0;
 const BOOLEAN_OR_OFFSET: u16 = 1;
@@ -173,8 +191,15 @@ pub fn binary_create(
         LogicalType::UBigint => numeric_binary_ref(BINARY_UINT64_BASE, ty, op),
         LogicalType::Float => numeric_binary_ref(BINARY_FLOAT32_BASE, ty, op),
         LogicalType::Double => numeric_binary_ref(BINARY_FLOAT64_BASE, ty, op),
+        #[cfg(feature = "time")]
         LogicalType::Date => numeric_binary_ref(BINARY_DATE_BASE, ty, op),
+        #[cfg(not(feature = "time"))]
+        LogicalType::Date => Err(DatabaseError::UnsupportedBinaryOperator(ty.clone(), op)),
+        #[cfg(feature = "time")]
         LogicalType::DateTime => numeric_binary_ref(BINARY_DATETIME_BASE, ty, op),
+        #[cfg(not(feature = "time"))]
+        LogicalType::DateTime => Err(DatabaseError::UnsupportedBinaryOperator(ty.clone(), op)),
+        #[cfg(feature = "time")]
         LogicalType::Time(_) => match op {
             BinaryOperator::Plus => unit_binary_ref(binary_pos(BINARY_TIME_BASE, TIME_PLUS_OFFSET)),
             BinaryOperator::Minus => {
@@ -194,6 +219,9 @@ pub fn binary_create(
             }
             _ => Err(DatabaseError::UnsupportedBinaryOperator(ty.clone(), op)),
         },
+        #[cfg(not(feature = "time"))]
+        LogicalType::Time(_) => Err(DatabaseError::UnsupportedBinaryOperator(ty.clone(), op)),
+        #[cfg(feature = "time")]
         LogicalType::TimeStamp(_, _) => match op {
             BinaryOperator::Gt => {
                 unit_binary_ref(binary_pos(BINARY_TIME64_BASE, TIMESTAMP_GT_OFFSET))
@@ -215,6 +243,10 @@ pub fn binary_create(
             }
             _ => Err(DatabaseError::UnsupportedBinaryOperator(ty.clone(), op)),
         },
+        #[cfg(not(feature = "time"))]
+        LogicalType::TimeStamp(_, _) => {
+            Err(DatabaseError::UnsupportedBinaryOperator(ty.clone(), op))
+        }
         #[cfg(feature = "decimal")]
         LogicalType::Decimal(_, _) => numeric_binary_ref(BINARY_DECIMAL_BASE, ty, op),
         #[cfg(not(feature = "decimal"))]
@@ -340,12 +372,22 @@ pub(crate) fn eval_binary(
         BINARY_FLOAT64_BASE..BINARY_DATE_BASE => {
             eval_numeric_binary!(pos, BINARY_FLOAT64_BASE, Float64, left, right)
         }
+        #[cfg(feature = "time")]
         BINARY_DATE_BASE..BINARY_DATETIME_BASE => {
             eval_numeric_binary!(pos, BINARY_DATE_BASE, Date, left, right)
         }
+        #[cfg(not(feature = "time"))]
+        BINARY_DATE_BASE..BINARY_DATETIME_BASE => Err(DatabaseError::UnsupportedStmt(
+            "time types require the `time` feature".to_string(),
+        )),
+        #[cfg(feature = "time")]
         BINARY_DATETIME_BASE..BINARY_DECIMAL_BASE => {
             eval_numeric_binary!(pos, BINARY_DATETIME_BASE, DateTime, left, right)
         }
+        #[cfg(not(feature = "time"))]
+        BINARY_DATETIME_BASE..BINARY_DECIMAL_BASE => Err(DatabaseError::UnsupportedStmt(
+            "time types require the `time` feature".to_string(),
+        )),
         #[cfg(feature = "decimal")]
         BINARY_DECIMAL_BASE..BINARY_TIME_BASE => {
             eval_numeric_binary!(pos, BINARY_DECIMAL_BASE, Decimal, left, right)
@@ -354,42 +396,64 @@ pub(crate) fn eval_binary(
         BINARY_DECIMAL_BASE..BINARY_TIME_BASE => Err(DatabaseError::UnsupportedStmt(
             "DECIMAL requires the `decimal` feature".to_string(),
         )),
+        #[cfg(feature = "time")]
         x if x == binary_pos(BINARY_TIME_BASE, TIME_PLUS_OFFSET) => {
             time_plus_binary_eval(left, right)
         }
+        #[cfg(feature = "time")]
         x if x == binary_pos(BINARY_TIME_BASE, TIME_MINUS_OFFSET) => {
             time_minus_binary_eval(left, right)
         }
+        #[cfg(feature = "time")]
         x if x == binary_pos(BINARY_TIME_BASE, TIME_GT_OFFSET) => time_gt_binary_eval(left, right),
+        #[cfg(feature = "time")]
         x if x == binary_pos(BINARY_TIME_BASE, TIME_GT_EQ_OFFSET) => {
             time_gt_eq_binary_eval(left, right)
         }
+        #[cfg(feature = "time")]
         x if x == binary_pos(BINARY_TIME_BASE, TIME_LT_OFFSET) => time_lt_binary_eval(left, right),
+        #[cfg(feature = "time")]
         x if x == binary_pos(BINARY_TIME_BASE, TIME_LT_EQ_OFFSET) => {
             time_lt_eq_binary_eval(left, right)
         }
+        #[cfg(feature = "time")]
         x if x == binary_pos(BINARY_TIME_BASE, TIME_EQ_OFFSET) => time_eq_binary_eval(left, right),
+        #[cfg(feature = "time")]
         x if x == binary_pos(BINARY_TIME_BASE, TIME_NOT_EQ_OFFSET) => {
             time_not_eq_binary_eval(left, right)
         }
+        #[cfg(not(feature = "time"))]
+        BINARY_TIME_BASE..BINARY_TIME64_BASE => Err(DatabaseError::UnsupportedStmt(
+            "time types require the `time` feature".to_string(),
+        )),
+        #[cfg(feature = "time")]
         x if x == binary_pos(BINARY_TIME64_BASE, TIMESTAMP_GT_OFFSET) => {
             time64_gt_binary_eval(left, right)
         }
+        #[cfg(feature = "time")]
         x if x == binary_pos(BINARY_TIME64_BASE, TIMESTAMP_GT_EQ_OFFSET) => {
             time64_gt_eq_binary_eval(left, right)
         }
+        #[cfg(feature = "time")]
         x if x == binary_pos(BINARY_TIME64_BASE, TIMESTAMP_LT_OFFSET) => {
             time64_lt_binary_eval(left, right)
         }
+        #[cfg(feature = "time")]
         x if x == binary_pos(BINARY_TIME64_BASE, TIMESTAMP_LT_EQ_OFFSET) => {
             time64_lt_eq_binary_eval(left, right)
         }
+        #[cfg(feature = "time")]
         x if x == binary_pos(BINARY_TIME64_BASE, TIMESTAMP_EQ_OFFSET) => {
             time64_eq_binary_eval(left, right)
         }
+        #[cfg(feature = "time")]
         x if x == binary_pos(BINARY_TIME64_BASE, TIMESTAMP_NOT_EQ_OFFSET) => {
             time64_not_eq_binary_eval(left, right)
         }
+        #[cfg(not(feature = "time"))]
+        BINARY_TIME64_BASE..BINARY_BOOLEAN_BASE => Err(DatabaseError::UnsupportedStmt(
+            "time types require the `time` feature".to_string(),
+        )),
         x if x == binary_pos(BINARY_BOOLEAN_BASE, BOOLEAN_AND_OFFSET) => {
             boolean_and_binary_eval(left, right)
         }

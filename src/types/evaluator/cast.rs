@@ -14,7 +14,9 @@
 
 use crate::errors::DatabaseError;
 use crate::types::evaluator::boolean::*;
+#[cfg(feature = "time")]
 use crate::types::evaluator::date::*;
+#[cfg(feature = "time")]
 use crate::types::evaluator::datetime::*;
 #[cfg(feature = "decimal")]
 use crate::types::evaluator::decimal::*;
@@ -25,7 +27,9 @@ use crate::types::evaluator::int32::*;
 use crate::types::evaluator::int64::*;
 use crate::types::evaluator::int8::*;
 use crate::types::evaluator::null::{null_cast_eval, to_sql_null_cast_eval};
+#[cfg(feature = "time")]
 use crate::types::evaluator::time32::*;
+#[cfg(feature = "time")]
 use crate::types::evaluator::time64::*;
 use crate::types::evaluator::tuple::eval_tuple_cast;
 use crate::types::evaluator::uint16::*;
@@ -103,6 +107,22 @@ fn cast_type_code(ty: &LogicalType) -> u16 {
 
 fn cast_pos(from: &LogicalType, to: &LogicalType) -> u16 {
     cast_type_code(from) * CAST_TYPE_STRIDE + cast_type_code(to)
+}
+
+#[cfg(not(feature = "time"))]
+fn is_chrono_type(ty: &LogicalType) -> bool {
+    matches!(
+        ty,
+        LogicalType::Date
+            | LogicalType::DateTime
+            | LogicalType::Time(_)
+            | LogicalType::TimeStamp(_, _)
+    )
+}
+
+#[cfg(not(feature = "time"))]
+fn is_chrono_type_code(code: u16) -> bool {
+    matches!(code, CAST_DATE | CAST_DATETIME | CAST_TIME | CAST_TIMESTAMP)
 }
 
 pub(crate) fn to_char(
@@ -521,6 +541,12 @@ pub fn cast_create(
             CastEvaluatorParams::Identity,
         ));
     }
+    #[cfg(not(feature = "time"))]
+    if is_chrono_type(from) || is_chrono_type(to) {
+        return Err(DatabaseError::UnsupportedStmt(
+            "time types require the `time` feature".to_string(),
+        ));
+    }
 
     match (from, to) {
         (LogicalType::SqlNull, _) => cast_ref!(from, to),
@@ -817,6 +843,7 @@ fn decimal_param(params: &CastEvaluatorParams) -> (Option<u8>, Option<u8>) {
     (*precision, *scale)
 }
 
+#[cfg(feature = "time")]
 fn precision_param(params: &CastEvaluatorParams) -> Option<u64> {
     let CastEvaluatorParams::Precision { precision } = params else {
         unreachable!("cast evaluator must have precision parameter")
@@ -824,6 +851,7 @@ fn precision_param(params: &CastEvaluatorParams) -> Option<u64> {
     *precision
 }
 
+#[cfg(feature = "time")]
 fn timestamp_param(params: &CastEvaluatorParams) -> (Option<u64>, bool) {
     let CastEvaluatorParams::Timestamp { precision, zone } = params else {
         unreachable!("cast evaluator must have timestamp parameters")
@@ -888,6 +916,12 @@ impl CastEvaluatorRef {
 
         if matches!(params, CastEvaluatorParams::Identity) {
             return run!(identity_cast_eval);
+        }
+        #[cfg(not(feature = "time"))]
+        if is_chrono_type_code(from_code) || is_chrono_type_code(to_code) {
+            return Err(DatabaseError::UnsupportedStmt(
+                "time types require the `time` feature".to_string(),
+            ));
         }
 
         match (from_code, to_code) {
@@ -988,70 +1022,91 @@ impl CastEvaluatorRef {
                 let (len, unit) = string_param(params);
                 run!(utf8_to_varchar_cast_eval { len, unit })
             }
+            #[cfg(feature = "time")]
             (CAST_CHAR | CAST_VARCHAR, CAST_DATE) => run!(utf8_to_date_cast_eval),
+            #[cfg(feature = "time")]
             (CAST_CHAR | CAST_VARCHAR, CAST_DATETIME) => run!(utf8_to_datetime_cast_eval),
+            #[cfg(feature = "time")]
             (CAST_CHAR | CAST_VARCHAR, CAST_TIME) => run!(utf8_to_time_cast_eval {
                 precision: precision_param(params)
             }),
+            #[cfg(feature = "time")]
             (CAST_CHAR | CAST_VARCHAR, CAST_TIMESTAMP) => {
                 let (precision, zone) = timestamp_param(params);
                 run!(utf8_to_timestamp_cast_eval { precision, zone })
             }
             #[cfg(feature = "decimal")]
             (CAST_CHAR | CAST_VARCHAR, CAST_DECIMAL) => run!(utf8_to_decimal_cast_eval),
+            #[cfg(feature = "time")]
             (CAST_DATE, CAST_CHAR) => {
                 let (len, unit) = string_param(params);
                 let len = len.expect("char cast must have fixed length");
                 run!(date32_to_char_cast_eval { len, unit })
             }
+            #[cfg(feature = "time")]
             (CAST_DATE, CAST_VARCHAR) => {
                 let (len, unit) = string_param(params);
                 run!(date32_to_varchar_cast_eval { len, unit })
             }
+            #[cfg(feature = "time")]
             (CAST_DATE, CAST_DATETIME) => run!(date32_to_datetime_cast_eval),
+            #[cfg(feature = "time")]
             (CAST_DATETIME, CAST_CHAR) => {
                 let (len, unit) = string_param(params);
                 let len = len.expect("char cast must have fixed length");
                 run!(date64_to_char_cast_eval { len, unit })
             }
+            #[cfg(feature = "time")]
             (CAST_DATETIME, CAST_VARCHAR) => {
                 let (len, unit) = string_param(params);
                 run!(date64_to_varchar_cast_eval { len, unit })
             }
+            #[cfg(feature = "time")]
             (CAST_DATETIME, CAST_DATE) => run!(date64_to_date_cast_eval),
+            #[cfg(feature = "time")]
             (CAST_DATETIME, CAST_TIME) => run!(date64_to_time_cast_eval {
                 precision: precision_param(params)
             }),
+            #[cfg(feature = "time")]
             (CAST_DATETIME, CAST_TIMESTAMP) => {
                 let (precision, zone) = timestamp_param(params);
                 run!(date64_to_timestamp_cast_eval { precision, zone })
             }
+            #[cfg(feature = "time")]
             (CAST_TIME, CAST_CHAR) => {
                 let (len, unit) = string_param(params);
                 let len = len.expect("char cast must have fixed length");
                 run!(time32_to_char_cast_eval { len, unit })
             }
+            #[cfg(feature = "time")]
             (CAST_TIME, CAST_VARCHAR) => {
                 let (len, unit) = string_param(params);
                 run!(time32_to_varchar_cast_eval { len, unit })
             }
+            #[cfg(feature = "time")]
             (CAST_TIME, CAST_TIME) => run!(time32_to_time_cast_eval {
                 precision: precision_param(params)
             }),
+            #[cfg(feature = "time")]
             (CAST_TIMESTAMP, CAST_CHAR) => {
                 let (len, unit) = string_param(params);
                 let len = len.expect("char cast must have fixed length");
                 run!(time64_to_char_cast_eval { len, unit })
             }
+            #[cfg(feature = "time")]
             (CAST_TIMESTAMP, CAST_VARCHAR) => {
                 let (len, unit) = string_param(params);
                 run!(time64_to_varchar_cast_eval { len, unit })
             }
+            #[cfg(feature = "time")]
             (CAST_TIMESTAMP, CAST_DATE) => run!(time64_to_date_cast_eval),
+            #[cfg(feature = "time")]
             (CAST_TIMESTAMP, CAST_DATETIME) => run!(time64_to_datetime_cast_eval),
+            #[cfg(feature = "time")]
             (CAST_TIMESTAMP, CAST_TIME) => run!(time64_to_time_cast_eval {
                 precision: precision_param(params)
             }),
+            #[cfg(feature = "time")]
             (CAST_TIMESTAMP, CAST_TIMESTAMP) => {
                 let (precision, zone) = timestamp_param(params);
                 run!(time64_to_timestamp_cast_eval { precision, zone })

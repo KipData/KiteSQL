@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext, ReadExecutor,
+    ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext, ReadExecutor,
 };
 use crate::planner::operator::values::ValuesOperator;
 use crate::storage::Transaction;
@@ -37,47 +37,27 @@ impl From<ValuesOperator> for Values {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Values {
-    fn into_executor(
-        self,
-        arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut crate::planner::PlanArena<'a>,
-        _: ReadExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
-        arena.push(ExecNode::Values(self))
-    }
-}
-
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values {
     type Input = ValuesOperator;
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena,
         _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
         arena.push(ExecNode::Values(Values::from(input)))
     }
-
-    fn next_tuple(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
-    ) -> Result<(), DatabaseError> {
-        Values::next_tuple(self, arena, plan_arena)
-    }
 }
 
-impl Values {
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+impl<'a> ExecutorNode<'a> for Values {
+    fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(mut values) = self.rows.next() else {
-            arena.finish();
+            runtime.finish();
             return Ok(());
         };
 
@@ -87,10 +67,10 @@ impl Values {
             *value = mem::replace(value, DataValue::Null).cast(&ty)?;
         }
 
-        let output = arena.result_tuple_mut();
+        let output = runtime.result_tuple_mut();
         output.pk = None;
         output.values = values;
-        arena.resume();
+        runtime.resume();
         Ok(())
     }
 }

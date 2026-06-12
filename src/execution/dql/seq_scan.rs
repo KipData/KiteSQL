@@ -14,100 +14,58 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext, ReadExecutor,
+    ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext, ReadExecutor,
+    RuntimeCursorId,
 };
 use crate::planner::operator::table_scan::TableScanOperator;
-use crate::storage::{Iter, Transaction, TupleIter};
+use crate::storage::Transaction;
 
-pub(crate) struct SeqScan<'a, T: Transaction + 'a> {
+pub(crate) struct SeqScan {
     op: Option<TableScanOperator>,
-    iter: Option<TupleIter<'a, T>>,
+    cursor: Option<RuntimeCursorId>,
 }
 
-impl<'a, T: Transaction + 'a> From<TableScanOperator> for SeqScan<'a, T> {
+impl From<TableScanOperator> for SeqScan {
     fn from(op: TableScanOperator) -> Self {
-        SeqScan {
+        Self {
             op: Some(op),
-            iter: None,
+            cursor: None,
         }
     }
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SeqScan<'a, T> {
-    fn into_executor(
-        self,
-        arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut crate::planner::PlanArena<'a>,
-        _: ReadExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
-        arena.push(ExecNode::SeqScan(self))
-    }
-}
-
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SeqScan<'a, T> {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SeqScan {
     type Input = TableScanOperator;
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena,
         _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
         arena.push(ExecNode::SeqScan(SeqScan::from(input)))
     }
-
-    fn next_tuple(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
-    ) -> Result<(), DatabaseError> {
-        SeqScan::next_tuple(self, arena, plan_arena)
-    }
 }
 
-impl<'a, T: Transaction + 'a> SeqScan<'a, T> {
-    pub(crate) fn next_tuple(
+impl<'a> ExecutorNode<'a> for SeqScan {
+    fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
-        if self.iter.is_none() {
-            let Some(TableScanOperator {
-                table_name,
-                columns,
-                limit,
-                with_pk,
-                ..
-            }) = self.op.take()
-            else {
-                arena.finish();
+        if self.cursor.is_none() {
+            let Some(op) = self.op.take() else {
+                runtime.finish();
                 return Ok(());
             };
-            let state = arena.local_state(plan_arena);
-            let context = state.context.read();
-            self.iter = Some(state.transaction().read(
-                state.table_codec,
-                state.plan_arena,
-                context.table_cache,
-                table_name,
-                limit,
-                columns,
-                with_pk,
-            )?);
+            self.cursor = Some(runtime.open_seq_scan(plan_arena, op)?);
         }
 
-        let state = arena.local_state(plan_arena);
-        if self
-            .iter
-            .as_mut()
-            .expect("seq scan iterator initialized")
-            .next_tuple_into(state.table_codec, &mut state.result.tuple)?
-        {
-            arena.resume();
+        if runtime.next_scan_tuple(self.cursor.expect("seq scan cursor initialized"))? {
+            runtime.resume();
         } else {
-            arena.finish();
+            runtime.finish();
         }
         Ok(())
     }

@@ -17,7 +17,8 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext, ReadExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
+    ReadExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
@@ -138,77 +139,47 @@ impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for NestedLoopJoin {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
-    fn into_executor(
-        mut self,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
-        cache: ReadExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let left_len = self.left_input_plan.output_schema(plan_arena).len();
-        let right_len = self.right_input_plan.output_schema(plan_arena).len();
-        self.eq_cond.left_len = left_len;
-        self.eq_cond.right_len = right_len;
-        self.left_input = build_read(
-            arena,
-            plan_arena,
-            self.left_input_plan.take(),
-            cache,
-            transaction,
-        );
-        arena.push(ExecNode::NestedLoopJoin(self))
-    }
-}
-
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
     type Input = (JoinOperator, LogicalPlan, LogicalPlan);
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena,
         plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        <Self as ReadExecutor<'a, T>>::into_executor(
-            Self::from(input),
+        let mut exec = Self::from(input);
+        let left_len = exec.left_input_plan.output_schema(plan_arena).len();
+        let right_len = exec.right_input_plan.output_schema(plan_arena).len();
+        exec.eq_cond.left_len = left_len;
+        exec.eq_cond.right_len = right_len;
+        exec.left_input = build_read(
             arena,
             plan_arena,
+            exec.left_input_plan.take(),
             cache,
             transaction,
-        )
-    }
-
-    fn next_tuple(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
-    ) -> Result<(), DatabaseError> {
-        NestedLoopJoin::next_tuple(self, arena, plan_arena)
+        );
+        arena.push(ExecNode::NestedLoopJoin(exec))
     }
 }
 
 impl NestedLoopJoin {
-    fn build_right_input<'a, T: Transaction + 'a>(
+    fn build_right_input<'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> ExecId {
-        let cache = arena.read_context();
-        let transaction = arena.transaction();
+        let cache = runtime.read_context();
         // Fixme: Executor reset
-        build_read(
-            arena,
-            plan_arena,
-            self.right_input_plan.clone(),
-            cache,
-            transaction,
-        )
+        runtime.build_read_plan(plan_arena, self.right_input_plan.clone(), cache)
     }
+}
 
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+impl<'a> ExecutorNode<'a> for NestedLoopJoin {
+    fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let mut state = std::mem::replace(&mut self.state, NestedLoopJoinState::End);
@@ -216,25 +187,25 @@ impl NestedLoopJoin {
         loop {
             match state {
                 NestedLoopJoinState::PullLeft { right_bitmap } => {
-                    if !arena.next_tuple(self.left_input, plan_arena)? {
+                    if !runtime.next_tuple(self.left_input, plan_arena)? {
                         if matches!(self.ty, JoinType::Full) {
                             state = NestedLoopJoinState::EmitRightUnmatched {
-                                right_input: self.build_right_input(arena, plan_arena),
+                                right_input: self.build_right_input(runtime, plan_arena),
                                 right_bitmap: right_bitmap.unwrap_or_default(),
                                 right_emit_index: 0,
                             };
                             continue;
                         }
                         self.state = NestedLoopJoinState::End;
-                        arena.finish();
+                        runtime.finish();
                         return Ok(());
                     }
-                    let left_tuple = arena.result_tuple().clone();
+                    let left_tuple = runtime.result_tuple().clone();
 
                     state = NestedLoopJoinState::ScanRight {
                         active_left: ActiveLeftState {
                             left_tuple,
-                            right_input: self.build_right_input(arena, plan_arena),
+                            right_input: self.build_right_input(runtime, plan_arena),
                             right_index: 0,
                             has_matched: false,
                             first_matches: Vec::new(),
@@ -246,8 +217,8 @@ impl NestedLoopJoin {
                     mut active_left,
                     mut right_bitmap,
                 } => {
-                    while arena.next_tuple(active_left.right_input, plan_arena)? {
-                        let right_tuple = arena.result_tuple().clone();
+                    while runtime.next_tuple(active_left.right_input, plan_arena)? {
+                        let right_tuple = runtime.result_tuple().clone();
                         let idx = active_left.right_index;
                         active_left.right_index += 1;
 
@@ -319,7 +290,7 @@ impl NestedLoopJoin {
                                 active_left,
                                 right_bitmap,
                             };
-                            arena.produce_tuple(tuple);
+                            runtime.produce_tuple(tuple);
                             return Ok(());
                         }
                     }
@@ -365,7 +336,7 @@ impl NestedLoopJoin {
 
                     self.state = NestedLoopJoinState::PullLeft { right_bitmap };
                     if let Some(tuple) = tuple {
-                        arena.produce_tuple(tuple);
+                        runtime.produce_tuple(tuple);
                         return Ok(());
                     }
                     state = std::mem::replace(&mut self.state, NestedLoopJoinState::End);
@@ -375,8 +346,8 @@ impl NestedLoopJoin {
                     right_bitmap,
                     mut right_emit_index,
                 } => {
-                    while arena.next_tuple(right_input, plan_arena)? {
-                        let mut right_tuple = arena.result_tuple().clone();
+                    while runtime.next_tuple(right_input, plan_arena)? {
+                        let mut right_tuple = runtime.result_tuple().clone();
                         let idx = right_emit_index;
                         right_emit_index += 1;
 
@@ -388,24 +359,26 @@ impl NestedLoopJoin {
                                 right_bitmap,
                                 right_emit_index,
                             };
-                            arena.produce_tuple(Tuple::new(right_tuple.pk, values));
+                            runtime.produce_tuple(Tuple::new(right_tuple.pk, values));
                             return Ok(());
                         }
                     }
 
                     self.state = NestedLoopJoinState::End;
-                    arena.finish();
+                    runtime.finish();
                     return Ok(());
                 }
                 NestedLoopJoinState::End => {
                     self.state = NestedLoopJoinState::End;
-                    arena.finish();
+                    runtime.finish();
                     return Ok(());
                 }
             }
         }
     }
+}
 
+impl NestedLoopJoin {
     /// Emit a tuple according to the join type.
     ///
     /// `left_tuple`: left tuple to be included.
@@ -660,8 +633,8 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = crate::execution::execute(
-            NestedLoopJoin::from((op, left, right)),
+        let executor = crate::execution::execute_input::<_, NestedLoopJoin>(
+            (op, left, right),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &mut transaction,
@@ -712,8 +685,8 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = crate::execution::execute(
-            NestedLoopJoin::from((op, left, right)),
+        let executor = crate::execution::execute_input::<_, NestedLoopJoin>(
+            (op, left, right),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &mut transaction,
@@ -793,8 +766,8 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = crate::execution::execute(
-            NestedLoopJoin::from((op, left, right)),
+        let executor = crate::execution::execute_input::<_, NestedLoopJoin>(
+            (op, left, right),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &mut transaction,
@@ -845,8 +818,8 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = crate::execution::execute(
-            NestedLoopJoin::from((op, left, right)),
+        let executor = crate::execution::execute_input::<_, NestedLoopJoin>(
+            (op, left, right),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &mut transaction,
@@ -912,8 +885,8 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = crate::execution::execute(
-            NestedLoopJoin::from((op, left, right)),
+        let executor = crate::execution::execute_input::<_, NestedLoopJoin>(
+            (op, left, right),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &mut transaction,
@@ -954,8 +927,8 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = crate::execution::execute(
-            NestedLoopJoin::from((op, left, right)),
+        let executor = crate::execution::execute_input::<_, NestedLoopJoin>(
+            (op, left, right),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &mut transaction,
@@ -1030,8 +1003,8 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = crate::execution::execute(
-            NestedLoopJoin::from((op, left, right)),
+        let executor = crate::execution::execute_input::<_, NestedLoopJoin>(
+            (op, left, right),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &mut transaction,
@@ -1174,8 +1147,8 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = crate::execution::execute(
-            NestedLoopJoin::from((op, left, right)),
+        let executor = crate::execution::execute_input::<_, NestedLoopJoin>(
+            (op, left, right),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &mut transaction,

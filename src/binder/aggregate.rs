@@ -98,11 +98,22 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         exprs: impl IntoIterator<Item = &'c mut ScalarExpression>,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<(), DatabaseError> {
-        let mut binder = AggregateOutputBinder::new(
+        self.bind_aggregate_output_exprs_with_outputs(
             &self.context.agg_calls,
             &self.context.group_by_exprs,
+            exprs,
             arena,
-        );
+        )
+    }
+
+    pub(crate) fn bind_aggregate_output_exprs_with_outputs<'c>(
+        &self,
+        agg_calls: &[ScalarExpression],
+        group_by_exprs: &[ScalarExpression],
+        exprs: impl IntoIterator<Item = &'c mut ScalarExpression>,
+        arena: &mut crate::planner::PlanArena,
+    ) -> Result<(), DatabaseError> {
+        let mut binder = AggregateOutputBinder::new(agg_calls, group_by_exprs, arena);
         for expr in exprs {
             binder.visit(expr)?;
         }

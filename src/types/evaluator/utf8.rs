@@ -13,12 +13,10 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::types::evaluator::cast::{cast_fail, to_char, to_varchar};
+use crate::types::evaluator::cast::{to_char, to_varchar};
 use crate::types::evaluator::DataValue;
 use crate::types::value::Utf8Type;
 use crate::types::CharLengthUnits;
-use crate::types::LogicalType;
-use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use ordered_float::OrderedFloat;
 #[cfg(feature = "decimal")]
 use rust_decimal::Decimal;
@@ -99,99 +97,113 @@ crate::define_cast_evaluator!(
     },
     DataValue::Utf8 { value, .. } => |this| to_varchar(value.clone(), this.len, this.unit)
 );
-crate::define_cast_evaluator!(utf8_to_date_cast_eval, DataValue::Utf8 { value, .. } => {
-    Ok(DataValue::Date32(
-        NaiveDate::parse_from_str(value, crate::types::value::DATE_FMT)?.num_days_from_ce(),
-    ))
-});
-crate::define_cast_evaluator!(utf8_to_datetime_cast_eval, DataValue::Utf8 { value, .. } => {
-    let value = NaiveDateTime::parse_from_str(value, crate::types::value::DATE_TIME_FMT)
-        .or_else(|_| {
-            NaiveDate::parse_from_str(value, crate::types::value::DATE_FMT)
-                .map(|date| date.and_hms_opt(0, 0, 0).unwrap())
-        })?
-        .and_utc()
-        .timestamp();
+#[cfg(feature = "time")]
+mod chrono_cast {
+    use super::DataValue;
+    use crate::types::evaluator::cast::cast_fail;
+    use crate::types::LogicalType;
+    use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 
-    Ok(DataValue::Date64(value))
-});
-crate::define_cast_evaluator!(
-    utf8_to_time_cast_eval {
-        precision: Option<u64>
-    },
-    DataValue::Utf8 { value, .. } => |this| {
-        let precision = this.precision.unwrap_or(0);
-        let fmt = if precision == 0 {
-            crate::types::value::TIME_FMT
-        } else {
-            crate::types::value::TIME_FMT_WITHOUT_ZONE
-        };
-        let (value, nano) = match precision {
-            0 => (
-                NaiveTime::parse_from_str(value, fmt)
-                    .map(|time| time.num_seconds_from_midnight())?,
-                0,
-            ),
-            _ => NaiveTime::parse_from_str(value, fmt)
-                .map(|time| (time.num_seconds_from_midnight(), time.nanosecond()))?,
-        };
+    crate::define_cast_evaluator!(utf8_to_date_cast_eval, DataValue::Utf8 { value, .. } => {
+        Ok(DataValue::Date32(
+            NaiveDate::parse_from_str(value, crate::types::value::DATE_FMT)?.num_days_from_ce(),
+        ))
+    });
 
-        Ok(DataValue::Time32(DataValue::pack(value, nano, precision), precision))
-    }
-);
-crate::define_cast_evaluator!(
-    utf8_to_timestamp_cast_eval {
-        precision: Option<u64>,
-        zone: bool
-    },
-    DataValue::Utf8 { value, .. } => |this| {
-        let precision = this.precision.unwrap_or(0);
-        let target_type = || LogicalType::TimeStamp(this.precision, this.zone);
-        let fmt = match (precision, this.zone) {
-            (0, false) => crate::types::value::DATE_TIME_FMT,
-            (0, true) => crate::types::value::TIME_STAMP_FMT_WITHOUT_PRECISION,
-            (3 | 6 | 9, false) => crate::types::value::TIME_STAMP_FMT_WITHOUT_ZONE,
-            _ => crate::types::value::TIME_STAMP_FMT_WITH_ZONE,
-        };
-        let complete_value = if this.zone {
-            if value.contains("+") {
-                value.clone()
+    crate::define_cast_evaluator!(utf8_to_datetime_cast_eval, DataValue::Utf8 { value, .. } => {
+        let value = NaiveDateTime::parse_from_str(value, crate::types::value::DATE_TIME_FMT)
+            .or_else(|_| {
+                NaiveDate::parse_from_str(value, crate::types::value::DATE_FMT)
+                    .map(|date| date.and_hms_opt(0, 0, 0).unwrap())
+            })?
+            .and_utc()
+            .timestamp();
+
+        Ok(DataValue::Date64(value))
+    });
+
+    crate::define_cast_evaluator!(
+        utf8_to_time_cast_eval {
+            precision: Option<u64>
+        },
+        DataValue::Utf8 { value, .. } => |this| {
+            let precision = this.precision.unwrap_or(0);
+            let fmt = if precision == 0 {
+                crate::types::value::TIME_FMT
             } else {
-                format!("{value}+00:00")
-            }
-        } else {
-            value.clone()
-        };
+                crate::types::value::TIME_FMT_WITHOUT_ZONE
+            };
+            let (value, nano) = match precision {
+                0 => (
+                    NaiveTime::parse_from_str(value, fmt)
+                        .map(|time| time.num_seconds_from_midnight())?,
+                    0,
+                ),
+                _ => NaiveTime::parse_from_str(value, fmt)
+                    .map(|time| (time.num_seconds_from_midnight(), time.nanosecond()))?,
+            };
 
-        if !this.zone {
-            let value = NaiveDateTime::parse_from_str(&complete_value, fmt)?.and_utc();
-            let value = match precision {
-            3 => value.timestamp_millis(),
-            6 => value.timestamp_micros(),
-            9 => value
-                .timestamp_nanos_opt()
-                .ok_or_else(|| cast_fail(target_type(), target_type()))?,
-            0 => value.timestamp(),
-            _ => unreachable!(),
-        };
-
-            return Ok(DataValue::Time64(value, precision, false));
+            Ok(DataValue::Time32(DataValue::pack(value, nano, precision), precision))
         }
+    );
 
-        let value = DateTime::parse_from_str(&complete_value, fmt);
-        let value = match precision {
-            3 => value.map(|date_time| date_time.timestamp_millis())?,
-            6 => value.map(|date_time| date_time.timestamp_micros())?,
-            9 => value
-                .map(|date_time| date_time.timestamp_nanos_opt())?
-                .ok_or_else(|| cast_fail(target_type(), target_type()))?,
-            0 => value.map(|date_time| date_time.timestamp())?,
-            _ => unreachable!(),
-        };
+    crate::define_cast_evaluator!(
+        utf8_to_timestamp_cast_eval {
+            precision: Option<u64>,
+            zone: bool
+        },
+        DataValue::Utf8 { value, .. } => |this| {
+            let precision = this.precision.unwrap_or(0);
+            let target_type = || LogicalType::TimeStamp(this.precision, this.zone);
+            let fmt = match (precision, this.zone) {
+                (0, false) => crate::types::value::DATE_TIME_FMT,
+                (0, true) => crate::types::value::TIME_STAMP_FMT_WITHOUT_PRECISION,
+                (3 | 6 | 9, false) => crate::types::value::TIME_STAMP_FMT_WITHOUT_ZONE,
+                _ => crate::types::value::TIME_STAMP_FMT_WITH_ZONE,
+            };
+            let complete_value = if this.zone {
+                if value.contains("+") {
+                    value.clone()
+                } else {
+                    format!("{value}+00:00")
+                }
+            } else {
+                value.clone()
+            };
 
-        Ok(DataValue::Time64(value, precision, this.zone))
-    }
-);
+            if !this.zone {
+                let value = NaiveDateTime::parse_from_str(&complete_value, fmt)?.and_utc();
+                let value = match precision {
+                    3 => value.timestamp_millis(),
+                    6 => value.timestamp_micros(),
+                    9 => value
+                        .timestamp_nanos_opt()
+                        .ok_or_else(|| cast_fail(target_type(), target_type()))?,
+                    0 => value.timestamp(),
+                    _ => unreachable!(),
+                };
+
+                return Ok(DataValue::Time64(value, precision, false));
+            }
+
+            let value = DateTime::parse_from_str(&complete_value, fmt);
+            let value = match precision {
+                3 => value.map(|date_time| date_time.timestamp_millis())?,
+                6 => value.map(|date_time| date_time.timestamp_micros())?,
+                9 => value
+                    .map(|date_time| date_time.timestamp_nanos_opt())?
+                    .ok_or_else(|| cast_fail(target_type(), target_type()))?,
+                0 => value.map(|date_time| date_time.timestamp())?,
+                _ => unreachable!(),
+            };
+
+            Ok(DataValue::Time64(value, precision, this.zone))
+        }
+    );
+}
+
+#[cfg(feature = "time")]
+pub use chrono_cast::*;
 #[cfg(feature = "decimal")]
 crate::define_cast_evaluator!(utf8_to_decimal_cast_eval, DataValue::Utf8 { value, .. } => {
     Ok(DataValue::Decimal(Decimal::from_str(value)?))

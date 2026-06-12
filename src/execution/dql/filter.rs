@@ -14,7 +14,8 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext,
+    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
+    ReadExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::filter::FilterOperator;
@@ -25,12 +26,12 @@ pub struct Filter {
     input: ExecId,
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Filter {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Filter {
     type Input = (FilterOperator, LogicalPlan);
 
     fn into_executor(
         (FilterOperator { predicate, .. }, input): Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena,
         plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
@@ -38,20 +39,22 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Filter {
         let input = build_read(arena, plan_arena, input, cache, transaction);
         arena.push(ExecNode::Filter(Filter { predicate, input }))
     }
+}
 
+impl<'a> ExecutorNode<'a> for Filter {
     fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         loop {
-            if !arena.next_tuple(self.input, plan_arena)? {
-                arena.finish();
+            if !runtime.next_tuple(self.input, plan_arena)? {
+                runtime.finish();
                 return Ok(());
             };
-            let tuple = arena.result_tuple();
+            let tuple = runtime.result_tuple();
             if self.predicate.eval(Some(tuple))?.is_true()? {
-                arena.resume();
+                runtime.resume();
                 return Ok(());
             }
         }

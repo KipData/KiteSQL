@@ -15,7 +15,9 @@
 pub mod binary;
 pub mod boolean;
 pub mod cast;
+#[cfg(feature = "time")]
 pub mod date;
+#[cfg(feature = "time")]
 pub mod datetime;
 #[cfg(feature = "decimal")]
 pub mod decimal;
@@ -26,7 +28,9 @@ pub mod int32;
 pub mod int64;
 pub mod int8;
 pub mod null;
+#[cfg(feature = "time")]
 pub mod time32;
+#[cfg(feature = "time")]
 pub mod time64;
 pub mod tuple;
 pub mod uint16;

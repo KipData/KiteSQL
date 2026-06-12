@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{rewrite_table_in_batches, visit_table_in_batches};
 use crate::errors::DatabaseError;
 use crate::execution::{
-    DDLApply, ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor,
+    DDLApply, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
+    TupleValueSerializerIter, WriteExecutor,
 };
 use crate::planner::operator::alter_table::change_column::{ChangeColumnOperator, NotNullChange};
 use crate::storage::Transaction;
@@ -33,24 +33,24 @@ impl From<ChangeColumnOperator> for ChangeColumn {
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for ChangeColumn {
+    type Input = crate::planner::operator::alter_table::change_column::ChangeColumnOperator;
+
     fn into_executor(
-        self,
-        arena: &mut ExecArena<'a, T>,
+        input: Self::Input,
+        arena: &mut ExecArena,
         _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::ChangeColumn(self))
+        arena.push(ExecNode::ChangeColumn(Self::from(input)))
     }
 }
-
-impl ChangeColumn {
-    pub(crate) fn next_tuple<'a, T: Transaction>(
+impl<'a> ExecutorNode<'a> for ChangeColumn {
+    fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
-        let table_cache = arena.table_cache();
         let Some(ChangeColumnOperator {
             table_name,
             old_column_name,
@@ -60,14 +60,13 @@ impl ChangeColumn {
             not_null_change,
         }) = self.op.take()
         else {
-            arena.finish();
+            runtime.finish();
             return Ok(());
         };
 
         let (old_schema, pk_ty, column_index, old_column_type, old_column_id, affected_index_name) = {
-            let table_catalog = arena
-                .transaction()
-                .table(table_cache, table_name.clone())?
+            let table_catalog = runtime
+                .transaction_table(table_name.clone())?
                 .ok_or(DatabaseError::TableNotFound)?;
             let (column_index, old_column) = table_catalog
                 .columns()
@@ -112,30 +111,27 @@ impl ChangeColumn {
         if needs_data_rewrite {
             let target_column_name = new_column_name.clone();
             let target_data_type = data_type.clone();
-            let mut state = arena.local_state(plan_arena);
-            let plan_arena = state.plan_arena;
-            let (transaction, table_codec) = state.transaction_codec_mut();
-            rewrite_table_in_batches(
-                transaction,
-                table_codec,
+            runtime.transaction_rewrite_table_in_batches(
                 &table_name,
                 &pk_ty,
                 old_schema.len(),
-                || {
-                    old_schema
-                        .iter()
-                        .map(|column| plan_arena.column(*column).datatype().serializable())
+                &mut || -> TupleValueSerializerIter<'_> {
+                    Box::new(
+                        old_schema
+                            .iter()
+                            .map(|column| plan_arena.column(*column).datatype().serializable()),
+                    )
                 },
-                || {
-                    old_schema.iter().enumerate().map(|(index, column)| {
+                &mut || -> TupleValueSerializerIter<'_> {
+                    Box::new(old_schema.iter().enumerate().map(|(index, column)| {
                         if index == column_index {
                             data_type.serializable()
                         } else {
                             plan_arena.column(*column).datatype().serializable()
                         }
-                    })
+                    }))
                 },
-                |tuple| {
+                &mut |tuple| {
                     tuple.values[column_index] =
                         tuple.values[column_index].clone().cast(&target_data_type)?;
                     if needs_not_null_validation && tuple.values[column_index].is_null() {
@@ -143,25 +139,22 @@ impl ChangeColumn {
                     }
                     Ok(())
                 },
-                |_, _, _| Ok(()),
+                &mut |_, _| Ok(()),
             )?;
         } else if needs_not_null_validation {
             let target_column_name = new_column_name.clone();
-            let mut state = arena.local_state(plan_arena);
-            let plan_arena = state.plan_arena;
-            let (transaction, table_codec) = state.transaction_codec_mut();
-            visit_table_in_batches(
-                transaction,
-                table_codec,
+            runtime.transaction_visit_table_in_batches(
                 &table_name,
                 &pk_ty,
                 old_schema.len(),
-                || {
-                    old_schema
-                        .iter()
-                        .map(|column| plan_arena.column(*column).datatype().serializable())
+                &mut || -> TupleValueSerializerIter<'_> {
+                    Box::new(
+                        old_schema
+                            .iter()
+                            .map(|column| plan_arena.column(*column).datatype().serializable()),
+                    )
                 },
-                |tuple| {
+                &mut |tuple| {
                     if tuple.values[column_index].is_null() {
                         return Err(DatabaseError::not_null_column(target_column_name.clone()));
                     }
@@ -171,9 +164,7 @@ impl ChangeColumn {
         }
 
         let apply = {
-            let (transaction, table_codec) = arena.transaction_codec_mut();
-            let table = transaction.change_column(
-                table_codec,
+            let table = runtime.transaction_change_column(
                 plan_arena,
                 &table_name,
                 &old_column_name,
@@ -184,10 +175,10 @@ impl ChangeColumn {
             )?;
             DDLApply::upsert_table(table, true)
         };
-        arena.push_ddl_apply(apply);
+        runtime.push_ddl_apply(apply);
 
-        TupleBuilder::build_result_into(arena.result_tuple_mut(), format!("{table_name}"));
-        arena.resume();
+        TupleBuilder::build_result_into(runtime.result_tuple_mut(), format!("{table_name}"));
+        runtime.resume();
         Ok(())
     }
 }

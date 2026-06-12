@@ -21,7 +21,6 @@ use crate::types::tuple::{SchemaView, Tuple};
 use crate::types::value::DataValue;
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 #[cfg(feature = "decimal")]
 use rust_decimal::Decimal;
 use std::borrow::Cow;
@@ -2747,9 +2746,6 @@ impl_from_data_value_by_method!(u32, u32);
 impl_from_data_value_by_method!(u64, u64);
 impl_from_data_value_by_method!(f32, float);
 impl_from_data_value_by_method!(f64, double);
-impl_from_data_value_by_method!(NaiveDate, date);
-impl_from_data_value_by_method!(NaiveDateTime, datetime);
-impl_from_data_value_by_method!(NaiveTime, time);
 #[cfg(feature = "decimal")]
 impl_from_data_value_by_method!(Decimal, decimal);
 
@@ -2780,9 +2776,6 @@ impl_model_column_type!(LogicalType::UInteger; u32);
 impl_model_column_type!(LogicalType::UBigint; u64);
 impl_model_column_type!(LogicalType::Float; f32);
 impl_model_column_type!(LogicalType::Double; f64);
-impl_model_column_type!(LogicalType::Date; NaiveDate);
-impl_model_column_type!(LogicalType::DateTime; NaiveDateTime);
-impl_model_column_type!(LogicalType::Time(Some(0)); NaiveTime);
 #[cfg(feature = "decimal")]
 impl_model_column_type!(LogicalType::Decimal(None, None); Decimal);
 impl_model_column_type!(LogicalType::Varchar(None, CharLengthUnits::Characters); String, Arc<str>);
@@ -2791,6 +2784,40 @@ impl StringType for String {}
 impl StringType for Arc<str> {}
 #[cfg(feature = "decimal")]
 impl DecimalType for Decimal {}
+
+#[cfg(feature = "time")]
+mod chrono_orm {
+    use super::{FromDataValue, ModelColumnType, ToDataValue};
+    use crate::types::value::DataValue;
+    use crate::types::LogicalType;
+    use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+
+    impl_from_data_value_by_method!(NaiveDate, date);
+    impl_from_data_value_by_method!(NaiveDateTime, datetime);
+    impl_from_data_value_by_method!(NaiveTime, time);
+
+    impl_model_column_type!(LogicalType::Date; NaiveDate);
+    impl_model_column_type!(LogicalType::DateTime; NaiveDateTime);
+    impl_model_column_type!(LogicalType::Time(Some(0)); NaiveTime);
+
+    impl ToDataValue for NaiveDate {
+        fn to_data_value(&self) -> DataValue {
+            DataValue::from(self)
+        }
+    }
+
+    impl ToDataValue for NaiveDateTime {
+        fn to_data_value(&self) -> DataValue {
+            DataValue::from(self)
+        }
+    }
+
+    impl ToDataValue for NaiveTime {
+        fn to_data_value(&self) -> DataValue {
+            DataValue::from(self)
+        }
+    }
+}
 
 impl FromDataValue for String {
     fn logical_type() -> Option<LogicalType> {
@@ -2835,24 +2862,6 @@ impl ToDataValue for str {
 impl ToDataValue for &str {
     fn to_data_value(&self) -> DataValue {
         DataValue::from((*self).to_string())
-    }
-}
-
-impl ToDataValue for NaiveDate {
-    fn to_data_value(&self) -> DataValue {
-        DataValue::from(self)
-    }
-}
-
-impl ToDataValue for NaiveDateTime {
-    fn to_data_value(&self) -> DataValue {
-        DataValue::from(self)
-    }
-}
-
-impl ToDataValue for NaiveTime {
-    fn to_data_value(&self) -> DataValue {
-        DataValue::from(self)
     }
 }
 

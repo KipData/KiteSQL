@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext, ReadExecutor,
+    ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext, ReadExecutor,
 };
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
@@ -36,23 +36,11 @@ impl From<LogicalPlan> for Explain {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Explain {
-    fn into_executor(
-        self,
-        arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut crate::planner::PlanArena<'a>,
-        _: ReadExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
-        arena.push(ExecNode::Explain(self))
-    }
-}
-
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Explain {
     type Input = LogicalPlan;
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena,
         _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
@@ -62,29 +50,21 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Explain {
             emitted: false,
         }))
     }
-
-    fn next_tuple(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
-    ) -> Result<(), DatabaseError> {
-        Explain::next_tuple(self, arena, plan_arena)
-    }
 }
 
-impl Explain {
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+impl<'a> ExecutorNode<'a> for Explain {
+    fn next_tuple(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        runtime: &mut dyn ExecRuntime<'a>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if self.emitted {
-            arena.finish();
+            runtime.finish();
             return Ok(());
         }
 
         let plan = self.plan.explain(plan_arena, 0);
-        let output = arena.result_tuple_mut();
+        let output = runtime.result_tuple_mut();
         output.pk = None;
         output.values.clear();
         output.values.push(DataValue::Utf8 {
@@ -94,7 +74,7 @@ impl Explain {
         });
 
         self.emitted = true;
-        arena.resume();
+        runtime.resume();
         Ok(())
     }
 }
