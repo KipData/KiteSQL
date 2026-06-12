@@ -50,6 +50,7 @@ pub struct PlanArena<'a> {
     table_arena: &'a TableArenaCell,
     #[cfg(debug_assertions)]
     table_arena_version: usize,
+    allocated_columns_len: usize,
     columns: Vec<ColumnCatalog>,
     indexes: Vec<IndexMeta>,
 }
@@ -342,6 +343,7 @@ impl<'a> PlanArena<'a> {
             table_arena,
             #[cfg(debug_assertions)]
             table_arena_version,
+            allocated_columns_len: 0,
             columns: Vec::new(),
             indexes: Vec::new(),
         }
@@ -419,6 +421,10 @@ impl<'a> PlanArena<'a> {
         <Self as MetaArena>::alloc_column(self, column)
     }
 
+    pub(crate) fn allocated_columns_len(&self) -> usize {
+        self.allocated_columns_len
+    }
+
     pub fn alloc_index(&mut self, index: IndexMeta) -> IndexMetaRef {
         <Self as MetaArena>::alloc_index(self, index)
     }
@@ -440,6 +446,7 @@ impl<'a> PlanArena<'a> {
 impl MetaArena for PlanArena<'_> {
     fn alloc_column(&mut self, column: ColumnCatalog) -> ColumnRef {
         self.assert_table_arena_unchanged();
+        self.allocated_columns_len += 1;
 
         if let Some(column_ref) = self.find_column(&column) {
             return column_ref;

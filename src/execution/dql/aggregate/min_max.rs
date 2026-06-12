@@ -55,7 +55,7 @@ impl Accumulator for MinMaxAccumulator {
         Ok(())
     }
 
-    fn evaluate(&self) -> Result<DataValue, DatabaseError> {
-        Ok(self.inner.clone().unwrap_or(DataValue::Null))
+    fn evaluate(self: Box<Self>) -> Result<DataValue, DatabaseError> {
+        Ok(self.inner.unwrap_or(DataValue::Null))
     }
 }

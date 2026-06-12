@@ -13,12 +13,10 @@
 // limitations under the License.
 
 use crate::catalog::{ColumnCatalog, ColumnRef};
-use crate::db::ResultIter;
 use crate::errors::DatabaseError;
 use crate::planner::PlanArena;
 use crate::types::serialize::{TupleValueSerializable, TupleValueSerializableImpl};
 use crate::types::value::DataValue;
-use comfy_table::{Cell, Table};
 use itertools::Itertools;
 use std::borrow::Borrow;
 use std::io::Cursor;
@@ -271,35 +269,6 @@ impl Tuple {
     }
 }
 
-pub fn create_table<I: ResultIter>(iter: I) -> Result<Table, DatabaseError> {
-    let mut table = Table::new();
-    let (header, schema_len) = iter.schema(|schema| {
-        (
-            schema
-                .iter()
-                .map(|column| Cell::new(column.full_name()))
-                .collect_vec(),
-            schema.len(),
-        )
-    });
-    table.set_header(header);
-
-    for tuple in iter {
-        let tuple = tuple?;
-        debug_assert_eq!(schema_len, tuple.values.len());
-
-        let cells = tuple
-            .values
-            .iter()
-            .map(|value| Cell::new(format!("{value}")))
-            .collect_vec();
-
-        table.add_row(cells);
-    }
-
-    Ok(table)
-}
-
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
@@ -419,6 +388,17 @@ mod tests {
                 )
                 .unwrap(),
             ),
+            ColumnCatalog::new(
+                "c17".to_string(),
+                false,
+                ColumnDesc::new(
+                    LogicalType::Char(3, CharLengthUnits::Characters),
+                    None,
+                    false,
+                    None,
+                )
+                .unwrap(),
+            ),
         ]);
 
         let tuples = [
@@ -457,12 +437,18 @@ mod tests {
                         ty: Utf8Type::Fixed(10),
                         unit: CharLengthUnits::Octets,
                     },
+                    DataValue::Utf8 {
+                        value: "你".to_string(),
+                        ty: Utf8Type::Fixed(3),
+                        unit: CharLengthUnits::Characters,
+                    },
                 ],
             ),
             Tuple::new(
                 Some(DataValue::Int32(1)),
                 vec![
                     DataValue::Int32(1),
+                    DataValue::Null,
                     DataValue::Null,
                     DataValue::Null,
                     DataValue::Null,

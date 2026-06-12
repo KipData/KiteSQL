@@ -40,6 +40,16 @@ struct ReferencedColumns {
 }
 
 impl ReferencedColumns {
+    fn with_arena_capacity(arena: &crate::planner::PlanArena) -> Self {
+        Self {
+            columns: Vec::with_capacity(arena.allocated_columns_len()),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.columns.clear();
+    }
+
     fn insert(&mut self, column: ColumnRef, arena: &crate::planner::PlanArena) {
         if let Err(index) = self.search(column, arena) {
             self.columns.insert(index, column);
@@ -51,6 +61,8 @@ impl ReferencedColumns {
         columns: impl IntoIterator<Item = ColumnRef>,
         arena: &crate::planner::PlanArena,
     ) {
+        let columns = columns.into_iter();
+        self.columns.reserve(columns.size_hint().0);
         for column in columns {
             self.insert(column, arena);
         }
@@ -68,10 +80,10 @@ impl ReferencedColumns {
 }
 
 impl ApplyOutcome {
-    fn new() -> Self {
+    fn with_arena_capacity(arena: &crate::planner::PlanArena) -> Self {
         Self {
             changed: false,
-            removed_positions: Vec::new(),
+            removed_positions: Vec::with_capacity(arena.allocated_columns_len()),
         }
     }
 }
@@ -422,13 +434,13 @@ impl ColumnPruning {
         plan: &mut LogicalPlan,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<ApplyOutcome, DatabaseError> {
-        let mut outcome = ApplyOutcome::new();
+        let mut outcome = ApplyOutcome::with_arena_capacity(arena);
         Self::_apply_appending(required_columns, all_referenced, plan, &mut outcome, arena)?;
         Ok(outcome)
     }
 
     fn _apply_appending(
-        required_columns: ReferencedColumns,
+        mut required_columns: ReferencedColumns,
         all_referenced: bool,
         plan: &mut LogicalPlan,
         outcome: &mut ApplyOutcome,
@@ -474,19 +486,17 @@ impl ColumnPruning {
 
                 let child_start = outcome.removed_positions.len();
                 let child_changed = {
-                    let mut child_required = if op.is_distinct {
-                        required_columns
-                    } else {
-                        ReferencedColumns::default()
-                    };
+                    if !op.is_distinct {
+                        required_columns.clear();
+                    }
                     Self::extend_expr_referenced_columns(
                         op.agg_calls.iter().chain(op.groupby_exprs.iter()),
-                        &mut child_required,
+                        &mut required_columns,
                         arena,
                     )?;
 
                     Self::apply_only_child(
-                        child_required,
+                        required_columns,
                         false,
                         childrens,
                         outcome,
@@ -526,15 +536,15 @@ impl ColumnPruning {
 
                     let child_start = outcome.removed_positions.len();
                     let child_changed = {
-                        let mut child_required = ReferencedColumns::default();
+                        required_columns.clear();
                         Self::extend_expr_referenced_columns(
                             op.exprs.iter(),
-                            &mut child_required,
+                            &mut required_columns,
                             arena,
                         )?;
 
                         Self::apply_only_child(
-                            child_required,
+                            required_columns,
                             false,
                             childrens,
                             outcome,
@@ -773,11 +783,11 @@ impl ColumnPruning {
             | Operator::Analyze(_) => {
                 let child_start = outcome.removed_positions.len();
                 let child_changed = {
-                    let mut child_required = ReferencedColumns::default();
-                    Self::extend_operator_referenced_columns(operator, &mut child_required, arena)?;
+                    required_columns.clear();
+                    Self::extend_operator_referenced_columns(operator, &mut required_columns, arena)?;
 
                     Self::apply_only_child(
-                        child_required,
+                        required_columns,
                         true,
                         childrens,
                         outcome,
@@ -825,7 +835,7 @@ impl NormalizationRule for ColumnPruning {
         plan: &mut LogicalPlan,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<bool, DatabaseError> {
-        let outcome = Self::_apply(ReferencedColumns::default(), true, plan, arena)?;
+        let outcome = Self::_apply(ReferencedColumns::with_arena_capacity(arena), true, plan, arena)?;
         Ok(outcome.changed)
     }
 }

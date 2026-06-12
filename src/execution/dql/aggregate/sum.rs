@@ -36,6 +36,10 @@ impl SumAccumulator {
             evaluator: binary_create(ty, BinaryOperator::Plus)?,
         })
     }
+
+    pub(super) fn into_result(self) -> DataValue {
+        self.result
+    }
 }
 
 impl Accumulator for SumAccumulator {
@@ -51,8 +55,8 @@ impl Accumulator for SumAccumulator {
         Ok(())
     }
 
-    fn evaluate(&self) -> Result<DataValue, DatabaseError> {
-        Ok(self.result.clone())
+    fn evaluate(self: Box<Self>) -> Result<DataValue, DatabaseError> {
+        Ok(self.into_result())
     }
 }
 
@@ -80,7 +84,7 @@ impl Accumulator for DistinctSumAccumulator {
         Ok(())
     }
 
-    fn evaluate(&self) -> Result<DataValue, DatabaseError> {
-        self.inner.evaluate()
+    fn evaluate(self: Box<Self>) -> Result<DataValue, DatabaseError> {
+        Ok(self.inner.into_result())
     }
 }

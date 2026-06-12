@@ -292,6 +292,16 @@ struct SkipFixed(usize);
 #[derive(Debug)]
 struct SkipVariable;
 
+fn write_spaces<W: Write>(writer: &mut W, mut len: usize) -> Result<(), DatabaseError> {
+    const SPACES: [u8; 64] = [b' '; 64];
+    while len >= SPACES.len() {
+        writer.write_all(&SPACES)?;
+        len -= SPACES.len();
+    }
+    writer.write_all(&SPACES[..len])?;
+    Ok(())
+}
+
 // Int
 impl_tuple_value_serializable!(
     Int8Serializable,
@@ -380,11 +390,12 @@ impl TupleValueSerializable for CharSerializable {
         match unit {
             CharLengthUnits::Characters => {
                 let chars_len = *len as usize;
-                let v = format!("{value:chars_len$}");
-                let bytes = v.as_bytes();
+                let bytes = value.as_bytes();
+                let spaces_len = chars_len.saturating_sub(value.chars().count());
 
-                writer.write_u32::<LittleEndian>(bytes.len() as u32)?;
+                writer.write_u32::<LittleEndian>((bytes.len() + spaces_len) as u32)?;
                 writer.write_all(bytes)?;
+                write_spaces(writer, spaces_len)?;
             }
             CharLengthUnits::Octets => {
                 let octets_len = *len as usize;
@@ -392,9 +403,7 @@ impl TupleValueSerializable for CharSerializable {
                 debug_assert!(octets_len >= bytes.len());
 
                 writer.write_all(bytes)?;
-                for _ in 0..octets_len - bytes.len() {
-                    writer.write_u8(b' ')?;
-                }
+                write_spaces(writer, octets_len - bytes.len())?;
             }
         }
         Ok(())
