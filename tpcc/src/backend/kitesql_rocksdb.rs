@@ -151,7 +151,7 @@ pub(crate) fn execute_kitesql_batch<S: Storage>(
 
     let mut transaction = database.new_transaction()?;
     for statement in statements {
-        transaction.execute(&statement, &[])?.done()?;
+        transaction.execute(statement, &[])?.done()?;
     }
     transaction.commit()?;
     Ok(())
@@ -171,7 +171,7 @@ impl<'a, S: Storage> KiteSqlRocksTransaction<'a, S> {
             return Err(TpccError::InvalidBackend);
         };
         Ok(KiteSqlTxnResult::new(
-            self.inner.execute(statement, params)?,
+            self.inner.execute(statement.clone(), params)?,
         ))
     }
 }

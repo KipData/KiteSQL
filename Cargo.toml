@@ -34,7 +34,7 @@ rocksdb = ["dep:rocksdb"]
 unsafe_txdb_checkpoint = ["rocksdb", "dep:librocksdb-sys"]
 lmdb    = ["dep:lmdb", "dep:lmdb-sys"]
 pprof   = ["pprof/criterion", "pprof/flamegraph"]
-python  = ["dep:pyo3"]
+python  = ["parser", "dep:pyo3"]
 shell   = ["parser", "dep:comfy-table", "dep:rustyline"]
 
 [[bench]]

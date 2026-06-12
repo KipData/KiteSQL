@@ -81,7 +81,7 @@ impl<S: Storage> Database<S> {
     }
 
     /// Creates a view from a binder-backed ORM plan builder.
-    pub fn create_view<F, P>(&mut self, view_name: &str, build: F) -> Result<(), DatabaseError>
+    pub fn create_view<F>(&mut self, view_name: &str, build: F) -> Result<(), DatabaseError>
     where
         F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
             &'ctx mut OrmContext<
@@ -92,15 +92,13 @@ impl<S: Storage> Database<S> {
                 S::TransactionType<'_>,
                 &'static [(&'static str, DataValue)],
             >,
-        ) -> Result<P, DatabaseError>,
-        P: TryInto<LogicalPlan>,
-        P::Error: Into<DatabaseError>,
+        ) -> Result<LogicalPlan, DatabaseError>,
     {
         execute_create_view(self, view_name, build, false)
     }
 
     /// Creates or replaces a view from a binder-backed ORM plan builder.
-    pub fn create_or_replace_view<F, P>(
+    pub fn create_or_replace_view<F>(
         &mut self,
         view_name: &str,
         build: F,
@@ -115,9 +113,7 @@ impl<S: Storage> Database<S> {
                 S::TransactionType<'_>,
                 &'static [(&'static str, DataValue)],
             >,
-        ) -> Result<P, DatabaseError>,
-        P: TryInto<LogicalPlan>,
-        P::Error: Into<DatabaseError>,
+        ) -> Result<LogicalPlan, DatabaseError>,
     {
         execute_create_view(self, view_name, build, true)
     }
@@ -451,7 +447,7 @@ fn execute_create_index<S: Storage>(
     })
 }
 
-fn execute_create_view<S: Storage, F, P>(
+fn execute_create_view<S: Storage, F>(
     database: &mut Database<S>,
     view_name: &str,
     build: F,
@@ -467,15 +463,13 @@ where
             S::TransactionType<'_>,
             &'static [(&'static str, DataValue)],
         >,
-    ) -> Result<P, DatabaseError>,
-    P: TryInto<LogicalPlan>,
-    P::Error: Into<DatabaseError>,
+    ) -> Result<LogicalPlan, DatabaseError>,
 {
     static EMPTY_ORM_PARAMS: &[(&str, DataValue)] = &[];
     let view_name = view_name.to_string();
     database.execute_mut("ORM CREATE VIEW", EMPTY_ORM_PARAMS, move |binder, arena| {
         let mut context = OrmContext { binder, arena };
-        let plan = build(&mut context)?.try_into().map_err(Into::into)?;
+        let plan = build(&mut context)?;
         binder.bind_create_view(
             view_name.as_str().into(),
             or_replace,

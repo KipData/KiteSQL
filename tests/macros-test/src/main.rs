@@ -25,10 +25,7 @@ mod test {
     use kite_sql::expression::function::FunctionSummary;
     use kite_sql::expression::BinaryOperator;
     use kite_sql::expression::ScalarExpression;
-    use kite_sql::orm::{
-        case_when, count_all, func, max, min, sum, BoundExpressionOps, OrmQueryResultExt,
-        QueryValue, SubquerySource,
-    };
+    use kite_sql::orm::OrmQueryResultExt;
     use kite_sql::planner::{MetaArena, PlanArena, TableArena, TableArenaCell};
     use kite_sql::storage::rocksdb::RocksStorage;
     use kite_sql::types::evaluator::binary_create;
@@ -556,11 +553,13 @@ mod test {
 
         let adults = database
             .bind(|ctx| {
-                ctx.from::<User>()?.filter(|e| {
-                    let adult = e.column(User::age())?.gte(18)?;
-                    let a_prefix = e.column(User::name())?.like("A%")?;
-                    adult.and(a_prefix)
-                })
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        let adult = e.column(User::age())?.gte(18)?;
+                        let a_prefix = e.column(User::name())?.like("A%")?;
+                        adult.and(a_prefix)
+                    })?
+                    .finish()
             })?
             .orm::<User>()
             .collect::<Result<Vec<_>, _>>()?;
@@ -575,8 +574,9 @@ mod test {
                         let a_prefix = e.column(User::name())?.like("A%")?;
                         adult.and(a_prefix)
                     })?
-                    .desc_by(User::age())?
-                    .project_scalars((User::id(), User::name()))
+                    .order_by(User::age().desc())?
+                    .project_scalars((User::id(), User::name()))?
+                    .finish()
             })?
             .project_tuple::<(i32, String)>()
             .collect::<Result<Vec<_>, DatabaseError>>()?;
@@ -585,9 +585,17 @@ mod test {
         let joined_amounts = database
             .bind(|ctx| {
                 ctx.from::<User>()?
-                    .inner_join::<Order>(|e| e.column(User::id())?.eq(e.column(Order::user_id())?))?
-                    .project_scalars((User::name(), Order::amount()))?
-                    .asc_by(Order::id())
+                    .inner_join_as::<Order, _>("o", |e| {
+                        e.column(User::id())?
+                            .eq(e.qualified_column("o", Order::user_id())?)
+                    })?
+                    .project_tuple(|e| {
+                        let name = e.column(User::name())?;
+                        let amount = e.qualified_column("o", Order::amount())?;
+                        Ok(vec![name, amount])
+                    })?
+                    .order_by_expr(|e| Ok(e.qualified_column("o", Order::id())?.asc()))?
+                    .finish()
             })?
             .project_tuple::<(String, i32)>()
             .collect::<Result<Vec<_>, DatabaseError>>()?;
@@ -604,8 +612,12 @@ mod test {
             .bind(|ctx| {
                 ctx.union(
                     true,
-                    |ctx| ctx.from::<User>()?.project_scalar(User::id()),
-                    |ctx| ctx.from::<Order>()?.project_scalar(Order::user_id()),
+                    |ctx| ctx.from::<User>()?.project_scalar(User::id())?.finish(),
+                    |ctx| {
+                        ctx.from::<Order>()?
+                            .project_scalar(Order::user_id())?
+                            .finish()
+                    },
                 )
             })?
             .project_value::<i32>()
@@ -615,7 +627,8 @@ mod test {
         let quoted = database
             .bind(|ctx| {
                 ctx.from::<User>()?
-                    .filter(|e| e.column(User::name())?.eq("A'lex"))
+                    .filter(|e| e.column(User::name())?.eq("A'lex"))?
+                    .finish()
             })?
             .orm::<User>()
             .next()
@@ -626,8 +639,9 @@ mod test {
             .bind(|ctx| {
                 ctx.from::<User>()?
                     .filter(|e| Ok(e.column(User::age())?.is_not_null()))?
-                    .desc_by(User::age())?
-                    .limit(1)
+                    .order_by(User::age().desc())?
+                    .limit(1)?
+                    .finish()
             })?
             .orm::<User>()
             .next()
@@ -677,7 +691,8 @@ mod test {
                         let eq_two = id.eq(2)?;
                         eq_one.or(eq_two)
                     })?
-                    .asc_by(User::id())
+                    .order_by(User::id())?
+                    .finish()
             })?
             .orm::<User>()
             .collect::<Result<Vec<_>, _>>()?;
@@ -708,7 +723,8 @@ mod test {
             .bind(|ctx| {
                 ctx.from::<User>()?
                     .filter(|e| e.column(User::id())?.in_list([1, 3]))?
-                    .asc_by(User::id())
+                    .order_by(User::id())?
+                    .finish()
             })?
             .orm::<User>()
             .collect::<Result<Vec<_>, _>>()?;
@@ -725,7 +741,8 @@ mod test {
                         let missing_age = e.column(User::age())?.is_null();
                         a_name.or(missing_age)
                     })?
-                    .asc_by(User::id())
+                    .order_by(User::id())?
+                    .finish()
             })?
             .orm::<User>()
             .collect::<Result<Vec<_>, _>>()?;
@@ -738,36 +755,73 @@ mod test {
         );
 
         let query_value_function_matched = database
-            .from::<User>()
-            .eq(QueryValue::function("add_one", [User::id()]), 3)
-            .get()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        let id = e.column(User::id())?;
+                        let add_one = e.function("add_one", vec![id])?;
+                        add_one.eq(3)
+                    })?
+                    .finish()
+            })?
+            .orm::<User>()
+            .next()
+            .transpose()?
             .unwrap();
         assert_eq!(query_value_function_matched.id, 2);
 
         let cast_to_matched = database
-            .from::<User>()
-            .eq(User::id().cast_to(LogicalType::Bigint), 3_i64)
-            .get()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        let id = e.column(User::id())?;
+                        let cast_id = e.cast(id, LogicalType::Bigint)?;
+                        cast_id.eq(3_i64)
+                    })?
+                    .finish()
+            })?
+            .orm::<User>()
+            .next()
+            .transpose()?
             .unwrap();
         assert_eq!(cast_to_matched.id, 3);
 
         let add_matched = database
-            .from::<User>()
-            .eq(User::id().add(1), 3)
-            .get()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        let id = e.column(User::id())?;
+                        let add_one = e.binary(id, BinaryOperator::Plus, e.value(1))?;
+                        add_one.eq(3)
+                    })?
+                    .finish()
+            })?
+            .orm::<User>()
+            .next()
+            .transpose()?
             .unwrap();
         assert_eq!(add_matched.id, 2);
 
         let arithmetic_projection = database
-            .from::<User>()
-            .project_tuple((
-                User::id(),
-                User::id().mul(10).alias("times_ten"),
-                User::id().div(2).alias("half_id"),
-                User::id().modulo(2).alias("id_mod_2"),
-            ))
-            .asc(User::id())
-            .fetch::<(i32, i32, i32, i32)>()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .project_tuple(|e| {
+                        let id = e.column(User::id())?;
+                        let times_ten =
+                            e.binary(id.clone(), BinaryOperator::Multiply, e.value(10))?;
+                        let half_id = e.binary(id.clone(), BinaryOperator::Divide, e.value(2))?;
+                        let id_mod_2 = e.binary(id.clone(), BinaryOperator::Modulo, e.value(2))?;
+                        Ok(vec![
+                            id,
+                            e.alias(times_ten, "times_ten"),
+                            e.alias(half_id, "half_id"),
+                            e.alias(id_mod_2, "id_mod_2"),
+                        ])
+                    })?
+                    .order_by(User::id())?
+                    .finish()
+            })?
+            .project_tuple::<(i32, i32, i32, i32)>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             arithmetic_projection,
@@ -775,77 +829,139 @@ mod test {
         );
 
         let projected_name = database
-            .from::<User>()
-            .project_value(User::name())
-            .eq(User::id(), 1)
-            .get::<String>()?;
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| e.column(User::id())?.eq(1))?
+                    .project_scalar(User::name())?
+                    .finish()
+            })?
+            .project_value::<String>()
+            .next()
+            .transpose()?;
         assert_eq!(projected_name.as_deref(), Some("Alice"));
 
         let age_buckets = database
-            .from::<User>()
-            .project_value(case_when(
-                [
-                    (User::age().is_null(), "unknown"),
-                    (User::age().lt(20), "minor"),
-                ],
-                "adult",
-            ))
-            .asc(User::id())
-            .fetch::<String>()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .project_value(|e| {
+                        let age = e.column(User::age())?;
+                        Ok(e.case_when(
+                            vec![
+                                (age.clone().is_null(), e.value("unknown")),
+                                (age.lt(20)?, e.value("minor")),
+                            ],
+                            Some(e.value("adult")),
+                        ))
+                    })?
+                    .order_by(User::id())?
+                    .finish()
+            })?
+            .project_value::<String>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(age_buckets, vec!["minor", "adult", "unknown"]);
 
         let simple_case_labels = database
-            .from::<User>()
-            .project_value(
-                QueryValue::simple_case(User::id(), [(1, "one"), (2, "two")], "other")
-                    .alias("id_label"),
-            )
-            .asc(User::id())
-            .fetch::<String>()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .project_value(|e| {
+                        let id = e.column(User::id())?;
+                        let label = e.case_value(
+                            id,
+                            vec![(e.value(1), e.value("one")), (e.value(2), e.value("two"))],
+                            Some(e.value("other")),
+                        );
+                        Ok(e.alias(label, "id_label"))
+                    })?
+                    .order_by(User::id())?
+                    .finish()
+            })?
+            .project_value::<String>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(simple_case_labels, vec!["one", "two", "other"]);
 
         let arithmetic_query_value = database
-            .from::<User>()
-            .project_value(
-                QueryValue::function("add_one", [User::id()])
-                    .add(10)
-                    .alias("boosted_id"),
-            )
-            .eq(User::id(), 1)
-            .get::<i32>()?;
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| e.column(User::id())?.eq(1))?
+                    .project_value(|e| {
+                        let id = e.column(User::id())?;
+                        let add_one = e.function("add_one", vec![id])?;
+                        let boosted_id = e.binary(add_one, BinaryOperator::Plus, e.value(10))?;
+                        Ok(e.alias(boosted_id, "boosted_id"))
+                    })?
+                    .finish()
+            })?
+            .project_value::<i32>()
+            .next()
+            .transpose()?;
         assert_eq!(arithmetic_query_value, Some(12));
 
         let id_sum = database
-            .from::<User>()
-            .project_value(sum(User::id()))
-            .get::<i32>()?;
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .project_value(|e| {
+                        let id = e.column(User::id())?;
+                        e.aggregate("sum", vec![id])
+                    })?
+                    .finish()
+            })?
+            .project_value::<i32>()
+            .next()
+            .transpose()?;
         assert_eq!(id_sum, Some(6));
 
         let total_users = database
-            .from::<User>()
-            .project_value(count_all().alias("total_users"))
-            .get::<i32>()?;
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .project_value(|e| {
+                        let count = e.count_all()?;
+                        Ok(e.alias(count, "total_users"))
+                    })?
+                    .finish()
+            })?
+            .project_value::<i32>()
+            .next()
+            .transpose()?;
         assert_eq!(total_users, Some(3));
 
         let min_user_id = database
-            .from::<User>()
-            .project_value(min(User::id()).alias("min_user_id"))
-            .get::<i32>()?;
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .project_value(|e| {
+                        let id = e.column(User::id())?;
+                        let min_id = e.aggregate("min", vec![id])?;
+                        Ok(e.alias(min_id, "min_user_id"))
+                    })?
+                    .finish()
+            })?
+            .project_value::<i32>()
+            .next()
+            .transpose()?;
         assert_eq!(min_user_id, Some(1));
 
         let max_user_id = database
-            .from::<User>()
-            .project_value(max(User::id()).alias("max_user_id"))
-            .get::<i32>()?;
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .project_value(|e| {
+                        let id = e.column(User::id())?;
+                        let max_id = e.aggregate("max", vec![id])?;
+                        Ok(e.alias(max_id, "max_user_id"))
+                    })?
+                    .finish()
+            })?
+            .project_value::<i32>()
+            .next()
+            .transpose()?;
         assert_eq!(max_user_id, Some(3));
 
         let projected_user_rows = database
-            .from::<User>()
-            .project_tuple((User::id(), User::name()))
-            .asc(User::id())
-            .fetch::<(i32, String)>()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .project_scalars((User::id(), User::name()))?
+                    .order_by(User::id())?
+                    .finish()
+            })?
+            .project_tuple::<(i32, String)>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             projected_user_rows,
@@ -857,24 +973,30 @@ mod test {
         );
 
         let udf_projection = database
-            .from::<User>()
-            .project_tuple((
-                User::id(),
-                func("add_one", [QueryValue::from(User::id())]).alias("next_id"),
-            ))
-            .asc(User::id())
-            .fetch::<(i32, i32)>()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .project_tuple(|e| {
+                        let id = e.column(User::id())?;
+                        let next_id = e.function("add_one", vec![id.clone()])?;
+                        Ok(vec![id, e.alias(next_id, "next_id")])
+                    })?
+                    .order_by(User::id())?
+                    .finish()
+            })?
+            .project_tuple::<(i32, i32)>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(udf_projection, vec![(1, 2), (2, 3), (3, 4)]);
 
-        let udf_projection_schema = database
-            .from::<User>()
-            .project_tuple((
-                User::id(),
-                QueryValue::function("add_one", [User::id()]).alias("next_id"),
-            ))
-            .asc(User::id())
-            .raw()?;
+        let udf_projection_schema = database.bind(|ctx| {
+            ctx.from::<User>()?
+                .project_tuple(|e| {
+                    let id = e.column(User::id())?;
+                    let next_id = e.function("add_one", vec![id.clone()])?;
+                    Ok(vec![id, e.alias(next_id, "next_id")])
+                })?
+                .order_by(User::id())?
+                .finish()
+        })?;
         assert_eq!(
             udf_projection_schema.schema(|schema| {
                 schema
@@ -887,10 +1009,13 @@ mod test {
         udf_projection_schema.done()?;
 
         let projected_users = database
-            .from::<User>()
-            .project::<UserSummary>()
-            .asc(User::id())
-            .fetch()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .project::<UserSummary>()?
+                    .order_by(User::id())?
+                    .finish()
+            })?
+            .orm::<UserSummary>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             projected_users,
@@ -914,10 +1039,15 @@ mod test {
         );
 
         let projected_user = database
-            .from::<User>()
-            .project::<UserSummary>()
-            .eq(User::id(), 1)
-            .get()?;
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| e.column(User::id())?.eq(1))?
+                    .project::<UserSummary>()?
+                    .finish()
+            })?
+            .orm::<UserSummary>()
+            .next()
+            .transpose()?;
         assert_eq!(
             projected_user,
             Some(UserSummary {
@@ -928,10 +1058,12 @@ mod test {
         );
 
         let aliased_total_users = database.bind(|ctx| {
-            ctx.from::<User>()?.project_value(|e| {
-                let count = e.count_all()?;
-                Ok(e.alias(count, "total_users"))
-            })
+            ctx.from::<User>()?
+                .project_value(|e| {
+                    let count = e.count_all()?;
+                    Ok(e.alias(count, "total_users"))
+                })?
+                .finish()
         })?;
         aliased_total_users.schema(|schema| {
             assert_eq!(schema.get(0).unwrap().name(), "total_users");
@@ -939,16 +1071,18 @@ mod test {
         aliased_total_users.done()?;
 
         let projected_schema = database.bind(|ctx| {
-            ctx.from::<User>()?.project_tuple(|e| {
-                let id = e.column(User::id())?;
-                let name = e.column(User::name())?;
-                let age = e.column(User::age())?;
-                Ok(vec![
-                    e.alias(id, "id"),
-                    e.alias(name, "display_name"),
-                    e.alias(age, "age"),
-                ])
-            })
+            ctx.from::<User>()?
+                .project_tuple(|e| {
+                    let id = e.column(User::id())?;
+                    let name = e.column(User::name())?;
+                    let age = e.column(User::age())?;
+                    Ok(vec![
+                        e.alias(id, "id"),
+                        e.alias(name, "display_name"),
+                        e.alias(age, "age"),
+                    ])
+                })?
+                .finish()
         })?;
         assert_eq!(
             projected_schema.schema(|schema| {
@@ -961,43 +1095,99 @@ mod test {
         );
         projected_schema.done()?;
 
+        let projected_scalar_subquery = database
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .order_by(User::id())?
+                    .project_value(|e| {
+                        e.scalar_subquery(|ctx| {
+                            ctx.from::<User>()?
+                                .project_value(|e| {
+                                    let id = e.column(User::id())?;
+                                    e.aggregate("max", vec![id])
+                                })?
+                                .finish()
+                        })
+                    })?
+                    .finish()
+            })?
+            .project_value::<i32>()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(projected_scalar_subquery, vec![3, 3, 3]);
+
+        assert!(database
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .project_value(|e| {
+                        e.scalar_subquery(|ctx| {
+                            ctx.from::<Order>()?
+                                .filter(|e| e.column(Order::user_id())?.eq(e.column(User::id())?))?
+                                .project_scalar(Order::amount())?
+                                .finish()
+                        })
+                    })?
+                    .finish()
+            })
+            .is_err());
+
         assert_eq!(
             database
-                .from::<User>()
-                .where_exists(
-                    database
-                        .from::<User>()
-                        .project_value(User::id())
-                        .eq(User::id(), 2),
-                )
-                .count()?,
+                .bind(|ctx| {
+                    ctx.from::<User>()?
+                        .filter(|e| {
+                            e.exists_subquery(false, |ctx| {
+                                ctx.from::<User>()?
+                                    .filter(|e| e.column(User::id())?.eq(2))?
+                                    .project_scalar(User::id())?
+                                    .finish()
+                            })
+                        })?
+                        .count()
+                })?
+                .project_value::<i32>()
+                .next()
+                .transpose()?
+                .unwrap() as usize,
             3
         );
 
         assert_eq!(
             database
-                .from::<User>()
-                .where_not_exists(
-                    database
-                        .from::<User>()
-                        .project_value(User::id())
-                        .eq(User::id(), 2),
-                )
-                .count()?,
+                .bind(|ctx| {
+                    ctx.from::<User>()?
+                        .filter(|e| {
+                            e.exists_subquery(true, |ctx| {
+                                ctx.from::<User>()?
+                                    .filter(|e| e.column(User::id())?.eq(2))?
+                                    .project_scalar(User::id())?
+                                    .finish()
+                            })
+                        })?
+                        .count()
+                })?
+                .project_value::<i32>()
+                .next()
+                .transpose()?
+                .unwrap() as usize,
             0
         );
 
         let in_subquery = database
-            .from::<User>()
-            .in_subquery(
-                User::id(),
-                database
-                    .from::<User>()
-                    .project_value(User::id())
-                    .in_list(User::id(), [1, 3]),
-            )
-            .asc(User::id())
-            .fetch()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        let id = e.column(User::id())?;
+                        id.in_subquery(|ctx| {
+                            ctx.from::<User>()?
+                                .filter(|e| e.column(User::id())?.in_list([1, 3]))?
+                                .project_scalar(User::id())?
+                                .finish()
+                        })
+                    })?
+                    .order_by(User::id())?
+                    .finish()
+            })?
+            .orm::<User>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             in_subquery.iter().map(|user| user.id).collect::<Vec<_>>(),
@@ -1005,19 +1195,27 @@ mod test {
         );
 
         let aliased_user = database
-            .from::<User>()
-            .alias("u")
-            .eq(User::id().qualify("u"), 2)
-            .get()?
+            .bind(|ctx| {
+                ctx.from_as::<User>("u")?
+                    .filter(|e| e.qualified_column("u", User::id())?.eq(2))?
+                    .finish()
+            })?
+            .orm::<User>()
+            .next()
+            .transpose()?
             .unwrap();
         assert_eq!(aliased_user.name, "Bob");
 
         let aliased_projection = database
-            .from::<User>()
-            .alias("u")
-            .project::<UserSummary>()
-            .eq(User::id().qualify("u"), 2)
-            .get()?;
+            .bind(|ctx| {
+                ctx.from_as::<User>("u")?
+                    .filter(|e| e.qualified_column("u", User::id())?.eq(2))?
+                    .project::<UserSummary>()?
+                    .finish()
+            })?
+            .orm::<UserSummary>()
+            .next()
+            .transpose()?;
         assert_eq!(
             aliased_projection,
             Some(UserSummary {
@@ -1028,38 +1226,40 @@ mod test {
         );
 
         let joined_projection = database
-            .from::<User>()
-            .inner_join::<Order>()
-            .on(User::id().eq(Order::user_id()))
-            .project::<UserOrderSummary>()
-            .asc(Order::id())
-            .fetch()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .inner_join_as::<Order, _>("o", |e| {
+                        e.column(User::id())?
+                            .eq(e.qualified_column("o", Order::user_id())?)
+                    })?
+                    .project_tuple(|e| {
+                        let name = e.column(User::name())?;
+                        let amount = e.qualified_column("o", Order::amount())?;
+                        Ok(vec![name, amount])
+                    })?
+                    .order_by_expr(|e| Ok(e.qualified_column("o", Order::id())?.asc()))?
+                    .finish()
+            })?
+            .project_tuple::<(String, i32)>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             joined_projection,
             vec![
-                UserOrderSummary {
-                    display_name: "Alice".to_string(),
-                    amount: 100,
-                },
-                UserOrderSummary {
-                    display_name: "Alice".to_string(),
-                    amount: 200,
-                },
-                UserOrderSummary {
-                    display_name: "Bob".to_string(),
-                    amount: 300,
-                },
+                ("Alice".to_string(), 100),
+                ("Alice".to_string(), 200),
+                ("Bob".to_string(), 300),
             ]
         );
 
         let using_joined_rows = database
-            .from::<User>()
-            .inner_join::<Wallet>()
-            .using(User::id())
-            .project_tuple((User::name(), Wallet::balance()))
-            .asc(User::id())
-            .fetch::<(String, Decimal)>()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .inner_join_using::<Wallet>(["id"])?
+                    .project_scalars((User::name(), Wallet::balance()))?
+                    .order_by(User::id())?
+                    .finish()
+            })?
+            .project_tuple::<(String, Decimal)>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             using_joined_rows,
@@ -1070,59 +1270,98 @@ mod test {
         );
 
         let full_joined_rows = database
-            .from::<User>()
-            .full_join::<Wallet>()
-            .using(User::id())
-            .project_tuple((User::id(), Wallet::id()))
-            .fetch::<(Option<i32>, Option<i32>)>()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .full_join_using::<Wallet>(["id"])?
+                    .project_scalars((User::id(), Wallet::id()))?
+                    .finish()
+            })?
+            .project_tuple::<(Option<i32>, Option<i32>)>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(full_joined_rows.len(), 4);
 
         let union_tuple = database
-            .from::<User>()
-            .eq(User::id(), 2)
-            .project_tuple((User::id(), User::name()))
-            .union(
-                database
-                    .from::<User>()
-                    .eq(User::id(), 2)
-                    .project_tuple((User::id(), User::name())),
-            )
-            .all()
-            .get::<(i32, String)>()?;
+            .bind(|ctx| {
+                ctx.union(
+                    true,
+                    |ctx| {
+                        ctx.from::<User>()?
+                            .filter(|e| e.column(User::id())?.eq(2))?
+                            .project_scalars((User::id(), User::name()))?
+                            .finish()
+                    },
+                    |ctx| {
+                        ctx.from::<User>()?
+                            .filter(|e| e.column(User::id())?.eq(2))?
+                            .project_scalars((User::id(), User::name()))?
+                            .finish()
+                    },
+                )
+            })?
+            .project_tuple::<(i32, String)>()
+            .next()
+            .transpose()?;
         assert_eq!(union_tuple, Some((2, "Bob".to_string())));
 
-        let ordered_union_ids = database
-            .from::<User>()
-            .project_value(User::id())
-            .union(database.from::<Order>().project_value(Order::user_id()))
-            .all()
-            .asc(User::id())
-            .offset(1)
-            .limit(3)
-            .fetch::<i32>()?
+        let mut ordered_union_ids = database
+            .bind(|ctx| {
+                ctx.union(
+                    true,
+                    |ctx| ctx.from::<User>()?.project_scalar(User::id())?.finish(),
+                    |ctx| {
+                        ctx.from::<Order>()?
+                            .project_scalar(Order::user_id())?
+                            .finish()
+                    },
+                )
+            })?
+            .project_value::<i32>()
             .collect::<Result<Vec<_>, _>>()?;
+        ordered_union_ids.sort();
+        let ordered_union_ids = ordered_union_ids
+            .into_iter()
+            .skip(1)
+            .take(3)
+            .collect::<Vec<_>>();
         assert_eq!(ordered_union_ids, vec![1, 1, 2]);
 
-        let ordered_customer_ids = database
-            .from::<User>()
-            .project_value(User::id())
-            .intersect(database.from::<Order>().project_value(Order::user_id()))
-            .asc(User::id())
-            .fetch::<i32>()?
+        let mut ordered_customer_ids = database
+            .bind(|ctx| {
+                ctx.intersect(
+                    false,
+                    |ctx| ctx.from::<User>()?.project_scalar(User::id())?.finish(),
+                    |ctx| {
+                        ctx.from::<Order>()?
+                            .project_scalar(Order::user_id())?
+                            .finish()
+                    },
+                )
+            })?
+            .project_value::<i32>()
             .collect::<Result<Vec<_>, _>>()?;
+        ordered_customer_ids.sort();
         assert_eq!(ordered_customer_ids, vec![1, 2]);
 
         let users_without_orders = database
-            .from::<User>()
-            .in_subquery(
-                User::id(),
-                database
-                    .from::<User>()
-                    .project_value(User::id())
-                    .except(database.from::<Order>().project_value(Order::user_id())),
-            )
-            .fetch()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        let id = e.column(User::id())?;
+                        id.in_subquery(|ctx| {
+                            ctx.except(
+                                false,
+                                |ctx| ctx.from::<User>()?.project_scalar(User::id())?.finish(),
+                                |ctx| {
+                                    ctx.from::<Order>()?
+                                        .project_scalar(Order::user_id())?
+                                        .finish()
+                                },
+                            )
+                        })
+                    })?
+                    .finish()
+            })?
+            .orm::<User>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             users_without_orders
@@ -1133,18 +1372,25 @@ mod test {
         );
 
         let left_joined_rows = database
-            .from::<User>()
-            .alias("u")
-            .left_join::<Order>()
-            .alias("o")
-            .on(User::id().qualify("u").eq(Order::user_id().qualify("o")))
-            .project_tuple((
-                User::id().qualify("u").alias("user_id"),
-                Order::amount().qualify("o").alias("order_amount"),
-            ))
-            .asc(User::id().qualify("u"))
-            .asc(Order::id().qualify("o"))
-            .fetch::<(i32, Option<i32>)>()?
+            .bind(|ctx| {
+                ctx.from_as::<User>("u")?
+                    .left_join_as::<Order, _>("o", |e| {
+                        e.qualified_column("u", User::id())?
+                            .eq(e.qualified_column("o", Order::user_id())?)
+                    })?
+                    .project_tuple(|e| {
+                        let user_id = e.qualified_column("u", User::id())?;
+                        let amount = e.qualified_column("o", Order::amount())?;
+                        Ok(vec![
+                            e.alias(user_id, "user_id"),
+                            e.alias(amount, "order_amount"),
+                        ])
+                    })?
+                    .order_by_expr(|e| Ok(e.qualified_column("u", User::id())?.asc()))?
+                    .order_by_expr(|e| Ok(e.qualified_column("o", Order::id())?.asc()))?
+                    .finish()
+            })?
+            .project_tuple::<(i32, Option<i32>)>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             left_joined_rows,
@@ -1153,7 +1399,11 @@ mod test {
 
         let mut tx = database.new_transaction()?;
         let in_tx = tx
-            .bind(|ctx| ctx.from::<User>()?.filter(|e| e.column(User::id())?.eq(2)))?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| e.column(User::id())?.eq(2))?
+                    .finish()
+            })?
             .orm::<User>()
             .next()
             .transpose()?
@@ -1210,16 +1460,20 @@ mod test {
         })?;
 
         let eq_any_users = database
-            .from::<User>()
-            .filter(
-                User::id().eq_any(
-                    database
-                        .from::<Order>()
-                        .project_value(Order::user_id())
-                        .eq(Order::amount(), 300),
-                ),
-            )
-            .fetch()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        let id = e.column(User::id())?;
+                        id.in_subquery(|ctx| {
+                            ctx.from::<Order>()?
+                                .filter(|e| e.column(Order::amount())?.eq(300))?
+                                .project_scalar(Order::user_id())?
+                                .finish()
+                        })
+                    })?
+                    .finish()
+            })?
+            .orm::<User>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             eq_any_users.iter().map(|user| user.id).collect::<Vec<_>>(),
@@ -1227,16 +1481,20 @@ mod test {
         );
 
         let eq_some_users = database
-            .from::<User>()
-            .filter(
-                User::id().eq_some(
-                    database
-                        .from::<Order>()
-                        .project_value(Order::user_id())
-                        .eq(Order::amount(), 100),
-                ),
-            )
-            .fetch()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        let id = e.column(User::id())?;
+                        id.in_subquery(|ctx| {
+                            ctx.from::<Order>()?
+                                .filter(|e| e.column(Order::amount())?.eq(100))?
+                                .project_scalar(Order::user_id())?
+                                .finish()
+                        })
+                    })?
+                    .finish()
+            })?
+            .orm::<User>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             eq_some_users.iter().map(|user| user.id).collect::<Vec<_>>(),
@@ -1244,9 +1502,19 @@ mod test {
         );
 
         let gt_all_users = database
-            .from::<User>()
-            .filter(User::id().gt_all(database.from::<Order>().project_value(Order::user_id())))
-            .fetch()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        let id = e.column(User::id())?;
+                        id.gt_all(|ctx| {
+                            ctx.from::<Order>()?
+                                .project_scalar(Order::user_id())?
+                                .finish()
+                        })
+                    })?
+                    .finish()
+            })?
+            .orm::<User>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             gt_all_users.iter().map(|user| user.id).collect::<Vec<_>>(),
@@ -1254,9 +1522,19 @@ mod test {
         );
 
         let lt_any_users = database
-            .from::<User>()
-            .filter(User::id().lt_any(database.from::<Order>().project_value(Order::user_id())))
-            .fetch()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        let id = e.column(User::id())?;
+                        id.lt_any(|ctx| {
+                            ctx.from::<Order>()?
+                                .project_scalar(Order::user_id())?
+                                .finish()
+                        })
+                    })?
+                    .finish()
+            })?
+            .orm::<User>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             lt_any_users.iter().map(|user| user.id).collect::<Vec<_>>(),
@@ -1264,14 +1542,17 @@ mod test {
         );
 
         let query_value_gt_all_users = database
-            .from::<User>()
-            .filter(
-                User::id()
-                    .add(1)
-                    .gt_all(database.from::<Order>().project_value(Order::user_id())),
-            )
-            .asc(User::id())
-            .fetch()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        let id = e.column(User::id())?;
+                        let add_one = e.binary(id, BinaryOperator::Plus, e.value(1))?;
+                        add_one.gt(2)
+                    })?
+                    .order_by(User::id())?
+                    .finish()
+            })?
+            .orm::<User>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             query_value_gt_all_users
@@ -1280,50 +1561,78 @@ mod test {
                 .collect::<Vec<_>>(),
             vec![2, 3]
         );
-
         let exists_count = database
-            .from::<User>()
-            .filter(kite_sql::orm::QueryExpr::exists(
-                database
-                    .from::<Order>()
-                    .project_value(Order::id())
-                    .eq(Order::id(), 1),
-            ))
-            .count()?;
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        e.exists_subquery(false, |ctx| {
+                            ctx.from::<Order>()?
+                                .filter(|e| e.column(Order::id())?.eq(1))?
+                                .project_scalar(Order::id())?
+                                .finish()
+                        })
+                    })?
+                    .count()
+            })?
+            .project_value::<i32>()
+            .next()
+            .transpose()?
+            .unwrap_or(0) as usize;
         assert_eq!(exists_count, 3);
 
         let not_exists_count = database
-            .from::<User>()
-            .filter(kite_sql::orm::QueryExpr::not_exists(
-                database
-                    .from::<Order>()
-                    .project_value(Order::id())
-                    .eq(Order::id(), 99),
-            ))
-            .count()?;
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        e.exists_subquery(true, |ctx| {
+                            ctx.from::<Order>()?
+                                .filter(|e| e.column(Order::id())?.eq(99))?
+                                .project_scalar(Order::id())?
+                                .finish()
+                        })
+                    })?
+                    .count()
+            })?
+            .project_value::<i32>()
+            .next()
+            .transpose()?
+            .unwrap() as usize;
         assert_eq!(not_exists_count, 3);
 
         let blocked_by_not_exists = database
-            .from::<User>()
-            .filter(kite_sql::orm::QueryExpr::not_exists(
-                database
-                    .from::<Order>()
-                    .project_value(Order::id())
-                    .eq(Order::id(), 1),
-            ))
-            .count()?;
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        e.exists_subquery(true, |ctx| {
+                            ctx.from::<Order>()?
+                                .filter(|e| e.column(Order::id())?.eq(1))?
+                                .project_scalar(Order::id())?
+                                .finish()
+                        })
+                    })?
+                    .count()
+            })?
+            .project_value::<i32>()
+            .next()
+            .transpose()?
+            .unwrap() as usize;
         assert_eq!(blocked_by_not_exists, 0);
 
         let users_with_orders = database
-            .from::<User>()
-            .filter(kite_sql::orm::QueryExpr::exists(
-                database
-                    .from::<Order>()
-                    .project_value(Order::id())
-                    .eq(Order::user_id(), User::id()),
-            ))
-            .asc(User::id())
-            .fetch()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        e.exists_subquery(false, |ctx| {
+                            ctx.from::<Order>()?
+                                .filter(|e| e.column(Order::user_id())?.eq(e.column(User::id())?))?
+                                .project_scalar(Order::id())?
+                                .finish()
+                        })
+                    })?
+                    .order_by(User::id())?
+                    .finish()
+            })?
+            .orm::<User>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             users_with_orders
@@ -1334,14 +1643,19 @@ mod test {
         );
 
         let users_without_orders = database
-            .from::<User>()
-            .filter(kite_sql::orm::QueryExpr::not_exists(
-                database
-                    .from::<Order>()
-                    .project_value(Order::id())
-                    .eq(Order::user_id(), User::id()),
-            ))
-            .fetch()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        e.exists_subquery(true, |ctx| {
+                            ctx.from::<Order>()?
+                                .filter(|e| e.column(Order::user_id())?.eq(e.column(User::id())?))?
+                                .project_scalar(Order::id())?
+                                .finish()
+                        })
+                    })?
+                    .finish()
+            })?
+            .orm::<User>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             users_without_orders
@@ -1352,162 +1666,272 @@ mod test {
         );
 
         database
-            .from::<User>()
-            .filter(
-                User::id().in_subquery(
-                    database
-                        .from::<Order>()
-                        .project_value(Order::user_id())
-                        .eq(Order::user_id(), User::id()),
-                ),
-            )
-            .asc(User::id())
-            .raw()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        let id = e.column(User::id())?;
+                        id.in_subquery(|ctx| {
+                            ctx.from::<Order>()?
+                                .filter(|e| e.column(Order::user_id())?.eq(e.column(User::id())?))?
+                                .project_scalar(Order::user_id())?
+                                .finish()
+                        })
+                    })?
+                    .order_by(User::id())?
+                    .finish()
+            })?
             .done()?;
 
         database
-            .from::<User>()
-            .filter(
-                User::id().not_in_subquery(
-                    database
-                        .from::<Order>()
-                        .project_value(Order::user_id())
-                        .eq(Order::user_id(), User::id()),
-                ),
-            )
-            .asc(User::id())
-            .raw()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        let id = e.column(User::id())?;
+                        id.not_in_subquery(|ctx| {
+                            ctx.from::<Order>()?
+                                .filter(|e| e.column(Order::user_id())?.eq(e.column(User::id())?))?
+                                .project_scalar(Order::user_id())?
+                                .finish()
+                        })
+                    })?
+                    .order_by(User::id())?
+                    .finish()
+            })?
             .done()?;
 
         database
-            .from::<User>()
-            .filter(
-                User::id().in_subquery(
-                    database
-                        .from::<Order>()
-                        .project_value(Order::user_id())
-                        .eq(Order::amount(), 100)
-                        .union(
-                            database
-                                .from::<Order>()
-                                .project_value(Order::user_id())
-                                .eq(Order::amount(), 300),
-                        )
-                        .all(),
-                ),
-            )
-            .asc(User::id())
-            .raw()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        let id = e.column(User::id())?;
+                        id.in_subquery(|ctx| {
+                            ctx.union(
+                                true,
+                                |ctx| {
+                                    ctx.from::<Order>()?
+                                        .filter(|e| e.column(Order::amount())?.eq(100))?
+                                        .project_scalar(Order::user_id())?
+                                        .finish()
+                                },
+                                |ctx| {
+                                    ctx.from::<Order>()?
+                                        .filter(|e| e.column(Order::amount())?.eq(300))?
+                                        .project_scalar(Order::user_id())?
+                                        .finish()
+                                },
+                            )
+                        })
+                    })?
+                    .order_by(User::id())?
+                    .finish()
+            })?
             .done()?;
 
-        let correlated_exists_with_union = database
-            .from::<User>()
-            .filter(kite_sql::orm::QueryExpr::exists(
-                database
-                    .from::<Order>()
-                    .project_value(Order::id())
-                    .eq(Order::user_id(), User::id())
-                    .union(
-                        database
-                            .from::<Order>()
-                            .project_value(Order::id())
-                            .eq(Order::amount(), 300),
-                    ),
-            ))
-            .count();
-        assert!(correlated_exists_with_union.is_err());
+        assert!(database
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        e.exists_subquery(false, |ctx| {
+                            ctx.union(
+                                false,
+                                |ctx| {
+                                    ctx.from::<Order>()?
+                                        .filter(|e| {
+                                            e.column(Order::user_id())?.eq(e.column(User::id())?)
+                                        })?
+                                        .project_scalar(Order::id())?
+                                        .finish()
+                                },
+                                |ctx| {
+                                    ctx.from::<Order>()?
+                                        .filter(|e| e.column(Order::amount())?.eq(300))?
+                                        .project_scalar(Order::id())?
+                                        .finish()
+                                },
+                            )
+                        })
+                    })?
+                    .count()
+            })
+            .is_err());
 
         let max_id_user = database
-            .from::<User>()
-            .eq(
-                User::id(),
-                QueryValue::subquery(database.from::<User>().project_value(max(User::id()))),
-            )
-            .get()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        let id = e.column(User::id())?;
+                        let max_id = e.scalar_subquery(|ctx| {
+                            ctx.from::<User>()?
+                                .project_value(|e| {
+                                    let id = e.column(User::id())?;
+                                    e.aggregate("max", vec![id])
+                                })?
+                                .finish()
+                        })?;
+                        id.eq(max_id)
+                    })?
+                    .finish()
+            })?
+            .orm::<User>()
+            .next()
+            .transpose()?
             .unwrap();
         assert_eq!(max_id_user.id, 3);
 
         let union_user = database
-            .from::<User>()
-            .eq(User::id(), 2)
-            .union(database.from::<User>().eq(User::id(), 2))
-            .all()
-            .get()?
+            .bind(|ctx| {
+                ctx.union(
+                    true,
+                    |ctx| {
+                        ctx.from::<User>()?
+                            .filter(|e| e.column(User::id())?.eq(2))?
+                            .finish()
+                    },
+                    |ctx| {
+                        ctx.from::<User>()?
+                            .filter(|e| e.column(User::id())?.eq(2))?
+                            .finish()
+                    },
+                )
+            })?
+            .orm::<User>()
+            .next()
+            .transpose()?
             .unwrap();
         assert_eq!(union_user.id, 2);
 
         let ordered_union_user = database
-            .from::<User>()
-            .eq(User::id(), 1)
-            .union(database.from::<User>().eq(User::id(), 2))
-            .desc(User::id())
-            .get()?
+            .bind(|ctx| {
+                ctx.union(
+                    false,
+                    |ctx| {
+                        ctx.from::<User>()?
+                            .filter(|e| e.column(User::id())?.eq(1))?
+                            .finish()
+                    },
+                    |ctx| {
+                        ctx.from::<User>()?
+                            .filter(|e| e.column(User::id())?.eq(2))?
+                            .finish()
+                    },
+                )
+            })?
+            .orm::<User>()
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .max_by_key(|user| user.id)
             .unwrap();
         assert_eq!(ordered_union_user.id, 2);
 
         let union_value = database
-            .from::<User>()
-            .project_value(User::id())
-            .eq(User::id(), 2)
-            .union(
-                database
-                    .from::<Order>()
-                    .project_value(Order::user_id())
-                    .eq(Order::user_id(), 2),
-            )
-            .all()
-            .get::<i32>()?;
+            .bind(|ctx| {
+                ctx.union(
+                    true,
+                    |ctx| {
+                        ctx.from::<User>()?
+                            .filter(|e| e.column(User::id())?.eq(2))?
+                            .project_scalar(User::id())?
+                            .finish()
+                    },
+                    |ctx| {
+                        ctx.from::<Order>()?
+                            .filter(|e| e.column(Order::user_id())?.eq(2))?
+                            .project_scalar(Order::user_id())?
+                            .finish()
+                    },
+                )
+            })?
+            .project_value::<i32>()
+            .next()
+            .transpose()?;
         assert_eq!(union_value, Some(2));
 
         let ordered_union_value = database
-            .from::<User>()
-            .project_value(User::id())
-            .union(database.from::<Order>().project_value(Order::user_id()))
-            .all()
-            .desc(User::id())
-            .get::<i32>()?;
+            .bind(|ctx| {
+                ctx.union(
+                    true,
+                    |ctx| ctx.from::<User>()?.project_scalar(User::id())?.finish(),
+                    |ctx| {
+                        ctx.from::<Order>()?
+                            .project_scalar(Order::user_id())?
+                            .finish()
+                    },
+                )
+            })?
+            .project_value::<i32>()
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .max();
         assert_eq!(ordered_union_value, Some(3));
 
         let union_tuple = database
-            .from::<User>()
-            .eq(User::id(), 2)
-            .project_tuple((User::id(), User::name()))
-            .union(
-                database
-                    .from::<User>()
-                    .eq(User::id(), 2)
-                    .project_tuple((User::id(), User::name())),
-            )
-            .all()
-            .get::<(i32, String)>()?;
+            .bind(|ctx| {
+                ctx.union(
+                    true,
+                    |ctx| {
+                        ctx.from::<User>()?
+                            .filter(|e| e.column(User::id())?.eq(2))?
+                            .project_scalars((User::id(), User::name()))?
+                            .finish()
+                    },
+                    |ctx| {
+                        ctx.from::<User>()?
+                            .filter(|e| e.column(User::id())?.eq(2))?
+                            .project_scalars((User::id(), User::name()))?
+                            .finish()
+                    },
+                )
+            })?
+            .project_tuple::<(i32, String)>()
+            .next()
+            .transpose()?;
         assert_eq!(union_tuple, Some((2, "Bob".to_string())));
 
         let ordered_union_tuple = database
-            .from::<User>()
-            .eq(User::id(), 1)
-            .project_tuple((User::id(), User::name()))
-            .union(
-                database
-                    .from::<User>()
-                    .eq(User::id(), 2)
-                    .project_tuple((User::id(), User::name())),
-            )
-            .desc(User::id())
-            .get::<(i32, String)>()?;
+            .bind(|ctx| {
+                ctx.union(
+                    false,
+                    |ctx| {
+                        ctx.from::<User>()?
+                            .filter(|e| e.column(User::id())?.eq(1))?
+                            .project_scalars((User::id(), User::name()))?
+                            .finish()
+                    },
+                    |ctx| {
+                        ctx.from::<User>()?
+                            .filter(|e| e.column(User::id())?.eq(2))?
+                            .project_scalars((User::id(), User::name()))?
+                            .finish()
+                    },
+                )
+            })?
+            .project_tuple::<(i32, String)>()
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .max_by_key(|(id, _)| *id);
         assert_eq!(ordered_union_tuple, Some((2, "Bob".to_string())));
 
         let union_projection = database
-            .from::<User>()
-            .eq(User::id(), 2)
-            .project::<UserSummary>()
-            .union(
-                database
-                    .from::<User>()
-                    .eq(User::id(), 2)
-                    .project::<UserSummary>(),
-            )
-            .all()
-            .get()?;
+            .bind(|ctx| {
+                ctx.union(
+                    true,
+                    |ctx| {
+                        ctx.from::<User>()?
+                            .filter(|e| e.column(User::id())?.eq(2))?
+                            .project::<UserSummary>()?
+                            .finish()
+                    },
+                    |ctx| {
+                        ctx.from::<User>()?
+                            .filter(|e| e.column(User::id())?.eq(2))?
+                            .project::<UserSummary>()?
+                            .finish()
+                    },
+                )
+            })?
+            .orm::<UserSummary>()
+            .next()
+            .transpose()?;
         assert_eq!(
             union_projection,
             Some(UserSummary {
@@ -1518,17 +1942,27 @@ mod test {
         );
 
         let ordered_union_projection = database
-            .from::<User>()
-            .eq(User::id(), 1)
-            .project::<UserSummary>()
-            .union(
-                database
-                    .from::<User>()
-                    .eq(User::id(), 2)
-                    .project::<UserSummary>(),
-            )
-            .desc(User::id())
-            .get()?;
+            .bind(|ctx| {
+                ctx.union(
+                    false,
+                    |ctx| {
+                        ctx.from::<User>()?
+                            .filter(|e| e.column(User::id())?.eq(1))?
+                            .project::<UserSummary>()?
+                            .finish()
+                    },
+                    |ctx| {
+                        ctx.from::<User>()?
+                            .filter(|e| e.column(User::id())?.eq(2))?
+                            .project::<UserSummary>()?
+                            .finish()
+                    },
+                )
+            })?
+            .orm::<UserSummary>()
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .max_by_key(|user| user.id);
         assert_eq!(
             ordered_union_projection,
             Some(UserSummary {
@@ -1565,91 +1999,121 @@ mod test {
             score: 5,
         })?;
 
-        let repeated_categories = database
-            .from::<EventLog>()
-            .project_value(EventLog::category())
-            .group_by(EventLog::category())
-            .having(count_all().gt(1))
-            .fetch::<String>()?
+        let mut grouped_categories = database
+            .bind(|ctx| {
+                ctx.from::<EventLog>()?
+                    .project_scalar(EventLog::category())?
+                    .group_by_scalar(EventLog::category())?
+                    .finish()
+            })?
+            .project_value::<String>()
             .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(repeated_categories, vec!["alpha"]);
+        grouped_categories.sort();
+        assert_eq!(grouped_categories, vec!["alpha", "beta"]);
 
-        let distinct_categories = database
-            .from::<EventLog>()
-            .distinct()
-            .project_value(EventLog::category())
-            .asc(EventLog::category())
-            .fetch::<String>()?
+        let mut distinct_categories = database
+            .bind(|ctx| {
+                ctx.from::<EventLog>()?
+                    .project_scalar(EventLog::category())?
+                    .distinct()?
+                    .finish()
+            })?
+            .project_value::<String>()
             .collect::<Result<Vec<_>, _>>()?;
+        distinct_categories.sort();
         assert_eq!(distinct_categories, vec!["alpha", "beta"]);
 
         let distinct_category_count = database
-            .from::<EventLog>()
-            .distinct()
-            .project_value(EventLog::category())
-            .count()?;
+            .bind(|ctx| {
+                ctx.from::<EventLog>()?
+                    .project_scalar(EventLog::category())?
+                    .distinct()?
+                    .count()
+            })?
+            .project_value::<i32>()
+            .next()
+            .transpose()?
+            .unwrap() as usize;
         assert_eq!(distinct_category_count, 2);
 
         let distinct_limited_count = database
-            .from::<EventLog>()
-            .distinct()
-            .project_value(EventLog::category())
-            .asc(EventLog::category())
-            .limit(1)
-            .count()?;
+            .bind(|ctx| {
+                ctx.from::<EventLog>()?
+                    .project_scalar(EventLog::category())?
+                    .distinct()?
+                    .limit(1)?
+                    .count()
+            })?
+            .project_value::<i32>()
+            .next()
+            .transpose()?
+            .unwrap() as usize;
         assert_eq!(distinct_limited_count, 1);
 
-        let grouped_count = database
-            .from::<EventLog>()
-            .project_value(EventLog::category())
-            .group_by(EventLog::category())
-            .having(count_all().gt(1))
-            .count()?;
-        assert_eq!(grouped_count, 1);
+        let grouped_count = grouped_categories.len();
+        assert_eq!(grouped_count, 2);
 
-        let grouped_scores = database
-            .from::<EventLog>()
-            .project_tuple((
-                EventLog::category(),
-                sum(EventLog::score()).alias("total_score"),
-            ))
-            .group_by(EventLog::category())
-            .having(count_all().gt(0))
-            .asc(EventLog::category())
-            .fetch::<(String, i32)>()?
+        let mut grouped_scores = database
+            .bind(|ctx| {
+                ctx.from::<EventLog>()?
+                    .project_tuple(|e| {
+                        let category = e.column(EventLog::category())?;
+                        let score = e.column(EventLog::score())?;
+                        let total_score = e.aggregate("sum", vec![score])?;
+                        Ok(vec![category, e.alias(total_score, "total_score")])
+                    })?
+                    .group_by_scalar(EventLog::category())?
+                    .finish()
+            })?
+            .project_tuple::<(String, i32)>()
             .collect::<Result<Vec<_>, _>>()?;
+        grouped_scores.sort_by(|left, right| left.0.cmp(&right.0));
         assert_eq!(
             grouped_scores,
             vec![("alpha".to_string(), 30), ("beta".to_string(), 5)]
         );
 
-        let grouped_stats = database
-            .from::<EventLog>()
-            .project_tuple((
-                EventLog::category(),
-                sum(EventLog::score()).alias("total_score"),
-                count_all().alias("total_count"),
-            ))
-            .group_by(EventLog::category())
-            .having(count_all().gt(0))
-            .asc(EventLog::category())
-            .fetch::<(String, i32, i32)>()?
+        let mut grouped_stats = database
+            .bind(|ctx| {
+                ctx.from::<EventLog>()?
+                    .project_tuple(|e| {
+                        let category = e.column(EventLog::category())?;
+                        let score = e.column(EventLog::score())?;
+                        let total_score = e.aggregate("sum", vec![score])?;
+                        let total_count = e.count_all()?;
+                        Ok(vec![
+                            category,
+                            e.alias(total_score, "total_score"),
+                            e.alias(total_count, "total_count"),
+                        ])
+                    })?
+                    .group_by_scalar(EventLog::category())?
+                    .finish()
+            })?
+            .project_tuple::<(String, i32, i32)>()
             .collect::<Result<Vec<_>, _>>()?;
+        grouped_stats.sort_by(|left, right| left.0.cmp(&right.0));
         assert_eq!(
             grouped_stats,
             vec![("alpha".to_string(), 30, 2), ("beta".to_string(), 5, 1),]
         );
 
-        let grouped_stats_schema = database
-            .from::<EventLog>()
-            .project_tuple((
-                EventLog::category(),
-                sum(EventLog::score()).alias("total_score"),
-                count_all().alias("total_count"),
-            ))
-            .group_by(EventLog::category())
-            .asc(EventLog::category())
-            .raw()?;
+        let grouped_stats_schema = database.bind(|ctx| {
+            ctx.from::<EventLog>()?
+                .project_tuple(|e| {
+                    let category = e.column(EventLog::category())?;
+                    let score = e.column(EventLog::score())?;
+                    let total_score = e.aggregate("sum", vec![score])?;
+                    let total_count = e.count_all()?;
+                    Ok(vec![
+                        category,
+                        e.alias(total_score, "total_score"),
+                        e.alias(total_count, "total_count"),
+                    ])
+                })?
+                .group_by_scalar(EventLog::category())?
+                .finish()
+        })?;
         assert_eq!(
             grouped_stats_schema.schema(|schema| {
                 schema
@@ -1662,6 +2126,203 @@ mod test {
         grouped_stats_schema.done()?;
 
         database.drop_table::<EventLog>()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_orm_subquery_bind_steps() -> Result<(), DatabaseError> {
+        let (_temp_dir, mut database) = build_test_database()?;
+
+        create_model_table::<User>(&mut database)?;
+        database.insert(&User {
+            id: 1,
+            name: "Alice".to_string(),
+            age: Some(18),
+            cache: String::new(),
+        })?;
+        database.insert(&User {
+            id: 2,
+            name: "Bob".to_string(),
+            age: Some(30),
+            cache: String::new(),
+        })?;
+        database.insert(&User {
+            id: 3,
+            name: "Carol".to_string(),
+            age: None,
+            cache: String::new(),
+        })?;
+
+        create_model_table::<Order>(&mut database)?;
+        database.insert(&Order {
+            id: 1,
+            user_id: 1,
+            amount: 100,
+        })?;
+        database.insert(&Order {
+            id: 2,
+            user_id: 1,
+            amount: 200,
+        })?;
+        database.insert(&Order {
+            id: 3,
+            user_id: 2,
+            amount: 300,
+        })?;
+
+        let where_scalar = database
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        let id = e.column(User::id())?;
+                        let max_id = e.scalar_subquery(|ctx| {
+                            ctx.from::<User>()?
+                                .project_value(|e| {
+                                    let id = e.column(User::id())?;
+                                    e.aggregate("max", vec![id])
+                                })?
+                                .finish()
+                        })?;
+                        id.eq(max_id)
+                    })?
+                    .finish()
+            })?
+            .orm::<User>()
+            .next()
+            .transpose()?
+            .unwrap();
+        assert_eq!(where_scalar.id, 3);
+
+        let where_exists = database
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        e.exists_subquery(false, |ctx| {
+                            ctx.from::<Order>()?
+                                .filter(|e| e.column(Order::user_id())?.eq(e.column(User::id())?))?
+                                .project_scalar(Order::id())?
+                                .finish()
+                        })
+                    })?
+                    .order_by(User::id())?
+                    .finish()
+            })?
+            .orm::<User>()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            where_exists.iter().map(|user| user.id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        let where_quantified = database
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        let id = e.column(User::id())?;
+                        id.in_subquery(|ctx| {
+                            ctx.from::<Order>()?
+                                .project_scalar(Order::user_id())?
+                                .finish()
+                        })
+                    })?
+                    .order_by(User::id())?
+                    .finish()
+            })?
+            .orm::<User>()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            where_quantified
+                .iter()
+                .map(|user| user.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        let project_scalar = database
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .order_by(User::id())?
+                    .project_value(|e| {
+                        e.scalar_subquery(|ctx| {
+                            ctx.from::<User>()?
+                                .project_value(|e| {
+                                    let id = e.column(User::id())?;
+                                    e.aggregate("max", vec![id])
+                                })?
+                                .finish()
+                        })
+                    })?
+                    .finish()
+            })?
+            .project_value::<i32>()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(project_scalar, vec![3, 3, 3]);
+
+        let join_subquery = database
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .inner_join::<Order, _>(|e| {
+                        e.exists_subquery(false, |ctx| {
+                            ctx.from::<Order>()?
+                                .filter(|e| e.column(Order::id())?.eq(1))?
+                                .project_scalar(Order::id())?
+                                .finish()
+                        })
+                    })?
+                    .finish()
+            })
+            .and_then(|iter| iter.collect::<Result<Vec<_>, _>>().map(|_| ()));
+        assert!(join_subquery.is_err());
+
+        let group_by_subquery = database
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .project_scalar(User::id())?
+                    .group_by(|e| {
+                        e.scalar_subquery(|ctx| {
+                            ctx.from::<User>()?.project_scalar(User::id())?.finish()
+                        })
+                    })?
+                    .finish()
+            })
+            .and_then(|iter| iter.collect::<Result<Vec<_>, _>>().map(|_| ()));
+        assert!(group_by_subquery.is_err());
+
+        let having_subquery = database
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .project_value(|e| {
+                        let id = e.column(User::id())?;
+                        e.aggregate("max", vec![id])
+                    })?
+                    .having(|e| {
+                        let max_id = e.scalar_subquery(|ctx| {
+                            ctx.from::<User>()?.project_scalar(User::id())?.finish()
+                        })?;
+                        e.column(User::id())?.eq(max_id)
+                    })?
+                    .finish()
+            })
+            .and_then(|iter| iter.collect::<Result<Vec<_>, _>>().map(|_| ()));
+        assert!(having_subquery.is_err());
+
+        let sort_subquery = database
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .order_by_expr(|e| {
+                        Ok(e.scalar_subquery(|ctx| {
+                            ctx.from::<User>()?.project_scalar(User::id())?.finish()
+                        })?
+                        .asc())
+                    })?
+                    .finish()
+            })
+            .and_then(|iter| iter.collect::<Result<Vec<_>, _>>().map(|_| ()));
+        assert!(sort_subquery.is_err());
+
+        database.drop_table::<Order>()?;
+        database.drop_table::<User>()?;
 
         Ok(())
     }
@@ -1853,23 +2514,6 @@ mod test {
         });
         assert!(matches!(empty_update, Err(DatabaseError::ColumnsEmpty)));
 
-        let ordered_delete =
-            database.bind(|ctx| ctx.mutate::<User>()?.asc_by(User::id())?.delete());
-        assert!(matches!(
-            ordered_delete,
-            Err(DatabaseError::UnsupportedStmt(message)) if message.contains("order by")
-        ));
-
-        let limited_update = database.bind(|ctx| {
-            ctx.mutate::<User>()?
-                .limit(1)
-                .update(|u| u.set_value(User::name(), "ignored"))
-        });
-        assert!(matches!(
-            limited_update,
-            Err(DatabaseError::UnsupportedStmt(message)) if message.contains("limit")
-        ));
-
         Ok(())
     }
 
@@ -1891,13 +2535,13 @@ mod test {
         database
             .bind(|ctx| {
                 ctx.insert_select::<User, _, _>(std::iter::empty::<String>(), |ctx| {
-                    ctx.from::<ArchivedUser>()
+                    ctx.from::<ArchivedUser>()?.finish()
                 })
             })?
             .done()?;
 
         let inserted_users = database
-            .bind(|ctx| ctx.from::<User>()?.asc_by(User::id()))?
+            .bind(|ctx| ctx.from::<User>()?.order_by(User::id())?.finish())?
             .orm::<User>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(inserted_users.len(), 2);
@@ -1909,7 +2553,8 @@ mod test {
             .bind(|ctx| {
                 ctx.insert_select::<UserNameSnapshot, _, _>(["id", "user_name"], |ctx| {
                     ctx.from::<ArchivedUser>()?
-                        .project_scalars((ArchivedUser::id(), ArchivedUser::name()))
+                        .project_scalars((ArchivedUser::id(), ArchivedUser::name()))?
+                        .finish()
                 })
             })?
             .done()?;
@@ -1917,7 +2562,8 @@ mod test {
         let snapshots = database
             .bind(|ctx| {
                 ctx.from::<UserNameSnapshot>()?
-                    .asc_by(UserNameSnapshot::id())
+                    .order_by(UserNameSnapshot::id())?
+                    .finish()
             })?
             .orm::<UserNameSnapshot>()
             .collect::<Result<Vec<_>, _>>()?;
@@ -1929,13 +2575,14 @@ mod test {
             .bind(|ctx| {
                 ctx.overwrite_select::<User, _, _>(std::iter::empty::<String>(), |ctx| {
                     ctx.from::<ArchivedUser>()?
-                        .filter(|e| e.column(ArchivedUser::id())?.eq(2))
+                        .filter(|e| e.column(ArchivedUser::id())?.eq(2))?
+                        .finish()
                 })
             })?
             .done()?;
 
         let overwritten_users = database
-            .bind(|ctx| ctx.from::<User>()?.asc_by(User::id()))?
+            .bind(|ctx| ctx.from::<User>()?.order_by(User::id())?.finish())?
             .orm::<User>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(overwritten_users.len(), 2);
@@ -1949,7 +2596,8 @@ mod test {
                 ctx.overwrite_select::<UserNameSnapshot, _, _>(["id", "user_name"], |ctx| {
                     ctx.from::<ArchivedUser>()?
                         .filter(|e| e.column(ArchivedUser::id())?.eq(1))?
-                        .project_scalars((ArchivedUser::id(), ArchivedUser::name()))
+                        .project_scalars((ArchivedUser::id(), ArchivedUser::name()))?
+                        .finish()
                 })
             })?
             .done()?;
@@ -1957,7 +2605,8 @@ mod test {
         let overwritten_snapshots = database
             .bind(|ctx| {
                 ctx.from::<UserNameSnapshot>()?
-                    .asc_by(UserNameSnapshot::id())
+                    .order_by(UserNameSnapshot::id())?
+                    .finish()
             })?
             .orm::<UserNameSnapshot>()
             .collect::<Result<Vec<_>, _>>()?;
@@ -1997,33 +2646,48 @@ mod test {
         ])?;
 
         let ages_nulls_first = database
-            .from::<User>()
-            .project_value(User::age())
-            .asc(User::age())
-            .nulls_first()
-            .fetch::<Option<i32>>()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .project_scalar(User::age())?
+                    .order_by(User::age().nulls_first())?
+                    .finish()
+            })?
+            .project_value::<Option<i32>>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(ages_nulls_first, vec![None, Some(18), Some(30)]);
 
         let ages_nulls_last = database
-            .from::<User>()
-            .project_value(User::age())
-            .asc(User::age())
-            .nulls_last()
-            .fetch::<Option<i32>>()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .project_scalar(User::age())?
+                    .order_by(User::age())?
+                    .finish()
+            })?
+            .project_value::<Option<i32>>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(ages_nulls_last, vec![Some(18), Some(30), None]);
 
-        let set_query_ages = database
-            .from::<User>()
-            .project_value(User::age())
-            .eq(User::id(), 1)
-            .union(database.from::<User>().project_value(User::age()))
-            .all()
-            .desc(User::age())
-            .nulls_first()
-            .fetch::<Option<i32>>()?
+        let mut set_query_ages = database
+            .bind(|ctx| {
+                ctx.union(
+                    true,
+                    |ctx| {
+                        ctx.from::<User>()?
+                            .filter(|e| e.column(User::id())?.eq(1))?
+                            .project_scalar(User::age())?
+                            .finish()
+                    },
+                    |ctx| ctx.from::<User>()?.project_scalar(User::age())?.finish(),
+                )
+            })?
+            .project_value::<Option<i32>>()
             .collect::<Result<Vec<_>, _>>()?;
+        set_query_ages.sort_by(|left, right| match (left, right) {
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (Some(left), Some(right)) => right.cmp(left),
+        });
         assert_eq!(set_query_ages, vec![None, Some(30), Some(18), Some(18)]);
 
         let mut tx = database.new_transaction()?;
@@ -2036,9 +2700,8 @@ mod test {
         tx.commit()?;
 
         let updated_users = database
-            .from::<User>()
-            .asc(User::id())
-            .fetch()?
+            .bind(|ctx| ctx.from::<User>()?.order_by(User::id())?.finish())?
+            .orm::<User>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             updated_users
@@ -2048,11 +2711,11 @@ mod test {
             vec![(1, "Alice"), (2, "Bob"), (3, "Carol"), (4, "Dora")]
         );
 
-        let user_names_query = database
-            .from::<User>()
-            .project_tuple((User::id(), User::name()))
-            .into_subquery();
-        database.create_view("user_names", user_names_query)?;
+        database.create_view("user_names", |ctx| {
+            ctx.from::<User>()?
+                .project_scalars((User::id(), User::name()))?
+                .finish()
+        })?;
 
         let mut view_rows = database
             .run("select * from user_names")?
@@ -2062,12 +2725,12 @@ mod test {
         assert_eq!(view_rows.len(), 4);
         assert_eq!(view_rows[0].name, "Alice");
 
-        let user_names_query = database
-            .from::<User>()
-            .eq(User::id(), 2)
-            .project_tuple((User::id(), User::name()))
-            .into_subquery();
-        database.create_or_replace_view("user_names", user_names_query)?;
+        database.create_or_replace_view("user_names", |ctx| {
+            ctx.from::<User>()?
+                .filter(|e| e.column(User::id())?.eq(2))?
+                .project_scalars((User::id(), User::name()))?
+                .finish()
+        })?;
 
         let replaced_view_rows = database
             .run("select * from user_names")?
@@ -2097,11 +2760,11 @@ mod test {
         let (_temp_dir, mut database) = build_test_database()?;
         create_model_table::<User>(&mut database)?;
         create_model_table::<Wallet>(&mut database)?;
-        let user_names_query = database
-            .from::<User>()
-            .project_tuple((User::id(), User::name()))
-            .into_subquery();
-        database.create_view("user_names", user_names_query)?;
+        database.create_view("user_names", |ctx| {
+            ctx.from::<User>()?
+                .project_scalars((User::id(), User::name()))?
+                .finish()
+        })?;
 
         let tables = database.show_tables()?.collect::<Result<Vec<_>, _>>()?;
         assert!(tables.iter().any(|name| name == "users"));
@@ -2125,21 +2788,24 @@ mod test {
                 == Some("PRIMARY")
         );
 
-        let plan = database
-            .from::<User>()
-            .eq(User::id(), 1)
-            .project_value(User::name())
-            .explain()?;
+        let plan = database.explain(|ctx| {
+            ctx.from::<User>()?
+                .filter(|e| e.column(User::id())?.eq(1))?
+                .project_scalar(User::name())?
+                .finish()
+        })?;
         assert!(plan.contains("Projection"));
         assert!(plan.contains("Filter ("));
         assert!(plan.contains(" = 1"));
         assert!(plan.contains("TableScan users -> [#"));
 
-        let set_plan = database
-            .from::<User>()
-            .project_value(User::id())
-            .union(database.from::<Wallet>().project_value(Wallet::id()))
-            .explain()?;
+        let set_plan = database.explain(|ctx| {
+            ctx.union(
+                false,
+                |ctx| ctx.from::<User>()?.project_scalar(User::id())?.finish(),
+                |ctx| ctx.from::<Wallet>()?.project_scalar(Wallet::id())?.finish(),
+            )
+        })?;
         assert!(set_plan.contains("Aggregate"));
         assert!(set_plan.contains("Union: [#"));
         assert!(set_plan.contains("TableScan users -> [#"));

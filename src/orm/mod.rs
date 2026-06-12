@@ -1,8 +1,8 @@
 #![doc = include_str!("README.md")]
 
 use crate::binder::{
-    BindPlanFrom, BindPlanSelectList, Binder, JoinConstraintInput, QueryBindStep, SetOperatorKind,
-    TableAliasInput,
+    with_query_bind_step, BindPlanFrom, BindPlanSelectList, Binder, JoinConstraintInput,
+    QueryBindStep, SetOperatorKind, TableAliasInput,
 };
 use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog, TableName};
 use crate::db::{
@@ -26,7 +26,11 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use rust_decimal::Decimal;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
+use std::ptr::NonNull;
+use std::rc::Rc;
 use std::sync::Arc;
 
 mod ddl;
@@ -93,6 +97,14 @@ pub struct Field<M, T> {
     _marker: PhantomData<(M, T)>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct FieldSort<M, T> {
+    field: Field<M, T>,
+    asc: bool,
+    nulls_first: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct QuerySource {
     table_name: String,
@@ -130,6 +142,52 @@ impl<M, T> Field<M, T> {
     pub fn column_name(&self) -> &'static str {
         self.column
     }
+
+    pub fn asc(self) -> FieldSort<M, T> {
+        FieldSort::new(self).asc()
+    }
+
+    pub fn desc(self) -> FieldSort<M, T> {
+        FieldSort::new(self).desc()
+    }
+
+    pub fn nulls_first(self) -> FieldSort<M, T> {
+        FieldSort::new(self).nulls_first()
+    }
+
+    pub fn nulls_last(self) -> FieldSort<M, T> {
+        FieldSort::new(self).nulls_last()
+    }
+}
+
+impl<M, T> FieldSort<M, T> {
+    fn new(field: Field<M, T>) -> Self {
+        Self {
+            field,
+            asc: true,
+            nulls_first: false,
+        }
+    }
+
+    pub fn asc(mut self) -> Self {
+        self.asc = true;
+        self
+    }
+
+    pub fn desc(mut self) -> Self {
+        self.asc = false;
+        self
+    }
+
+    pub fn nulls_first(mut self) -> Self {
+        self.nulls_first = true;
+        self
+    }
+
+    pub fn nulls_last(mut self) -> Self {
+        self.nulls_first = false;
+        self
+    }
 }
 
 #[doc(hidden)]
@@ -153,7 +211,7 @@ where
         self,
         scope: &mut ExprBindScope<'_, 'bind, 'parent, 'arena, T, A>,
     ) -> Result<ScalarExpression, DatabaseError> {
-        scope.column(self).map(Into::into)
+        scope.column(self).map(CtxExpression::into_scalar)
     }
 }
 
@@ -170,7 +228,8 @@ where
     }
 }
 
-impl<'bind, 'parent, 'arena, T, A> BindOrmScalar<'bind, 'parent, 'arena, T, A> for CtxExpression
+impl<'bind, 'parent, 'arena, T, A> BindOrmScalar<'bind, 'parent, 'arena, T, A>
+    for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
     A: AsRef<[(&'static str, DataValue)]>,
@@ -179,7 +238,103 @@ where
         self,
         _scope: &mut ExprBindScope<'_, 'bind, 'parent, 'arena, T, A>,
     ) -> Result<ScalarExpression, DatabaseError> {
+        Ok(self.into_scalar())
+    }
+}
+
+#[doc(hidden)]
+pub trait BindOrmSort<'bind, 'parent, 'arena, T, A>
+where
+    T: Transaction,
+    A: AsRef<[(&'static str, DataValue)]>,
+{
+    fn bind_sort<'scope>(
+        self,
+        scope: &'scope mut ExprBindScope<'scope, 'bind, 'parent, 'arena, T, A>,
+    ) -> Result<SortField, DatabaseError>;
+}
+
+impl<'bind, 'parent, 'arena, T, A, M, V> BindOrmSort<'bind, 'parent, 'arena, T, A> for Field<M, V>
+where
+    T: Transaction,
+    A: AsRef<[(&'static str, DataValue)]>,
+{
+    fn bind_sort<'scope>(
+        self,
+        scope: &'scope mut ExprBindScope<'scope, 'bind, 'parent, 'arena, T, A>,
+    ) -> Result<SortField, DatabaseError> {
+        self.bind_scalar(scope).map(SortField::from)
+    }
+}
+
+impl<'bind, 'parent, 'arena, T, A, M, V> BindOrmSort<'bind, 'parent, 'arena, T, A>
+    for FieldSort<M, V>
+where
+    T: Transaction,
+    A: AsRef<[(&'static str, DataValue)]>,
+{
+    fn bind_sort<'scope>(
+        self,
+        scope: &'scope mut ExprBindScope<'scope, 'bind, 'parent, 'arena, T, A>,
+    ) -> Result<SortField, DatabaseError> {
+        let mut sort = self.field.bind_scalar(scope).map(SortField::from)?;
+        sort.asc = self.asc;
+        sort.nulls_first = self.nulls_first;
+        Ok(sort)
+    }
+}
+
+impl<'bind, 'parent, 'arena, T, A> BindOrmSort<'bind, 'parent, 'arena, T, A> for ScalarExpression
+where
+    T: Transaction,
+    A: AsRef<[(&'static str, DataValue)]>,
+{
+    fn bind_sort<'scope>(
+        self,
+        _scope: &'scope mut ExprBindScope<'scope, 'bind, 'parent, 'arena, T, A>,
+    ) -> Result<SortField, DatabaseError> {
         Ok(self.into())
+    }
+}
+
+impl<'bind, 'parent, 'arena, T, A> BindOrmSort<'bind, 'parent, 'arena, T, A> for SortField
+where
+    T: Transaction,
+    A: AsRef<[(&'static str, DataValue)]>,
+{
+    fn bind_sort<'scope>(
+        self,
+        _scope: &'scope mut ExprBindScope<'scope, 'bind, 'parent, 'arena, T, A>,
+    ) -> Result<SortField, DatabaseError> {
+        Ok(self)
+    }
+}
+
+impl<'bind, 'parent, 'arena, T, A> BindOrmSort<'bind, 'parent, 'arena, T, A>
+    for CtxExpression<'bind, 'parent, 'arena, T, A>
+where
+    T: Transaction,
+    A: AsRef<[(&'static str, DataValue)]>,
+{
+    fn bind_sort<'scope>(
+        self,
+        _scope: &'scope mut ExprBindScope<'scope, 'bind, 'parent, 'arena, T, A>,
+    ) -> Result<SortField, DatabaseError> {
+        Ok(self.into_scalar().into())
+    }
+}
+
+#[doc(hidden)]
+pub trait IntoOrmScalarExpression {
+    fn into_orm_scalar(self) -> ScalarExpression;
+}
+
+impl<E> IntoOrmScalarExpression for E
+where
+    E: Into<ScalarExpression>,
+{
+    fn into_orm_scalar(self) -> ScalarExpression {
+        self.into()
     }
 }
 
@@ -230,203 +385,527 @@ impl_bind_orm_scalar_list!(
     (A, B, C, D, E, F, G, H),
 );
 
-/// ORM expression already bound against the current query scope.
-///
-/// It is intentionally just a thin wrapper around [`ScalarExpression`]. ORM
-/// APIs can keep returning this contextual expression, while planner entry
-/// points normalize it with `Into<ScalarExpression>`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct CtxExpression {
-    expr: ScalarExpression,
+macro_rules! impl_quantified_subquery_methods {
+    ($($method:ident, $quantifier:ident, $negated:expr, $op:ident;)+) => {
+        $(
+            pub fn $method<F>(self, build: F) -> Result<Self, DatabaseError>
+            where
+                F: for<'scope, 'sub_bind, 'sub_parent> FnOnce(
+                    &'scope mut OrmContext<'scope, 'sub_bind, 'sub_parent, 'arena, T, A>,
+                ) -> Result<LogicalPlan, DatabaseError>,
+            {
+                self.quantified_subquery(
+                    MarkApplyQuantifier::$quantifier,
+                    $negated,
+                    expression::BinaryOperator::$op,
+                    build,
+                )
+            }
+        )+
+    };
 }
 
-impl CtxExpression {
-    fn new(expr: ScalarExpression) -> Self {
-        Self { expr }
+struct ExprBindScopeHandle<'bind, 'parent, 'arena, T, A>
+where
+    T: Transaction,
+    A: AsRef<[(&'static str, DataValue)]>,
+{
+    binder: NonNull<Binder<'bind, 'parent, T, A>>,
+    arena: NonNull<PlanArena<'arena>>,
+    _marker: PhantomData<(&'bind (), &'parent (), &'arena (), T, A, Rc<()>)>,
+}
+
+impl<'bind, 'parent, 'arena, T, A> Clone for ExprBindScopeHandle<'bind, 'parent, 'arena, T, A>
+where
+    T: Transaction,
+    A: AsRef<[(&'static str, DataValue)]>,
+{
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'bind, 'parent, 'arena, T, A> Copy for ExprBindScopeHandle<'bind, 'parent, 'arena, T, A>
+where
+    T: Transaction,
+    A: AsRef<[(&'static str, DataValue)]>,
+{
+}
+
+impl<'bind, 'parent, 'arena, T, A> ExprBindScopeHandle<'bind, 'parent, 'arena, T, A>
+where
+    T: Transaction,
+    A: AsRef<[(&'static str, DataValue)]>,
+{
+    fn new<'ctx>(scope: &ExprBindScope<'ctx, 'bind, 'parent, 'arena, T, A>) -> Self {
+        Self {
+            binder: NonNull::new((&*scope.binder) as *const _ as *mut _).unwrap(),
+            arena: NonNull::new((&*scope.arena) as *const _ as *mut _).unwrap(),
+            _marker: PhantomData,
+        }
     }
 
+    fn wrap(self, expr: ScalarExpression) -> CtxExpression<'bind, 'parent, 'arena, T, A> {
+        CtxExpression { expr, scope: self }
+    }
+
+    fn binder(&self) -> &mut Binder<'bind, 'parent, T, A> {
+        // SAFETY: ExprBindScopeHandle is created only from an active ExprBindScope
+        // during synchronous ORM binding. CtxExpression is !Send and !Sync, and
+        // all public ORM entry points immediately normalize expressions before
+        // leaving the bind/filter/project closure, so this pointer is never used
+        // after its owning binder scope has ended.
+        unsafe { &mut *self.binder.as_ptr() }
+    }
+
+    fn arena(&self) -> &mut PlanArena<'arena> {
+        // SAFETY: See binder(); the arena pointer has the same scope-bound
+        // lifetime and is accessed only through ORM expression binding methods.
+        unsafe { &mut *self.arena.as_ptr() }
+    }
+
+    fn binary(
+        self,
+        left: ScalarExpression,
+        op: expression::BinaryOperator,
+        right: ScalarExpression,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.binder()
+            .bind_binary_op_expr(left, right, op, self.arena())
+            .map(|expr| self.wrap(expr))
+    }
+
+    fn unary(
+        self,
+        op: expression::UnaryOperator,
+        expr: ScalarExpression,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.binder()
+            .bind_unary_op_expr(expr, op, self.arena())
+            .map(|expr| self.wrap(expr))
+    }
+
+    fn function(
+        self,
+        name: impl Into<String>,
+        args: Vec<ScalarExpression>,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.binder()
+            .bind_function_call(name.into(), args, false, self.arena())
+            .map(|expr| self.wrap(expr))
+    }
+
+    fn scalar_subquery<F>(
+        self,
+        build: F,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError>
+    where
+        F: for<'scope, 'sub_bind, 'sub_parent> FnOnce(
+            &'scope mut OrmContext<'scope, 'sub_bind, 'sub_parent, 'arena, T, A>,
+        )
+            -> Result<LogicalPlan, DatabaseError>,
+    {
+        self.binder()
+            .bind_scalar_subquery_plan(self.arena(), |binder, arena| {
+                let mut context = OrmContext { binder, arena };
+                build(&mut context)
+            })
+            .map(|expr| self.wrap(expr))
+    }
+
+    fn exists_subquery<F>(
+        self,
+        negated: bool,
+        build: F,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError>
+    where
+        F: for<'scope, 'sub_bind, 'sub_parent> FnOnce(
+            &'scope mut OrmContext<'scope, 'sub_bind, 'sub_parent, 'arena, T, A>,
+        )
+            -> Result<LogicalPlan, DatabaseError>,
+    {
+        self.binder()
+            .bind_exists_subquery_plan(negated, self.arena(), |binder, arena| {
+                let mut context = OrmContext { binder, arena };
+                build(&mut context)
+            })
+            .map(|expr| self.wrap(expr))
+    }
+
+    fn quantified_subquery<F>(
+        self,
+        quantifier: MarkApplyQuantifier,
+        negated: bool,
+        left_expr: ScalarExpression,
+        compare_op: expression::BinaryOperator,
+        build: F,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError>
+    where
+        F: for<'scope, 'sub_bind, 'sub_parent> FnOnce(
+            &'scope mut OrmContext<'scope, 'sub_bind, 'sub_parent, 'arena, T, A>,
+        )
+            -> Result<LogicalPlan, DatabaseError>,
+    {
+        self.binder()
+            .bind_quantified_subquery_plan(
+                quantifier,
+                negated,
+                left_expr,
+                compare_op,
+                self.arena(),
+                |binder, arena| {
+                    let mut context = OrmContext { binder, arena };
+                    build(&mut context)
+                },
+            )
+            .map(|expr| self.wrap(expr))
+    }
+}
+
+/// ORM expression bound to the current query scope.
+///
+/// `CtxExpression` is a scope-bound ORM expression handle, not a reusable core
+/// expression value. It exists so ORM code can use natural chained binding such
+/// as `e.column(User::age())?.gte(18)?`. Convert it to a core
+/// [`ScalarExpression`] only at ORM binder boundaries with [`Self::into_scalar`].
+///
+/// This type intentionally cannot be sent or shared across threads, and its
+/// internal scope handle is private.
+pub struct CtxExpression<'bind, 'parent, 'arena, T, A>
+where
+    T: Transaction,
+    A: AsRef<[(&'static str, DataValue)]>,
+{
+    expr: ScalarExpression,
+    scope: ExprBindScopeHandle<'bind, 'parent, 'arena, T, A>,
+}
+
+impl<'bind, 'parent, 'arena, T, A> CtxExpression<'bind, 'parent, 'arena, T, A>
+where
+    T: Transaction,
+    A: AsRef<[(&'static str, DataValue)]>,
+{
     pub fn into_scalar(self) -> ScalarExpression {
         self.expr
     }
-}
 
-impl From<CtxExpression> for ScalarExpression {
-    fn from(value: CtxExpression) -> Self {
-        value.expr
+    pub fn into_sort(self) -> SortField {
+        self.into_scalar().into()
     }
-}
 
-impl From<ScalarExpression> for CtxExpression {
-    fn from(expr: ScalarExpression) -> Self {
-        Self::new(expr)
+    pub fn asc(self) -> SortField {
+        self.into_sort().asc()
     }
-}
 
-/// Convenience methods for composing expressions that can be normalized into a
-/// core [`ScalarExpression`].
-pub trait BoundExpressionOps: Into<ScalarExpression> + Sized {
-    fn eq<R: Into<ScalarExpression>>(self, right: R) -> Result<CtxExpression, DatabaseError> {
-        Ok(orm_binary_expr(
-            self.into(),
+    pub fn desc(self) -> SortField {
+        self.into_sort().desc()
+    }
+
+    pub fn nulls_first(self) -> SortField {
+        self.into_sort().nulls_first()
+    }
+
+    pub fn nulls_last(self) -> SortField {
+        self.into_sort().nulls_last()
+    }
+
+    pub fn eq<R: IntoOrmScalarExpression>(self, right: R) -> Result<Self, DatabaseError> {
+        self.scope.binary(
+            self.expr,
             expression::BinaryOperator::Eq,
-            right.into(),
-        ))
+            right.into_orm_scalar(),
+        )
     }
 
-    fn ne<R: Into<ScalarExpression>>(self, right: R) -> Result<CtxExpression, DatabaseError> {
-        Ok(orm_binary_expr(
-            self.into(),
+    pub fn ne<R: IntoOrmScalarExpression>(self, right: R) -> Result<Self, DatabaseError> {
+        self.scope.binary(
+            self.expr,
             expression::BinaryOperator::NotEq,
-            right.into(),
-        ))
+            right.into_orm_scalar(),
+        )
     }
 
-    fn gt<R: Into<ScalarExpression>>(self, right: R) -> Result<CtxExpression, DatabaseError> {
-        Ok(orm_binary_expr(
-            self.into(),
+    pub fn gt<R: IntoOrmScalarExpression>(self, right: R) -> Result<Self, DatabaseError> {
+        self.scope.binary(
+            self.expr,
             expression::BinaryOperator::Gt,
-            right.into(),
-        ))
+            right.into_orm_scalar(),
+        )
     }
 
-    fn gte<R: Into<ScalarExpression>>(self, right: R) -> Result<CtxExpression, DatabaseError> {
-        Ok(orm_binary_expr(
-            self.into(),
+    pub fn gte<R: IntoOrmScalarExpression>(self, right: R) -> Result<Self, DatabaseError> {
+        self.scope.binary(
+            self.expr,
             expression::BinaryOperator::GtEq,
-            right.into(),
-        ))
+            right.into_orm_scalar(),
+        )
     }
 
-    fn lt<R: Into<ScalarExpression>>(self, right: R) -> Result<CtxExpression, DatabaseError> {
-        Ok(orm_binary_expr(
-            self.into(),
+    pub fn lt<R: IntoOrmScalarExpression>(self, right: R) -> Result<Self, DatabaseError> {
+        self.scope.binary(
+            self.expr,
             expression::BinaryOperator::Lt,
-            right.into(),
-        ))
+            right.into_orm_scalar(),
+        )
     }
 
-    fn lte<R: Into<ScalarExpression>>(self, right: R) -> Result<CtxExpression, DatabaseError> {
-        Ok(orm_binary_expr(
-            self.into(),
+    pub fn lte<R: IntoOrmScalarExpression>(self, right: R) -> Result<Self, DatabaseError> {
+        self.scope.binary(
+            self.expr,
             expression::BinaryOperator::LtEq,
-            right.into(),
-        ))
+            right.into_orm_scalar(),
+        )
     }
 
-    fn like<R: Into<ScalarExpression>>(self, right: R) -> Result<CtxExpression, DatabaseError> {
-        Ok(orm_binary_expr(
-            self.into(),
+    pub fn like<R: IntoOrmScalarExpression>(self, right: R) -> Result<Self, DatabaseError> {
+        self.scope.binary(
+            self.expr,
             expression::BinaryOperator::Like(None),
-            right.into(),
-        ))
+            right.into_orm_scalar(),
+        )
     }
 
-    fn not_like<R: Into<ScalarExpression>>(self, right: R) -> Result<CtxExpression, DatabaseError> {
-        Ok(orm_binary_expr(
-            self.into(),
+    pub fn not_like<R: IntoOrmScalarExpression>(self, right: R) -> Result<Self, DatabaseError> {
+        self.scope.binary(
+            self.expr,
             expression::BinaryOperator::NotLike(None),
-            right.into(),
-        ))
+            right.into_orm_scalar(),
+        )
     }
 
-    fn and<R: Into<ScalarExpression>>(self, right: R) -> Result<CtxExpression, DatabaseError> {
-        Ok(orm_binary_expr(
-            self.into(),
+    pub fn and<R: IntoOrmScalarExpression>(self, right: R) -> Result<Self, DatabaseError> {
+        self.scope.binary(
+            self.expr,
             expression::BinaryOperator::And,
-            right.into(),
-        ))
+            right.into_orm_scalar(),
+        )
     }
 
-    fn or<R: Into<ScalarExpression>>(self, right: R) -> Result<CtxExpression, DatabaseError> {
-        Ok(orm_binary_expr(
-            self.into(),
+    pub fn or<R: IntoOrmScalarExpression>(self, right: R) -> Result<Self, DatabaseError> {
+        self.scope.binary(
+            self.expr,
             expression::BinaryOperator::Or,
-            right.into(),
-        ))
+            right.into_orm_scalar(),
+        )
     }
 
-    fn is_null(self) -> CtxExpression {
-        CtxExpression::new(ScalarExpression::IsNull {
+    pub fn not(self) -> Result<Self, DatabaseError> {
+        self.scope.unary(expression::UnaryOperator::Not, self.expr)
+    }
+
+    pub fn is_null(self) -> Self {
+        let scope = self.scope;
+        let expr = ScalarExpression::IsNull {
             negated: false,
-            expr: Box::new(self.into()),
-        })
+            expr: Box::new(self.expr),
+        };
+        scope.wrap(expr)
     }
 
-    fn is_not_null(self) -> CtxExpression {
-        CtxExpression::new(ScalarExpression::IsNull {
+    pub fn is_not_null(self) -> Self {
+        let scope = self.scope;
+        let expr = ScalarExpression::IsNull {
             negated: true,
-            expr: Box::new(self.into()),
-        })
+            expr: Box::new(self.expr),
+        };
+        scope.wrap(expr)
     }
 
-    fn in_list<I, E>(self, values: I) -> Result<CtxExpression, DatabaseError>
+    pub fn in_list<I, E>(self, values: I) -> Result<Self, DatabaseError>
     where
         I: IntoIterator<Item = E>,
-        E: Into<ScalarExpression>,
+        E: IntoOrmScalarExpression,
     {
-        Ok(CtxExpression::new(ScalarExpression::In {
+        let scope = self.scope;
+        let expr = ScalarExpression::In {
             negated: false,
-            expr: Box::new(self.into()),
-            args: values.into_iter().map(Into::into).collect(),
-        }))
+            expr: Box::new(self.expr),
+            args: values
+                .into_iter()
+                .map(IntoOrmScalarExpression::into_orm_scalar)
+                .collect(),
+        };
+        Ok(scope.wrap(expr))
     }
 
-    fn not_in_list<I, E>(self, values: I) -> Result<CtxExpression, DatabaseError>
+    pub fn not_in_list<I, E>(self, values: I) -> Result<Self, DatabaseError>
     where
         I: IntoIterator<Item = E>,
-        E: Into<ScalarExpression>,
+        E: IntoOrmScalarExpression,
     {
-        Ok(CtxExpression::new(ScalarExpression::In {
+        let scope = self.scope;
+        let expr = ScalarExpression::In {
             negated: true,
-            expr: Box::new(self.into()),
-            args: values.into_iter().map(Into::into).collect(),
-        }))
+            expr: Box::new(self.expr),
+            args: values
+                .into_iter()
+                .map(IntoOrmScalarExpression::into_orm_scalar)
+                .collect(),
+        };
+        Ok(scope.wrap(expr))
     }
 
-    fn between<L, H>(self, low: L, high: H) -> Result<CtxExpression, DatabaseError>
+    pub fn between<L, H>(self, low: L, high: H) -> Result<Self, DatabaseError>
     where
-        L: Into<ScalarExpression>,
-        H: Into<ScalarExpression>,
+        L: IntoOrmScalarExpression,
+        H: IntoOrmScalarExpression,
     {
-        Ok(CtxExpression::new(ScalarExpression::Between {
+        let scope = self.scope;
+        let expr = ScalarExpression::Between {
             negated: false,
-            expr: Box::new(self.into()),
-            left_expr: Box::new(low.into()),
-            right_expr: Box::new(high.into()),
-        }))
+            expr: Box::new(self.expr),
+            left_expr: Box::new(low.into_orm_scalar()),
+            right_expr: Box::new(high.into_orm_scalar()),
+        };
+        Ok(scope.wrap(expr))
     }
 
-    fn not_between<L, H>(self, low: L, high: H) -> Result<CtxExpression, DatabaseError>
+    pub fn not_between<L, H>(self, low: L, high: H) -> Result<Self, DatabaseError>
     where
-        L: Into<ScalarExpression>,
-        H: Into<ScalarExpression>,
+        L: IntoOrmScalarExpression,
+        H: IntoOrmScalarExpression,
     {
-        Ok(CtxExpression::new(ScalarExpression::Between {
+        let scope = self.scope;
+        let expr = ScalarExpression::Between {
             negated: true,
-            expr: Box::new(self.into()),
-            left_expr: Box::new(low.into()),
-            right_expr: Box::new(high.into()),
-        }))
+            expr: Box::new(self.expr),
+            left_expr: Box::new(low.into_orm_scalar()),
+            right_expr: Box::new(high.into_orm_scalar()),
+        };
+        Ok(scope.wrap(expr))
+    }
+
+    pub fn alias(self, alias: impl Into<String>) -> Self {
+        let scope = self.scope;
+        let alias = alias.into();
+        scope
+            .binder()
+            .context
+            .add_alias(None, alias.clone(), self.expr.clone());
+        let expr = ScalarExpression::Alias {
+            expr: Box::new(self.expr),
+            alias: AliasType::Name(alias),
+        };
+        scope.wrap(expr)
+    }
+
+    pub fn cast(self, ty: LogicalType) -> Result<Self, DatabaseError> {
+        let scope = self.scope;
+        ScalarExpression::type_cast(self.expr, Cow::Owned(ty), scope.arena())
+            .map(|expr| scope.wrap(expr))
+    }
+
+    pub fn function<E>(
+        self,
+        name: impl Into<String>,
+        args: impl IntoIterator<Item = E>,
+    ) -> Result<Self, DatabaseError>
+    where
+        E: IntoOrmScalarExpression,
+    {
+        let mut args = args
+            .into_iter()
+            .map(IntoOrmScalarExpression::into_orm_scalar)
+            .collect::<Vec<_>>();
+        args.insert(0, self.expr);
+        self.scope.function(name, args)
+    }
+
+    fn quantified_subquery<F>(
+        self,
+        quantifier: MarkApplyQuantifier,
+        negated: bool,
+        compare_op: expression::BinaryOperator,
+        build: F,
+    ) -> Result<Self, DatabaseError>
+    where
+        F: for<'scope, 'sub_bind, 'sub_parent> FnOnce(
+            &'scope mut OrmContext<'scope, 'sub_bind, 'sub_parent, 'arena, T, A>,
+        )
+            -> Result<LogicalPlan, DatabaseError>,
+    {
+        self.scope
+            .quantified_subquery(quantifier, negated, self.expr, compare_op, build)
+    }
+
+    impl_quantified_subquery_methods! {
+        eq_any, Any, false, Eq;
+        eq_all, All, false, Eq;
+        gt_any, Any, false, Gt;
+        gt_all, All, false, Gt;
+        gte_any, Any, false, GtEq;
+        gte_all, All, false, GtEq;
+        lt_any, Any, false, Lt;
+        lt_all, All, false, Lt;
+        lte_any, Any, false, LtEq;
+        lte_all, All, false, LtEq;
+        in_subquery, Any, false, Eq;
+        not_in_subquery, Any, true, Eq;
     }
 }
 
-impl<T> BoundExpressionOps for T where T: Into<ScalarExpression> {}
-
-fn orm_binary_expr(
-    left: ScalarExpression,
-    op: expression::BinaryOperator,
-    right: ScalarExpression,
-) -> CtxExpression {
-    CtxExpression::new(ScalarExpression::Binary {
-        op,
-        left_expr: Box::new(left),
-        right_expr: Box::new(right),
-        evaluator: None,
-        ty: LogicalType::Boolean,
-    })
+impl<'bind, 'parent, 'arena, T, A> fmt::Debug for CtxExpression<'bind, 'parent, 'arena, T, A>
+where
+    T: Transaction,
+    A: AsRef<[(&'static str, DataValue)]>,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.expr.fmt(f)
+    }
 }
 
-fn bind_orm_context<E, F, P>(executor: E, build: F) -> Result<E::Iter, DatabaseError>
+impl<'bind, 'parent, 'arena, T, A> Clone for CtxExpression<'bind, 'parent, 'arena, T, A>
+where
+    T: Transaction,
+    A: AsRef<[(&'static str, DataValue)]>,
+{
+    fn clone(&self) -> Self {
+        Self {
+            expr: self.expr.clone(),
+            scope: self.scope,
+        }
+    }
+}
+
+impl<'bind, 'parent, 'arena, T, A> PartialEq for CtxExpression<'bind, 'parent, 'arena, T, A>
+where
+    T: Transaction,
+    A: AsRef<[(&'static str, DataValue)]>,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.expr == other.expr
+    }
+}
+
+impl<'bind, 'parent, 'arena, T, A> Eq for CtxExpression<'bind, 'parent, 'arena, T, A>
+where
+    T: Transaction,
+    A: AsRef<[(&'static str, DataValue)]>,
+{
+}
+
+impl<'bind, 'parent, 'arena, T, A> Hash for CtxExpression<'bind, 'parent, 'arena, T, A>
+where
+    T: Transaction,
+    A: AsRef<[(&'static str, DataValue)]>,
+{
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.expr.hash(state);
+    }
+}
+
+impl<'bind, 'parent, 'arena, T, A> IntoOrmScalarExpression
+    for CtxExpression<'bind, 'parent, 'arena, T, A>
+where
+    T: Transaction,
+    A: AsRef<[(&'static str, DataValue)]>,
+{
+    fn into_orm_scalar(self) -> ScalarExpression {
+        self.into_scalar()
+    }
+}
+
+fn bind_orm_context<E, F>(executor: E, build: F) -> Result<E::Iter, DatabaseError>
 where
     E: BindSource,
     F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
@@ -438,18 +917,16 @@ where
             E::Transaction,
             &'static [(&'static str, DataValue)],
         >,
-    ) -> Result<P, DatabaseError>,
-    P: TryInto<LogicalPlan>,
-    P::Error: Into<DatabaseError>,
+    ) -> Result<LogicalPlan, DatabaseError>,
 {
     static EMPTY_BIND_PARAMS: &[(&'static str, DataValue)] = &[];
     executor.execute(EMPTY_BIND_PARAMS, |binder, arena| {
         let mut context = OrmContext { binder, arena };
-        build(&mut context)?.try_into().map_err(Into::into)
+        build(&mut context)
     })
 }
 
-fn explain_orm_context<E, F, P>(executor: E, build: F) -> Result<String, DatabaseError>
+fn explain_orm_context<E, F>(executor: E, build: F) -> Result<String, DatabaseError>
 where
     E: BindSource,
     F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
@@ -461,14 +938,12 @@ where
             E::Transaction,
             &'static [(&'static str, DataValue)],
         >,
-    ) -> Result<P, DatabaseError>,
-    P: TryInto<LogicalPlan>,
-    P::Error: Into<DatabaseError>,
+    ) -> Result<LogicalPlan, DatabaseError>,
 {
     static EMPTY_BIND_PARAMS: &[(&'static str, DataValue)] = &[];
     executor.explain(EMPTY_BIND_PARAMS, |binder, arena| {
         let mut context = OrmContext { binder, arena };
-        build(&mut context)?.try_into().map_err(Into::into)
+        build(&mut context)
     })
 }
 
@@ -557,7 +1032,7 @@ where
             .map(|from| from.typed())
     }
 
-    fn set_operation<L, R, LP, RP>(
+    fn set_operation<L, R>(
         &mut self,
         op: SetOperatorKind,
         all: bool,
@@ -567,14 +1042,12 @@ where
     where
         L: for<'scope, 'child_bind, 'child_parent> FnOnce(
             &'scope mut OrmContext<'scope, 'child_bind, 'child_parent, 'arena, T, A>,
-        ) -> Result<LP, DatabaseError>,
+        )
+            -> Result<LogicalPlan, DatabaseError>,
         R: for<'scope, 'child_bind, 'child_parent> FnOnce(
             &'scope mut OrmContext<'scope, 'child_bind, 'child_parent, 'arena, T, A>,
-        ) -> Result<RP, DatabaseError>,
-        LP: TryInto<LogicalPlan>,
-        LP::Error: Into<DatabaseError>,
-        RP: TryInto<LogicalPlan>,
-        RP::Error: Into<DatabaseError>,
+        )
+            -> Result<LogicalPlan, DatabaseError>,
     {
         let left_plan = self.child_plan(left)?;
         let right_plan = self.child_plan(right)?;
@@ -582,13 +1055,12 @@ where
             .bind_set_operation_plans(op, all, left_plan, right_plan, self.arena)
     }
 
-    fn child_plan<F, P>(&mut self, build: F) -> Result<LogicalPlan, DatabaseError>
+    fn child_plan<F>(&mut self, build: F) -> Result<LogicalPlan, DatabaseError>
     where
         F: for<'scope, 'child_bind, 'child_parent> FnOnce(
             &'scope mut OrmContext<'scope, 'child_bind, 'child_parent, 'arena, T, A>,
-        ) -> Result<P, DatabaseError>,
-        P: TryInto<LogicalPlan>,
-        P::Error: Into<DatabaseError>,
+        )
+            -> Result<LogicalPlan, DatabaseError>,
     {
         let mut child_binder = Binder::new(
             self.binder.context.fork(),
@@ -600,7 +1072,7 @@ where
                 binder: &mut child_binder,
                 arena: self.arena,
             };
-            build(&mut context)?.try_into().map_err(Into::into)?
+            build(&mut context)?
         };
         if child_binder.context.has_outer_refs() {
             self.binder.context.mark_outer_ref();
@@ -608,7 +1080,7 @@ where
         Ok(plan)
     }
 
-    pub fn union<L, R, LP, RP>(
+    pub fn union<L, R>(
         &mut self,
         all: bool,
         left: L,
@@ -617,19 +1089,17 @@ where
     where
         L: for<'scope, 'child_bind, 'child_parent> FnOnce(
             &'scope mut OrmContext<'scope, 'child_bind, 'child_parent, 'arena, T, A>,
-        ) -> Result<LP, DatabaseError>,
+        )
+            -> Result<LogicalPlan, DatabaseError>,
         R: for<'scope, 'child_bind, 'child_parent> FnOnce(
             &'scope mut OrmContext<'scope, 'child_bind, 'child_parent, 'arena, T, A>,
-        ) -> Result<RP, DatabaseError>,
-        LP: TryInto<LogicalPlan>,
-        LP::Error: Into<DatabaseError>,
-        RP: TryInto<LogicalPlan>,
-        RP::Error: Into<DatabaseError>,
+        )
+            -> Result<LogicalPlan, DatabaseError>,
     {
         self.set_operation(SetOperatorKind::Union, all, left, right)
     }
 
-    pub fn except<L, R, LP, RP>(
+    pub fn except<L, R>(
         &mut self,
         all: bool,
         left: L,
@@ -638,19 +1108,17 @@ where
     where
         L: for<'scope, 'child_bind, 'child_parent> FnOnce(
             &'scope mut OrmContext<'scope, 'child_bind, 'child_parent, 'arena, T, A>,
-        ) -> Result<LP, DatabaseError>,
+        )
+            -> Result<LogicalPlan, DatabaseError>,
         R: for<'scope, 'child_bind, 'child_parent> FnOnce(
             &'scope mut OrmContext<'scope, 'child_bind, 'child_parent, 'arena, T, A>,
-        ) -> Result<RP, DatabaseError>,
-        LP: TryInto<LogicalPlan>,
-        LP::Error: Into<DatabaseError>,
-        RP: TryInto<LogicalPlan>,
-        RP::Error: Into<DatabaseError>,
+        )
+            -> Result<LogicalPlan, DatabaseError>,
     {
         self.set_operation(SetOperatorKind::Except, all, left, right)
     }
 
-    pub fn intersect<L, R, LP, RP>(
+    pub fn intersect<L, R>(
         &mut self,
         all: bool,
         left: L,
@@ -659,19 +1127,17 @@ where
     where
         L: for<'scope, 'child_bind, 'child_parent> FnOnce(
             &'scope mut OrmContext<'scope, 'child_bind, 'child_parent, 'arena, T, A>,
-        ) -> Result<LP, DatabaseError>,
+        )
+            -> Result<LogicalPlan, DatabaseError>,
         R: for<'scope, 'child_bind, 'child_parent> FnOnce(
             &'scope mut OrmContext<'scope, 'child_bind, 'child_parent, 'arena, T, A>,
-        ) -> Result<RP, DatabaseError>,
-        LP: TryInto<LogicalPlan>,
-        LP::Error: Into<DatabaseError>,
-        RP: TryInto<LogicalPlan>,
-        RP::Error: Into<DatabaseError>,
+        )
+            -> Result<LogicalPlan, DatabaseError>,
     {
         self.set_operation(SetOperatorKind::Intersect, all, left, right)
     }
 
-    pub fn insert_select<M, C, F, P>(
+    pub fn insert_select<M, C, F>(
         &mut self,
         columns: C,
         build: F,
@@ -682,14 +1148,13 @@ where
         C::Item: Into<String>,
         F: for<'scope, 'child_bind, 'child_parent> FnOnce(
             &'scope mut OrmContext<'scope, 'child_bind, 'child_parent, 'arena, T, A>,
-        ) -> Result<P, DatabaseError>,
-        P: TryInto<LogicalPlan>,
-        P::Error: Into<DatabaseError>,
+        )
+            -> Result<LogicalPlan, DatabaseError>,
     {
-        self.insert_select_inner::<M, C, F, P>(columns, false, build)
+        self.insert_select_inner::<M, C, F>(columns, false, build)
     }
 
-    pub fn overwrite_select<M, C, F, P>(
+    pub fn overwrite_select<M, C, F>(
         &mut self,
         columns: C,
         build: F,
@@ -700,14 +1165,13 @@ where
         C::Item: Into<String>,
         F: for<'scope, 'child_bind, 'child_parent> FnOnce(
             &'scope mut OrmContext<'scope, 'child_bind, 'child_parent, 'arena, T, A>,
-        ) -> Result<P, DatabaseError>,
-        P: TryInto<LogicalPlan>,
-        P::Error: Into<DatabaseError>,
+        )
+            -> Result<LogicalPlan, DatabaseError>,
     {
-        self.insert_select_inner::<M, C, F, P>(columns, true, build)
+        self.insert_select_inner::<M, C, F>(columns, true, build)
     }
 
-    fn insert_select_inner<M, C, F, P>(
+    fn insert_select_inner<M, C, F>(
         &mut self,
         columns: C,
         overwrite: bool,
@@ -719,9 +1183,8 @@ where
         C::Item: Into<String>,
         F: for<'scope, 'child_bind, 'child_parent> FnOnce(
             &'scope mut OrmContext<'scope, 'child_bind, 'child_parent, 'arena, T, A>,
-        ) -> Result<P, DatabaseError>,
-        P: TryInto<LogicalPlan>,
-        P::Error: Into<DatabaseError>,
+        )
+            -> Result<LogicalPlan, DatabaseError>,
     {
         let input_plan = self.child_plan(build)?;
         bind_orm_insert_plan(
@@ -744,260 +1207,305 @@ where
     T: Transaction,
     A: AsRef<[(&'static str, DataValue)]>,
 {
-    pub fn column<M, V>(&mut self, field: Field<M, V>) -> Result<CtxExpression, DatabaseError> {
-        self.binder
-            .bind_column_ref_by_name(Some(field.table), field.column, None, self.arena)
-            .map(CtxExpression::from)
+    fn handle(&self) -> ExprBindScopeHandle<'bind, 'parent, 'arena, T, A> {
+        ExprBindScopeHandle::new(self)
+    }
+
+    fn wrap(&self, expr: ScalarExpression) -> CtxExpression<'bind, 'parent, 'arena, T, A> {
+        self.handle().wrap(expr)
+    }
+
+    pub fn column<M, V>(
+        &self,
+        field: Field<M, V>,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        let scope = self.handle();
+        let expr = scope.binder().bind_column_ref_by_name(
+            Some(field.table),
+            field.column,
+            None,
+            scope.arena(),
+        )?;
+        Ok(scope.wrap(expr))
     }
 
     pub fn qualified_column<M, V>(
-        &mut self,
+        &self,
         relation: &str,
         field: Field<M, V>,
-    ) -> Result<CtxExpression, DatabaseError> {
-        self.binder
-            .bind_column_ref_by_name(Some(relation), field.column, None, self.arena)
-            .map(CtxExpression::from)
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        let scope = self.handle();
+        let expr = scope.binder().bind_column_ref_by_name(
+            Some(relation),
+            field.column,
+            None,
+            scope.arena(),
+        )?;
+        Ok(scope.wrap(expr))
     }
 
     #[doc(hidden)]
     pub fn column_ref(
-        &mut self,
+        &self,
         relation: &str,
         column: &str,
-    ) -> Result<CtxExpression, DatabaseError> {
-        self.binder
-            .bind_column_ref_by_name(Some(relation), column, None, self.arena)
-            .map(CtxExpression::from)
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        let scope = self.handle();
+        let expr =
+            scope
+                .binder()
+                .bind_column_ref_by_name(Some(relation), column, None, scope.arena())?;
+        Ok(scope.wrap(expr))
     }
 
-    pub fn value<V: ToDataValue>(&self, value: V) -> CtxExpression {
-        CtxExpression::new(ScalarExpression::Constant(value.to_data_value()))
+    pub fn value<V: ToDataValue>(&self, value: V) -> CtxExpression<'bind, 'parent, 'arena, T, A> {
+        self.wrap(ScalarExpression::Constant(value.to_data_value()))
     }
 
-    pub fn data_value(&self, value: DataValue) -> CtxExpression {
-        CtxExpression::new(ScalarExpression::Constant(value))
+    pub fn data_value(&self, value: DataValue) -> CtxExpression<'bind, 'parent, 'arena, T, A> {
+        self.wrap(ScalarExpression::Constant(value))
     }
 
     pub fn alias(
-        &mut self,
-        expr: impl Into<ScalarExpression>,
+        &self,
+        expr: impl IntoOrmScalarExpression,
         alias: impl Into<String>,
-    ) -> CtxExpression {
-        let expr = expr.into();
-        let alias = alias.into();
-        self.binder
-            .context
-            .add_alias(None, alias.clone(), expr.clone());
-        CtxExpression::new(ScalarExpression::Alias {
-            expr: Box::new(expr),
-            alias: AliasType::Name(alias),
-        })
+    ) -> CtxExpression<'bind, 'parent, 'arena, T, A> {
+        self.wrap(expr.into_orm_scalar()).alias(alias)
     }
 
     pub fn cast(
-        &mut self,
-        expr: impl Into<ScalarExpression>,
+        &self,
+        expr: impl IntoOrmScalarExpression,
         ty: LogicalType,
-    ) -> Result<CtxExpression, DatabaseError> {
-        ScalarExpression::type_cast(expr.into(), Cow::Owned(ty), self.arena)
-            .map(CtxExpression::from)
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        let scope = self.handle();
+        let expr =
+            ScalarExpression::type_cast(expr.into_orm_scalar(), Cow::Owned(ty), scope.arena())?;
+        Ok(scope.wrap(expr))
     }
 
     pub fn unary(
-        &mut self,
+        &self,
         op: expression::UnaryOperator,
-        expr: impl Into<ScalarExpression>,
-    ) -> Result<CtxExpression, DatabaseError> {
-        self.binder
-            .bind_unary_op_expr(expr.into(), op, self.arena)
-            .map(CtxExpression::from)
+        expr: impl IntoOrmScalarExpression,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.handle().unary(op, expr.into_orm_scalar())
     }
 
     pub fn binary(
-        &mut self,
-        left: impl Into<ScalarExpression>,
+        &self,
+        left: impl IntoOrmScalarExpression,
         op: expression::BinaryOperator,
-        right: impl Into<ScalarExpression>,
-    ) -> Result<CtxExpression, DatabaseError> {
-        self.binder
-            .bind_binary_op_expr(left.into(), right.into(), op, self.arena)
-            .map(CtxExpression::from)
+        right: impl IntoOrmScalarExpression,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.handle()
+            .binary(left.into_orm_scalar(), op, right.into_orm_scalar())
     }
 
     pub fn eq(
-        &mut self,
-        left: impl Into<ScalarExpression>,
-        right: impl Into<ScalarExpression>,
-    ) -> Result<CtxExpression, DatabaseError> {
+        &self,
+        left: impl IntoOrmScalarExpression,
+        right: impl IntoOrmScalarExpression,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binary(left, expression::BinaryOperator::Eq, right)
     }
 
     pub fn ne(
-        &mut self,
-        left: impl Into<ScalarExpression>,
-        right: impl Into<ScalarExpression>,
-    ) -> Result<CtxExpression, DatabaseError> {
+        &self,
+        left: impl IntoOrmScalarExpression,
+        right: impl IntoOrmScalarExpression,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binary(left, expression::BinaryOperator::NotEq, right)
     }
 
     pub fn gt(
-        &mut self,
-        left: impl Into<ScalarExpression>,
-        right: impl Into<ScalarExpression>,
-    ) -> Result<CtxExpression, DatabaseError> {
+        &self,
+        left: impl IntoOrmScalarExpression,
+        right: impl IntoOrmScalarExpression,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binary(left, expression::BinaryOperator::Gt, right)
     }
 
     pub fn gte(
-        &mut self,
-        left: impl Into<ScalarExpression>,
-        right: impl Into<ScalarExpression>,
-    ) -> Result<CtxExpression, DatabaseError> {
+        &self,
+        left: impl IntoOrmScalarExpression,
+        right: impl IntoOrmScalarExpression,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binary(left, expression::BinaryOperator::GtEq, right)
     }
 
     pub fn lt(
-        &mut self,
-        left: impl Into<ScalarExpression>,
-        right: impl Into<ScalarExpression>,
-    ) -> Result<CtxExpression, DatabaseError> {
+        &self,
+        left: impl IntoOrmScalarExpression,
+        right: impl IntoOrmScalarExpression,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binary(left, expression::BinaryOperator::Lt, right)
     }
 
     pub fn lte(
-        &mut self,
-        left: impl Into<ScalarExpression>,
-        right: impl Into<ScalarExpression>,
-    ) -> Result<CtxExpression, DatabaseError> {
+        &self,
+        left: impl IntoOrmScalarExpression,
+        right: impl IntoOrmScalarExpression,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binary(left, expression::BinaryOperator::LtEq, right)
     }
 
     pub fn and(
-        &mut self,
-        left: impl Into<ScalarExpression>,
-        right: impl Into<ScalarExpression>,
-    ) -> Result<CtxExpression, DatabaseError> {
+        &self,
+        left: impl IntoOrmScalarExpression,
+        right: impl IntoOrmScalarExpression,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binary(left, expression::BinaryOperator::And, right)
     }
 
     pub fn or(
-        &mut self,
-        left: impl Into<ScalarExpression>,
-        right: impl Into<ScalarExpression>,
-    ) -> Result<CtxExpression, DatabaseError> {
+        &self,
+        left: impl IntoOrmScalarExpression,
+        right: impl IntoOrmScalarExpression,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binary(left, expression::BinaryOperator::Or, right)
     }
 
-    pub fn is_null(&mut self, expr: impl Into<ScalarExpression>) -> CtxExpression {
-        CtxExpression::new(ScalarExpression::IsNull {
-            negated: false,
-            expr: Box::new(expr.into()),
-        })
+    pub fn is_null(
+        &self,
+        expr: impl IntoOrmScalarExpression,
+    ) -> CtxExpression<'bind, 'parent, 'arena, T, A> {
+        self.wrap(expr.into_orm_scalar()).is_null()
     }
 
-    pub fn is_not_null(&mut self, expr: impl Into<ScalarExpression>) -> CtxExpression {
-        CtxExpression::new(ScalarExpression::IsNull {
-            negated: true,
-            expr: Box::new(expr.into()),
-        })
+    pub fn is_not_null(
+        &self,
+        expr: impl IntoOrmScalarExpression,
+    ) -> CtxExpression<'bind, 'parent, 'arena, T, A> {
+        self.wrap(expr.into_orm_scalar()).is_not_null()
     }
 
-    pub fn in_list<I, E>(&mut self, expr: impl Into<ScalarExpression>, args: I) -> CtxExpression
+    pub fn in_list<I, E>(
+        &self,
+        expr: impl IntoOrmScalarExpression,
+        args: I,
+    ) -> CtxExpression<'bind, 'parent, 'arena, T, A>
     where
         I: IntoIterator<Item = E>,
-        E: Into<ScalarExpression>,
+        E: IntoOrmScalarExpression,
     {
-        CtxExpression::new(ScalarExpression::In {
+        let expr = ScalarExpression::In {
             negated: false,
-            expr: Box::new(expr.into()),
-            args: args.into_iter().map(Into::into).collect(),
-        })
+            expr: Box::new(expr.into_orm_scalar()),
+            args: args
+                .into_iter()
+                .map(IntoOrmScalarExpression::into_orm_scalar)
+                .collect(),
+        };
+        self.wrap(expr)
     }
 
-    pub fn not_in_list<I, E>(&mut self, expr: impl Into<ScalarExpression>, args: I) -> CtxExpression
+    pub fn not_in_list<I, E>(
+        &self,
+        expr: impl IntoOrmScalarExpression,
+        args: I,
+    ) -> CtxExpression<'bind, 'parent, 'arena, T, A>
     where
         I: IntoIterator<Item = E>,
-        E: Into<ScalarExpression>,
+        E: IntoOrmScalarExpression,
     {
-        CtxExpression::new(ScalarExpression::In {
+        let expr = ScalarExpression::In {
             negated: true,
-            expr: Box::new(expr.into()),
-            args: args.into_iter().map(Into::into).collect(),
-        })
+            expr: Box::new(expr.into_orm_scalar()),
+            args: args
+                .into_iter()
+                .map(IntoOrmScalarExpression::into_orm_scalar)
+                .collect(),
+        };
+        self.wrap(expr)
     }
 
     pub fn between(
-        &mut self,
-        expr: impl Into<ScalarExpression>,
-        low: impl Into<ScalarExpression>,
-        high: impl Into<ScalarExpression>,
-    ) -> CtxExpression {
-        CtxExpression::new(ScalarExpression::Between {
+        &self,
+        expr: impl IntoOrmScalarExpression,
+        low: impl IntoOrmScalarExpression,
+        high: impl IntoOrmScalarExpression,
+    ) -> CtxExpression<'bind, 'parent, 'arena, T, A> {
+        let expr = ScalarExpression::Between {
             negated: false,
-            expr: Box::new(expr.into()),
-            left_expr: Box::new(low.into()),
-            right_expr: Box::new(high.into()),
-        })
+            expr: Box::new(expr.into_orm_scalar()),
+            left_expr: Box::new(low.into_orm_scalar()),
+            right_expr: Box::new(high.into_orm_scalar()),
+        };
+        self.wrap(expr)
     }
 
     pub fn not_between(
-        &mut self,
-        expr: impl Into<ScalarExpression>,
-        low: impl Into<ScalarExpression>,
-        high: impl Into<ScalarExpression>,
-    ) -> CtxExpression {
-        CtxExpression::new(ScalarExpression::Between {
+        &self,
+        expr: impl IntoOrmScalarExpression,
+        low: impl IntoOrmScalarExpression,
+        high: impl IntoOrmScalarExpression,
+    ) -> CtxExpression<'bind, 'parent, 'arena, T, A> {
+        let expr = ScalarExpression::Between {
             negated: true,
-            expr: Box::new(expr.into()),
-            left_expr: Box::new(low.into()),
-            right_expr: Box::new(high.into()),
-        })
+            expr: Box::new(expr.into_orm_scalar()),
+            left_expr: Box::new(low.into_orm_scalar()),
+            right_expr: Box::new(high.into_orm_scalar()),
+        };
+        self.wrap(expr)
     }
 
     pub fn not(
-        &mut self,
-        expr: impl Into<ScalarExpression>,
-    ) -> Result<CtxExpression, DatabaseError> {
+        &self,
+        expr: impl IntoOrmScalarExpression,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.unary(expression::UnaryOperator::Not, expr)
     }
 
-    pub fn function(
-        &mut self,
+    pub fn function<E>(
+        &self,
         name: impl Into<String>,
-        args: Vec<ScalarExpression>,
-    ) -> Result<CtxExpression, DatabaseError> {
-        self.binder
-            .bind_function_call(name.into(), args, false, self.arena)
-            .map(CtxExpression::from)
+        args: impl IntoIterator<Item = E>,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError>
+    where
+        E: IntoOrmScalarExpression,
+    {
+        let args = args
+            .into_iter()
+            .map(IntoOrmScalarExpression::into_orm_scalar)
+            .collect();
+        self.handle().function(name, args)
     }
 
-    pub fn aggregate(
-        &mut self,
+    pub fn aggregate<E>(
+        &self,
         name: impl Into<String>,
-        args: Vec<ScalarExpression>,
-    ) -> Result<CtxExpression, DatabaseError> {
-        self.binder
-            .bind_function_call(name.into(), args, false, self.arena)
-            .map(CtxExpression::from)
+        args: impl IntoIterator<Item = E>,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError>
+    where
+        E: IntoOrmScalarExpression,
+    {
+        self.function(name, args)
     }
 
-    pub fn count_all(&mut self) -> Result<CtxExpression, DatabaseError> {
-        self.binder
-            .bind_function_call(
-                "count".to_string(),
-                vec![Binder::<'bind, 'parent, T, A>::wildcard_expr()],
-                false,
-                self.arena,
-            )
-            .map(CtxExpression::from)
+    pub fn count_all(&self) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.function(
+            "count",
+            vec![Binder::<'bind, 'parent, T, A>::wildcard_expr()],
+        )
     }
 
-    pub fn case_when(
-        &mut self,
-        expr_pairs: Vec<(ScalarExpression, ScalarExpression)>,
-        else_expr: Option<ScalarExpression>,
-    ) -> CtxExpression {
+    pub fn case_when<C, V, E>(
+        &self,
+        expr_pairs: impl IntoIterator<Item = (C, V)>,
+        else_expr: Option<E>,
+    ) -> CtxExpression<'bind, 'parent, 'arena, T, A>
+    where
+        C: IntoOrmScalarExpression,
+        V: IntoOrmScalarExpression,
+        E: IntoOrmScalarExpression,
+    {
+        let expr_pairs = expr_pairs
+            .into_iter()
+            .map(|(condition, value)| (condition.into_orm_scalar(), value.into_orm_scalar()))
+            .collect::<Vec<_>>();
+        let else_expr = else_expr.map(IntoOrmScalarExpression::into_orm_scalar);
         let ty = expr_pairs
             .first()
             .map(|(_, value)| value.return_type(self.arena).into_owned())
@@ -1007,7 +1515,7 @@ where
                     .map(|value| value.return_type(self.arena).into_owned())
             })
             .unwrap_or(LogicalType::SqlNull);
-        CtxExpression::new(ScalarExpression::CaseWhen {
+        self.wrap(ScalarExpression::CaseWhen {
             operand_expr: None,
             expr_pairs,
             else_expr: else_expr.map(Box::new),
@@ -1015,12 +1523,22 @@ where
         })
     }
 
-    pub fn case_value(
-        &mut self,
-        operand_expr: impl Into<ScalarExpression>,
-        expr_pairs: Vec<(ScalarExpression, ScalarExpression)>,
-        else_expr: Option<ScalarExpression>,
-    ) -> CtxExpression {
+    pub fn case_value<K, V, E>(
+        &self,
+        operand_expr: impl IntoOrmScalarExpression,
+        expr_pairs: impl IntoIterator<Item = (K, V)>,
+        else_expr: Option<E>,
+    ) -> CtxExpression<'bind, 'parent, 'arena, T, A>
+    where
+        K: IntoOrmScalarExpression,
+        V: IntoOrmScalarExpression,
+        E: IntoOrmScalarExpression,
+    {
+        let expr_pairs = expr_pairs
+            .into_iter()
+            .map(|(key, value)| (key.into_orm_scalar(), value.into_orm_scalar()))
+            .collect::<Vec<_>>();
+        let else_expr = else_expr.map(IntoOrmScalarExpression::into_orm_scalar);
         let ty = expr_pairs
             .first()
             .map(|(_, value)| value.return_type(self.arena).into_owned())
@@ -1030,103 +1548,39 @@ where
                     .map(|value| value.return_type(self.arena).into_owned())
             })
             .unwrap_or(LogicalType::SqlNull);
-        CtxExpression::new(ScalarExpression::CaseWhen {
-            operand_expr: Some(Box::new(operand_expr.into())),
+        self.wrap(ScalarExpression::CaseWhen {
+            operand_expr: Some(Box::new(operand_expr.into_orm_scalar())),
             expr_pairs,
             else_expr: else_expr.map(Box::new),
             ty,
         })
     }
 
-    pub fn scalar_subquery(
-        &mut self,
-        build: impl for<'scope, 'sub_bind, 'sub_parent> FnOnce(
+    pub fn scalar_subquery<F>(
+        &self,
+        build: F,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError>
+    where
+        F: for<'scope, 'sub_bind, 'sub_parent> FnOnce(
             &'scope mut OrmContext<'scope, 'sub_bind, 'sub_parent, 'arena, T, A>,
         )
             -> Result<LogicalPlan, DatabaseError>,
-    ) -> Result<CtxExpression, DatabaseError> {
-        self.binder
-            .bind_scalar_subquery_plan(self.arena, |binder, arena| {
-                let mut context = OrmContext { binder, arena };
-                build(&mut context)
-            })
-            .map(CtxExpression::from)
+    {
+        self.handle().scalar_subquery(build)
     }
 
-    pub fn exists_subquery(
-        &mut self,
+    pub fn exists_subquery<F>(
+        &self,
         negated: bool,
-        build: impl for<'scope, 'sub_bind, 'sub_parent> FnOnce(
+        build: F,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError>
+    where
+        F: for<'scope, 'sub_bind, 'sub_parent> FnOnce(
             &'scope mut OrmContext<'scope, 'sub_bind, 'sub_parent, 'arena, T, A>,
         )
             -> Result<LogicalPlan, DatabaseError>,
-    ) -> Result<CtxExpression, DatabaseError> {
-        self.binder
-            .bind_exists_subquery_plan(negated, self.arena, |binder, arena| {
-                let mut context = OrmContext { binder, arena };
-                build(&mut context)
-            })
-            .map(CtxExpression::from)
-    }
-
-    pub fn quantified_subquery(
-        &mut self,
-        quantifier: MarkApplyQuantifier,
-        negated: bool,
-        left_expr: impl Into<ScalarExpression>,
-        compare_op: expression::BinaryOperator,
-        build: impl for<'scope, 'sub_bind, 'sub_parent> FnOnce(
-            &'scope mut OrmContext<'scope, 'sub_bind, 'sub_parent, 'arena, T, A>,
-        )
-            -> Result<LogicalPlan, DatabaseError>,
-    ) -> Result<CtxExpression, DatabaseError> {
-        self.binder
-            .bind_quantified_subquery_plan(
-                quantifier,
-                negated,
-                left_expr.into(),
-                compare_op,
-                self.arena,
-                |binder, arena| {
-                    let mut context = OrmContext { binder, arena };
-                    build(&mut context)
-                },
-            )
-            .map(CtxExpression::from)
-    }
-
-    pub fn in_subquery(
-        &mut self,
-        left_expr: impl Into<ScalarExpression>,
-        build: impl for<'scope, 'sub_bind, 'sub_parent> FnOnce(
-            &'scope mut OrmContext<'scope, 'sub_bind, 'sub_parent, 'arena, T, A>,
-        )
-            -> Result<LogicalPlan, DatabaseError>,
-    ) -> Result<CtxExpression, DatabaseError> {
-        self.quantified_subquery(
-            MarkApplyQuantifier::Any,
-            false,
-            left_expr,
-            expression::BinaryOperator::Eq,
-            build,
-        )
-    }
-
-    pub fn not_in_subquery(
-        &mut self,
-        left_expr: impl Into<ScalarExpression>,
-        build: impl for<'scope, 'sub_bind, 'sub_parent> FnOnce(
-            &'scope mut OrmContext<'scope, 'sub_bind, 'sub_parent, 'arena, T, A>,
-        )
-            -> Result<LogicalPlan, DatabaseError>,
-    ) -> Result<CtxExpression, DatabaseError> {
-        self.quantified_subquery(
-            MarkApplyQuantifier::Any,
-            true,
-            left_expr,
-            expression::BinaryOperator::Eq,
-            build,
-        )
+    {
+        self.handle().exists_subquery(negated, build)
     }
 }
 
@@ -1155,14 +1609,14 @@ where
         field: Field<M, V>,
         build: impl BindOrmScalar<'bind, 'parent, 'arena, T, A>,
     ) -> Result<(), DatabaseError> {
-        let expr = {
+        let expr = with_query_bind_step!(self.binder, QueryBindStep::Project, {
             let mut scope = ExprBindScope {
                 binder: self.binder,
                 arena: self.arena,
             };
             build.bind_scalar(&mut scope)?
-        };
-        self.push_assignment(field.column, expr)
+        });
+        self.push_assignment(field.column, expr?)
     }
 
     pub fn set_expr<M, V, E>(
@@ -1173,16 +1627,16 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<(), DatabaseError>
     where
-        E: Into<ScalarExpression>,
+        E: IntoOrmScalarExpression,
     {
-        let expr = {
+        let expr = with_query_bind_step!(self.binder, QueryBindStep::Project, {
             let mut scope = ExprBindScope {
                 binder: self.binder,
                 arena: self.arena,
             };
-            build(&mut scope)?.into()
-        };
-        self.push_assignment(field.column, expr)
+            build(&mut scope)?.into_orm_scalar()
+        });
+        self.push_assignment(field.column, expr?)
     }
 
     fn push_assignment(
@@ -1259,12 +1713,13 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: Into<ScalarExpression>,
+        E: IntoOrmScalarExpression,
     {
-        let predicate = {
+        let predicate = with_query_bind_step!(self.binder, QueryBindStep::Where, {
             let mut scope = self.expr_scope();
-            build(&mut scope)?.into()
-        };
+            build(&mut scope)?.into_orm_scalar()
+        });
+        let predicate = predicate?;
         self.filter_expr(predicate)
     }
 
@@ -1300,7 +1755,7 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: Into<ScalarExpression>,
+        E: IntoOrmScalarExpression,
     {
         let source = match alias {
             Some(alias) => QuerySource::model::<N>().with_alias(alias),
@@ -1316,16 +1771,19 @@ where
                 bind_orm_source(&mut right_binder, source, Some(join_type), self.arena)?;
             (right_plan, right_binder.context)
         };
-        let on = {
+        self.binder.extend(right_context);
+        let on = with_query_bind_step!(self.binder, QueryBindStep::From, {
             let mut scope = self.expr_scope();
-            build(&mut scope)?.into()
-        };
-        self.join_plan(
+            build(&mut scope)?.into_orm_scalar()
+        });
+        self.plan = self.binder.bind_join_plans(
+            self.plan,
             right_plan,
-            right_context,
             join_type,
-            JoinConstraintInput::On(on),
-        )
+            JoinConstraintInput::On(on?),
+            self.arena,
+        )?;
+        Ok(self)
     }
 
     pub fn inner_join<N: Model, E>(
@@ -1335,7 +1793,7 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: Into<ScalarExpression>,
+        E: IntoOrmScalarExpression,
     {
         self.join_on::<N, E>(JoinType::Inner, None, build)
     }
@@ -1348,7 +1806,7 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: Into<ScalarExpression>,
+        E: IntoOrmScalarExpression,
     {
         self.join_on::<N, E>(JoinType::Inner, Some(alias.into()), build)
     }
@@ -1360,7 +1818,7 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: Into<ScalarExpression>,
+        E: IntoOrmScalarExpression,
     {
         self.join_on::<N, E>(JoinType::LeftOuter, None, build)
     }
@@ -1373,7 +1831,7 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: Into<ScalarExpression>,
+        E: IntoOrmScalarExpression,
     {
         self.join_on::<N, E>(JoinType::LeftOuter, Some(alias.into()), build)
     }
@@ -1385,7 +1843,7 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: Into<ScalarExpression>,
+        E: IntoOrmScalarExpression,
     {
         self.join_on::<N, E>(JoinType::RightOuter, None, build)
     }
@@ -1397,7 +1855,7 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: Into<ScalarExpression>,
+        E: IntoOrmScalarExpression,
     {
         self.join_on::<N, E>(JoinType::Full, None, build)
     }
@@ -1452,8 +1910,8 @@ where
     {
         let relation = self.model_relation_name()?;
         let mut select_list = Vec::with_capacity(M::fields().len());
-        {
-            let mut scope = self.expr_scope();
+        with_query_bind_step!(self.binder, QueryBindStep::Project, {
+            let scope = self.expr_scope();
             for field in M::fields() {
                 select_list.push(
                     scope
@@ -1461,10 +1919,11 @@ where
                             &relation,
                             Field::<M, ()>::new(M::table_name(), field.column),
                         )?
-                        .into(),
+                        .into_orm_scalar(),
                 );
             }
-        }
+            ()
+        })?;
         Ok(self.select_list(select_list))
     }
 
@@ -1473,13 +1932,10 @@ where
     ) -> Result<BindPlanSelectList<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>, DatabaseError>
     {
         let relation = self.model_relation_name()?;
-        let current_step = self.binder.context.step_now();
-        self.binder.context.step(QueryBindStep::Project);
-        let projection = {
+        let projection = with_query_bind_step!(self.binder, QueryBindStep::Project, {
             let mut scope = self.expr_scope();
-            P::bind_projection(&mut scope, &relation)
-        };
-        self.binder.context.step(current_step);
+            P::bind_projection(&mut scope, &relation)?
+        });
         Ok(self.select_list(projection?))
     }
 
@@ -1490,13 +1946,13 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<BindPlanSelectList<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>, DatabaseError>
     where
-        E: Into<ScalarExpression>,
+        E: IntoOrmScalarExpression,
     {
-        let expr = {
+        let expr = with_query_bind_step!(self.binder, QueryBindStep::Project, {
             let mut scope = self.expr_scope();
-            build(&mut scope)?.into()
-        };
-        Ok(self.select_list(vec![expr]))
+            build(&mut scope)?.into_orm_scalar()
+        });
+        Ok(self.select_list(vec![expr?]))
     }
 
     pub fn project_tuple<E>(
@@ -1506,13 +1962,18 @@ where
         ) -> Result<Vec<E>, DatabaseError>,
     ) -> Result<BindPlanSelectList<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>, DatabaseError>
     where
-        E: Into<ScalarExpression>,
+        E: IntoOrmScalarExpression,
     {
-        let exprs = {
+        let exprs = with_query_bind_step!(self.binder, QueryBindStep::Project, {
             let mut scope = self.expr_scope();
             build(&mut scope)?
-        };
-        Ok(self.select_list(exprs.into_iter().map(Into::into).collect()))
+        });
+        Ok(self.select_list(
+            exprs?
+                .into_iter()
+                .map(IntoOrmScalarExpression::into_orm_scalar)
+                .collect(),
+        ))
     }
 
     pub fn project_scalar(
@@ -1520,11 +1981,11 @@ where
         build: impl BindOrmScalar<'bind, 'parent, 'arena, T, A>,
     ) -> Result<BindPlanSelectList<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>, DatabaseError>
     {
-        let expr = {
+        let expr = with_query_bind_step!(self.binder, QueryBindStep::Project, {
             let mut scope = self.expr_scope();
             build.bind_scalar(&mut scope)?
-        };
-        Ok(self.select_list(vec![expr]))
+        });
+        Ok(self.select_list(vec![expr?]))
     }
 
     pub fn project_scalars(
@@ -1532,11 +1993,11 @@ where
         build: impl BindOrmScalarList<'bind, 'parent, 'arena, T, A>,
     ) -> Result<BindPlanSelectList<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>, DatabaseError>
     {
-        let exprs = {
+        let exprs = with_query_bind_step!(self.binder, QueryBindStep::Project, {
             let mut scope = self.expr_scope();
             build.bind_scalar_list(&mut scope)?
-        };
-        Ok(self.select_list(exprs))
+        });
+        Ok(self.select_list(exprs?))
     }
 
     pub fn group_by<E>(
@@ -1546,7 +2007,7 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<BindPlanSelectList<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>, DatabaseError>
     where
-        E: Into<ScalarExpression>,
+        E: IntoOrmScalarExpression,
     {
         self.project_model()?.group_by(build)
     }
@@ -1558,33 +2019,9 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<BindPlanSelectList<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>, DatabaseError>
     where
-        E: Into<ScalarExpression>,
+        E: IntoOrmScalarExpression,
     {
         self.project_model()?.having(build)
-    }
-
-    pub fn asc<E>(
-        self,
-        build: impl for<'scope> FnOnce(
-            &'scope mut ExprBindScope<'scope, 'bind, 'parent, 'arena, T, A>,
-        ) -> Result<E, DatabaseError>,
-    ) -> Result<BindPlanSelectList<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>, DatabaseError>
-    where
-        E: Into<ScalarExpression>,
-    {
-        self.project_model()?.asc(build)
-    }
-
-    pub fn desc<E>(
-        self,
-        build: impl for<'scope> FnOnce(
-            &'scope mut ExprBindScope<'scope, 'bind, 'parent, 'arena, T, A>,
-        ) -> Result<E, DatabaseError>,
-    ) -> Result<BindPlanSelectList<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>, DatabaseError>
-    where
-        E: Into<ScalarExpression>,
-    {
-        self.project_model()?.desc(build)
     }
 
     pub fn group_by_scalar(
@@ -1603,33 +2040,31 @@ where
         self.project_model()?.having_scalar(build)
     }
 
-    pub fn asc_by(
+    pub fn order_by(
         self,
-        build: impl BindOrmScalar<'bind, 'parent, 'arena, T, A>,
+        build: impl BindOrmSort<'bind, 'parent, 'arena, T, A>,
     ) -> Result<BindPlanSelectList<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>, DatabaseError>
     {
-        self.project_model()?.asc_by(build)
+        self.project_model()?.order_by(build)
     }
 
-    pub fn desc_by(
+    pub fn order_by_expr(
         self,
-        build: impl BindOrmScalar<'bind, 'parent, 'arena, T, A>,
+        build: impl for<'scope> FnOnce(
+            &'scope mut ExprBindScope<'scope, 'bind, 'parent, 'arena, T, A>,
+        ) -> Result<SortField, DatabaseError>,
     ) -> Result<BindPlanSelectList<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>, DatabaseError>
     {
-        self.project_model()?.desc_by(build)
-    }
-
-    pub fn finish(self) -> Result<LogicalPlan, DatabaseError> {
-        self.project_model()?.finish()
+        self.project_model()?.order_by_expr(build)
     }
 
     pub fn count(mut self) -> Result<LogicalPlan, DatabaseError> {
-        let count = {
-            let mut scope = self.expr_scope();
+        let count = with_query_bind_step!(self.binder, QueryBindStep::Project, {
+            let scope = self.expr_scope();
             let count = scope.count_all()?;
-            scope.alias(count, "count")
-        };
-        self.select_list(vec![count.into()]).finish()
+            scope.alias(count, "count").into_orm_scalar()
+        });
+        self.select_list(vec![count?]).count()
     }
 
     pub fn exists(self) -> Result<LogicalPlan, DatabaseError> {
@@ -1670,21 +2105,9 @@ where
         build(&mut scope)?;
         scope.finish(table_name, self.plan)
     }
-}
 
-impl<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>
-    TryFrom<BindPlanFrom<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>> for LogicalPlan
-where
-    T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
-    M: Model,
-{
-    type Error = DatabaseError;
-
-    fn try_from(
-        value: BindPlanFrom<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>,
-    ) -> Result<Self, Self::Error> {
-        value.finish()
+    pub fn finish(self) -> Result<LogicalPlan, DatabaseError> {
+        self.project_model()?.finish()
     }
 }
 
@@ -1709,13 +2132,13 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: Into<ScalarExpression>,
+        E: IntoOrmScalarExpression,
     {
-        let expr = {
+        let expr = with_query_bind_step!(self.binder, QueryBindStep::Project, {
             let mut scope = self.expr_scope();
-            build(&mut scope)?.into()
-        };
-        Ok(self.set_select_list(vec![expr]))
+            build(&mut scope)?.into_orm_scalar()
+        });
+        Ok(self.set_select_list(vec![expr?]))
     }
 
     pub fn project_tuple<E>(
@@ -1725,35 +2148,40 @@ where
         ) -> Result<Vec<E>, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: Into<ScalarExpression>,
+        E: IntoOrmScalarExpression,
     {
-        let exprs = {
+        let exprs = with_query_bind_step!(self.binder, QueryBindStep::Project, {
             let mut scope = self.expr_scope();
             build(&mut scope)?
-        };
-        Ok(self.set_select_list(exprs.into_iter().map(Into::into).collect()))
+        });
+        Ok(self.set_select_list(
+            exprs?
+                .into_iter()
+                .map(IntoOrmScalarExpression::into_orm_scalar)
+                .collect(),
+        ))
     }
 
     pub fn project_scalar(
         mut self,
         build: impl BindOrmScalar<'bind, 'parent, 'arena, T, A>,
     ) -> Result<Self, DatabaseError> {
-        let expr = {
+        let expr = with_query_bind_step!(self.binder, QueryBindStep::Project, {
             let mut scope = self.expr_scope();
             build.bind_scalar(&mut scope)?
-        };
-        Ok(self.set_select_list(vec![expr]))
+        });
+        Ok(self.set_select_list(vec![expr?]))
     }
 
     pub fn project_scalars(
         mut self,
         build: impl BindOrmScalarList<'bind, 'parent, 'arena, T, A>,
     ) -> Result<Self, DatabaseError> {
-        let exprs = {
+        let exprs = with_query_bind_step!(self.binder, QueryBindStep::Project, {
             let mut scope = self.expr_scope();
             build.bind_scalar_list(&mut scope)?
-        };
-        Ok(self.set_select_list(exprs))
+        });
+        Ok(self.set_select_list(exprs?))
     }
 
     pub fn group_by<E>(
@@ -1763,13 +2191,13 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: Into<ScalarExpression>,
+        E: IntoOrmScalarExpression,
     {
-        let expr = {
+        let expr = with_query_bind_step!(self.binder, QueryBindStep::Agg, {
             let mut scope = self.expr_scope();
-            build(&mut scope)?.into()
-        };
-        self.group_by_expr(expr)
+            build(&mut scope)?.into_orm_scalar()
+        });
+        self.group_by_expr(expr?)
     }
 
     pub fn having<E>(
@@ -1779,114 +2207,70 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: Into<ScalarExpression>,
+        E: IntoOrmScalarExpression,
     {
-        let expr = {
+        let expr = with_query_bind_step!(self.binder, QueryBindStep::Having, {
             let mut scope = self.expr_scope();
-            build(&mut scope)?.into()
-        };
-        self.having_expr(expr)
-    }
-
-    pub fn asc<E>(
-        mut self,
-        build: impl for<'scope> FnOnce(
-            &'scope mut ExprBindScope<'scope, 'bind, 'parent, 'arena, T, A>,
-        ) -> Result<E, DatabaseError>,
-    ) -> Result<Self, DatabaseError>
-    where
-        E: Into<ScalarExpression>,
-    {
-        let expr = {
-            let mut scope = self.expr_scope();
-            build(&mut scope)?.into()
-        };
-        self.sort_field(SortField::new(expr, true, false))
-    }
-
-    pub fn desc<E>(
-        mut self,
-        build: impl for<'scope> FnOnce(
-            &'scope mut ExprBindScope<'scope, 'bind, 'parent, 'arena, T, A>,
-        ) -> Result<E, DatabaseError>,
-    ) -> Result<Self, DatabaseError>
-    where
-        E: Into<ScalarExpression>,
-    {
-        let expr = {
-            let mut scope = self.expr_scope();
-            build(&mut scope)?.into()
-        };
-        self.sort_field(SortField::new(expr, false, false))
+            build(&mut scope)?.into_orm_scalar()
+        });
+        self.having_expr(expr?)
     }
 
     pub fn group_by_scalar(
         mut self,
         build: impl BindOrmScalar<'bind, 'parent, 'arena, T, A>,
     ) -> Result<Self, DatabaseError> {
-        let expr = {
+        let expr = with_query_bind_step!(self.binder, QueryBindStep::Agg, {
             let mut scope = self.expr_scope();
             build.bind_scalar(&mut scope)?
-        };
-        self.group_by_expr(expr)
+        });
+        self.group_by_expr(expr?)
     }
 
     pub fn having_scalar(
         mut self,
         build: impl BindOrmScalar<'bind, 'parent, 'arena, T, A>,
     ) -> Result<Self, DatabaseError> {
-        let expr = {
+        let expr = with_query_bind_step!(self.binder, QueryBindStep::Having, {
             let mut scope = self.expr_scope();
             build.bind_scalar(&mut scope)?
-        };
-        self.having_expr(expr)
+        });
+        self.having_expr(expr?)
     }
 
-    pub fn asc_by(
+    pub fn order_by(
         mut self,
-        build: impl BindOrmScalar<'bind, 'parent, 'arena, T, A>,
+        build: impl BindOrmSort<'bind, 'parent, 'arena, T, A>,
     ) -> Result<Self, DatabaseError> {
-        let expr = {
+        let sort = with_query_bind_step!(self.binder, QueryBindStep::Sort, {
             let mut scope = self.expr_scope();
-            build.bind_scalar(&mut scope)?
-        };
-        self.sort_field(SortField::new(expr, true, false))
+            build.bind_sort(&mut scope)?
+        });
+        self.sort_field(sort?)
     }
 
-    pub fn desc_by(
+    pub fn order_by_expr(
         mut self,
-        build: impl BindOrmScalar<'bind, 'parent, 'arena, T, A>,
+        build: impl for<'scope> FnOnce(
+            &'scope mut ExprBindScope<'scope, 'bind, 'parent, 'arena, T, A>,
+        ) -> Result<SortField, DatabaseError>,
     ) -> Result<Self, DatabaseError> {
-        let expr = {
+        let sort = with_query_bind_step!(self.binder, QueryBindStep::Sort, {
             let mut scope = self.expr_scope();
-            build.bind_scalar(&mut scope)?
-        };
-        self.sort_field(SortField::new(expr, false, false))
+            build(&mut scope)?
+        });
+        self.sort_field(sort?)
     }
 
     pub fn count(mut self) -> Result<LogicalPlan, DatabaseError> {
-        let count = {
-            let mut scope = self.expr_scope();
+        let count = with_query_bind_step!(self.binder, QueryBindStep::Project, {
+            let scope = self.expr_scope();
             let count = scope.count_all()?;
-            scope.alias(count, "count")
-        };
-        self.set_select_list(vec![count.into()]).finish()
-    }
-}
-
-impl<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>
-    TryFrom<BindPlanSelectList<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>> for LogicalPlan
-where
-    T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
-    M: Model,
-{
-    type Error = DatabaseError;
-
-    fn try_from(
-        value: BindPlanSelectList<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>,
-    ) -> Result<Self, Self::Error> {
-        value.finish()
+            scope.alias(count, "count").into_orm_scalar()
+        });
+        self.set_select_list(vec![count?])
+            .aggregate_without_group()?
+            .finish()
     }
 }
 
@@ -2673,18 +3057,24 @@ fn orm_get<E: BindSource, M: Model>(
     let primary_key = M::primary_key_field();
     let key = key.to_data_value();
     extract_optional_model(bind_orm_context(executor, |ctx| {
-        ctx.from::<M>()?
+        let plan: LogicalPlan = ctx
+            .from::<M>()?
             .filter(|expr| {
                 let column = expr.qualified_column(
                     M::table_name(),
                     Field::<M, ()>::new(M::table_name(), primary_key.column),
                 )?;
-                expr.eq(column, expr.data_value(key))
+                column.eq(expr.data_value(key))
             })?
-            .finish()
+            .finish()?;
+        Ok(plan)
     })?)
 }
 
 fn orm_list<E: BindSource, M: Model>(executor: E) -> Result<OrmIter<E::Iter, M>, DatabaseError> {
-    Ok(bind_orm_context(executor, |ctx| ctx.from::<M>()?.finish())?.orm::<M>())
+    Ok(bind_orm_context(executor, |ctx| {
+        let plan: LogicalPlan = ctx.from::<M>()?.finish()?;
+        Ok(plan)
+    })?
+    .orm::<M>())
 }

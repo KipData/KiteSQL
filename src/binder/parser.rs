@@ -17,7 +17,7 @@ use super::select::{
     BindPlanHaving, BindPlanProjected, BindPlanSelectList, BindPlanStart, JoinConstraintInput,
     TableAliasInput,
 };
-use super::{is_valid_identifier, Binder, QueryBindStep, SetOperatorKind};
+use super::{is_valid_identifier, with_query_bind_step, Binder, QueryBindStep, SetOperatorKind};
 #[cfg(feature = "copy")]
 use crate::binder::copy::{ExtSource, FileFormat};
 use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
@@ -1376,12 +1376,11 @@ where
         self,
         projection: Vec<SelectItem>,
     ) -> Result<BindPlanSelectList<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
-        let select_bind_step = self.binder.context.step_now();
-        self.binder.context.step(QueryBindStep::Project);
-        let select_list = self.binder.normalize_select_item(projection, self.arena)?;
-        self.binder.context.step(select_bind_step);
+        let select_list = with_query_bind_step!(self.binder, QueryBindStep::Project, {
+            self.binder.normalize_select_item(projection, self.arena)?
+        });
 
-        Ok(self.select_list(select_list))
+        Ok(self.select_list(select_list?))
     }
 }
 
@@ -1395,8 +1394,9 @@ where
         selection: Option<Expr>,
     ) -> Result<BindPlanFiltered<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
         let predicate = if let Some(predicate) = selection {
-            self.binder.context.step(QueryBindStep::Where);
-            Some(self.binder.bind_expr(predicate, self.arena)?)
+            Some(with_query_bind_step!(self.binder, QueryBindStep::Where, {
+                self.binder.bind_expr(predicate, self.arena)?
+            })?)
         } else {
             None
         };
@@ -1416,34 +1416,42 @@ where
         having: Option<Expr>,
         orderby: Option<Vec<OrderByExpr>>,
     ) -> Result<BindPlanAggregated<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
-        let group_by = match group_by {
-            GroupByExpr::Expressions(group_by_exprs, modifiers) => {
-                if !modifiers.is_empty() {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "GROUP BY modifiers are not supported".to_string(),
-                    ));
+        let group_by = with_query_bind_step!(self.binder, QueryBindStep::Agg, {
+            match group_by {
+                GroupByExpr::Expressions(group_by_exprs, modifiers) => {
+                    if !modifiers.is_empty() {
+                        return Err(DatabaseError::UnsupportedStmt(
+                            "GROUP BY modifiers are not supported".to_string(),
+                        ));
+                    }
+                    group_by_exprs
+                        .into_iter()
+                        .map(|expr| self.binder.bind_expr(expr, self.arena))
+                        .collect::<Result<Vec<_>, DatabaseError>>()?
                 }
-                group_by_exprs
-                    .into_iter()
-                    .map(|expr| self.binder.bind_expr(expr, self.arena))
-                    .collect::<Result<Vec<_>, DatabaseError>>()?
+                GroupByExpr::All(_) => {
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "GROUP BY ALL is not supported".to_string(),
+                    ))
+                }
             }
-            GroupByExpr::All(_) => {
-                return Err(DatabaseError::UnsupportedStmt(
-                    "GROUP BY ALL is not supported".to_string(),
-                ))
-            }
-        };
+        })?;
         let having = having
-            .map(|having| self.binder.bind_expr(having, self.arena))
+            .map(|having| {
+                with_query_bind_step!(self.binder, QueryBindStep::Having, {
+                    self.binder.bind_expr(having, self.arena)?
+                })
+            })
             .transpose()?;
         self.aggregate(group_by, having, orderby, |binder, arena, orderby| {
             let OrderByExpr { expr, options, .. } = orderby;
-            Ok(SortField::new(
-                binder.bind_expr(expr, arena)?,
-                options.asc.is_none_or(|asc| asc),
-                options.nulls_first.unwrap_or(false),
-            ))
+            with_query_bind_step!(binder, QueryBindStep::Sort, {
+                SortField::new(
+                    binder.bind_expr(expr, arena)?,
+                    options.asc.is_none_or(|asc| asc),
+                    options.nulls_first.unwrap_or(false),
+                )
+            })
         })
     }
 }
@@ -2570,9 +2578,9 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
         predicate: Expr,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        self.context.step(QueryBindStep::Where);
-
-        let predicate = self.bind_expr(predicate, arena)?;
+        let predicate = with_query_bind_step!(self, QueryBindStep::Where, {
+            self.bind_expr(predicate, arena)?
+        })?;
 
         self.bind_where_expr(children, predicate, arena)
     }

@@ -363,6 +363,27 @@ where
         })
     }
 
+    pub(crate) fn aggregate_without_group(self) -> Result<Self, DatabaseError> {
+        let sorted = self
+            .filter_expr(None)?
+            .aggregate(
+                Vec::new(),
+                None,
+                None::<Vec<SortField>>,
+                |_binder, _arena, order| Ok(order),
+            )?
+            .having()?
+            .distinct(false)?
+            .order_by()?;
+        Ok(BindPlanSelectList {
+            binder: sorted.binder,
+            arena: sorted.arena,
+            plan: sorted.plan,
+            select_list: sorted.select_list,
+            _marker: std::marker::PhantomData,
+        })
+    }
+
     pub(crate) fn having_expr(mut self, expr: ScalarExpression) -> Result<Self, DatabaseError> {
         self.plan = self.binder.bind_having(self.plan, expr, self.arena)?;
         Ok(self)
@@ -401,6 +422,9 @@ where
     }
 
     pub fn finish(self) -> Result<LogicalPlan, DatabaseError> {
+        if self.select_list.iter().any(ScalarExpression::has_agg_call) {
+            return self.aggregate_without_group()?.finish();
+        }
         self.binder
             .bind_project(self.plan, self.select_list, self.arena)
     }

@@ -12,6 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+macro_rules! with_query_bind_step {
+    ($binder:expr, $step:expr, $body:block) => {{
+        let current_step = $binder.context.step_now();
+        $binder.context.step($step);
+        let result = (|| -> Result<_, DatabaseError> { Ok($body) })();
+        $binder.context.step(current_step);
+        result
+    }};
+}
+
+pub(crate) use with_query_bind_step;
+
 pub mod aggregate;
 mod alter_table;
 mod analyze;

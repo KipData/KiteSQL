@@ -67,6 +67,7 @@ fn data_value_to_js(value: &DataValue) -> Result<JsValue, JsValue> {
             set_prop(&object, "withTimezone", JsValue::from_bool(*with_tz))?;
             Ok(object.into())
         }
+        #[cfg(feature = "decimal")]
         DataValue::Decimal(value) => Ok(JsValue::from_str(&value.to_string())),
         DataValue::Tuple(values, is_upper) => {
             let object = Object::new();

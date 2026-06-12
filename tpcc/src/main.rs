@@ -797,8 +797,34 @@ impl_from_tpcc_error!(std::io::Error, Io);
 #[ignore]
 #[test]
 fn explain_tpcc() -> Result<(), DatabaseError> {
-    use kite_sql::db::DataBaseBuilder;
-    use kite_sql::types::tuple::create_table;
+    use kite_sql::db::{DataBaseBuilder, ResultIter};
+
+    fn create_table<I: ResultIter>(mut iter: I) -> Result<String, DatabaseError> {
+        let mut output = iter.schema(|schema| {
+            schema
+                .iter()
+                .map(|column| column.full_name().to_string())
+                .collect::<Vec<_>>()
+                .join("\t")
+        });
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        for tuple in iter.by_ref() {
+            let tuple = tuple?;
+            output.push_str(
+                &tuple
+                    .values
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\t"),
+            );
+            output.push('\n');
+        }
+        iter.done()?;
+        Ok(output)
+    }
 
     let database = DataBaseBuilder::path(tpcc_db_path()).build_lmdb()?;
     let mut tx = database.new_transaction()?;

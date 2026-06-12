@@ -35,14 +35,15 @@ Common field attributes are `primary_key`, `unique`, `index`, `rename`,
 ## Queries
 
 The recommended query entrypoint is `bind`. The closure receives an
-`OrmContext`, drives the binder directly, and may return a plan stage; the ORM
-normalizes it into a `LogicalPlan` at the boundary.
+`OrmContext`, drives the binder directly, and returns a `LogicalPlan`. Query
+chains end with `.finish()`; mutation chains end with `update`, `delete`, or
+another operation that already returns a plan.
 
 ```rust,ignore
 use kite_sql::db::{DataBaseBuilder, ResultIter};
-use kite_sql::orm::{BoundExpressionOps, OrmQueryResultExt};
+use kite_sql::orm::OrmQueryResultExt;
 
-let database = DataBaseBuilder::path(".").build_in_memory()?;
+let mut database = DataBaseBuilder::path(".").build_in_memory()?;
 database.create_table::<User>()?;
 database.insert(&User {
     id: 1,
@@ -52,11 +53,13 @@ database.insert(&User {
 
 let adults = database
     .bind(|ctx| {
-        ctx.from::<User>()?.filter(|e| {
-            let adult = e.column(User::age())?.gte(18)?;
-            let named_a = e.column(User::name())?.like("A%")?;
-            adult.and(named_a)
-        })
+        ctx.from::<User>()?
+            .filter(|e| {
+                let adult = e.column(User::age())?.gte(18)?;
+                let named_a = e.column(User::name())?.like("A%")?;
+                adult.and(named_a)
+            })?
+            .finish()
     })?
     .orm::<User>()
     .collect::<Result<Vec<_>, _>>()?;
@@ -77,8 +80,9 @@ let rows = database
     .bind(|ctx| {
         ctx.from::<User>()?
             .filter(|e| e.column(User::age())?.gte(18))?
-            .desc_by(User::age())?
-            .project_scalars((User::id(), User::name()))
+            .order_by(User::age().desc())?
+            .project_scalars((User::id(), User::name()))?
+            .finish()
     })?
     .project_tuple::<(i32, String)>()
     .collect::<Result<Vec<_>, _>>()?;
@@ -88,8 +92,10 @@ let rows = database
 
 Use `project_scalar(...)` for one field, `project_scalars((...))` for simple
 tuples, and `project_value/project_tuple` when the projection is an expression
-or needs aliases. Use `asc_by/desc_by` for field ordering, and `asc/desc` for
-computed sort expressions.
+or needs aliases. Use `order_by` for field ordering and already-bound sort
+fields, or `order_by_expr` for computed sort expressions. Call `.asc()`,
+`.desc()`, `.nulls_first()`, or `.nulls_last()` when the default
+ascending/nulls-last order is not enough.
 
 Joins and set operations use the same binder-backed style:
 
@@ -101,14 +107,15 @@ let joined = database
                 e.column(User::id())?.eq(e.column(Order::user_id())?)
             })?
             .project_scalars((User::name(), Order::amount()))?
-            .asc_by(Order::id())
+            .order_by(Order::id())?
+            .finish()
     })?;
 
 let ids = database.bind(|ctx| {
     ctx.union(
         true,
-        |ctx| ctx.from::<User>()?.project_scalar(User::id()),
-        |ctx| ctx.from::<Order>()?.project_scalar(Order::user_id()),
+        |ctx| ctx.from::<User>()?.project_scalar(User::id())?.finish(),
+        |ctx| ctx.from::<Order>()?.project_scalar(Order::user_id())?.finish(),
     )
 })?;
 # let _ = (joined, ids);
@@ -161,7 +168,8 @@ database
     .bind(|ctx| {
         ctx.insert_select::<UserSnapshot, _, _>(["id", "user_name"], |ctx| {
             ctx.from::<User>()?
-                .project_scalars((User::id(), User::name()))
+                .project_scalars((User::id(), User::name()))?
+                .finish()
         })
     })?
     .done()?;

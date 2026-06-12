@@ -57,7 +57,7 @@
 //! ```ignore
 //! use kite_sql::db::DataBaseBuilder;
 //! use kite_sql::errors::DatabaseError;
-//! use kite_sql::orm::{BoundExpressionOps, OrmQueryResultExt};
+//! use kite_sql::orm::OrmQueryResultExt;
 //! use kite_sql::Model;
 //!
 //! #[derive(Default, Debug, PartialEq, Model)]

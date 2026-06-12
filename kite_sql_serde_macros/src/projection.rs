@@ -99,7 +99,9 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                 T: ::kite_sql::storage::Transaction,
                 A: AsRef<[(&'static str, ::kite_sql::types::value::DataValue)]>,
             {
-                Ok(::std::vec![#(#projection_exprs),*])
+                Ok(::std::vec![
+                    #(::kite_sql::orm::IntoOrmScalarExpression::into_orm_scalar(#projection_exprs)),*
+                ])
             }
         }
 

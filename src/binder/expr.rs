@@ -214,10 +214,14 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         let (sub_query, column, correlated) =
             self.bind_subquery_plan_with_output(None, arena, build)?;
         let sub_query = ScalarSubqueryOperator::build(sub_query);
-        let (expr, sub_query) = if !self.context.is_step(&QueryBindStep::Where) {
-            self.bind_temp_table(column, sub_query, arena)?
-        } else {
-            (column, sub_query)
+        let (expr, sub_query) = match self.context.step_now() {
+            QueryBindStep::Where => (column, sub_query),
+            QueryBindStep::Project => self.bind_temp_table(column, sub_query, arena)?,
+            _ => {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "scalar subqueries can only appear in `WHERE` or SELECT list".to_string(),
+                ))
+            }
         };
         self.context.sub_query(SubQueryType::SubQuery {
             plan: sub_query,
@@ -238,6 +242,12 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             &mut PlanArena<'arena>,
         ) -> Result<LogicalPlan, DatabaseError>,
     {
+        if !self.context.is_step(&QueryBindStep::Where) {
+            return Err(DatabaseError::UnsupportedStmt(
+                "EXISTS subqueries can only appear in `WHERE`".to_string(),
+            ));
+        }
+
         let (sub_query, correlated) = self.bind_subquery_plan(arena, build)?;
         let (_, marker_ref) = self.bind_temp_table_alias(
             ScalarExpression::Constant(DataValue::Boolean(true)),

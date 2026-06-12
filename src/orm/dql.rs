@@ -2,7 +2,7 @@ use super::*;
 
 impl<S: Storage> Database<S> {
     /// Executes a binder-backed plan built inside a closure.
-    pub fn bind<F, P>(&self, build: F) -> Result<DatabaseIter<'_, S>, DatabaseError>
+    pub fn bind<F>(&self, build: F) -> Result<DatabaseIter<'_, S>, DatabaseError>
     where
         F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
             &'ctx mut OrmContext<
@@ -13,15 +13,13 @@ impl<S: Storage> Database<S> {
                 S::TransactionType<'_>,
                 &'static [(&'static str, DataValue)],
             >,
-        ) -> Result<P, DatabaseError>,
-        P: TryInto<LogicalPlan>,
-        P::Error: Into<DatabaseError>,
+        ) -> Result<LogicalPlan, DatabaseError>,
     {
         bind_orm_context(self, build)
     }
 
     /// Explains a binder-backed plan built inside a closure.
-    pub fn explain<F, P>(&self, build: F) -> Result<String, DatabaseError>
+    pub fn explain<F>(&self, build: F) -> Result<String, DatabaseError>
     where
         F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
             &'ctx mut OrmContext<
@@ -32,9 +30,7 @@ impl<S: Storage> Database<S> {
                 S::TransactionType<'_>,
                 &'static [(&'static str, DataValue)],
             >,
-        ) -> Result<P, DatabaseError>,
-        P: TryInto<LogicalPlan>,
-        P::Error: Into<DatabaseError>,
+        ) -> Result<LogicalPlan, DatabaseError>,
     {
         explain_orm_context(self, build)
     }
@@ -162,7 +158,7 @@ impl<S: Storage> Database<S> {
 
 impl<'a, S: Storage> DBTransaction<'a, S> {
     /// Executes a binder-backed plan inside the current transaction.
-    pub fn bind<F, P>(
+    pub fn bind<F>(
         &mut self,
         build: F,
     ) -> Result<TransactionIter<'_, S::TransactionType<'a>>, DatabaseError>
@@ -176,15 +172,13 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
                 S::TransactionType<'a>,
                 &'static [(&'static str, DataValue)],
             >,
-        ) -> Result<P, DatabaseError>,
-        P: TryInto<LogicalPlan>,
-        P::Error: Into<DatabaseError>,
+        ) -> Result<LogicalPlan, DatabaseError>,
     {
         bind_orm_context(self, build)
     }
 
     /// Explains a binder-backed plan inside the current transaction.
-    pub fn explain<F, P>(&mut self, build: F) -> Result<String, DatabaseError>
+    pub fn explain<F>(&mut self, build: F) -> Result<String, DatabaseError>
     where
         F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
             &'ctx mut OrmContext<
@@ -195,9 +189,7 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
                 S::TransactionType<'a>,
                 &'static [(&'static str, DataValue)],
             >,
-        ) -> Result<P, DatabaseError>,
-        P: TryInto<LogicalPlan>,
-        P::Error: Into<DatabaseError>,
+        ) -> Result<LogicalPlan, DatabaseError>,
     {
         explain_orm_context(self, build)
     }

@@ -55,7 +55,7 @@ For the full ORM guide, see [`src/orm/README.md`](src/orm/README.md).
 ```rust
 use kite_sql::db::DataBaseBuilder;
 use kite_sql::errors::DatabaseError;
-use kite_sql::orm::{BoundExpressionOps, OrmQueryResultExt};
+use kite_sql::orm::OrmQueryResultExt;
 use kite_sql::Model;
 
 #[derive(Default, Debug, PartialEq, Model)]
@@ -114,8 +114,9 @@ fn main() -> Result<(), DatabaseError> {
             ctx.from::<User>()?
                 .filter(|e| e.column(User::age())?.gte(18))?
                 .project_scalars((User::id(), User::name()))?
-                .asc_by(User::name())?
-                .limit(10)
+                .order_by(User::name())?
+                .limit(10)?
+                .finish()
         })?
         .project_tuple::<(i32, String)>();
 

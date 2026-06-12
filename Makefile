@@ -18,7 +18,7 @@ test:
 
 ## Run Python binding API tests implemented with pyo3.
 test-python:
-	PYO3_PYTHON=$(PYO3_PYTHON) $(CARGO) test --features python test_python_
+	PYO3_PYTHON=$(PYO3_PYTHON) $(CARGO) test --features python,decimal test_python_
 
 ## Perform a `cargo check` across the workspace.
 cargo-check:

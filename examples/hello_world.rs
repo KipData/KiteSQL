@@ -16,7 +16,6 @@
 mod app {
     use kite_sql::db::{DataBaseBuilder, Database};
     use kite_sql::errors::DatabaseError;
-    use kite_sql::orm::BoundExpressionOps;
     use kite_sql::storage::Storage;
     use kite_sql::Model;
     use std::env;

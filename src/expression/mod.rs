@@ -19,6 +19,7 @@ use crate::expression::function::scala::ScalarFunction;
 use crate::expression::function::table::TableFunction;
 use crate::expression::visitor::{walk_expr, Visitor};
 use crate::expression::visitor_mut::VisitorMut;
+use crate::planner::operator::sort::SortField;
 use crate::planner::{MetaArena, PlanArena};
 use crate::types::evaluator::{
     binary_create, cast_create, unary_create, BinaryEvaluatorRef, CastEvaluatorRef,
@@ -379,6 +380,22 @@ impl Visitor<'_> for HasCountStar {
 }
 
 impl ScalarExpression {
+    pub fn asc(self) -> SortField {
+        SortField::from(self).asc()
+    }
+
+    pub fn desc(self) -> SortField {
+        SortField::from(self).desc()
+    }
+
+    pub fn nulls_first(self) -> SortField {
+        SortField::from(self).nulls_first()
+    }
+
+    pub fn nulls_last(self) -> SortField {
+        SortField::from(self).nulls_last()
+    }
+
     pub fn column_expr(column: ColumnRef, position: usize) -> ScalarExpression {
         ScalarExpression::ColumnRef { column, position }
     }
