@@ -72,7 +72,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         source: CopySource,
         to: bool,
         target: CopyTarget,
-        options: &[CopyOption],
+        options: Vec<CopyOption>,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let ext_source = copy_ext_source(target, options)?;
@@ -88,7 +88,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         "'COPY FROM query'".to_string(),
                     ));
                 }
-                let input_plan = self.bind_query(&query, arena)?;
+                let input_plan = self.bind_query(*query, arena)?;
                 return Ok(LogicalPlan::new(
                     Operator::CopyToFile(CopyToFileOperator { target: ext_source }),
                     Childrens::Only(Box::new(input_plan)),
@@ -124,7 +124,10 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
     }
 }
 
-fn copy_ext_source(target: CopyTarget, options: &[CopyOption]) -> Result<ExtSource, DatabaseError> {
+fn copy_ext_source(
+    target: CopyTarget,
+    options: Vec<CopyOption>,
+) -> Result<ExtSource, DatabaseError> {
     Ok(ExtSource {
         path: match target {
             CopyTarget::File { filename } => filename.into(),
@@ -134,13 +137,13 @@ fn copy_ext_source(target: CopyTarget, options: &[CopyOption]) -> Result<ExtSour
                 )))
             }
         },
-        format: FileFormat::from_options(options),
+        format: FileFormat::from_options(options)?,
     })
 }
 
 impl FileFormat {
     /// Create from copy options.
-    pub fn from_options(options: &[CopyOption]) -> Self {
+    pub fn from_options(options: Vec<CopyOption>) -> Result<Self, DatabaseError> {
         let mut delimiter = ',';
         let mut quote = '"';
         let mut escape = None;
@@ -150,18 +153,22 @@ impl FileFormat {
                 CopyOption::Format(fmt) => {
                     debug_assert_eq!(fmt.value.to_lowercase(), "csv", "only support CSV format")
                 }
-                CopyOption::Delimiter(c) => delimiter = *c,
-                CopyOption::Header(b) => header = *b,
-                CopyOption::Quote(c) => quote = *c,
-                CopyOption::Escape(c) => escape = Some(*c),
-                o => panic!("unsupported copy option: {o:?}"),
+                CopyOption::Delimiter(c) => delimiter = c,
+                CopyOption::Header(b) => header = b,
+                CopyOption::Quote(c) => quote = c,
+                CopyOption::Escape(c) => escape = Some(c),
+                o => {
+                    return Err(DatabaseError::UnsupportedStmt(format!(
+                        "copy option: {o:?}"
+                    )))
+                }
             }
         }
-        FileFormat::Csv {
+        Ok(FileFormat::Csv {
             delimiter,
             quote,
             escape,
             header,
-        }
+        })
     }
 }

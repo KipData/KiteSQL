@@ -786,7 +786,11 @@ impl ColumnPruning {
                 let child_start = outcome.removed_positions.len();
                 let child_changed = {
                     required_columns.clear();
-                    Self::extend_operator_referenced_columns(operator, &mut required_columns, arena)?;
+                    Self::extend_operator_referenced_columns(
+                        operator,
+                        &mut required_columns,
+                        arena,
+                    )?;
 
                     Self::apply_only_child(
                         required_columns,
@@ -839,7 +843,12 @@ impl NormalizationRule for ColumnPruning {
         plan: &mut LogicalPlan,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<bool, DatabaseError> {
-        let outcome = Self::_apply(ReferencedColumns::with_arena_capacity(arena), true, plan, arena)?;
+        let outcome = Self::_apply(
+            ReferencedColumns::with_arena_capacity(arena),
+            true,
+            plan,
+            arena,
+        )?;
         Ok(outcome.changed)
     }
 }

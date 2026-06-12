@@ -26,8 +26,8 @@ use sqlparser::ast::{Expr, TableFactor, TableWithJoins};
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_delete(
         &mut self,
-        from: &TableWithJoins,
-        selection: &Option<Expr>,
+        from: TableWithJoins,
+        selection: Option<Expr>,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         if let TableFactor::Table { name, .. } = &from.relation {
@@ -56,7 +56,10 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 Childrens::Only(Box::new(plan)),
             ))
         } else {
-            unreachable!("only table")
+            Err(DatabaseError::UnsupportedStmt(format!(
+                "DELETE target must be a table: {:?}",
+                from.relation
+            )))
         }
     }
 }

@@ -23,11 +23,8 @@ use crate::types::value::DataValue;
 use sqlparser::ast::ObjectName;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
-    pub(crate) fn bind_truncate(
-        &mut self,
-        name: &ObjectName,
-    ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name: TableName = lower_case_name(name)?.into();
+    pub(crate) fn bind_truncate(&mut self, name: ObjectName) -> Result<LogicalPlan, DatabaseError> {
+        let table_name: TableName = lower_case_name(&name)?.into();
 
         Ok(LogicalPlan::new(
             Operator::Truncate(TruncateOperator { table_name }),

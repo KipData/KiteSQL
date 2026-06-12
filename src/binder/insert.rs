@@ -12,10 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::binder::{
-    attach_span_from_sqlparser_span_if_absent, attach_span_if_absent, lower_case_name, lower_ident,
-    Binder,
-};
+use crate::binder::{attach_span_if_absent, lower_case_name, lower_ident, Binder};
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::expression::simplify::ConstantCalculator;
@@ -29,22 +26,22 @@ use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::tuple::Schema;
 use crate::types::value::DataValue;
-use sqlparser::ast::{Expr, Ident, ObjectName, Query};
+use sqlparser::ast::{Expr, Ident, ObjectName, Query, Spanned};
 use std::slice;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_insert(
         &mut self,
-        name: &ObjectName,
-        idents: &[Ident],
-        expr_rows: &Vec<Vec<Expr>>,
+        name: ObjectName,
+        idents: Vec<Ident>,
+        expr_rows: Vec<Vec<Expr>>,
         is_overwrite: bool,
         is_mapping_by_name: bool,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         // FIXME: Make it better to detect the current BindStep
         self.context.allow_default = true;
-        let table_name: TableName = lower_case_name(name)?.into();
+        let table_name: TableName = lower_case_name(&name)?.into();
 
         let source = self
             .context
@@ -63,7 +60,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             _schema_ref = Some(source.schema().to_vec());
         } else {
             let mut columns = Vec::with_capacity(idents.len());
-            for ident in idents {
+            for ident in &idents {
                 match self.bind_column_ref_from_identifiers(
                     slice::from_ref(ident),
                     Some(table_name.as_ref()),
@@ -87,7 +84,8 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             }
             let mut row = Vec::with_capacity(expr_row.len());
 
-            for (i, expr) in expr_row.iter().enumerate() {
+            for (i, expr) in expr_row.into_iter().enumerate() {
+                let span = expr.span();
                 let mut expression = self.bind_expr(expr, arena)?;
 
                 ConstantCalculator::new(arena).visit(&mut expression)?;
@@ -102,7 +100,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         if value.is_null() && !column.nullable() {
                             return Err(attach_span_if_absent(
                                 DatabaseError::not_null_column(column.name().to_string()),
-                                expr,
+                                span,
                             ));
                         }
 
@@ -116,12 +114,19 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         if default_value.is_null() && !column.nullable() {
                             return Err(attach_span_if_absent(
                                 DatabaseError::not_null_column(column.name().to_string()),
-                                expr,
+                                span,
                             ));
                         }
                         row.push(default_value);
                     }
-                    _ => return Err(DatabaseError::UnsupportedStmt(expr.to_string())),
+                    _ => {
+                        return Err(attach_span_if_absent(
+                            DatabaseError::UnsupportedStmt(
+                                "INSERT values must be constants or DEFAULT".to_string(),
+                            ),
+                            span,
+                        ))
+                    }
                 }
             }
             rows.push(row);
@@ -141,13 +146,13 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
 
     pub(crate) fn bind_insert_query(
         &mut self,
-        name: &ObjectName,
-        idents: &[Ident],
-        query: &Query,
+        name: ObjectName,
+        idents: Vec<Ident>,
+        query: Query,
         is_overwrite: bool,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name: TableName = lower_case_name(name)?.into();
+        let table_name: TableName = lower_case_name(&name)?.into();
         let mut input_plan = self.bind_query(query, arena)?;
         let input_schema = input_plan.output_schema(arena);
         let input_len = input_schema.len();
@@ -186,7 +191,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 for (position, ident) in idents.iter().enumerate() {
                     let column_name = lower_ident(ident);
                     let column = source.column(&column_name, arena).ok_or_else(|| {
-                        attach_span_from_sqlparser_span_if_absent(
+                        attach_span_if_absent(
                             DatabaseError::column_not_found(column_name),
                             ident.span,
                         )

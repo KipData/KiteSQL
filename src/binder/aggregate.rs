@@ -58,11 +58,11 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
     pub fn extract_group_by_aggregate(
         &mut self,
         select_list: &mut [ScalarExpression],
-        groupby: &[Expr],
+        groupby: Vec<Expr>,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<(), DatabaseError> {
         let mut group_by_exprs = Vec::with_capacity(groupby.len());
-        for expr in groupby.iter() {
+        for expr in groupby {
             group_by_exprs.push(self.bind_expr(expr, arena)?);
         }
 
@@ -76,8 +76,8 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
 
     pub fn extract_having_orderby_aggregate(
         &mut self,
-        having: &Option<Expr>,
-        orderbys: &[OrderByExpr],
+        having: Option<Expr>,
+        orderbys: Vec<OrderByExpr>,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<(Option<ScalarExpression>, Option<Vec<SortField>>), DatabaseError> {
         // Extract having expression.

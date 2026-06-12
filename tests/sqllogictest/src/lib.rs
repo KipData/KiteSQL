@@ -15,7 +15,6 @@
 use kite_sql::binder::{command_type, CommandType};
 use kite_sql::db::{prepare_all, Database, DatabaseIter, Statement};
 use kite_sql::errors::DatabaseError;
-use kite_sql::orm::StatementSource;
 use kite_sql::storage::rocksdb::RocksStorage;
 use sqllogictest::{DBOutput, DefaultColumnType, DB};
 use std::time::Instant;
@@ -52,7 +51,7 @@ impl DB for SQLBase {
                     }
                 }
                 _ => {
-                    let iter = (&self.db).execute_statement(&statement, &[])?;
+                    let iter = (&self.db).execute(statement, &[])?;
                     if is_last {
                         let output = collect_output(iter)?;
                         println!(" |— time spent: {:?}", start.elapsed());

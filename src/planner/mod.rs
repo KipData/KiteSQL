@@ -229,8 +229,9 @@ impl LogicalPlan {
             Operator::ShowTable => Self::dummy_schema(arena, ["TABLE"]),
             Operator::ShowView => Self::dummy_schema(arena, ["VIEW"]),
             Operator::Explain => Self::dummy_schema(arena, ["PLAN"]),
-            Operator::Describe(_) => {
-                Self::dummy_schema(arena, [
+            Operator::Describe(_) => Self::dummy_schema(
+                arena,
+                [
                     "FIELD",
                     "TYPE",
                     "LEN",
@@ -238,8 +239,8 @@ impl LogicalPlan {
                     "Key",
                     "DEFAULT",
                     "COLUMN_REF",
-                ])
-            }
+                ],
+            ),
             Operator::Insert(_) => Self::dummy_schema(arena, ["INSERTED"]),
             Operator::Update(_) => Self::dummy_schema(arena, ["UPDATED"]),
             Operator::Delete(_) => Self::dummy_schema(arena, ["DELETED"]),

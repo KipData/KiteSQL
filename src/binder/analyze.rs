@@ -26,10 +26,10 @@ use sqlparser::ast::ObjectName;
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_analyze(
         &mut self,
-        name: &ObjectName,
+        name: ObjectName,
         arena: &crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name: TableName = lower_case_name(name)?.into();
+        let table_name: TableName = lower_case_name(&name)?.into();
 
         let table = self
             .context

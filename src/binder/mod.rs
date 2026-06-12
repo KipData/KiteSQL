@@ -69,48 +69,49 @@ pub enum CommandType {
     DDL,
 }
 
-fn annotate_bind_error(stmt: &Statement, err: DatabaseError) -> DatabaseError {
-    attach_span_if_absent(err, stmt)
+pub(crate) trait AttachSpanSource {
+    fn sql_error_span(self) -> Option<SqlErrorSpan>;
 }
 
-pub(crate) fn attach_span_from_sqlparser_span_if_absent(
+impl<T: Spanned + ?Sized> AttachSpanSource for &T {
+    fn sql_error_span(self) -> Option<SqlErrorSpan> {
+        self.span().sql_error_span()
+    }
+}
+
+impl AttachSpanSource for Span {
+    fn sql_error_span(self) -> Option<SqlErrorSpan> {
+        if self == Span::empty() {
+            return None;
+        }
+
+        let start = self.start.column as usize;
+        let mut end = self.end.column as usize;
+        if end <= start {
+            end = start.saturating_add(1);
+        }
+
+        Some(SqlErrorSpan {
+            start,
+            end,
+            line: self.start.line as usize,
+            highlight: None,
+        })
+    }
+}
+
+pub(crate) fn attach_span_if_absent<T: AttachSpanSource>(
     err: DatabaseError,
-    span: Span,
+    source: T,
 ) -> DatabaseError {
     if err.sql_error_span().is_some() {
         return err;
     }
 
-    match sqlparser_span_to_sql_error_span(span) {
+    match source.sql_error_span() {
         Some(span) => err.with_span(span),
         None => err,
     }
-}
-
-pub(crate) fn attach_span_if_absent<T: Spanned + ?Sized>(
-    err: DatabaseError,
-    node: &T,
-) -> DatabaseError {
-    attach_span_from_sqlparser_span_if_absent(err, node.span())
-}
-
-pub(crate) fn sqlparser_span_to_sql_error_span(span: Span) -> Option<SqlErrorSpan> {
-    if span == Span::empty() {
-        return None;
-    }
-
-    let start = span.start.column as usize;
-    let mut end = span.end.column as usize;
-    if end <= start {
-        end = start.saturating_add(1);
-    }
-
-    Some(SqlErrorSpan {
-        start,
-        end,
-        line: span.start.line as usize,
-        highlight: None,
-    })
 }
 
 pub fn command_type(stmt: &Statement) -> Result<CommandType, DatabaseError> {
@@ -638,29 +639,31 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
 
     fn bind_inner(
         &mut self,
-        stmt: &Statement,
+        stmt: Statement,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
+        let span = stmt.span();
         let plan = match stmt {
-            Statement::Query(query) => self.bind_query(query, arena)?,
+            Statement::Query(query) => self.bind_query(*query, arena)?,
             Statement::AlterTable(alter) => {
                 if alter.operations.len() != 1 {
                     return Err(DatabaseError::UnsupportedStmt(
                         "only a single ALTER TABLE operation is supported".to_string(),
                     ));
                 }
-                self.bind_alter_table(&alter.name, &alter.operations[0], arena)?
+                let operation = alter.operations.into_iter().next().unwrap();
+                self.bind_alter_table(alter.name, operation, arena)?
             }
             Statement::CreateTable(create) => self.bind_create_table(
-                &create.name,
-                &create.columns,
-                &create.constraints,
+                create.name,
+                create.columns,
+                create.constraints,
                 create.if_not_exists,
                 arena,
             )?,
             Statement::Drop {
                 object_type,
-                names,
+                mut names,
                 if_exists,
                 ..
             } => {
@@ -670,9 +673,9 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                     ));
                 }
                 match object_type {
-                    ObjectType::Table => self.bind_drop_table(&names[0], if_exists)?,
-                    ObjectType::View => self.bind_drop_view(&names[0], if_exists)?,
-                    ObjectType::Index => self.bind_drop_index(&names[0], if_exists)?,
+                    ObjectType::Table => self.bind_drop_table(names.remove(0), if_exists)?,
+                    ObjectType::View => self.bind_drop_view(names.remove(0), if_exists)?,
+                    ObjectType::Index => self.bind_drop_index(names.remove(0), if_exists)?,
                     _ => {
                         return Err(DatabaseError::UnsupportedStmt(
                             "only `Table` and `View` are allowed to be Dropped".to_string(),
@@ -681,7 +684,14 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 }
             }
             Statement::Insert(insert) => {
-                let table_name = match &insert.table {
+                let sqlparser::ast::Insert {
+                    table,
+                    columns,
+                    overwrite,
+                    source,
+                    ..
+                } = insert;
+                let table_name = match table {
                     TableObject::TableName(table_name) => table_name,
                     TableObject::TableFunction(_) => {
                         return Err(DatabaseError::UnsupportedStmt(
@@ -689,43 +699,42 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                         ))
                     }
                 };
-                let source = insert.source.as_ref().ok_or_else(|| {
+                let source = source.ok_or_else(|| {
                     DatabaseError::UnsupportedStmt(
                         "insert without source is not supported".to_string(),
                     )
                 })?;
-                match source.body.as_ref() {
-                    SetExpr::Values(values) => self.bind_insert(
-                        table_name,
-                        &insert.columns,
-                        &values.rows,
-                        insert.overwrite,
-                        false,
-                        arena,
-                    )?,
-                    _ => self.bind_insert_query(
-                        table_name,
-                        &insert.columns,
-                        source,
-                        insert.overwrite,
-                        arena,
-                    )?,
+                if matches!(source.body.as_ref(), SetExpr::Values(_)) {
+                    let query = *source;
+                    let values = match *query.body {
+                        SetExpr::Values(values) => values,
+                        body => {
+                            return Err(DatabaseError::UnsupportedStmt(format!(
+                                "insert source: {body:?}"
+                            )))
+                        }
+                    };
+                    self.bind_insert(table_name, columns, values.rows, overwrite, false, arena)?
+                } else {
+                    self.bind_insert_query(table_name, columns, *source, overwrite, arena)?
                 }
             }
             Statement::Update(update) => {
-                let table = &update.table;
-                self.bind_update(table, &update.selection, &update.assignments, arena)?
+                self.bind_update(update.table, update.selection, update.assignments, arena)?
             }
             Statement::Delete(delete) => {
-                let from = match &delete.from {
+                let from = match delete.from {
                     FromTable::WithFromKeyword(from) | FromTable::WithoutKeyword(from) => from,
                 };
-                let table = &from[0];
+                let table = from
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| DatabaseError::invalid_table("DELETE without FROM"))?;
 
-                self.bind_delete(table, &delete.selection, arena)?
+                self.bind_delete(table, delete.selection, arena)?
             }
             Statement::Analyze(analyze) => {
-                let table_name = analyze.table_name.as_ref().ok_or_else(|| {
+                let table_name = analyze.table_name.ok_or_else(|| {
                     DatabaseError::UnsupportedStmt(
                         "ANALYZE without table is not supported".to_string(),
                     )
@@ -738,7 +747,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                         "only truncate a single table is supported".to_string(),
                     ));
                 }
-                self.bind_truncate(&truncate.table_names[0].name)?
+                self.bind_truncate(truncate.table_names.into_iter().next().unwrap().name)?
             }
             Statement::ShowTables { .. } => self.bind_show_tables()?,
             Statement::ShowViews { .. } => self.bind_show_views()?,
@@ -749,7 +758,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 target,
                 options,
                 ..
-            } => self.bind_copy(source.clone(), *to, target.clone(), options, arena)?,
+            } => self.bind_copy(source, to, target, options, arena)?,
             #[cfg(not(feature = "copy"))]
             Statement::Copy { .. } => {
                 return Err(DatabaseError::UnsupportedStmt(
@@ -757,7 +766,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 ))
             }
             Statement::Explain { statement, .. } => {
-                let plan = self.bind_inner(statement, arena)?;
+                let plan = self.bind_inner(*statement, arena)?;
 
                 self.bind_explain(plan)?
             }
@@ -767,48 +776,41 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 ..
             } => self.bind_describe(table_name)?,
             Statement::CreateIndex(create) => self.bind_create_index(
-                &create.table_name,
-                create.name.as_ref(),
-                &create.columns,
+                create.table_name,
+                create.name,
+                create.columns,
                 create.if_not_exists,
                 create.unique,
                 arena,
             )?,
-            Statement::CreateView(create) => self.bind_create_view(
-                &create.or_replace,
-                &create.name,
-                &create.columns,
-                &create.query,
-                arena,
-            )?,
+            Statement::CreateView(create) => self.bind_create_view(create, arena)?,
             _ => return Err(DatabaseError::UnsupportedStmt(stmt.to_string())),
         };
-        Ok(plan)
+        Ok(plan).map_err(|err| attach_span_if_absent(err, span))
     }
 
     pub fn bind(
         &mut self,
-        stmt: &Statement,
+        stmt: Statement,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         self.bind_inner(stmt, arena)
-            .map_err(|err| annotate_bind_error(stmt, err))
     }
 
     pub fn bind_set_expr(
         &mut self,
-        set_expr: &SetExpr,
+        set_expr: SetExpr,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         match set_expr {
-            SetExpr::Select(select) => self.bind_select(select, None, arena),
-            SetExpr::Query(query) => self.bind_query(query, arena),
+            SetExpr::Select(select) => self.bind_select(*select, None, arena),
+            SetExpr::Query(query) => self.bind_query(*query, arena),
             SetExpr::SetOperation {
                 op,
                 set_quantifier,
                 left,
                 right,
-            } => self.bind_set_operation(op, set_quantifier, left, right, arena),
+            } => self.bind_set_operation(op, set_quantifier, *left, *right, arena),
             expr => Err(DatabaseError::UnsupportedStmt(format!(
                 "set expression: {expr:?}"
             ))),
@@ -917,7 +919,7 @@ pub mod test {
             );
             let stmt = crate::parser::parse_sql(sql)?;
 
-            binder.bind(&stmt[0], plan_arena)
+            binder.bind(stmt.into_iter().next().unwrap(), plan_arena)
         }
 
         pub(crate) fn column_id_by_name(&self, name: &str) -> &ColumnId {

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use sqlparser::ast::{AlterColumnOperation, AlterTableOperation, ColumnOption, ObjectName};
+use sqlparser::ast::{AlterColumnOperation, AlterTableOperation, ColumnOption, Expr, ObjectName};
 
 use std::borrow::Cow;
 
@@ -36,7 +36,7 @@ use crate::types::LogicalType;
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     fn bind_alter_default_expr(
         &mut self,
-        expr: &sqlparser::ast::Expr,
+        expr: Expr,
         ty: &LogicalType,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
@@ -54,7 +54,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
 
     fn bind_change_column_options(
         &mut self,
-        options: &[ColumnOption],
+        options: Vec<ColumnOption>,
         data_type: &LogicalType,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<(DefaultChange, NotNullChange), DatabaseError> {
@@ -82,11 +82,11 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
 
     pub(crate) fn bind_alter_table(
         &mut self,
-        name: &ObjectName,
-        operation: &AlterTableOperation,
+        name: ObjectName,
+        operation: AlterTableOperation,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name: TableName = lower_case_name(name)?.into();
+        let table_name: TableName = lower_case_name(&name)?.into();
         let table = self
             .context
             .table(table_name.clone())?
@@ -98,18 +98,19 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 column_def,
                 ..
             } => {
+                let column_span = column_def.name.span;
                 let column = self.bind_column(column_def, None, arena)?;
 
                 if !is_valid_identifier(column.name()) {
                     return Err(attach_span_if_absent(
                         DatabaseError::invalid_column("illegal column naming".to_string()),
-                        column_def,
+                        column_span,
                     ));
                 }
                 LogicalPlan::new(
                     Operator::AddColumn(AddColumnOperator {
                         table_name,
-                        if_not_exists: *if_not_exists,
+                        if_not_exists,
                         column,
                     }),
                     Childrens::None,
@@ -130,7 +131,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 LogicalPlan::new(
                     Operator::DropColumn(DropColumnOperator {
                         table_name,
-                        if_exists: *if_exists,
+                        if_exists,
                         column_name,
                     }),
                     Childrens::None,
@@ -140,8 +141,8 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 old_column_name,
                 new_column_name,
             } => {
-                let old_column_name = lower_ident(old_column_name);
-                let new_column_name = lower_ident(new_column_name).into_owned();
+                let old_column_name = lower_ident(&old_column_name);
+                let new_column_name = lower_ident(&new_column_name).into_owned();
                 let old_column = table
                     .get_column_by_name(old_column_name.as_ref())
                     .map(|column| arena.column(column))
@@ -166,7 +167,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 )
             }
             AlterTableOperation::AlterColumn { column_name, op } => {
-                let old_column_name = lower_ident(column_name);
+                let old_column_name = lower_ident(&column_name);
                 let old_column = table
                     .get_column_by_name(old_column_name.as_ref())
                     .map(|column| arena.column(column))
@@ -183,7 +184,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                             ));
                         }
                         (
-                            LogicalType::try_from(data_type.clone())?,
+                            LogicalType::try_from(data_type)?,
                             DefaultChange::NoChange,
                             NotNullChange::NoChange,
                         )
@@ -242,12 +243,12 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         "MODIFY COLUMN does not currently support column positions".to_string(),
                     ));
                 }
-                let old_column_name = lower_ident(col_name);
+                let old_column_name = lower_ident(&col_name);
                 let _ = table
                     .get_column_by_name(old_column_name.as_ref())
                     .ok_or_else(|| DatabaseError::column_not_found(old_column_name.to_string()))?;
                 let old_column_name = old_column_name.into_owned();
-                let data_type = LogicalType::try_from(data_type.clone())?;
+                let data_type = LogicalType::try_from(data_type)?;
                 let (default_change, not_null_change) =
                     self.bind_change_column_options(options, &data_type, arena)?;
 
@@ -275,8 +276,8 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         "CHANGE COLUMN does not currently support column positions".to_string(),
                     ));
                 }
-                let old_column_name = lower_ident(old_name);
-                let new_column_name = lower_ident(new_name).into_owned();
+                let old_column_name = lower_ident(&old_name);
+                let new_column_name = lower_ident(&new_name).into_owned();
                 let _ = table
                     .get_column_by_name(old_column_name.as_ref())
                     .ok_or_else(|| DatabaseError::column_not_found(old_column_name.to_string()))?;
@@ -286,7 +287,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         "illegal column naming".to_string(),
                     ));
                 }
-                let data_type = LogicalType::try_from(data_type.clone())?;
+                let data_type = LogicalType::try_from(data_type)?;
                 let (default_change, not_null_change) =
                     self.bind_change_column_options(options, &data_type, arena)?;
 

@@ -24,11 +24,11 @@ use sqlparser::ast::ObjectName;
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_drop_index(
         &mut self,
-        name: &ObjectName,
-        if_exists: &bool,
+        name: ObjectName,
+        if_exists: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
         let table_name = name.0.first().ok_or_else(|| {
-            attach_span_if_absent(DatabaseError::invalid_table(name.to_string()), name)
+            attach_span_if_absent(DatabaseError::invalid_table(name.to_string()), &name)
         })?;
         let index_name = name.0.get(1).ok_or(DatabaseError::InvalidIndex)?;
 
@@ -39,7 +39,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             Operator::DropIndex(DropIndexOperator {
                 table_name,
                 index_name: index_name.into_owned(),
-                if_exists: *if_exists,
+                if_exists,
             }),
             Childrens::None,
         ))

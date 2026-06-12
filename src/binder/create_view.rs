@@ -22,18 +22,22 @@ use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
-use sqlparser::ast::{ObjectName, Query, SelectItem, SetExpr, ViewColumnDef};
+use sqlparser::ast::{CreateView, Query, SelectItem, SetExpr};
 use ulid::Ulid;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_create_view(
         &mut self,
-        or_replace: &bool,
-        name: &ObjectName,
-        columns: &[ViewColumnDef],
-        query: &Query,
+        create: CreateView,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
+        let CreateView {
+            or_replace,
+            name,
+            columns,
+            query,
+            ..
+        } = create;
         fn projection_exprs(
             view_name: &TableName,
             mapping_schema: &[ColumnRef],
@@ -66,8 +70,9 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             exprs
         }
 
-        let view_name: TableName = lower_case_name(name)?.into();
-        let mut plan = self.bind_query(query, arena)?;
+        let output_aliases = query_output_aliases(&query);
+        let view_name: TableName = lower_case_name(&name)?.into();
+        let mut plan = self.bind_query(*query, arena)?;
 
         let mapping_schema = plan.output_schema(arena);
 
@@ -81,7 +86,9 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
 
         let exprs: Vec<ScalarExpression> = if columns.is_empty() {
             projection_exprs(&view_name, mapping_schema, arena, |i, column, arena| {
-                query_output_alias(query, i)
+                output_aliases
+                    .get(i)
+                    .and_then(Clone::clone)
                     .unwrap_or_else(|| arena.column(column).name().to_string())
             })
         } else {
@@ -102,20 +109,24 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                     plan: Box::new(plan),
                     schema,
                 },
-                or_replace: *or_replace,
+                or_replace,
             }),
             Childrens::None,
         ))
     }
 }
 
-fn query_output_alias(query: &Query, index: usize) -> Option<String> {
+fn query_output_aliases(query: &Query) -> Vec<Option<String>> {
     let SetExpr::Select(select) = query.body.as_ref() else {
-        return None;
+        return Vec::new();
     };
 
-    match select.projection.get(index)? {
-        SelectItem::ExprWithAlias { alias, .. } => Some(lower_ident(alias).into_owned()),
-        _ => None,
-    }
+    select
+        .projection
+        .iter()
+        .map(|item| match item {
+            SelectItem::ExprWithAlias { alias, .. } => Some(lower_ident(alias).into_owned()),
+            _ => None,
+        })
+        .collect()
 }

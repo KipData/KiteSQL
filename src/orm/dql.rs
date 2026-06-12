@@ -104,7 +104,7 @@ impl<S: Storage> Database<S> {
         &self,
     ) -> Result<ProjectValueIter<DatabaseIter<'_, S>, String>, DatabaseError> {
         Ok(ProjectValueIter::new(
-            self.execute(&orm_show_tables_statement(), &[])?,
+            self.execute(orm_show_tables_statement(), &[])?,
         ))
     }
 
@@ -113,7 +113,7 @@ impl<S: Storage> Database<S> {
         &self,
     ) -> Result<ProjectValueIter<DatabaseIter<'_, S>, String>, DatabaseError> {
         Ok(ProjectValueIter::new(
-            self.execute(&orm_show_views_statement(), &[])?,
+            self.execute(orm_show_views_statement(), &[])?,
         ))
     }
 
@@ -140,7 +140,7 @@ impl<S: Storage> Database<S> {
         &self,
     ) -> Result<OrmIter<DatabaseIter<'_, S>, DescribeColumn>, DatabaseError> {
         Ok(self
-            .execute(&orm_describe_statement(M::table_name()), &[])?
+            .execute(orm_describe_statement(M::table_name()), &[])?
             .orm::<DescribeColumn>())
     }
 }
@@ -169,7 +169,7 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
     ) -> Result<ProjectValueIter<TransactionIter<'_, S::TransactionType<'a>>, String>, DatabaseError>
     {
         Ok(ProjectValueIter::new(
-            self.execute(&orm_show_tables_statement(), &[])?,
+            self.execute(orm_show_tables_statement(), &[])?,
         ))
     }
 
@@ -179,7 +179,7 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
     ) -> Result<ProjectValueIter<TransactionIter<'_, S::TransactionType<'a>>, String>, DatabaseError>
     {
         Ok(ProjectValueIter::new(
-            self.execute(&orm_show_views_statement(), &[])?,
+            self.execute(orm_show_views_statement(), &[])?,
         ))
     }
 
@@ -189,7 +189,7 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
     ) -> Result<OrmIter<TransactionIter<'_, S::TransactionType<'a>>, DescribeColumn>, DatabaseError>
     {
         Ok(self
-            .execute(&orm_describe_statement(M::table_name()), &[])?
+            .execute(orm_describe_statement(M::table_name()), &[])?
             .orm::<DescribeColumn>())
     }
 }

@@ -24,21 +24,22 @@ use crate::storage::Transaction;
 use crate::types::index::IndexType;
 use crate::types::value::DataValue;
 use sqlparser::ast::{IndexColumn, ObjectName};
+use std::borrow::Cow;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_create_index(
         &mut self,
-        table_name: &ObjectName,
-        name: Option<&ObjectName>,
-        index_columns: &[IndexColumn],
+        table_name: ObjectName,
+        name: Option<ObjectName>,
+        index_columns: Vec<IndexColumn>,
         if_not_exists: bool,
         is_unique: bool,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name: TableName = lower_case_name(table_name)?.into();
+        let table_name: TableName = lower_case_name(&table_name)?.into();
         let index_name = name
             .ok_or(DatabaseError::InvalidIndex)
-            .and_then(lower_case_name)?;
+            .and_then(|name| lower_case_name(&name).map(Cow::into_owned))?;
         let ty = if is_unique {
             IndexType::Unique
         } else if index_columns.len() == 1 {
@@ -66,7 +67,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
 
         for index_column in index_columns {
             // TODO: Expression Index
-            match self.bind_expr(&index_column.column.expr, arena)? {
+            match self.bind_expr(index_column.column.expr, arena)? {
                 ScalarExpression::ColumnRef { column, .. } => columns.push(column),
                 expr => {
                     return Err(DatabaseError::UnsupportedStmt(format!(
@@ -80,7 +81,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             Operator::CreateIndex(CreateIndexOperator {
                 table_name,
                 columns,
-                index_name: index_name.into_owned(),
+                index_name,
                 if_not_exists,
                 ty,
             }),

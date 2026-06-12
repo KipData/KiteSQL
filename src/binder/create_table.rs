@@ -32,18 +32,18 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
     // TODO: TableConstraint
     pub(crate) fn bind_create_table(
         &mut self,
-        name: &ObjectName,
-        columns: &[ColumnDef],
-        constraints: &[TableConstraint],
+        name: ObjectName,
+        columns: Vec<ColumnDef>,
+        constraints: Vec<TableConstraint>,
         if_not_exists: bool,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name: TableName = lower_case_name(name)?.into();
+        let table_name: TableName = lower_case_name(&name)?.into();
 
         if !is_valid_identifier(&table_name) {
             return Err(attach_span_if_absent(
                 DatabaseError::invalid_table("illegal table naming".to_string()),
-                name,
+                &name,
             ));
         }
         {
@@ -63,19 +63,19 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             }
         }
         let mut columns: Vec<ColumnCatalog> = columns
-            .iter()
+            .into_iter()
             .enumerate()
             .map(|(i, col)| self.bind_column(col, Some(i), arena))
             .try_collect()?;
         for constraint in constraints {
             match constraint {
                 TableConstraint::PrimaryKey(primary) => {
-                    Self::bind_constraint(&mut columns, &primary.columns, |i, desc| {
+                    Self::bind_constraint(&mut columns, primary.columns, |i, desc| {
                         desc.set_primary(Some(i))
                     })?;
                 }
                 TableConstraint::Unique(unique) => {
-                    Self::bind_constraint(&mut columns, &unique.columns, |_, desc| {
+                    Self::bind_constraint(&mut columns, unique.columns, |_, desc| {
                         desc.set_unique()
                     })?;
                 }
@@ -92,7 +92,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 DatabaseError::invalid_table(
                     "the primary key field must exist and have at least one".to_string(),
                 ),
-                name,
+                &name,
             ));
         }
 
@@ -108,16 +108,16 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
 
     fn bind_constraint<F: Fn(usize, &mut ColumnDesc)>(
         table_columns: &mut [ColumnCatalog],
-        exprs: &[IndexColumn],
+        exprs: Vec<IndexColumn>,
         fn_constraint: F,
     ) -> Result<(), DatabaseError> {
-        for (i, index_column) in exprs.iter().enumerate() {
-            let Expr::Identifier(ident) = &index_column.column.expr else {
+        for (i, index_column) in exprs.into_iter().enumerate() {
+            let Expr::Identifier(ident) = index_column.column.expr else {
                 return Err(DatabaseError::UnsupportedStmt(
                     "only identifier columns are supported in `PRIMARY KEY/UNIQUE`".to_string(),
                 ));
             };
-            let column_name = lower_ident(ident);
+            let column_name = lower_ident(&ident);
 
             if let Some(column) = table_columns
                 .iter_mut()
@@ -131,21 +131,21 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
 
     pub fn bind_column(
         &mut self,
-        column_def: &ColumnDef,
+        column_def: ColumnDef,
         column_index: Option<usize>,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<ColumnCatalog, DatabaseError> {
         let column_name = lower_ident(&column_def.name).into_owned();
         let mut column_desc = ColumnDesc::new(
-            LogicalType::try_from(column_def.data_type.clone())?,
+            LogicalType::try_from(column_def.data_type)?,
             None,
             false,
             None,
         )?;
         let mut nullable = true;
 
-        for option_def in &column_def.options {
-            match &option_def.option {
+        for option_def in column_def.options {
+            match option_def.option {
                 ColumnOption::Null => nullable = true,
                 ColumnOption::NotNull => nullable = false,
                 ColumnOption::PrimaryKey(_) => {
@@ -221,7 +221,9 @@ mod tests {
         let stmt = crate::parser::parse_sql(sql).unwrap();
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
-        let plan1 = binder.bind(&stmt[0], &mut plan_arena).unwrap();
+        let plan1 = binder
+            .bind(stmt.into_iter().next().unwrap(), &mut plan_arena)
+            .unwrap();
 
         match plan1.operator {
             Operator::CreateTable(op) => {

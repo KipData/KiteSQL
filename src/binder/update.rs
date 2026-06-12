@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::binder::{
-    attach_span_from_sqlparser_span_if_absent, attach_span_if_absent, lower_case_name, Binder,
-};
+use crate::binder::{attach_span_if_absent, lower_case_name, Binder};
 use crate::catalog::ColumnRef;
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
@@ -27,7 +25,8 @@ use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
 use sqlparser::ast::{
-    Assignment, AssignmentTarget, Expr, Ident, ObjectName, TableFactor, TableWithJoins,
+    Assignment, AssignmentTarget, Expr, Ident, ObjectName, ObjectNamePart, TableFactor,
+    TableWithJoins,
 };
 use std::borrow::Cow;
 use std::slice;
@@ -59,23 +58,25 @@ impl VisitorMut<'_> for UpdateExprTargetRemapper<'_, '_> {
 }
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
-    fn single_ident_from_object_name(name: &ObjectName) -> Result<&Ident, DatabaseError> {
+    fn single_ident_from_object_name(name: ObjectName) -> Result<Ident, DatabaseError> {
         if name.0.len() != 1 {
             return Err(attach_span_if_absent(
                 DatabaseError::invalid_column(name.to_string()),
-                name,
+                &name,
             ));
         }
-        name.0[0].as_ident().ok_or_else(|| {
-            attach_span_if_absent(DatabaseError::invalid_column(name.to_string()), name)
-        })
+        match name.0.into_iter().next() {
+            Some(ObjectNamePart::Identifier(ident)) => Ok(ident),
+            Some(part) => Err(DatabaseError::invalid_column(part.to_string())),
+            None => Err(DatabaseError::invalid_column(String::new())),
+        }
     }
 
     pub(crate) fn bind_update(
         &mut self,
-        to: &TableWithJoins,
-        selection: &Option<Expr>,
-        assignments: &[Assignment],
+        to: TableWithJoins,
+        selection: Option<Expr>,
+        assignments: Vec<Assignment>,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         // FIXME: Make it better to detect the current BindStep
@@ -100,54 +101,71 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             }
             for Assignment { target, value } in assignments {
                 let expression = self.bind_expr(value, arena)?;
-                let mut idents = vec![];
-                match target {
-                    AssignmentTarget::ColumnName(name) => {
-                        idents.push(Self::single_ident_from_object_name(name)?);
-                    }
-                    AssignmentTarget::Tuple(_) => {
-                        return Err(DatabaseError::UnsupportedStmt(
-                            "UPDATE assignment tuple target is not supported".to_string(),
-                        ))
-                    }
-                }
+                let mut bind_assignment =
+                    |name: ObjectName, expression: ScalarExpression| -> Result<(), DatabaseError> {
+                        let ident = Self::single_ident_from_object_name(name)?;
 
-                for ident in idents {
-                    match self.bind_column_ref_from_identifiers(
-                        slice::from_ref(ident),
-                        Some(table_name.as_ref()),
-                        arena,
-                    )? {
-                        ScalarExpression::ColumnRef { column, .. } => {
-                            let mut expr = if matches!(expression, ScalarExpression::Empty) {
-                                let column_catalog = arena.column(column);
-                                let default_value = column_catalog
-                                    .default_value()?
-                                    .ok_or(DatabaseError::DefaultNotExist)?;
-                                ScalarExpression::Constant(default_value)
-                            } else {
-                                expression.clone()
-                            };
-                            let column_catalog = arena.column(column);
-                            expr = ScalarExpression::type_cast(
-                                expr,
-                                Cow::Borrowed(column_catalog.datatype()),
+                        let column = {
+                            match self.bind_column_ref_from_identifiers(
+                                slice::from_ref(&ident),
+                                Some(table_name.as_ref()),
                                 arena,
-                            )?;
-                            if is_joined_update {
-                                UpdateExprTargetRemapper {
-                                    target_schema: &target_schema,
-                                    arena,
+                            )? {
+                                ScalarExpression::ColumnRef { column, .. } => column,
+                                _ => {
+                                    return Err(attach_span_if_absent(
+                                        DatabaseError::invalid_column(ident.to_string()),
+                                        ident.span,
+                                    ))
                                 }
-                                .visit(&mut expr)?;
                             }
-                            value_exprs.push((column, expr));
+                        };
+
+                        let mut expr = if matches!(expression, ScalarExpression::Empty) {
+                            let column_catalog = arena.column(column);
+                            let default_value = column_catalog
+                                .default_value()?
+                                .ok_or(DatabaseError::DefaultNotExist)?;
+                            ScalarExpression::Constant(default_value)
+                        } else {
+                            expression
+                        };
+                        let column_catalog = arena.column(column);
+                        expr = ScalarExpression::type_cast(
+                            expr,
+                            Cow::Borrowed(column_catalog.datatype()),
+                            arena,
+                        )?;
+                        if is_joined_update {
+                            UpdateExprTargetRemapper {
+                                target_schema: &target_schema,
+                                arena,
+                            }
+                            .visit(&mut expr)?;
                         }
-                        _ => {
-                            return Err(attach_span_from_sqlparser_span_if_absent(
-                                DatabaseError::invalid_column(ident.to_string()),
-                                ident.span,
-                            ))
+                        value_exprs.push((column, expr));
+                        Ok(())
+                    };
+
+                match target {
+                    AssignmentTarget::ColumnName(name) => bind_assignment(name, expression)?,
+                    AssignmentTarget::Tuple(names) => {
+                        let expected = names.len();
+                        let ScalarExpression::Tuple(exprs) = expression else {
+                            return Err(DatabaseError::ValuesLenMismatch(expected, 1));
+                        };
+                        let got = exprs.len();
+                        let mut names = names.into_iter();
+                        let mut exprs = exprs.into_iter();
+
+                        loop {
+                            match (names.next(), exprs.next()) {
+                                (Some(name), Some(expression)) => {
+                                    bind_assignment(name, expression)?
+                                }
+                                (None, None) => break,
+                                _ => return Err(DatabaseError::ValuesLenMismatch(expected, got)),
+                            }
                         }
                     }
                 }
@@ -175,7 +193,10 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 Childrens::Only(Box::new(plan)),
             ))
         } else {
-            unreachable!("only table")
+            Err(DatabaseError::UnsupportedStmt(format!(
+                "UPDATE target must be a table: {:?}",
+                to.relation
+            )))
         }
     }
 }

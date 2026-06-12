@@ -680,7 +680,7 @@ mod tests {
         let stmt = crate::parser::parse_sql(
             "select c1, c3 from t1 inner join t2 on c1 = c3 where (c1 > 40 or c1 = 2) and c3 > 22",
         )?;
-        let plan = binder.bind(&stmt[0], &mut plan_arena)?;
+        let plan = binder.bind(stmt.into_iter().next().unwrap(), &mut plan_arena)?;
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
                 "Simplify Filter".to_string(),

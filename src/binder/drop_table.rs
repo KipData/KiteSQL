@@ -25,15 +25,15 @@ use sqlparser::ast::ObjectName;
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_drop_table(
         &mut self,
-        name: &ObjectName,
-        if_exists: &bool,
+        name: ObjectName,
+        if_exists: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name: TableName = lower_case_name(name)?.into();
+        let table_name: TableName = lower_case_name(&name)?.into();
 
         Ok(LogicalPlan::new(
             Operator::DropTable(DropTableOperator {
                 table_name,
-                if_exists: *if_exists,
+                if_exists,
             }),
             Childrens::None,
         ))

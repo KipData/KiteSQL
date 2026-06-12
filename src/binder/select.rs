@@ -24,7 +24,6 @@ use crate::{
     },
     types::value::DataValue,
 };
-use std::borrow::Borrow;
 use std::collections::HashSet;
 
 use super::{
@@ -52,7 +51,8 @@ use itertools::Itertools;
 use sqlparser::ast::{
     Distinct, Expr, GroupByExpr, Join, JoinConstraint, JoinOperator, LimitClause, OrderByExpr,
     OrderByKind, Query, Select, SelectInto, SelectItem, SelectItemQualifiedWildcardKind, SetExpr,
-    SetOperator, SetQuantifier, TableAlias, TableAliasColumnDef, TableFactor, TableWithJoins,
+    SetOperator, SetQuantifier, Spanned, TableAlias, TableAliasColumnDef, TableFactor,
+    TableWithJoins,
 };
 
 struct RightSidePositionGlobalizer<'a, 'p> {
@@ -378,18 +378,25 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
     pub(crate) fn bind_query(
         &mut self,
-        query: &Query,
+        query: Query,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
+        let Query {
+            with,
+            body,
+            order_by,
+            limit_clause,
+            ..
+        } = query;
         let origin_step = self.context.step_now();
 
-        if let Some(_with) = &query.with {
+        if let Some(_with) = with {
             // TODO support with clause.
         }
 
-        let order_by_exprs = if let Some(order_by) = &query.order_by {
-            match &order_by.kind {
-                OrderByKind::Expressions(exprs) => Some(exprs.as_slice()),
+        let mut order_by_exprs = if let Some(order_by) = order_by {
+            match order_by.kind {
+                OrderByKind::Expressions(exprs) => Some(exprs),
                 OrderByKind::All(_) => {
                     return Err(DatabaseError::UnsupportedStmt(
                         "ORDER BY ALL is not supported".to_string(),
@@ -399,17 +406,17 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         } else {
             None
         };
-        let is_plain_select = matches!(query.body.borrow(), SetExpr::Select(_));
-        let mut plan = match query.body.borrow() {
-            SetExpr::Select(select) => self.bind_select(select, order_by_exprs, arena),
-            SetExpr::Query(query) => self.bind_query(query, arena),
+        let is_plain_select = matches!(body.as_ref(), SetExpr::Select(_));
+        let mut plan = match *body {
+            SetExpr::Select(select) => self.bind_select(*select, order_by_exprs.take(), arena),
+            SetExpr::Query(query) => self.bind_query(*query, arena),
             SetExpr::SetOperation {
                 op,
                 set_quantifier,
                 left,
                 right,
-            } => self.bind_set_operation(op, set_quantifier, left, right, arena),
-            SetExpr::Values(values) => self.bind_temp_values(&values.rows, arena),
+            } => self.bind_set_operation(op, set_quantifier, *left, *right, arena),
+            SetExpr::Values(values) => self.bind_temp_values(values.rows, arena),
             expr => {
                 return Err(DatabaseError::UnsupportedStmt(format!(
                     "query body: {expr:?}"
@@ -423,7 +430,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             }
         }
 
-        if let Some(limit_clause) = query.limit_clause.clone() {
+        if let Some(limit_clause) = limit_clause {
             plan = self.bind_limit(plan, limit_clause, arena)?;
         }
 
@@ -434,7 +441,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
     fn bind_top_level_orderby(
         &mut self,
         mut plan: LogicalPlan,
-        orderbys: &[OrderByExpr],
+        orderbys: Vec<OrderByExpr>,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let saved_aliases = self.context.expr_aliases.clone();
@@ -448,7 +455,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         }
 
         let sort_fields = self
-            .extract_having_orderby_aggregate(&None, orderbys, arena)?
+            .extract_having_orderby_aggregate(None, orderbys, arena)?
             .1;
         self.context.expr_aliases = saved_aliases;
 
@@ -460,39 +467,48 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
     pub(crate) fn bind_select(
         &mut self,
-        select: &Select,
-        orderby: Option<&[OrderByExpr]>,
+        select: Select,
+        orderby: Option<Vec<OrderByExpr>>,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let mut plan = if select.from.is_empty() {
-            LogicalPlan::new(Operator::Dummy, Childrens::None)
-        } else {
-            let mut plan = self.bind_table_ref(&select.from[0], arena)?;
+        let Select {
+            projection,
+            from,
+            selection,
+            group_by,
+            having,
+            distinct,
+            into,
+            ..
+        } = select;
+        let mut froms = from.into_iter();
+        let mut plan = if let Some(from) = froms.next() {
+            let mut plan = self.bind_table_ref(from, arena)?;
 
-            if select.from.len() > 1 {
-                for from in select.from[1..].iter() {
-                    plan = LJoinOperator::build(
-                        plan,
-                        self.bind_table_ref(from, arena)?,
-                        JoinCondition::None,
-                        JoinType::Cross,
-                    )
-                }
+            for from in froms {
+                plan = LJoinOperator::build(
+                    plan,
+                    self.bind_table_ref(from, arena)?,
+                    JoinCondition::None,
+                    JoinType::Cross,
+                )
             }
             plan
+        } else {
+            LogicalPlan::new(Operator::Dummy, Childrens::None)
         };
         let select_bind_step = self.context.step_now();
         self.context.step(QueryBindStep::Project);
-        let mut select_list = self.normalize_select_item(&select.projection, arena)?;
+        let mut select_list = self.normalize_select_item(projection, arena)?;
         self.context.step(select_bind_step);
 
-        if let Some(predicate) = &select.selection {
+        if let Some(predicate) = selection {
             plan = self.bind_where(plan, predicate, arena)?;
         }
         self.extract_select_join(&mut select_list, arena);
         self.extract_select_aggregate(&mut select_list)?;
 
-        match &select.group_by {
+        match group_by {
             GroupByExpr::Expressions(group_by_exprs, modifiers) => {
                 if !modifiers.is_empty() {
                     return Err(DatabaseError::UnsupportedStmt(
@@ -512,12 +528,9 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
         let mut having_orderby = (None, None);
 
-        if select.having.is_some() || orderby.is_some() {
-            having_orderby = self.extract_having_orderby_aggregate(
-                &select.having,
-                orderby.unwrap_or(&[]),
-                arena,
-            )?;
+        if having.is_some() || orderby.is_some() {
+            having_orderby =
+                self.extract_having_orderby_aggregate(having, orderby.unwrap_or_default(), arena)?;
         }
 
         if !self.context.agg_calls.is_empty() || !self.context.group_by_exprs.is_empty() {
@@ -539,7 +552,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             plan = self.bind_having(plan, having, arena)?;
         }
 
-        if let Some(Distinct::Distinct) = select.distinct {
+        if let Some(Distinct::Distinct) = distinct {
             plan = self.bind_distinct(plan, select_list.clone())?;
             let distinct_outputs = select_list.clone();
             self.bind_distinct_output_exprs(&distinct_outputs, select_list.iter_mut(), arena)?;
@@ -556,7 +569,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             plan = self.bind_project(plan, select_list, arena)?;
         }
 
-        if let Some(SelectInto { name, .. }) = &select.into {
+        if let Some(SelectInto { name, .. }) = &into {
             plan = LogicalPlan::new(
                 Operator::Insert(InsertOperator {
                     table_name: lower_case_name(name)?.into(),
@@ -573,7 +586,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
     /// FIXME: temp values need to register BindContext.bind_table
     fn bind_temp_values(
         &mut self,
-        expr_rows: &[Vec<Expr>],
+        expr_rows: Vec<Vec<Expr>>,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let values_len = expr_rows[0].len();
@@ -581,14 +594,14 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         let mut inferred_types: Vec<Option<LogicalType>> = vec![None; values_len];
         let mut rows = Vec::with_capacity(expr_rows.len());
 
-        for expr_row in expr_rows.iter() {
+        for expr_row in expr_rows {
             if expr_row.len() != values_len {
                 return Err(DatabaseError::ValuesLenMismatch(expr_row.len(), values_len));
             }
 
             let mut row = Vec::with_capacity(values_len);
 
-            for (col_index, expr) in expr_row.iter().enumerate() {
+            for (col_index, expr) in expr_row.into_iter().enumerate() {
                 let mut expression = self.bind_expr(expr, arena)?;
                 ConstantCalculator::new(arena).visit(&mut expression)?;
 
@@ -688,10 +701,10 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
     pub(crate) fn bind_set_operation(
         &mut self,
-        op: &SetOperator,
-        set_quantifier: &SetQuantifier,
-        left: &SetExpr,
-        right: &SetExpr,
+        op: SetOperator,
+        set_quantifier: SetQuantifier,
+        left: SetExpr,
+        right: SetExpr,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let is_all = match set_quantifier {
@@ -814,7 +827,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
     pub(crate) fn bind_table_ref(
         &mut self,
-        from: &TableWithJoins,
+        from: TableWithJoins,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         self.context.step(QueryBindStep::From);
@@ -830,13 +843,13 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
     fn bind_single_table_ref(
         &mut self,
-        table: &TableFactor,
+        table: TableFactor,
         joint_type: Option<JoinType>,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let plan = match table {
             TableFactor::Table { name, alias, .. } => {
-                let table_name = lower_case_name(name)?;
+                let table_name = lower_case_name(&name)?;
 
                 self._bind_single_table_ref(joint_type, &table_name, alias.as_ref(), arena)?
             }
@@ -865,7 +878,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         self.args,
                         Some(&self.context),
                     );
-                    binder.bind_query(subquery, arena)?
+                    binder.bind_query(*subquery, arena)?
                 };
 
                 if let Some(TableAlias {
@@ -875,11 +888,11 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 }) = alias
                 {
                     let source_name = self.context.temp_table();
-                    let table_alias: TableName = lower_ident(name).into();
+                    let table_alias: TableName = lower_ident(&name).into();
 
                     plan = self.bind_alias(
                         plan,
-                        alias_column,
+                        &alias_column,
                         table_alias.clone(),
                         source_name.clone(),
                         arena,
@@ -933,11 +946,11 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         ..
                     }) = alias
                     {
-                        table_alias = Some(lower_ident(name).into());
+                        table_alias = Some(lower_ident(&name).into());
 
                         plan = self.bind_alias(
                             plan,
-                            alias_column,
+                            &alias_column,
                             table_alias.clone().unwrap(),
                             table_name.clone(),
                             arena,
@@ -949,7 +962,9 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         .add_bound_source(table_name, table_alias, joint_type, source);
                     plan
                 } else {
-                    unreachable!()
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "table function source must be a table function expression".to_string(),
+                    ));
                 }
             }
             table => return Err(DatabaseError::UnsupportedStmt(format!("{table:#?}"))),
@@ -1101,17 +1116,17 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
     ///  
     fn normalize_select_item(
         &mut self,
-        items: &[SelectItem],
+        items: Vec<SelectItem>,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<Vec<ScalarExpression>, DatabaseError> {
         let mut select_items = vec![];
 
-        for item in items.iter() {
+        for item in items {
             match item {
                 SelectItem::UnnamedExpr(expr) => select_items.push(self.bind_expr(expr, arena)?),
                 SelectItem::ExprWithAlias { expr, alias } => {
                     let expr = self.bind_expr(expr, arena)?;
-                    let alias_name = lower_ident(alias).into_owned();
+                    let alias_name = lower_ident(&alias).into_owned();
 
                     self.context
                         .add_alias(None, alias_name.clone(), expr.clone());
@@ -1150,7 +1165,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 SelectItem::QualifiedWildcard(table_name, _) => {
                     let table_name: TableName = match table_name {
                         SelectItemQualifiedWildcardKind::ObjectName(name) => {
-                            lower_case_name(name)?.into()
+                            lower_case_name(&name)?.into()
                         }
                         SelectItemQualifiedWildcardKind::Expr(expr) => {
                             return Err(DatabaseError::UnsupportedStmt(format!(
@@ -1243,7 +1258,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
     fn bind_join(
         &mut self,
         mut left: LogicalPlan,
-        join: &Join,
+        join: Join,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let Join {
@@ -1323,7 +1338,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
     pub(crate) fn bind_where(
         &mut self,
         mut children: LogicalPlan,
-        predicate: &Expr,
+        predicate: Expr,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         self.context.step(QueryBindStep::Where);
@@ -1829,9 +1844,10 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
     fn bind_non_negative_limit_value(
         &mut self,
-        expr: &Expr,
+        expr: Expr,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<usize, DatabaseError> {
+        let span = expr.span();
         let bound_expr = self.bind_expr(expr, arena)?;
         match bound_expr {
             ScalarExpression::Constant(dv) => match &dv {
@@ -1841,7 +1857,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             },
             _ => Err(attach_span_if_absent(
                 DatabaseError::invalid_column("invalid limit expression.".to_owned()),
-                expr,
+                span,
             )),
         }
     }
@@ -1868,21 +1884,21 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     ));
                 }
 
-                if let Some(limit_ast) = limit_expr.as_ref() {
+                if let Some(limit_ast) = limit_expr {
                     limit_value = Some(self.bind_non_negative_limit_value(limit_ast, arena)?);
                 }
 
-                if let Some(offset_ast) = offset_expr.as_ref() {
+                if let Some(offset_ast) = offset_expr {
                     offset_value =
-                        Some(self.bind_non_negative_limit_value(&offset_ast.value, arena)?);
+                        Some(self.bind_non_negative_limit_value(offset_ast.value, arena)?);
                 }
             }
             LimitClause::OffsetCommaLimit {
                 offset: offset_expr,
                 limit: limit_expr,
             } => {
-                limit_value = Some(self.bind_non_negative_limit_value(&limit_expr, arena)?);
-                offset_value = Some(self.bind_non_negative_limit_value(&offset_expr, arena)?);
+                limit_value = Some(self.bind_non_negative_limit_value(limit_expr, arena)?);
+                offset_value = Some(self.bind_non_negative_limit_value(offset_expr, arena)?);
             }
         }
 
@@ -1942,7 +1958,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
     fn bind_join_constraint(
         &mut self,
         join_type: JoinType,
-        constraint: &JoinConstraint,
+        constraint: JoinConstraint,
         left_schema: &Schema,
         right_schema: &Schema,
         arena: &mut crate::planner::PlanArena,
@@ -1994,14 +2010,14 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 let mut on_keys: Vec<(ScalarExpression, ScalarExpression)> = Vec::new();
 
                 for ident in idents {
-                    let name = lower_case_name(ident)?;
+                    let name = lower_case_name(&ident)?;
                     let (Some((left_position, left_column)), Some((right_position, right_column))) = (
                         find_column(left_schema, &name, arena),
                         find_column(right_schema, &name, arena),
                     ) else {
                         return Err(attach_span_if_absent(
                             DatabaseError::invalid_column("not found column".to_string()),
-                            ident,
+                            &ident,
                         ));
                     };
                     self.context.add_using(

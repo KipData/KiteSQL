@@ -284,8 +284,7 @@ impl Operator {
             | Operator::DropTable(_)
             | Operator::DropView(_)
             | Operator::DropIndex(_)
-            | Operator::Truncate(_)
-            => true,
+            | Operator::Truncate(_) => true,
             #[cfg(feature = "copy")]
             Operator::CopyFromFile(_) | Operator::CopyToFile(_) => true,
         }

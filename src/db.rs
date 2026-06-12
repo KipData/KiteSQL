@@ -513,7 +513,7 @@ impl<S: Storage> State<S> {
 
     fn build_plan<'a, A: AsRef<[(&'static str, DataValue)]>>(
         &'a self,
-        stmt: &Statement,
+        stmt: Statement,
         params: A,
         transaction: &<S as Storage>::TransactionType<'_>,
     ) -> Result<(LogicalPlan, PlanArena<'a>), DatabaseError> {
@@ -556,7 +556,7 @@ impl<S: Storage> State<S> {
     fn execute<'a, 'txn, A: AsRef<[(&'static str, DataValue)]>>(
         &'a self,
         transaction: &'a mut S::TransactionType<'txn>,
-        stmt: &Statement,
+        stmt: Statement,
         params: A,
     ) -> Result<
         (
@@ -599,7 +599,7 @@ impl<S: Storage> State<S> {
     fn execute_mut<'a, 'txn, A: AsRef<[(&'static str, DataValue)]>>(
         &'a mut self,
         transaction: &'a mut S::TransactionType<'txn>,
-        stmt: &Statement,
+        stmt: Statement,
         params: A,
     ) -> Result<
         (
@@ -778,7 +778,7 @@ impl<S: Storage> Database<S> {
             let (schema, plan_arena, executor) =
                 match self
                     .state
-                    .execute(unsafe { &mut *transaction }, &statement, &[])
+                    .execute(unsafe { &mut *transaction }, statement, &[])
                 {
                     Ok(result) => result,
                     Err(err) => {
@@ -812,10 +812,10 @@ impl<S: Storage> Database<S> {
     /// Executes a prepared [`Statement`] inside the current transaction.
     pub fn execute<A: AsRef<[(&'static str, DataValue)]>>(
         &self,
-        statement: &Statement,
+        statement: Statement,
         params: A,
     ) -> Result<DatabaseIter<'_, S>, DatabaseError> {
-        if mutates_catalog_or_statistics(statement)? {
+        if mutates_catalog_or_statistics(&statement)? {
             return Err(DatabaseError::UnsupportedStmt(
                 "DDL and ANALYZE require `Database::ddl` or `Database::analyze`".to_string(),
             ));
@@ -966,7 +966,7 @@ impl<S: Storage> Database<S> {
             ));
             let state = std::ptr::from_mut(&mut self.state);
             let (schema, plan_arena, executor) =
-                match unsafe { (&mut *state).execute_mut(&mut *transaction, &statement, &[]) } {
+                match unsafe { (&mut *state).execute_mut(&mut *transaction, statement, &[]) } {
                     Ok(result) => result,
                     Err(err) => {
                         unsafe { drop(Box::from_raw(transaction)) };
@@ -1208,23 +1208,23 @@ impl<'txn, S: Storage> DBTransaction<'txn, S> {
             .ok_or_else(|| DatabaseError::EmptyStatement.with_sql_context(sql))?;
 
         for statement in statements {
-            self.execute(&statement, &[])
+            self.execute(statement, &[])
                 .map_err(|err| err.with_sql_context(sql))?
                 .done()
                 .map_err(|err| err.with_sql_context(sql))?;
         }
 
-        self.execute(&last_statement, &[])
+        self.execute(last_statement, &[])
             .map_err(|err| err.with_sql_context(sql))
     }
 
     /// Executes a prepared [`Statement`] inside the current transaction.
     pub fn execute<'a, A: AsRef<[(&'static str, DataValue)]>>(
         &'a mut self,
-        statement: &Statement,
+        statement: Statement,
         params: A,
     ) -> Result<TransactionIter<'a, S::TransactionType<'txn>>, DatabaseError> {
-        if matches!(command_type(statement)?, CommandType::DDL) {
+        if matches!(command_type(&statement)?, CommandType::DDL) {
             return Err(DatabaseError::UnsupportedStmt(
                 "`DDL` is not allowed to execute within a transaction".to_string(),
             ));
@@ -1581,8 +1581,8 @@ pub(crate) mod test {
             None,
         );
         let mut source_plan_arena = PlanArena::new(kite_sql.state.table_arena());
-        let source_plan = binder.bind(&stmt, &mut source_plan_arena)?;
-        let (best_plan, _best_plan_arena) = kite_sql.state.build_plan(&stmt, [], &transaction)?;
+        let source_plan = binder.bind(stmt.clone(), &mut source_plan_arena)?;
+        let (best_plan, _best_plan_arena) = kite_sql.state.build_plan(stmt, [], &transaction)?;
 
         let join_plan = match source_plan.operator {
             Operator::Project(_) => source_plan.childrens.pop_only(),
@@ -1662,8 +1662,8 @@ pub(crate) mod test {
             None,
         );
         let mut source_plan_arena = PlanArena::new(kite_sql.state.table_arena());
-        let source_plan = binder.bind(&stmt, &mut source_plan_arena)?;
-        let (best_plan, _best_plan_arena) = kite_sql.state.build_plan(&stmt, [], &transaction)?;
+        let source_plan = binder.bind(stmt.clone(), &mut source_plan_arena)?;
+        let (best_plan, _best_plan_arena) = kite_sql.state.build_plan(stmt, [], &transaction)?;
 
         let join_plan = match source_plan.operator {
             Operator::Project(_) => source_plan.childrens.pop_only(),
@@ -1757,7 +1757,7 @@ pub(crate) mod test {
             "SELECT o.x, t.y FROM onecolumn o INNER JOIN twocolumn t ON (o.x=t.x AND t.y=53)",
         )?;
         let transaction = kite_sql.storage.transaction()?;
-        let (best_plan, _best_plan_arena) = kite_sql.state.build_plan(&stmt, [], &transaction)?;
+        let (best_plan, _best_plan_arena) = kite_sql.state.build_plan(stmt, [], &transaction)?;
         let join_plan = match best_plan.operator {
             Operator::Project(_) => best_plan.childrens.pop_only(),
             Operator::Join(_) => best_plan,
@@ -1829,7 +1829,7 @@ pub(crate) mod test {
         {
             let statement = crate::db::prepare("explain select * from t1 where b > $1")?;
 
-            let mut iter = kite_sql.execute(&statement, &[("$1", DataValue::Int32(0))])?;
+            let mut iter = kite_sql.execute(statement, &[("$1", DataValue::Int32(0))])?;
 
             let row = iter.next().unwrap()?;
             let plan = row.values[0].utf8().unwrap();
@@ -1845,7 +1845,7 @@ pub(crate) mod test {
             )?;
 
             let mut iter = kite_sql.execute(
-                &statement,
+                statement,
                 &[
                     ("$1", DataValue::Int32(0)),
                     ("$2", DataValue::Int32(0)),
@@ -1865,7 +1865,7 @@ pub(crate) mod test {
             let statement = crate::db::prepare("explain select *, $1 from (select * from t1 where b > $2) left join (select * from t1 where a > $3) on a > $4")?;
 
             let mut iter = kite_sql.execute(
-                &statement,
+                statement,
                 &[
                     ("$1", DataValue::Int32(9)),
                     ("$2", DataValue::Int32(0)),

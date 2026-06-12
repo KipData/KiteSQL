@@ -80,7 +80,7 @@ impl<S: Storage> Database<S> {
     /// assert_eq!(database.fetch::<User>().unwrap().count(), 0);
     /// ```
     pub fn truncate<M: Model>(&self) -> Result<(), DatabaseError> {
-        self.execute(&orm_truncate_statement(M::table_name()), &[])?
+        self.execute(orm_truncate_statement(M::table_name()), &[])?
             .done()
     }
 

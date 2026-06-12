@@ -1446,7 +1446,7 @@ pub trait StatementSource {
     /// Executes a prepared ORM statement with named parameters.
     fn execute_statement<A: AsRef<[(&'static str, DataValue)]>>(
         self,
-        statement: &Statement,
+        statement: Statement,
         params: A,
     ) -> Result<Self::Iter, DatabaseError>;
 }
@@ -1456,7 +1456,7 @@ impl<'a, S: Storage> StatementSource for &'a Database<S> {
 
     fn execute_statement<A: AsRef<[(&'static str, DataValue)]>>(
         self,
-        statement: &Statement,
+        statement: Statement,
         params: A,
     ) -> Result<Self::Iter, DatabaseError> {
         self.execute(statement, params)
@@ -1468,7 +1468,7 @@ impl<'a, 'tx, S: Storage> StatementSource for &'a mut DBTransaction<'tx, S> {
 
     fn execute_statement<A: AsRef<[(&'static str, DataValue)]>>(
         self,
-        statement: &Statement,
+        statement: Statement,
         params: A,
     ) -> Result<Self::Iter, DatabaseError> {
         self.execute(statement, params)
@@ -2459,7 +2459,7 @@ impl<Q: StatementSource, M: Model> UpdateBuilder<Q, M> {
         }
 
         let statement = orm_update_builder_statement(&query_source, filter, statement_assignments);
-        source.execute_statement(&statement, params)?.done()
+        source.execute_statement(statement, params)?.done()
     }
 }
 
@@ -3755,10 +3755,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
 
     fn raw(self) -> Result<Q::Iter, DatabaseError> {
         let (source, statement) = self.into_statement();
-        match statement {
-            Statement::Query(query) => execute_query(source, *query),
-            _ => source.execute_statement(&statement, &[]),
-        }
+        source.execute_statement(statement, &[])
     }
 
     fn explain(self) -> Result<String, DatabaseError> {
@@ -3795,7 +3792,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
             ..
         } = self.state;
         let statement = orm_count_statement(&query_source, joins, filter);
-        let mut iter = source.execute_statement(&statement, &[])?;
+        let mut iter = source.execute_statement(statement, &[])?;
         let count = match iter.next().transpose()? {
             Some(tuple) => match tuple.values.first() {
                 Some(DataValue::Int32(value)) => *value as usize,
@@ -3825,7 +3822,7 @@ impl<Q: StatementSource, M: Model, P: ProjectionSpec<M>> QueryBuilder<Q, M, P> {
         } = self.state;
 
         source
-            .execute_statement(&orm_delete_builder_statement(&query_source, filter), &[])?
+            .execute_statement(orm_delete_builder_statement(&query_source, filter), &[])?
             .done()
     }
 }
@@ -4291,18 +4288,18 @@ fn query_current_offset(query: &Query) -> Option<Offset> {
 }
 
 fn execute_query<Q: StatementSource>(source: Q, query: Query) -> Result<Q::Iter, DatabaseError> {
-    source.execute_statement(&Statement::Query(Box::new(query)), &[])
+    source.execute_statement(Statement::Query(Box::new(query)), &[])
 }
 
 fn execute_insert_query<Q: StatementSource>(
     source: Q,
     statement: Statement,
 ) -> Result<(), DatabaseError> {
-    source.execute_statement(&statement, &[])?.done()
+    source.execute_statement(statement, &[])?.done()
 }
 
 fn query_explain<Q: StatementSource>(source: Q, query: Query) -> Result<String, DatabaseError> {
-    let mut iter = source.execute_statement(&orm_explain_query_statement(query), &[])?;
+    let mut iter = source.execute_statement(orm_explain_query_statement(query), &[])?;
     let plan = match iter.next().transpose()? {
         Some(tuple) => extract_value_from_tuple::<String>(tuple)?,
         None => {
@@ -5649,7 +5646,7 @@ where
 
 fn orm_analyze<E: StatementSource, M: Model>(executor: E) -> Result<(), DatabaseError> {
     executor
-        .execute_statement(M::analyze_statement(), &[])?
+        .execute_statement(M::analyze_statement().clone(), &[])?
         .done()
 }
 
@@ -5666,7 +5663,9 @@ where
     E: StatementSource,
     A: AsRef<[(&'static str, DataValue)]>,
 {
-    executor.execute_statement(statement, params)?.done()
+    executor
+        .execute_statement(statement.clone(), params)?
+        .done()
 }
 
 fn orm_get<E: StatementSource, M: Model>(
@@ -5674,13 +5673,13 @@ fn orm_get<E: StatementSource, M: Model>(
     key: &M::PrimaryKey,
 ) -> Result<Option<M>, DatabaseError> {
     let params = [(M::primary_key_field().placeholder, key.to_data_value())];
-    extract_optional_model(executor.execute_statement(M::find_statement(), params)?)
+    extract_optional_model(executor.execute_statement(M::find_statement().clone(), params)?)
 }
 
 fn orm_list<E: StatementSource, M: Model>(
     executor: E,
 ) -> Result<OrmIter<E::Iter, M>, DatabaseError> {
     Ok(executor
-        .execute_statement(M::select_statement(), &[])?
+        .execute_statement(M::select_statement().clone(), &[])?
         .orm::<M>())
 }
