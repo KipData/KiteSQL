@@ -202,9 +202,9 @@ impl ColumnPruning {
             | Operator::DropTable(_)
             | Operator::DropView(_)
             | Operator::DropIndex(_)
-            | Operator::Truncate(_)
-            | Operator::CopyFromFile(_)
-            | Operator::CopyToFile(_) => {}
+            | Operator::Truncate(_) => {}
+            #[cfg(feature = "copy")]
+            Operator::CopyFromFile(_) | Operator::CopyToFile(_) => {}
         }
         Ok(())
     }
@@ -343,9 +343,9 @@ impl ColumnPruning {
             | Operator::DropTable(_)
             | Operator::DropView(_)
             | Operator::DropIndex(_)
-            | Operator::Truncate(_)
-            | Operator::CopyFromFile(_)
-            | Operator::CopyToFile(_) => {}
+            | Operator::Truncate(_) => {}
+            #[cfg(feature = "copy")]
+            Operator::CopyFromFile(_) | Operator::CopyToFile(_) => {}
         }
 
         Ok(())
@@ -816,12 +816,14 @@ impl ColumnPruning {
             | Operator::Truncate(_)
             | Operator::ShowTable
             | Operator::ShowView
-            | Operator::CopyFromFile(_)
-            | Operator::CopyToFile(_)
             | Operator::AddColumn(_)
             | Operator::ChangeColumn(_)
             | Operator::DropColumn(_)
             | Operator::Describe(_) => {
+                outcome.removed_positions.truncate(output_start);
+            }
+            #[cfg(feature = "copy")]
+            Operator::CopyFromFile(_) | Operator::CopyToFile(_) => {
                 outcome.removed_positions.truncate(output_start);
             }
         }

@@ -14,7 +14,9 @@
 
 use crate::errors::DatabaseError;
 use crate::types::evaluator::DataValue;
+#[cfg(feature = "decimal")]
 use crate::types::LogicalType;
+#[cfg(feature = "decimal")]
 use rust_decimal::prelude::FromPrimitive;
 use std::hint;
 pub fn float32_plus_unary_eval(value: &DataValue) -> DataValue {
@@ -117,6 +119,7 @@ mod test {
     use crate::types::value::Utf8Type;
     use crate::types::CharLengthUnits;
     use ordered_float::OrderedFloat;
+    #[cfg(feature = "decimal")]
     use rust_decimal::Decimal;
 
     #[test]
@@ -179,6 +182,7 @@ mod test {
                 unit: CharLengthUnits::Characters,
             }
         );
+        #[cfg(feature = "decimal")]
         assert_eq!(
             float32_to_decimal_cast_eval(None, Some(1), &value).unwrap(),
             DataValue::Decimal(Decimal::new(15, 1))

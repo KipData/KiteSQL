@@ -16,6 +16,7 @@ use crate::errors::DatabaseError;
 use crate::types::evaluator::boolean::*;
 use crate::types::evaluator::date::*;
 use crate::types::evaluator::datetime::*;
+#[cfg(feature = "decimal")]
 use crate::types::evaluator::decimal::*;
 use crate::types::evaluator::float32::*;
 use crate::types::evaluator::float64::*;
@@ -66,6 +67,7 @@ const CAST_DATE: u16 = 14;
 const CAST_DATETIME: u16 = 15;
 const CAST_TIME: u16 = 16;
 const CAST_TIMESTAMP: u16 = 17;
+#[cfg(feature = "decimal")]
 const CAST_DECIMAL: u16 = 18;
 const CAST_TUPLE: u16 = 19;
 
@@ -91,7 +93,10 @@ fn cast_type_code(ty: &LogicalType) -> u16 {
         LogicalType::DateTime => CAST_DATETIME,
         LogicalType::Time(_) => CAST_TIME,
         LogicalType::TimeStamp(_, _) => CAST_TIMESTAMP,
+        #[cfg(feature = "decimal")]
         LogicalType::Decimal(_, _) => CAST_DECIMAL,
+        #[cfg(not(feature = "decimal"))]
+        LogicalType::Decimal(_, _) => unreachable!("DECIMAL requires the `decimal` feature"),
         LogicalType::Tuple(_) => CAST_TUPLE,
     }
 }
@@ -162,6 +167,7 @@ macro_rules! float_to_int_cast {
     }};
 }
 
+#[cfg(feature = "decimal")]
 #[macro_export]
 macro_rules! decimal_to_int_cast {
     ($decimal:expr, $int_type:ty) => {{
@@ -314,6 +320,7 @@ macro_rules! define_integer_cast_evaluators {
                     $crate::types::evaluator::cast::to_varchar(value.to_string(), this.len, this.unit)
                 }
             );
+            #[cfg(feature = "decimal")]
             $crate::define_cast_evaluator!(
                 [<$prefix:snake _to_decimal_cast_eval>] {
                     scale: Option<u8>
@@ -380,6 +387,7 @@ macro_rules! define_float_cast_evaluators {
                     $crate::types::evaluator::cast::to_varchar(value.to_string(), this.len, this.unit)
                 }
             );
+            #[cfg(feature = "decimal")]
             $crate::define_cast_evaluator!(
                 [<$prefix:snake _to_decimal_cast_eval>] {
                     precision: Option<u8>,
@@ -424,6 +432,7 @@ macro_rules! cast_string_ref {
     }};
 }
 
+#[cfg(feature = "decimal")]
 macro_rules! cast_decimal_ref {
     ($from:expr, $to:expr, $precision:expr, $scale:expr) => {{
         Ok(CastEvaluatorRef::new(
@@ -487,6 +496,7 @@ macro_rules! build_integer_cast {
                     *len,
                     *unit
                 ),
+                #[cfg(feature = "decimal")]
                 LogicalType::Decimal(precision, scale) => cast_decimal_ref!(
                     $from,
                     $to,
@@ -592,6 +602,7 @@ pub fn cast_create(
         (LogicalType::Float, LogicalType::Varchar(len, unit)) => {
             cast_string_ref!(from, to, *len, *unit)
         }
+        #[cfg(feature = "decimal")]
         (LogicalType::Float, LogicalType::Decimal(precision, scale)) => {
             cast_decimal_ref!(from, to, *precision, *scale)
         }
@@ -628,6 +639,7 @@ pub fn cast_create(
         (LogicalType::Double, LogicalType::Varchar(len, unit)) => {
             cast_string_ref!(from, to, *len, *unit)
         }
+        #[cfg(feature = "decimal")]
         (LogicalType::Double, LogicalType::Decimal(precision, scale)) => {
             cast_decimal_ref!(from, to, *precision, *scale)
         }
@@ -685,6 +697,7 @@ pub fn cast_create(
         ) => {
             cast_timestamp_ref!(from, to, *precision, *zone)
         }
+        #[cfg(feature = "decimal")]
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Decimal(_, _)) => {
             cast_ref!(from, to)
         }
@@ -743,45 +756,23 @@ pub fn cast_create(
         (LogicalType::TimeStamp(_, _), LogicalType::TimeStamp(precision, zone)) => {
             cast_timestamp_ref!(from, to, *precision, *zone)
         }
-        (LogicalType::Decimal(_, _), LogicalType::Float) => {
-            cast_ref!(from, to)
-        }
-        (LogicalType::Decimal(_, _), LogicalType::Double) => {
-            cast_ref!(from, to)
-        }
-        (LogicalType::Decimal(_, _), LogicalType::Decimal(_, _)) => {
-            cast_ref!(from, to)
-        }
-        (LogicalType::Decimal(_, _), LogicalType::Char(len, unit)) => {
-            cast_string_ref!(from, to, Some(*len), *unit)
-        }
-        (LogicalType::Decimal(_, _), LogicalType::Varchar(len, unit)) => {
-            cast_string_ref!(from, to, *len, *unit)
-        }
-        (LogicalType::Decimal(_, _), LogicalType::Tinyint) => {
-            cast_ref!(from, to)
-        }
-        (LogicalType::Decimal(_, _), LogicalType::Smallint) => {
-            cast_ref!(from, to)
-        }
-        (LogicalType::Decimal(_, _), LogicalType::Integer) => {
-            cast_ref!(from, to)
-        }
-        (LogicalType::Decimal(_, _), LogicalType::Bigint) => {
-            cast_ref!(from, to)
-        }
-        (LogicalType::Decimal(_, _), LogicalType::UTinyint) => {
-            cast_ref!(from, to)
-        }
-        (LogicalType::Decimal(_, _), LogicalType::USmallint) => {
-            cast_ref!(from, to)
-        }
-        (LogicalType::Decimal(_, _), LogicalType::UInteger) => {
-            cast_ref!(from, to)
-        }
-        (LogicalType::Decimal(_, _), LogicalType::UBigint) => {
-            cast_ref!(from, to)
-        }
+        #[cfg(feature = "decimal")]
+        (LogicalType::Decimal(_, _), to) => match to {
+            LogicalType::Float
+            | LogicalType::Double
+            | LogicalType::Decimal(_, _)
+            | LogicalType::Tinyint
+            | LogicalType::Smallint
+            | LogicalType::Integer
+            | LogicalType::Bigint
+            | LogicalType::UTinyint
+            | LogicalType::USmallint
+            | LogicalType::UInteger
+            | LogicalType::UBigint => cast_ref!(from, to),
+            LogicalType::Char(len, unit) => cast_string_ref!(from, to, Some(*len), *unit),
+            LogicalType::Varchar(len, unit) => cast_string_ref!(from, to, *len, *unit),
+            _ => Err(cast_fail(from.clone(), to.clone())),
+        },
         (LogicalType::Tuple(from_types), LogicalType::Tuple(to_types)) => {
             let evaluators = from_types
                 .iter()
@@ -818,6 +809,7 @@ fn string_param(params: &CastEvaluatorParams) -> (Option<u32>, CharLengthUnits) 
     (*len, *unit)
 }
 
+#[cfg(feature = "decimal")]
 fn decimal_param(params: &CastEvaluatorParams) -> (Option<u8>, Option<u8>) {
     let CastEvaluatorParams::Decimal { precision, scale } = params else {
         unreachable!("cast evaluator must have decimal parameters")
@@ -865,6 +857,7 @@ macro_rules! eval_integer_cast_by_pos {
                     let (len, unit) = string_param(params);
                     [<$prefix:snake _to_varchar_cast_eval>](len, unit, $value)
                 }
+                #[cfg(feature = "decimal")]
                 CAST_DECIMAL => {
                     let (_, scale) = decimal_param(params);
                     [<$prefix:snake _to_decimal_cast_eval>](scale, $value)
@@ -945,6 +938,7 @@ impl CastEvaluatorRef {
                 let (len, unit) = string_param(params);
                 run!(float32_to_varchar_cast_eval { len, unit })
             }
+            #[cfg(feature = "decimal")]
             (CAST_FLOAT, CAST_DECIMAL) => {
                 let (precision, scale) = decimal_param(params);
                 run!(float32_to_decimal_cast_eval { precision, scale })
@@ -967,6 +961,7 @@ impl CastEvaluatorRef {
                 let (len, unit) = string_param(params);
                 run!(float64_to_varchar_cast_eval { len, unit })
             }
+            #[cfg(feature = "decimal")]
             (CAST_DOUBLE, CAST_DECIMAL) => {
                 let (precision, scale) = decimal_param(params);
                 run!(float64_to_decimal_cast_eval { precision, scale })
@@ -1002,6 +997,7 @@ impl CastEvaluatorRef {
                 let (precision, zone) = timestamp_param(params);
                 run!(utf8_to_timestamp_cast_eval { precision, zone })
             }
+            #[cfg(feature = "decimal")]
             (CAST_CHAR | CAST_VARCHAR, CAST_DECIMAL) => run!(utf8_to_decimal_cast_eval),
             (CAST_DATE, CAST_CHAR) => {
                 let (len, unit) = string_param(params);
@@ -1060,26 +1056,30 @@ impl CastEvaluatorRef {
                 let (precision, zone) = timestamp_param(params);
                 run!(time64_to_timestamp_cast_eval { precision, zone })
             }
-            (CAST_DECIMAL, CAST_FLOAT) => run!(decimal_to_float_cast_eval),
-            (CAST_DECIMAL, CAST_DOUBLE) => run!(decimal_to_double_cast_eval),
-            (CAST_DECIMAL, CAST_DECIMAL) => run!(decimal_to_decimal_cast_eval),
-            (CAST_DECIMAL, CAST_CHAR) => {
-                let (len, unit) = string_param(params);
-                let len = len.expect("char cast must have fixed length");
-                run!(decimal_to_char_cast_eval { len, unit })
-            }
-            (CAST_DECIMAL, CAST_VARCHAR) => {
-                let (len, unit) = string_param(params);
-                run!(decimal_to_varchar_cast_eval { len, unit })
-            }
-            (CAST_DECIMAL, CAST_TINYINT) => run!(decimal_to_tinyint_cast_eval),
-            (CAST_DECIMAL, CAST_SMALLINT) => run!(decimal_to_smallint_cast_eval),
-            (CAST_DECIMAL, CAST_INTEGER) => run!(decimal_to_integer_cast_eval),
-            (CAST_DECIMAL, CAST_BIGINT) => run!(decimal_to_bigint_cast_eval),
-            (CAST_DECIMAL, CAST_UTINYINT) => run!(decimal_to_utinyint_cast_eval),
-            (CAST_DECIMAL, CAST_USMALLINT) => run!(decimal_to_usmallint_cast_eval),
-            (CAST_DECIMAL, CAST_UINTEGER) => run!(decimal_to_uinteger_cast_eval),
-            (CAST_DECIMAL, CAST_UBIGINT) => run!(decimal_to_ubigint_cast_eval),
+            #[cfg(feature = "decimal")]
+            (CAST_DECIMAL, to_code) => match to_code {
+                CAST_FLOAT => run!(decimal_to_float_cast_eval),
+                CAST_DOUBLE => run!(decimal_to_double_cast_eval),
+                CAST_DECIMAL => run!(decimal_to_decimal_cast_eval),
+                CAST_CHAR => {
+                    let (len, unit) = string_param(params);
+                    let len = len.expect("char cast must have fixed length");
+                    run!(decimal_to_char_cast_eval { len, unit })
+                }
+                CAST_VARCHAR => {
+                    let (len, unit) = string_param(params);
+                    run!(decimal_to_varchar_cast_eval { len, unit })
+                }
+                CAST_TINYINT => run!(decimal_to_tinyint_cast_eval),
+                CAST_SMALLINT => run!(decimal_to_smallint_cast_eval),
+                CAST_INTEGER => run!(decimal_to_integer_cast_eval),
+                CAST_BIGINT => run!(decimal_to_bigint_cast_eval),
+                CAST_UTINYINT => run!(decimal_to_utinyint_cast_eval),
+                CAST_USMALLINT => run!(decimal_to_usmallint_cast_eval),
+                CAST_UINTEGER => run!(decimal_to_uinteger_cast_eval),
+                CAST_UBIGINT => run!(decimal_to_ubigint_cast_eval),
+                _ => unreachable!("invalid decimal cast evaluator position"),
+            },
             (CAST_TUPLE, CAST_TUPLE) => {
                 let CastEvaluatorParams::Tuple { evaluators } = params else {
                     unreachable!("tuple cast must have tuple parameters")

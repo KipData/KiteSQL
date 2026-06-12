@@ -12,6 +12,7 @@ use crate::types::value::DataValue;
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+#[cfg(feature = "decimal")]
 use rust_decimal::Decimal;
 use sqlparser::ast::helpers::attached_token::AttachedToken;
 use sqlparser::ast::TruncateTableTarget;
@@ -4506,6 +4507,7 @@ fn data_value_to_ast_expr(value: &DataValue) -> Expr {
             ),
             value.to_string(),
         ),
+        #[cfg(feature = "decimal")]
         DataValue::Decimal(value) => number_expr(value),
         DataValue::Tuple(values, ..) => {
             Expr::Tuple(values.iter().map(data_value_to_ast_expr).collect())
@@ -5282,9 +5284,12 @@ impl_from_data_value_by_method!(f64, double);
 impl_from_data_value_by_method!(NaiveDate, date);
 impl_from_data_value_by_method!(NaiveDateTime, datetime);
 impl_from_data_value_by_method!(NaiveTime, time);
+#[cfg(feature = "decimal")]
 impl_from_data_value_by_method!(Decimal, decimal);
 
-impl_to_data_value_by_clone!(bool, i8, i16, i32, i64, u8, u16, u32, u64, f32, f64, Decimal, String);
+impl_to_data_value_by_clone!(bool, i8, i16, i32, i64, u8, u16, u32, u64, f32, f64, String);
+#[cfg(feature = "decimal")]
+impl_to_data_value_by_clone!(Decimal);
 
 macro_rules! impl_model_column_type {
     ($sql:expr; $($ty:ty),+ $(,)?) => {
@@ -5312,11 +5317,13 @@ impl_model_column_type!("double"; f64);
 impl_model_column_type!("date"; NaiveDate);
 impl_model_column_type!("datetime"; NaiveDateTime);
 impl_model_column_type!("time"; NaiveTime);
+#[cfg(feature = "decimal")]
 impl_model_column_type!("decimal"; Decimal);
 impl_model_column_type!("varchar"; String, Arc<str>);
 
 impl StringType for String {}
 impl StringType for Arc<str> {}
+#[cfg(feature = "decimal")]
 impl DecimalType for Decimal {}
 
 impl FromDataValue for String {

@@ -15,7 +15,9 @@
 pub mod aggregate;
 pub mod alter_table;
 pub mod analyze;
+#[cfg(feature = "copy")]
 pub mod copy_from_file;
+#[cfg(feature = "copy")]
 pub mod copy_to_file;
 pub mod create_index;
 pub mod create_table;
@@ -53,7 +55,9 @@ use self::{
 use crate::catalog::ColumnRef;
 use crate::planner::operator::alter_table::drop_column::DropColumnOperator;
 use crate::planner::operator::analyze::AnalyzeOperator;
+#[cfg(feature = "copy")]
 use crate::planner::operator::copy_from_file::CopyFromFileOperator;
+#[cfg(feature = "copy")]
 use crate::planner::operator::copy_to_file::CopyToFileOperator;
 use crate::planner::operator::create_index::CreateIndexOperator;
 use crate::planner::operator::create_table::CreateTableOperator;
@@ -119,7 +123,9 @@ pub enum Operator {
     DropIndex(DropIndexOperator),
     Truncate(TruncateOperator),
     // Copy
+    #[cfg(feature = "copy")]
     CopyFromFile(CopyFromFileOperator),
+    #[cfg(feature = "copy")]
     CopyToFile(CopyToFileOperator),
 }
 
@@ -182,7 +188,9 @@ pub enum PlanImpl {
     DropTable,
     Truncate,
     Show,
+    #[cfg(feature = "copy")]
     CopyFromFile,
+    #[cfg(feature = "copy")]
     CopyToFile,
     Analyze,
 }
@@ -277,8 +285,9 @@ impl Operator {
             | Operator::DropView(_)
             | Operator::DropIndex(_)
             | Operator::Truncate(_)
-            | Operator::CopyFromFile(_)
-            | Operator::CopyToFile(_) => true,
+            => true,
+            #[cfg(feature = "copy")]
+            Operator::CopyFromFile(_) | Operator::CopyToFile(_) => true,
         }
     }
 
@@ -344,7 +353,9 @@ impl fmt::Display for Operator {
             Operator::DropView(op) => write!(f, "{op}"),
             Operator::DropIndex(op) => write!(f, "{op}"),
             Operator::Truncate(op) => write!(f, "{op}"),
+            #[cfg(feature = "copy")]
             Operator::CopyFromFile(op) => write!(f, "{op}"),
+            #[cfg(feature = "copy")]
             Operator::CopyToFile(op) => write!(f, "{op}"),
             Operator::Union(op) => write!(f, "{op}"),
             Operator::SetMembership(op) => write!(f, "{op}"),
@@ -412,7 +423,9 @@ impl fmt::Display for PlanImpl {
             PlanImpl::DropTable => write!(f, "DropTable"),
             PlanImpl::Truncate => write!(f, "Truncate"),
             PlanImpl::Show => write!(f, "Show"),
+            #[cfg(feature = "copy")]
             PlanImpl::CopyFromFile => write!(f, "CopyFromFile"),
+            #[cfg(feature = "copy")]
             PlanImpl::CopyToFile => write!(f, "CopyToFile"),
             PlanImpl::Analyze => write!(f, "Analyze"),
         }

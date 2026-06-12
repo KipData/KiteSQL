@@ -35,7 +35,9 @@ use crate::execution::ddl::drop_table::DropTable;
 use crate::execution::ddl::drop_view::DropView;
 use crate::execution::ddl::truncate::Truncate;
 use crate::execution::dml::analyze::Analyze;
+#[cfg(feature = "copy")]
 use crate::execution::dml::copy_from_file::CopyFromFile;
+#[cfg(feature = "copy")]
 use crate::execution::dml::copy_to_file::CopyToFile;
 use crate::execution::dml::delete::Delete;
 use crate::execution::dml::insert::Insert;
@@ -236,7 +238,9 @@ pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
     AddColumn(AddColumn),
     Analyze(Analyze),
     ChangeColumn(ChangeColumn),
+    #[cfg(feature = "copy")]
     CopyFromFile(CopyFromFile),
+    #[cfg(feature = "copy")]
     CopyToFile(CopyToFile),
     CreateIndex(CreateIndex),
     CreateTable(CreateTable),
@@ -310,9 +314,11 @@ impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
             ExecNode::ChangeColumn(exec) => {
                 <ChangeColumn as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
+            #[cfg(feature = "copy")]
             ExecNode::CopyFromFile(exec) => {
                 <CopyFromFile as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
+            #[cfg(feature = "copy")]
             ExecNode::CopyToFile(exec) => {
                 <CopyToFile as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
@@ -673,6 +679,7 @@ pub(crate) trait WriteExecutor<'a, T: Transaction + 'a>: Sized {
     ) -> ExecId;
 }
 
+#[cfg(feature = "copy")]
 macro_rules! impl_read_executor_node_via_from {
     ($ty:ty, $input:ty) => {
         impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for $ty
@@ -743,6 +750,7 @@ macro_rules! impl_write_executor_node_via_from {
     };
 }
 
+#[cfg(feature = "copy")]
 impl_read_executor_node_via_from!(
     CopyToFile,
     (
@@ -766,6 +774,7 @@ impl_write_executor_node_via_from!(
     ChangeColumn,
     crate::planner::operator::alter_table::change_column::ChangeColumnOperator
 );
+#[cfg(feature = "copy")]
 impl_write_executor_node_via_from!(
     CopyFromFile,
     crate::planner::operator::copy_from_file::CopyFromFileOperator
@@ -1275,6 +1284,7 @@ fn build_write_inner<'a, T: Transaction + 'a>(
             cache,
             transaction_ref,
         ),
+        #[cfg(feature = "copy")]
         Operator::CopyFromFile(op) => <CopyFromFile as ExecutorNode<'a, T>>::into_executor(
             op,
             arena,
@@ -1282,6 +1292,7 @@ fn build_write_inner<'a, T: Transaction + 'a>(
             cache,
             transaction_ref,
         ),
+        #[cfg(feature = "copy")]
         Operator::CopyToFile(op) => {
             let input = childrens.pop_only();
 

@@ -130,12 +130,12 @@ impl NormalizationRuleRootTag {
             | Operator::DropView(_)
             | Operator::DropIndex(_)
             | Operator::Truncate(_)
-            | Operator::CopyFromFile(_)
-            | Operator::CopyToFile(_)
             | Operator::FunctionScan(_)
             | Operator::Update(_)
             | Operator::Union(_)
             | Operator::SetMembership(_) => None,
+            #[cfg(feature = "copy")]
+            Operator::CopyFromFile(_) | Operator::CopyToFile(_) => None,
         }
     }
 }

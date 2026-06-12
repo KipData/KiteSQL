@@ -558,12 +558,14 @@ impl ImplementationRuleIndex {
             Operator::Analyze(_) if self.contains(ImplementationRuleImpl::Analyze) => {
                 Some(PhysicalOption::new(PlanImpl::Analyze, SortOption::None))
             }
+            #[cfg(feature = "copy")]
             Operator::CopyFromFile(_) if self.contains(ImplementationRuleImpl::CopyFromFile) => {
                 Some(PhysicalOption::new(
                     PlanImpl::CopyFromFile,
                     SortOption::None,
                 ))
             }
+            #[cfg(feature = "copy")]
             Operator::CopyToFile(_) if self.contains(ImplementationRuleImpl::CopyToFile) => {
                 Some(PhysicalOption::new(PlanImpl::CopyToFile, SortOption::None))
             }

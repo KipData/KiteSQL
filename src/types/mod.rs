@@ -20,6 +20,7 @@ pub mod tuple_builder;
 pub mod value;
 
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+#[cfg(feature = "decimal")]
 use rust_decimal::Decimal;
 use std::any::TypeId;
 use std::borrow::Cow;
@@ -27,7 +28,9 @@ use std::cmp;
 
 use crate::errors::DatabaseError;
 use kite_sql_serde_macros::ReferenceSerialization;
-use sqlparser::ast::{ExactNumberInfo, TimezoneInfo};
+#[cfg(feature = "decimal")]
+use sqlparser::ast::ExactNumberInfo;
+use sqlparser::ast::TimezoneInfo;
 use ulid::Ulid;
 
 pub type ColumnId = Ulid;
@@ -115,7 +118,16 @@ impl LogicalType {
             Some(LogicalType::DateTime)
         } else if type_id == TypeId::of::<NaiveTime>() {
             Some(LogicalType::Time(Some(0)))
-        } else if type_id == TypeId::of::<Decimal>() {
+        } else if {
+            #[cfg(feature = "decimal")]
+            {
+                type_id == TypeId::of::<Decimal>()
+            }
+            #[cfg(not(feature = "decimal"))]
+            {
+                false
+            }
+        } {
             Some(LogicalType::Decimal(None, None))
         } else if type_id == TypeId::of::<String>() {
             Some(LogicalType::Varchar(None, CharLengthUnits::Characters))
@@ -550,13 +562,25 @@ impl TryFrom<sqlparser::ast::DataType> for LogicalType {
             | sqlparser::ast::DataType::DecimalUnsigned(info)
             | sqlparser::ast::DataType::Dec(info)
             | sqlparser::ast::DataType::DecUnsigned(info)
-            | sqlparser::ast::DataType::Numeric(info) => match info {
-                ExactNumberInfo::None => Ok(Self::Decimal(None, None)),
-                ExactNumberInfo::Precision(p) => Ok(Self::Decimal(Some(p as u8), None)),
-                ExactNumberInfo::PrecisionAndScale(p, s) => {
-                    Ok(Self::Decimal(Some(p as u8), Some(s as u8)))
+            | sqlparser::ast::DataType::Numeric(info) => {
+                #[cfg(feature = "decimal")]
+                {
+                    match info {
+                        ExactNumberInfo::None => Ok(Self::Decimal(None, None)),
+                        ExactNumberInfo::Precision(p) => Ok(Self::Decimal(Some(p as u8), None)),
+                        ExactNumberInfo::PrecisionAndScale(p, s) => {
+                            Ok(Self::Decimal(Some(p as u8), Some(s as u8)))
+                        }
+                    }
                 }
-            },
+                #[cfg(not(feature = "decimal"))]
+                {
+                    let _ = info;
+                    Err(DatabaseError::UnsupportedStmt(
+                        "DECIMAL requires the `decimal` feature".to_string(),
+                    ))
+                }
+            }
             other => Err(DatabaseError::UnsupportedStmt(format!(
                 "unsupported data type: {other}"
             ))),

@@ -34,6 +34,8 @@ use kite_sql::errors::DatabaseError;
 use pprof::ProfilerGuard;
 use rand::prelude::ThreadRng;
 use rand::Rng;
+use std::error::Error;
+use std::fmt;
 use std::fs;
 use std::path::Path;
 #[cfg(any(feature = "pprof", test))]
@@ -728,53 +730,69 @@ fn other_ware(rng: &mut ThreadRng, home_ware: usize, num_ware: usize) -> usize {
     }
 }
 
-#[derive(thiserror::Error, Debug)]
+#[derive(Debug)]
 pub enum TpccError {
-    #[error("kite_sql: {0}")]
-    Database(
-        #[source]
-        #[from]
-        DatabaseError,
-    ),
-    #[error("sqlite: {0}")]
-    Sqlite(
-        #[source]
-        #[from]
-        sqlite::Error,
-    ),
-    #[error("decimal parse error: {0}")]
-    Decimal(
-        #[source]
-        #[from]
-        rust_decimal::Error,
-    ),
-    #[error("datetime parse error: {0}")]
-    Chrono(
-        #[source]
-        #[from]
-        chrono::ParseError,
-    ),
-    #[error("io error: {0}")]
-    Io(
-        #[source]
-        #[from]
-        std::io::Error,
-    ),
-    #[error("tuples is empty")]
+    Database(DatabaseError),
+    Sqlite(sqlite::Error),
+    Decimal(rust_decimal::Error),
+    Chrono(chrono::ParseError),
+    Io(std::io::Error),
     EmptyTuples,
-    #[error("maximum retries reached")]
     MaxRetry,
-    #[error("invalid backend usage")]
     InvalidBackend,
-    #[error("invalid parameter name")]
     InvalidParameter,
-    #[error("invalid datetime value")]
     InvalidDateTime,
-    #[error("backend mismatch: {0}")]
     BackendMismatch(String),
-    #[error("profile error: {0}")]
     Profile(String),
 }
+
+impl fmt::Display for TpccError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Database(err) => write!(f, "kite_sql: {err}"),
+            Self::Sqlite(err) => write!(f, "sqlite: {err}"),
+            Self::Decimal(err) => write!(f, "decimal parse error: {err}"),
+            Self::Chrono(err) => write!(f, "datetime parse error: {err}"),
+            Self::Io(err) => write!(f, "io error: {err}"),
+            Self::EmptyTuples => f.write_str("tuples is empty"),
+            Self::MaxRetry => f.write_str("maximum retries reached"),
+            Self::InvalidBackend => f.write_str("invalid backend usage"),
+            Self::InvalidParameter => f.write_str("invalid parameter name"),
+            Self::InvalidDateTime => f.write_str("invalid datetime value"),
+            Self::BackendMismatch(value) => write!(f, "backend mismatch: {value}"),
+            Self::Profile(value) => write!(f, "profile error: {value}"),
+        }
+    }
+}
+
+impl Error for TpccError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Database(err) => Some(err),
+            Self::Sqlite(err) => Some(err),
+            Self::Decimal(err) => Some(err),
+            Self::Chrono(err) => Some(err),
+            Self::Io(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+macro_rules! impl_from_tpcc_error {
+    ($source:ty, $variant:ident) => {
+        impl From<$source> for TpccError {
+            fn from(value: $source) -> Self {
+                Self::$variant(value)
+            }
+        }
+    };
+}
+
+impl_from_tpcc_error!(DatabaseError, Database);
+impl_from_tpcc_error!(sqlite::Error, Sqlite);
+impl_from_tpcc_error!(rust_decimal::Error, Decimal);
+impl_from_tpcc_error!(chrono::ParseError, Chrono);
+impl_from_tpcc_error!(std::io::Error, Io);
 
 #[ignore]
 #[test]

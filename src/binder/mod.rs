@@ -15,6 +15,7 @@
 pub mod aggregate;
 mod alter_table;
 mod analyze;
+#[cfg(feature = "copy")]
 pub mod copy;
 mod create_index;
 mod create_table;
@@ -128,8 +129,9 @@ pub fn command_type(stmt: &Statement) -> Result<CommandType, DatabaseError> {
         | Statement::Truncate(_)
         | Statement::Update(_)
         | Statement::Delete(_)
-        | Statement::Insert(_)
-        | Statement::Copy { .. } => Ok(CommandType::DML),
+        | Statement::Insert(_) => Ok(CommandType::DML),
+        #[cfg(feature = "copy")]
+        Statement::Copy { .. } => Ok(CommandType::DML),
         stmt => Err(DatabaseError::UnsupportedStmt(stmt.to_string())),
     }
 }
@@ -740,6 +742,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
             }
             Statement::ShowTables { .. } => self.bind_show_tables()?,
             Statement::ShowViews { .. } => self.bind_show_views()?,
+            #[cfg(feature = "copy")]
             Statement::Copy {
                 source,
                 to,
@@ -747,6 +750,12 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 options,
                 ..
             } => self.bind_copy(source.clone(), *to, target.clone(), options, arena)?,
+            #[cfg(not(feature = "copy"))]
+            Statement::Copy { .. } => {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "COPY requires the `copy` feature".to_string(),
+                ))
+            }
             Statement::Explain { statement, .. } => {
                 let plan = self.bind_inner(statement, arena)?;
 

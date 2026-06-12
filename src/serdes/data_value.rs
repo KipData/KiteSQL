@@ -19,6 +19,7 @@ use crate::types::value::DataValue;
 use crate::types::value::Utf8Type;
 use crate::types::CharLengthUnits;
 use ordered_float::OrderedFloat;
+#[cfg(feature = "decimal")]
 use rust_decimal::Decimal;
 use std::io::{Read, Write};
 
@@ -164,6 +165,7 @@ impl DataValue {
                 write_u64(writer, *precision)?;
                 write_bool(writer, *with_tz)
             }
+            #[cfg(feature = "decimal")]
             DataValue::Decimal(value) => {
                 write_u8(writer, TAG_DECIMAL)?;
                 writer.write_all(&value.serialize())?;
@@ -207,10 +209,19 @@ impl DataValue {
                 read_u64(reader)?,
                 read_bool(reader)?,
             )),
+            #[cfg(feature = "decimal")]
             TAG_DECIMAL => {
                 let mut bytes = [0; 16];
                 reader.read_exact(&mut bytes)?;
                 Ok(DataValue::Decimal(Decimal::deserialize(bytes)))
+            }
+            #[cfg(not(feature = "decimal"))]
+            TAG_DECIMAL => {
+                let mut bytes = [0; 16];
+                reader.read_exact(&mut bytes)?;
+                Err(DatabaseError::UnsupportedStmt(
+                    "DECIMAL requires the `decimal` feature".to_string(),
+                ))
             }
             TAG_TUPLE => {
                 let len = read_len(reader)?;
@@ -393,6 +404,7 @@ pub(crate) mod test {
     use crate::types::value::{DataValue, Utf8Type};
     use crate::types::CharLengthUnits;
     use ordered_float::OrderedFloat;
+    #[cfg(feature = "decimal")]
     use rust_decimal::Decimal;
     use std::io::{Cursor, Seek, SeekFrom};
 
@@ -425,6 +437,7 @@ pub(crate) mod test {
             DataValue::Date64(34),
             DataValue::Time32(56, 3),
             DataValue::Time64(78, 6, true),
+            #[cfg(feature = "decimal")]
             DataValue::Decimal(Decimal::new(12345, 2)),
             DataValue::Tuple(vec![DataValue::Null, DataValue::Int32(42)], false),
         ];

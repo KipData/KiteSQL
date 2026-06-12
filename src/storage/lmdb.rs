@@ -15,8 +15,8 @@
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::Bytes;
 use crate::storage::{
-    reuse_bound_as_excluded, InnerIter, KeyValueRef, Storage, Transaction,
-    TransactionIsolationLevel,
+    bytes_bound_as_slice, owned_bound, reuse_bound_as_excluded, InnerIter, KeyValueRef, Storage,
+    Transaction, TransactionIsolationLevel,
 };
 use lmdb::{
     Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, RoCursor, RwTransaction,
@@ -107,10 +107,8 @@ impl LmdbStorage {
         if let Some(max_dbs) = config.max_dbs {
             builder.set_max_dbs(max_dbs);
         }
-        let env = builder.open(&path).map_err(map_lmdb_err)?;
-        let db = env
-            .create_db(None, DatabaseFlags::empty())
-            .map_err(map_lmdb_err)?;
+        let env = builder.open(&path)?;
+        let db = env.create_db(None, DatabaseFlags::empty())?;
 
         Ok(Self {
             env: Arc::new(env),
@@ -133,7 +131,7 @@ impl Storage for LmdbStorage {
         isolation: TransactionIsolationLevel,
     ) -> Result<Self::TransactionType<'_>, DatabaseError> {
         self.validate_transaction_isolation(isolation)?;
-        let tx = self.env.begin_rw_txn().map_err(map_lmdb_err)?;
+        let tx = self.env.begin_rw_txn()?;
 
         Ok(LmdbTransaction { tx, db: self.db })
     }
@@ -176,7 +174,7 @@ pub struct LmdbIter<'txn> {
 impl LmdbIter<'_> {
     fn next_visible(&mut self) -> Option<(&[u8], &[u8])> {
         if let Some(entry) = self.pending.take() {
-            if within_upper_bound(entry.0, &self.max) {
+            if within_upper_bound(entry.0, bytes_bound_as_slice(&self.max)) {
                 return Some(entry);
             }
             self.done = true;
@@ -184,7 +182,7 @@ impl LmdbIter<'_> {
         }
 
         if let Some((key, value)) = self.iter.next() {
-            if !within_upper_bound(key, &self.max) {
+            if !within_upper_bound(key, bytes_bound_as_slice(&self.max)) {
                 self.done = true;
                 return None;
             }
@@ -222,21 +220,20 @@ impl Transaction for LmdbTransaction<'_> {
         match self.tx.get(self.db, &key) {
             Ok(value) => Ok(Some(value)),
             Err(lmdb::Error::NotFound) => Ok(None),
-            Err(err) => Err(map_lmdb_err(err)),
+            Err(err) => Err(err.into()),
         }
     }
 
     fn set(&mut self, key: &[u8], value: &[u8]) -> Result<(), DatabaseError> {
         self.tx
-            .put(self.db, &key, &value, lmdb::WriteFlags::empty())
-            .map_err(map_lmdb_err)?;
+            .put(self.db, &key, &value, lmdb::WriteFlags::empty())?;
         Ok(())
     }
 
     fn remove(&mut self, key: &[u8]) -> Result<(), DatabaseError> {
         match self.tx.del(self.db, &key, None) {
             Ok(()) | Err(lmdb::Error::NotFound) => Ok(()),
-            Err(err) => Err(map_lmdb_err(err)),
+            Err(err) => Err(err.into()),
         }
     }
 
@@ -245,8 +242,8 @@ impl Transaction for LmdbTransaction<'_> {
         min: Bound<&'key [u8]>,
         max: Bound<&'key [u8]>,
     ) -> Result<Self::IterType<'txn>, DatabaseError> {
-        let mut cursor = self.tx.open_ro_cursor(self.db).map_err(map_lmdb_err)?;
-        let (pending, done) = initial_entry(&mut cursor, &min).map_err(map_lmdb_err)?;
+        let mut cursor = self.tx.open_ro_cursor(self.db)?;
+        let (pending, done) = initial_entry(&mut cursor, &min)?;
         let iter = cursor.iter();
 
         Ok(LmdbIter {
@@ -259,27 +256,26 @@ impl Transaction for LmdbTransaction<'_> {
     }
 
     fn remove_range(&mut self, min: Bound<&[u8]>, max: Bound<&[u8]>) -> Result<(), DatabaseError> {
-        let mut cursor = self.tx.open_rw_cursor(self.db).map_err(map_lmdb_err)?;
-        let upper = owned_bound(max);
+        let mut cursor = self.tx.open_rw_cursor(self.db)?;
         let mut lower = owned_bound(min);
         let mut seek_key = Bytes::new();
 
         loop {
-            let entry = cursor_seek(&mut cursor, &lower, &mut seek_key).map_err(map_lmdb_err)?;
+            let entry = cursor_seek(&mut cursor, &lower, &mut seek_key)?;
             let Some((key, _)) = entry else {
                 return Ok(());
             };
-            if !within_upper_bound(key, &upper) {
+            if !within_upper_bound(key, max) {
                 return Ok(());
             }
 
             reuse_bound_as_excluded(&mut lower, key);
-            cursor.del(WriteFlags::empty()).map_err(map_lmdb_err)?;
+            cursor.del(WriteFlags::empty())?;
         }
     }
 
     fn commit(self) -> Result<(), DatabaseError> {
-        self.tx.commit().map_err(map_lmdb_err)?;
+        self.tx.commit()?;
         Ok(())
     }
 }
@@ -341,24 +337,12 @@ fn cursor_seek<'txn>(
     }
 }
 
-fn owned_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
-    match bound {
-        Bound::Included(bytes) => Bound::Included(bytes.to_vec()),
-        Bound::Excluded(bytes) => Bound::Excluded(bytes.to_vec()),
-        Bound::Unbounded => Bound::Unbounded,
-    }
-}
-
-fn within_upper_bound(key: &[u8], max: &Bound<Bytes>) -> bool {
+fn within_upper_bound(key: &[u8], max: Bound<&[u8]>) -> bool {
     match max {
-        Bound::Included(max) => key.cmp(max.as_slice()) != Ordering::Greater,
-        Bound::Excluded(max) => key.cmp(max.as_slice()) == Ordering::Less,
+        Bound::Included(max) => key.cmp(max) != Ordering::Greater,
+        Bound::Excluded(max) => key.cmp(max) == Ordering::Less,
         Bound::Unbounded => true,
     }
-}
-
-fn map_lmdb_err(err: impl std::fmt::Display) -> DatabaseError {
-    DatabaseError::InvalidValue(format!("lmdb: {err}"))
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

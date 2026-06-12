@@ -20,6 +20,7 @@ use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use ordered_float::OrderedFloat;
+#[cfg(feature = "decimal")]
 use rust_decimal::Decimal;
 use std::hint;
 use std::str::FromStr;
@@ -191,6 +192,7 @@ crate::define_cast_evaluator!(
         Ok(DataValue::Time64(value, precision, this.zone))
     }
 );
+#[cfg(feature = "decimal")]
 crate::define_cast_evaluator!(utf8_to_decimal_cast_eval, DataValue::Utf8 { value, .. } => {
     Ok(DataValue::Decimal(Decimal::from_str(value)?))
 });

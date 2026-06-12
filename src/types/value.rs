@@ -22,14 +22,17 @@ use chrono::format::{DelayedFormat, StrftimeItems};
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use itertools::Itertools;
 use ordered_float::OrderedFloat;
+#[cfg(feature = "decimal")]
 use rust_decimal::Decimal;
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::fmt::Formatter;
 use std::hash::Hash;
-use std::io::{Read, Write};
+use std::io::Read;
+#[cfg(feature = "decimal")]
+use std::mem;
 use std::sync::LazyLock;
-use std::{cmp, fmt, mem};
+use std::{cmp, fmt};
 
 static UNIX_DATETIME: LazyLock<NaiveDateTime> =
     LazyLock::new(|| DateTime::from_timestamp(0, 0).unwrap().naive_utc());
@@ -52,7 +55,7 @@ pub const ONE_DAY_TO_SEC: u32 = 86_400;
 const ENCODE_GROUP_SIZE: usize = 8;
 const ENCODE_MARKER: u8 = 0xFF;
 
-pub trait MemComparableBuffer: Write {
+pub trait MemComparableBuffer {
     fn push_byte(&mut self, byte: u8);
     fn extend_bytes(&mut self, bytes: &[u8]);
     fn reserve_bytes(&mut self, size: usize);
@@ -127,6 +130,7 @@ pub enum DataValue {
     Date64(i64),
     Time32(u32, u64),
     Time64(i64, u64, bool),
+    #[cfg(feature = "decimal")]
     Decimal(Decimal),
     /// (values, is_upper)
     Tuple(Vec<DataValue>, bool),
@@ -227,9 +231,19 @@ generate_get_option!(DataValue,
     u8 : UInt8(Option<u8>),
     u16 : UInt16(Option<u16>),
     u32 : UInt32(Option<u32>),
-    u64 : UInt64(Option<u64>),
-    decimal : Decimal(Option<Decimal>)
+    u64 : UInt64(Option<u64>)
 );
+
+#[cfg(feature = "decimal")]
+impl DataValue {
+    pub fn decimal(&self) -> Option<Decimal> {
+        if let DataValue::Decimal(val) = self {
+            Some(*val)
+        } else {
+            None
+        }
+    }
+}
 
 impl PartialEq for DataValue {
     fn eq(&self, other: &Self) -> bool {
@@ -274,7 +288,9 @@ impl PartialEq for DataValue {
             (Time32(..), _) => false,
             (Time64(v1, ..), Time64(v2, ..)) => v1.eq(v2),
             (Time64(..), _) => false,
+            #[cfg(feature = "decimal")]
             (Decimal(v1), Decimal(v2)) => v1.eq(v2),
+            #[cfg(feature = "decimal")]
             (Decimal(_), _) => false,
             (Tuple(values_1, is_upper_1), Tuple(values_2, is_upper_2)) => {
                 values_1.eq(values_2) && is_upper_1.eq(is_upper_2)
@@ -322,7 +338,9 @@ impl PartialOrd for DataValue {
             (Time32(..), _) => None,
             (Time64(v1, ..), Time64(v2, ..)) => v1.partial_cmp(v2),
             (Time64(..), _) => None,
+            #[cfg(feature = "decimal")]
             (Decimal(v1), Decimal(v2)) => v1.partial_cmp(v2),
+            #[cfg(feature = "decimal")]
             (Decimal(_), _) => None,
             (Tuple(..), _) => None,
         }
@@ -331,7 +349,7 @@ impl PartialOrd for DataValue {
 
 macro_rules! encode_u {
     ($writer:ident, $u:expr) => {
-        $writer.write_all(&$u.to_be_bytes())?
+        $writer.extend_bytes(&$u.to_be_bytes())
     };
 }
 
@@ -366,6 +384,7 @@ impl Hash for DataValue {
             Date64(v) => v.hash(state),
             Time32(v, ..) => v.hash(state),
             Time64(v, ..) => v.hash(state),
+            #[cfg(feature = "decimal")]
             Decimal(v) => v.hash(state),
             Tuple(values, is_upper) => {
                 values.hash(state);
@@ -475,6 +494,7 @@ impl DataValue {
                     unit: CharLengthUnits::Octets,
                 },
             ) => Self::check_string_len(val, *len as usize, CharLengthUnits::Octets),
+            #[cfg(feature = "decimal")]
             (LogicalType::Decimal(full_len, scale_len), DataValue::Decimal(val)) => {
                 if let Some(len) = full_len {
                     let mantissa = val.mantissa().abs();
@@ -592,7 +612,10 @@ impl DataValue {
                 None => DataValue::Time64(UNIX_DATETIME.and_utc().timestamp(), 0, *zone),
                 _ => unreachable!(),
             },
+            #[cfg(feature = "decimal")]
             LogicalType::Decimal(_, _) => DataValue::Decimal(Decimal::new(0, 0)),
+            #[cfg(not(feature = "decimal"))]
+            LogicalType::Decimal(_, _) => unreachable!("DECIMAL requires the `decimal` feature"),
             LogicalType::Tuple(types) => {
                 let values = types.iter().map(DataValue::init).collect_vec();
 
@@ -630,6 +653,7 @@ impl DataValue {
             DataValue::Date64(_) => LogicalType::DateTime,
             DataValue::Time32(..) => LogicalType::Time(None),
             DataValue::Time64(..) => LogicalType::TimeStamp(None, false),
+            #[cfg(feature = "decimal")]
             DataValue::Decimal(_) => LogicalType::Decimal(None, None),
             DataValue::Tuple(values, ..) => {
                 let types = values.iter().map(|v| v.logical_type()).collect_vec();
@@ -779,6 +803,7 @@ impl DataValue {
 
                 encode_u!(b, u);
             }
+            #[cfg(feature = "decimal")]
             DataValue::Decimal(v) => Self::serialize_decimal(*v, b)?,
             DataValue::Tuple(values, is_upper) => {
                 let last = values.len() - 1;
@@ -880,7 +905,12 @@ impl DataValue {
                 ty: Utf8Type::Fixed(*len),
                 unit: *unit,
             }),
+            #[cfg(feature = "decimal")]
             LogicalType::Decimal(..) => Ok(DataValue::Decimal(Self::deserialize_decimal(reader)?)),
+            #[cfg(not(feature = "decimal"))]
+            LogicalType::Decimal(..) => Err(DatabaseError::UnsupportedStmt(
+                "DECIMAL requires the `decimal` feature".to_string(),
+            )),
             LogicalType::Tuple(tys) => {
                 let mut collector = TupleCollector::new(tuple_mapping, tys.len());
 
@@ -894,6 +924,7 @@ impl DataValue {
     }
 
     // https://github.com/risingwavelabs/memcomparable/blob/main/src/ser.rs#L468
+    #[cfg(feature = "decimal")]
     pub fn serialize_decimal<B: MemComparableBuffer>(
         decimal: Decimal,
         bytes: &mut B,
@@ -939,6 +970,7 @@ impl DataValue {
         Ok(())
     }
 
+    #[cfg(feature = "decimal")]
     fn decimal_e_m(decimal: Decimal) -> (i8, Vec<u8>) {
         if decimal.is_zero() {
             return (0, vec![]);
@@ -1015,6 +1047,7 @@ impl DataValue {
         (e100 as i8, byte_array)
     }
 
+    #[cfg(feature = "decimal")]
     pub fn deserialize_decimal<R: Read>(mut reader: R) -> Result<Decimal, DatabaseError> {
         // decode exponent
         let flag = reader.read_u8()?;
@@ -1143,6 +1176,7 @@ impl DataValue {
         }
     }
 
+    #[cfg(feature = "decimal")]
     pub(crate) fn decimal_round_i(option: &Option<u8>, decimal: &mut Decimal) {
         if let Some(scale) = option {
             let new_decimal = decimal.trunc_with_scale(*scale as u32);
@@ -1150,6 +1184,7 @@ impl DataValue {
         }
     }
 
+    #[cfg(feature = "decimal")]
     pub(crate) fn decimal_round_f(option: &Option<u8>, decimal: &mut Decimal) {
         if let Some(scale) = option {
             let new_decimal = decimal.round_dp_with_strategy(
@@ -1183,6 +1218,7 @@ impl DataValue {
             .map(|date_time| date_time.format(TIME_STAMP_FMT_WITHOUT_ZONE))
     }
 
+    #[cfg(feature = "decimal")]
     fn decimal_format(v: &Decimal) -> String {
         v.to_string()
     }
@@ -1241,6 +1277,7 @@ impl_scalar!(u8, UInt8);
 impl_scalar!(u16, UInt16);
 impl_scalar!(u32, UInt32);
 impl_scalar!(u64, UInt64);
+#[cfg(feature = "decimal")]
 impl_scalar!(Decimal, Decimal);
 
 impl From<f32> for DataValue {
@@ -1420,6 +1457,7 @@ impl fmt::Display for DataValue {
                 "{}",
                 DataValue::time_stamp_format(*e, *precision, *zone).unwrap()
             )?,
+            #[cfg(feature = "decimal")]
             DataValue::Decimal(e) => write!(f, "{}", DataValue::decimal_format(e))?,
             DataValue::Tuple(values, ..) => {
                 write!(f, "(")?;
@@ -1458,6 +1496,7 @@ impl fmt::Debug for DataValue {
             DataValue::Date64(_) => write!(f, "Date64({self})"),
             DataValue::Time32(..) => write!(f, "Time32({self})"),
             DataValue::Time64(..) => write!(f, "Time64({self})"),
+            #[cfg(feature = "decimal")]
             DataValue::Decimal(_) => write!(f, "Decimal({self})"),
             DataValue::Tuple(..) => {
                 write!(f, "Tuple({self}")?;

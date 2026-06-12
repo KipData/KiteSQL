@@ -28,7 +28,9 @@ use crate::optimizer::rule::implementation::ddl::drop_column::DropColumnImplemen
 use crate::optimizer::rule::implementation::ddl::drop_table::DropTableImplementation;
 use crate::optimizer::rule::implementation::ddl::truncate::TruncateImplementation;
 use crate::optimizer::rule::implementation::dml::analyze::AnalyzeImplementation;
+#[cfg(feature = "copy")]
 use crate::optimizer::rule::implementation::dml::copy_from_file::CopyFromFileImplementation;
+#[cfg(feature = "copy")]
 use crate::optimizer::rule::implementation::dml::copy_to_file::CopyToFileImplementation;
 use crate::optimizer::rule::implementation::dml::delete::DeleteImplementation;
 use crate::optimizer::rule::implementation::dml::insert::InsertImplementation;
@@ -71,7 +73,9 @@ pub enum ImplementationRuleRootTag {
     TopK,
     Values,
     Analyze,
+    #[cfg(feature = "copy")]
     CopyFromFile,
+    #[cfg(feature = "copy")]
     CopyToFile,
     Delete,
     Insert,
@@ -104,7 +108,9 @@ impl ImplementationRuleRootTag {
             Operator::TopK(_) => Some(Self::TopK),
             Operator::Values(_) => Some(Self::Values),
             Operator::Analyze(_) => Some(Self::Analyze),
+            #[cfg(feature = "copy")]
             Operator::CopyFromFile(_) => Some(Self::CopyFromFile),
+            #[cfg(feature = "copy")]
             Operator::CopyToFile(_) => Some(Self::CopyToFile),
             Operator::Delete(_) => Some(Self::Delete),
             Operator::Insert(_) => Some(Self::Insert),
@@ -150,7 +156,9 @@ pub enum ImplementationRuleImpl {
     Values,
     // DML
     Analyze,
+    #[cfg(feature = "copy")]
     CopyFromFile,
+    #[cfg(feature = "copy")]
     CopyToFile,
     Delete,
     Insert,
@@ -183,7 +191,9 @@ impl MatchPattern for ImplementationRuleImpl {
             ImplementationRuleImpl::Sort => SortImplementation.pattern(),
             ImplementationRuleImpl::TopK => TopKImplementation.pattern(),
             ImplementationRuleImpl::Values => ValuesImplementation.pattern(),
+            #[cfg(feature = "copy")]
             ImplementationRuleImpl::CopyFromFile => CopyFromFileImplementation.pattern(),
+            #[cfg(feature = "copy")]
             ImplementationRuleImpl::CopyToFile => CopyToFileImplementation.pattern(),
             ImplementationRuleImpl::Delete => DeleteImplementation.pattern(),
             ImplementationRuleImpl::Insert => InsertImplementation.pattern(),
@@ -221,7 +231,9 @@ impl ImplementationRuleImpl {
             ImplementationRuleImpl::TopK => ImplementationRuleRootTag::TopK,
             ImplementationRuleImpl::Values => ImplementationRuleRootTag::Values,
             ImplementationRuleImpl::Analyze => ImplementationRuleRootTag::Analyze,
+            #[cfg(feature = "copy")]
             ImplementationRuleImpl::CopyFromFile => ImplementationRuleRootTag::CopyFromFile,
+            #[cfg(feature = "copy")]
             ImplementationRuleImpl::CopyToFile => ImplementationRuleRootTag::CopyToFile,
             ImplementationRuleImpl::Delete => ImplementationRuleRootTag::Delete,
             ImplementationRuleImpl::Insert => ImplementationRuleRootTag::Insert,
@@ -329,12 +341,14 @@ impl ImplementationRule for ImplementationRuleImpl {
                 loader,
                 best_physical_option,
             )?,
+            #[cfg(feature = "copy")]
             ImplementationRuleImpl::CopyFromFile => CopyFromFileImplementation.update_best_option(
                 operator,
                 arena,
                 loader,
                 best_physical_option,
             )?,
+            #[cfg(feature = "copy")]
             ImplementationRuleImpl::CopyToFile => CopyToFileImplementation.update_best_option(
                 operator,
                 arena,

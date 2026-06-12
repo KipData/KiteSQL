@@ -17,6 +17,7 @@ use crate::expression::BinaryOperator;
 use crate::types::evaluator::boolean::*;
 use crate::types::evaluator::date::*;
 use crate::types::evaluator::datetime::*;
+#[cfg(feature = "decimal")]
 use crate::types::evaluator::decimal::*;
 use crate::types::evaluator::float32::*;
 use crate::types::evaluator::float64::*;
@@ -214,7 +215,10 @@ pub fn binary_create(
             }
             _ => Err(DatabaseError::UnsupportedBinaryOperator(ty.clone(), op)),
         },
+        #[cfg(feature = "decimal")]
         LogicalType::Decimal(_, _) => numeric_binary_ref(BINARY_DECIMAL_BASE, ty, op),
+        #[cfg(not(feature = "decimal"))]
+        LogicalType::Decimal(_, _) => Err(DatabaseError::UnsupportedBinaryOperator(ty.clone(), op)),
         LogicalType::Boolean => match op {
             BinaryOperator::And => {
                 unit_binary_ref(binary_pos(BINARY_BOOLEAN_BASE, BOOLEAN_AND_OFFSET))
@@ -342,9 +346,14 @@ pub(crate) fn eval_binary(
         BINARY_DATETIME_BASE..BINARY_DECIMAL_BASE => {
             eval_numeric_binary!(pos, BINARY_DATETIME_BASE, DateTime, left, right)
         }
+        #[cfg(feature = "decimal")]
         BINARY_DECIMAL_BASE..BINARY_TIME_BASE => {
             eval_numeric_binary!(pos, BINARY_DECIMAL_BASE, Decimal, left, right)
         }
+        #[cfg(not(feature = "decimal"))]
+        BINARY_DECIMAL_BASE..BINARY_TIME_BASE => Err(DatabaseError::UnsupportedStmt(
+            "DECIMAL requires the `decimal` feature".to_string(),
+        )),
         x if x == binary_pos(BINARY_TIME_BASE, TIME_PLUS_OFFSET) => {
             time_plus_binary_eval(left, right)
         }

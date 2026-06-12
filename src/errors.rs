@@ -18,6 +18,8 @@ use crate::types::LogicalType;
 use chrono::ParseError;
 use sqlparser::parser::ParserError;
 use std::convert::Infallible;
+use std::error::Error;
+use std::fmt;
 use std::num::{ParseFloatError, ParseIntError, TryFromIntError};
 use std::str::{ParseBoolError, Utf8Error};
 use std::string::FromUtf8Error;
@@ -52,214 +54,272 @@ fn format_not_null_message(column: &Option<String>, span: &Option<SqlErrorSpan>)
     }
 }
 
-#[derive(thiserror::Error, Debug)]
+#[derive(Debug)]
 pub enum DatabaseError {
-    #[error("agg miss: {0}")]
     AggMiss(String),
-    #[error("cache size overflow")]
     CacheSizeOverFlow,
-    #[error(
-        "cast fail: {from} -> {to}{loc}",
-        loc = format_sql_error_loc(span)
-    )]
     CastFail {
         from: LogicalType,
         to: LogicalType,
         span: Option<SqlErrorSpan>,
     },
-    #[error("channel close")]
     ChannelClose,
-    #[error("columns empty")]
     ColumnsEmpty,
-    #[error("column id: `{0}` not found")]
     ColumnIdNotFound(String),
-    #[error(
-        "column: `{name}` not found{loc}",
-        loc = format_sql_error_loc(span)
-    )]
     ColumnNotFound {
         name: String,
         span: Option<SqlErrorSpan>,
     },
-    #[error("csv error: {0}")]
-    Csv(
-        #[from]
-        #[source]
-        csv::Error,
-    ),
-    #[error("default cannot be a column related to the table")]
+    #[cfg(feature = "copy")]
+    Csv(csv::Error),
     DefaultNotColumnRef,
-    #[error("default does not exist")]
     DefaultNotExist,
-    #[error("column: `{0}` already exists")]
     DuplicateColumn(String),
-    #[error("table or view: `{0}` hash already exists")]
     DuplicateSourceHash(String),
-    #[error("index: `{0}` already exists")]
     DuplicateIndex(String),
-    #[error("duplicate primary key")]
     DuplicatePrimaryKey,
-    #[error("the column has been declared unique and the value already exists")]
     DuplicateUniqueValue,
-    #[error(
-        "function: `{name}` not found{loc}",
-        loc = format_sql_error_loc(span)
-    )]
     FunctionNotFound {
         name: String,
         span: Option<SqlErrorSpan>,
     },
-    #[error("empty plan")]
     EmptyPlan,
-    #[error("sql statement is empty")]
     EmptyStatement,
-    #[error("evaluator not found")]
     EvaluatorNotFound,
-    #[error("from utf8: {0}")]
-    FromUtf8Error(
-        #[source]
-        #[from]
-        FromUtf8Error,
-    ),
-    #[error("can not compare two types: {0} and {1}")]
+    FromUtf8Error(FromUtf8Error),
     Incomparable(LogicalType, LogicalType),
-    #[error(
-        "invalid column: `{name}`{loc}",
-        loc = format_sql_error_loc(span)
-    )]
     InvalidColumn {
         name: String,
         span: Option<SqlErrorSpan>,
     },
-    #[error("invalid index")]
     InvalidIndex,
-    #[error(
-        "invalid table: `{name}`{loc}",
-        loc = format_sql_error_loc(span)
-    )]
     InvalidTable {
         name: String,
         span: Option<SqlErrorSpan>,
     },
-    #[error("invalid type")]
     InvalidType,
-    #[error("invalid value: {0}")]
     InvalidValue(String),
-    #[error("io: {0}")]
-    IO(
-        #[source]
-        #[from]
-        std::io::Error,
-    ),
-    #[error("{0} and {1} do not match")]
+    IO(std::io::Error),
     MisMatch(&'static str, &'static str),
-    #[error("add column must be nullable or specify a default value")]
     NeedNullAbleOrDefault,
-    #[error(
-        "parameter: `{name}` not found{loc}",
-        loc = format_sql_error_loc(span)
-    )]
     ParametersNotFound {
         name: String,
         span: Option<SqlErrorSpan>,
     },
-    #[error("no transaction begin")]
     NoTransactionBegin,
-    #[error("{msg}", msg = format_not_null_message(column, span))]
     NotNull {
         column: Option<String>,
         span: Option<SqlErrorSpan>,
     },
-    #[error("over flow")]
     OverFlow,
-    #[error("parser bool: {0}")]
-    ParseBool(
-        #[source]
-        #[from]
-        ParseBoolError,
-    ),
-    #[error("parser date: {0}")]
-    ParseDate(
-        #[source]
-        #[from]
-        ParseError,
-    ),
-    #[error("parser float: {0}")]
-    ParseFloat(
-        #[source]
-        #[from]
-        ParseFloatError,
-    ),
-    #[error("parser int: {0}")]
-    ParseInt(
-        #[source]
-        #[from]
-        ParseIntError,
-    ),
-    #[error("parser sql: {0}")]
-    ParserSql(
-        #[source]
-        #[from]
-        ParserError,
-    ),
-    #[error("must contain primary key!")]
+    ParseBool(ParseBoolError),
+    ParseDate(ParseError),
+    ParseFloat(ParseFloatError),
+    ParseInt(ParseIntError),
+    ParserSql(ParserError),
     PrimaryKeyNotFound,
-    #[error("primaryKey only allows single or multiple values")]
     PrimaryKeyTooManyLayers,
+    #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
+    Lmdb(lmdb::Error),
     #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
-    #[error("rocksdb: {0}")]
-    RocksDB(
-        #[source]
-        #[from]
-        rocksdb::Error,
-    ),
-    #[error("the number of caches cannot be divisible by the number of shards")]
+    RocksDB(rocksdb::Error),
     SharedNotAlign,
-    #[error("the table or view not found")]
     SourceNotFound,
-    #[error("the table already exists")]
     TableExists,
-    #[error("the table not found")]
     TableNotFound,
-    #[error("transaction already exists")]
     TransactionAlreadyExists,
-    #[error("try from decimal: {0}")]
-    TryFromDecimal(
-        #[source]
-        #[from]
-        rust_decimal::Error,
-    ),
-    #[error("try from int: {0}")]
-    TryFromInt(
-        #[source]
-        #[from]
-        TryFromIntError,
-    ),
-    #[error("too long")]
+    #[cfg(feature = "decimal")]
+    TryFromDecimal(rust_decimal::Error),
+    TryFromInt(TryFromIntError),
     TooLong,
-    #[error("tuple id: {0} not found")]
     TupleIdNotFound(TupleId),
-    #[error("there are more buckets: {0} than elements: {1}")]
     TooManyBuckets(usize, usize),
-    #[error("unsupported unary operator: {0} cannot support {1} for calculations")]
     UnsupportedUnaryOperator(LogicalType, UnaryOperator),
-    #[error("unsupported binary operator: {0} cannot support {1} for calculations")]
     UnsupportedBinaryOperator(LogicalType, BinaryOperator),
-    #[error("unsupported statement: {0}")]
     UnsupportedStmt(String),
-    #[error("utf8: {0}")]
-    Utf8(
-        #[source]
-        #[from]
-        Utf8Error,
-    ),
-    #[error("values length not match, expect {0}, got {1}")]
+    Utf8(Utf8Error),
     ValuesLenMismatch(usize, usize),
-    #[error("the view already exists")]
     ViewExists,
-    #[error("the view not found")]
     ViewNotFound,
 }
+
+impl fmt::Display for DatabaseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AggMiss(value) => write!(f, "agg miss: {value}"),
+            Self::CacheSizeOverFlow => f.write_str("cache size overflow"),
+            Self::CastFail { from, to, span } => {
+                write!(f, "cast fail: {from} -> {to}{}", format_sql_error_loc(span))
+            }
+            Self::ChannelClose => f.write_str("channel close"),
+            Self::ColumnsEmpty => f.write_str("columns empty"),
+            Self::ColumnIdNotFound(value) => write!(f, "column id: `{value}` not found"),
+            Self::ColumnNotFound { name, span } => {
+                write!(
+                    f,
+                    "column: `{name}` not found{}",
+                    format_sql_error_loc(span)
+                )
+            }
+            #[cfg(feature = "copy")]
+            Self::Csv(err) => write!(f, "csv error: {err}"),
+            Self::DefaultNotColumnRef => {
+                f.write_str("default cannot be a column related to the table")
+            }
+            Self::DefaultNotExist => f.write_str("default does not exist"),
+            Self::DuplicateColumn(value) => write!(f, "column: `{value}` already exists"),
+            Self::DuplicateSourceHash(value) => {
+                write!(f, "table or view: `{value}` hash already exists")
+            }
+            Self::DuplicateIndex(value) => write!(f, "index: `{value}` already exists"),
+            Self::DuplicatePrimaryKey => f.write_str("duplicate primary key"),
+            Self::DuplicateUniqueValue => {
+                f.write_str("the column has been declared unique and the value already exists")
+            }
+            Self::FunctionNotFound { name, span } => {
+                write!(
+                    f,
+                    "function: `{name}` not found{}",
+                    format_sql_error_loc(span)
+                )
+            }
+            Self::EmptyPlan => f.write_str("empty plan"),
+            Self::EmptyStatement => f.write_str("sql statement is empty"),
+            Self::EvaluatorNotFound => f.write_str("evaluator not found"),
+            Self::FromUtf8Error(err) => write!(f, "from utf8: {err}"),
+            Self::Incomparable(left, right) => {
+                write!(f, "can not compare two types: {left} and {right}")
+            }
+            Self::InvalidColumn { name, span } => {
+                write!(f, "invalid column: `{name}`{}", format_sql_error_loc(span))
+            }
+            Self::InvalidIndex => f.write_str("invalid index"),
+            Self::InvalidTable { name, span } => {
+                write!(f, "invalid table: `{name}`{}", format_sql_error_loc(span))
+            }
+            Self::InvalidType => f.write_str("invalid type"),
+            Self::InvalidValue(value) => write!(f, "invalid value: {value}"),
+            Self::IO(err) => write!(f, "io: {err}"),
+            Self::MisMatch(left, right) => write!(f, "{left} and {right} do not match"),
+            Self::NeedNullAbleOrDefault => {
+                f.write_str("add column must be nullable or specify a default value")
+            }
+            Self::ParametersNotFound { name, span } => {
+                write!(
+                    f,
+                    "parameter: `{name}` not found{}",
+                    format_sql_error_loc(span)
+                )
+            }
+            Self::NoTransactionBegin => f.write_str("no transaction begin"),
+            Self::NotNull { column, span } => f.write_str(&format_not_null_message(column, span)),
+            Self::OverFlow => f.write_str("over flow"),
+            Self::ParseBool(err) => write!(f, "parser bool: {err}"),
+            Self::ParseDate(err) => write!(f, "parser date: {err}"),
+            Self::ParseFloat(err) => write!(f, "parser float: {err}"),
+            Self::ParseInt(err) => write!(f, "parser int: {err}"),
+            Self::ParserSql(err) => write!(f, "parser sql: {err}"),
+            Self::PrimaryKeyNotFound => f.write_str("must contain primary key!"),
+            Self::PrimaryKeyTooManyLayers => {
+                f.write_str("primaryKey only allows single or multiple values")
+            }
+            #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
+            Self::Lmdb(err) => write!(f, "lmdb: {err}"),
+            #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
+            Self::RocksDB(err) => write!(f, "rocksdb: {err}"),
+            Self::SharedNotAlign => {
+                f.write_str("the number of caches cannot be divisible by the number of shards")
+            }
+            Self::SourceNotFound => f.write_str("the table or view not found"),
+            Self::TableExists => f.write_str("the table already exists"),
+            Self::TableNotFound => f.write_str("the table not found"),
+            Self::TransactionAlreadyExists => f.write_str("transaction already exists"),
+            #[cfg(feature = "decimal")]
+            Self::TryFromDecimal(err) => write!(f, "try from decimal: {err}"),
+            Self::TryFromInt(err) => write!(f, "try from int: {err}"),
+            Self::TooLong => f.write_str("too long"),
+            Self::TupleIdNotFound(value) => write!(f, "tuple id: {value} not found"),
+            Self::TooManyBuckets(buckets, elements) => {
+                write!(
+                    f,
+                    "there are more buckets: {buckets} than elements: {elements}"
+                )
+            }
+            Self::UnsupportedUnaryOperator(ty, op) => {
+                write!(
+                    f,
+                    "unsupported unary operator: {ty} cannot support {op} for calculations"
+                )
+            }
+            Self::UnsupportedBinaryOperator(ty, op) => {
+                write!(
+                    f,
+                    "unsupported binary operator: {ty} cannot support {op} for calculations"
+                )
+            }
+            Self::UnsupportedStmt(value) => write!(f, "unsupported statement: {value}"),
+            Self::Utf8(err) => write!(f, "utf8: {err}"),
+            Self::ValuesLenMismatch(expect, got) => {
+                write!(f, "values length not match, expect {expect}, got {got}")
+            }
+            Self::ViewExists => f.write_str("the view already exists"),
+            Self::ViewNotFound => f.write_str("the view not found"),
+        }
+    }
+}
+
+impl Error for DatabaseError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            #[cfg(feature = "copy")]
+            Self::Csv(err) => Some(err),
+            Self::FromUtf8Error(err) => Some(err),
+            Self::IO(err) => Some(err),
+            Self::ParseBool(err) => Some(err),
+            Self::ParseDate(err) => Some(err),
+            Self::ParseFloat(err) => Some(err),
+            Self::ParseInt(err) => Some(err),
+            Self::ParserSql(err) => Some(err),
+            #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
+            Self::Lmdb(err) => Some(err),
+            #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
+            Self::RocksDB(err) => Some(err),
+            #[cfg(feature = "decimal")]
+            Self::TryFromDecimal(err) => Some(err),
+            Self::TryFromInt(err) => Some(err),
+            Self::Utf8(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+macro_rules! impl_from_database_error {
+    ($source:ty, $variant:ident) => {
+        impl From<$source> for DatabaseError {
+            fn from(value: $source) -> Self {
+                Self::$variant(value)
+            }
+        }
+    };
+}
+
+#[cfg(feature = "copy")]
+impl_from_database_error!(csv::Error, Csv);
+impl_from_database_error!(FromUtf8Error, FromUtf8Error);
+impl_from_database_error!(std::io::Error, IO);
+impl_from_database_error!(ParseBoolError, ParseBool);
+impl_from_database_error!(ParseError, ParseDate);
+impl_from_database_error!(ParseFloatError, ParseFloat);
+impl_from_database_error!(ParseIntError, ParseInt);
+impl_from_database_error!(ParserError, ParserSql);
+#[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
+impl_from_database_error!(lmdb::Error, Lmdb);
+#[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
+impl_from_database_error!(rocksdb::Error, RocksDB);
+#[cfg(feature = "decimal")]
+impl_from_database_error!(rust_decimal::Error, TryFromDecimal);
+impl_from_database_error!(TryFromIntError, TryFromInt);
+impl_from_database_error!(Utf8Error, Utf8);
 
 impl From<Infallible> for DatabaseError {
     fn from(value: Infallible) -> Self {

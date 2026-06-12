@@ -17,6 +17,7 @@ pub mod boolean;
 pub mod cast;
 pub mod date;
 pub mod datetime;
+#[cfg(feature = "decimal")]
 pub mod decimal;
 pub mod float32;
 pub mod float64;
@@ -98,6 +99,7 @@ pub enum CastEvaluatorParams {
         len: Option<u32>,
         unit: CharLengthUnits,
     },
+    #[cfg(feature = "decimal")]
     Decimal {
         precision: Option<u8>,
         scale: Option<u8>,

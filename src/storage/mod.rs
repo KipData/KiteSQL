@@ -1147,7 +1147,7 @@ pub trait Transaction: Sized {
     fn commit(self) -> Result<(), DatabaseError>;
 }
 
-fn owned_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
+pub(crate) fn owned_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
     match bound {
         Bound::Included(bytes) => Bound::Included(bytes.to_vec()),
         Bound::Excluded(bytes) => Bound::Excluded(bytes.to_vec()),
@@ -1165,7 +1165,7 @@ pub(crate) fn reuse_bound_as_excluded(bound: &mut Bound<Bytes>, key: &[u8]) {
     *bound = Bound::Excluded(bytes);
 }
 
-fn bytes_bound_as_slice(bound: &Bound<Bytes>) -> Bound<&[u8]> {
+pub(crate) fn bytes_bound_as_slice(bound: &Bound<Bytes>) -> Bound<&[u8]> {
     match bound {
         Bound::Included(bytes) => Bound::Included(bytes.as_slice()),
         Bound::Excluded(bytes) => Bound::Excluded(bytes.as_slice()),

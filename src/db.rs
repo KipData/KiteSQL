@@ -121,7 +121,10 @@ pub enum CatalogKind {
 /// The builder wires together storage, built-in functions and optional runtime
 /// features before the database is opened.
 pub struct DataBaseBuilder {
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "rocksdb", feature = "lmdb")
+    ))]
     path: PathBuf,
     histogram_buckets: Option<usize>,
     transaction_isolation: Option<TransactionIsolationLevel>,
@@ -137,8 +140,23 @@ impl DataBaseBuilder {
     /// Built-in scalar functions and table functions are registered
     /// automatically.
     pub fn path(path: impl Into<PathBuf> + Send) -> Self {
+        #[cfg(all(
+            not(target_arch = "wasm32"),
+            any(feature = "rocksdb", feature = "lmdb")
+        ))]
+        let path = path.into();
+        #[cfg(not(all(
+            not(target_arch = "wasm32"),
+            any(feature = "rocksdb", feature = "lmdb")
+        )))]
+        let _ = path;
+
         DataBaseBuilder {
-            path: path.into(),
+            #[cfg(all(
+                not(target_arch = "wasm32"),
+                any(feature = "rocksdb", feature = "lmdb")
+            ))]
+            path,
             histogram_buckets: None,
             transaction_isolation: None,
             #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
@@ -392,7 +410,9 @@ fn default_optimizer_pipeline() -> HepOptimizerPipeline {
             ImplementationRuleImpl::Values,
             // DML
             ImplementationRuleImpl::Analyze,
+            #[cfg(feature = "copy")]
             ImplementationRuleImpl::CopyFromFile,
+            #[cfg(feature = "copy")]
             ImplementationRuleImpl::CopyToFile,
             ImplementationRuleImpl::Delete,
             ImplementationRuleImpl::Insert,

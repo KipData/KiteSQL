@@ -102,12 +102,7 @@ impl Describe {
                 .transaction()
                 .table(arena.table_cache(), self.table_name.clone())?
                 .ok_or(DatabaseError::TableNotFound)?;
-            self.columns = Some(
-                table
-                    .columns()
-                    .copied()
-                    .collect(),
-            );
+            self.columns = Some(table.columns().copied().collect());
         }
 
         let Some(column_ref) = self

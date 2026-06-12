@@ -13,11 +13,17 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+#[cfg(feature = "decimal")]
 use crate::types::evaluator::cast::{cast_fail, to_char, to_varchar};
+#[cfg(not(feature = "decimal"))]
+use crate::types::evaluator::cast::{to_char, to_varchar};
 use crate::types::evaluator::DataValue;
 use crate::types::CharLengthUnits;
+#[cfg(feature = "decimal")]
 use crate::types::LogicalType;
+#[cfg(feature = "decimal")]
 use rust_decimal::prelude::FromPrimitive;
+#[cfg(feature = "decimal")]
 use rust_decimal::Decimal;
 use std::hint;
 pub fn float64_plus_unary_eval(value: &DataValue) -> DataValue {
@@ -102,6 +108,7 @@ crate::define_cast_evaluator!(
     },
     DataValue::Float64(value) => |this| to_varchar(value.to_string(), this.len, this.unit)
 );
+#[cfg(feature = "decimal")]
 crate::define_cast_evaluator!(
     float64_to_decimal_cast_eval {
         precision: Option<u8>,
@@ -179,6 +186,7 @@ mod test {
     use super::*;
     use crate::types::value::Utf8Type;
     use crate::types::CharLengthUnits;
+    #[cfg(feature = "decimal")]
     use rust_decimal::Decimal;
 
     #[test]
@@ -249,6 +257,7 @@ mod test {
                 unit: CharLengthUnits::Characters,
             }
         );
+        #[cfg(feature = "decimal")]
         assert_eq!(
             float64_to_decimal_cast_eval(None, Some(1), &value).unwrap(),
             DataValue::Decimal(Decimal::new(15, 1))

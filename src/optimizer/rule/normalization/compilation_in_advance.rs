@@ -108,10 +108,10 @@ pub(crate) fn evaluator_bind_current(
         | Operator::DropView(_)
         | Operator::DropIndex(_)
         | Operator::Truncate(_)
-        | Operator::CopyFromFile(_)
-        | Operator::CopyToFile(_)
         | Operator::Union(_)
         | Operator::SetMembership(_) => (),
+        #[cfg(feature = "copy")]
+        Operator::CopyFromFile(_) | Operator::CopyToFile(_) => (),
     }
 
     Ok(())

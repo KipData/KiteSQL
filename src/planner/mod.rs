@@ -254,7 +254,9 @@ impl LogicalPlan {
             Operator::DropView(_) => Self::dummy_schema(arena, ["DROP VIEW SUCCESS"]),
             Operator::DropIndex(_) => Self::dummy_schema(arena, ["DROP INDEX SUCCESS"]),
             Operator::Truncate(_) => Self::dummy_schema(arena, ["TRUNCATE TABLE SUCCESS"]),
+            #[cfg(feature = "copy")]
             Operator::CopyFromFile(_) => Self::dummy_schema(arena, ["COPY FROM SOURCE"]),
+            #[cfg(feature = "copy")]
             Operator::CopyToFile(_) => Self::dummy_schema(arena, ["COPY TO TARGET"]),
         }
     }

@@ -4,7 +4,7 @@ version = "0.4.0"
 edition = "2021"
 
 [dev-dependencies]
-"kite_sql"  = { path = "../..", features = ["macros", "orm"] }
+"kite_sql"  = { path = "../..", features = ["macros", "orm", "decimal"] }
 lazy_static = { version = "1" }
 rust_decimal = { version = "1", default-features = false, features = ["std"] }
 sqlparser   = { version = "0.61", default-features = false, features = ["std"] }

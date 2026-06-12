@@ -25,6 +25,8 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["macros", "rocksdb"]
+copy    = ["dep:csv"]
+decimal = ["dep:rust_decimal"]
 macros  = []
 orm     = []
 rocksdb = ["dep:rocksdb"]
@@ -42,25 +44,24 @@ required-features = ["pprof"]
 
 [dependencies]
 ahash                 = { version = "0.8" }
-bumpalo               = { version = "3", features = ["allocator-api2", "collections", "std"] }
+bumpalo               = { version = "3", default-features = false, features = ["collections"] }
 byteorder             = { version = "1" }
 chrono                = { version = "0.4" }
-csv                   = { version = "1" }
 fixedbitset           = { version = "0.4" }
 itertools             = { version = "0.12" }
 ordered-float         = { version = "4" }
 paste                 = { version = "1" }
 recursive             = { version = "0.1" }
-rust_decimal          = { version = "1", default-features = false, features = ["std"] }
 kite_sql_serde_macros = { version = "0.2.0", path = "kite_sql_serde_macros" }
 siphasher             = { version = "1" }
 sqlparser             = { version = "0.61", default-features = false, features = ["std"] }
-thiserror             = { version = "1" }
 ulid                  = { version = "1" }
 
 # Optional dependencies for features
 comfy-table           = { version = "7", default-features = false, optional = true }
+csv                   = { version = "1", optional = true }
 pyo3                  = { version = "0.23", features = ["auto-initialize"], optional = true }
+rust_decimal          = { version = "1", default-features = false, features = ["std"], optional = true }
 
 [target.'cfg(unix)'.dev-dependencies]
 pprof = { version = "0.15", features = ["flamegraph", "criterion"] }
@@ -73,10 +74,11 @@ tempfile              = { version = "3.10" }
 sqlite                = { version = "0.34" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-rocksdb = { version = "0.23", optional = true, default-features = false, features = ["bindgen-runtime"] }
+# Optional dependencies for features
 librocksdb-sys = { version = "0.17.1", optional = true }
 lmdb = { version = "0.8.0", optional = true }
 lmdb-sys = { version = "0.8.0", optional = true }
+rocksdb = { version = "0.23", optional = true, default-features = false, features = ["bindgen-runtime"] }
 rustyline = { version = "14", default-features = false, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

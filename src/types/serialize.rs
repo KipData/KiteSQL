@@ -19,6 +19,7 @@ use crate::types::LogicalType;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use kite_sql_serde_macros::ReferenceSerialization;
 use ordered_float::OrderedFloat;
+#[cfg(feature = "decimal")]
 use rust_decimal::Decimal;
 use std::fmt::Debug;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
@@ -511,6 +512,7 @@ impl TupleValueSerializable for TimeStampSerializable {
     }
 }
 
+#[cfg(feature = "decimal")]
 impl_tuple_value_serializable!(
     DecimalSerializable,
     Decimal,
@@ -521,6 +523,22 @@ impl_tuple_value_serializable!(
         Result::<_, DatabaseError>::Ok(Decimal::deserialize(bytes))
     }
 );
+
+#[cfg(not(feature = "decimal"))]
+impl TupleValueSerializable for DecimalSerializable {
+    fn to_raw<W: Write>(&self, _: &DataValue, _: &mut W) -> Result<(), DatabaseError> {
+        Err(DatabaseError::UnsupportedStmt(
+            "DECIMAL requires the `decimal` feature".to_string(),
+        ))
+    }
+
+    fn from_raw(&self, reader: &mut Cursor<&[u8]>) -> Result<DataValue, DatabaseError> {
+        reader.seek(SeekFrom::Current(16))?;
+        Err(DatabaseError::UnsupportedStmt(
+            "DECIMAL requires the `decimal` feature".to_string(),
+        ))
+    }
+}
 
 impl TupleValueSerializable for SkipFixed {
     fn to_raw<W: Write>(&self, _: &DataValue, _: &mut W) -> Result<(), DatabaseError> {

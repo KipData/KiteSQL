@@ -13,7 +13,9 @@
 // limitations under the License.
 
 pub(crate) mod analyze;
+#[cfg(feature = "copy")]
 pub(crate) mod copy_from_file;
+#[cfg(feature = "copy")]
 pub(crate) mod copy_to_file;
 pub(crate) mod delete;
 pub(crate) mod insert;

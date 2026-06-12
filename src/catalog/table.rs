@@ -115,6 +115,7 @@ impl TableCatalog {
         &self.primary_key_type
     }
 
+    #[cfg(feature = "copy")]
     pub(crate) fn primary_key_indices(&self) -> &[usize] {
         &self.primary_key_indices
     }

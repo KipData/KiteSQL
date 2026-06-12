@@ -72,6 +72,7 @@ impl ReferenceSerialization for CastEvaluatorParams {
                 len.encode(writer, is_direct, reference_tables, arena)?;
                 unit.encode(writer, is_direct, reference_tables, arena)
             }
+            #[cfg(feature = "decimal")]
             CastEvaluatorParams::Decimal { precision, scale } => {
                 3u8.encode(writer, is_direct, reference_tables, arena)?;
                 precision.encode(writer, is_direct, reference_tables, arena)?;
@@ -112,10 +113,19 @@ impl ReferenceSerialization for CastEvaluatorParams {
                         arena,
                     )?,
                 },
+                #[cfg(feature = "decimal")]
                 3 => CastEvaluatorParams::Decimal {
                     precision: Option::<u8>::decode(reader, context, reference_tables, arena)?,
                     scale: Option::<u8>::decode(reader, context, reference_tables, arena)?,
                 },
+                #[cfg(not(feature = "decimal"))]
+                3 => {
+                    let _ = Option::<u8>::decode(reader, context, reference_tables, arena)?;
+                    let _ = Option::<u8>::decode(reader, context, reference_tables, arena)?;
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "DECIMAL requires the `decimal` feature".to_string(),
+                    ));
+                }
                 4 => CastEvaluatorParams::Precision {
                     precision: Option::<u64>::decode(reader, context, reference_tables, arena)?,
                 },
@@ -288,6 +298,7 @@ mod tests {
             },
             2,
         )?;
+        #[cfg(feature = "decimal")]
         roundtrip_cast_params(
             CastEvaluatorParams::Decimal {
                 precision: Some(10),
@@ -295,6 +306,7 @@ mod tests {
             },
             3,
         )?;
+        #[cfg(feature = "decimal")]
         roundtrip_cast_params(
             CastEvaluatorParams::Decimal {
                 precision: None,
@@ -344,6 +356,7 @@ mod tests {
             42,
             CastEvaluatorParams::Tuple {
                 evaluators: vec![
+                    #[cfg(feature = "decimal")]
                     CastEvaluatorRef::new(
                         3,
                         CastEvaluatorParams::Decimal {
