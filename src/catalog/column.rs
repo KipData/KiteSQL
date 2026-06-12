@@ -20,25 +20,12 @@ use crate::types::value::DataValue;
 use crate::types::CharLengthUnits;
 use crate::types::{ColumnId, LogicalType};
 use kite_sql_serde_macros::ReferenceSerialization;
+use std::fmt;
 use std::hash::Hash;
-use std::ops::Deref;
-use std::sync::Arc;
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-pub struct ColumnRef(pub Arc<ColumnCatalog>);
-
-impl Deref for ColumnRef {
-    type Target = ColumnCatalog;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_ref()
-    }
-}
-
-impl From<ColumnCatalog> for ColumnRef {
-    fn from(c: ColumnCatalog) -> Self {
-        ColumnRef(Arc::new(c))
-    }
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
+pub struct ColumnRef {
+    pos: usize,
 }
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, ReferenceSerialization)]
@@ -66,18 +53,18 @@ pub struct ColumnSummary {
 }
 
 impl ColumnRef {
-    pub(crate) fn same_column(&self, other: &ColumnRef) -> bool {
-        self.summary() == other.summary()
+    pub(crate) fn new(pos: usize) -> Self {
+        Self { pos }
     }
 
-    pub(crate) fn nullable_for_join(&self, nullable: bool) -> Option<ColumnRef> {
-        if self.nullable == nullable {
-            return None;
-        }
-        let mut temp = ColumnCatalog::clone(self);
-        temp.nullable = nullable;
-        temp.in_join = true;
-        Some(ColumnRef::from(temp))
+    pub(crate) fn pos(self) -> usize {
+        self.pos
+    }
+}
+
+impl fmt::Display for ColumnRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "#{}", self.pos)
     }
 }
 
@@ -184,6 +171,10 @@ impl ColumnCatalog {
         self.nullable = nullable;
     }
 
+    pub(crate) fn set_in_join(&mut self, in_join: bool) {
+        self.in_join = in_join;
+    }
+
     pub fn datatype(&self) -> &LogicalType {
         &self.desc.column_datatype
     }
@@ -207,8 +198,9 @@ impl ColumnCatalog {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use super::{ColumnCatalog, ColumnDesc, ColumnRef};
+    use super::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
+    use crate::planner::PlanArena;
     use crate::types::LogicalType;
 
     #[test]
@@ -223,17 +215,19 @@ mod tests {
             true,
             ColumnDesc::new(LogicalType::Bigint, None, false, None)?,
         );
-        let left_ref = ColumnRef::from(left.clone());
-        let right_ref = ColumnRef::from(right.clone());
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let left_ref = arena.alloc_column(left.clone());
+        let right_ref = arena.alloc_column(right.clone());
 
         assert_ne!(left_ref, right_ref);
-        assert!(left_ref.same_column(&right_ref));
+        assert!(arena.same_column(left_ref, right_ref));
 
         left.set_name("c2".to_string());
         right.set_name("c3".to_string());
-        let left_ref = ColumnRef::from(left);
-        let right_ref = ColumnRef::from(right);
-        assert!(!left_ref.same_column(&right_ref));
+        let left_ref = arena.alloc_column(left);
+        let right_ref = arena.alloc_column(right);
+        assert!(!arena.same_column(left_ref, right_ref));
         Ok(())
     }
 }
@@ -255,7 +249,9 @@ impl ColumnDesc {
         default: Option<ScalarExpression>,
     ) -> Result<ColumnDesc, DatabaseError> {
         if let Some(expr) = &default {
-            if expr.has_table_ref_column() {
+            let table_arena = crate::planner::TableArenaCell::default();
+            let plan_arena = crate::planner::PlanArena::new(&table_arena);
+            if expr.has_table_ref_column(&plan_arena) {
                 return Err(DatabaseError::DefaultNotColumnRef);
             }
         }

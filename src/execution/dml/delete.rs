@@ -47,11 +47,13 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Delete {
     fn into_executor(
         mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
         self.input = Some(build_read(
             arena,
+            plan_arena,
             self.input_plan.take(),
             cache,
             transaction,
@@ -64,6 +66,7 @@ impl Delete {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(input) = self.input.take() else {
             arena.finish();
@@ -81,7 +84,7 @@ impl Delete {
                     Ok((
                         index_meta.id,
                         index_meta.ty,
-                        index_meta.column_exprs(table)?,
+                        index_meta.column_exprs(table, plan_arena)?,
                     ))
                 })
                 .collect::<Result<Vec<_>, DatabaseError>>()?
@@ -90,7 +93,7 @@ impl Delete {
 
         let mut deleted_count = 0;
 
-        while arena.next_tuple(input)? {
+        while arena.next_tuple(input, plan_arena)? {
             let tuple = arena.result_tuple().clone();
             for (index_id, index_ty, exprs) in index_templates.iter() {
                 if let Some(Value { exprs, values, .. }) = indexes.get_mut(index_id) {
@@ -128,7 +131,7 @@ impl Delete {
                 ) in indexes.iter_mut()
                 {
                     for value in values {
-                        let mut state = arena.local_state();
+                        let mut state = arena.local_state(plan_arena);
                         let (transaction, table_codec) = state.transaction_codec_mut();
                         transaction.del_index(
                             table_codec,
@@ -139,7 +142,7 @@ impl Delete {
                     }
                 }
 
-                let mut state = arena.local_state();
+                let mut state = arena.local_state(plan_arena);
                 let (transaction, table_codec) = state.transaction_codec_mut();
                 transaction.remove_tuple(table_codec, &self.table_name, tuple_id)?;
                 deleted_count += 1;

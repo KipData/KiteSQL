@@ -35,6 +35,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Dummy {
     fn into_executor(
         self,
         arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
@@ -48,14 +49,19 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Dummy {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
         arena.push(ExecNode::Dummy(input))
     }
 
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
-        Dummy::next_tuple(self, arena)
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
+        Dummy::next_tuple(self, arena, plan_arena)
     }
 }
 
@@ -63,6 +69,7 @@ impl Dummy {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        _: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(row) = self.row.take() else {
             arena.finish();

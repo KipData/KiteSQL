@@ -21,26 +21,28 @@ impl<V> ReferenceSerialization for [V; 2]
 where
     V: ReferenceSerialization,
 {
-    fn encode<W: Write>(
+    fn encode<W: Write, A: crate::planner::MetaArena>(
         &self,
         writer: &mut W,
         is_direct: bool,
         reference_tables: &mut ReferenceTables,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        self[0].encode(writer, is_direct, reference_tables)?;
-        self[1].encode(writer, is_direct, reference_tables)?;
+        self[0].encode(writer, is_direct, reference_tables, arena)?;
+        self[1].encode(writer, is_direct, reference_tables, arena)?;
 
         Ok(())
     }
 
-    fn decode<T: Transaction, R: Read>(
+    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
         reader: &mut R,
         drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
+        arena: &mut A,
     ) -> Result<Self, DatabaseError> {
         Ok([
-            V::decode(reader, drive, reference_tables)?,
-            V::decode(reader, drive, reference_tables)?,
+            V::decode(reader, drive, reference_tables, arena)?,
+            V::decode(reader, drive, reference_tables, arena)?,
         ])
     }
 }

@@ -21,21 +21,24 @@ use crate::storage::Transaction;
 use std::io::{Read, Write};
 
 impl ReferenceSerialization for ArcScalarFunctionImpl {
-    fn encode<W: Write>(
+    fn encode<W: Write, A: crate::planner::MetaArena>(
         &self,
         writer: &mut W,
         is_direct: bool,
         reference_tables: &mut ReferenceTables,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.summary().encode(writer, is_direct, reference_tables)
+        self.summary()
+            .encode(writer, is_direct, reference_tables, arena)
     }
 
-    fn decode<T: Transaction, R: Read>(
+    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
         reader: &mut R,
         context: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
+        arena: &mut A,
     ) -> Result<Self, DatabaseError> {
-        let summary = FunctionSummary::decode(reader, context, reference_tables)?;
+        let summary = FunctionSummary::decode(reader, context, reference_tables, arena)?;
         let Some(functions) = context.and_then(ReferenceDecodeContext::scala_functions) else {
             return Err(DatabaseError::InvalidValue(format!(
                 "scalar function decode context missing for {}",
@@ -54,21 +57,24 @@ impl ReferenceSerialization for ArcScalarFunctionImpl {
 }
 
 impl ReferenceSerialization for ArcTableFunctionImpl {
-    fn encode<W: Write>(
+    fn encode<W: Write, A: crate::planner::MetaArena>(
         &self,
         writer: &mut W,
         is_direct: bool,
         reference_tables: &mut ReferenceTables,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.summary().encode(writer, is_direct, reference_tables)
+        self.summary()
+            .encode(writer, is_direct, reference_tables, arena)
     }
 
-    fn decode<T: Transaction, R: Read>(
+    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
         reader: &mut R,
         context: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
+        arena: &mut A,
     ) -> Result<Self, DatabaseError> {
-        let summary = FunctionSummary::decode(reader, context, reference_tables)?;
+        let summary = FunctionSummary::decode(reader, context, reference_tables, arena)?;
         let Some(functions) = context.and_then(ReferenceDecodeContext::table_functions) else {
             return Err(DatabaseError::InvalidValue(format!(
                 "table function decode context missing for {}",
@@ -82,6 +88,6 @@ impl ReferenceSerialization for ArcTableFunctionImpl {
             )));
         };
 
-        Ok(Self(function.clone()))
+        Ok(function.inner.clone())
     }
 }

@@ -18,24 +18,28 @@ use crate::expression::BindEvaluator;
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::Operator;
-use crate::planner::{Childrens, LogicalPlan};
+use crate::planner::{Childrens, LogicalPlan, PlanArena};
 
 #[derive(Clone)]
 pub struct EvaluatorBind;
 
-pub(crate) fn evaluator_bind_current(plan: &mut LogicalPlan) -> Result<(), DatabaseError> {
+pub(crate) fn evaluator_bind_current(
+    plan: &mut LogicalPlan,
+    arena: &PlanArena,
+) -> Result<(), DatabaseError> {
     let operator = &mut plan.operator;
+    let mut evaluator = BindEvaluator { arena };
 
     match operator {
         Operator::Join(op) => {
             match &mut op.on {
                 JoinCondition::On { on, filter } => {
                     for (left_expr, right_expr) in on {
-                        BindEvaluator.visit(left_expr)?;
-                        BindEvaluator.visit(right_expr)?;
+                        evaluator.visit(left_expr)?;
+                        evaluator.visit(right_expr)?;
                     }
                     if let Some(expr) = filter {
-                        BindEvaluator.visit(expr)?;
+                        evaluator.visit(expr)?;
                     }
                 }
                 JoinCondition::None => {}
@@ -45,41 +49,41 @@ pub(crate) fn evaluator_bind_current(plan: &mut LogicalPlan) -> Result<(), Datab
         }
         Operator::Aggregate(op) => {
             for expr in op.agg_calls.iter_mut().chain(op.groupby_exprs.iter_mut()) {
-                BindEvaluator.visit(expr)?;
+                evaluator.visit(expr)?;
             }
         }
         Operator::Filter(op) => {
-            BindEvaluator.visit(&mut op.predicate)?;
+            evaluator.visit(&mut op.predicate)?;
         }
         Operator::Project(op) => {
             for expr in op.exprs.iter_mut() {
-                BindEvaluator.visit(expr)?;
+                evaluator.visit(expr)?;
             }
         }
         Operator::MarkApply(op) => {
             for predicate in op.predicates_mut().iter_mut() {
-                BindEvaluator.visit(predicate)?;
+                evaluator.visit(predicate)?;
             }
         }
         Operator::ScalarApply(_) => {}
         Operator::Sort(op) => {
             for sort_field in op.sort_fields.iter_mut() {
-                BindEvaluator.visit(&mut sort_field.expr)?;
+                evaluator.visit(&mut sort_field.expr)?;
             }
         }
         Operator::TopK(op) => {
             for sort_field in op.sort_fields.iter_mut() {
-                BindEvaluator.visit(&mut sort_field.expr)?;
+                evaluator.visit(&mut sort_field.expr)?;
             }
         }
         Operator::FunctionScan(op) => {
             for expr in op.table_function.args.iter_mut() {
-                BindEvaluator.visit(expr)?;
+                evaluator.visit(expr)?;
             }
         }
         Operator::Update(op) => {
             for (_, expr) in op.value_exprs.iter_mut() {
-                BindEvaluator.visit(expr)?;
+                evaluator.visit(expr)?;
             }
         }
         Operator::Dummy
@@ -114,11 +118,11 @@ pub(crate) fn evaluator_bind_current(plan: &mut LogicalPlan) -> Result<(), Datab
 }
 
 impl EvaluatorBind {
-    fn _apply(plan: &mut LogicalPlan) -> Result<(), DatabaseError> {
+    fn _apply(plan: &mut LogicalPlan, arena: &PlanArena) -> Result<(), DatabaseError> {
         match plan.childrens.as_mut() {
-            Childrens::Only(child) => Self::_apply(child)?,
+            Childrens::Only(child) => Self::_apply(child, arena)?,
             Childrens::Twins { left, right } => {
-                Self::_apply(left)?;
+                Self::_apply(left, arena)?;
                 if matches!(
                     plan.operator,
                     Operator::ScalarApply(_)
@@ -127,19 +131,23 @@ impl EvaluatorBind {
                         | Operator::Union(_)
                         | Operator::SetMembership(_)
                 ) {
-                    Self::_apply(right)?;
+                    Self::_apply(right, arena)?;
                 }
             }
             Childrens::None => {}
         }
 
-        evaluator_bind_current(plan)
+        evaluator_bind_current(plan, arena)
     }
 }
 
 impl NormalizationRule for EvaluatorBind {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
-        Self::_apply(plan)?;
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        arena: &mut crate::planner::PlanArena,
+    ) -> Result<bool, DatabaseError> {
+        Self::_apply(plan, arena)?;
         Ok(true)
     }
 }

@@ -33,10 +33,11 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor {
     fn into_executor(
         (AggregateOperator { agg_calls, .. }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let input = build_read(arena, input, cache, transaction);
+        let input = build_read(arena, plan_arena, input, cache, transaction);
         arena.push(ExecNode::SimpleAgg(SimpleAggExecutor {
             agg_calls,
             input,
@@ -44,7 +45,11 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor {
         }))
     }
 
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
         if self.returned {
             arena.finish();
             return Ok(());
@@ -52,7 +57,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor {
 
         let mut accs = create_accumulators(&self.agg_calls)?;
 
-        while arena.next_tuple(self.input)? {
+        while arena.next_tuple(self.input, plan_arena)? {
             let tuple = arena.result_tuple();
             for (acc, expr) in accs.iter_mut().zip(self.agg_calls.iter()) {
                 let ScalarExpression::AggCall { args, .. } = expr else {

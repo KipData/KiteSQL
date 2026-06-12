@@ -17,6 +17,7 @@ use crate::errors::DatabaseError;
 use crate::expression::range_detacher::Range;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::SortOption;
+use crate::planner::PlanArena;
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::value::DataValue;
 use crate::types::{ColumnId, LogicalType};
@@ -80,16 +81,18 @@ impl IndexMeta {
     pub(crate) fn column_exprs(
         &self,
         table: &TableCatalog,
+        arena: &PlanArena,
     ) -> Result<Vec<ScalarExpression>, DatabaseError> {
         let mut exprs = Vec::with_capacity(self.column_ids.len());
 
         for column_id in self.column_ids.iter() {
-            if let Some((position, column)) = table
+            if let Some((position, column_ref)) = table
                 .columns()
+                .copied()
                 .enumerate()
-                .find(|(_, column)| column.id() == Some(*column_id))
+                .find(|(_, column)| arena.column(*column).id() == Some(*column_id))
             {
-                exprs.push(ScalarExpression::column_expr(column.clone(), position));
+                exprs.push(ScalarExpression::column_expr(column_ref, position));
             } else {
                 return Err(DatabaseError::column_not_found(column_id.to_string()));
             }

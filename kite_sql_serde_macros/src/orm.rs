@@ -389,14 +389,18 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
     let primary_key_value = primary_key_value.expect("primary key checked above");
     let _primary_key_column = primary_key_column.expect("primary key checked above");
     let _primary_key_placeholder = primary_key_placeholder.expect("primary key checked above");
+    let mut from_generics = generics.clone();
+    from_generics.params.insert(0, parse_quote!('__kite_arena));
+    from_generics.params.insert(0, parse_quote!('__kite_schema));
+    let (from_impl_generics, _, from_where_clause) = from_generics.split_for_impl();
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     Ok(quote! {
-        impl #impl_generics ::core::convert::From<(&::kite_sql::types::tuple::SchemaRef, ::kite_sql::types::tuple::Tuple)>
+        impl #from_impl_generics ::core::convert::From<(&::kite_sql::types::tuple::SchemaView<'__kite_schema, '__kite_arena>, ::kite_sql::types::tuple::Tuple)>
             for #struct_name #ty_generics
-            #where_clause
+            #from_where_clause
         {
-            fn from((schema, mut tuple): (&::kite_sql::types::tuple::SchemaRef, ::kite_sql::types::tuple::Tuple)) -> Self {
+            fn from((schema, mut tuple): (&::kite_sql::types::tuple::SchemaView<'__kite_schema, '__kite_arena>, ::kite_sql::types::tuple::Tuple)) -> Self {
                 let mut struct_instance = <Self as ::core::default::Default>::default();
 
                 #(#assignments)*

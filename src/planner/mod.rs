@@ -12,23 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod arena;
 pub mod operator;
 
-use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
+use crate::catalog::{ColumnCatalog, TableName};
 use crate::planner::operator::set_membership::SetMembershipOperator;
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::operator::{Operator, PhysicalOption};
-use crate::types::tuple::{Schema, SchemaRef};
+use crate::types::tuple::Schema;
 use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
-use std::sync::Arc;
 
-#[derive(Debug, Clone)]
-pub(crate) enum SchemaOutput {
-    Schema(Schema),
-    SchemaRef(SchemaRef),
-}
+pub use arena::{MetaArena, PlanArena, SchemaSlot, TableArena, TableArenaCell};
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub enum Childrens {
@@ -101,17 +97,6 @@ pub struct LogicalPlan {
     pub(crate) operator: Operator,
     pub(crate) childrens: Box<Childrens>,
     pub(crate) physical_option: Option<PhysicalOption>,
-
-    pub(crate) _output_schema_ref: Option<SchemaRef>,
-}
-
-impl SchemaOutput {
-    pub(crate) fn columns(&self) -> impl Iterator<Item = &ColumnRef> {
-        match self {
-            SchemaOutput::Schema(schema) => schema.iter(),
-            SchemaOutput::SchemaRef(schema_ref) => schema_ref.iter(),
-        }
-    }
 }
 
 impl LogicalPlan {
@@ -120,28 +105,11 @@ impl LogicalPlan {
             operator,
             childrens: Box::new(childrens),
             physical_option: None,
-            _output_schema_ref: None,
         }
     }
 
     pub(crate) fn take(&mut self) -> Self {
         std::mem::replace(self, Self::new(Operator::Dummy, Childrens::None))
-    }
-
-    pub(crate) fn reset_output_schema_cache(&mut self) {
-        self._output_schema_ref = None;
-    }
-
-    pub(crate) fn reset_output_schema_cache_recursive(&mut self) {
-        self.reset_output_schema_cache();
-        match self.childrens.as_mut() {
-            Childrens::Only(child) => child.reset_output_schema_cache_recursive(),
-            Childrens::Twins { left, right } => {
-                left.reset_output_schema_cache_recursive();
-                right.reset_output_schema_cache_recursive();
-            }
-            Childrens::None => (),
-        }
     }
 
     pub fn referenced_table(&self) -> Vec<TableName> {
@@ -159,56 +127,92 @@ impl LogicalPlan {
         tables
     }
 
-    pub(crate) fn _output_schema_direct(
-        operator: &Operator,
-        mut childrens_iter: ChildrensIter,
-    ) -> SchemaOutput {
-        match operator {
+    pub(crate) fn visit_column_refs<A, F>(&self, arena: &mut A, f: &mut F)
+    where
+        A: MetaArena,
+        F: FnMut(&crate::catalog::ColumnRef) + ?Sized,
+    {
+        self.operator
+            .visit_referenced_columns(arena, &mut |_, column| {
+                f(column);
+                true
+            });
+        for child in self.childrens.iter() {
+            child.visit_column_refs(arena, f);
+        }
+    }
+
+    pub fn output_schema_to<'arena>(
+        &self,
+        arena: &'arena mut PlanArena,
+        slot: SchemaSlot,
+    ) -> &'arena Schema {
+        match &self.operator {
             Operator::Filter(_)
             | Operator::Sort(_)
             | Operator::Limit(_)
             | Operator::TopK(_)
-            | Operator::ScalarSubquery(_) => childrens_iter.next().unwrap().output_schema_direct(),
+            | Operator::ScalarSubquery(_) => self
+                .childrens
+                .iter()
+                .next()
+                .unwrap()
+                .output_schema_to(arena, slot),
             Operator::ScalarApply(_) | Operator::Join(_) => {
-                let mut columns = Vec::new();
+                let mut childrens = self.childrens.iter();
+                let left = childrens.next().unwrap();
+                let right = childrens.next().unwrap();
+                left.output_schema_to(arena, SchemaSlot::S0);
+                right.output_schema_to(arena, SchemaSlot::S1);
 
-                for plan in childrens_iter {
-                    for column in plan.output_schema_direct().columns() {
-                        columns.push(column.clone());
+                match slot {
+                    SchemaSlot::S0 => {
+                        let right = arena.schema(SchemaSlot::S1).clone();
+                        arena.append_schema(SchemaSlot::S0, right);
+                    }
+                    SchemaSlot::S1 => {
+                        let mut columns = arena.schema(SchemaSlot::S0).clone();
+                        columns.extend(arena.schema(SchemaSlot::S1).iter().cloned());
+                        arena.write_schema(SchemaSlot::S1, columns);
                     }
                 }
-                SchemaOutput::Schema(columns)
+                arena.schema(slot)
             }
             Operator::MarkApply(op) => {
-                let mut columns = Vec::new();
-
-                if let Some(left) = childrens_iter.next() {
-                    for column in left.output_schema_direct().columns() {
-                        columns.push(column.clone());
-                    }
+                if let Some(left) = self.childrens.iter().next() {
+                    left.output_schema_to(arena, slot);
+                } else {
+                    arena.write_schema(slot, std::iter::empty());
                 }
-                columns.push(op.output_column().clone());
-
-                SchemaOutput::Schema(columns)
+                arena.append_schema(slot, std::iter::once(op.output_column().clone()));
+                arena.schema(slot)
             }
-            Operator::Aggregate(op) => SchemaOutput::Schema(
-                op.agg_calls
+            Operator::Aggregate(op) => {
+                let columns = op
+                    .agg_calls
                     .iter()
                     .chain(op.groupby_exprs.iter())
-                    .map(|expr| expr.output_column())
-                    .collect_vec(),
-            ),
-            Operator::Project(op) => SchemaOutput::Schema(
-                op.exprs
+                    .map(|expr| expr.output_column_ref(arena))
+                    .collect_vec();
+                arena.write_schema(slot, columns);
+                arena.schema(slot)
+            }
+            Operator::Project(op) => {
+                let columns = op
+                    .exprs
                     .iter()
-                    .map(|expr| expr.output_column())
-                    .collect_vec(),
-            ),
+                    .map(|expr| expr.output_column_ref(arena))
+                    .collect_vec();
+                arena.write_schema(slot, columns);
+                arena.schema(slot)
+            }
             Operator::TableScan(op) => {
-                SchemaOutput::Schema(op.columns.iter().cloned().collect_vec())
+                arena.write_schema(slot, op.columns.iter().cloned());
+                arena.schema(slot)
             }
             Operator::FunctionScan(op) => {
-                SchemaOutput::SchemaRef(op.table_function.output_schema().clone())
+                op.table_function.output_schema_into(arena.schema_mut(slot));
+                arena.schema(slot)
             }
             Operator::Values(ValuesOperator { schema_ref, .. })
             | Operator::Union(UnionOperator {
@@ -218,90 +222,78 @@ impl LogicalPlan {
             | Operator::SetMembership(SetMembershipOperator {
                 left_schema_ref: schema_ref,
                 ..
-            }) => SchemaOutput::SchemaRef(schema_ref.clone()),
-            Operator::Dummy => SchemaOutput::Schema(vec![]),
-            Operator::ShowTable => SchemaOutput::Schema(vec![ColumnRef::from(
-                ColumnCatalog::new_dummy("TABLE".to_string()),
-            )]),
-            Operator::ShowView => SchemaOutput::Schema(vec![ColumnRef::from(
-                ColumnCatalog::new_dummy("VIEW".to_string()),
-            )]),
-            Operator::Explain => SchemaOutput::Schema(vec![ColumnRef::from(
-                ColumnCatalog::new_dummy("PLAN".to_string()),
-            )]),
-            Operator::Describe(_) => SchemaOutput::Schema(vec![
-                ColumnRef::from(ColumnCatalog::new_dummy("FIELD".to_string())),
-                ColumnRef::from(ColumnCatalog::new_dummy("TYPE".to_string())),
-                ColumnRef::from(ColumnCatalog::new_dummy("LEN".to_string())),
-                ColumnRef::from(ColumnCatalog::new_dummy("NULL".to_string())),
-                ColumnRef::from(ColumnCatalog::new_dummy("Key".to_string())),
-                ColumnRef::from(ColumnCatalog::new_dummy("DEFAULT".to_string())),
-            ]),
-            Operator::Insert(_) => SchemaOutput::Schema(vec![ColumnRef::from(
-                ColumnCatalog::new_dummy("INSERTED".to_string()),
-            )]),
-            Operator::Update(_) => SchemaOutput::Schema(vec![ColumnRef::from(
-                ColumnCatalog::new_dummy("UPDATED".to_string()),
-            )]),
-            Operator::Delete(_) => SchemaOutput::Schema(vec![ColumnRef::from(
-                ColumnCatalog::new_dummy("DELETED".to_string()),
-            )]),
-            Operator::Analyze(_) => SchemaOutput::Schema(vec![ColumnRef::from(
-                ColumnCatalog::new_dummy("STATISTICS_META_PATH".to_string()),
-            )]),
-            Operator::AddColumn(_) => SchemaOutput::Schema(vec![ColumnRef::from(
-                ColumnCatalog::new_dummy("ADD COLUMN SUCCESS".to_string()),
-            )]),
-            Operator::ChangeColumn(_) => SchemaOutput::Schema(vec![ColumnRef::from(
-                ColumnCatalog::new_dummy("CHANGE COLUMN SUCCESS".to_string()),
-            )]),
-            Operator::DropColumn(_) => SchemaOutput::Schema(vec![ColumnRef::from(
-                ColumnCatalog::new_dummy("DROP COLUMN SUCCESS".to_string()),
-            )]),
-            Operator::CreateTable(_) => SchemaOutput::Schema(vec![ColumnRef::from(
-                ColumnCatalog::new_dummy("CREATE TABLE SUCCESS".to_string()),
-            )]),
-            Operator::CreateIndex(_) => SchemaOutput::Schema(vec![ColumnRef::from(
-                ColumnCatalog::new_dummy("CREATE INDEX SUCCESS".to_string()),
-            )]),
-            Operator::CreateView(_) => SchemaOutput::Schema(vec![ColumnRef::from(
-                ColumnCatalog::new_dummy("CREATE VIEW SUCCESS".to_string()),
-            )]),
-            Operator::DropTable(_) => SchemaOutput::Schema(vec![ColumnRef::from(
-                ColumnCatalog::new_dummy("DROP TABLE SUCCESS".to_string()),
-            )]),
-            Operator::DropView(_) => SchemaOutput::Schema(vec![ColumnRef::from(
-                ColumnCatalog::new_dummy("DROP VIEW SUCCESS".to_string()),
-            )]),
-            Operator::DropIndex(_) => SchemaOutput::Schema(vec![ColumnRef::from(
-                ColumnCatalog::new_dummy("DROP INDEX SUCCESS".to_string()),
-            )]),
-            Operator::Truncate(_) => SchemaOutput::Schema(vec![ColumnRef::from(
-                ColumnCatalog::new_dummy("TRUNCATE TABLE SUCCESS".to_string()),
-            )]),
-            Operator::CopyFromFile(_) => SchemaOutput::Schema(vec![ColumnRef::from(
-                ColumnCatalog::new_dummy("COPY FROM SOURCE".to_string()),
-            )]),
-            Operator::CopyToFile(_) => SchemaOutput::Schema(vec![ColumnRef::from(
-                ColumnCatalog::new_dummy("COPY TO TARGET".to_string()),
-            )]),
+            }) => {
+                arena.write_schema(slot, schema_ref.iter().cloned());
+                arena.schema(slot)
+            }
+            Operator::Dummy => {
+                arena.write_schema(slot, std::iter::empty());
+                arena.schema(slot)
+            }
+            Operator::ShowTable => self.write_dummy_schema(arena, slot, ["TABLE"]),
+            Operator::ShowView => self.write_dummy_schema(arena, slot, ["VIEW"]),
+            Operator::Explain => self.write_dummy_schema(arena, slot, ["PLAN"]),
+            Operator::Describe(_) => self.write_dummy_schema(
+                arena,
+                slot,
+                ["FIELD", "TYPE", "LEN", "NULL", "Key", "DEFAULT"],
+            ),
+            Operator::Insert(_) => self.write_dummy_schema(arena, slot, ["INSERTED"]),
+            Operator::Update(_) => self.write_dummy_schema(arena, slot, ["UPDATED"]),
+            Operator::Delete(_) => self.write_dummy_schema(arena, slot, ["DELETED"]),
+            Operator::Analyze(_) => self.write_dummy_schema(arena, slot, ["STATISTICS_META_PATH"]),
+            Operator::AddColumn(_) => self.write_dummy_schema(arena, slot, ["ADD COLUMN SUCCESS"]),
+            Operator::ChangeColumn(_) => {
+                self.write_dummy_schema(arena, slot, ["CHANGE COLUMN SUCCESS"])
+            }
+            Operator::DropColumn(_) => {
+                self.write_dummy_schema(arena, slot, ["DROP COLUMN SUCCESS"])
+            }
+            Operator::CreateTable(_) => {
+                self.write_dummy_schema(arena, slot, ["CREATE TABLE SUCCESS"])
+            }
+            Operator::CreateIndex(_) => {
+                self.write_dummy_schema(arena, slot, ["CREATE INDEX SUCCESS"])
+            }
+            Operator::CreateView(_) => {
+                self.write_dummy_schema(arena, slot, ["CREATE VIEW SUCCESS"])
+            }
+            Operator::DropTable(_) => self.write_dummy_schema(arena, slot, ["DROP TABLE SUCCESS"]),
+            Operator::DropView(_) => self.write_dummy_schema(arena, slot, ["DROP VIEW SUCCESS"]),
+            Operator::DropIndex(_) => self.write_dummy_schema(arena, slot, ["DROP INDEX SUCCESS"]),
+            Operator::Truncate(_) => {
+                self.write_dummy_schema(arena, slot, ["TRUNCATE TABLE SUCCESS"])
+            }
+            Operator::CopyFromFile(_) => self.write_dummy_schema(arena, slot, ["COPY FROM SOURCE"]),
+            Operator::CopyToFile(_) => self.write_dummy_schema(arena, slot, ["COPY TO TARGET"]),
         }
     }
 
-    pub(crate) fn output_schema_direct(&self) -> SchemaOutput {
-        Self::_output_schema_direct(&self.operator, self.childrens.iter())
+    fn write_dummy_schema<'arena, const N: usize>(
+        &self,
+        arena: &'arena mut PlanArena,
+        slot: SchemaSlot,
+        names: [&str; N],
+    ) -> &'arena Schema {
+        arena.write_schema(slot, std::iter::empty());
+        for name in names {
+            let column = arena.alloc_column(ColumnCatalog::new_dummy(name.to_string()));
+            arena.append_schema(slot, std::iter::once(column));
+        }
+        arena.schema(slot)
     }
 
-    pub fn output_schema(&mut self) -> &SchemaRef {
-        self._output_schema_ref.get_or_insert_with(|| {
-            match Self::_output_schema_direct(&self.operator, self.childrens.iter()) {
-                SchemaOutput::Schema(schema) => Arc::new(schema),
-                SchemaOutput::SchemaRef(schema_ref) => schema_ref.clone(),
-            }
-        })
+    pub fn with_output_schema_to<R>(
+        &self,
+        arena: &mut PlanArena,
+        slot: SchemaSlot,
+        f: impl FnOnce(&PlanArena, &Schema) -> R,
+    ) -> R {
+        self.output_schema_to(arena, slot);
+        f(arena, arena.schema(slot))
     }
 
-    pub fn explain(&self, indentation: usize) -> String {
+    pub fn explain(&self, arena: &mut PlanArena, indentation: usize) -> String {
         let mut result = format!("{:indent$}{}", "", self.operator, indent = indentation);
 
         if let Some(physical_option) = &self.physical_option {
@@ -310,7 +302,7 @@ impl LogicalPlan {
 
         for child in self.childrens.iter() {
             result.push('\n');
-            result.push_str(&child.explain(indentation + 2));
+            result.push_str(&child.explain(arena, indentation + 2));
         }
 
         result

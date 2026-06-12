@@ -23,37 +23,41 @@ use crate::planner::{Childrens, LogicalPlan};
 #[derive(Copy, Clone)]
 pub struct ConstantCalculation;
 
-pub(crate) fn constant_calculation_current(plan: &mut LogicalPlan) -> Result<(), DatabaseError> {
+pub(crate) fn constant_calculation_current(
+    plan: &mut LogicalPlan,
+    arena: &crate::planner::PlanArena,
+) -> Result<(), DatabaseError> {
     let operator = &mut plan.operator;
+    let mut calculator = ConstantCalculator::new(arena);
 
     match operator {
         Operator::Aggregate(op) => {
             for expr in op.agg_calls.iter_mut().chain(op.groupby_exprs.iter_mut()) {
-                ConstantCalculator.visit(expr)?;
+                calculator.visit(expr)?;
             }
         }
         Operator::Filter(op) => {
-            ConstantCalculator.visit(&mut op.predicate)?;
+            calculator.visit(&mut op.predicate)?;
         }
         Operator::Join(op) => {
             if let JoinCondition::On { on, filter } = &mut op.on {
                 for (left_expr, right_expr) in on {
-                    ConstantCalculator.visit(left_expr)?;
-                    ConstantCalculator.visit(right_expr)?;
+                    calculator.visit(left_expr)?;
+                    calculator.visit(right_expr)?;
                 }
                 if let Some(expr) = filter {
-                    ConstantCalculator.visit(expr)?;
+                    calculator.visit(expr)?;
                 }
             }
         }
         Operator::Project(op) => {
             for expr in &mut op.exprs {
-                ConstantCalculator.visit(expr)?;
+                calculator.visit(expr)?;
             }
         }
         Operator::Sort(op) => {
             for field in &mut op.sort_fields {
-                ConstantCalculator.visit(&mut field.expr)?;
+                calculator.visit(&mut field.expr)?;
             }
         }
         _ => (),
@@ -63,13 +67,16 @@ pub(crate) fn constant_calculation_current(plan: &mut LogicalPlan) -> Result<(),
 }
 
 impl ConstantCalculation {
-    fn _apply(plan: &mut LogicalPlan) -> Result<(), DatabaseError> {
-        constant_calculation_current(plan)?;
+    fn _apply(
+        plan: &mut LogicalPlan,
+        arena: &crate::planner::PlanArena,
+    ) -> Result<(), DatabaseError> {
+        constant_calculation_current(plan, arena)?;
         match plan.childrens.as_mut() {
-            Childrens::Only(child) => Self::_apply(child.as_mut())?,
+            Childrens::Only(child) => Self::_apply(child.as_mut(), arena)?,
             Childrens::Twins { left, right } => {
-                Self::_apply(left.as_mut())?;
-                Self::_apply(right.as_mut())?;
+                Self::_apply(left.as_mut(), arena)?;
+                Self::_apply(right.as_mut(), arena)?;
             }
             Childrens::None => (),
         }
@@ -79,8 +86,12 @@ impl ConstantCalculation {
 }
 
 impl NormalizationRule for ConstantCalculation {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
-        Self::_apply(plan)?;
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        arena: &mut crate::planner::PlanArena,
+    ) -> Result<bool, DatabaseError> {
+        Self::_apply(plan, arena)?;
         Ok(true)
     }
 }
@@ -103,7 +114,11 @@ fn has_aggregate_descendant(plan: &LogicalPlan) -> bool {
 }
 
 impl NormalizationRule for SimplifyFilter {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        arena: &mut crate::planner::PlanArena,
+    ) -> Result<bool, DatabaseError> {
         if let Operator::Filter(filter_op) = &mut plan.operator {
             if filter_op.is_optimized {
                 return Ok(false);
@@ -113,7 +128,7 @@ impl NormalizationRule for SimplifyFilter {
                     return Ok(false);
                 }
             }
-            ConstantCalculator.visit(&mut filter_op.predicate)?;
+            ConstantCalculator::new(arena).visit(&mut filter_op.predicate)?;
             Simplify::default().visit(&mut filter_op.predicate)?;
             filter_op.is_optimized = true;
             return Ok(true);
@@ -134,7 +149,7 @@ mod test {
     use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::Operator;
-    use crate::planner::LogicalPlan;
+    use crate::planner::{LogicalPlan, PlanArena};
     use crate::types::value::DataValue;
     use crate::types::{ColumnId, LogicalType};
     use std::collections::Bound;
@@ -144,20 +159,24 @@ mod test {
         name: &str,
         strategy: HepBatchStrategy,
         rules: Vec<NormalizationRuleImpl>,
+        arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         HepOptimizerPipeline::builder()
             .before_batch(name.to_string(), strategy, rules)
             .build()
             .instantiate(plan)
-            .find_best(None)
+            .find_best(None, arena)
     }
 
     #[test]
     fn test_constant_calculation_omitted() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
         // (2 + (-1)) < -(c1 + 1)
-        let plan =
-            table_state.plan("select c1 + (2 + 1), 2 + 1 from t1 where (2 + (-1)) < -(c1 + 1)")?;
+        let plan = table_state.plan_with_arena(
+            "select c1 + (2 + 1), 2 + 1 from t1 where (2 + (-1)) < -(c1 + 1)",
+            &mut arena,
+        )?;
 
         let best_plan = HepOptimizerPipeline::builder()
             .before_batch(
@@ -170,7 +189,7 @@ mod test {
             )
             .build()
             .instantiate(plan)
-            .find_best(None)?;
+            .find_best(None, &mut arena)?;
         if let Operator::Project(project_op) = best_plan.clone().operator {
             let constant_expr = ScalarExpression::Constant(DataValue::Int32(3));
             if let ScalarExpression::Binary { right_expr, .. } = &project_op.exprs[0] {
@@ -184,7 +203,7 @@ mod test {
         }
         let filter_op = best_plan.childrens.pop_only();
         if let Operator::Filter(filter_op) = filter_op.operator {
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &arena)
                 .detach(&filter_op.predicate)?
                 .unwrap();
             assert_eq!(
@@ -204,14 +223,18 @@ mod test {
     #[test]
     fn test_constant_cast_elimination() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let plan = table_state
-            .plan("select cast(1 as int), cast(2 as int) + 1 from t1 where cast(3 as int) = 3")?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let plan = table_state.plan_with_arena(
+            "select cast(1 as int), cast(2 as int) + 1 from t1 where cast(3 as int) = 3",
+            &mut arena,
+        )?;
 
         let best_plan = run_with_single_batch(
             plan,
             "test_constant_cast_elimination",
             HepBatchStrategy::once_topdown(),
             vec![NormalizationRuleImpl::ConstantCalculation],
+            &mut arena,
         )?;
 
         if let Operator::Project(project_op) = best_plan.operator {
@@ -243,40 +266,50 @@ mod test {
     #[test]
     fn test_simplify_filter_single_column() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
         // c1 + 1 < -1 => c1 < -2
-        let plan_1 = table_state.plan("select * from t1 where -(c1 + 1) > 1")?;
+        let plan_1 =
+            table_state.plan_with_arena("select * from t1 where -(c1 + 1) > 1", &mut arena)?;
         // 1 - c1 < -1 => c1 > 2
-        let plan_2 = table_state.plan("select * from t1 where -(1 - c1) > 1")?;
+        let plan_2 =
+            table_state.plan_with_arena("select * from t1 where -(1 - c1) > 1", &mut arena)?;
         // c1 < -1
-        let plan_3 = table_state.plan("select * from t1 where -c1 > 1")?;
+        let plan_3 = table_state.plan_with_arena("select * from t1 where -c1 > 1", &mut arena)?;
         // c1 > 0
-        let plan_4 = table_state.plan("select * from t1 where c1 + 1 > 1")?;
+        let plan_4 =
+            table_state.plan_with_arena("select * from t1 where c1 + 1 > 1", &mut arena)?;
 
         // c1 + 1 < -1 => c1 < -2
-        let plan_5 = table_state.plan("select * from t1 where 1 < -(c1 + 1)")?;
+        let plan_5 =
+            table_state.plan_with_arena("select * from t1 where 1 < -(c1 + 1)", &mut arena)?;
         // 1 - c1 < -1 => c1 > 2
-        let plan_6 = table_state.plan("select * from t1 where 1 < -(1 - c1)")?;
+        let plan_6 =
+            table_state.plan_with_arena("select * from t1 where 1 < -(1 - c1)", &mut arena)?;
         // c1 < -1
-        let plan_7 = table_state.plan("select * from t1 where 1 < -c1")?;
+        let plan_7 = table_state.plan_with_arena("select * from t1 where 1 < -c1", &mut arena)?;
         // c1 > 0
-        let plan_8 = table_state.plan("select * from t1 where 1 < c1 + 1")?;
+        let plan_8 =
+            table_state.plan_with_arena("select * from t1 where 1 < c1 + 1", &mut arena)?;
         // c1 < 24
-        let plan_9 = table_state.plan("select * from t1 where (-1 - c1) + 1 > 24")?;
+        let plan_9 =
+            table_state.plan_with_arena("select * from t1 where (-1 - c1) + 1 > 24", &mut arena)?;
         // c1 < 24
-        let plan_10 = table_state.plan("select * from t1 where 24 < (-1 - c1) + 1")?;
+        let plan_10 =
+            table_state.plan_with_arena("select * from t1 where 24 < (-1 - c1) + 1", &mut arena)?;
 
-        let op = |plan: LogicalPlan| -> Result<Option<Range>, DatabaseError> {
+        let mut op = |plan: LogicalPlan| -> Result<Option<Range>, DatabaseError> {
             let best_plan = run_with_single_batch(
                 plan,
                 "test_simplify_filter",
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::SimplifyFilter],
+                &mut arena,
             )?;
 
             let filter_op = best_plan.childrens.pop_only();
             if let Operator::Filter(filter_op) = filter_op.operator {
                 Ok(
-                    RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+                    RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &arena)
                         .detach(&filter_op.predicate)?,
                 )
             } else {
@@ -308,6 +341,7 @@ mod test {
     #[test]
     fn test_simplify_filter_boolean_wrapped_range_comparison() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
         let expected = Some(Range::Scope {
             min: Bound::Unbounded,
             max: Bound::Included(DataValue::Int32(10)),
@@ -318,9 +352,9 @@ mod test {
             "select * from t1 where (c1 > 10) != true",
             "select * from t1 where not (c1 > 10)",
         ] {
-            let plan = table_state.plan(sql)?;
+            let plan = table_state.plan_with_arena(sql, &mut arena)?;
             assert_eq!(
-                plan_filter(&plan, table_state.column_id_by_name("c1"))?,
+                plan_filter(&plan, table_state.column_id_by_name("c1"), &mut arena)?,
                 expected
             );
         }
@@ -331,43 +365,22 @@ mod test {
     #[test]
     fn test_simplify_filter_repeating_column() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let plan = table_state.plan("select * from t1 where -(c1 + 1) > c2")?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let plan =
+            table_state.plan_with_arena("select * from t1 where -(c1 + 1) > c2", &mut arena)?;
 
         let best_plan = run_with_single_batch(
             plan,
             "test_simplify_filter",
             HepBatchStrategy::once_topdown(),
             vec![NormalizationRuleImpl::SimplifyFilter],
+            &mut arena,
         )?;
 
         let filter_op = best_plan.childrens.pop_only();
         if let Operator::Filter(filter_op) = filter_op.operator {
-            let c1_col = ColumnCatalog::direct_new(
-                ColumnSummary {
-                    name: "c1".to_string(),
-                    relation: ColumnRelation::Table {
-                        column_id: *table_state.column_id_by_name("c1"),
-                        table_name: "t1".to_string().into(),
-                        is_temp: false,
-                    },
-                },
-                false,
-                ColumnDesc::new(LogicalType::Integer, Some(0), false, None)?,
-                false,
-            );
-            let c2_col = ColumnCatalog::direct_new(
-                ColumnSummary {
-                    name: "c2".to_string(),
-                    relation: ColumnRelation::Table {
-                        column_id: *table_state.column_id_by_name("c2"),
-                        table_name: "t1".to_string().into(),
-                        is_temp: false,
-                    },
-                },
-                false,
-                ColumnDesc::new(LogicalType::Integer, None, true, None)?,
-                false,
-            );
+            let c1_ref = table_state.table.get_column_by_name("c1").unwrap();
+            let c2_ref = table_state.table.get_column_by_name("c2").unwrap();
 
             // -(c1 + 1) > c2 => c1 < -c2 - 1
             assert_eq!(
@@ -378,10 +391,7 @@ mod test {
                         op: UnaryOperator::Minus,
                         expr: Box::new(ScalarExpression::Binary {
                             op: BinaryOperator::Plus,
-                            left_expr: Box::new(ScalarExpression::column_expr(
-                                ColumnRef::from(c1_col),
-                                0
-                            )),
+                            left_expr: Box::new(ScalarExpression::column_expr(c1_ref, 0)),
                             right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(1))),
                             evaluator: None,
                             ty: LogicalType::Integer,
@@ -389,9 +399,7 @@ mod test {
                         evaluator: None,
                         ty: LogicalType::Integer,
                     }),
-                    right_expr: Box::new(
-                        ScalarExpression::column_expr(ColumnRef::from(c2_col), 1,)
-                    ),
+                    right_expr: Box::new(ScalarExpression::column_expr(c2_ref, 1)),
                     evaluator: None,
                     ty: LogicalType::Boolean,
                 }
@@ -406,17 +414,19 @@ mod test {
     fn plan_filter(
         plan: &LogicalPlan,
         column_id: &ColumnId,
+        arena: &mut PlanArena,
     ) -> Result<Option<Range>, DatabaseError> {
         let best_plan = run_with_single_batch(
             plan.clone(),
             "test_simplify_filter",
             HepBatchStrategy::once_topdown(),
             vec![NormalizationRuleImpl::SimplifyFilter],
+            arena,
         )?;
 
         let filter_op = best_plan.childrens.pop_only();
         if let Operator::Filter(filter_op) = filter_op.operator {
-            Ok(RangeDetacher::new("t1", column_id).detach(&filter_op.predicate)?)
+            Ok(RangeDetacher::new("t1", column_id, arena).detach(&filter_op.predicate)?)
         } else {
             Ok(None)
         }
@@ -425,26 +435,43 @@ mod test {
     #[test]
     fn test_simplify_filter_multiple_column() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
         // c1 + 1 < -1 => c1 < -2
-        let plan_1 = table_state.plan("select * from t1 where -(c1 + 1) > 1 and -(1 - c2) > 1")?;
+        let plan_1 = table_state.plan_with_arena(
+            "select * from t1 where -(c1 + 1) > 1 and -(1 - c2) > 1",
+            &mut arena,
+        )?;
         // 1 - c1 < -1 => c1 > 2
-        let plan_2 = table_state.plan("select * from t1 where -(1 - c1) > 1 and -(c2 + 1) > 1")?;
+        let plan_2 = table_state.plan_with_arena(
+            "select * from t1 where -(1 - c1) > 1 and -(c2 + 1) > 1",
+            &mut arena,
+        )?;
         // c1 < -1
-        let plan_3 = table_state.plan("select * from t1 where -c1 > 1 and c2 + 1 > 1")?;
+        let plan_3 = table_state
+            .plan_with_arena("select * from t1 where -c1 > 1 and c2 + 1 > 1", &mut arena)?;
         // c1 > 0
-        let plan_4 = table_state.plan("select * from t1 where c1 + 1 > 1 and -c2 > 1")?;
+        let plan_4 = table_state
+            .plan_with_arena("select * from t1 where c1 + 1 > 1 and -c2 > 1", &mut arena)?;
 
-        let range_1_c1 = plan_filter(&plan_1, table_state.column_id_by_name("c1"))?.unwrap();
-        let range_1_c2 = plan_filter(&plan_1, table_state.column_id_by_name("c2"))?.unwrap();
+        let range_1_c1 =
+            plan_filter(&plan_1, table_state.column_id_by_name("c1"), &mut arena)?.unwrap();
+        let range_1_c2 =
+            plan_filter(&plan_1, table_state.column_id_by_name("c2"), &mut arena)?.unwrap();
 
-        let range_2_c1 = plan_filter(&plan_2, table_state.column_id_by_name("c1"))?.unwrap();
-        let range_2_c2 = plan_filter(&plan_2, table_state.column_id_by_name("c2"))?.unwrap();
+        let range_2_c1 =
+            plan_filter(&plan_2, table_state.column_id_by_name("c1"), &mut arena)?.unwrap();
+        let range_2_c2 =
+            plan_filter(&plan_2, table_state.column_id_by_name("c2"), &mut arena)?.unwrap();
 
-        let range_3_c1 = plan_filter(&plan_3, table_state.column_id_by_name("c1"))?.unwrap();
-        let range_3_c2 = plan_filter(&plan_3, table_state.column_id_by_name("c2"))?.unwrap();
+        let range_3_c1 =
+            plan_filter(&plan_3, table_state.column_id_by_name("c1"), &mut arena)?.unwrap();
+        let range_3_c2 =
+            plan_filter(&plan_3, table_state.column_id_by_name("c2"), &mut arena)?.unwrap();
 
-        let range_4_c1 = plan_filter(&plan_4, table_state.column_id_by_name("c1"))?.unwrap();
-        let range_4_c2 = plan_filter(&plan_4, table_state.column_id_by_name("c2"))?.unwrap();
+        let range_4_c1 =
+            plan_filter(&plan_4, table_state.column_id_by_name("c1"), &mut arena)?.unwrap();
+        let range_4_c2 =
+            plan_filter(&plan_4, table_state.column_id_by_name("c2"), &mut arena)?.unwrap();
 
         assert_eq!(
             range_1_c1,
@@ -509,11 +536,13 @@ mod test {
     #[test]
     fn test_simplify_filter_multiple_column_in_or() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
         // c1 > c2 or c1 > 1
-        let plan_1 = table_state.plan("select * from t1 where c1 > c2 or c1 > 1")?;
+        let plan_1 =
+            table_state.plan_with_arena("select * from t1 where c1 > c2 or c1 > 1", &mut arena)?;
 
         assert_eq!(
-            plan_filter(&plan_1, table_state.column_id_by_name("c1"))?,
+            plan_filter(&plan_1, table_state.column_id_by_name("c1"), &mut arena)?,
             None
         );
 
@@ -523,10 +552,14 @@ mod test {
     #[test]
     fn test_simplify_filter_multiple_dispersed_same_column_in_or() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let plan_1 = table_state.plan("select * from t1 where c1 = 4 and c1 > c2 or c1 > 1")?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let plan_1 = table_state.plan_with_arena(
+            "select * from t1 where c1 = 4 and c1 > c2 or c1 > 1",
+            &mut arena,
+        )?;
 
         assert_eq!(
-            plan_filter(&plan_1, table_state.column_id_by_name("c1"))?,
+            plan_filter(&plan_1, table_state.column_id_by_name("c1"), &mut arena)?,
             Some(Range::Scope {
                 min: Bound::Excluded(DataValue::Int32(1)),
                 max: Bound::Unbounded,
@@ -539,10 +572,12 @@ mod test {
     #[test]
     fn test_simplify_filter_column_is_null() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let plan_1 = table_state.plan("select * from t1 where c1 is null")?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let plan_1 =
+            table_state.plan_with_arena("select * from t1 where c1 is null", &mut arena)?;
 
         assert_eq!(
-            plan_filter(&plan_1, table_state.column_id_by_name("c1"))?,
+            plan_filter(&plan_1, table_state.column_id_by_name("c1"), &mut arena)?,
             Some(Range::Eq(DataValue::Null))
         );
 
@@ -552,10 +587,12 @@ mod test {
     #[test]
     fn test_simplify_filter_column_is_not_null() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let plan_1 = table_state.plan("select * from t1 where c1 is not null")?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let plan_1 =
+            table_state.plan_with_arena("select * from t1 where c1 is not null", &mut arena)?;
 
         assert_eq!(
-            plan_filter(&plan_1, table_state.column_id_by_name("c1"))?,
+            plan_filter(&plan_1, table_state.column_id_by_name("c1"), &mut arena)?,
             None
         );
 
@@ -565,10 +602,12 @@ mod test {
     #[test]
     fn test_simplify_filter_column_in() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let plan_1 = table_state.plan("select * from t1 where c1 in (1, 2, 3)")?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let plan_1 =
+            table_state.plan_with_arena("select * from t1 where c1 in (1, 2, 3)", &mut arena)?;
 
         assert_eq!(
-            plan_filter(&plan_1, table_state.column_id_by_name("c1"))?,
+            plan_filter(&plan_1, table_state.column_id_by_name("c1"), &mut arena)?,
             Some(Range::SortedRanges(vec![
                 Range::Eq(DataValue::Int32(1)),
                 Range::Eq(DataValue::Int32(2)),
@@ -582,10 +621,12 @@ mod test {
     #[test]
     fn test_simplify_filter_column_not_in() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let plan_1 = table_state.plan("select * from t1 where c1 not in (1, 2, 3)")?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let plan_1 = table_state
+            .plan_with_arena("select * from t1 where c1 not in (1, 2, 3)", &mut arena)?;
 
         assert_eq!(
-            plan_filter(&plan_1, table_state.column_id_by_name("c1"))?,
+            plan_filter(&plan_1, table_state.column_id_by_name("c1"), &mut arena)?,
             None
         );
 

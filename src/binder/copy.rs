@@ -85,6 +85,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         to: bool,
         target: CopyTarget,
         options: &[CopyOption],
+        arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let ext_source = copy_ext_source(target, options)?;
 
@@ -99,35 +100,27 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         "'COPY FROM query'".to_string(),
                     ));
                 }
-                let mut input_plan = self.bind_query(&query)?;
-                let schema_ref = input_plan.output_schema().clone();
+                let input_plan = self.bind_query(&query, arena)?;
                 return Ok(LogicalPlan::new(
-                    Operator::CopyToFile(CopyToFileOperator {
-                        target: ext_source,
-                        schema_ref,
-                    }),
+                    Operator::CopyToFile(CopyToFileOperator { target: ext_source }),
                     Childrens::Only(Box::new(input_plan)),
                 ));
             }
         };
         let table_name: TableName = lower_case_name(&table_name)?.into();
 
-        if let Some(table) = self.context.table(table_name.clone())? {
-            let schema_ref = table.schema_ref().clone();
-
+        if let Some(table) = self.context.table(table_name.clone())?.cloned() {
             if to {
                 // COPY <source_table> TO <dest_file>
                 Ok(LogicalPlan::new(
-                    Operator::CopyToFile(CopyToFileOperator {
-                        target: ext_source,
-                        schema_ref,
-                    }),
+                    Operator::CopyToFile(CopyToFileOperator { target: ext_source }),
                     Childrens::Only(Box::new(TableScanOperator::build(
-                        table_name, table, false,
+                        table_name, &table, false,
                     )?)),
                 ))
             } else {
                 // COPY <dest_table> FROM <source_file>
+                let schema_ref = table.columns().copied().collect();
                 Ok(LogicalPlan::new(
                     Operator::CopyFromFile(CopyFromFileOperator {
                         source: ext_source,

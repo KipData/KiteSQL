@@ -22,7 +22,11 @@ use crate::planner::LogicalPlan;
 pub struct TopK;
 
 impl NormalizationRule for TopK {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        _: &mut crate::planner::PlanArena,
+    ) -> Result<bool, DatabaseError> {
         let (offset, limit) = match &plan.operator {
             Operator::Limit(op) => match op.limit {
                 Some(limit) => (op.offset, limit),

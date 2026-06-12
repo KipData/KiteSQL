@@ -45,17 +45,17 @@ impl TableScanOperator {
         with_pk: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
         // Fill all Columns in TableCatalog by default
-        let columns = table_catalog.columns().cloned().collect();
+        let columns = table_catalog.columns().copied().collect_vec();
         let mut index_infos = Vec::with_capacity(table_catalog.indexes.len());
 
         for index_meta in table_catalog.indexes.iter() {
             let mut sort_fields = Vec::with_capacity(index_meta.column_ids.len());
             for col_id in &index_meta.column_ids {
-                let column = table_catalog.get_column_by_id(col_id).ok_or_else(|| {
+                let column_ref = table_catalog.get_column_by_id(col_id).ok_or_else(|| {
                     DatabaseError::column_not_found(format!("index column id: {col_id} not found"))
                 })?;
                 sort_fields.push(SortField {
-                    expr: ScalarExpression::column_expr(column.clone(), sort_fields.len()),
+                    expr: ScalarExpression::column_expr(column_ref, sort_fields.len()),
                     asc: true,
                     nulls_first: false,
                 })
@@ -90,11 +90,7 @@ impl TableScanOperator {
 
 impl fmt::Display for TableScanOperator {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let projection_columns = self
-            .columns
-            .iter()
-            .map(|column| column.name().to_string())
-            .join(", ");
+        let projection_columns = self.columns.iter().join(", ");
         let (offset, limit) = self.limit;
 
         write!(

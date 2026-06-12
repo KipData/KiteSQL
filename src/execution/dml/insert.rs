@@ -12,18 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::{ColumnCatalog, TableName};
+use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor,
 };
 use crate::planner::operator::insert::InsertOperator;
-use crate::planner::LogicalPlan;
+use crate::planner::{LogicalPlan, SchemaSlot};
 use crate::storage::Transaction;
 use crate::types::index::Index;
-use crate::types::tuple::SchemaRef;
-use crate::types::tuple::Tuple;
+use crate::types::tuple::{Schema, Tuple};
 use crate::types::tuple_builder::TupleBuilder;
 use crate::types::value::DataValue;
 use crate::types::ColumnId;
@@ -32,7 +31,7 @@ use std::collections::HashMap;
 
 pub struct Insert {
     table_name: TableName,
-    input_schema: SchemaRef,
+    input_schema: Schema,
     input_plan: LogicalPlan,
     input: Option<ExecId>,
     is_overwrite: bool,
@@ -47,17 +46,40 @@ impl From<(InsertOperator, LogicalPlan)> for Insert {
                 is_overwrite,
                 is_mapping_by_name,
             },
-            mut input,
+            input,
         ): (InsertOperator, LogicalPlan),
     ) -> Self {
         Insert {
             table_name,
-            input_schema: input.output_schema().clone(),
+            input_schema: Default::default(),
             input_plan: input,
             input: None,
             is_overwrite,
             is_mapping_by_name,
         }
+    }
+}
+
+impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert {
+    fn into_executor(
+        mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+        cache: ReadExecutionContext<'_>,
+        transaction: &T,
+    ) -> ExecId {
+        self.input_schema = self
+            .input_plan
+            .output_schema_to(plan_arena, SchemaSlot::S0)
+            .clone();
+        self.input = Some(build_read(
+            arena,
+            plan_arena,
+            self.input_plan.take(),
+            cache,
+            transaction,
+        ));
+        arena.push(ExecNode::Insert(self))
     }
 }
 
@@ -67,47 +89,35 @@ enum MappingKey<'a> {
     Id(Option<ColumnId>),
 }
 
-impl ColumnCatalog {
-    fn key(&self, is_mapping_by_name: bool) -> MappingKey<'_> {
+impl Insert {
+    fn column_key<'a>(
+        column: &'a crate::catalog::ColumnCatalog,
+        is_mapping_by_name: bool,
+    ) -> MappingKey<'a> {
         if is_mapping_by_name {
-            MappingKey::Name(self.name())
+            MappingKey::Name(column.name())
         } else {
-            MappingKey::Id(self.id())
+            MappingKey::Id(column.id())
         }
     }
-}
 
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert {
-    fn into_executor(
-        mut self,
-        arena: &mut ExecArena<'a, T>,
-        cache: ReadExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        self.input = Some(build_read(
-            arena,
-            self.input_plan.take(),
-            cache,
-            transaction,
-        ));
-        arena.push(ExecNode::Insert(self))
-    }
-}
-
-impl Insert {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(input) = self.input.take() else {
             arena.finish();
             return Ok(());
         };
 
-        if let Some(table_snapshot) = arena
+        let table = arena
             .transaction()
             .table(arena.table_cache(), self.table_name.clone())?
-            .map(|table| table.dml_snapshot())
+            .cloned();
+        if let Some(table_snapshot) = table
+            .as_ref()
+            .map(|table| table.dml_snapshot(plan_arena))
             .transpose()?
         {
             if table_snapshot.primary_key_indices.is_empty() {
@@ -115,34 +125,37 @@ impl Insert {
             }
 
             let serializers = table_snapshot
-                .schema_ref
+                .columns
                 .iter()
-                .map(|column| column.datatype().serializable())
+                .map(|column| plan_arena.column(*column).datatype().serializable())
                 .collect_vec();
             let mut inserted_count = 0;
 
-            while arena.next_tuple(input)? {
+            while arena.next_tuple(input, plan_arena)? {
                 let values = arena.result_tuple().values.clone();
 
                 let mut tuple_map = HashMap::new();
                 for (i, value) in values.into_iter().enumerate() {
-                    tuple_map.insert(self.input_schema[i].key(self.is_mapping_by_name), value);
+                    let column = plan_arena.column(self.input_schema[i]);
+                    tuple_map.insert(Self::column_key(column, self.is_mapping_by_name), value);
                 }
                 let mut values = Vec::with_capacity(table_snapshot.columns_len);
 
-                for col in table_snapshot.schema_ref.iter() {
+                for column in table_snapshot.columns.iter() {
+                    let column = plan_arena.column(*column);
                     let mut value = {
-                        let mut value = tuple_map.remove(&col.key(self.is_mapping_by_name));
+                        let mut value =
+                            tuple_map.remove(&Self::column_key(column, self.is_mapping_by_name));
 
                         if value.is_none() {
-                            value = col.default_value()?;
+                            value = column.default_value()?;
                         }
                         value.unwrap_or(DataValue::Null)
                     };
-                    value = value.cast(col.datatype())?;
-                    value.check_len(col.datatype())?;
-                    if value.is_null() && !col.nullable() {
-                        return Err(DatabaseError::not_null_column(col.name().to_string()));
+                    value = value.cast(column.datatype())?;
+                    value.check_len(column.datatype())?;
+                    if value.is_null() && !column.nullable() {
+                        return Err(DatabaseError::not_null_column(column.name().to_string()));
                     }
                     values.push(value)
                 }
@@ -156,11 +169,11 @@ impl Insert {
                     };
                     let tuple_id = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
                     let index = Index::new(index_meta.id, &value, index_meta.ty);
-                    let mut state = arena.local_state();
+                    let mut state = arena.local_state(plan_arena);
                     let (transaction, table_codec) = state.transaction_codec_mut();
                     transaction.add_index(table_codec, &self.table_name, index, tuple_id)?;
                 }
-                let mut state = arena.local_state();
+                let mut state = arena.local_state(plan_arena);
                 let (transaction, table_codec) = state.transaction_codec_mut();
                 transaction.append_tuple(
                     table_codec,

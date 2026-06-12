@@ -14,7 +14,9 @@
 
 use super::rewrite_table_in_batches;
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor};
+use crate::execution::{
+    DDLApply, ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor,
+};
 use crate::planner::operator::alter_table::add_column::AddColumnOperator;
 use crate::storage::Transaction;
 use crate::types::index::{Index, IndexType};
@@ -36,6 +38,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for AddColumn {
     fn into_executor(
         self,
         arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
@@ -47,6 +50,7 @@ impl AddColumn {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let table_cache = arena.table_cache();
         let Some(AddColumnOperator {
@@ -59,13 +63,13 @@ impl AddColumn {
             return Ok(());
         };
 
-        let (schema, pk_ty, column_exists) = {
+        let (old_schema, pk_ty, column_exists) = {
             let table_catalog = arena
                 .transaction()
                 .table(table_cache, table_name.clone())?
                 .ok_or(DatabaseError::TableNotFound)?;
             (
-                table_catalog.schema_ref().clone(),
+                table_catalog.columns().copied().collect_vec(),
                 table_catalog.primary_keys_type().clone(),
                 table_catalog.get_column_by_name(column.name()).is_some(),
             )
@@ -79,49 +83,47 @@ impl AddColumn {
             return Err(DatabaseError::DuplicateColumn(column.name().to_string()));
         }
 
-        let old_deserializers = schema
-            .iter()
-            .map(|column_ref| column_ref.datatype().serializable())
-            .collect_vec();
-        let serializers = schema
-            .iter()
-            .map(|column_ref| column_ref.datatype().serializable())
-            .chain(::std::iter::once(column.datatype().serializable()))
-            .collect_vec();
         let default_value = column.default_value()?;
 
-        let unique_meta = {
-            let mut state = arena.local_state();
-            let (transaction, table_codec, context) = state.write_context_mut();
-            let table_cache = context.table_cache_mut();
-            let col_id = transaction.add_column(
+        let (unique_meta, apply) = {
+            let (transaction, table_codec) = arena.transaction_codec_mut();
+            let (table, col_id) = transaction.add_column(
                 table_codec,
-                table_cache,
+                plan_arena,
                 &table_name,
                 &column,
                 if_not_exists,
             )?;
-            if column.desc().is_unique() {
-                table_cache
-                    .get(&table_name)
-                    .and_then(|table| table.get_unique_index(&col_id))
-                    .cloned()
+            let unique_meta = if column.desc().is_unique() {
+                table.get_unique_index(&col_id).cloned()
             } else {
                 None
-            }
+            };
+            (unique_meta, DDLApply::upsert_table(table, false))
         };
+        arena.push_ddl_apply(apply);
         let default_for_index = default_value.clone();
 
-        let mut state = arena.local_state();
+        let mut state = arena.local_state(plan_arena);
+        let plan_arena = state.plan_arena;
         let (transaction, table_codec) = state.transaction_codec_mut();
         rewrite_table_in_batches(
             transaction,
             table_codec,
             &table_name,
             &pk_ty,
-            &old_deserializers,
-            schema.len(),
-            &serializers,
+            old_schema.len(),
+            || {
+                old_schema
+                    .iter()
+                    .map(|column| plan_arena.column(*column).datatype().serializable())
+            },
+            || {
+                old_schema
+                    .iter()
+                    .map(|column| plan_arena.column(*column).datatype().serializable())
+                    .chain(::std::iter::once(column.datatype().serializable()))
+            },
             |tuple| {
                 if let Some(value) = &default_value {
                     tuple.values.push(value.clone());

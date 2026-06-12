@@ -18,11 +18,12 @@ use crate::storage::Transaction;
 use std::io::{Read, Write};
 
 impl ReferenceSerialization for char {
-    fn encode<W: Write>(
+    fn encode<W: Write, A: crate::planner::MetaArena>(
         &self,
         writer: &mut W,
         _: bool,
         _: &mut ReferenceTables,
+        _: &A,
     ) -> Result<(), DatabaseError> {
         let mut buf = [0u8; 2];
         self.encode_utf8(&mut buf);
@@ -30,10 +31,11 @@ impl ReferenceSerialization for char {
         Ok(writer.write_all(&buf)?)
     }
 
-    fn decode<T: Transaction, R: Read>(
+    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
         reader: &mut R,
         _: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         _: &ReferenceTables,
+        _: &mut A,
     ) -> Result<Self, DatabaseError> {
         let mut buf = [0u8; 2];
         reader.read_exact(&mut buf)?;

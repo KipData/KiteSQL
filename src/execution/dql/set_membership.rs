@@ -52,11 +52,18 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SetMembership {
     fn into_executor(
         mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        self.left_input = build_read(arena, self.left_plan.take(), cache, transaction);
-        self.right_input = build_read(arena, self.right_plan.take(), cache, transaction);
+        self.left_input = build_read(arena, plan_arena, self.left_plan.take(), cache, transaction);
+        self.right_input = build_read(
+            arena,
+            plan_arena,
+            self.right_plan.take(),
+            cache,
+            transaction,
+        );
         arena.push(ExecNode::SetMembership(self))
     }
 }
@@ -67,14 +74,25 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SetMembership {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        <Self as ReadExecutor<'a, T>>::into_executor(Self::from(input), arena, cache, transaction)
+        <Self as ReadExecutor<'a, T>>::into_executor(
+            Self::from(input),
+            arena,
+            plan_arena,
+            cache,
+            transaction,
+        )
     }
 
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
-        SetMembership::next_tuple(self, arena)
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
+        SetMembership::next_tuple(self, arena, plan_arena)
     }
 }
 
@@ -82,9 +100,10 @@ impl SetMembership {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if !self.built {
-            while arena.next_tuple(self.right_input)? {
+            while arena.next_tuple(self.right_input, plan_arena)? {
                 *self
                     .right_counts
                     .entry(arena.result_tuple().clone())
@@ -94,7 +113,7 @@ impl SetMembership {
         }
 
         loop {
-            if !arena.next_tuple(self.left_input)? {
+            if !arena.next_tuple(self.left_input, plan_arena)? {
                 arena.finish();
                 return Ok(());
             }

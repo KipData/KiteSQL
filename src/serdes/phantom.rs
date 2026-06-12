@@ -19,19 +19,21 @@ use std::io::{Read, Write};
 use std::marker::PhantomData;
 
 impl<V> ReferenceSerialization for PhantomData<V> {
-    fn encode<W: Write>(
+    fn encode<W: Write, A: crate::planner::MetaArena>(
         &self,
         _: &mut W,
         _: bool,
         _: &mut ReferenceTables,
+        _: &A,
     ) -> Result<(), DatabaseError> {
         Ok(())
     }
 
-    fn decode<T: Transaction, R: Read>(
+    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
         _: &mut R,
         _: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         _: &ReferenceTables,
+        _: &mut A,
     ) -> Result<Self, DatabaseError> {
         Ok(PhantomData)
     }

@@ -39,6 +39,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for FunctionScan {
     fn into_executor(
         self,
         arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
@@ -52,14 +53,19 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for FunctionScan {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
         arena.push(ExecNode::FunctionScan(FunctionScan::from(input)))
     }
 
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
-        FunctionScan::next_tuple(self, arena)
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
+        FunctionScan::next_tuple(self, arena, plan_arena)
     }
 }
 
@@ -67,10 +73,11 @@ impl FunctionScan {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        _: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if self.iter.is_none() {
-            let TableFunction { args, inner } = &self.table_function;
-            self.iter = Some(inner.eval(args)?);
+            let TableFunction { args, catalog } = &self.table_function;
+            self.iter = Some(catalog.inner.eval(args)?);
         }
 
         let tuple = self.iter.as_mut().and_then(Iterator::next).transpose()?;

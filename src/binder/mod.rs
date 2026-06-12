@@ -51,9 +51,9 @@ use crate::errors::{DatabaseError, SqlErrorSpan};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::JoinType;
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
-use crate::planner::{LogicalPlan, SchemaOutput};
+use crate::planner::{LogicalPlan, PlanArena};
 use crate::storage::{TableCache, Transaction, ViewCache};
-use crate::types::tuple::SchemaRef;
+use crate::types::tuple::Schema;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 
@@ -173,7 +173,7 @@ pub enum SubQueryType {
 pub enum Source<'a> {
     Table(&'a TableCatalog),
     View(&'a View),
-    Schema(SchemaRef),
+    Schema(Schema),
 }
 
 #[derive(Debug, Clone)]
@@ -240,14 +240,17 @@ impl UsingColumn {
         ScalarExpression::column_expr(self.right_column.clone(), self.right_position)
     }
 
-    pub(crate) fn visible_expr(&self) -> Result<ScalarExpression, DatabaseError> {
+    pub(crate) fn visible_expr(
+        &self,
+        arena: &PlanArena,
+    ) -> Result<ScalarExpression, DatabaseError> {
         match self.join_type {
             JoinType::RightOuter => Ok(self.right_expr()),
             JoinType::Full => {
                 let left_expr = self.left_expr();
                 let right_expr = self.right_expr();
-                let left_ty = left_expr.return_type();
-                let right_ty = right_expr.return_type();
+                let left_ty = left_expr.return_type(arena);
+                let right_ty = right_expr.return_type(arena);
                 let ty = LogicalType::max_logical_type(&left_ty, &right_ty)?.into_owned();
 
                 Ok(ScalarExpression::Coalesce {
@@ -259,17 +262,16 @@ impl UsingColumn {
         }
     }
 
-    pub(crate) fn hides_column(&self, column: &ColumnRef) -> bool {
+    pub(crate) fn hides_column(&self, column: &ColumnRef, arena: &PlanArena) -> bool {
         let hidden_column = if self.join_type.is_right() {
             &self.left_column
         } else {
             &self.right_column
         };
-        hidden_column.same_column(column)
+        arena.same_column(*hidden_column, *column)
     }
 }
 
-#[derive(Clone)]
 pub struct BinderContext<'a, T: Transaction> {
     pub(crate) scala_functions: &'a ScalaFunctions,
     pub(crate) table_functions: &'a TableFunctions,
@@ -297,32 +299,34 @@ pub struct BinderContext<'a, T: Transaction> {
 }
 
 impl Source<'_> {
-    pub(crate) fn column(
-        &self,
-        name: &str,
-        schema_buf: &mut Option<SchemaOutput>,
-    ) -> Option<ColumnRef> {
+    pub(crate) fn column(&self, name: &str, arena: &mut PlanArena) -> Option<ColumnRef> {
         match self {
             Source::Table(table) => table.get_column_by_name(name),
-            Source::View(view) => schema_buf
-                .get_or_insert_with(|| view.plan.output_schema_direct())
-                .columns()
-                .find(|column| column.name() == name),
-            Source::Schema(schema_ref) => schema_ref.iter().find(|column| column.name() == name),
+            Source::View(view) => view
+                .schema
+                .iter()
+                .find(|column| arena.column(**column).name() == name)
+                .copied(),
+            Source::Schema(schema_ref) => schema_ref
+                .iter()
+                .find(|column| arena.column(**column).name() == name)
+                .copied(),
         }
-        .cloned()
     }
 
-    pub(crate) fn schema_ref(&self, schema_buf: &mut Option<SchemaOutput>) -> SchemaRef {
+    pub(crate) fn schema(&self) -> std::iter::Copied<std::slice::Iter<'_, ColumnRef>> {
         match self {
-            Source::Table(table) => table.schema_ref().clone(),
-            Source::View(view) => {
-                match schema_buf.get_or_insert_with(|| view.plan.output_schema_direct()) {
-                    SchemaOutput::Schema(schema) => Arc::new(schema.clone()),
-                    SchemaOutput::SchemaRef(schema_ref) => schema_ref.clone(),
-                }
-            }
-            Source::Schema(schema_ref) => schema_ref.clone(),
+            Source::Table(table) => table.columns().copied(),
+            Source::View(view) => view.schema.iter().copied(),
+            Source::Schema(schema_ref) => schema_ref.iter().copied(),
+        }
+    }
+
+    pub(crate) fn schema_len(&self) -> usize {
+        match self {
+            Source::Table(table) => table.columns_len(),
+            Source::View(view) => view.schema.len(),
+            Source::Schema(schema_ref) => schema_ref.len(),
         }
     }
 }
@@ -362,6 +366,27 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
             self.temp_table_id.fetch_add(1, Ordering::SeqCst)
         )
         .into()
+    }
+
+    pub(crate) fn fork(&self) -> Self {
+        BinderContext {
+            scala_functions: self.scala_functions,
+            table_functions: self.table_functions,
+            table_cache: self.table_cache,
+            view_cache: self.view_cache,
+            transaction: self.transaction,
+            bind_table: self.bind_table.clone(),
+            expr_aliases: self.expr_aliases.clone(),
+            table_aliases: self.table_aliases.clone(),
+            group_by_exprs: self.group_by_exprs.clone(),
+            agg_calls: self.agg_calls.clone(),
+            using: self.using.clone(),
+            bind_step: self.bind_step,
+            sub_queries: Default::default(),
+            has_outer_refs: false,
+            temp_table_id: self.temp_table_id.clone(),
+            allow_default: self.allow_default,
+        }
     }
 
     pub fn step(&mut self, bind_step: QueryBindStep) {
@@ -577,23 +602,21 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
     }
 }
 
-pub struct Binder<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> {
-    context: BinderContext<'a, T>,
-    table_schema_buf: HashMap<TableName, Option<SchemaOutput>>,
+pub struct Binder<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> {
+    pub(crate) context: BinderContext<'a, T>,
     args: &'a A,
     with_pk: Option<TableName>,
-    pub(crate) parent: Option<&'b Binder<'a, 'b, T, A>>,
+    pub(crate) parent: Option<&'parent BinderContext<'a, T>>,
 }
 
-impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, 'b, T, A> {
+impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, 'parent, T, A> {
     pub fn new(
         context: BinderContext<'a, T>,
         args: &'a A,
-        parent: Option<&'b Binder<'a, 'b, T, A>>,
+        parent: Option<&'parent BinderContext<'a, T>>,
     ) -> Self {
         Binder {
             context,
-            table_schema_buf: Default::default(),
             args,
             with_pk: None,
             parent,
@@ -611,22 +634,27 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
         false
     }
 
-    fn bind_inner(&mut self, stmt: &Statement) -> Result<LogicalPlan, DatabaseError> {
+    fn bind_inner(
+        &mut self,
+        stmt: &Statement,
+        arena: &mut PlanArena,
+    ) -> Result<LogicalPlan, DatabaseError> {
         let plan = match stmt {
-            Statement::Query(query) => self.bind_query(query)?,
+            Statement::Query(query) => self.bind_query(query, arena)?,
             Statement::AlterTable(alter) => {
                 if alter.operations.len() != 1 {
                     return Err(DatabaseError::UnsupportedStmt(
                         "only a single ALTER TABLE operation is supported".to_string(),
                     ));
                 }
-                self.bind_alter_table(&alter.name, &alter.operations[0])?
+                self.bind_alter_table(&alter.name, &alter.operations[0], arena)?
             }
             Statement::CreateTable(create) => self.bind_create_table(
                 &create.name,
                 &create.columns,
                 &create.constraints,
                 create.if_not_exists,
+                arena,
             )?,
             Statement::Drop {
                 object_type,
@@ -671,18 +699,20 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
                         &values.rows,
                         insert.overwrite,
                         false,
+                        arena,
                     )?,
                     _ => self.bind_insert_query(
                         table_name,
                         &insert.columns,
                         source,
                         insert.overwrite,
+                        arena,
                     )?,
                 }
             }
             Statement::Update(update) => {
                 let table = &update.table;
-                self.bind_update(table, &update.selection, &update.assignments)?
+                self.bind_update(table, &update.selection, &update.assignments, arena)?
             }
             Statement::Delete(delete) => {
                 let from = match &delete.from {
@@ -690,7 +720,7 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
                 };
                 let table = &from[0];
 
-                self.bind_delete(table, &delete.selection)?
+                self.bind_delete(table, &delete.selection, arena)?
             }
             Statement::Analyze(analyze) => {
                 let table_name = analyze.table_name.as_ref().ok_or_else(|| {
@@ -716,9 +746,9 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
                 target,
                 options,
                 ..
-            } => self.bind_copy(source.clone(), *to, target.clone(), options)?,
+            } => self.bind_copy(source.clone(), *to, target.clone(), options, arena)?,
             Statement::Explain { statement, .. } => {
-                let plan = self.bind_inner(statement)?;
+                let plan = self.bind_inner(statement, arena)?;
 
                 self.bind_explain(plan)?
             }
@@ -733,33 +763,43 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
                 &create.columns,
                 create.if_not_exists,
                 create.unique,
+                arena,
             )?,
             Statement::CreateView(create) => self.bind_create_view(
                 &create.or_replace,
                 &create.name,
                 &create.columns,
                 &create.query,
+                arena,
             )?,
             _ => return Err(DatabaseError::UnsupportedStmt(stmt.to_string())),
         };
         Ok(plan)
     }
 
-    pub fn bind(&mut self, stmt: &Statement) -> Result<LogicalPlan, DatabaseError> {
-        self.bind_inner(stmt)
+    pub fn bind(
+        &mut self,
+        stmt: &Statement,
+        arena: &mut PlanArena,
+    ) -> Result<LogicalPlan, DatabaseError> {
+        self.bind_inner(stmt, arena)
             .map_err(|err| annotate_bind_error(stmt, err))
     }
 
-    pub fn bind_set_expr(&mut self, set_expr: &SetExpr) -> Result<LogicalPlan, DatabaseError> {
+    pub fn bind_set_expr(
+        &mut self,
+        set_expr: &SetExpr,
+        arena: &mut PlanArena,
+    ) -> Result<LogicalPlan, DatabaseError> {
         match set_expr {
-            SetExpr::Select(select) => self.bind_select(select, None),
-            SetExpr::Query(query) => self.bind_query(query),
+            SetExpr::Select(select) => self.bind_select(select, None, arena),
+            SetExpr::Query(query) => self.bind_query(query, arena),
             SetExpr::SetOperation {
                 op,
                 set_quantifier,
                 left,
                 right,
-            } => self.bind_set_operation(op, set_quantifier, left, right),
+            } => self.bind_set_operation(op, set_quantifier, left, right, arena),
             expr => Err(DatabaseError::UnsupportedStmt(format!(
                 "set expression: {expr:?}"
             ))),
@@ -822,7 +862,7 @@ pub mod test {
     use crate::binder::{is_valid_identifier, Binder, BinderContext};
     use crate::catalog::{ColumnCatalog, ColumnDesc, TableCatalog};
     use crate::errors::DatabaseError;
-    use crate::planner::LogicalPlan;
+    use crate::planner::{LogicalPlan, PlanArena, TableArenaCell};
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::{table_codec::TableCodec, Storage, TableCache, Transaction, ViewCache};
     use crate::types::ColumnId;
@@ -836,11 +876,21 @@ pub mod test {
         pub(crate) table: TableCatalog,
         pub(crate) table_cache: TableCache,
         pub(crate) view_cache: ViewCache,
+        pub(crate) table_arena: TableArenaCell,
         pub(crate) storage: S,
     }
 
     impl<S: Storage> TableState<S> {
         pub(crate) fn plan<T: AsRef<str>>(&self, sql: T) -> Result<LogicalPlan, DatabaseError> {
+            let mut plan_arena = PlanArena::new(&self.table_arena);
+            self.plan_with_arena(sql, &mut plan_arena)
+        }
+
+        pub(crate) fn plan_with_arena<T: AsRef<str>>(
+            &self,
+            sql: T,
+            plan_arena: &mut PlanArena,
+        ) -> Result<LogicalPlan, DatabaseError> {
             let scala_functions = Default::default();
             let table_functions = Default::default();
             let transaction = self.storage.transaction()?;
@@ -858,7 +908,7 @@ pub mod test {
             );
             let stmt = crate::parser::parse_sql(sql)?;
 
-            binder.bind(&stmt[0])
+            binder.bind(&stmt[0], plan_arena)
         }
 
         pub(crate) fn column_id_by_name(&self, name: &str) -> &ColumnId {
@@ -870,7 +920,8 @@ pub mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let mut table_cache = crate::storage::TableCache::default();
         let view_cache = crate::storage::ViewCache::default();
-        let storage = build_test_catalog(&mut table_cache, temp_dir.path())?;
+        let table_arena = TableArenaCell::default();
+        let storage = build_test_catalog(&mut table_cache, temp_dir.path(), &table_arena)?;
         let table = {
             let transaction = storage.transaction()?;
             transaction
@@ -883,6 +934,7 @@ pub mod test {
             table,
             table_cache,
             view_cache,
+            table_arena,
             storage,
         })
     }
@@ -890,14 +942,16 @@ pub mod test {
     pub(crate) fn build_test_catalog(
         table_cache: &mut TableCache,
         path: impl Into<PathBuf> + Send,
+        table_arena: &TableArenaCell,
     ) -> Result<RocksStorage, DatabaseError> {
         let storage = RocksStorage::new(path)?;
         let mut transaction = storage.transaction()?;
         let mut table_codec = TableCodec::default();
 
-        let _ = transaction.create_table(
+        let mut plan_arena = PlanArena::new(table_arena);
+        if let Some(table) = transaction.create_table(
             &mut table_codec,
-            table_cache,
+            &mut plan_arena,
             "t1".to_string().into(),
             vec![
                 ColumnCatalog::new(
@@ -912,11 +966,15 @@ pub mod test {
                 ),
             ],
             false,
-        )?;
+        )? {
+            let table = table.transplant_to_table_arena(&plan_arena)?;
+            table_cache.insert(table.name().clone(), table);
+        }
 
-        let _ = transaction.create_table(
+        let mut plan_arena = PlanArena::new(table_arena);
+        if let Some(table) = transaction.create_table(
             &mut table_codec,
-            table_cache,
+            &mut plan_arena,
             "t2".to_string().into(),
             vec![
                 ColumnCatalog::new(
@@ -931,8 +989,10 @@ pub mod test {
                 ),
             ],
             false,
-        )?;
-
+        )? {
+            let table = table.transplant_to_table_arena(&plan_arena)?;
+            table_cache.insert(table.name().clone(), table);
+        }
         transaction.commit()?;
 
         Ok(storage)

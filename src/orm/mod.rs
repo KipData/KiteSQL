@@ -1,13 +1,13 @@
 #![doc = include_str!("README.md")]
 
-use crate::catalog::{ColumnRef, TableCatalog};
+use crate::catalog::{ColumnCatalog, TableCatalog};
 use crate::db::{
     BorrowResultIter, DBTransaction, Database, DatabaseIter, OrmIter, ResultIter, Statement,
     TransactionIter,
 };
 use crate::errors::DatabaseError;
 use crate::storage::{Storage, Transaction};
-use crate::types::tuple::{SchemaRef, Tuple};
+use crate::types::tuple::{SchemaView, Tuple};
 use crate::types::value::DataValue;
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
@@ -75,8 +75,8 @@ pub struct DescribeColumn {
     pub default: String,
 }
 
-impl From<(&SchemaRef, Tuple)> for DescribeColumn {
-    fn from((_, tuple): (&SchemaRef, Tuple)) -> Self {
+impl From<(&SchemaView<'_, '_>, Tuple)> for DescribeColumn {
+    fn from((_, tuple): (&SchemaView<'_, '_>, Tuple)) -> Self {
         let mut values = tuple.values.into_iter();
 
         let field = describe_text_value(values.next());
@@ -1676,7 +1676,9 @@ pub trait ProjectionSpec<M: Model> {
 /// let rows = database.from::<User>().project::<UserSummary>().fetch()?;
 /// # Ok::<(), kite_sql::errors::DatabaseError>(())
 /// ```
-pub trait Projection: for<'a> From<(&'a SchemaRef, Tuple)> {
+pub trait Projection:
+    for<'view, 'schema, 'arena> From<(&'view SchemaView<'schema, 'arena>, Tuple)>
+{
     /// Returns the projected select-list items for model `M`.
     fn projected_values<M: Model>(relation: &str) -> Vec<ProjectedValue>;
 }
@@ -4952,7 +4954,9 @@ fn orm_add_column_statement(
 /// In normal usage you should derive this trait with `#[derive(Model)]` rather
 /// than implementing it by hand. The derive macro generates tuple mapping,
 /// cached model/DDL statements and model metadata.
-pub trait Model: Sized + for<'a> From<(&'a SchemaRef, Tuple)> {
+pub trait Model:
+    Sized + for<'view, 'schema, 'arena> From<(&'view SchemaView<'schema, 'arena>, Tuple)>
+{
     /// Rust type used as the model primary key.
     ///
     /// This associated type lets APIs such as
@@ -5225,14 +5229,11 @@ pub trait DecimalType {}
 #[doc(hidden)]
 pub fn try_get<T: FromDataValue>(
     tuple: &mut Tuple,
-    schema: &SchemaRef,
+    schema: &SchemaView<'_, '_>,
     field_name: &str,
 ) -> Option<T> {
     let ty = T::logical_type()?;
-    let (idx, _) = schema
-        .iter()
-        .enumerate()
-        .find(|(_, col)| col.name() == field_name)?;
+    let idx = schema.position(field_name)?;
 
     let value = std::mem::replace(&mut tuple.values[idx], DataValue::Null)
         .cast(&ty)
@@ -5524,7 +5525,7 @@ fn model_column_default(model: &OrmColumn) -> Option<String> {
     model.default_expr.map(normalize_sql_fragment)
 }
 
-fn catalog_column_default(column: &ColumnRef) -> Option<String> {
+fn catalog_column_default(column: &ColumnCatalog) -> Option<String> {
     column
         .desc()
         .default
@@ -5532,12 +5533,12 @@ fn catalog_column_default(column: &ColumnRef) -> Option<String> {
         .map(|expr| normalize_sql_fragment(&expr.to_string()))
 }
 
-fn model_column_type_matches_catalog(model: &OrmColumn, column: &ColumnRef) -> bool {
+fn model_column_type_matches_catalog(model: &OrmColumn, column: &ColumnCatalog) -> bool {
     canonicalize_model_type(&model.ddl_type)
         == normalize_sql_fragment(&column.datatype().to_string())
 }
 
-fn model_column_matches_catalog(model: &OrmColumn, column: &ColumnRef) -> bool {
+fn model_column_matches_catalog(model: &OrmColumn, column: &ColumnCatalog) -> bool {
     model.primary_key == column.desc().is_primary()
         && model.unique == column.desc().is_unique()
         && model.nullable == column.nullable()
@@ -5545,7 +5546,7 @@ fn model_column_matches_catalog(model: &OrmColumn, column: &ColumnRef) -> bool {
         && model_column_default(model) == catalog_column_default(column)
 }
 
-fn model_column_rename_compatible(model: &OrmColumn, column: &ColumnRef) -> bool {
+fn model_column_rename_compatible(model: &OrmColumn, column: &ColumnCatalog) -> bool {
     model.primary_key == column.desc().is_primary()
         && model.unique == column.desc().is_unique()
         && model.nullable == column.nullable()
@@ -5564,12 +5565,13 @@ where
 fn extract_optional_row<I, T>(mut iter: I) -> Result<Option<T>, DatabaseError>
 where
     I: ResultIter,
-    T: for<'a> From<(&'a SchemaRef, Tuple)>,
+    T: for<'view, 'schema, 'arena> From<(&'view SchemaView<'schema, 'arena>, Tuple)>,
 {
-    let schema = iter.schema().clone();
-
     Ok(match iter.next() {
-        Some(tuple) => Some(T::from((&schema, tuple?))),
+        Some(tuple) => {
+            let tuple = tuple?;
+            Some(iter.schema(|schema| T::from((schema, tuple))))
+        }
         None => None,
     })
 }

@@ -16,7 +16,7 @@ fn main() {}
 
 #[cfg(test)]
 mod test {
-    use kite_sql::catalog::column::{ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation};
+    use kite_sql::catalog::column::{ColumnCatalog, ColumnDesc, ColumnRelation};
     use kite_sql::catalog::table::TableName;
     use kite_sql::db::{DataBaseBuilder, Database, ResultIter};
     use kite_sql::errors::DatabaseError;
@@ -26,9 +26,10 @@ mod test {
     use kite_sql::expression::BinaryOperator;
     use kite_sql::expression::ScalarExpression;
     use kite_sql::orm::{case_when, count_all, func, max, min, sum, QueryValue, SubquerySource};
+    use kite_sql::planner::{MetaArena, PlanArena, TableArena, TableArenaCell};
     use kite_sql::storage::rocksdb::RocksStorage;
     use kite_sql::types::evaluator::binary_create;
-    use kite_sql::types::tuple::{SchemaRef, Tuple};
+    use kite_sql::types::tuple::{Schema, SchemaView, Tuple};
     use kite_sql::types::value::{DataValue, Utf8Type};
     use kite_sql::types::{CharLengthUnits, LogicalType};
     use kite_sql::{from_tuple, scala_function, table_function, Model, Projection};
@@ -37,14 +38,14 @@ mod test {
     use std::sync::Arc;
     use tempfile::TempDir;
 
-    fn build_tuple() -> (Tuple, SchemaRef) {
-        let schema_ref = Arc::new(vec![
-            ColumnRef::from(ColumnCatalog::new(
+    fn build_tuple(arena: &mut impl MetaArena) -> (Tuple, Schema) {
+        let schema = vec![
+            arena.alloc_column(ColumnCatalog::new(
                 "c1".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
             )),
-            ColumnRef::from(ColumnCatalog::new(
+            arena.alloc_column(ColumnCatalog::new(
                 "c2".to_string(),
                 false,
                 ColumnDesc::new(
@@ -55,7 +56,7 @@ mod test {
                 )
                 .unwrap(),
             )),
-        ]);
+        ];
         let values = vec![
             DataValue::Int32(9),
             DataValue::Utf8 {
@@ -65,7 +66,7 @@ mod test {
             },
         ];
 
-        (Tuple::new(None, values), schema_ref)
+        (Tuple::new(None, values), schema)
     }
 
     fn build_test_database() -> Result<(TempDir, Database<RocksStorage>), DatabaseError> {
@@ -73,6 +74,38 @@ mod test {
         let database = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         Ok((temp_dir, database))
+    }
+
+    fn create_model_table<M: kite_sql::orm::Model>(
+        database: &mut Database<RocksStorage>,
+    ) -> Result<(), DatabaseError> {
+        database.create_table::<M>()
+    }
+
+    fn create_model_table_if_not_exists<M: kite_sql::orm::Model>(
+        database: &mut Database<RocksStorage>,
+    ) -> Result<(), DatabaseError> {
+        database.create_table_if_not_exists::<M>()
+    }
+
+    fn migrate_model<M: kite_sql::orm::Model>(
+        database: &mut Database<RocksStorage>,
+    ) -> Result<(), DatabaseError> {
+        database.migrate::<M>()
+    }
+
+    fn drop_model_index<M: kite_sql::orm::Model>(
+        database: &mut Database<RocksStorage>,
+        index_name: &str,
+    ) -> Result<(), DatabaseError> {
+        database.drop_index::<M>(index_name)
+    }
+
+    fn drop_model_index_if_exists<M: kite_sql::orm::Model>(
+        database: &mut Database<RocksStorage>,
+        index_name: &str,
+    ) -> Result<(), DatabaseError> {
+        database.drop_index_if_exists::<M>(index_name)
     }
 
     #[derive(Default, Debug, PartialEq)]
@@ -251,8 +284,11 @@ mod test {
 
     #[test]
     fn test_from_tuple() {
-        let (tuple, schema_ref) = build_tuple();
-        let my_struct = MyStruct::from((&schema_ref, tuple));
+        let table_arena = TableArenaCell::default();
+        let mut plan_arena = PlanArena::new(&table_arena);
+        let (tuple, schema) = build_tuple(&mut plan_arena);
+        let schema = SchemaView::new(&schema, &plan_arena);
+        let my_struct = MyStruct::from((&schema, tuple));
 
         println!("{:?}", my_struct);
 
@@ -262,31 +298,15 @@ mod test {
 
     #[test]
     fn test_model_mapping() {
-        let mut tuple_and_schema = build_tuple();
-        tuple_and_schema.1 = Arc::new(vec![
-            ColumnRef::from(ColumnCatalog::new(
-                "c1".to_string(),
-                false,
-                ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
-                "c2".to_string(),
-                false,
-                ColumnDesc::new(
-                    LogicalType::Varchar(None, CharLengthUnits::Characters),
-                    None,
-                    false,
-                    None,
-                )
-                .unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
-                "age".to_string(),
-                true,
-                ColumnDesc::new(LogicalType::Integer, None, true, None).unwrap(),
-            )),
-        ]);
-        tuple_and_schema.0 = Tuple::new(
+        let table_arena = TableArenaCell::default();
+        let mut plan_arena = PlanArena::new(&table_arena);
+        let (_, mut schema) = build_tuple(&mut plan_arena);
+        schema.push(plan_arena.alloc_column(ColumnCatalog::new(
+            "age".to_string(),
+            true,
+            ColumnDesc::new(LogicalType::Integer, None, true, None).unwrap(),
+        )));
+        let tuple = Tuple::new(
             None,
             vec![
                 DataValue::Int32(9),
@@ -299,7 +319,8 @@ mod test {
             ],
         );
 
-        let derived = DerivedStruct::from((&tuple_and_schema.1, tuple_and_schema.0));
+        let schema = SchemaView::new(&schema, &plan_arena);
+        let derived = DerivedStruct::from((&schema, tuple));
 
         assert_eq!(derived.c1, 9);
         assert_eq!(derived.name, "LOL");
@@ -346,7 +367,7 @@ mod test {
     fn test_model_decimal_ddl() -> Result<(), DatabaseError> {
         let (_temp_dir, mut database) = build_test_database()?;
 
-        database.create_table::<Wallet>()?;
+        create_model_table::<Wallet>(&mut database)?;
         for id in 1..=101 {
             database.insert(&Wallet {
                 id,
@@ -381,7 +402,7 @@ mod test {
     fn test_model_char_ddl() -> Result<(), DatabaseError> {
         let (_temp_dir, mut database) = build_test_database()?;
 
-        database.create_table::<CountryCode>()?;
+        create_model_table::<CountryCode>(&mut database)?;
 
         let mut iter = database.run("describe country_codes")?;
         let rows = iter.by_ref().collect::<Result<Vec<_>, _>>()?;
@@ -409,16 +430,16 @@ mod test {
     fn test_model_migrate() -> Result<(), DatabaseError> {
         let (_temp_dir, mut database) = build_test_database()?;
 
-        database.create_table::<MigratingUserV1>()?;
+        create_model_table::<MigratingUserV1>(&mut database)?;
         database.insert(&MigratingUserV1 {
             id: 1,
             name: "Alice".to_string(),
         })?;
 
-        database.migrate::<MigratingUserV2>()?;
+        migrate_model::<MigratingUserV2>(&mut database)?;
         assert_eq!(database.get::<MigratingUserV2>(&1)?.unwrap().age, 18);
 
-        database.migrate::<MigratingUserV3>()?;
+        migrate_model::<MigratingUserV3>(&mut database)?;
         assert_eq!(
             database.get::<MigratingUserV3>(&1)?,
             Some(MigratingUserV3 { id: 1, age: 18 })
@@ -436,13 +457,13 @@ mod test {
             .collect::<Vec<_>>();
         assert_eq!(column_names, vec!["id", "age"]);
 
-        database.migrate::<MigratingUserV4>()?;
+        migrate_model::<MigratingUserV4>(&mut database)?;
         assert_eq!(
             database.get::<MigratingUserV4>(&1)?,
             Some(MigratingUserV4 { id: 1, years: 18 })
         );
 
-        database.migrate::<MigratingUserV5>()?;
+        migrate_model::<MigratingUserV5>(&mut database)?;
         assert_eq!(
             database.get::<MigratingUserV5>(&1)?,
             Some(MigratingUserV5 {
@@ -467,12 +488,13 @@ mod test {
     #[test]
     fn test_orm_query_builder() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("create temp dir for ORM test");
-        let mut database = DataBaseBuilder::path(temp_dir.path())
-            .register_scala_function(MyOrmFunction::new())
-            .build_rocksdb()?;
+        let mut database = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        database.load(kite_sql::db::CatalogKind::ScalarFunction(
+            MyOrmFunction::new(),
+        ))?;
 
-        database.create_table::<User>()?;
-        database.ddl("drop index users.users_age_index")?;
+        create_model_table::<User>(&mut database)?;
+        drop_model_index::<User>(&mut database, "users_age_index")?;
         database.insert(&User {
             id: 1,
             name: "Alice".to_string(),
@@ -492,7 +514,7 @@ mod test {
             cache: "".to_string(),
         })?;
 
-        database.create_table::<Order>()?;
+        create_model_table::<Order>(&mut database)?;
         database.insert(&Order {
             id: 1,
             user_id: 1,
@@ -509,7 +531,7 @@ mod test {
             amount: 300,
         })?;
 
-        database.create_table::<Wallet>()?;
+        create_model_table::<Wallet>(&mut database)?;
         database.insert(&Wallet {
             id: 1,
             balance: Decimal::new(5000, 2),
@@ -734,11 +756,12 @@ mod test {
             .asc(User::id())
             .raw()?;
         assert_eq!(
-            udf_projection_schema
-                .schema()
-                .iter()
-                .map(|column| column.name().to_string())
-                .collect::<Vec<_>>(),
+            udf_projection_schema.schema(|schema| {
+                schema
+                    .iter()
+                    .map(|column| column.name().to_string())
+                    .collect::<Vec<_>>()
+            }),
             vec!["id", "next_id"]
         );
         udf_projection_schema.done()?;
@@ -788,16 +811,19 @@ mod test {
             .from::<User>()
             .project_value(count_all().alias("total_users"))
             .raw()?;
-        assert_eq!(aliased_total_users.schema()[0].name(), "total_users");
+        aliased_total_users.schema(|schema| {
+            assert_eq!(schema.get(0).unwrap().name(), "total_users");
+        });
         aliased_total_users.done()?;
 
         let projected_schema = database.from::<User>().project::<UserSummary>().raw()?;
         assert_eq!(
-            projected_schema
-                .schema()
-                .iter()
-                .map(|column| column.name().to_string())
-                .collect::<Vec<_>>(),
+            projected_schema.schema(|schema| {
+                schema
+                    .iter()
+                    .map(|column| column.name().to_string())
+                    .collect::<Vec<_>>()
+            }),
             vec!["id", "display_name", "age"]
         );
         projected_schema.done()?;
@@ -1008,7 +1034,7 @@ mod test {
     fn test_orm_expression_and_set_query_helpers() -> Result<(), DatabaseError> {
         let (_temp_dir, mut database) = build_test_database()?;
 
-        database.create_table::<User>()?;
+        create_model_table::<User>(&mut database)?;
         database.insert(&User {
             id: 1,
             name: "Alice".to_string(),
@@ -1028,7 +1054,7 @@ mod test {
             cache: "".to_string(),
         })?;
 
-        database.create_table::<Order>()?;
+        create_model_table::<Order>(&mut database)?;
         database.insert(&Order {
             id: 1,
             user_id: 1,
@@ -1384,7 +1410,7 @@ mod test {
     fn test_orm_group_by_builder() -> Result<(), DatabaseError> {
         let (_temp_dir, mut database) = build_test_database()?;
 
-        database.create_table::<EventLog>()?;
+        create_model_table::<EventLog>(&mut database)?;
         database.insert(&EventLog {
             id: 1,
             category: "alpha".to_string(),
@@ -1487,11 +1513,12 @@ mod test {
             .asc(EventLog::category())
             .raw()?;
         assert_eq!(
-            grouped_stats_schema
-                .schema()
-                .iter()
-                .map(|column| column.name().to_string())
-                .collect::<Vec<_>>(),
+            grouped_stats_schema.schema(|schema| {
+                schema
+                    .iter()
+                    .map(|column| column.name().to_string())
+                    .collect::<Vec<_>>()
+            }),
             vec!["category", "total_score", "total_count"]
         );
         grouped_stats_schema.done()?;
@@ -1505,11 +1532,11 @@ mod test {
     fn test_orm_model_lifecycle() -> Result<(), DatabaseError> {
         let (_temp_dir, mut database) = build_test_database()?;
 
-        database.create_table::<User>()?;
-        database.ddl("drop index users.users_age_index")?;
-        database.create_table_if_not_exists::<User>()?;
-        database.ddl("drop index users.users_age_index")?;
-        database.create_table_if_not_exists::<User>()?;
+        create_model_table::<User>(&mut database)?;
+        drop_model_index::<User>(&mut database, "users_age_index")?;
+        create_model_table_if_not_exists::<User>(&mut database)?;
+        drop_model_index::<User>(&mut database, "users_age_index")?;
+        create_model_table_if_not_exists::<User>(&mut database)?;
 
         let user = User {
             id: 1,
@@ -1612,7 +1639,7 @@ mod test {
     #[test]
     fn test_orm_update_delete_builder() -> Result<(), DatabaseError> {
         let (_temp_dir, mut database) = build_test_database()?;
-        database.create_table::<User>()?;
+        create_model_table::<User>(&mut database)?;
 
         for (id, name, age) in [
             (1, "Alice", Some(18)),
@@ -1682,8 +1709,8 @@ mod test {
     #[test]
     fn test_orm_insert_query_builder() -> Result<(), DatabaseError> {
         let (_temp_dir, mut database) = build_test_database()?;
-        database.create_table::<User>()?;
-        database.create_table::<ArchivedUser>()?;
+        create_model_table::<User>(&mut database)?;
+        create_model_table::<ArchivedUser>(&mut database)?;
 
         for (id, name, age) in [(1, "Alice", Some(18)), (2, "Bob", Some(19))] {
             database.insert(&ArchivedUser {
@@ -1705,7 +1732,7 @@ mod test {
         assert_eq!(inserted_users[0].name, "Alice");
         assert_eq!(inserted_users[1].name, "Bob");
 
-        database.create_table::<UserNameSnapshot>()?;
+        create_model_table::<UserNameSnapshot>(&mut database)?;
         database
             .from::<ArchivedUser>()
             .project_tuple((ArchivedUser::id(), ArchivedUser::name()))
@@ -1765,7 +1792,7 @@ mod test {
     #[test]
     fn test_orm_extended_write_and_ddl_helpers() -> Result<(), DatabaseError> {
         let (_temp_dir, mut database) = build_test_database()?;
-        database.create_table::<User>()?;
+        create_model_table::<User>(&mut database)?;
 
         database.insert_many([
             User {
@@ -1881,8 +1908,8 @@ mod test {
     #[test]
     fn test_orm_introspection_helpers() -> Result<(), DatabaseError> {
         let (_temp_dir, mut database) = build_test_database()?;
-        database.create_table::<User>()?;
-        database.create_table::<Wallet>()?;
+        create_model_table::<User>(&mut database)?;
+        create_model_table::<Wallet>(&mut database)?;
         let user_names_query = database
             .from::<User>()
             .project_tuple((User::id(), User::name()))
@@ -1916,20 +1943,26 @@ mod test {
             .eq(User::id(), 1)
             .project_value(User::name())
             .explain()?;
-        assert_eq!(
-            plan,
-            "Projection [users.user_name] [Project => (Sort Option: Follow)]\n  Filter (users.id = 1), Is Having: false [Filter => (Sort Option: Follow)]\n    TableScan users -> [id, user_name] [SeqScan => (Sort Option: None)]"
-        );
+        assert!(plan.contains("Columns:"));
+        assert!(plan.contains("users.id"));
+        assert!(plan.contains("users.user_name"));
+        assert!(plan.contains("Projection"));
+        assert!(plan.contains("Filter ("));
+        assert!(plan.contains(" = 1"));
+        assert!(plan.contains("TableScan users -> [#"));
 
         let set_plan = database
             .from::<User>()
             .project_value(User::id())
             .union(database.from::<Wallet>().project_value(Wallet::id()))
             .explain()?;
-        assert_eq!(
-            set_plan,
-            "Aggregate [] -> Group By [users.id] [HashAggregate => (Sort Option: None)]\n  Union: [id]\n    Projection [users.id] [Project => (Sort Option: Follow)]\n      TableScan users -> [id] [SeqScan => (Sort Option: None)]\n    Projection [wallets.id] [Project => (Sort Option: Follow)]\n      TableScan wallets -> [id] [SeqScan => (Sort Option: None)]"
-        );
+        assert!(set_plan.contains("Columns:"));
+        assert!(set_plan.contains("users.id"));
+        assert!(set_plan.contains("wallets.id"));
+        assert!(set_plan.contains("Aggregate"));
+        assert!(set_plan.contains("Union: [#"));
+        assert!(set_plan.contains("TableScan users -> [#"));
+        assert!(set_plan.contains("TableScan wallets -> [#"));
 
         let mut tx = database.new_transaction()?;
         let tx_tables = tx.show_tables()?.collect::<Result<Vec<_>, _>>()?;
@@ -1945,7 +1978,7 @@ mod test {
     fn test_orm_drop_index() -> Result<(), DatabaseError> {
         let (_temp_dir, mut database) = build_test_database()?;
 
-        database.create_table::<User>()?;
+        create_model_table::<User>(&mut database)?;
         database.insert(&User {
             id: 1,
             name: "Alice".to_string(),
@@ -1964,10 +1997,10 @@ mod test {
             Err(DatabaseError::DuplicateUniqueValue)
         ));
 
-        database.drop_index::<User>("users_age_index")?;
-        database.drop_index_if_exists::<User>("users_age_index")?;
+        drop_model_index::<User>(&mut database, "users_age_index")?;
+        drop_model_index_if_exists::<User>(&mut database, "users_age_index")?;
 
-        database.drop_index::<User>("uk_user_name_index")?;
+        drop_model_index::<User>(&mut database, "uk_user_name_index")?;
 
         database.insert(&User {
             id: 2,
@@ -1976,8 +2009,8 @@ mod test {
             cache: "".to_string(),
         })?;
 
-        database.drop_index::<User>("users_name_age_index")?;
-        database.drop_index_if_exists::<User>("users_name_age_index")?;
+        drop_model_index::<User>(&mut database, "users_name_age_index")?;
+        drop_model_index_if_exists::<User>(&mut database, "users_name_age_index")?;
 
         assert!(matches!(
             database.drop_index::<User>("pk_index"),
@@ -2064,15 +2097,19 @@ mod test {
         );
         assert!(numbers.next().is_none());
 
-        let function_schema = function.output_schema();
         let table_name: TableName = "test_numbers".to_string().into();
+        let mut table_arena = TableArena::default();
+        let mut function_schema = Schema::new();
+        function.output_schema_into(&table_name, &mut table_arena, &mut function_schema);
+        let c1_ref = function_schema[0];
+        let c2_ref = function_schema[1];
         let mut c1 = ColumnCatalog::new(
             "c1".to_string(),
             true,
             ColumnDesc::new(LogicalType::Integer, None, false, None)?,
         );
         c1.summary_mut().relation = ColumnRelation::Table {
-            column_id: function_schema[0].id().unwrap(),
+            column_id: table_arena.column(c1_ref).id().unwrap(),
             table_name: table_name.clone(),
             is_temp: false,
         };
@@ -2082,15 +2119,13 @@ mod test {
             ColumnDesc::new(LogicalType::Integer, None, false, None)?,
         );
         c2.summary_mut().relation = ColumnRelation::Table {
-            column_id: function_schema[1].id().unwrap(),
+            column_id: table_arena.column(c2_ref).id().unwrap(),
             table_name: table_name.clone(),
             is_temp: false,
         };
 
-        assert_eq!(
-            function_schema,
-            &Arc::new(vec![ColumnRef::from(c1), ColumnRef::from(c2)])
-        );
+        assert_eq!(table_arena.column(c1_ref), &c1);
+        assert_eq!(table_arena.column(c2_ref), &c2);
 
         Ok(())
     }

@@ -19,24 +19,31 @@ use crate::optimizer::core::rule::NormalizationRule;
 use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyQuantifier};
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
-use crate::planner::{Childrens, LogicalPlan};
+use crate::planner::{Childrens, LogicalPlan, SchemaSlot};
 use crate::types::index::{IndexLookup, IndexType};
 use crate::types::tuple::Schema;
 
 pub(crate) struct ParameterizeMarkApply;
 
 impl NormalizationRule for ParameterizeMarkApply {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        arena: &mut crate::planner::PlanArena,
+    ) -> Result<bool, DatabaseError> {
         let (op, new_probe) = match (&mut plan.operator, plan.childrens.as_mut()) {
             (Operator::MarkApply(op), Childrens::Twins { left, right }) => {
-                let new_probe = find_parameterized_probe(
+                left.output_schema_to(arena, SchemaSlot::S0);
+                right.output_schema_to(arena, SchemaSlot::S1);
+                let probe = find_parameterized_probe(
                     op.kind.clone(),
                     op.predicates(),
-                    left.output_schema().as_ref(),
-                    right.output_schema().as_ref(),
-                )
-                .and_then(|(right_column, left_expr)| {
-                    parameterize_right_subtree(right, &right_column).then_some(left_expr)
+                    arena.schema(SchemaSlot::S0),
+                    arena.schema(SchemaSlot::S1),
+                    arena,
+                );
+                let new_probe = probe.and_then(|(right_column, left_expr)| {
+                    parameterize_right_subtree(right, &right_column, arena).then_some(left_expr)
                 });
                 (op, new_probe)
             }
@@ -54,14 +61,15 @@ fn find_parameterized_probe(
     predicates: &[ScalarExpression],
     left_schema: &Schema,
     right_schema: &Schema,
+    arena: &crate::planner::PlanArena,
 ) -> Option<(ColumnRef, ScalarExpression)> {
     match kind {
         MarkApplyKind::Exists => predicates.iter().find_map(|predicate| {
-            extract_parameterized_probe(predicate, left_schema, right_schema)
+            extract_parameterized_probe(predicate, left_schema, right_schema, arena)
         }),
         MarkApplyKind::Quantified(MarkApplyQuantifier::Any) => {
             predicates.first().and_then(|predicate| {
-                extract_parameterized_probe(predicate, left_schema, right_schema)
+                extract_parameterized_probe(predicate, left_schema, right_schema, arena)
             })
         }
         MarkApplyKind::Quantified(MarkApplyQuantifier::All) => None,
@@ -72,6 +80,7 @@ fn extract_parameterized_probe(
     predicate: &ScalarExpression,
     left_schema: &Schema,
     right_schema: &Schema,
+    arena: &crate::planner::PlanArena,
 ) -> Option<(ColumnRef, ScalarExpression)> {
     match predicate.unpack_alias_ref() {
         ScalarExpression::Binary {
@@ -79,10 +88,22 @@ fn extract_parameterized_probe(
             left_expr,
             right_expr,
             ..
-        } => extract_parameterized_probe_side(left_expr, right_expr, left_schema, right_schema)
-            .or_else(|| {
-                extract_parameterized_probe_side(right_expr, left_expr, left_schema, right_schema)
-            }),
+        } => extract_parameterized_probe_side(
+            left_expr,
+            right_expr,
+            left_schema,
+            right_schema,
+            arena,
+        )
+        .or_else(|| {
+            extract_parameterized_probe_side(
+                right_expr,
+                left_expr,
+                left_schema,
+                right_schema,
+                arena,
+            )
+        }),
         _ => None,
     }
 }
@@ -92,19 +113,20 @@ fn extract_parameterized_probe_side(
     left_expr: &ScalarExpression,
     left_schema: &Schema,
     right_schema: &Schema,
+    arena: &crate::planner::PlanArena,
 ) -> Option<(ColumnRef, ScalarExpression)> {
     let (right_column, _) = right_expr.unpack_alias_ref().unpack_bound_col(false)?;
 
-    if !schema_contains_column(right_schema, &right_column) {
+    if !schema_contains_column(right_schema, &right_column, arena) {
         return None;
     }
-    if !left_expr.all_referenced_columns(true, |candidate| {
-        schema_contains_column(left_schema, candidate)
+    if !left_expr.all_referenced_columns(arena, |arena, candidate| {
+        schema_contains_column(left_schema, candidate, arena)
     }) {
         return None;
     }
-    if left_expr.any_referenced_column(true, |candidate| {
-        schema_contains_column(right_schema, candidate)
+    if left_expr.any_referenced_column(arena, |arena, candidate| {
+        schema_contains_column(right_schema, candidate, arena)
     }) {
         return None;
     }
@@ -112,13 +134,18 @@ fn extract_parameterized_probe_side(
     Some((right_column, left_expr.clone()))
 }
 
-fn parameterize_right_subtree(plan: &mut LogicalPlan, right_column: &ColumnRef) -> bool {
+fn parameterize_right_subtree(
+    plan: &mut LogicalPlan,
+    right_column: &ColumnRef,
+    arena: &crate::planner::PlanArena,
+) -> bool {
     if matches!(plan.operator, Operator::TableScan(_)) {
         let index_info = {
             let Operator::TableScan(scan_op) = &mut plan.operator else {
                 unreachable!();
             };
-            let Some(target_index) = pick_parameterized_index_position(scan_op, right_column)
+            let Some(target_index) =
+                pick_parameterized_index_position(scan_op, right_column, arena)
             else {
                 return false;
             };
@@ -147,7 +174,7 @@ fn parameterize_right_subtree(plan: &mut LogicalPlan, right_column: &ColumnRef) 
     }
 
     match plan.childrens.as_mut() {
-        Childrens::Only(child) => parameterize_right_subtree(child, right_column),
+        Childrens::Only(child) => parameterize_right_subtree(child, right_column, arena),
         _ => false,
     }
 }
@@ -155,7 +182,9 @@ fn parameterize_right_subtree(plan: &mut LogicalPlan, right_column: &ColumnRef) 
 fn pick_parameterized_index_position(
     scan_op: &TableScanOperator,
     right_column: &ColumnRef,
+    arena: &crate::planner::PlanArena,
 ) -> Option<usize> {
+    let right_column = arena.column(*right_column);
     let column_id = right_column.id()?;
     let table_name = right_column.table_name()?;
 
@@ -184,6 +213,12 @@ fn index_priority(index_type: IndexType) -> usize {
     }
 }
 
-fn schema_contains_column(schema: &Schema, column: &ColumnRef) -> bool {
-    schema.iter().any(|candidate| candidate.same_column(column))
+fn schema_contains_column(
+    schema: &Schema,
+    column: &ColumnRef,
+    arena: &crate::planner::PlanArena,
+) -> bool {
+    schema
+        .iter()
+        .any(|candidate| arena.same_column(*candidate, *column))
 }

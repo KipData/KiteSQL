@@ -37,28 +37,59 @@ pub(crate) mod test {
         let mut reference_tables = ReferenceTables::new();
         let mut bytes = Vec::new();
         let mut cursor = Cursor::new(&mut bytes);
+        let mut arena = crate::planner::TableArena::default();
 
-        source_0.encode(&mut cursor, false, &mut reference_tables)?;
-        source_1.encode(&mut cursor, false, &mut reference_tables)?;
-        source_2.encode(&mut cursor, false, &mut reference_tables)?;
-        source_3.encode(&mut cursor, false, &mut reference_tables)?;
-        source_4.encode(&mut cursor, false, &mut reference_tables)?;
-        source_5.encode(&mut cursor, false, &mut reference_tables)?;
+        source_0.encode(&mut cursor, false, &mut reference_tables, &arena)?;
+        source_1.encode(&mut cursor, false, &mut reference_tables, &arena)?;
+        source_2.encode(&mut cursor, false, &mut reference_tables, &arena)?;
+        source_3.encode(&mut cursor, false, &mut reference_tables, &arena)?;
+        source_4.encode(&mut cursor, false, &mut reference_tables, &arena)?;
+        source_5.encode(&mut cursor, false, &mut reference_tables, &arena)?;
 
         cursor.seek(SeekFrom::Start(0))?;
 
-        let decoded_0 =
-            DataValue::decode::<RocksTransaction, _>(&mut cursor, None, &reference_tables).unwrap();
-        let decoded_1 =
-            DataValue::decode::<RocksTransaction, _>(&mut cursor, None, &reference_tables).unwrap();
-        let decoded_2 =
-            DataValue::decode::<RocksTransaction, _>(&mut cursor, None, &reference_tables).unwrap();
-        let decoded_3 =
-            DataValue::decode::<RocksTransaction, _>(&mut cursor, None, &reference_tables).unwrap();
-        let decoded_4 =
-            DataValue::decode::<RocksTransaction, _>(&mut cursor, None, &reference_tables).unwrap();
-        let decoded_5 =
-            DataValue::decode::<RocksTransaction, _>(&mut cursor, None, &reference_tables).unwrap();
+        let decoded_0 = DataValue::decode::<RocksTransaction, _, _>(
+            &mut cursor,
+            None,
+            &reference_tables,
+            &mut arena,
+        )
+        .unwrap();
+        let decoded_1 = DataValue::decode::<RocksTransaction, _, _>(
+            &mut cursor,
+            None,
+            &reference_tables,
+            &mut arena,
+        )
+        .unwrap();
+        let decoded_2 = DataValue::decode::<RocksTransaction, _, _>(
+            &mut cursor,
+            None,
+            &reference_tables,
+            &mut arena,
+        )
+        .unwrap();
+        let decoded_3 = DataValue::decode::<RocksTransaction, _, _>(
+            &mut cursor,
+            None,
+            &reference_tables,
+            &mut arena,
+        )
+        .unwrap();
+        let decoded_4 = DataValue::decode::<RocksTransaction, _, _>(
+            &mut cursor,
+            None,
+            &reference_tables,
+            &mut arena,
+        )
+        .unwrap();
+        let decoded_5 = DataValue::decode::<RocksTransaction, _, _>(
+            &mut cursor,
+            None,
+            &reference_tables,
+            &mut arena,
+        )
+        .unwrap();
 
         assert_eq!(source_0, decoded_0);
         assert_eq!(source_1, decoded_1);

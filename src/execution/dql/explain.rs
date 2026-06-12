@@ -39,6 +39,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Explain {
     fn into_executor(
         self,
         arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
@@ -52,6 +53,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Explain {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
@@ -61,8 +63,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Explain {
         }))
     }
 
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
-        Explain::next_tuple(self, arena)
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
+        Explain::next_tuple(self, arena, plan_arena)
     }
 }
 
@@ -70,17 +76,19 @@ impl Explain {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if self.emitted {
             arena.finish();
             return Ok(());
         }
 
+        let plan = self.plan.explain(plan_arena, 0);
         let output = arena.result_tuple_mut();
         output.pk = None;
         output.values.clear();
         output.values.push(DataValue::Utf8 {
-            value: self.plan.explain(0),
+            value: plan,
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         });

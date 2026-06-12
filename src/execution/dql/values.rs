@@ -18,13 +18,13 @@ use crate::execution::{
 };
 use crate::planner::operator::values::ValuesOperator;
 use crate::storage::Transaction;
-use crate::types::tuple::SchemaRef;
+use crate::types::tuple::Schema;
 use crate::types::value::DataValue;
 use std::mem;
 
 pub struct Values {
     rows: std::vec::IntoIter<Vec<DataValue>>,
-    schema_ref: SchemaRef,
+    schema_ref: Schema,
 }
 
 impl From<ValuesOperator> for Values {
@@ -40,6 +40,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Values {
     fn into_executor(
         self,
         arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
@@ -53,14 +54,19 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
         arena.push(ExecNode::Values(Values::from(input)))
     }
 
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
-        Values::next_tuple(self, arena)
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
+        Values::next_tuple(self, arena, plan_arena)
     }
 }
 
@@ -68,6 +74,7 @@ impl Values {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(mut values) = self.rows.next() else {
             arena.finish();
@@ -75,7 +82,7 @@ impl Values {
         };
 
         for (i, value) in values.iter_mut().enumerate() {
-            let ty = self.schema_ref[i].datatype().clone();
+            let ty = plan_arena.column(self.schema_ref[i]).datatype();
 
             *value = mem::replace(value, DataValue::Null).cast(&ty)?;
         }

@@ -64,6 +64,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for IndexScan<'a, T> {
     fn into_executor(
         self,
         arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
@@ -83,14 +84,19 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for IndexScan<'a, T> {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
         arena.push(ExecNode::IndexScan(IndexScan::from(input)))
     }
 
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
-        IndexScan::next_tuple(self, arena)
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
+        IndexScan::next_tuple(self, arena, plan_arena)
     }
 }
 
@@ -106,7 +112,11 @@ impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
         }
     }
 
-    pub(crate) fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+    pub(crate) fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
         if self.iter.is_none() {
             let Some(TableScanOperator {
                 table_name,
@@ -123,9 +133,11 @@ impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
                 self.lookup.take().expect("index scan lookup initialized"),
                 arena,
             );
-            let state = arena.local_state();
+            let state = arena.local_state(plan_arena);
+            let context = state.context.read();
             self.iter = Some(state.transaction().read_by_index(
-                state.context.read().table_cache,
+                context.table_cache,
+                state.plan_arena,
                 table_name,
                 limit,
                 columns,
@@ -137,7 +149,7 @@ impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
             )?);
         }
 
-        let state = arena.local_state();
+        let state = arena.local_state(plan_arena);
         if self
             .iter
             .as_mut()

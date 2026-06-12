@@ -37,6 +37,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SeqScan<'a, T> {
     fn into_executor(
         self,
         arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
@@ -50,19 +51,28 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SeqScan<'a, T> {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
         arena.push(ExecNode::SeqScan(SeqScan::from(input)))
     }
 
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
-        SeqScan::next_tuple(self, arena)
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
+        SeqScan::next_tuple(self, arena, plan_arena)
     }
 }
 
 impl<'a, T: Transaction + 'a> SeqScan<'a, T> {
-    pub(crate) fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+    pub(crate) fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
         if self.iter.is_none() {
             let Some(TableScanOperator {
                 table_name,
@@ -75,10 +85,12 @@ impl<'a, T: Transaction + 'a> SeqScan<'a, T> {
                 arena.finish();
                 return Ok(());
             };
-            let state = arena.local_state();
+            let state = arena.local_state(plan_arena);
+            let context = state.context.read();
             self.iter = Some(state.transaction().read(
                 state.table_codec,
-                state.context.read().table_cache,
+                state.plan_arena,
+                context.table_cache,
                 table_name,
                 limit,
                 columns,
@@ -86,7 +98,7 @@ impl<'a, T: Transaction + 'a> SeqScan<'a, T> {
             )?);
         }
 
-        let state = arena.local_state();
+        let state = arena.local_state(plan_arena);
         if self
             .iter
             .as_mut()

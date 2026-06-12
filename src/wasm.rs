@@ -114,15 +114,16 @@ impl WasmResultIter {
             .inner
             .as_ref()
             .ok_or_else(|| to_js_err("iterator already consumed"))?;
-        let columns: Vec<WasmSchemaColumn> = iter
-            .schema()
-            .iter()
-            .map(|col| WasmSchemaColumn {
-                name: col.name().to_string(),
-                datatype: col.datatype().to_string(),
-                nullable: col.nullable(),
-            })
-            .collect();
+        let columns: Vec<WasmSchemaColumn> = iter.schema(|schema| {
+            schema
+                .iter()
+                .map(|col| WasmSchemaColumn {
+                    name: col.name().to_string(),
+                    datatype: col.datatype().to_string(),
+                    nullable: col.nullable(),
+                })
+                .collect()
+        });
         serde_wasm_bindgen::to_value(&columns)
             .map_err(|e| to_js_err(format!("serialize schema: {e}")))
     }

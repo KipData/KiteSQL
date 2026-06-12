@@ -98,20 +98,16 @@ mod tests {
                         operator: Operator::Dummy,
                         childrens: Box::new(Childrens::None),
                         physical_option: None,
-                        _output_schema_ref: None,
                     }))),
                     physical_option: None,
-                    _output_schema_ref: None,
                 }),
                 right: Box::new(LogicalPlan {
                     operator: Operator::Dummy,
                     childrens: Box::new(Childrens::None),
                     physical_option: None,
-                    _output_schema_ref: None,
                 }),
             }),
             physical_option: None,
-            _output_schema_ref: None,
         };
 
         let only_dummy_pattern = Pattern {

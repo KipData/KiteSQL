@@ -759,10 +759,11 @@ fn next<'a, D: rocksdb::DBAccess>(
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
-    use crate::db::DataBaseBuilder;
+    use crate::catalog::{ColumnCatalog, ColumnDesc, TableName};
+    use crate::db::{CatalogKind, DataBaseBuilder};
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
+    use crate::planner::{PlanArena, TableArenaCell};
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::table_codec::TableCodec;
     use crate::storage::{
@@ -794,6 +795,7 @@ mod test {
             .storage_statistics(true)
             .build_rocksdb()?;
         kite_sql.ddl("create table t_metrics (a int primary key, b int)")?;
+        kite_sql.load(CatalogKind::Table("t_metrics".to_string().into()))?;
         kite_sql
             .run("insert into t_metrics values (1, 10), (2, 20), (3, 30)")?
             .done()?;
@@ -842,30 +844,32 @@ mod test {
         let mut transaction = storage.transaction()?;
         let mut table_cache = crate::storage::TableCache::default();
         let mut table_codec = TableCodec::default();
-        let columns = Arc::new(vec![
-            ColumnRef::from(ColumnCatalog::new(
+        let table_arena = TableArenaCell::default();
+        let mut plan_arena = PlanArena::new(&table_arena);
+        let source_columns = vec![
+            ColumnCatalog::new(
                 "c1".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
+            ),
+            ColumnCatalog::new(
                 "c2".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::Boolean, None, false, None).unwrap(),
-            )),
-        ]);
-
-        let source_columns = columns
-            .iter()
-            .map(|col_ref| ColumnCatalog::clone(col_ref))
-            .collect_vec();
-        let _ = transaction.create_table(
+            ),
+        ];
+        if let Some(table) = transaction.create_table(
             &mut table_codec,
-            &mut table_cache,
+            &mut plan_arena,
             "test".to_string().into(),
             source_columns,
             false,
-        )?;
+        )? {
+            let table = table.transplant_to_table_arena(&plan_arena)?;
+            table_cache.insert(table.name().clone(), table);
+        }
+        let plan_arena = PlanArena::new(&table_arena);
+        let table_name: TableName = "test".to_string().into();
 
         let table_catalog = transaction.table(&table_cache, "test".to_string().into())?;
         assert!(table_catalog.is_some());
@@ -898,10 +902,18 @@ mod test {
             false,
         )?;
 
-        let read_columns = vec![columns[0].clone()];
+        let read_column = table_cache
+            .get(&table_name)
+            .unwrap()
+            .columns()
+            .next()
+            .copied()
+            .unwrap();
+        let read_columns = vec![read_column];
 
         let mut iter = transaction.read(
             &mut table_codec,
+            &plan_arena,
             &table_cache,
             "test".to_string().into(),
             (Some(1), Some(1)),
@@ -924,6 +936,7 @@ mod test {
         let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql.ddl("create table t1 (a int primary key)")?;
+        kite_sql.load(CatalogKind::Table("t1".to_string().into()))?;
         kite_sql
             .run("insert into t1 (a) values (0), (1), (2), (3), (4)")?
             .done()?;
@@ -934,6 +947,7 @@ mod test {
             .table(kite_sql.state.table_cache(), table_name.clone())?
             .unwrap()
             .clone();
+        let plan_arena = PlanArena::new(kite_sql.state.table_arena());
         let a_column_id = table.get_column_id_by_name("a").unwrap();
         let tuple_ids = vec![
             DataValue::Int32(0),
@@ -943,7 +957,7 @@ mod test {
         ];
         let deserializers = table
             .columns()
-            .map(|column| column.datatype().serializable())
+            .map(|column| plan_arena.column(*column).datatype().serializable())
             .collect_vec();
         let mut iter: IndexIter<'_, _> = IndexIter {
             bounds: IterBounds::new(0, None),
@@ -993,6 +1007,7 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
         kite_sql.ddl("create table t1 (a int primary key, b int unique)")?;
+        kite_sql.load(CatalogKind::Table("t1".to_string().into()))?;
         kite_sql
             .run("insert into t1 (a, b) values (0, 0), (1, 1), (2, 2), (3, 4)")?
             .done()?;
@@ -1002,10 +1017,12 @@ mod test {
             .table(kite_sql.state.table_cache(), "t1".to_string().into())?
             .unwrap()
             .clone();
+        let plan_arena = PlanArena::new(kite_sql.state.table_arena());
         {
             let mut iter = transaction
                 .read_by_index(
                     kite_sql.state.table_cache(),
+                    &plan_arena,
                     "t1".to_string().into(),
                     (Some(0), Some(1)),
                     table.columns().cloned().collect(),
@@ -1033,6 +1050,7 @@ mod test {
             let mut iter = transaction
                 .read_by_index(
                     kite_sql.state.table_cache(),
+                    &plan_arena,
                     "t1".to_string().into(),
                     (Some(0), Some(1)),
                     columns,
@@ -1061,25 +1079,28 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
         kite_sql.ddl("create table t1 (a int primary key, b int unique)")?;
+        kite_sql.load(CatalogKind::Table("t1".to_string().into()))?;
         kite_sql
             .run("insert into t1 (a, b) values (0, 0), (1, 1), (2, 2), (3, 4)")?
             .done()?;
         kite_sql.ddl("create index idx_b_a on t1(b, a)")?;
+        kite_sql.load(CatalogKind::Table("t1".to_string().into()))?;
 
         let mut transaction = kite_sql.storage.transaction().unwrap();
         let table = transaction
             .table(kite_sql.state.table_cache(), "t1".to_string().into())?
             .unwrap()
             .clone();
+        let plan_arena = PlanArena::new(kite_sql.state.table_arena());
         let columns_vec: Vec<_> = table.columns().cloned().collect();
         let a_cover_column = columns_vec
             .iter()
-            .find(|column| column.name() == "a")
+            .find(|column| plan_arena.column(**column).name() == "a")
             .unwrap()
             .clone();
         let b_cover_column = columns_vec
             .iter()
-            .find(|column| column.name() == "b")
+            .find(|column| plan_arena.column(**column).name() == "b")
             .unwrap()
             .clone();
         let unique_index = table
@@ -1091,10 +1112,10 @@ mod test {
         let b_column = table
             .columns()
             .cloned()
-            .find(|column| column.name() == "b")
+            .find(|column| plan_arena.column(*column).name() == "b")
             .unwrap();
         let columns = vec![b_column.clone()];
-        let covered_deserializers = vec![b_column.datatype().serializable()];
+        let covered_deserializers = vec![plan_arena.column(b_column).datatype().serializable()];
 
         // ensure cover mapping can reorder index values to match scan order
         let composite_index = table
@@ -1105,11 +1126,11 @@ mod test {
             .clone();
         let reordered_columns = vec![a_cover_column.clone(), b_cover_column.clone()];
         let reordered_deserializers = vec![
-            a_cover_column.datatype().serializable(),
-            b_cover_column.datatype().serializable(),
+            plan_arena.column(a_cover_column).datatype().serializable(),
+            plan_arena.column(b_cover_column).datatype().serializable(),
         ];
-        let a_id = a_cover_column.id().unwrap();
-        let b_id = b_cover_column.id().unwrap();
+        let a_id = plan_arena.column(a_cover_column).id().unwrap();
+        let b_id = plan_arena.column(b_cover_column).id().unwrap();
         let cover_mapping = vec![
             composite_index
                 .column_ids
@@ -1125,6 +1146,7 @@ mod test {
 
         let mut iter = transaction.read_by_index(
             kite_sql.state.table_cache(),
+            &plan_arena,
             "t1".to_string().into(),
             (None, None),
             reordered_columns,
@@ -1151,6 +1173,7 @@ mod test {
 
         let mut iter = transaction.read_by_index(
             kite_sql.state.table_cache(),
+            &plan_arena,
             "t1".to_string().into(),
             (Some(0), Some(1)),
             columns,
@@ -1178,9 +1201,10 @@ mod test {
             .unwrap()
             .clone();
         let pk_columns = vec![a_cover_column.clone()];
-        let pk_deserializers = vec![a_cover_column.datatype().serializable()];
+        let pk_deserializers = vec![plan_arena.column(a_cover_column).datatype().serializable()];
         let mut iter = transaction.read_by_index(
             kite_sql.state.table_cache(),
+            &plan_arena,
             "t1".to_string().into(),
             (None, None),
             pk_columns,

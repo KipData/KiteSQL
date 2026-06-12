@@ -15,30 +15,30 @@
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor,
+    build_read, DDLApply, ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::create_index::CreateIndexOperator;
-use crate::planner::LogicalPlan;
+use crate::planner::{LogicalPlan, SchemaSlot};
 use crate::storage::Transaction;
 use crate::types::index::Index;
-use crate::types::tuple::SchemaRef;
+use crate::types::tuple::Schema;
 use crate::types::tuple_builder::TupleBuilder;
 use crate::types::value::DataValue;
 use crate::types::ColumnId;
 
 pub struct CreateIndex {
     op: Option<CreateIndexOperator>,
-    input_schema: SchemaRef,
+    input_schema: Schema,
     input_plan: LogicalPlan,
     input: ExecId,
 }
 
 impl From<(CreateIndexOperator, LogicalPlan)> for CreateIndex {
-    fn from((op, mut input): (CreateIndexOperator, LogicalPlan)) -> Self {
+    fn from((op, input): (CreateIndexOperator, LogicalPlan)) -> Self {
         Self {
             op: Some(op),
-            input_schema: input.output_schema().clone(),
+            input_schema: Default::default(),
             input_plan: input,
             input: 0,
         }
@@ -49,10 +49,21 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateIndex {
     fn into_executor(
         mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        self.input = build_read(arena, self.input_plan.take(), cache, transaction);
+        self.input_schema = self
+            .input_plan
+            .output_schema_to(plan_arena, SchemaSlot::S0)
+            .clone();
+        self.input = build_read(
+            arena,
+            plan_arena,
+            self.input_plan.take(),
+            cache,
+            transaction,
+        );
         arena.push(ExecNode::CreateIndex(self))
     }
 }
@@ -61,6 +72,7 @@ impl CreateIndex {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(CreateIndexOperator {
             table_name,
@@ -74,10 +86,20 @@ impl CreateIndex {
             return Ok(());
         };
 
+        if if_not_exists
+            && arena
+                .table_cache()
+                .get(&table_name)
+                .is_some_and(|table| table.indexes().any(|index| index.name == index_name))
+        {
+            arena.finish();
+            return Ok(());
+        }
+
         let (column_ids, column_exprs): (Vec<ColumnId>, Vec<ScalarExpression>) = columns
             .into_iter()
             .filter_map(|column| {
-                column.id().and_then(|id| {
+                plan_arena.column(column).id().and_then(|id| {
                     self.input_schema
                         .iter()
                         .position(|schema_column| schema_column == &column)
@@ -86,17 +108,17 @@ impl CreateIndex {
             })
             .unzip();
         let index_id_result = {
-            let mut state = arena.local_state();
-            let (transaction, table_codec, context) = state.write_context_mut();
-            let table_cache = context.table_cache_mut();
-            transaction.add_index_meta(
+            let (transaction, table_codec) = arena.transaction_codec_mut();
+            let (table, index_id) = transaction.add_index_meta(
                 table_codec,
-                table_cache,
+                plan_arena,
                 &table_name,
                 index_name,
                 column_ids,
                 ty,
-            )
+            )?;
+            arena.push_ddl_apply(DDLApply::upsert_table(table, false));
+            Ok(index_id)
         };
         let index_id = match index_id_result {
             Ok(index_id) => index_id,
@@ -111,7 +133,7 @@ impl CreateIndex {
             Err(err) => return Err(err),
         };
 
-        while arena.next_tuple(self.input)? {
+        while arena.next_tuple(self.input, plan_arena)? {
             let (value, tuple_pk) = {
                 let tuple = arena.result_tuple();
                 let Some(value) =
@@ -125,7 +147,7 @@ impl CreateIndex {
                 (value, tuple_pk)
             };
             let index = Index::new(index_id, &value, ty);
-            let mut state = arena.local_state();
+            let mut state = arena.local_state(plan_arena);
             let (transaction, table_codec) = state.transaction_codec_mut();
             transaction.add_index(table_codec, table_name.as_ref(), index, &tuple_pk)?;
         }

@@ -30,6 +30,7 @@ use crate::optimizer::core::cm_sketch::{
 };
 use crate::optimizer::core::statistics_meta::StatisticsMeta;
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
+use crate::planner::{MetaArena, PlanArena, TableArenaCell};
 use crate::serdes::ReferenceTables;
 use crate::storage::table_codec::{Bytes, StatisticsCodecType, TableCodec, BOUND_MAX_TAG};
 use crate::types::index::{Index, IndexId, IndexMeta, IndexMetaRef, IndexType};
@@ -39,7 +40,7 @@ use crate::types::value::{DataValue, TupleMappingRef};
 use crate::types::{ColumnId, LogicalType};
 use ahash::HashMap;
 use itertools::Itertools;
-use std::borrow::Cow;
+use std::borrow::{Borrow, Cow};
 use std::collections::Bound;
 use std::fmt::{self, Display, Formatter};
 use std::io::Cursor;
@@ -78,12 +79,14 @@ impl Display for TransactionIsolationLevel {
 
 pub(crate) fn index_value_type(
     table: &TableCatalog,
+    arena: &impl MetaArena,
     column_ids: &[ColumnId],
 ) -> Result<LogicalType, DatabaseError> {
     let mut value_types = Vec::with_capacity(column_ids.len());
     for column_id in column_ids {
         let value_type = table
             .get_column_by_id(column_id)
+            .map(|column| arena.column(column))
             .ok_or_else(|| DatabaseError::column_not_found(column_id.to_string()))?
             .datatype()
             .clone();
@@ -176,6 +179,7 @@ pub trait Transaction: Sized {
     fn read<'a>(
         &'a self,
         table_codec: &mut TableCodec,
+        arena: &PlanArena,
         table_cache: &TableCache,
         table_name: TableName,
         bounds: Bounds,
@@ -185,7 +189,7 @@ pub trait Transaction: Sized {
         let table = self
             .table(table_cache, table_name.clone())?
             .ok_or(DatabaseError::TableNotFound)?;
-        let deserializers = Self::create_deserializers(&columns, table, with_pk);
+        let deserializers = Self::create_deserializers(&columns, table, arena, with_pk);
         let pk_ty = with_pk.then(|| table.primary_keys_type().clone());
         let offset = bounds.0.unwrap_or(0);
 
@@ -206,6 +210,7 @@ pub trait Transaction: Sized {
     fn read_by_index<'a, R>(
         &'a self,
         table_cache: &TableCache,
+        arena: &PlanArena,
         table_name: TableName,
         (offset_option, limit_option): Bounds,
         columns: Vec<ColumnRef>,
@@ -243,7 +248,7 @@ pub trait Transaction: Sized {
                 )
             }
             _ => {
-                let deserializers = Self::create_deserializers(&columns, table, with_pk);
+                let deserializers = Self::create_deserializers(&columns, table, arena, with_pk);
                 (IndexImplEnum::instance(index_meta.ty), deserializers, None)
             }
         };
@@ -271,6 +276,7 @@ pub trait Transaction: Sized {
     fn create_deserializers(
         columns: &[ColumnRef],
         table: &TableCatalog,
+        arena: &PlanArena,
         with_pk: bool,
     ) -> Vec<TupleValueSerializableImpl> {
         let mut pk_len = if with_pk {
@@ -281,7 +287,8 @@ pub trait Transaction: Sized {
         let mut deserializers = Vec::with_capacity(table.columns_len());
         let mut columns = columns.iter().peekable();
 
-        for table_column in table.columns() {
+        for table_column_ref in table.columns() {
+            let table_column = arena.column(*table_column_ref);
             if columns.peek().is_none() && pk_len == 0 {
                 break;
             }
@@ -289,7 +296,7 @@ pub trait Transaction: Sized {
             let is_primary_key = with_pk && table_column.desc().primary().is_some();
             if columns
                 .peek()
-                .is_some_and(|column| same_projection_column(column, &table_column))
+                .is_some_and(|column| arena.same_column(**column, *table_column_ref))
             {
                 deserializers.push(table_column.datatype().serializable());
                 columns.next();
@@ -311,24 +318,22 @@ pub trait Transaction: Sized {
     fn add_index_meta(
         &mut self,
         table_codec: &mut TableCodec,
-        table_cache: &mut TableCache,
+        plan_arena: &mut PlanArena,
         table_name: &TableName,
         index_name: String,
         column_ids: Vec<ColumnId>,
         ty: IndexType,
-    ) -> Result<IndexId, DatabaseError> {
-        if let Some(mut table) = self.table(table_cache, table_name.clone())?.cloned() {
-            let index_meta = table.add_index_meta(index_name, column_ids, ty)?;
-            let index_id = index_meta.id;
-            table_codec.with_index_meta(table_name, index_id, Some(index_meta), |key, value| {
-                self.set(key, value)
-            })?;
-            table_cache.insert(table_name.clone(), table);
+    ) -> Result<(TableCatalog, IndexId), DatabaseError> {
+        let mut table = self
+            .load_table(table_codec, plan_arena, table_name.clone())?
+            .ok_or(DatabaseError::TableNotFound)?;
+        let index_meta = table.add_index_meta(index_name, column_ids, ty, plan_arena)?;
+        let index_id = index_meta.id;
+        table_codec.with_index_meta(table_name, index_id, Some(index_meta), |key, value| {
+            self.set(key, value)
+        })?;
 
-            Ok(index_id)
-        } else {
-            Err(DatabaseError::TableNotFound)
-        }
+        Ok((table, index_id))
     }
 
     fn add_index(
@@ -370,19 +375,26 @@ pub trait Transaction: Sized {
         Ok(())
     }
 
-    fn append_tuple(
+    fn append_tuple<I, S>(
         &mut self,
         table_codec: &mut TableCodec,
         table_name: &str,
         tuple: Tuple,
-        serializers: &[TupleValueSerializableImpl],
+        serializers: I,
         is_overwrite: bool,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<(), DatabaseError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Borrow<TupleValueSerializableImpl>,
+    {
         let tuple_id = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
+        let mut serializers = serializers.into_iter();
+        let mut write_value =
+            |tuple: &Tuple, value: &mut Bytes| tuple.serialize_to(&mut serializers, value);
         table_codec.with_tuple(
             table_name,
             tuple_id,
-            Some((&tuple, serializers)),
+            Some((&tuple, &mut write_value)),
             |key, value| {
                 if !is_overwrite && self.exists(key)? {
                     return Err(DatabaseError::DuplicatePrimaryKey);
@@ -404,7 +416,7 @@ pub trait Transaction: Sized {
     fn rewrite_table_metadata(
         &mut self,
         table_codec: &mut TableCodec,
-        table_cache: &mut TableCache,
+        arena: &impl MetaArena,
         table: &TableCatalog,
     ) -> Result<(), DatabaseError> {
         let table_name = table.name().clone();
@@ -416,23 +428,17 @@ pub trait Transaction: Sized {
             self.remove_range(Bound::Included(min), Bound::Included(max))
         })?;
 
-        let mut reference_tables = ReferenceTables::new();
-        let _ = reference_tables.push_or_replace(table.name());
-        for column in table.columns() {
-            table_codec.with_column(&column, Some(&mut reference_tables), |key, value| {
-                self.set(key, value)
-            })?;
+        for column in table.columns().map(|column| arena.column(*column)) {
+            table_codec.with_column(&column, true, |key, value| self.set(key, value))?;
         }
         for index_meta in table.indexes() {
             table_codec.with_index_meta(
-                table.name(),
+                table_name.as_ref(),
                 index_meta.id,
                 Some(index_meta),
                 |key, value| self.set(key, value),
             )?;
         }
-        table_cache.insert(table.name().clone(), table.clone());
-
         Ok(())
     }
 
@@ -440,7 +446,7 @@ pub trait Transaction: Sized {
     fn change_column(
         &mut self,
         table_codec: &mut TableCodec,
-        table_cache: &mut TableCache,
+        plan_arena: &mut PlanArena,
         table_name: &TableName,
         old_column_name: &str,
         new_column_name: &str,
@@ -449,10 +455,9 @@ pub trait Transaction: Sized {
         not_null_change: &NotNullChange,
     ) -> Result<TableCatalog, DatabaseError> {
         let table = self
-            .table(table_cache, table_name.clone())?
-            .cloned()
+            .load_table(table_codec, plan_arena, table_name.clone())?
             .ok_or(DatabaseError::TableNotFound)?;
-        let mut column_refs = Vec::with_capacity(table.columns_len());
+        let mut column_catalogs = Vec::with_capacity(table.columns_len());
         let mut found = false;
 
         if old_column_name != new_column_name && table.get_column_by_name(new_column_name).is_some()
@@ -460,8 +465,8 @@ pub trait Transaction: Sized {
             return Err(DatabaseError::DuplicateColumn(new_column_name.to_string()));
         }
 
-        for column in table.columns() {
-            let mut new_column = ColumnCatalog::clone(&column);
+        for column in table.columns().map(|column| plan_arena.column(*column)) {
+            let mut new_column = ColumnCatalog::clone(column);
             if column.name() == old_column_name {
                 found = true;
                 new_column.set_name(new_column_name.to_string());
@@ -472,6 +477,7 @@ pub trait Transaction: Sized {
                             new_column.desc_mut().default = Some(ScalarExpression::type_cast(
                                 default_expr,
                                 Cow::Borrowed(new_data_type),
+                                plan_arena,
                             )?);
                         }
                     }
@@ -492,13 +498,18 @@ pub trait Transaction: Sized {
                     new_column.set_nullable(false);
                 }
             }
-            column_refs.push(ColumnRef::from(new_column));
+            column_catalogs.push(new_column);
         }
         if !found {
             return Err(DatabaseError::column_not_found(old_column_name.to_string()));
         }
 
-        let temp_table = TableCatalog::reload(table_name.clone(), column_refs.clone(), vec![])?;
+        let temp_table = TableCatalog::reload(
+            table_name.clone(),
+            column_catalogs.clone().into_iter(),
+            vec![],
+            plan_arena,
+        )?;
         let index_metas = table
             .indexes()
             .map(|index_meta| {
@@ -507,14 +518,22 @@ pub trait Transaction: Sized {
                     column_ids: index_meta.column_ids.clone(),
                     table_name: table_name.clone(),
                     pk_ty: temp_table.primary_keys_type().clone(),
-                    value_ty: index_value_type(&temp_table, &index_meta.column_ids)?,
+                    value_ty: index_value_type(&temp_table, plan_arena, &index_meta.column_ids)?,
                     name: index_meta.name.clone(),
                     ty: index_meta.ty,
                 }))
             })
             .collect::<Result<Vec<_>, DatabaseError>>()?;
-        let updated_table = TableCatalog::reload(table_name.clone(), column_refs, index_metas)?;
-        self.rewrite_table_metadata(table_codec, table_cache, &updated_table)?;
+        let updated_table = TableCatalog::reload(
+            table_name.clone(),
+            column_catalogs.into_iter(),
+            index_metas,
+            plan_arena,
+        )?;
+        self.rewrite_table_metadata(table_codec, plan_arena, &updated_table)?;
+        table_codec.with_statistics_bound(table_name.as_ref(), |min, max| {
+            self.remove_range(Bound::Included(min), Bound::Included(max))
+        })?;
 
         Ok(updated_table)
     }
@@ -522,152 +541,141 @@ pub trait Transaction: Sized {
     fn add_column(
         &mut self,
         table_codec: &mut TableCodec,
-        table_cache: &mut TableCache,
+        plan_arena: &mut PlanArena,
         table_name: &TableName,
         column: &ColumnCatalog,
         if_not_exists: bool,
-    ) -> Result<ColumnId, DatabaseError> {
-        if let Some(mut table) = self.table(table_cache, table_name.clone())?.cloned() {
-            if !column.nullable() && column.default_value()?.is_none() {
-                return Err(DatabaseError::NeedNullAbleOrDefault);
-            }
-
-            for col in table.columns() {
-                if col.name() == column.name() {
-                    return if if_not_exists {
-                        Ok(col.id().unwrap())
-                    } else {
-                        Err(DatabaseError::DuplicateColumn(column.name().to_string()))
-                    };
-                }
-            }
-            let mut generator = Generator::new();
-            let col_id = table.add_column(column.clone(), &mut generator)?;
-
-            if column.desc().is_unique() {
-                let meta_ref = table.add_index_meta(
-                    format!("uk_{}", column.name()),
-                    vec![col_id],
-                    IndexType::Unique,
-                )?;
-                table_codec.with_index_meta(
-                    table_name,
-                    meta_ref.id,
-                    Some(meta_ref),
-                    |key, value| self.set(key, value),
-                )?;
-            }
-
-            let column = table.get_column_by_id(&col_id).unwrap();
-            let mut reference_tables = ReferenceTables::new();
-            table_codec.with_column(&column, Some(&mut reference_tables), |key, value| {
-                self.set(key, value)
-            })?;
-            table_cache.insert(table_name.clone(), table);
-
-            Ok(col_id)
-        } else {
-            Err(DatabaseError::TableNotFound)
+    ) -> Result<(TableCatalog, ColumnId), DatabaseError> {
+        let mut table = self
+            .load_table(table_codec, plan_arena, table_name.clone())?
+            .ok_or(DatabaseError::TableNotFound)?;
+        if !column.nullable() && column.default_value()?.is_none() {
+            return Err(DatabaseError::NeedNullAbleOrDefault);
         }
+
+        for col in table.columns().map(|column| plan_arena.column(*column)) {
+            if col.name() == column.name() {
+                return if if_not_exists {
+                    Ok((table, col.id().unwrap()))
+                } else {
+                    Err(DatabaseError::DuplicateColumn(column.name().to_string()))
+                };
+            }
+        }
+        let mut generator = Generator::new();
+        let col_id = table.add_column(column.clone(), &mut generator, plan_arena)?;
+
+        if column.desc().is_unique() {
+            let meta_ref = table.add_index_meta(
+                format!("uk_{}", column.name()),
+                vec![col_id],
+                IndexType::Unique,
+                plan_arena,
+            )?;
+            table_codec.with_index_meta(
+                table_name,
+                meta_ref.id,
+                Some(meta_ref),
+                |key, value| self.set(key, value),
+            )?;
+        }
+
+        let column = plan_arena.column(table.get_column_by_id(&col_id).unwrap());
+        table_codec.with_column(&column, true, |key, value| self.set(key, value))?;
+
+        Ok((table, col_id))
     }
 
     fn drop_column(
         &mut self,
         table_codec: &mut TableCodec,
-        table_cache: &mut TableCache,
-        meta_cache: &mut StatisticsMetaCache,
+        plan_arena: &mut PlanArena,
         table_name: &TableName,
         column_name: &str,
-    ) -> Result<(), DatabaseError> {
-        if let Some(table_catalog) = self.table(table_cache, table_name.clone())?.cloned() {
-            let column = table_catalog.get_column_by_name(column_name).unwrap();
+    ) -> Result<TableCatalog, DatabaseError> {
+        let table_catalog = self
+            .load_table(table_codec, plan_arena, table_name.clone())?
+            .ok_or(DatabaseError::TableNotFound)?;
+        let column_id = {
+            let column = plan_arena.column(table_catalog.get_column_by_name(column_name).unwrap());
+            let column_id = column.id().unwrap();
+            table_codec.with_column(&column, false, |key, _| self.remove(key))?;
+            column_id
+        };
 
-            table_codec.with_column(&column, None, |key, _| self.remove(key))?;
-
-            for index_meta in table_catalog.indexes.iter() {
-                if !index_meta.column_ids.contains(&column.id().unwrap()) {
-                    continue;
-                }
-                table_codec
-                    .with_index_meta(table_name, index_meta.id, None, |key, _| self.remove(key))?;
-
-                table_codec.with_index_bound(table_name, index_meta.id, |min, max| {
-                    self.remove_range(Bound::Included(min), Bound::Included(max))
-                })?;
-
-                self.remove_statistics_meta(table_codec, meta_cache, table_name, index_meta.id)?;
+        for index_meta in table_catalog.indexes.iter() {
+            if !index_meta.column_ids.contains(&column_id) {
+                continue;
             }
-            if let Some(table) = self.load_table(table_codec, table_name.clone())? {
-                table_cache.insert(table_name.clone(), table);
-            } else {
-                table_cache.remove(table_name);
-            }
+            table_codec
+                .with_index_meta(table_name, index_meta.id, None, |key, _| self.remove(key))?;
 
-            Ok(())
-        } else {
-            Err(DatabaseError::TableNotFound)
+            table_codec.with_index_bound(table_name, index_meta.id, |min, max| {
+                self.remove_range(Bound::Included(min), Bound::Included(max))
+            })?;
+
+            self.remove_statistics_meta(table_codec, table_name, index_meta.id)?;
         }
+        self.load_table(table_codec, plan_arena, table_name.clone())?
+            .ok_or(DatabaseError::TableNotFound)
     }
 
     fn create_view(
         &mut self,
         table_codec: &mut TableCodec,
-        view_cache: &mut ViewCache,
+        arena: &PlanArena,
         view: View,
         or_replace: bool,
-    ) -> Result<(), DatabaseError> {
-        let already_exists = table_codec.with_view(&view.name, None, |key, _| self.exists(key))?;
+    ) -> Result<View, DatabaseError> {
+        let already_exists = table_codec.with_view(&view.name, |key, _| self.exists(key))?;
         if !or_replace && already_exists {
             return Err(DatabaseError::ViewExists);
         }
         if !already_exists {
             self.check_name_hash(table_codec, &view.name)?;
         }
-        table_codec.with_view(&view.name, Some(&view), |key, value| self.set(key, value))?;
-        view_cache.insert(view.name.clone(), view);
+        table_codec.with_view_value(&view.name, &view, arena, |key, value| self.set(key, value))?;
 
-        Ok(())
+        Ok(view)
     }
 
     fn create_table(
         &mut self,
         table_codec: &mut TableCodec,
-        table_cache: &mut TableCache,
+        plan_arena: &mut PlanArena,
         table_name: TableName,
         columns: Vec<ColumnCatalog>,
         if_not_exists: bool,
-    ) -> Result<TableName, DatabaseError> {
-        let mut table_catalog = TableCatalog::new(table_name.clone(), columns)?;
+    ) -> Result<Option<TableCatalog>, DatabaseError> {
+        let mut table_catalog = TableCatalog::new(table_name.clone(), columns, plan_arena)?;
 
         for (_, column) in table_catalog.primary_keys() {
-            TableCodec::check_primary_key_type(column.datatype())?;
+            TableCodec::check_primary_key_type(plan_arena.column(*column).datatype())?;
         }
 
         let exists =
             table_codec.with_root_table(table_name.as_ref(), None, |key, _| self.exists(key))?;
         if exists {
             if if_not_exists {
-                return Ok(table_name);
+                return Ok(None);
             }
             return Err(DatabaseError::TableExists);
         }
         self.check_name_hash(table_codec, &table_name)?;
-        self.create_index_meta_from_column(table_codec, &mut table_catalog)?;
+        self.create_index_meta_from_column(table_codec, plan_arena, &mut table_catalog)?;
         let table_meta = TableMeta::empty(table_name.clone());
         table_codec.with_root_table(table_name.as_ref(), Some(&table_meta), |key, value| {
             self.set(key, value)
         })?;
 
-        let mut reference_tables = ReferenceTables::new();
-        for column in table_catalog.columns() {
-            table_codec.with_column(&column, Some(&mut reference_tables), |key, value| {
-                self.set(key, value)
-            })?;
+        for column in table_catalog
+            .columns()
+            .map(|column| plan_arena.column(*column))
+        {
+            table_codec.with_column(&column, true, |key, value| self.set(key, value))?;
         }
-        debug_assert_eq!(reference_tables.len(), 1);
-        table_cache.insert(table_name.clone(), table_catalog);
 
-        Ok(table_name)
+        Ok(Some(table_catalog))
     }
 
     fn check_name_hash(
@@ -692,41 +700,38 @@ pub trait Transaction: Sized {
     fn drop_view(
         &mut self,
         table_codec: &mut TableCodec,
-        view_cache: &mut ViewCache,
         view_name: TableName,
         if_exists: bool,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<bool, DatabaseError> {
         self.drop_name_hash(table_codec, &view_name)?;
-        let exists = table_codec.with_view(&view_name, None, |key, _| self.exists(key))?;
+        let exists = table_codec.with_view(&view_name, |key, _| self.exists(key))?;
         if !exists {
             if if_exists {
-                return Ok(());
+                return Ok(false);
             } else {
                 return Err(DatabaseError::ViewNotFound);
             }
         }
 
-        table_codec.with_view(view_name.as_ref(), None, |key, _| self.remove(key))?;
-        view_cache.remove(&view_name);
+        table_codec.with_view(view_name.as_ref(), |key, _| self.remove(key))?;
 
-        Ok(())
+        Ok(true)
     }
 
     fn drop_index(
         &mut self,
         table_codec: &mut TableCodec,
-        table_cache: &mut TableCache,
-        meta_cache: &mut StatisticsMetaCache,
+        plan_arena: &mut PlanArena,
         table_name: TableName,
         index_name: &str,
         if_exists: bool,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<Option<(TableCatalog, IndexId)>, DatabaseError> {
         let table = self
-            .table(table_cache, table_name.clone())?
+            .load_table(table_codec, plan_arena, table_name.clone())?
             .ok_or(DatabaseError::TableNotFound)?;
         let Some(index_meta) = table.indexes.iter().find(|index| index.name == index_name) else {
             if if_exists {
-                return Ok(());
+                return Ok(None);
             } else {
                 return Err(DatabaseError::TableNotFound);
             }
@@ -745,27 +750,25 @@ pub trait Transaction: Sized {
             self.remove_range(Bound::Included(min), Bound::Included(max))
         })?;
 
-        self.remove_statistics_meta(table_codec, meta_cache, &table_name, index_id)?;
+        self.remove_statistics_meta(table_codec, &table_name, index_id)?;
 
-        if let Some(table) = self.load_table(table_codec, table_name.clone())? {
-            table_cache.insert(table_name.clone(), table);
-        } else {
-            table_cache.remove(&table_name);
-        }
-
-        Ok(())
+        self.load_table(table_codec, plan_arena, table_name.clone())?
+            .map(|table| (table, index_id))
+            .map(Some)
+            .ok_or(DatabaseError::TableNotFound)
     }
 
     fn drop_table(
         &mut self,
         table_codec: &mut TableCodec,
-        table_cache: &mut TableCache,
         table_name: TableName,
         if_exists: bool,
-    ) -> Result<(), DatabaseError> {
-        if self.table(table_cache, table_name.clone())?.is_none() {
+    ) -> Result<bool, DatabaseError> {
+        let exists =
+            table_codec.with_root_table(table_name.as_ref(), None, |key, _| self.exists(key))?;
+        if !exists {
             if if_exists {
-                return Ok(());
+                return Ok(false);
             } else {
                 return Err(DatabaseError::TableNotFound);
             }
@@ -782,9 +785,8 @@ pub trait Transaction: Sized {
         })?;
 
         table_codec.with_root_table(table_name.as_ref(), None, |key, _| self.remove(key))?;
-        table_cache.remove(&table_name);
 
-        Ok(())
+        Ok(true)
     }
 
     fn drop_data(
@@ -821,11 +823,12 @@ pub trait Transaction: Sized {
         &self,
         table_codec: &mut TableCodec,
         table_cache: &TableCache,
+        table_arena: &TableArenaCell,
         scala_functions: &ScalaFunctions,
         table_functions: &TableFunctions,
         view_name: TableName,
     ) -> Result<Option<View>, DatabaseError> {
-        table_codec.with_view(&view_name, None, |key, _| {
+        table_codec.with_view(&view_name, |key, _| {
             let Some(bytes) = self.get_borrowed(key)? else {
                 return Ok(None);
             };
@@ -834,6 +837,7 @@ pub trait Transaction: Sized {
                 (self, table_cache),
                 scala_functions,
                 table_functions,
+                table_arena.borrow_mut(),
             )
             .map(Some)
         })
@@ -843,6 +847,7 @@ pub trait Transaction: Sized {
         &'a self,
         table_codec: &mut TableCodec,
         table_cache: &'a TableCache,
+        table_arena: &'a TableArenaCell,
         scala_functions: &'a ScalaFunctions,
         table_functions: &'a TableFunctions,
     ) -> Result<ViewIter<'a, Self>, DatabaseError> {
@@ -851,6 +856,7 @@ pub trait Transaction: Sized {
                 iter: self.range(Bound::Included(min), Bound::Included(max))?,
                 transaction: self,
                 table_cache,
+                table_arena,
                 scala_functions,
                 table_functions,
             })
@@ -868,10 +874,13 @@ pub trait Transaction: Sized {
     fn load_table(
         &self,
         table_codec: &mut TableCodec,
+        arena: &mut impl MetaArena,
         table_name: TableName,
     ) -> Result<Option<TableCatalog>, DatabaseError> {
         self.table_collect(table_codec, &table_name)?
-            .map(|(columns, indexes)| TableCatalog::reload(table_name, columns, indexes))
+            .map(|(columns, indexes)| {
+                TableCatalog::reload(table_name, columns.into_iter(), indexes, arena)
+            })
             .transpose()
     }
 
@@ -889,12 +898,10 @@ pub trait Transaction: Sized {
     fn save_statistics_meta(
         &mut self,
         table_codec: &mut TableCodec,
-        meta_cache: &mut StatisticsMetaCache,
         table_name: &TableName,
         statistics_meta: StatisticsMeta,
     ) -> Result<(), DatabaseError> {
         let index_id = statistics_meta.index_id();
-        let cached_meta = statistics_meta.clone();
         let (root, buckets, cm_sketch) = statistics_meta.into_parts();
         table_codec.with_statistics_meta(
             table_name.as_ref(),
@@ -929,8 +936,6 @@ pub trait Transaction: Sized {
                 |key, value| self.set(key, value),
             )?;
         }
-
-        meta_cache.insert((table_name.clone(), index_id), cached_meta);
 
         Ok(())
     }
@@ -983,15 +988,12 @@ pub trait Transaction: Sized {
     fn remove_statistics_meta(
         &mut self,
         table_codec: &mut TableCodec,
-        meta_cache: &mut StatisticsMetaCache,
         table_name: &TableName,
         index_id: IndexId,
     ) -> Result<(), DatabaseError> {
         table_codec.with_statistics_index_bound(table_name.as_ref(), index_id, |min, max| {
             self.remove_range(Bound::Included(min), Bound::Included(max))
         })?;
-
-        meta_cache.remove(&(table_name.clone(), index_id));
 
         Ok(())
     }
@@ -1001,7 +1003,7 @@ pub trait Transaction: Sized {
         &self,
         table_codec: &mut TableCodec,
         table_name: &TableName,
-    ) -> Result<Option<(Vec<ColumnRef>, Vec<IndexMetaRef>)>, DatabaseError> {
+    ) -> Result<Option<(Vec<ColumnCatalog>, Vec<IndexMetaRef>)>, DatabaseError> {
         table_codec.with_table_bound(table_name, |table_min, table_max| {
             let mut column_iter =
                 self.range(Bound::Included(table_min), Bound::Included(table_max))?;
@@ -1031,24 +1033,28 @@ pub trait Transaction: Sized {
     fn create_index_meta_from_column(
         &mut self,
         table_codec: &mut TableCodec,
+        arena: &impl MetaArena,
         table: &mut TableCatalog,
     ) -> Result<(), DatabaseError> {
         let table_name = table.name.clone();
         let mut primary_keys = Vec::new();
 
-        let schema_ref = table.schema_ref().clone();
-        for col in schema_ref.iter() {
+        let mut i = 0;
+        while i < table.columns_len() {
+            let column = table.column_ref(i).unwrap();
+            i += 1;
+            let col = arena.column(column);
             let col_id = col.id().ok_or(DatabaseError::PrimaryKeyNotFound)?;
-            let index_ty = if let Some(i) = col.desc().primary() {
-                primary_keys.push((i, col_id));
+            let index_ty = if let Some(primary_key_index) = col.desc().primary() {
+                primary_keys.push((primary_key_index, col_id));
                 continue;
             } else if col.desc().is_unique() {
                 IndexType::Unique
             } else {
                 continue;
             };
-            let meta_ref =
-                table.add_index_meta(format!("uk_{}_index", col.name()), vec![col_id], index_ty)?;
+            let index_name = format!("uk_{}_index", col.name());
+            let meta_ref = table.add_index_meta(index_name, vec![col_id], index_ty, arena)?;
             table_codec.with_index_meta(
                 &table_name,
                 meta_ref.id,
@@ -1059,12 +1065,13 @@ pub trait Transaction: Sized {
         let primary_keys = table
             .primary_keys()
             .iter()
-            .map(|(_, column)| column.id().unwrap())
+            .map(|(_, column)| arena.column(*column).id().unwrap())
             .collect_vec();
         let pk_index_ty = IndexType::PrimaryKey {
             is_multiple: primary_keys.len() != 1,
         };
-        let meta_ref = table.add_index_meta("pk_index".to_string(), primary_keys, pk_index_ty)?;
+        let meta_ref =
+            table.add_index_meta("pk_index".to_string(), primary_keys, pk_index_ty, arena)?;
         table_codec.with_index_meta(&table_name, meta_ref.id, Some(meta_ref), |key, value| {
             self.set(key, value)
         })?;
@@ -1147,13 +1154,6 @@ pub(crate) fn reuse_bound_as_excluded(bound: &mut Bound<Bytes>, key: &[u8]) {
     bytes.clear();
     bytes.extend_from_slice(key);
     *bound = Bound::Excluded(bytes);
-}
-
-fn same_projection_column(left: &ColumnRef, right: &ColumnRef) -> bool {
-    match (left.id(), right.id()) {
-        (Some(left), Some(right)) => left == right,
-        _ => left.name() == right.name(),
-    }
 }
 
 fn bytes_bound_as_slice(bound: &Bound<Bytes>) -> Bound<&[u8]> {
@@ -2005,6 +2005,7 @@ pub struct ViewIter<'a, T: Transaction + 'a> {
     iter: T::IterType<'a>,
     transaction: &'a T,
     table_cache: &'a TableCache,
+    table_arena: &'a TableArenaCell,
     scala_functions: &'a ScalaFunctions,
     table_functions: &'a TableFunctions,
 }
@@ -2020,6 +2021,7 @@ impl<T: Transaction> ViewIter<'_, T> {
             (self.transaction, self.table_cache),
             self.scala_functions,
             self.table_functions,
+            self.table_arena.borrow_mut(),
         )?))
     }
 }
@@ -2045,11 +2047,11 @@ mod test {
     use crate::db::test::build_table;
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
+    use crate::planner::{PlanArena, SchemaSlot, TableArenaCell};
     use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
     use crate::storage::table_codec::TableCodec;
     use crate::storage::{
-        IndexIter, InnerIter, StatisticsMetaCache, Storage, TableCache, Transaction,
-        TransactionIsolationLevel,
+        IndexIter, InnerIter, Storage, TableCache, Transaction, TransactionIsolationLevel,
     };
     use crate::types::index::{Index, IndexMeta, IndexType};
     use crate::types::tuple::Tuple;
@@ -2059,24 +2061,8 @@ mod test {
     use std::sync::Arc;
     use tempfile::TempDir;
 
-    fn full_columns() -> Vec<ColumnRef> {
-        vec![
-            ColumnRef::from(ColumnCatalog::new(
-                "c1".to_string(),
-                false,
-                ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
-                "c2".to_string(),
-                false,
-                ColumnDesc::new(LogicalType::Boolean, None, false, None).unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
-                "c3".to_string(),
-                false,
-                ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
-            )),
-        ]
+    fn full_columns(table_cache: &TableCache) -> Vec<ColumnRef> {
+        table_cache.get("t1").unwrap().columns().copied().collect()
     }
 
     fn build_tuples() -> Vec<Tuple> {
@@ -2114,11 +2100,15 @@ mod test {
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
         let mut table_cache = crate::storage::TableCache::default();
+        let table_arena = TableArenaCell::default();
+        let mut plan_arena = PlanArena::new(&table_arena);
 
-        build_table(&mut table_cache, &mut transaction)?;
+        build_table(&mut table_cache, &mut transaction, &mut plan_arena)?;
+        let plan_arena = PlanArena::new(&table_arena);
 
         let fn_assert = |transaction: &mut RocksTransaction,
-                         table_cache: &TableCache|
+                         table_cache: &TableCache,
+                         plan_arena: &PlanArena|
          -> Result<(), DatabaseError> {
             let table = transaction
                 .table(table_cache, "t1".to_string().into())?
@@ -2142,7 +2132,7 @@ mod test {
             );
 
             let mut column_iter = table.columns();
-            let c1_column = column_iter.next().unwrap();
+            let c1_column = plan_arena.column(*column_iter.next().unwrap());
             assert!(!c1_column.nullable());
             assert_eq!(
                 c1_column.summary(),
@@ -2160,7 +2150,7 @@ mod test {
                 &ColumnDesc::new(LogicalType::Integer, Some(0), false, None)?
             );
 
-            let c2_column = column_iter.next().unwrap();
+            let c2_column = plan_arena.column(*column_iter.next().unwrap());
             assert!(!c2_column.nullable());
             assert_eq!(
                 c2_column.summary(),
@@ -2178,7 +2168,7 @@ mod test {
                 &ColumnDesc::new(LogicalType::Boolean, None, false, None)?
             );
 
-            let c3_column = column_iter.next().unwrap();
+            let c3_column = plan_arena.column(*column_iter.next().unwrap());
             assert!(!c3_column.nullable());
             assert_eq!(
                 c3_column.summary(),
@@ -2198,15 +2188,16 @@ mod test {
 
             Ok(())
         };
-        fn_assert(&mut transaction, &table_cache)?;
+        fn_assert(&mut transaction, &table_cache, &plan_arena)?;
         let mut reloaded_table_cache = crate::storage::TableCache::default();
         let mut table_codec = TableCodec::default();
         let table_name = "t1".to_string().into();
         let table = transaction
-            .load_table(&mut table_codec, table_name)?
+            .load_table(&mut table_codec, table_arena.borrow_mut(), table_name)?
             .ok_or(DatabaseError::TableNotFound)?;
         reloaded_table_cache.insert("t1".to_string().into(), table);
-        fn_assert(&mut transaction, &reloaded_table_cache)?;
+        let plan_arena = PlanArena::new(&table_arena);
+        fn_assert(&mut transaction, &reloaded_table_cache, &plan_arena)?;
 
         Ok(())
     }
@@ -2218,8 +2209,11 @@ mod test {
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
         let mut table_cache = crate::storage::TableCache::default();
+        let table_arena = TableArenaCell::default();
+        let mut plan_arena = PlanArena::new(&table_arena);
 
-        build_table(&mut table_cache, &mut transaction)?;
+        build_table(&mut table_cache, &mut transaction, &mut plan_arena)?;
+        let plan_arena = PlanArena::new(&table_arena);
 
         let tuples = build_tuples();
         for tuple in tuples.iter().cloned() {
@@ -2238,10 +2232,11 @@ mod test {
         {
             let mut tuple_iter = transaction.read(
                 &mut table_codec,
+                &plan_arena,
                 &table_cache,
                 "t1".to_string().into(),
                 (None, None),
-                full_columns(),
+                full_columns(&table_cache),
                 true,
             )?;
 
@@ -2275,10 +2270,11 @@ mod test {
         {
             let mut tuple_iter = transaction.read(
                 &mut table_codec,
+                &plan_arena,
                 &table_cache,
                 "t1".to_string().into(),
                 (None, None),
-                full_columns(),
+                full_columns(&table_cache),
                 true,
             )?;
 
@@ -2312,8 +2308,11 @@ mod test {
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
         let mut table_cache = crate::storage::TableCache::default();
+        let table_arena = TableArenaCell::default();
+        let mut plan_arena = PlanArena::new(&table_arena);
 
-        build_table(&mut table_cache, &mut transaction)?;
+        build_table(&mut table_cache, &mut transaction, &mut plan_arena)?;
+        let mut plan_arena = PlanArena::new(&table_arena);
         let (c2_column_id, c3_column_id) = {
             let t1_table = transaction
                 .table(&table_cache, "t1".to_string().into())?
@@ -2325,22 +2324,27 @@ mod test {
             )
         };
 
-        let _ = transaction.add_index_meta(
+        let (table, _) = transaction.add_index_meta(
             &mut table_codec,
-            &mut table_cache,
+            &mut plan_arena,
             &"t1".to_string().into(),
             "i1".to_string(),
             vec![c3_column_id],
             IndexType::Normal,
         )?;
-        let _ = transaction.add_index_meta(
+        let table = table.transplant_to_table_arena(&plan_arena)?;
+        table_cache.insert(table.name().clone(), table);
+        let mut plan_arena = PlanArena::new(&table_arena);
+        let (table, _) = transaction.add_index_meta(
             &mut table_codec,
-            &mut table_cache,
+            &mut plan_arena,
             &"t1".to_string().into(),
             "i2".to_string(),
             vec![c3_column_id, c2_column_id],
             IndexType::Composite,
         )?;
+        let table = table.transplant_to_table_arena(&plan_arena)?;
+        table_cache.insert(table.name().clone(), table);
 
         let fn_assert = |transaction: &mut RocksTransaction,
                          table_cache: &TableCache|
@@ -2371,9 +2375,10 @@ mod test {
         let mut reloaded_table_cache = crate::storage::TableCache::default();
         let table_name = "t1".to_string().into();
         let table = transaction
-            .load_table(&mut table_codec, table_name)?
+            .load_table(&mut table_codec, table_arena.borrow_mut(), table_name)?
             .ok_or(DatabaseError::TableNotFound)?;
         reloaded_table_cache.insert("t1".to_string().into(), table);
+        let mut plan_arena = PlanArena::new(&table_arena);
         fn_assert(&mut transaction, &reloaded_table_cache)?;
         {
             let mut iter = table_codec.with_index_meta_bound("t1", |min, max| {
@@ -2388,11 +2393,9 @@ mod test {
             dbg!(value);
             assert!(iter.try_next()?.is_none());
         }
-        let mut meta_cache = crate::storage::StatisticsMetaCache::default();
         match transaction.drop_index(
             &mut table_codec,
-            &mut table_cache,
-            &mut meta_cache,
+            &mut plan_arena,
             "t1".to_string().into(),
             "pk_index",
             false,
@@ -2400,14 +2403,16 @@ mod test {
             Err(DatabaseError::InvalidIndex) => (),
             _ => unreachable!(),
         }
-        transaction.drop_index(
+        if let Some((table, _)) = transaction.drop_index(
             &mut table_codec,
-            &mut table_cache,
-            &mut meta_cache,
+            &mut plan_arena,
             "t1".to_string().into(),
             "i1",
             false,
-        )?;
+        )? {
+            let table = table.transplant_to_table_arena(&plan_arena)?;
+            table_cache.insert(table.name().clone(), table);
+        }
         {
             let table = transaction
                 .table(&table_cache, "t1".to_string().into())?
@@ -2439,13 +2444,15 @@ mod test {
         fn build_index_iter<'a>(
             transaction: &'a RocksTransaction<'a>,
             table_cache: &'a TableCache,
+            plan_arena: &'a PlanArena<'a>,
             index_column_id: ColumnId,
         ) -> Result<IndexIter<'a, RocksTransaction<'a>>, DatabaseError> {
             transaction.read_by_index(
                 table_cache,
+                plan_arena,
                 "t1".to_string().into(),
                 (None, None),
-                full_columns(),
+                full_columns(table_cache),
                 Arc::new(IndexMeta {
                     id: 1,
                     column_ids: vec![index_column_id],
@@ -2470,21 +2477,27 @@ mod test {
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
         let mut table_cache = crate::storage::TableCache::default();
+        let table_arena = TableArenaCell::default();
+        let mut plan_arena = PlanArena::new(&table_arena);
 
-        build_table(&mut table_cache, &mut transaction)?;
+        build_table(&mut table_cache, &mut transaction, &mut plan_arena)?;
+        let mut plan_arena = PlanArena::new(&table_arena);
         let t1_table = transaction
             .table(&table_cache, "t1".to_string().into())?
             .unwrap();
         let c3_column_id = *t1_table.get_column_id_by_name("c3").unwrap();
 
-        let _ = transaction.add_index_meta(
+        let (table, _) = transaction.add_index_meta(
             &mut table_codec,
-            &mut table_cache,
+            &mut plan_arena,
             &"t1".to_string().into(),
             "i1".to_string(),
             vec![c3_column_id],
             IndexType::Normal,
         )?;
+        let table = table.transplant_to_table_arena(&plan_arena)?;
+        table_cache.insert(table.name().clone(), table);
+        let plan_arena = PlanArena::new(&table_arena);
 
         let tuples = build_tuples();
         let indexes = [
@@ -2518,7 +2531,8 @@ mod test {
             )?;
         }
         {
-            let mut index_iter = build_index_iter(&transaction, &table_cache, c3_column_id)?;
+            let mut index_iter =
+                build_index_iter(&transaction, &table_cache, &plan_arena, c3_column_id)?;
 
             assert_eq!(
                 super::next_tuple_for_test(&mut index_iter)?.unwrap(),
@@ -2547,7 +2561,8 @@ mod test {
         }
         transaction.del_index(&mut table_codec, "t1", &indexes[0].1, &indexes[0].0)?;
 
-        let mut index_iter = build_index_iter(&transaction, &table_cache, c3_column_id)?;
+        let mut index_iter =
+            build_index_iter(&transaction, &table_cache, &plan_arena, c3_column_id)?;
 
         assert_eq!(
             super::next_tuple_for_test(&mut index_iter)?.unwrap(),
@@ -2599,22 +2614,27 @@ mod test {
                 DataValue::Int32(1),
             ],
         );
+        let table_arena = TableArenaCell::default();
+        let mut plan_arena = PlanArena::new(&table_arena);
 
         let index_id = {
             let mut setup_tx = storage.transaction()?;
-            build_table(&mut table_cache, &mut setup_tx)?;
+            build_table(&mut table_cache, &mut setup_tx, &mut plan_arena)?;
+            let mut plan_arena = PlanArena::new(&table_arena);
             let table = setup_tx
                 .table(&table_cache, "t1".to_string().into())?
                 .unwrap();
             let c3_column_id = *table.get_column_id_by_name("c3").unwrap();
-            let index_id = setup_tx.add_index_meta(
+            let (table, index_id) = setup_tx.add_index_meta(
                 &mut table_codec,
-                &mut table_cache,
+                &mut plan_arena,
                 &"t1".to_string().into(),
                 "i1".to_string(),
                 vec![c3_column_id],
                 IndexType::Normal,
             )?;
+            let table = table.transplant_to_table_arena(&plan_arena)?;
+            table_cache.insert(table.name().clone(), table);
 
             setup_tx.add_index(
                 &mut table_codec,
@@ -2633,7 +2653,6 @@ mod test {
 
             index_id
         };
-
         let reader_tx =
             storage.transaction_with_isolation(TransactionIsolationLevel::ReadCommitted)?;
         let tuple_id = {
@@ -2709,10 +2728,12 @@ mod test {
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
         let mut table_cache = crate::storage::TableCache::default();
-        let mut meta_cache = StatisticsMetaCache::default();
         let mut table_codec = TableCodec::default();
+        let table_arena = TableArenaCell::default();
+        let mut plan_arena = PlanArena::new(&table_arena);
 
-        build_table(&mut table_cache, &mut transaction)?;
+        build_table(&mut table_cache, &mut transaction, &mut plan_arena)?;
+        let mut plan_arena = PlanArena::new(&table_arena);
         let table_name: TableName = "t1".to_string().into();
 
         let new_column = ColumnCatalog::new(
@@ -2720,18 +2741,21 @@ mod test {
             true,
             ColumnDesc::new(LogicalType::Integer, None, false, None)?,
         );
-        let new_column_id = transaction.add_column(
+        let (table, new_column_id) = transaction.add_column(
             &mut table_codec,
-            &mut table_cache,
+            &mut plan_arena,
             &table_name,
             &new_column,
             false,
         )?;
+        let table = table.transplant_to_table_arena(&plan_arena)?;
+        table_cache.insert(table.name().clone(), table);
+        let mut plan_arena = PlanArena::new(&table_arena);
         {
             assert!(transaction
                 .add_column(
                     &mut table_codec,
-                    &mut table_cache,
+                    &mut plan_arena,
                     &table_name,
                     &new_column,
                     false,
@@ -2739,13 +2763,15 @@ mod test {
                 .is_err());
             assert_eq!(
                 new_column_id,
-                transaction.add_column(
-                    &mut table_codec,
-                    &mut table_cache,
-                    &table_name,
-                    &new_column,
-                    true,
-                )?
+                transaction
+                    .add_column(
+                        &mut table_codec,
+                        &mut plan_arena,
+                        &table_name,
+                        &new_column,
+                        true,
+                    )?
+                    .1
             );
         }
         {
@@ -2764,18 +2790,13 @@ mod test {
                 table_name: table_name.clone(),
                 is_temp: false,
             };
-            assert_eq!(
-                table.get_column_by_name("c4"),
-                Some(&ColumnRef::from(new_column))
-            );
+            let column = table.get_column_by_name("c4").unwrap();
+            assert_eq!(table_arena.borrow().column(column), &new_column);
         }
-        transaction.drop_column(
-            &mut table_codec,
-            &mut table_cache,
-            &mut meta_cache,
-            &table_name,
-            "c4",
-        )?;
+        let table =
+            transaction.drop_column(&mut table_codec, &mut plan_arena, &table_name, "c4")?;
+        let table = table.transplant_to_table_arena(&plan_arena)?;
+        table_cache.insert(table.name().clone(), table);
         {
             let table = transaction
                 .table(&table_cache, table_name.clone())?
@@ -2794,16 +2815,24 @@ mod test {
         let table_functions = Default::default();
 
         let view_name: TableName = "v1".to_string().into();
+        let mut plan_arena = PlanArena::new(&table_state.table_arena);
+        let plan = table_state.plan_with_arena(
+            "select c1, c3 from t1 inner join t2 on c1 = c3 and c1 > 1",
+            &mut plan_arena,
+        )?;
+        let schema = plan
+            .output_schema_to(&mut plan_arena, SchemaSlot::S0)
+            .clone();
         let view = View {
             name: view_name.clone(),
-            plan: Box::new(
-                table_state.plan("select c1, c3 from t1 inner join t2 on c1 = c3 and c1 > 1")?,
-            ),
+            plan: Box::new(plan),
+            schema,
         };
         let mut transaction = table_state.storage.transaction()?;
         let mut view_cache = table_state.view_cache.clone();
         let mut table_codec = TableCodec::default();
-        transaction.create_view(&mut table_codec, &mut view_cache, view.clone(), true)?;
+        let view = transaction.create_view(&mut table_codec, &plan_arena, view.clone(), true)?;
+        view_cache.insert(view.name.clone(), view.clone());
 
         assert_eq!(
             &view,
@@ -2830,8 +2859,12 @@ mod test {
                 .unwrap()
         );
 
-        transaction.drop_view(&mut table_codec, &mut view_cache, view_name.clone(), false)?;
-        transaction.drop_view(&mut table_codec, &mut view_cache, view_name.clone(), true)?;
+        if transaction.drop_view(&mut table_codec, view_name.clone(), false)? {
+            view_cache.remove(&view_name);
+        }
+        if transaction.drop_view(&mut table_codec, view_name.clone(), true)? {
+            view_cache.remove(&view_name);
+        }
         assert!(transaction
             .view(
                 &table_state.table_cache,

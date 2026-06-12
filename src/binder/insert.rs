@@ -25,14 +25,13 @@ use crate::expression::ScalarExpression;
 use crate::planner::operator::insert::InsertOperator;
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::operator::Operator;
-use crate::planner::{Childrens, LogicalPlan};
+use crate::planner::{Childrens, LogicalPlan, SchemaSlot};
 use crate::storage::Transaction;
-use crate::types::tuple::SchemaRef;
+use crate::types::tuple::Schema;
 use crate::types::value::DataValue;
 use sqlparser::ast::{Expr, Ident, ObjectName, Query};
 use std::borrow::Cow;
 use std::slice;
-use std::sync::Arc;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_insert(
@@ -42,6 +41,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         expr_rows: &Vec<Vec<Expr>>,
         is_overwrite: bool,
         is_mapping_by_name: bool,
+        arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         // FIXME: Make it better to detect the current BindStep
         self.context.allow_default = true;
@@ -55,21 +55,20 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         let values_len = expr_rows[0].len();
 
         if idents.is_empty() {
-            let schema_buf = self.table_schema_buf.entry(table_name.clone()).or_default();
-            let temp_schema_ref = source.schema_ref(schema_buf);
-            if values_len > temp_schema_ref.len() {
+            if values_len > source.schema_len() {
                 return Err(DatabaseError::ValuesLenMismatch(
-                    temp_schema_ref.len(),
+                    source.schema_len(),
                     values_len,
                 ));
             }
-            _schema_ref = Some(temp_schema_ref);
+            _schema_ref = Some(source.schema().collect());
         } else {
             let mut columns = Vec::with_capacity(idents.len());
             for ident in idents {
                 match self.bind_column_ref_from_identifiers(
                     slice::from_ref(ident),
                     Some(table_name.as_ref()),
+                    arena,
                 )? {
                     ScalarExpression::ColumnRef { column, .. } => columns.push(column),
                     _ => return Err(DatabaseError::UnsupportedStmt(ident.to_string())),
@@ -78,7 +77,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             if values_len != columns.len() {
                 return Err(DatabaseError::ValuesLenMismatch(columns.len(), values_len));
             }
-            _schema_ref = Some(Arc::new(columns));
+            _schema_ref = Some(columns);
         }
         let schema_ref = _schema_ref.ok_or(DatabaseError::ColumnsEmpty)?;
         let mut rows = Vec::with_capacity(expr_rows.len());
@@ -90,19 +89,20 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             let mut row = Vec::with_capacity(expr_row.len());
 
             for (i, expr) in expr_row.iter().enumerate() {
-                let mut expression = self.bind_expr(expr)?;
+                let mut expression = self.bind_expr(expr, arena)?;
 
-                ConstantCalculator.visit(&mut expression)?;
+                ConstantCalculator::new(arena).visit(&mut expression)?;
                 match expression {
                     ScalarExpression::Constant(mut value) => {
-                        let ty = schema_ref[i].datatype();
+                        let column = arena.column(schema_ref[i]);
+                        let ty = column.datatype();
 
                         value = value.cast(ty)?;
                         // Check if the value length is too long
                         value.check_len(ty)?;
-                        if value.is_null() && !schema_ref[i].nullable() {
+                        if value.is_null() && !column.nullable() {
                             return Err(attach_span_if_absent(
-                                DatabaseError::not_null_column(schema_ref[i].name().to_string()),
+                                DatabaseError::not_null_column(column.name().to_string()),
                                 expr,
                             ));
                         }
@@ -110,12 +110,13 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                         row.push(value);
                     }
                     ScalarExpression::Empty => {
-                        let default_value = schema_ref[i]
+                        let column = arena.column(schema_ref[i]);
+                        let default_value = column
                             .default_value()?
                             .ok_or(DatabaseError::DefaultNotExist)?;
-                        if default_value.is_null() && !schema_ref[i].nullable() {
+                        if default_value.is_null() && !column.nullable() {
                             return Err(attach_span_if_absent(
-                                DatabaseError::not_null_column(schema_ref[i].name().to_string()),
+                                DatabaseError::not_null_column(column.name().to_string()),
                                 expr,
                             ));
                         }
@@ -145,6 +146,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         idents: &[Ident],
         query: &Query,
         is_overwrite: bool,
+        arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let table_name: TableName = lower_case_name(name)?.into();
         let table_schema = {
@@ -152,12 +154,11 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 .context
                 .source(&table_name)?
                 .ok_or(DatabaseError::TableNotFound)?;
-            let mut schema_buf = None;
-            source.schema_ref(&mut schema_buf)
+            source.schema().collect::<Schema>()
         };
 
-        let mut input_plan = self.bind_query(query)?;
-        let input_schema = input_plan.output_schema().clone();
+        let mut input_plan = self.bind_query(query, arena)?;
+        let input_schema = input_plan.output_schema_to(arena, SchemaSlot::S0).clone();
         let input_len = input_schema.len();
 
         let target_columns = if idents.is_empty() {
@@ -174,17 +175,14 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 .context
                 .source(&table_name)?
                 .ok_or(DatabaseError::TableNotFound)?;
-            let mut schema_buf = None;
             for ident in idents {
                 let column_name = lower_ident(ident);
-                let column = source
-                    .column(&column_name, &mut schema_buf)
-                    .ok_or_else(|| {
-                        attach_span_from_sqlparser_span_if_absent(
-                            DatabaseError::column_not_found(column_name),
-                            ident.span,
-                        )
-                    })?;
+                let column = source.column(&column_name, arena).ok_or_else(|| {
+                    attach_span_from_sqlparser_span_if_absent(
+                        DatabaseError::column_not_found(column_name),
+                        ident.span,
+                    )
+                })?;
                 columns.push(column);
             }
             if input_len != columns.len() {
@@ -199,15 +197,12 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             .zip(target_columns.iter())
             .map(
                 |((position, input_column), target_column)| ScalarExpression::Alias {
-                    expr: Box::new(ScalarExpression::column_expr(
-                        input_column.clone(),
-                        position,
-                    )),
-                    alias: AliasType::Name(target_column.name().to_string()),
+                    expr: Box::new(ScalarExpression::column_expr(*input_column, position)),
+                    alias: AliasType::Name(arena.column(*target_column).name().to_string()),
                 },
             )
             .collect::<Vec<_>>();
-        input_plan = self.bind_project(input_plan, projection)?;
+        input_plan = self.bind_project(input_plan, projection, arena)?;
 
         Ok(LogicalPlan::new(
             Operator::Insert(InsertOperator {
@@ -222,7 +217,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
     pub(crate) fn bind_values(
         &mut self,
         rows: Vec<Vec<DataValue>>,
-        schema_ref: SchemaRef,
+        schema_ref: Schema,
     ) -> LogicalPlan {
         LogicalPlan::new(
             Operator::Values(ValuesOperator { rows, schema_ref }),

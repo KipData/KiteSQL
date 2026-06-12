@@ -37,6 +37,7 @@ mod vec;
 use crate::catalog::TableName;
 use crate::db::{ScalaFunctions, TableFunctions};
 use crate::errors::DatabaseError;
+use crate::planner::MetaArena;
 use crate::storage::{TableCache, Transaction};
 use std::io;
 use std::io::{Read, Write};
@@ -45,21 +46,27 @@ use std::io::{Read, Write};
 macro_rules! implement_serialization_by_bincode {
     ($struct_name:ident) => {
         impl $crate::serdes::ReferenceSerialization for $struct_name {
-            fn encode<W: std::io::Write>(
+            fn encode<W: std::io::Write, A: $crate::planner::MetaArena>(
                 &self,
                 writer: &mut W,
                 _: bool,
                 _: &mut $crate::serdes::ReferenceTables,
+                _: &A,
             ) -> Result<(), $crate::errors::DatabaseError> {
                 bincode::serialize_into(writer, self)?;
 
                 Ok(())
             }
 
-            fn decode<T: $crate::storage::Transaction, R: std::io::Read>(
+            fn decode<
+                T: $crate::storage::Transaction,
+                R: std::io::Read,
+                A: $crate::planner::MetaArena,
+            >(
                 reader: &mut R,
                 _: Option<&$crate::serdes::ReferenceDecodeContext<'_, T>>,
                 _: &$crate::serdes::ReferenceTables,
+                _: &mut A,
             ) -> Result<Self, $crate::errors::DatabaseError> {
                 Ok(bincode::deserialize_from(reader)?)
             }
@@ -68,17 +75,19 @@ macro_rules! implement_serialization_by_bincode {
 }
 
 pub trait ReferenceSerialization {
-    fn encode<W: Write>(
+    fn encode<W: Write, A: MetaArena>(
         &self,
         writer: &mut W,
         is_direct: bool,
         reference_tables: &mut ReferenceTables,
+        arena: &A,
     ) -> Result<(), DatabaseError>;
 
-    fn decode<T: Transaction, R: Read>(
+    fn decode<T: Transaction, R: Read, A: MetaArena>(
         reader: &mut R,
         context: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
+        arena: &mut A,
     ) -> Result<Self, DatabaseError>
     where
         Self: Sized;
@@ -124,10 +133,18 @@ impl<'a, T: Transaction> ReferenceDecodeContext<'a, T> {
     }
 }
 
-#[derive(Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Default)]
 pub struct ReferenceTables {
     tables: Vec<TableName>,
 }
+
+impl PartialEq for ReferenceTables {
+    fn eq(&self, other: &Self) -> bool {
+        self.tables == other.tables
+    }
+}
+
+impl Eq for ReferenceTables {}
 
 impl ReferenceTables {
     pub fn new() -> Self {
@@ -136,6 +153,10 @@ impl ReferenceTables {
 
     pub fn is_empty(&self) -> bool {
         self.tables.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.tables.clear();
     }
 
     pub fn len(&self) -> usize {
@@ -193,9 +214,9 @@ mod tests {
 
     #[test]
     fn test_to_raw() -> io::Result<()> {
-        let reference_tables = ReferenceTables {
-            tables: vec!["t1".to_string().into(), "t2".to_string().into()],
-        };
+        let mut reference_tables = ReferenceTables::new();
+        reference_tables.push_or_replace(&"t1".to_string().into());
+        reference_tables.push_or_replace(&"t2".to_string().into());
 
         let mut cursor = io::Cursor::new(Vec::new());
         reference_tables.to_raw(&mut cursor)?;

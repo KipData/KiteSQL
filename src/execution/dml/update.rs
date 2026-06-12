@@ -20,11 +20,10 @@ use crate::execution::{
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::update::UpdateOperator;
-use crate::planner::LogicalPlan;
+use crate::planner::{LogicalPlan, SchemaSlot};
 use crate::storage::Transaction;
 use crate::types::index::Index;
-use crate::types::tuple::SchemaRef;
-use crate::types::tuple::Tuple;
+use crate::types::tuple::{Schema, Tuple};
 use crate::types::tuple_builder::TupleBuilder;
 use crate::types::value::DataValue;
 use itertools::Itertools;
@@ -33,7 +32,7 @@ use std::collections::HashMap;
 pub struct Update {
     table_name: TableName,
     value_exprs: Vec<(ColumnRef, ScalarExpression)>,
-    input_schema: SchemaRef,
+    input_schema: Schema,
     input_plan: LogicalPlan,
     input: Option<ExecId>,
 }
@@ -45,13 +44,13 @@ impl From<(UpdateOperator, LogicalPlan)> for Update {
                 table_name,
                 value_exprs,
             },
-            mut input,
+            input,
         ): (UpdateOperator, LogicalPlan),
     ) -> Self {
         Update {
             table_name,
             value_exprs,
-            input_schema: input.output_schema().clone(),
+            input_schema: Default::default(),
             input_plan: input,
             input: None,
         }
@@ -62,11 +61,17 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Update {
     fn into_executor(
         mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
+        self.input_schema = self
+            .input_plan
+            .output_schema_to(plan_arena, SchemaSlot::S0)
+            .clone();
         self.input = Some(build_read(
             arena,
+            plan_arena,
             self.input_plan.take(),
             cache,
             transaction,
@@ -79,6 +84,7 @@ impl Update {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(input) = self.input.take() else {
             arena.finish();
@@ -87,24 +93,27 @@ impl Update {
 
         let mut exprs_map = HashMap::with_capacity(self.value_exprs.len());
         for (column, expr) in self.value_exprs.drain(..) {
-            exprs_map.insert(column.id(), expr);
+            exprs_map.insert(plan_arena.column(column).id(), expr);
         }
 
-        if let Some(table_snapshot) = arena
+        let table = arena
             .transaction()
             .table(arena.table_cache(), self.table_name.clone())?
-            .map(|table| table.dml_snapshot())
+            .cloned();
+        if let Some(table_snapshot) = table
+            .as_ref()
+            .map(|table| table.dml_snapshot(plan_arena))
             .transpose()?
         {
             let serializers = self
                 .input_schema
                 .iter()
-                .map(|column| column.datatype().serializable())
+                .map(|column| plan_arena.column(*column).datatype().serializable())
                 .collect_vec();
 
             let mut updated_count = 0;
 
-            while arena.next_tuple(input)? {
+            while arena.next_tuple(input, plan_arena)? {
                 let mut tuple = arena.result_tuple().clone();
                 let mut is_overwrite = true;
 
@@ -117,12 +126,12 @@ impl Update {
                         continue;
                     };
                     let index = Index::new(index_meta.id, &value, index_meta.ty);
-                    let mut state = arena.local_state();
+                    let mut state = arena.local_state(plan_arena);
                     let (transaction, table_codec) = state.transaction_codec_mut();
                     transaction.del_index(table_codec, &self.table_name, &index, &old_pk)?;
                 }
                 for (i, column) in self.input_schema.iter().enumerate() {
-                    if let Some(expr) = exprs_map.get(&column.id()) {
+                    if let Some(expr) = exprs_map.get(&plan_arena.column(*column).id()) {
                         let value = expr.eval(Some(&tuple))?;
                         tuple.values[i] = value;
                     }
@@ -135,7 +144,7 @@ impl Update {
                 let new_pk = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
 
                 if new_pk != &old_pk {
-                    let mut state = arena.local_state();
+                    let mut state = arena.local_state(plan_arena);
                     let (transaction, table_codec) = state.transaction_codec_mut();
                     transaction.remove_tuple(table_codec, &self.table_name, &old_pk)?;
                     is_overwrite = false;
@@ -146,12 +155,12 @@ impl Update {
                         continue;
                     };
                     let index = Index::new(index_meta.id, &value, index_meta.ty);
-                    let mut state = arena.local_state();
+                    let mut state = arena.local_state(plan_arena);
                     let (transaction, table_codec) = state.transaction_codec_mut();
                     transaction.add_index(table_codec, &self.table_name, index, new_pk)?;
                 }
 
-                let mut state = arena.local_state();
+                let mut state = arena.local_state(plan_arena);
                 let (transaction, table_codec) = state.transaction_codec_mut();
                 transaction.append_tuple(
                     table_codec,

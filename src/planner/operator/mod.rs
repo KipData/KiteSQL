@@ -51,7 +51,6 @@ use self::{
     table_scan::TableScanOperator,
 };
 use crate::catalog::ColumnRef;
-use crate::expression::ScalarExpression;
 use crate::planner::operator::alter_table::drop_column::DropColumnOperator;
 use crate::planner::operator::analyze::AnalyzeOperator;
 use crate::planner::operator::copy_from_file::CopyFromFileOperator;
@@ -74,6 +73,7 @@ use crate::planner::operator::truncate::TruncateOperator;
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::update::UpdateOperator;
 use crate::planner::operator::values::ValuesOperator;
+use crate::planner::{MetaArena, PlanArena};
 use crate::types::index::IndexInfo;
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
@@ -188,117 +188,35 @@ pub enum PlanImpl {
 }
 
 impl Operator {
-    pub fn output_exprs(&self, output_exprs: &mut Vec<ScalarExpression>) -> bool {
-        match self {
-            Operator::Dummy => false,
-            Operator::Aggregate(op) => {
-                output_exprs.clear();
-                output_exprs.extend(op.agg_calls.iter().chain(op.groupby_exprs.iter()).cloned());
-                true
-            }
-            Operator::ScalarApply(_)
-            | Operator::MarkApply(_)
-            | Operator::Filter(_)
-            | Operator::Join(_)
-            | Operator::ScalarSubquery(_) => false,
-            Operator::Project(op) => {
-                output_exprs.clear();
-                output_exprs.extend(op.exprs.iter().cloned());
-                true
-            }
-            Operator::TableScan(op) => {
-                output_exprs.clear();
-                output_exprs.extend(op.columns.iter().enumerate().map(|(position, column)| {
-                    ScalarExpression::column_expr(column.clone(), position)
-                }));
-                true
-            }
-            Operator::Sort(_) | Operator::Limit(_) | Operator::TopK(_) => false,
-            Operator::Values(ValuesOperator { schema_ref, .. })
-            | Operator::Union(UnionOperator {
-                left_schema_ref: schema_ref,
-                ..
-            })
-            | Operator::SetMembership(SetMembershipOperator {
-                left_schema_ref: schema_ref,
-                ..
-            }) => {
-                output_exprs.clear();
-                output_exprs.extend(
-                    schema_ref
-                        .iter()
-                        .cloned()
-                        .enumerate()
-                        .map(|(position, column)| ScalarExpression::column_expr(column, position)),
-                );
-                true
-            }
-            Operator::FunctionScan(op) => {
-                output_exprs.clear();
-                output_exprs.extend(
-                    op.table_function
-                        .inner
-                        .output_schema()
-                        .iter()
-                        .enumerate()
-                        .map(|(position, column)| {
-                            ScalarExpression::column_expr(column.clone(), position)
-                        }),
-                );
-                true
-            }
-            Operator::ShowTable
-            | Operator::ShowView
-            | Operator::Explain
-            | Operator::Describe(_)
-            | Operator::Insert(_)
-            | Operator::Update(_)
-            | Operator::Delete(_)
-            | Operator::Analyze(_)
-            | Operator::AddColumn(_)
-            | Operator::ChangeColumn(_)
-            | Operator::DropColumn(_)
-            | Operator::CreateTable(_)
-            | Operator::CreateIndex(_)
-            | Operator::CreateView(_)
-            | Operator::DropTable(_)
-            | Operator::DropView(_)
-            | Operator::DropIndex(_)
-            | Operator::Truncate(_)
-            | Operator::CopyFromFile(_)
-            | Operator::CopyToFile(_) => false,
-        }
-    }
-
-    pub fn visit_referenced_columns(
+    pub fn visit_referenced_columns<A: MetaArena>(
         &self,
-        only_column_ref: bool,
-        f: &mut impl FnMut(&ColumnRef) -> bool,
+        arena: &mut A,
+        f: &mut impl FnMut(&mut A, &ColumnRef) -> bool,
     ) -> bool {
         match self {
             Operator::Aggregate(op) => op
                 .agg_calls
                 .iter()
                 .chain(op.groupby_exprs.iter())
-                .all(|expr| expr.visit_referenced_columns(only_column_ref, f)),
+                .all(|expr| expr.visit_referenced_columns(arena, f)),
             Operator::ScalarApply(_) => true,
             Operator::MarkApply(op) => op
                 .predicates()
                 .iter()
-                .all(|expr| expr.visit_referenced_columns(only_column_ref, f)),
-            Operator::Filter(op) => op.predicate.visit_referenced_columns(only_column_ref, f),
+                .all(|expr| expr.visit_referenced_columns(arena, f)),
+            Operator::Filter(op) => op.predicate.visit_referenced_columns(arena, f),
             Operator::Join(op) => {
                 if let JoinCondition::On { on, filter } = &op.on {
                     for (left_expr, right_expr) in on {
-                        if !left_expr.visit_referenced_columns(only_column_ref, f)
-                            || !right_expr.visit_referenced_columns(only_column_ref, f)
+                        if !left_expr.visit_referenced_columns(arena, f)
+                            || !right_expr.visit_referenced_columns(arena, f)
                         {
                             return false;
                         }
                     }
 
                     if let Some(filter_expr) = filter {
-                        return filter_expr.visit_referenced_columns(only_column_ref, f);
+                        return filter_expr.visit_referenced_columns(arena, f);
                     }
                 }
                 true
@@ -306,25 +224,27 @@ impl Operator {
             Operator::Project(op) => op
                 .exprs
                 .iter()
-                .all(|expr| expr.visit_referenced_columns(only_column_ref, f)),
+                .all(|expr| expr.visit_referenced_columns(arena, f)),
             Operator::ScalarSubquery(_) => true,
-            Operator::TableScan(op) => op.columns.iter().all(f),
+            Operator::TableScan(op) => op.columns.iter().all(|column| f(arena, column)),
             Operator::FunctionScan(op) => op
                 .table_function
                 .args
                 .iter()
-                .all(|expr| expr.visit_referenced_columns(only_column_ref, f)),
+                .all(|expr| expr.visit_referenced_columns(arena, f)),
             Operator::Sort(op) => op
                 .sort_fields
                 .iter()
                 .map(|field| &field.expr)
-                .all(|expr| expr.visit_referenced_columns(only_column_ref, f)),
+                .all(|expr| expr.visit_referenced_columns(arena, f)),
             Operator::TopK(op) => op
                 .sort_fields
                 .iter()
                 .map(|field| &field.expr)
-                .all(|expr| expr.visit_referenced_columns(only_column_ref, f)),
-            Operator::Values(ValuesOperator { schema_ref, .. }) => schema_ref.iter().all(f),
+                .all(|expr| expr.visit_referenced_columns(arena, f)),
+            Operator::Values(ValuesOperator { schema_ref, .. }) => {
+                schema_ref.iter().all(|column| f(arena, column))
+            }
             Operator::Union(UnionOperator {
                 left_schema_ref,
                 _right_schema_ref,
@@ -336,9 +256,9 @@ impl Operator {
             }) => left_schema_ref
                 .iter()
                 .chain(_right_schema_ref.iter())
-                .all(f),
+                .all(|column| f(arena, column)),
             Operator::Analyze(_) => true,
-            Operator::Delete(op) => op.primary_keys.iter().all(f),
+            Operator::Delete(op) => op.primary_keys.iter().all(|column| f(arena, column)),
             Operator::Dummy
             | Operator::Limit(_)
             | Operator::ShowTable
@@ -364,11 +284,11 @@ impl Operator {
 
     pub fn any_referenced_column(
         &self,
-        only_column_ref: bool,
+        arena: &mut PlanArena,
         mut predicate: impl FnMut(&ColumnRef) -> bool,
     ) -> bool {
         let mut found = false;
-        self.visit_referenced_columns(only_column_ref, &mut |column| {
+        self.visit_referenced_columns(arena, &mut |_, column| {
             found = predicate(column);
             !found
         });
@@ -377,11 +297,11 @@ impl Operator {
 
     pub fn all_referenced_columns(
         &self,
-        only_column_ref: bool,
+        arena: &mut PlanArena,
         mut predicate: impl FnMut(&ColumnRef) -> bool,
     ) -> bool {
         let mut all = true;
-        self.visit_referenced_columns(only_column_ref, &mut |column| {
+        self.visit_referenced_columns(arena, &mut |_, column| {
             all = predicate(column);
             all
         });

@@ -356,15 +356,17 @@ mod test {
         let evaluator = create(LogicalType::Boolean, BinaryOperator::NotEq)?;
         let mut cursor = Cursor::new(Vec::new());
         let mut reference_tables = ReferenceTables::new();
+        let mut arena = crate::planner::TableArena::default();
 
-        evaluator.encode(&mut cursor, false, &mut reference_tables)?;
+        evaluator.encode(&mut cursor, false, &mut reference_tables, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
 
         assert_eq!(
-            BinaryEvaluatorBox::decode::<RocksTransaction, _>(
+            BinaryEvaluatorBox::decode::<RocksTransaction, _, _>(
                 &mut cursor,
                 None,
-                &reference_tables
+                &reference_tables,
+                &mut arena,
             )?,
             evaluator
         );

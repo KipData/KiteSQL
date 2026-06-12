@@ -175,13 +175,17 @@ Transaction commands:
         I: BorrowResultIter,
     {
         let mut table = Table::new();
-        let schema = iter.schema().clone();
 
-        if !schema.is_empty() {
-            let header = schema
-                .iter()
-                .map(|column| Cell::new(column.full_name()))
-                .collect::<Vec<_>>();
+        let (header, schema_len) = iter.schema(|schema| {
+            (
+                schema
+                    .iter()
+                    .map(|column| Cell::new(column.full_name()))
+                    .collect::<Vec<_>>(),
+                schema.len(),
+            )
+        });
+        if !header.is_empty() {
             table.set_header(header);
         }
 
@@ -197,7 +201,7 @@ Transaction commands:
         }
         iter.done()?;
 
-        if schema.is_empty() {
+        if schema_len == 0 {
             println!("OK");
         } else if row_count == 0 {
             println!("{table}");

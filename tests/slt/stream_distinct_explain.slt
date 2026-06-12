@@ -14,7 +14,7 @@ analyze table distinct_t;
 query T
 explain select distinct c1 from distinct_t where c1 < 10 and c1 > 0;
 ----
-Projection [distinct_t.c1] [Project => (Sort Option: Follow)] Aggregate [] -> Group By [distinct_t.c1] [StreamDistinct => (Sort Option: Follow)] Filter ((distinct_t.c1 < 10) && (distinct_t.c1 > 0)), Is Having: false [Filter => (Sort Option: Follow)] TableScan distinct_t -> [c1] [IndexScan By distinct_t_c1_index => (0, 10) Covered => (Sort Option: OrderBy: (distinct_t.c1 Asc Nulls Last) ignore_prefix_len: 0)]
+Columns: #5=distinct_t.c1 Projection [#5] [Project => (Sort Option: Follow)] Aggregate [] -> Group By [#5] [StreamDistinct => (Sort Option: Follow)] Filter ((#5 < 10) && (#5 > 0)), Is Having: false [Filter => (Sort Option: Follow)] TableScan distinct_t -> [#5] [IndexScan By distinct_t_c1_index => (0, 10) Covered => (Sort Option: OrderBy: (#5 Asc Nulls Last) ignore_prefix_len: 0)]
 
 statement ok
 drop index distinct_t.distinct_t_c1_index;
@@ -23,7 +23,7 @@ drop index distinct_t.distinct_t_c1_index;
 query T
 explain select distinct c1 from distinct_t where c1 < 10 and c1 > 0;
 ----
-Projection [distinct_t.c1] [Project => (Sort Option: Follow)] Aggregate [] -> Group By [distinct_t.c1] [HashAggregate => (Sort Option: None)] Filter ((distinct_t.c1 < 10) && (distinct_t.c1 > 0)), Is Having: false [Filter => (Sort Option: Follow)] TableScan distinct_t -> [c1] [SeqScan => (Sort Option: None)]
+Columns: #8=distinct_t.c1 Projection [#8] [Project => (Sort Option: Follow)] Aggregate [] -> Group By [#8] [HashAggregate => (Sort Option: None)] Filter ((#8 < 10) && (#8 > 0)), Is Having: false [Filter => (Sort Option: Follow)] TableScan distinct_t -> [#8] [SeqScan => (Sort Option: None)]
 
 statement ok
 drop table distinct_t;

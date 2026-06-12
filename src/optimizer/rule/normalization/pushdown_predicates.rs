@@ -24,7 +24,7 @@ use crate::optimizer::plan_utils::{
 use crate::planner::operator::filter::FilterOperator;
 use crate::planner::operator::join::{JoinCondition, JoinType};
 use crate::planner::operator::{Operator, SortOption};
-use crate::planner::{Childrens, LogicalPlan, SchemaOutput};
+use crate::planner::{Childrens, LogicalPlan, SchemaSlot};
 use crate::types::index::{IndexInfo, IndexLookup, IndexMetaRef, IndexType};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
@@ -66,11 +66,11 @@ fn reduce_filters(filters: Vec<ScalarExpression>, having: bool) -> Option<Filter
         })
 }
 
-fn plan_output_columns(plan: &LogicalPlan) -> Vec<ColumnRef> {
-    match plan.output_schema_direct() {
-        SchemaOutput::Schema(schema) => schema,
-        SchemaOutput::SchemaRef(schema_ref) => schema_ref.iter().cloned().collect(),
-    }
+fn plan_output_columns(
+    plan: &LogicalPlan,
+    arena: &mut crate::planner::PlanArena,
+) -> Vec<ColumnRef> {
+    plan.output_schema_to(arena, SchemaSlot::S0).clone()
 }
 
 fn localize_right_filters(
@@ -101,7 +101,11 @@ fn localize_right_filters(
 pub struct PushPredicateThroughJoin;
 
 impl NormalizationRule for PushPredicateThroughJoin {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        arena: &mut crate::planner::PlanArena,
+    ) -> Result<bool, DatabaseError> {
         let mut applied = false;
 
         let parent_replacement = {
@@ -133,19 +137,19 @@ impl NormalizationRule for PushPredicateThroughJoin {
             }
 
             let left_columns = left_child(join_plan)
-                .map(plan_output_columns)
+                .map(|plan| plan_output_columns(plan, arena))
                 .unwrap_or_default();
             let right_columns = right_child(join_plan)
-                .map(plan_output_columns)
+                .map(|plan| plan_output_columns(plan, arena))
                 .unwrap_or_default();
 
             let filter_exprs = split_conjunctive_predicates(&filter_op.predicate);
             let (left_filters, rest): (Vec<_>, Vec<_>) = filter_exprs.into_iter().partition(|f| {
-                f.all_referenced_columns(true, |column| left_columns.contains(column))
+                f.all_referenced_columns(arena, |_, column| left_columns.contains(column))
             });
             let (right_filters, common_filters): (Vec<_>, Vec<_>) =
                 rest.into_iter().partition(|f| {
-                    f.all_referenced_columns(true, |column| right_columns.contains(column))
+                    f.all_referenced_columns(arena, |_, column| right_columns.contains(column))
                 });
 
             let mut new_ops = (None, None, None);
@@ -218,7 +222,11 @@ impl NormalizationRule for PushPredicateThroughJoin {
 pub struct PushPredicateIntoScan;
 
 impl NormalizationRule for PushPredicateIntoScan {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        arena: &mut crate::planner::PlanArena,
+    ) -> Result<bool, DatabaseError> {
         let LogicalPlan {
             operator,
             childrens,
@@ -260,12 +268,12 @@ impl NormalizationRule for PushPredicateIntoScan {
                 IndexType::PrimaryKey { is_multiple: false }
                 | IndexType::Unique
                 | IndexType::Normal => {
-                    RangeDetacher::new(meta.table_name.as_ref(), &meta.column_ids[0])
+                    RangeDetacher::new(meta.table_name.as_ref(), &meta.column_ids[0], arena)
                         .detach(&filter_op.predicate)?
                         .map(IndexLookup::Static)
                 }
                 IndexType::PrimaryKey { is_multiple: true } | IndexType::Composite => {
-                    Self::composite_range(filter_op, meta, ignore_prefix_len)?
+                    Self::composite_range(filter_op, meta, ignore_prefix_len, arena)?
                         .map(IndexLookup::Static)
                 }
             };
@@ -287,15 +295,18 @@ impl NormalizationRule for PushPredicateIntoScan {
             let mut deserializers = Vec::with_capacity(meta.column_ids.len());
 
             for (idx, column_id) in meta.column_ids.iter().enumerate() {
-                if let Some((scan_idx, column)) = scan_op
-                    .columns
-                    .iter()
-                    .enumerate()
-                    .find(|(_, column)| column.id().map(|id| id == *column_id).unwrap_or(false))
+                if let Some((scan_idx, column)) =
+                    scan_op.columns.iter().enumerate().find(|(_, column)| {
+                        arena
+                            .column(**column)
+                            .id()
+                            .map(|id| id == *column_id)
+                            .unwrap_or(false)
+                    })
                 {
                     mapping_slots[scan_idx] = idx;
                     needs_mapping |= scan_idx != idx;
-                    deserializers.push(column.datatype().serializable());
+                    deserializers.push(arena.column(*column).datatype().serializable());
                 } else {
                     deserializers.push(index_column_types[idx].skip_serializable());
                 }
@@ -318,14 +329,15 @@ impl PushPredicateIntoScan {
         op: &FilterOperator,
         meta: &mut IndexMetaRef,
         ignore_prefix_len: &mut usize,
+        arena: &crate::planner::PlanArena,
     ) -> Result<Option<Range>, DatabaseError> {
         let mut res = None;
         let mut eq_ranges = Vec::with_capacity(meta.column_ids.len());
         let mut apply_column_count = 0;
 
         for column_id in meta.column_ids.iter() {
-            if let Some(range) =
-                RangeDetacher::new(meta.table_name.as_ref(), column_id).detach(&op.predicate)?
+            if let Some(range) = RangeDetacher::new(meta.table_name.as_ref(), column_id, arena)
+                .detach(&op.predicate)?
             {
                 apply_column_count += 1;
 
@@ -374,7 +386,11 @@ impl PushPredicateIntoScan {
 pub struct PushJoinPredicateIntoScan;
 
 impl NormalizationRule for PushJoinPredicateIntoScan {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        arena: &mut crate::planner::PlanArena,
+    ) -> Result<bool, DatabaseError> {
         let (join_type, filter_expr) = {
             let Operator::Join(join_op) = &mut plan.operator else {
                 return Ok(false);
@@ -395,19 +411,19 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
         };
 
         let left_columns = left_child(plan)
-            .map(plan_output_columns)
+            .map(|plan| plan_output_columns(plan, arena))
             .unwrap_or_default();
         let right_columns = right_child(plan)
-            .map(plan_output_columns)
+            .map(|plan| plan_output_columns(plan, arena))
             .unwrap_or_default();
 
         let filter_exprs = split_conjunctive_predicates(&filter_expr);
         let (left_filters, rest): (Vec<_>, Vec<_>) = filter_exprs.into_iter().partition(|expr| {
-            expr.all_referenced_columns(true, |column| left_columns.contains(column))
+            expr.all_referenced_columns(arena, |_, column| left_columns.contains(column))
         });
         let (right_filters, common_filters): (Vec<_>, Vec<_>) =
             rest.into_iter().partition(|expr| {
-                expr.all_referenced_columns(true, |column| right_columns.contains(column))
+                expr.all_referenced_columns(arena, |_, column| right_columns.contains(column))
             });
 
         let (push_left, push_right) = match join_type {
@@ -479,7 +495,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::binder::test::build_t1_table;
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
+    use crate::catalog::{ColumnCatalog, ColumnDesc, TableName};
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
     use crate::expression::{BinaryOperator, ScalarExpression};
@@ -492,7 +508,7 @@ mod tests {
     use crate::planner::operator::join::{JoinCondition, JoinType};
     use crate::planner::operator::table_scan::TableScanOperator;
     use crate::planner::operator::{Operator, SortOption};
-    use crate::planner::{Childrens, LogicalPlan};
+    use crate::planner::{Childrens, LogicalPlan, PlanArena};
     use crate::types::index::{IndexInfo, IndexLookup, IndexMeta, IndexType};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -502,15 +518,18 @@ mod tests {
     fn apply_pipeline(
         plan: LogicalPlan,
         builder: HepOptimizerPipelineBuilder,
+        arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        builder.build().instantiate(plan).find_best(None)
+        builder.build().instantiate(plan).find_best(None, arena)
     }
 
     #[test]
     fn test_push_predicate_into_scan() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
         // 1 - c2 < 0 => c2 > 1
-        let plan = table_state.plan("select * from t1 where -(1 - c2) > 0")?;
+        let plan =
+            table_state.plan_with_arena("select * from t1 where -(1 - c2) > 0", &mut arena)?;
 
         let best_plan = apply_pipeline(
             plan,
@@ -525,6 +544,7 @@ mod tests {
                     HepBatchStrategy::once_topdown(),
                     vec![NormalizationRuleImpl::PushPredicateIntoScan],
                 ),
+            &mut arena,
         )?;
 
         let scan_op = best_plan.childrens.pop_only().childrens.pop_only();
@@ -548,6 +568,8 @@ mod tests {
     #[test]
     fn test_cover_mapping_matches_scan_order() -> Result<(), DatabaseError> {
         let table_name: TableName = ::std::sync::Arc::from("mock_table");
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
         let c1_id = Ulid::new();
         let c2_id = Ulid::new();
         let c3_id = Ulid::new();
@@ -558,7 +580,7 @@ mod tests {
             ColumnDesc::new(LogicalType::Integer, Some(0), false, None)?,
         );
         c1.set_ref_table(table_name.clone(), c1_id, false);
-        let c1_ref = ColumnRef::from(c1.clone());
+        let c1_ref = arena.alloc_column(c1);
 
         let mut c2 = ColumnCatalog::new(
             "c2".to_string(),
@@ -566,7 +588,7 @@ mod tests {
             ColumnDesc::new(LogicalType::Integer, None, false, None)?,
         );
         c2.set_ref_table(table_name.clone(), c2_id, false);
-        let c2_ref = ColumnRef::from(c2.clone());
+        let c2_ref = arena.alloc_column(c2);
 
         let mut c3 = ColumnCatalog::new(
             "c3".to_string(),
@@ -674,6 +696,7 @@ mod tests {
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushPredicateIntoScan],
             ),
+            &mut arena,
         )?;
 
         let table_scan = best_plan.childrens.pop_only();
@@ -690,7 +713,7 @@ mod tests {
             assert_eq!(deserializers.len(), 3);
             assert_eq!(
                 deserializers[0],
-                c2_ref.datatype().serializable(),
+                arena.column(c2_ref).datatype().serializable(),
                 "first serializer should align with c2"
             );
             assert_eq!(
@@ -700,7 +723,7 @@ mod tests {
             );
             assert_eq!(
                 deserializers[2],
-                c1_ref.datatype().serializable(),
+                arena.column(c1_ref).datatype().serializable(),
                 "last serializer should align with c1"
             );
             let mapping = reordered_index.cover_mapping.as_deref();
@@ -723,8 +746,11 @@ mod tests {
     #[test]
     fn test_push_predicate_through_join_in_left_join() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let plan =
-            table_state.plan("select * from t1 left join t2 on c1 = c3 where c1 > 1 and c3 < 2")?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let plan = table_state.plan_with_arena(
+            "select * from t1 left join t2 on c1 = c3 where c1 > 1 and c3 < 2",
+            &mut arena,
+        )?;
 
         let best_plan = apply_pipeline(
             plan,
@@ -733,6 +759,7 @@ mod tests {
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushPredicateThroughJoin],
             ),
+            &mut arena,
         )?;
 
         let filter_op = best_plan.childrens.pop_only();
@@ -769,8 +796,11 @@ mod tests {
     #[test]
     fn test_push_predicate_through_join_in_right_join() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let plan = table_state
-            .plan("select * from t1 right join t2 on c1 = c3 where c1 > 1 and c3 < 2")?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let plan = table_state.plan_with_arena(
+            "select * from t1 right join t2 on c1 = c3 where c1 > 1 and c3 < 2",
+            &mut arena,
+        )?;
 
         let best_plan = apply_pipeline(
             plan,
@@ -779,6 +809,7 @@ mod tests {
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushPredicateThroughJoin],
             ),
+            &mut arena,
         )?;
 
         let filter_op = best_plan.childrens.pop_only();
@@ -815,8 +846,11 @@ mod tests {
     #[test]
     fn test_push_predicate_through_join_in_inner_join() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let plan = table_state
-            .plan("select * from t1 inner join t2 on c1 = c3 where c1 > 1 and c3 < 2")?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let plan = table_state.plan_with_arena(
+            "select * from t1 inner join t2 on c1 = c3 where c1 > 1 and c3 < 2",
+            &mut arena,
+        )?;
 
         let best_plan = apply_pipeline(
             plan,
@@ -825,6 +859,7 @@ mod tests {
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushPredicateThroughJoin],
             ),
+            &mut arena,
         )?;
 
         let join_op = best_plan.childrens.pop_only();
@@ -866,8 +901,11 @@ mod tests {
     #[test]
     fn test_push_join_predicate_into_scan_inner_join() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let plan = table_state
-            .plan("select * from t1 inner join t2 on t1.c1 = t2.c3 and t1.c1 > 1 and t2.c3 < 2")?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let plan = table_state.plan_with_arena(
+            "select * from t1 inner join t2 on t1.c1 = t2.c3 and t1.c1 > 1 and t2.c3 < 2",
+            &mut arena,
+        )?;
 
         let mut best_plan = apply_pipeline(
             plan,
@@ -876,6 +914,7 @@ mod tests {
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushJoinPredicateIntoScan],
             ),
+            &mut arena,
         )?;
 
         if matches!(best_plan.operator, Operator::Project(_)) {
@@ -938,8 +977,11 @@ mod tests {
     #[test]
     fn test_push_join_predicate_left_outer_preserve_left() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let plan =
-            table_state.plan("select * from t1 left join t2 on t1.c1 = t2.c3 and t1.c1 > 1")?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let plan = table_state.plan_with_arena(
+            "select * from t1 left join t2 on t1.c1 = t2.c3 and t1.c1 > 1",
+            &mut arena,
+        )?;
 
         let mut best_plan = apply_pipeline(
             plan,
@@ -948,6 +990,7 @@ mod tests {
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushJoinPredicateIntoScan],
             ),
+            &mut arena,
         )?;
 
         if matches!(best_plan.operator, Operator::Project(_)) {
@@ -982,8 +1025,11 @@ mod tests {
     #[test]
     fn test_push_join_predicate_left_outer_push_right() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let plan =
-            table_state.plan("select * from t1 left join t2 on t1.c1 = t2.c3 and t2.c3 < 2")?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let plan = table_state.plan_with_arena(
+            "select * from t1 left join t2 on t1.c1 = t2.c3 and t2.c3 < 2",
+            &mut arena,
+        )?;
 
         let mut best_plan = apply_pipeline(
             plan,
@@ -992,6 +1038,7 @@ mod tests {
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushJoinPredicateIntoScan],
             ),
+            &mut arena,
         )?;
 
         if matches!(best_plan.operator, Operator::Project(_)) {

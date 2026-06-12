@@ -28,6 +28,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         &mut self,
         from: &TableWithJoins,
         selection: &Option<Expr>,
+        arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         if let TableFactor::Table { name, .. } = &from.relation {
             let table_name: TableName = lower_case_name(name)?.into();
@@ -38,13 +39,13 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             let primary_keys = table
                 .primary_keys()
                 .iter()
-                .map(|(_, column)| column.clone())
+                .map(|(_, column)| *column)
                 .collect_vec();
             self.with_pk(table_name.clone());
-            let mut plan = self.bind_table_ref(from)?;
+            let mut plan = self.bind_table_ref(from, arena)?;
 
             if let Some(predicate) = selection {
-                plan = self.bind_where(plan, predicate)?;
+                plan = self.bind_where(plan, predicate, arena)?;
             }
 
             Ok(LogicalPlan::new(

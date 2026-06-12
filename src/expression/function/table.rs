@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::TableCatalog;
+use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::expression::function::FunctionSummary;
 use crate::expression::ScalarExpression;
-use crate::types::tuple::{SchemaRef, Tuple};
+use crate::planner::TableArena;
+use crate::types::tuple::{Schema, Tuple};
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
@@ -37,6 +38,12 @@ impl Deref for ArcTableFunctionImpl {
 #[derive(Debug, Clone, ReferenceSerialization)]
 pub struct TableFunction {
     pub(crate) args: Vec<ScalarExpression>,
+    pub(crate) catalog: TableFunctionCatalog,
+}
+
+#[derive(Debug, Clone, ReferenceSerialization)]
+pub struct TableFunctionCatalog {
+    pub(crate) schema: Schema,
     pub(crate) inner: ArcTableFunctionImpl,
 }
 
@@ -61,21 +68,25 @@ pub trait TableFunctionImpl: Debug + Send + Sync {
 
     fn summary(&self) -> &FunctionSummary;
 
-    fn output_schema(&self) -> &SchemaRef;
-
-    fn table(&self) -> &TableCatalog;
+    fn output_schema_into(
+        &self,
+        table_name: &TableName,
+        table_arena: &mut TableArena,
+        schema: &mut Schema,
+    );
 }
 
 impl TableFunction {
     pub fn summary(&self) -> &FunctionSummary {
-        self.inner.summary()
+        self.catalog.inner.summary()
     }
 
-    pub fn output_schema(&self) -> &SchemaRef {
-        self.inner.output_schema()
+    pub fn output_schema_into(&self, schema: &mut Schema) {
+        schema.clear();
+        schema.extend(self.catalog.schema.iter().copied());
     }
 
-    pub fn table(&self) -> &TableCatalog {
-        self.inner.table()
+    pub fn inner(&self) -> &ArcTableFunctionImpl {
+        &self.catalog.inner
     }
 }

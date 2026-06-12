@@ -21,7 +21,7 @@ use crate::storage::lmdb::LmdbStorage;
 use crate::storage::memory::MemoryStorage;
 #[cfg(feature = "rocksdb")]
 use crate::storage::rocksdb::RocksStorage;
-use crate::types::tuple::{SchemaRef, Tuple};
+use crate::types::tuple::{SchemaView, Tuple};
 use crate::types::value::DataValue;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -82,7 +82,7 @@ fn tuple_to_python_row(py: Python<'_>, tuple: &Tuple) -> PyResult<PyObject> {
     Ok(row.into_any().unbind())
 }
 
-fn schema_to_python(py: Python<'_>, schema: &SchemaRef) -> PyResult<Vec<PyObject>> {
+fn schema_to_python(py: Python<'_>, schema: &SchemaView<'_, '_>) -> PyResult<Vec<PyObject>> {
     schema
         .iter()
         .map(|col| {
@@ -172,13 +172,13 @@ impl PythonResultIterInner {
         }
     }
 
-    fn schema(&self) -> &SchemaRef {
+    fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
         match self {
             #[cfg(feature = "lmdb")]
-            PythonResultIterInner::Lmdb(iter) => iter.schema(),
-            PythonResultIterInner::Memory(iter) => iter.schema(),
+            PythonResultIterInner::Lmdb(iter) => iter.schema(f),
+            PythonResultIterInner::Memory(iter) => iter.schema(f),
             #[cfg(feature = "rocksdb")]
-            PythonResultIterInner::Rocks(iter) => iter.schema(),
+            PythonResultIterInner::Rocks(iter) => iter.schema(f),
         }
     }
 
@@ -297,7 +297,7 @@ impl PythonResultIter {
 
     pub fn schema(&self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
         let iter = self.inner_ref()?;
-        schema_to_python(py, iter.schema())
+        iter.schema(|schema| schema_to_python(py, schema))
     }
 
     pub fn rows(&mut self, py: Python<'_>) -> PyResult<Vec<PyObject>> {

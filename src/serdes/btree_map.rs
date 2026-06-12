@@ -23,30 +23,34 @@ where
     K: ReferenceSerialization + Ord,
     V: ReferenceSerialization,
 {
-    fn encode<W: Write>(
+    fn encode<W: Write, A: crate::planner::MetaArena>(
         &self,
         writer: &mut W,
         is_direct: bool,
         reference_tables: &mut ReferenceTables,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.len().encode(writer, is_direct, reference_tables)?;
+        self.len()
+            .encode(writer, is_direct, reference_tables, arena)?;
         for (key, value) in self.iter() {
-            key.encode(writer, is_direct, reference_tables)?;
-            value.encode(writer, is_direct, reference_tables)?;
+            key.encode(writer, is_direct, reference_tables, arena)?;
+            value.encode(writer, is_direct, reference_tables, arena)?;
         }
         Ok(())
     }
 
-    fn decode<T: Transaction, R: Read>(
+    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
         reader: &mut R,
         drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
+        arena: &mut A,
     ) -> Result<Self, DatabaseError> {
-        let len = <usize as ReferenceSerialization>::decode(reader, drive, reference_tables)?;
+        let len =
+            <usize as ReferenceSerialization>::decode(reader, drive, reference_tables, arena)?;
         let mut btree_map = BTreeMap::new();
         for _ in 0..len {
-            let key = K::decode(reader, drive, reference_tables)?;
-            let value = V::decode(reader, drive, reference_tables)?;
+            let key = K::decode(reader, drive, reference_tables, arena)?;
+            let value = V::decode(reader, drive, reference_tables, arena)?;
             btree_map.insert(key, value);
         }
         Ok(btree_map)

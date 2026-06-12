@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor};
+use crate::execution::{
+    DDLApply, ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor,
+};
 use crate::planner::operator::create_view::CreateViewOperator;
 use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
@@ -32,6 +34,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateView {
     fn into_executor(
         self,
         arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
@@ -43,16 +46,16 @@ impl CreateView {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(CreateViewOperator { view, or_replace }) = self.op.take() else {
             arena.finish();
             return Ok(());
         };
         let view_name = view.name.to_string();
-        let mut state = arena.local_state();
-        let (transaction, table_codec, context) = state.write_context_mut();
-        let view_cache = context.view_cache_mut();
-        transaction.create_view(table_codec, view_cache, view, or_replace)?;
+        let (transaction, table_codec) = arena.transaction_codec_mut();
+        let view = transaction.create_view(table_codec, plan_arena, view, or_replace)?;
+        arena.push_ddl_apply(DDLApply::upsert_view(view));
 
         TupleBuilder::build_result_into(arena.result_tuple_mut(), view_name);
         arena.resume();

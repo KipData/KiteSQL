@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor};
+use crate::execution::{
+    DDLApply, ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor,
+};
 use crate::planner::operator::create_table::CreateTableOperator;
 use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
@@ -32,6 +34,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateTable {
     fn into_executor(
         self,
         arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
@@ -43,6 +46,7 @@ impl CreateTable {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(CreateTableOperator {
             table_name,
@@ -54,16 +58,17 @@ impl CreateTable {
             return Ok(());
         };
 
-        let mut state = arena.local_state();
-        let (transaction, table_codec, context) = state.write_context_mut();
-        let table_cache = context.table_cache_mut();
-        transaction.create_table(
+        let (transaction, table_codec) = arena.transaction_codec_mut();
+        let table = transaction.create_table(
             table_codec,
-            table_cache,
+            plan_arena,
             table_name.clone(),
             columns,
             if_not_exists,
         )?;
+        if let Some(table) = table {
+            arena.push_ddl_apply(DDLApply::upsert_table(table, false));
+        }
 
         TupleBuilder::build_result_into(arena.result_tuple_mut(), format!("{table_name}"));
         arena.resume();

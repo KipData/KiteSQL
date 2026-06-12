@@ -19,25 +19,27 @@ use crate::types::CharLengthUnits;
 use std::io::{Read, Write};
 
 impl ReferenceSerialization for CharLengthUnits {
-    fn encode<W: Write>(
+    fn encode<W: Write, A: crate::planner::MetaArena>(
         &self,
         writer: &mut W,
         is_direct: bool,
         reference_tables: &mut ReferenceTables,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
         match self {
             CharLengthUnits::Characters => 0u8,
             CharLengthUnits::Octets => 1u8,
         }
-        .encode(writer, is_direct, reference_tables)?;
+        .encode(writer, is_direct, reference_tables, arena)?;
 
         Ok(())
     }
 
-    fn decode<T: Transaction, R: Read>(
+    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
         reader: &mut R,
         _: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         _: &ReferenceTables,
+        _: &mut A,
     ) -> Result<Self, DatabaseError> {
         let mut one_byte = [0u8; 1];
         reader.read_exact(&mut one_byte)?;
@@ -62,18 +64,29 @@ pub(crate) mod test {
     fn test_serialization() -> Result<(), DatabaseError> {
         let mut cursor = Cursor::new(Vec::new());
         let mut reference_tables = ReferenceTables::new();
+        let mut arena = crate::planner::TableArena::default();
 
-        CharLengthUnits::Characters.encode(&mut cursor, false, &mut reference_tables)?;
+        CharLengthUnits::Characters.encode(&mut cursor, false, &mut reference_tables, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
         assert_eq!(
-            CharLengthUnits::decode::<RocksTransaction, _>(&mut cursor, None, &reference_tables)?,
+            CharLengthUnits::decode::<RocksTransaction, _, _>(
+                &mut cursor,
+                None,
+                &reference_tables,
+                &mut arena,
+            )?,
             CharLengthUnits::Characters
         );
         cursor.seek(SeekFrom::Start(0))?;
-        CharLengthUnits::Octets.encode(&mut cursor, false, &mut reference_tables)?;
+        CharLengthUnits::Octets.encode(&mut cursor, false, &mut reference_tables, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
         assert_eq!(
-            CharLengthUnits::decode::<RocksTransaction, _>(&mut cursor, None, &reference_tables)?,
+            CharLengthUnits::decode::<RocksTransaction, _, _>(
+                &mut cursor,
+                None,
+                &reference_tables,
+                &mut arena,
+            )?,
             CharLengthUnits::Octets
         );
 

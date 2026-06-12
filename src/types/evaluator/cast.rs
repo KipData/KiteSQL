@@ -939,12 +939,18 @@ mod test {
         let evaluator = create(LogicalType::Integer, LogicalType::Bigint)?;
         let mut cursor = Cursor::new(Vec::new());
         let mut reference_tables = ReferenceTables::new();
+        let mut arena = crate::planner::TableArena::default();
 
-        evaluator.encode(&mut cursor, false, &mut reference_tables)?;
+        evaluator.encode(&mut cursor, false, &mut reference_tables, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
 
         assert_eq!(
-            CastEvaluatorBox::decode::<RocksTransaction, _>(&mut cursor, None, &reference_tables)?,
+            CastEvaluatorBox::decode::<RocksTransaction, _, _>(
+                &mut cursor,
+                None,
+                &reference_tables,
+                &mut arena
+            )?,
             evaluator
         );
 

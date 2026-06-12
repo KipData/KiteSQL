@@ -48,10 +48,11 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
             input,
         ): Self::Input,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let input = build_read(arena, input, cache, transaction);
+        let input = build_read(arena, plan_arena, input, cache, transaction);
         arena.push(ExecNode::HashAgg(HashAggExecutor {
             agg_calls,
             groupby_exprs,
@@ -60,12 +61,16 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
         }))
     }
 
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
         if self.output.is_none() {
             let mut group_hash_accs: HashMap<Vec<DataValue>, Vec<Box<dyn Accumulator>>> =
                 HashMap::new();
 
-            while arena.next_tuple(self.input)? {
+            while arena.next_tuple(self.input, plan_arena)? {
                 let tuple = arena.result_tuple();
                 let group_keys = self
                     .groupby_exprs
@@ -118,8 +123,6 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
-    use std::sync::Arc;
-
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
     use crate::errors::DatabaseError;
     use crate::execution::dql::aggregate::hash_agg::HashAggExecutor;
@@ -151,12 +154,14 @@ mod test {
         let storage = RocksStorage::new(temp_dir.path()).unwrap();
         let mut transaction = storage.transaction()?;
         let desc = ColumnDesc::new(LogicalType::Integer, None, false, None)?;
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
 
-        let t1_schema = Arc::new(vec![
-            ColumnRef::from(ColumnCatalog::new("c1".to_string(), true, desc.clone())),
-            ColumnRef::from(ColumnCatalog::new("c2".to_string(), true, desc.clone())),
-            ColumnRef::from(ColumnCatalog::new("c3".to_string(), true, desc.clone())),
-        ]);
+        let t1_schema = vec![
+            plan_arena.alloc_column(ColumnCatalog::new("c1".to_string(), true, desc.clone())),
+            plan_arena.alloc_column(ColumnCatalog::new("c2".to_string(), true, desc.clone())),
+            plan_arena.alloc_column(ColumnCatalog::new("c3".to_string(), true, desc.clone())),
+        ];
 
         let input = LogicalPlan {
             operator: Operator::Values(ValuesOperator {
@@ -186,7 +191,6 @@ mod test {
             }),
             childrens: Box::new(Childrens::None),
             physical_option: None,
-            _output_schema_ref: None,
         };
         let plan = LogicalPlan::new(
             Operator::Aggregate(AggregateOperator {
@@ -209,7 +213,9 @@ mod test {
                 vec![NormalizationRuleImpl::EvaluatorBind],
             )
             .build();
-        let plan = pipeline.instantiate(plan).find_best(None)?;
+        let plan = pipeline
+            .instantiate(plan)
+            .find_best(None, &mut plan_arena)?;
 
         let Operator::Aggregate(op) = plan.operator else {
             unreachable!()
@@ -217,6 +223,7 @@ mod test {
         let tuples = try_collect(execute_input::<_, HashAggExecutor>(
             (op, plan.childrens.pop_only()),
             (&table_cache, &view_cache, &meta_cache),
+            plan_arena,
             &mut transaction,
         ))?;
 

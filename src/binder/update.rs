@@ -15,6 +15,7 @@
 use crate::binder::{
     attach_span_from_sqlparser_span_if_absent, attach_span_if_absent, lower_case_name, Binder,
 };
+use crate::catalog::ColumnRef;
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::VisitorMut;
@@ -31,11 +32,12 @@ use sqlparser::ast::{
 use std::borrow::Cow;
 use std::slice;
 
-struct UpdateExprTargetRemapper<'a> {
-    target_schema: &'a [crate::catalog::ColumnRef],
+struct UpdateExprTargetRemapper<'a, 'p> {
+    target_schema: &'a [ColumnRef],
+    arena: &'a crate::planner::PlanArena<'p>,
 }
 
-impl VisitorMut<'_> for UpdateExprTargetRemapper<'_> {
+impl VisitorMut<'_> for UpdateExprTargetRemapper<'_, '_> {
     fn visit_column_ref(
         &mut self,
         column: &mut crate::catalog::ColumnRef,
@@ -44,7 +46,8 @@ impl VisitorMut<'_> for UpdateExprTargetRemapper<'_> {
         let Some(target_position) = self
             .target_schema
             .iter()
-            .position(|target_column| target_column.same_column(column))
+            .copied()
+            .position(|target_column| self.arena.same_column(target_column, *column))
         else {
             return Err(DatabaseError::UnsupportedStmt(
                 "joined UPDATE SET expressions can only reference target table columns".to_string(),
@@ -73,6 +76,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         to: &TableWithJoins,
         selection: &Option<Expr>,
         assignments: &[Assignment],
+        arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         // FIXME: Make it better to detect the current BindStep
         self.context.allow_default = true;
@@ -81,15 +85,13 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             let table_name: TableName = lower_case_name(name)?.into();
             self.with_pk(table_name.clone());
 
-            let mut plan = self.bind_table_ref(to)?;
-            let (target_schema, target_offset) = Self::resolve_source_columns_in_scope(
-                &self.context,
-                &mut self.table_schema_buf,
-                &table_name,
-            )?;
+            let mut plan = self.bind_table_ref(to, arena)?;
+            let (target_source, target_offset) =
+                Self::resolve_source_columns_in_scope(&self.context, &table_name)?;
+            let target_schema = target_source.schema().collect::<Vec<_>>();
 
             if let Some(predicate) = selection {
-                plan = self.bind_where(plan, predicate)?;
+                plan = self.bind_where(plan, predicate, arena)?;
             }
             let mut value_exprs = Vec::with_capacity(assignments.len());
 
@@ -97,7 +99,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 return Err(DatabaseError::ColumnsEmpty);
             }
             for Assignment { target, value } in assignments {
-                let expression = self.bind_expr(value)?;
+                let expression = self.bind_expr(value, arena)?;
                 let mut idents = vec![];
                 match target {
                     AssignmentTarget::ColumnName(name) => {
@@ -114,23 +116,28 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                     match self.bind_column_ref_from_identifiers(
                         slice::from_ref(ident),
                         Some(table_name.as_ref()),
+                        arena,
                     )? {
                         ScalarExpression::ColumnRef { column, .. } => {
                             let mut expr = if matches!(expression, ScalarExpression::Empty) {
-                                let default_value = column
+                                let column_catalog = arena.column(column);
+                                let default_value = column_catalog
                                     .default_value()?
                                     .ok_or(DatabaseError::DefaultNotExist)?;
                                 ScalarExpression::Constant(default_value)
                             } else {
                                 expression.clone()
                             };
+                            let column_catalog = arena.column(column);
                             expr = ScalarExpression::type_cast(
                                 expr,
-                                Cow::Borrowed(column.datatype()),
+                                Cow::Borrowed(column_catalog.datatype()),
+                                arena,
                             )?;
                             if is_joined_update {
                                 UpdateExprTargetRemapper {
                                     target_schema: &target_schema,
+                                    arena: arena,
                                 }
                                 .visit(&mut expr)?;
                             }
@@ -149,9 +156,10 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             if is_joined_update {
                 let exprs = target_schema
                     .iter()
+                    .copied()
                     .enumerate()
                     .map(|(index, column)| {
-                        ScalarExpression::column_expr(column.clone(), target_offset + index)
+                        ScalarExpression::column_expr(column, target_offset + index)
                     })
                     .collect();
                 plan = LogicalPlan::new(

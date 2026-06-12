@@ -15,6 +15,7 @@
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::{BinaryOperator, ScalarExpression};
+use crate::planner::PlanArena;
 use crate::types::value::DataValue;
 use crate::types::ColumnId;
 use itertools::Itertools;
@@ -179,16 +180,22 @@ impl Range {
     }
 }
 
-pub struct RangeDetacher<'a> {
+pub struct RangeDetacher<'a, 'p> {
     table_name: &'a str,
     column_id: &'a ColumnId,
+    arena: &'a PlanArena<'p>,
 }
 
-impl<'a> RangeDetacher<'a> {
-    pub(crate) fn new(table_name: &'a str, column_id: &'a ColumnId) -> Self {
+impl<'a, 'p> RangeDetacher<'a, 'p> {
+    pub(crate) fn new(
+        table_name: &'a str,
+        column_id: &'a ColumnId,
+        arena: &'a PlanArena<'p>,
+    ) -> Self {
         Self {
             table_name,
             column_id,
+            arena,
         }
     }
 
@@ -228,6 +235,7 @@ impl<'a> RangeDetacher<'a> {
             }
             ScalarExpression::IsNull { expr, negated, .. } => match expr.as_ref() {
                 ScalarExpression::ColumnRef { column, .. } => {
+                    let column = self.arena.column(*column);
                     if let (Some(col_id), Some(col_table)) = (column.id(), column.table_name()) {
                         if &col_id == self.column_id && col_table.as_ref() == self.table_name {
                             return if *negated {
@@ -684,9 +692,11 @@ impl<'a> RangeDetacher<'a> {
         }
     }
 
-    fn _is_belong(table_name: &str, col: &ColumnRef) -> bool {
+    fn _is_belong(&self, col: ColumnRef) -> bool {
+        let col = self.arena.column(col);
         matches!(
-            col.table_name().map(|name| table_name == name.as_ref()),
+            col.table_name()
+                .map(|name| self.table_name == name.as_ref()),
             Some(true)
         )
     }
@@ -725,10 +735,11 @@ impl<'a> RangeDetacher<'a> {
         mut val: DataValue,
         is_flip: bool,
     ) -> Result<Option<Range>, DatabaseError> {
-        if !Self::_is_belong(self.table_name, &col) || col.id() != Some(*self.column_id) {
+        let column = self.arena.column(col);
+        if !self._is_belong(col) || column.id() != Some(*self.column_id) {
             return Ok(None);
         }
-        val = val.cast(col.datatype())?;
+        val = val.cast(column.datatype())?;
         if is_flip {
             op = match op {
                 BinaryOperator::Gt => BinaryOperator::Lt,
@@ -818,7 +829,10 @@ mod test {
     use crate::types::LogicalType;
     use std::ops::Bound;
 
-    fn plan_filter(plan: LogicalPlan) -> Result<Option<FilterOperator>, DatabaseError> {
+    fn plan_filter(
+        plan: LogicalPlan,
+        arena: &mut crate::planner::PlanArena,
+    ) -> Result<Option<FilterOperator>, DatabaseError> {
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
                 "test_simplify_filter".to_string(),
@@ -826,7 +840,7 @@ mod test {
                 vec![NormalizationRuleImpl::SimplifyFilter],
             )
             .build();
-        let best_plan = pipeline.instantiate(plan).find_best(None)?;
+        let best_plan = pipeline.instantiate(plan).find_best(None, arena)?;
         if let Operator::Filter(filter_op) = best_plan.childrens.pop_only().operator {
             Ok(Some(filter_op))
         } else {
@@ -837,10 +851,11 @@ mod test {
     #[test]
     fn test_detach_ideal_cases() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
+        let mut plan_arena = crate::planner::PlanArena::new(&table_state.table_arena);
         {
             let plan = table_state.plan("select * from t1 where c1 = 1")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 = 1 => {}", range);
@@ -848,8 +863,8 @@ mod test {
         }
         {
             let plan = table_state.plan("select * from t1 where c1 = 1.0")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 = 1.0 => {}", range);
@@ -857,16 +872,16 @@ mod test {
         }
         {
             let plan = table_state.plan("select * from t1 where c1 != 1")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?;
             println!("c1 != 1 => {:#?}", range);
             assert_eq!(range, None)
         }
         {
             let plan = table_state.plan("select * from t1 where c1 > 1")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 > 1 => c1: {}", range);
@@ -880,8 +895,8 @@ mod test {
         }
         {
             let plan = table_state.plan("select * from t1 where c1 >= 1")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 >= 1 => c1: {}", range);
@@ -895,8 +910,8 @@ mod test {
         }
         {
             let plan = table_state.plan("select * from t1 where c1 < 1")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 < 1 => c1: {}", range);
@@ -910,8 +925,8 @@ mod test {
         }
         {
             let plan = table_state.plan("select * from t1 where c1 <= 1")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 <= 1 => c1: {}", range);
@@ -925,8 +940,8 @@ mod test {
         }
         {
             let plan = table_state.plan("select * from t1 where c1 < 1 and c1 >= 0")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 < 1 and c1 >= 0 => c1: {}", range);
@@ -940,8 +955,8 @@ mod test {
         }
         {
             let plan = table_state.plan("select * from t1 where c1 < 1 or c1 >= 0")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 < 1 or c1 >= 0 => c1: {}", range);
@@ -956,8 +971,8 @@ mod test {
         // and & or
         {
             let plan = table_state.plan("select * from t1 where c1 = 1 and c1 = 0")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 = 1 and c1 = 0 => c1: {}", range);
@@ -965,8 +980,8 @@ mod test {
         }
         {
             let plan = table_state.plan("select * from t1 where c1 = 1 or c1 = 0")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 = 1 or c1 = 0 => c1: {}", range);
@@ -980,8 +995,8 @@ mod test {
         }
         {
             let plan = table_state.plan("select * from t1 where c1 = 1 and c1 = 1")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 = 1 and c1 = 1 => c1: {}", range);
@@ -989,8 +1004,8 @@ mod test {
         }
         {
             let plan = table_state.plan("select * from t1 where c1 = 1 or c1 = 1")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 = 1 or c1 = 1 => c1: {}", range);
@@ -999,8 +1014,8 @@ mod test {
 
         {
             let plan = table_state.plan("select * from t1 where c1 > 1 and c1 = 1")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 > 1 and c1 = 1 => c1: {}", range);
@@ -1008,8 +1023,8 @@ mod test {
         }
         {
             let plan = table_state.plan("select * from t1 where c1 >= 1 and c1 = 1")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 >= 1 and c1 = 1 => c1: {}", range);
@@ -1017,8 +1032,8 @@ mod test {
         }
         {
             let plan = table_state.plan("select * from t1 where c1 > 1 or c1 = 1")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 > 1 or c1 = 1 => c1: {}", range);
@@ -1032,8 +1047,8 @@ mod test {
         }
         {
             let plan = table_state.plan("select * from t1 where c1 >= 1 or c1 = 1")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 >= 1 or c1 = 1 => c1: {}", range);
@@ -1049,8 +1064,8 @@ mod test {
         {
             let plan = table_state
                 .plan("select * from t1 where (c1 > 0 and c1 < 3) and (c1 > 1 and c1 < 4)")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!(
@@ -1068,8 +1083,8 @@ mod test {
         {
             let plan = table_state
                 .plan("select * from t1 where (c1 > 0 and c1 < 3) or (c1 > 1 and c1 < 4)")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!(
@@ -1089,8 +1104,8 @@ mod test {
             let plan = table_state.plan(
                 "select * from t1 where ((c1 > 0 and c1 < 3) and (c1 > 1 and c1 < 4)) and c1 = 0",
             )?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!(
@@ -1103,8 +1118,8 @@ mod test {
             let plan = table_state.plan(
                 "select * from t1 where ((c1 > 0 and c1 < 3) or (c1 > 1 and c1 < 4)) and c1 = 0",
             )?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!(
@@ -1117,8 +1132,8 @@ mod test {
             let plan = table_state.plan(
                 "select * from t1 where ((c1 > 0 and c1 < 3) and (c1 > 1 and c1 < 4)) or c1 = 0",
             )?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!(
@@ -1140,8 +1155,8 @@ mod test {
             let plan = table_state.plan(
                 "select * from t1 where ((c1 > 0 and c1 < 3) or (c1 > 1 and c1 < 4)) or c1 = 0",
             )?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!(
@@ -1159,8 +1174,8 @@ mod test {
 
         {
             let plan = table_state.plan("select * from t1 where (((c1 > 0 and c1 < 3) and (c1 > 1 and c1 < 4)) and c1 = 0) and (c1 >= 0 and c1 <= 2)")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("(((c1 > 0 and c1 < 3) and (c1 > 1 and c1 < 4)) and c1 = 0) and (c1 >= 0 and c1 <= 2) => c1: {}", range);
@@ -1168,8 +1183,8 @@ mod test {
         }
         {
             let plan = table_state.plan("select * from t1 where (((c1 > 0 and c1 < 3) and (c1 > 1 and c1 < 4)) and c1 = 0) or (c1 >= 0 and c1 <= 2)")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("(((c1 > 0 and c1 < 3) and (c1 > 1 and c1 < 4)) and c1 = 0) or (c1 >= 0 and c1 <= 2) => c1: {}", range);
@@ -1184,8 +1199,8 @@ mod test {
         // ranges and ranges
         {
             let plan = table_state.plan("select * from t1 where ((c1 < 2 and c1 > 0) or (c1 < 6 and c1 > 4)) and ((c1 < 3 and c1 > 1) or (c1 < 7 and c1 > 5))")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("((c1 < 2 and c1 > 0) or (c1 < 6 and c1 > 4)) and ((c1 < 3 and c1 > 1) or (c1 < 7 and c1 > 5)) => c1: {}", range);
@@ -1205,8 +1220,8 @@ mod test {
         }
         {
             let plan = table_state.plan("select * from t1 where ((c1 < 2 and c1 > 0) or (c1 < 6 and c1 > 4)) or ((c1 < 3 and c1 > 1) or (c1 < 7 and c1 > 5))")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("((c1 < 2 and c1 > 0) or (c1 < 6 and c1 > 4)) or ((c1 < 3 and c1 > 1) or (c1 < 7 and c1 > 5)) => c1: {}", range);
@@ -1227,8 +1242,8 @@ mod test {
         // empty
         {
             let plan = table_state.plan("select * from t1 where true")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?;
             println!("empty => c1: {:#?}", range);
             assert_eq!(range, None)
@@ -1236,24 +1251,24 @@ mod test {
         // other column
         {
             let plan = table_state.plan("select * from t1 where c2 = 1")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?;
             println!("c2 = 1 => c1: {:#?}", range);
             assert_eq!(range, None)
         }
         {
             let plan = table_state.plan("select * from t1 where c1 > 1 or c2 > 1")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?;
             println!("c1 > 1 or c2 > 1 => c1: {:#?}", range);
             assert_eq!(range, None)
         }
         {
             let plan = table_state.plan("select * from t1 where c1 > c2 or c2 > 1")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?;
             println!("c1 > c2 or c2 > 1 => c1: {:#?}", range);
             assert_eq!(range, None)
@@ -1263,8 +1278,8 @@ mod test {
             let plan = table_state.plan(
                 "select * from t1 where c1 = 5 or (c1 > 5 and (c1 > 6 or c1 < 8) and c1 < 12)",
             )?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!(
@@ -1284,8 +1299,8 @@ mod test {
             let plan = table_state.plan(
                 "select * from t1 where ((c2 >= -8 and -4 >= c1) or (c1 >= 0 and 5 > c2)) and ((c2 > 0 and c1 <= 1) or (c1 > -8 and c2 < -6))",
             )?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!(
@@ -1313,10 +1328,12 @@ mod test {
     #[test]
     fn test_detach_only_conjunction_can_keep_partial_range() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let detach_c1 = |sql: &str| -> Result<Option<Range>, DatabaseError> {
+        let mut plan_arena = crate::planner::PlanArena::new(&table_state.table_arena);
+        let mut detach_c1 = |sql: &str| -> Result<Option<Range>, DatabaseError> {
             let plan = table_state.plan(sql)?;
-            let op = plan_filter(plan)?.unwrap();
-            RangeDetacher::new("t1", table_state.column_id_by_name("c1")).detach(&op.predicate)
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
+                .detach(&op.predicate)
         };
 
         assert_eq!(
@@ -1355,11 +1372,12 @@ mod test {
     #[test]
     fn test_detach_null_cases() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
+        let mut plan_arena = crate::planner::PlanArena::new(&table_state.table_arena);
         // eq
         {
             let plan = table_state.plan("select * from t1 where c1 = null")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 = null => c1: {}", range);
@@ -1367,8 +1385,8 @@ mod test {
         }
         {
             let plan = table_state.plan("select * from t1 where c1 = null or c1 = 1")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 = null or c1 = 1 => c1: {}", range);
@@ -1382,8 +1400,8 @@ mod test {
         }
         {
             let plan = table_state.plan("select * from t1 where c1 = null or c1 < 5")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 = null or c1 < 5 => c1: {}", range);
@@ -1398,8 +1416,8 @@ mod test {
         {
             let plan =
                 table_state.plan("select * from t1 where c1 = null or (c1 > 1 and c1 < 5)")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 = null or (c1 > 1 and c1 < 5) => c1: {}", range);
@@ -1416,8 +1434,8 @@ mod test {
         }
         {
             let plan = table_state.plan("select * from t1 where c1 = null and c1 < 5")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 = null and c1 < 5 => c1: {}", range);
@@ -1426,8 +1444,8 @@ mod test {
         {
             let plan =
                 table_state.plan("select * from t1 where c1 = null and (c1 > 1 and c1 < 5)")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 = null and (c1 > 1 and c1 < 5) => c1: {}", range);
@@ -1436,24 +1454,24 @@ mod test {
         // noteq
         {
             let plan = table_state.plan("select * from t1 where c1 != null")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?;
             println!("c1 != null => c1: {:#?}", range);
             assert_eq!(range, None)
         }
         {
             let plan = table_state.plan("select * from t1 where c1 = null or c1 != 1")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?;
             println!("c1 = null or c1 != 1 => c1: {:#?}", range);
             assert_eq!(range, None)
         }
         {
             let plan = table_state.plan("select * from t1 where c1 != null or c1 < 5")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?;
             println!("c1 != null or c1 < 5 => c1: {:#?}", range);
             assert_eq!(range, None)
@@ -1461,16 +1479,16 @@ mod test {
         {
             let plan =
                 table_state.plan("select * from t1 where c1 != null or (c1 > 1 and c1 < 5)")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?;
             println!("c1 != null or (c1 > 1 and c1 < 5) => c1: {:#?}", range);
             assert_eq!(range, None)
         }
         {
             let plan = table_state.plan("select * from t1 where c1 != null and c1 < 5")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 != null and c1 < 5 => c1: {}", range);
@@ -1485,8 +1503,8 @@ mod test {
         {
             let plan =
                 table_state.plan("select * from t1 where c1 != null and (c1 > 1 and c1 < 5)")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("c1 != null and (c1 > 1 and c1 < 5) => c1: {}", range);
@@ -1500,8 +1518,8 @@ mod test {
         }
         {
             let plan = table_state.plan("select * from t1 where (c1 = null or (c1 < 2 and c1 > 0) or (c1 < 6 and c1 > 4)) or ((c1 < 3 and c1 > 1) or (c1 < 7 and c1 > 5))")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("(c1 = null or (c1 < 2 and c1 > 0) or (c1 < 6 and c1 > 4)) or ((c1 < 3 and c1 > 1) or (c1 < 7 and c1 > 5)) => c1: {}", range);
@@ -1522,8 +1540,8 @@ mod test {
         }
         {
             let plan = table_state.plan("select * from t1 where ((c1 < 2 and c1 > 0) or (c1 < 6 and c1 > 4)) or (c1 = null or (c1 < 3 and c1 > 1) or (c1 < 7 and c1 > 5))")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("((c1 < 2 and c1 > 0) or (c1 < 6 and c1 > 4)) or (c1 = null or (c1 < 3 and c1 > 1) or (c1 < 7 and c1 > 5)) => c1: {}", range);
@@ -1544,8 +1562,8 @@ mod test {
         }
         {
             let plan = table_state.plan("select * from t1 where (c1 = null or (c1 < 2 and c1 > 0) or (c1 < 6 and c1 > 4)) and ((c1 < 3 and c1 > 1) or (c1 < 7 and c1 > 5))")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("(c1 = null or (c1 < 2 and c1 > 0) or (c1 < 6 and c1 > 4)) and ((c1 < 3 and c1 > 1) or (c1 < 7 and c1 > 5)) => c1: {}", range);
@@ -1565,8 +1583,8 @@ mod test {
         }
         {
             let plan = table_state.plan("select * from t1 where ((c1 < 2 and c1 > 0) or (c1 < 6 and c1 > 4)) and (c1 = null or (c1 < 3 and c1 > 1) or (c1 < 7 and c1 > 5))")?;
-            let op = plan_filter(plan)?.unwrap();
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"))
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &plan_arena)
                 .detach(&op.predicate)?
                 .unwrap();
             println!("((c1 < 2 and c1 > 0) or (c1 < 6 and c1 > 4)) and (c1 = null or (c1 < 3 and c1 > 1) or (c1 < 7 and c1 > 5)) => c1: {}", range);

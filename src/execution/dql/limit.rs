@@ -33,10 +33,11 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Limit {
     fn into_executor(
         (LimitOperator { offset, limit }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let input = build_read(arena, input, cache, transaction);
+        let input = build_read(arena, plan_arena, input, cache, transaction);
         arena.push(ExecNode::Limit(Limit {
             offset,
             limit,
@@ -46,7 +47,11 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Limit {
         }))
     }
 
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
         let offset = self.offset.unwrap_or(0);
         let limit = self.limit.unwrap_or(usize::MAX);
 
@@ -56,7 +61,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Limit {
         }
 
         loop {
-            if !arena.next_tuple(self.input)? {
+            if !arena.next_tuple(self.input, plan_arena)? {
                 arena.finish();
                 return Ok(());
             }

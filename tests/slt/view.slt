@@ -22,6 +22,12 @@ create or replace view v1 (c0, c1, c2) as select * from t1
 statement ok
 create view v2 as select * from t1 where a != 1
 
+statement ok
+create view v_alias as select a as aa, b from t1
+
+statement error
+create view v_bad (c0, c1) as select a from t1
+
 query III
 select * from v1
 ----
@@ -34,6 +40,13 @@ select * from v2
 ----
 0 0 0 0
 2 2 2 2
+
+query I
+select aa from v_alias order by aa
+----
+0
+1
+2
 
 query IIIIIII
 select * from v1 left join v2

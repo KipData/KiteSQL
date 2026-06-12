@@ -112,6 +112,11 @@ select v from set_left intersect select v from set_right order by v desc
 1
 null
 
+# Regression: branch table names from a set operation must not leak to the
+# top-level ORDER BY scope.
+statement error
+select v from set_left union select v from set_right order by set_left.v
+
 statement ok
 drop table set_right
 

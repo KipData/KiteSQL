@@ -31,16 +31,21 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Filter {
     fn into_executor(
         (FilterOperator { predicate, .. }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let input = build_read(arena, input, cache, transaction);
+        let input = build_read(arena, plan_arena, input, cache, transaction);
         arena.push(ExecNode::Filter(Filter { predicate, input }))
     }
 
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
         loop {
-            if !arena.next_tuple(self.input)? {
+            if !arena.next_tuple(self.input, plan_arena)? {
                 arena.finish();
                 return Ok(());
             };

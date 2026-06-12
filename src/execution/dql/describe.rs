@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
+use crate::catalog::{ColumnCatalog, TableName};
 use crate::errors::DatabaseError;
 use crate::execution::{
     ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext, ReadExecutor,
@@ -43,7 +43,7 @@ static EMPTY_KEY_TYPE: LazyLock<DataValue> = LazyLock::new(|| DataValue::Utf8 {
 
 pub struct Describe {
     table_name: TableName,
-    columns: Option<Vec<ColumnRef>>,
+    columns: Option<Vec<ColumnCatalog>>,
     cursor: usize,
 }
 
@@ -61,6 +61,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Describe {
     fn into_executor(
         self,
         arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
@@ -74,14 +75,19 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Describe {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
         arena.push(ExecNode::Describe(Describe::from(input)))
     }
 
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
-        Describe::next_tuple(self, arena)
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
+        Describe::next_tuple(self, arena, plan_arena)
     }
 }
 
@@ -89,13 +95,19 @@ impl Describe {
     pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if self.columns.is_none() {
             let table = arena
                 .transaction()
                 .table(arena.table_cache(), self.table_name.clone())?
                 .ok_or(DatabaseError::TableNotFound)?;
-            self.columns = Some(table.columns().cloned().collect());
+            self.columns = Some(
+                table
+                    .columns()
+                    .map(|column| plan_arena.column(*column).clone())
+                    .collect(),
+            );
         }
 
         let Some(column) = self
@@ -109,25 +121,29 @@ impl Describe {
         };
 
         self.cursor += 1;
+        let default = describe_default(&column, plan_arena);
 
         let output = arena.result_tuple_mut();
         output.pk = None;
         output.values.clear();
-        fill_describe_row(&mut output.values, &column);
+        fill_describe_row(&mut output.values, &column, default);
 
         arena.resume();
         Ok(())
     }
 }
 
-fn fill_describe_row(values: &mut Vec<DataValue>, column: &ColumnCatalog) {
-    let datatype = column.datatype();
-    let default = column
+fn describe_default(column: &ColumnCatalog, arena: &crate::planner::PlanArena) -> String {
+    column
         .desc()
         .default
         .as_ref()
-        .map(|expr| format!("{expr}"))
-        .unwrap_or_else(|| "null".to_string());
+        .map(|expr| expr.output_name(arena))
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn fill_describe_row(values: &mut Vec<DataValue>, column: &ColumnCatalog, default: String) {
+    let datatype = column.datatype();
 
     values.push(DataValue::Utf8 {
         value: column.name().to_string(),

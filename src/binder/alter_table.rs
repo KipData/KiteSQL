@@ -38,15 +38,16 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         &mut self,
         expr: &sqlparser::ast::Expr,
         ty: &LogicalType,
+        arena: &mut crate::planner::PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
-        let mut expr = self.bind_expr(expr)?;
+        let mut expr = self.bind_expr(expr, arena)?;
 
-        if expr.any_referenced_column(true, |_| true) {
+        if expr.any_referenced_column(arena, |_, _| true) {
             return Err(DatabaseError::UnsupportedStmt(
                 "column is not allowed to exist in default".to_string(),
             ));
         }
-        expr = ScalarExpression::type_cast(expr, Cow::Borrowed(ty))?;
+        expr = ScalarExpression::type_cast(expr, Cow::Borrowed(ty), arena)?;
 
         Ok(expr)
     }
@@ -55,6 +56,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         &mut self,
         options: &[ColumnOption],
         data_type: &LogicalType,
+        arena: &mut crate::planner::PlanArena,
     ) -> Result<(DefaultChange, NotNullChange), DatabaseError> {
         let mut default_change = DefaultChange::NoChange;
         let mut not_null_change = NotNullChange::NoChange;
@@ -65,7 +67,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 ColumnOption::NotNull => not_null_change = NotNullChange::Set,
                 ColumnOption::Default(expr) => {
                     default_change =
-                        DefaultChange::Set(self.bind_alter_default_expr(expr, data_type)?);
+                        DefaultChange::Set(self.bind_alter_default_expr(expr, data_type, arena)?);
                 }
                 option => {
                     return Err(DatabaseError::UnsupportedStmt(format!(
@@ -82,6 +84,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         &mut self,
         name: &ObjectName,
         operation: &AlterTableOperation,
+        arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let table_name: TableName = lower_case_name(name)?.into();
         let table = self
@@ -95,7 +98,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 column_def,
                 ..
             } => {
-                let column = self.bind_column(column_def, None)?;
+                let column = self.bind_column(column_def, None, arena)?;
 
                 if !is_valid_identifier(column.name()) {
                     return Err(attach_span_if_absent(
@@ -141,6 +144,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 let new_column_name = lower_ident(new_column_name).into_owned();
                 let old_column = table
                     .get_column_by_name(old_column_name.as_ref())
+                    .map(|column| arena.column(column))
                     .ok_or_else(|| DatabaseError::column_not_found(old_column_name.to_string()))?;
 
                 if !is_valid_identifier(&new_column_name) {
@@ -165,6 +169,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 let old_column_name = lower_ident(column_name);
                 let old_column = table
                     .get_column_by_name(old_column_name.as_ref())
+                    .map(|column| arena.column(column))
                     .ok_or_else(|| DatabaseError::column_not_found(old_column_name.to_string()))?;
                 let old_data_type = old_column.datatype().clone();
 
@@ -185,7 +190,11 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                     }
                     AlterColumnOperation::SetDefault { value } => (
                         old_data_type.clone(),
-                        DefaultChange::Set(self.bind_alter_default_expr(value, &old_data_type)?),
+                        DefaultChange::Set(self.bind_alter_default_expr(
+                            value,
+                            &old_data_type,
+                            arena,
+                        )?),
                         NotNullChange::NoChange,
                     ),
                     AlterColumnOperation::DropDefault => (
@@ -240,7 +249,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 let old_column_name = old_column_name.into_owned();
                 let data_type = LogicalType::try_from(data_type.clone())?;
                 let (default_change, not_null_change) =
-                    self.bind_change_column_options(options, &data_type)?;
+                    self.bind_change_column_options(options, &data_type, arena)?;
 
                 LogicalPlan::new(
                     Operator::ChangeColumn(ChangeColumnOperator {
@@ -279,7 +288,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 }
                 let data_type = LogicalType::try_from(data_type.clone())?;
                 let (default_change, not_null_change) =
-                    self.bind_change_column_options(options, &data_type)?;
+                    self.bind_change_column_options(options, &data_type, arena)?;
 
                 LogicalPlan::new(
                     Operator::ChangeColumn(ChangeColumnOperator {

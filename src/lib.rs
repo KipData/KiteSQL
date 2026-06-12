@@ -50,7 +50,7 @@
 //! [`Database::new_transaction`](db::Database::new_transaction) method.
 //!
 //! support UDF (User-Defined Function) so that users can customize internal calculation functions
-//! with the [`DataBaseBuilder::register_function`](db::DataBaseBuilder::register_scala_function)
+//! with [`Database::load`](db::Database::load) and [`CatalogKind`](db::CatalogKind)
 //!
 //! # Examples
 //!

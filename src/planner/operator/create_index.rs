@@ -31,11 +31,7 @@ pub struct CreateIndexOperator {
 
 impl fmt::Display for CreateIndexOperator {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let columns = self
-            .columns
-            .iter()
-            .map(|column| column.name().to_string())
-            .join(", ");
+        let columns = self.columns.iter().join(", ");
         write!(
             f,
             "Create Index On {} -> [{}], If Not Exists: {}",

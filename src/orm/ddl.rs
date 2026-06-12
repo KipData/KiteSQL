@@ -144,15 +144,26 @@ impl<S: Storage> Database<S> {
         let Some(table) = self.table_catalog(M::table_name())? else {
             return self.create_table::<M>();
         };
+        let (table_primary_key, current_columns) = {
+            let table_arena = self.state.table_arena().borrow();
+            let table_primary_key = table
+                .primary_keys()
+                .first()
+                .map(|(_, column)| table_arena.column(*column).clone())
+                .ok_or(DatabaseError::PrimaryKeyNotFound)?;
+            let current_columns = table
+                .columns()
+                .map(|column| {
+                    let column = table_arena.column(*column).clone();
+                    (column.name().to_string(), column)
+                })
+                .collect::<BTreeMap<_, _>>();
+            (table_primary_key, current_columns)
+        };
 
         let model_primary_key = columns
             .iter()
             .find(|column| column.primary_key)
-            .ok_or(DatabaseError::PrimaryKeyNotFound)?;
-        let table_primary_key = table
-            .primary_keys()
-            .first()
-            .map(|(_, column)| column.clone())
             .ok_or(DatabaseError::PrimaryKeyNotFound)?;
         if table_primary_key.name() != model_primary_key.name
             || !model_column_matches_catalog(model_primary_key, &table_primary_key)
@@ -162,11 +173,6 @@ impl<S: Storage> Database<S> {
                 M::table_name(),
             )));
         }
-
-        let current_columns = table
-            .columns()
-            .map(|column| (column.name().to_string(), column.clone()))
-            .collect::<BTreeMap<_, _>>();
         let model_columns = columns
             .iter()
             .map(|column| (column.name, column))
@@ -231,9 +237,10 @@ impl<S: Storage> Database<S> {
             .iter()
             .filter(|column| !handled_model.contains_key(column.name))
             .collect::<Vec<_>>();
-        let unmatched_current_columns = table
-            .columns()
+        let unmatched_current_columns = current_columns
+            .values()
             .filter(|column| !handled_current.contains_key(column.name()))
+            .cloned()
             .collect::<Vec<_>>();
 
         for model_column in &unmatched_model_columns {
@@ -242,7 +249,6 @@ impl<S: Storage> Database<S> {
             }
             let candidates = unmatched_current_columns
                 .iter()
-                .copied()
                 .filter(|column| !column.desc().is_primary())
                 .filter(|column| model_column_rename_compatible(model_column, column))
                 .collect::<Vec<_>>();
@@ -268,7 +274,7 @@ impl<S: Storage> Database<S> {
             self.execute_ddl_statement("ORM RENAME COLUMN", &statement)?;
         }
 
-        for column in table.columns() {
+        for column in current_columns.values() {
             if handled_current.contains_key(column.name())
                 || model_columns.contains_key(column.name())
             {

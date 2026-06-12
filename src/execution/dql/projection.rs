@@ -34,15 +34,20 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection {
     fn into_executor(
         (ProjectOperator { exprs }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let input = build_read(arena, input, cache, transaction);
+        let input = build_read(arena, plan_arena, input, cache, transaction);
         arena.push(ExecNode::Projection(Projection { exprs, input }))
     }
 
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
-        if !arena.next_tuple(self.input)? {
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
+        if !arena.next_tuple(self.input, plan_arena)? {
             arena.finish();
             return Ok(());
         }

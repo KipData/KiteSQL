@@ -35,11 +35,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarApply {
     fn into_executor(
         (_, left_input, right_input): Self::Input,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let left_input = build_read(arena, left_input, cache, transaction);
-        let right_input = build_read(arena, right_input, cache, transaction);
+        let left_input = build_read(arena, plan_arena, left_input, cache, transaction);
+        let right_input = build_read(arena, plan_arena, right_input, cache, transaction);
         arena.push(ExecNode::ScalarApply(Self {
             left_input,
             right_input,
@@ -47,14 +48,18 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarApply {
         }))
     }
 
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
-        Self::load_right_once(&mut self.cached_right, self.right_input, arena)?;
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
+        Self::load_right_once(&mut self.cached_right, self.right_input, arena, plan_arena)?;
 
         let right_tuple = self
             .cached_right
             .as_ref()
             .expect("scalar apply right tuple initialized");
-        if !arena.next_tuple(self.left_input)? {
+        if !arena.next_tuple(self.left_input, plan_arena)? {
             arena.finish();
             return Ok(());
         }
@@ -72,9 +77,10 @@ impl ScalarApply {
         cached_right: &mut Option<Tuple>,
         right_input: ExecId,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if cached_right.is_none() {
-            if !arena.next_tuple(right_input)? {
+            if !arena.next_tuple(right_input, plan_arena)? {
                 return Err(DatabaseError::InvalidValue(
                     "scalar apply right input returned no rows".to_string(),
                 ));
@@ -99,16 +105,15 @@ mod tests {
     use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
-    use std::sync::Arc;
     use tempfile::TempDir;
 
-    fn build_values(name: &str, rows: Vec<Vec<crate::types::value::DataValue>>) -> LogicalPlan {
+    fn build_values(
+        arena: &mut crate::planner::PlanArena,
+        name: &str,
+        rows: Vec<Vec<crate::types::value::DataValue>>,
+    ) -> LogicalPlan {
         let desc = ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap();
-        let schema_ref = Arc::new(vec![ColumnRef::from(ColumnCatalog::new(
-            name.to_string(),
-            true,
-            desc,
-        ))]);
+        let schema_ref = vec![arena.alloc_column(ColumnCatalog::new(name.to_string(), true, desc))];
 
         LogicalPlan::new(
             Operator::Values(ValuesOperator { rows, schema_ref }),
@@ -138,7 +143,10 @@ mod tests {
 
     #[test]
     fn scalar_apply_repeats_scalar_result_for_each_left_row() -> Result<(), DatabaseError> {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
         let left = build_values(
+            &mut plan_arena,
             "left_c1",
             vec![
                 vec![crate::types::value::DataValue::Int32(1)],
@@ -146,6 +154,7 @@ mod tests {
             ],
         );
         let right = ScalarSubqueryOperator::build(build_values(
+            &mut plan_arena,
             "right_c1",
             vec![vec![crate::types::value::DataValue::Int32(7)]],
         ));
@@ -155,6 +164,7 @@ mod tests {
         let tuples = try_collect(execute_input::<_, ScalarApply>(
             (ScalarApplyOperator, left, right),
             (&table_cache, &view_cache, &meta_cache),
+            plan_arena,
             &mut transaction,
         ))?;
 
@@ -177,18 +187,25 @@ mod tests {
 
     #[test]
     fn scalar_apply_repeats_null_scalar_result_for_each_left_row() -> Result<(), DatabaseError> {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
         let left = build_values(
+            &mut plan_arena,
             "left_c1",
             vec![vec![DataValue::Int32(1)], vec![DataValue::Int32(2)]],
         );
-        let right =
-            ScalarSubqueryOperator::build(build_values("right_c1", vec![vec![DataValue::Null]]));
+        let right = ScalarSubqueryOperator::build(build_values(
+            &mut plan_arena,
+            "right_c1",
+            vec![vec![DataValue::Null]],
+        ));
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let mut transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, ScalarApply>(
             (ScalarApplyOperator, left, right),
             (&table_cache, &view_cache, &meta_cache),
+            plan_arena,
             &mut transaction,
         ))?;
 

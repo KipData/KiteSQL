@@ -22,7 +22,11 @@ use crate::planner::LogicalPlan;
 pub struct LimitProjectTranspose;
 
 impl NormalizationRule for LimitProjectTranspose {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        _: &mut crate::planner::PlanArena,
+    ) -> Result<bool, DatabaseError> {
         let operator = std::mem::replace(&mut plan.operator, Operator::Dummy);
 
         let limit_op = match operator {
@@ -63,7 +67,11 @@ impl NormalizationRule for LimitProjectTranspose {
 pub struct PushLimitThroughJoin;
 
 impl NormalizationRule for PushLimitThroughJoin {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        _: &mut crate::planner::PlanArena,
+    ) -> Result<bool, DatabaseError> {
         let limit_op = match &plan.operator {
             Operator::Limit(op) => op.clone(),
             _ => return Ok(false),
@@ -93,7 +101,11 @@ impl NormalizationRule for PushLimitThroughJoin {
 pub struct PushLimitIntoScan;
 
 impl NormalizationRule for PushLimitIntoScan {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        _: &mut crate::planner::PlanArena,
+    ) -> Result<bool, DatabaseError> {
         let (offset, limit) = match &plan.operator {
             Operator::Limit(limit_op) => (limit_op.offset, limit_op.limit),
             _ => return Ok(false),
@@ -119,11 +131,13 @@ mod tests {
     use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::Operator;
+    use crate::planner::PlanArena;
 
     #[test]
     fn test_limit_project_transpose() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let plan = table_state.plan("select c1, c2 from t1 limit 1")?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let plan = table_state.plan_with_arena("select c1, c2 from t1 limit 1", &mut arena)?;
 
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
@@ -132,7 +146,7 @@ mod tests {
                 vec![NormalizationRuleImpl::LimitProjectTranspose],
             )
             .build();
-        let best_plan = pipeline.instantiate(plan).find_best(None)?;
+        let best_plan = pipeline.instantiate(plan).find_best(None, &mut arena)?;
 
         if let Operator::Project(_) = &best_plan.operator {
         } else {
@@ -151,7 +165,11 @@ mod tests {
     #[test]
     fn test_push_limit_through_join() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let plan = table_state.plan("select * from t1 left join t2 on c1 = c3 limit 1")?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let plan = table_state.plan_with_arena(
+            "select * from t1 left join t2 on c1 = c3 limit 1",
+            &mut arena,
+        )?;
 
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
@@ -163,7 +181,7 @@ mod tests {
                 ],
             )
             .build();
-        let best_plan = pipeline.instantiate(plan).find_best(None)?;
+        let best_plan = pipeline.instantiate(plan).find_best(None, &mut arena)?;
 
         let join_op = best_plan.childrens.pop_only().childrens.pop_only();
         if let Operator::Join(_) = &join_op.operator {
@@ -184,7 +202,8 @@ mod tests {
     #[test]
     fn test_push_limit_into_table_scan() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let plan = table_state.plan("select * from t1 limit 1 offset 1")?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let plan = table_state.plan_with_arena("select * from t1 limit 1 offset 1", &mut arena)?;
 
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
@@ -196,7 +215,7 @@ mod tests {
                 ],
             )
             .build();
-        let best_plan = pipeline.instantiate(plan).find_best(None)?;
+        let best_plan = pipeline.instantiate(plan).find_best(None, &mut arena)?;
 
         let scan_op = best_plan.childrens.pop_only();
         if let Operator::TableScan(op) = &scan_op.operator {

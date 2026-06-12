@@ -23,14 +23,19 @@ pub struct ShowViews<'a, T: Transaction + 'a> {
 }
 
 impl<'a, T: Transaction + 'a> ShowViews<'a, T> {
-    pub(crate) fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+    pub(crate) fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
         if self.metas.is_none() {
             let context = arena.read_context();
-            let mut state = arena.local_state();
+            let mut state = arena.local_state(plan_arena);
             let (transaction, table_codec) = state.transaction_codec();
             self.metas = Some(transaction.views(
                 table_codec,
                 context.table_cache(),
+                plan_arena.table_arena_cell(),
                 context.scala_functions(),
                 context.table_functions(),
             )?);

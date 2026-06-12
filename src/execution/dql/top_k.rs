@@ -111,10 +111,11 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for TopK {
             input,
         ): Self::Input,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let input = build_read(arena, input, cache, transaction);
+        let input = build_read(arena, plan_arena, input, cache, transaction);
         arena.push(ExecNode::TopK(TopK {
             output: None,
             arena: Box::<Bump>::default(),
@@ -126,12 +127,16 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for TopK {
     }
 
     #[allow(clippy::mutable_key_type)]
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
         if self.output.is_none() {
             let keep_count = self.offset.unwrap_or(0) + self.limit;
             let mut set = BTreeSet::new();
 
-            while arena.next_tuple(self.input)? {
+            while arena.next_tuple(self.input, plan_arena)? {
                 top_sort(
                     &self.arena,
                     &self.sort_fields,
@@ -178,14 +183,17 @@ mod test {
 
     #[test]
     fn test_top_k_sort() -> Result<(), DatabaseError> {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let sort_column = plan_arena.alloc_column(ColumnCatalog::new(
+            String::new(),
+            false,
+            ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
+        ));
         let fn_sort_fields = |asc: bool, nulls_first: bool| {
             vec![SortField {
                 expr: ScalarExpression::ColumnRef {
-                    column: ColumnRef::from(ColumnCatalog::new(
-                        String::new(),
-                        false,
-                        ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
-                    )),
+                    column: sort_column,
                     position: 0,
                 },
                 asc,
@@ -348,37 +356,39 @@ mod test {
 
     #[test]
     fn test_top_k_sort_mix_values() -> Result<(), DatabaseError> {
-        let fn_sort_fields = |asc_1: bool,
-                              nulls_first_1: bool,
-                              asc_2: bool,
-                              nulls_first_2: bool| {
-            vec![
-                SortField {
-                    expr: ScalarExpression::ColumnRef {
-                        column: ColumnRef::from(ColumnCatalog::new(
-                            String::new(),
-                            false,
-                            ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
-                        )),
-                        position: 0,
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let sort_column_1 = plan_arena.alloc_column(ColumnCatalog::new(
+            String::new(),
+            false,
+            ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
+        ));
+        let sort_column_2 = plan_arena.alloc_column(ColumnCatalog::new(
+            String::new(),
+            false,
+            ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
+        ));
+        let fn_sort_fields =
+            |asc_1: bool, nulls_first_1: bool, asc_2: bool, nulls_first_2: bool| {
+                vec![
+                    SortField {
+                        expr: ScalarExpression::ColumnRef {
+                            column: sort_column_1,
+                            position: 0,
+                        },
+                        asc: asc_1,
+                        nulls_first: nulls_first_1,
                     },
-                    asc: asc_1,
-                    nulls_first: nulls_first_1,
-                },
-                SortField {
-                    expr: ScalarExpression::ColumnRef {
-                        column: ColumnRef::from(ColumnCatalog::new(
-                            String::new(),
-                            false,
-                            ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
-                        )),
-                        position: 1,
+                    SortField {
+                        expr: ScalarExpression::ColumnRef {
+                            column: sort_column_2,
+                            position: 1,
+                        },
+                        asc: asc_2,
+                        nulls_first: nulls_first_2,
                     },
-                    asc: asc_2,
-                    nulls_first: nulls_first_2,
-                },
-            ]
-        };
+                ]
+            };
         let arena = Bump::new();
 
         let fn_asc_1_and_nulls_first_1_and_asc_2_and_nulls_first_2_eq =

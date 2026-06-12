@@ -16,7 +16,7 @@ use crate::errors::DatabaseError;
 use crate::expression::{AliasType, BinaryOperator, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child};
-use crate::optimizer::rule::normalization::{is_subset_exprs, strip_alias};
+use crate::optimizer::rule::normalization::strip_alias;
 use crate::planner::operator::filter::FilterOperator;
 use crate::planner::operator::project::ProjectOperator;
 use crate::planner::operator::Operator;
@@ -38,6 +38,13 @@ fn passthrough_source_position(expr: &ScalarExpression) -> Option<usize> {
     }
 }
 
+fn collapse_match_expr(expr: &ScalarExpression) -> &ScalarExpression {
+    match expr {
+        ScalarExpression::Alias { expr, .. } => expr,
+        _ => expr,
+    }
+}
+
 fn rewrite_column_position(expr: &mut ScalarExpression, new_position: usize) {
     match expr {
         ScalarExpression::ColumnRef { position, .. } => {
@@ -56,13 +63,15 @@ fn rewrite_column_position(expr: &mut ScalarExpression, new_position: usize) {
 fn remap_passthrough_project_exprs(
     parent_exprs: &mut [ScalarExpression],
     child_exprs: &[ScalarExpression],
+    arena: &crate::planner::PlanArena,
 ) -> bool {
     let mut remapped_positions = Vec::with_capacity(parent_exprs.len());
 
     for parent_expr in parent_exprs.iter() {
+        let parent_match_expr = collapse_match_expr(parent_expr);
         let Some(position) = child_exprs
             .iter()
-            .find(|child_expr| parent_expr.eq_ignore_colref_pos(child_expr))
+            .find(|child_expr| parent_match_expr.eq_ignore_colref_pos(child_expr, arena))
             .and_then(passthrough_source_position)
         else {
             return false;
@@ -80,19 +89,24 @@ fn remap_passthrough_project_exprs(
 fn groupby_exprs_match(
     parent_exprs: &[ScalarExpression],
     child_exprs: &[ScalarExpression],
+    arena: &crate::planner::PlanArena,
 ) -> bool {
     parent_exprs.len() == child_exprs.len()
         && parent_exprs
             .iter()
             .zip(child_exprs.iter())
-            .all(|(parent_expr, child_expr)| parent_expr.eq_ignore_colref_pos(child_expr))
+            .all(|(parent_expr, child_expr)| parent_expr.eq_ignore_colref_pos(child_expr, arena))
 }
 
 /// Combine two adjacent project operators into one.
 pub struct CollapseProject;
 
 impl NormalizationRule for CollapseProject {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        arena: &mut crate::planner::PlanArena,
+    ) -> Result<bool, DatabaseError> {
         let Operator::Project(parent_op) = &mut plan.operator else {
             return Ok(false);
         };
@@ -105,10 +119,10 @@ impl NormalizationRule for CollapseProject {
             match &child.operator {
                 Operator::Project(child_op)
                     if is_passthrough_project(child_op)
-                        && is_subset_exprs(&parent_op.exprs, &child_op.exprs)
                         && remap_passthrough_project_exprs(
                             &mut parent_op.exprs,
                             &child_op.exprs,
+                            arena,
                         ) =>
                 {
                     removed |= replace_with_only_child(child.as_mut());
@@ -125,7 +139,11 @@ impl NormalizationRule for CollapseProject {
 pub struct CombineFilter;
 
 impl NormalizationRule for CombineFilter {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        _: &mut crate::planner::PlanArena,
+    ) -> Result<bool, DatabaseError> {
         let parent_filter = match mem::replace(&mut plan.operator, Operator::Dummy) {
             Operator::Filter(op) => op,
             operator => {
@@ -185,7 +203,11 @@ impl NormalizationRule for CombineFilter {
 pub struct CollapseGroupByAgg;
 
 impl NormalizationRule for CollapseGroupByAgg {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        arena: &mut crate::planner::PlanArena,
+    ) -> Result<bool, DatabaseError> {
         let can_collapse = {
             let LogicalPlan {
                 operator,
@@ -205,7 +227,7 @@ impl NormalizationRule for CollapseGroupByAgg {
             let Operator::Aggregate(child_op) = &child.operator else {
                 return Ok(false);
             };
-            groupby_exprs_match(&op.groupby_exprs, &child_op.groupby_exprs)
+            groupby_exprs_match(&op.groupby_exprs, &child_op.groupby_exprs, arena)
         };
 
         if can_collapse {
@@ -219,7 +241,7 @@ impl NormalizationRule for CollapseGroupByAgg {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::binder::test::build_t1_table;
-    use crate::catalog::{ColumnCatalog, ColumnRef};
+    use crate::catalog::ColumnCatalog;
     use crate::errors::DatabaseError;
     use crate::expression::{BinaryOperator, ScalarExpression};
     use crate::optimizer::core::rule::NormalizationRule;
@@ -232,19 +254,19 @@ mod tests {
     use crate::planner::operator::aggregate::AggregateOperator;
     use crate::planner::operator::project::ProjectOperator;
     use crate::planner::operator::Operator;
-    use crate::planner::{Childrens, LogicalPlan};
+    use crate::planner::{Childrens, LogicalPlan, PlanArena};
 
-    fn column_expr(name: &str, position: usize) -> ScalarExpression {
-        ScalarExpression::column_expr(
-            ColumnRef::from(ColumnCatalog::new_dummy(name.to_string())),
-            position,
-        )
+    fn column_expr(arena: &mut PlanArena, name: &str, position: usize) -> ScalarExpression {
+        let column = arena.alloc_column(ColumnCatalog::new_dummy(name.to_string()));
+        ScalarExpression::column_expr(column, position)
     }
 
     #[test]
     fn test_collapse_project() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let plan = table_state.plan("select c1 from (select c1, c2 from t1) t")?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let plan =
+            table_state.plan_with_arena("select c1 from (select c1, c2 from t1) t", &mut arena)?;
 
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
@@ -253,7 +275,7 @@ mod tests {
                 vec![NormalizationRuleImpl::CollapseProject],
             )
             .build();
-        let best_plan = pipeline.instantiate(plan).find_best(None)?;
+        let best_plan = pipeline.instantiate(plan).find_best(None, &mut arena)?;
 
         if let Operator::Project(op) = &best_plan.operator {
             assert_eq!(op.exprs.len(), 1);
@@ -276,7 +298,9 @@ mod tests {
     #[test]
     fn test_collapse_project_with_alias() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let plan = table_state.plan("select t.x from (select c1 as x from t1) t")?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let plan = table_state
+            .plan_with_arena("select t.x from (select c1 as x from t1) t", &mut arena)?;
         let original = plan.clone();
         let original_child = original.childrens.pop_only();
         assert!(matches!(original_child.operator, Operator::Project(_)));
@@ -290,7 +314,7 @@ mod tests {
                 vec![NormalizationRuleImpl::CollapseProject],
             )
             .build();
-        let best_plan = pipeline.instantiate(plan).find_best(None)?;
+        let best_plan = pipeline.instantiate(plan).find_best(None, &mut arena)?;
         if let Operator::Project(op) = &best_plan.operator {
             assert_eq!(op.exprs.len(), 1);
         } else {
@@ -310,20 +334,25 @@ mod tests {
 
     #[test]
     fn test_collapse_project_remaps_reordered_passthrough_positions() -> Result<(), DatabaseError> {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
         let child = LogicalPlan::new(
             Operator::Project(ProjectOperator {
-                exprs: vec![column_expr("c2", 1), column_expr("c1", 0)],
+                exprs: vec![
+                    column_expr(&mut arena, "c2", 1),
+                    column_expr(&mut arena, "c1", 0),
+                ],
             }),
             Childrens::Only(Box::new(LogicalPlan::new(Operator::Dummy, Childrens::None))),
         );
         let mut plan = LogicalPlan::new(
             Operator::Project(ProjectOperator {
-                exprs: vec![column_expr("c2", 0)],
+                exprs: vec![column_expr(&mut arena, "c2", 0)],
             }),
             Childrens::Only(Box::new(child)),
         );
 
-        assert!(CollapseProject.apply(&mut plan)?);
+        assert!(CollapseProject.apply(&mut plan, &mut arena)?);
 
         let Operator::Project(op) = &plan.operator else {
             unreachable!("expected project");
@@ -342,8 +371,11 @@ mod tests {
     #[test]
     fn test_combine_filter() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let plan =
-            table_state.plan("select * from (select * from t1 where c1 > 1) t where 1 = 1")?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let plan = table_state.plan_with_arena(
+            "select * from (select * from t1 where c1 > 1) t where 1 = 1",
+            &mut arena,
+        )?;
 
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
@@ -352,7 +384,7 @@ mod tests {
                 vec![NormalizationRuleImpl::CombineFilter],
             )
             .build();
-        let best_plan = pipeline.instantiate(plan).find_best(None)?;
+        let best_plan = pipeline.instantiate(plan).find_best(None, &mut arena)?;
 
         let filter_op = best_plan.childrens.pop_only();
         if let Operator::Filter(op) = &filter_op.operator {
@@ -371,7 +403,9 @@ mod tests {
     #[test]
     fn test_collapse_group_by_agg() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let plan = table_state.plan("select distinct c1, c2 from t1 group by c1, c2")?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let plan = table_state
+            .plan_with_arena("select distinct c1, c2 from t1 group by c1, c2", &mut arena)?;
 
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
@@ -381,7 +415,7 @@ mod tests {
             )
             .build();
 
-        let best_plan = pipeline.instantiate(plan).find_best(None)?;
+        let best_plan = pipeline.instantiate(plan).find_best(None, &mut arena)?;
 
         let agg_op = best_plan.childrens.pop_only();
         if let Operator::Aggregate(_) = &agg_op.operator {
@@ -397,15 +431,18 @@ mod tests {
 
     #[test]
     fn test_collapse_group_by_agg_ignores_columnref_position() -> Result<(), DatabaseError> {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
         let child = AggregateOperator::build(
             LogicalPlan::new(Operator::Dummy, Childrens::None),
             vec![],
-            vec![column_expr("c2", 1)],
+            vec![column_expr(&mut arena, "c2", 1)],
             false,
         );
-        let mut plan = AggregateOperator::build(child, vec![], vec![column_expr("c2", 0)], true);
+        let expr = column_expr(&mut arena, "c2", 0);
+        let mut plan = AggregateOperator::build(child, vec![], vec![expr], true);
 
-        assert!(CollapseGroupByAgg.apply(&mut plan)?);
+        assert!(CollapseGroupByAgg.apply(&mut plan, &mut arena)?);
         let Operator::Aggregate(op) = &plan.operator else {
             unreachable!("expected aggregate");
         };

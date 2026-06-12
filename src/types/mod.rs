@@ -636,11 +636,17 @@ pub(crate) mod test {
             reference_tables: &mut ReferenceTables,
             logical_type: LogicalType,
         ) -> Result<(), DatabaseError> {
-            logical_type.encode(cursor, false, reference_tables)?;
+            let mut arena = crate::planner::TableArena::default();
+            logical_type.encode(cursor, false, reference_tables, &arena)?;
 
             cursor.seek(SeekFrom::Start(0))?;
             assert_eq!(
-                LogicalType::decode::<RocksTransaction, _>(cursor, None, reference_tables)?,
+                LogicalType::decode::<RocksTransaction, _, _>(
+                    cursor,
+                    None,
+                    reference_tables,
+                    &mut arena,
+                )?,
                 logical_type
             );
             cursor.seek(SeekFrom::Start(0))?;

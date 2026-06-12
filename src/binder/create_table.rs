@@ -36,6 +36,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         columns: &[ColumnDef],
         constraints: &[TableConstraint],
         if_not_exists: bool,
+        arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let table_name: TableName = lower_case_name(name)?.into();
 
@@ -64,7 +65,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         let mut columns: Vec<ColumnCatalog> = columns
             .iter()
             .enumerate()
-            .map(|(i, col)| self.bind_column(col, Some(i)))
+            .map(|(i, col)| self.bind_column(col, Some(i), arena))
             .try_collect()?;
         for constraint in constraints {
             match constraint {
@@ -132,6 +133,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         &mut self,
         column_def: &ColumnDef,
         column_index: Option<usize>,
+        arena: &mut crate::planner::PlanArena,
     ) -> Result<ColumnCatalog, DatabaseError> {
         let column_name = lower_ident(&column_def.name).into_owned();
         let mut column_desc = ColumnDesc::new(
@@ -154,9 +156,9 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 }
                 ColumnOption::Unique(_) => column_desc.set_unique(),
                 ColumnOption::Default(expr) => {
-                    let mut expr = self.bind_expr(expr)?;
+                    let mut expr = self.bind_expr(expr, arena)?;
 
-                    if expr.any_referenced_column(true, |_| true) {
+                    if expr.any_referenced_column(arena, |_, _| true) {
                         return Err(DatabaseError::UnsupportedStmt(
                             "column is not allowed to exist in `default`".to_string(),
                         ));
@@ -164,6 +166,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                     expr = ScalarExpression::type_cast(
                         expr,
                         Cow::Borrowed(&column_desc.column_datatype),
+                        arena,
                     )?;
                     column_desc.default = Some(expr);
                 }
@@ -216,7 +219,9 @@ mod tests {
             None,
         );
         let stmt = crate::parser::parse_sql(sql).unwrap();
-        let plan1 = binder.bind(&stmt[0]).unwrap();
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let plan1 = binder.bind(&stmt[0], &mut plan_arena).unwrap();
 
         match plan1.operator {
             Operator::CreateTable(op) => {

@@ -25,7 +25,11 @@ use crate::planner::{Childrens, LogicalPlan};
 pub struct EliminateRedundantSort;
 
 impl NormalizationRule for EliminateRedundantSort {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        arena: &mut crate::planner::PlanArena,
+    ) -> Result<bool, DatabaseError> {
         let (sort_fields, topk_limit) = match &plan.operator {
             Operator::Sort(sort_op) => (sort_op.sort_fields.clone(), None),
             Operator::TopK(topk_op) => (
@@ -39,8 +43,8 @@ impl NormalizationRule for EliminateRedundantSort {
             Some(child) => child,
             None => return Ok(false),
         };
-        mark_sort_preserving_indexes(child, &sort_fields);
-        let can_remove = ensure_index_order(child, &sort_fields);
+        mark_sort_preserving_indexes(child, &sort_fields, arena);
+        let can_remove = ensure_index_order(child, &sort_fields, arena);
 
         if !can_remove {
             return Ok(false);
@@ -59,8 +63,12 @@ impl NormalizationRule for EliminateRedundantSort {
     }
 }
 
-fn mark_sort_preserving_indexes(plan: &mut LogicalPlan, required: &[SortField]) {
-    mark_order_hint(plan, required, OrderHintKind::SortElimination);
+fn mark_sort_preserving_indexes(
+    plan: &mut LogicalPlan,
+    required: &[SortField],
+    arena: &crate::planner::PlanArena,
+) {
+    mark_order_hint(plan, required, OrderHintKind::SortElimination, arena);
 }
 
 #[derive(Copy, Clone)]
@@ -85,7 +93,12 @@ impl<'a> ScanOrderHint<'a> {
     }
 }
 
-fn mark_order_hint(plan: &mut LogicalPlan, required: &[SortField], hint: OrderHintKind) {
+fn mark_order_hint(
+    plan: &mut LogicalPlan,
+    required: &[SortField],
+    hint: OrderHintKind,
+    arena: &crate::planner::PlanArena,
+) {
     if required.is_empty() {
         return;
     }
@@ -97,11 +110,11 @@ fn mark_order_hint(plan: &mut LogicalPlan, required: &[SortField], hint: OrderHi
         | Operator::TopK(_)
         | Operator::Sort(_) => {
             if let Childrens::Only(child) = plan.childrens.as_mut() {
-                mark_order_hint(child, required, hint);
+                mark_order_hint(child, required, hint, arena);
             }
         }
         Operator::TableScan(scan_op) => {
-            apply_scan_order_hint(scan_op, ScanOrderHint::sort_fields(required), hint);
+            apply_scan_order_hint(scan_op, ScanOrderHint::sort_fields(required), hint, arena);
         }
         _ => {}
     }
@@ -111,22 +124,23 @@ pub(crate) fn apply_scan_order_hint(
     scan_op: &mut TableScanOperator,
     required: ScanOrderHint<'_>,
     hint: OrderHintKind,
+    arena: &crate::planner::PlanArena,
 ) {
     let required_from_table = match required {
         ScanOrderHint::SortFields(fields) => fields.iter().all(|field| {
-            field.expr.all_referenced_columns(true, |column| {
+            field.expr.all_referenced_columns(arena, |arena, column| {
                 scan_op
                     .columns
                     .iter()
-                    .any(|table_column| table_column == column)
+                    .any(|scan_column| arena.same_column(*scan_column, *column))
             })
         }),
         ScanOrderHint::DistinctGroupBy(groupby_exprs) => groupby_exprs.iter().all(|expr| {
-            expr.all_referenced_columns(true, |column| {
+            expr.all_referenced_columns(arena, |arena, column| {
                 scan_op
                     .columns
                     .iter()
-                    .any(|table_column| table_column == column)
+                    .any(|scan_column| arena.same_column(*scan_column, *column))
             })
         }),
     };
@@ -134,7 +148,7 @@ pub(crate) fn apply_scan_order_hint(
         return;
     }
     for index_info in scan_op.index_infos.iter_mut() {
-        if hint_covers(required, &index_info.sort_option) {
+        if hint_covers(required, &index_info.sort_option, arena) {
             let covered = hint_len(required);
             match hint {
                 OrderHintKind::SortElimination => {
@@ -163,12 +177,18 @@ fn hint_len(required: ScanOrderHint<'_>) -> usize {
     }
 }
 
-fn hint_covers(required: ScanOrderHint<'_>, provided: &SortOption) -> bool {
+fn hint_covers(
+    required: ScanOrderHint<'_>,
+    provided: &SortOption,
+    arena: &crate::planner::PlanArena,
+) -> bool {
     match required {
-        ScanOrderHint::SortFields(fields) => covers(fields, provided, sort_field_matches),
+        ScanOrderHint::SortFields(fields) => covers(fields, provided, |required, provided| {
+            sort_field_matches(required, provided, arena)
+        }),
         ScanOrderHint::DistinctGroupBy(groupby_exprs) => {
             covers(groupby_exprs, provided, |expr, field| {
-                field.asc && !field.nulls_first && expr.eq_ignore_colref_pos(&field.expr)
+                field.asc && !field.nulls_first && expr.eq_ignore_colref_pos(&field.expr, arena)
             })
         }
     }
@@ -185,7 +205,11 @@ pub(crate) fn distinct_sort_fields(groupby_exprs: &[ScalarExpression]) -> Vec<So
 pub struct UseStreamDistinct;
 
 impl NormalizationRule for UseStreamDistinct {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        arena: &mut crate::planner::PlanArena,
+    ) -> Result<bool, DatabaseError> {
         let Operator::Aggregate(op) = &plan.operator else {
             return Ok(false);
         };
@@ -207,7 +231,7 @@ impl NormalizationRule for UseStreamDistinct {
             Some(child) => child,
             None => return Ok(false),
         };
-        if !ensure_stream_distinct_order(child, &required) {
+        if !ensure_stream_distinct_order(child, &required, arena) {
             return Ok(false);
         }
 
@@ -219,27 +243,35 @@ impl NormalizationRule for UseStreamDistinct {
     }
 }
 
-pub(crate) fn apply_annotated_post_rules(plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+pub(crate) fn apply_annotated_post_rules(
+    plan: &mut LogicalPlan,
+    arena: &mut crate::planner::PlanArena,
+) -> Result<bool, DatabaseError> {
     let mut changed = false;
 
-    if EliminateRedundantSort.apply(plan)? {
-        plan.reset_output_schema_cache_recursive();
+    if EliminateRedundantSort.apply(plan, arena)? {
         changed = true;
     }
-    if UseStreamDistinct.apply(plan)? {
+    if UseStreamDistinct.apply(plan, arena)? {
         changed = true;
     }
 
     Ok(changed)
 }
 
-fn ensure_stream_distinct_order(plan: &mut LogicalPlan, required: &[SortField]) -> bool {
+fn ensure_stream_distinct_order(
+    plan: &mut LogicalPlan,
+    required: &[SortField],
+    arena: &crate::planner::PlanArena,
+) -> bool {
     if let Some(PhysicalOption {
         plan: PlanImpl::IndexScan(index_info),
         ..
     }) = plan.physical_option.as_ref()
     {
-        if covers(required, &index_info.sort_option, sort_field_matches) {
+        if covers(required, &index_info.sort_option, |required, provided| {
+            sort_field_matches(required, provided, arena)
+        }) {
             return true;
         }
     }
@@ -247,14 +279,18 @@ fn ensure_stream_distinct_order(plan: &mut LogicalPlan, required: &[SortField]) 
     if let Some(physical_option) = plan.physical_option.as_ref() {
         match physical_option.sort_option() {
             SortOption::OrderBy { .. }
-                if covers(required, physical_option.sort_option(), sort_field_matches) =>
+                if covers(
+                    required,
+                    physical_option.sort_option(),
+                    |required, provided| sort_field_matches(required, provided, arena),
+                ) =>
             {
                 return true
             }
             SortOption::OrderBy { .. } => {}
             SortOption::Follow => {
                 if let Childrens::Only(child) = plan.childrens.as_mut() {
-                    if ensure_stream_distinct_order(child, required) {
+                    if ensure_stream_distinct_order(child, required, arena) {
                         return true;
                     }
                 }
@@ -266,13 +302,19 @@ fn ensure_stream_distinct_order(plan: &mut LogicalPlan, required: &[SortField]) 
     false
 }
 
-fn ensure_index_order(plan: &mut LogicalPlan, required: &[SortField]) -> bool {
+fn ensure_index_order(
+    plan: &mut LogicalPlan,
+    required: &[SortField],
+    arena: &crate::planner::PlanArena,
+) -> bool {
     if let Some(PhysicalOption {
         plan: PlanImpl::IndexScan(index_info),
         ..
     }) = plan.physical_option.as_ref()
     {
-        if covers(required, &index_info.sort_option, sort_field_matches) {
+        if covers(required, &index_info.sort_option, |required, provided| {
+            sort_field_matches(required, provided, arena)
+        }) {
             return true;
         }
     }
@@ -280,7 +322,7 @@ fn ensure_index_order(plan: &mut LogicalPlan, required: &[SortField]) -> bool {
     if let Some(physical_option) = plan.physical_option.as_ref() {
         if matches!(physical_option.sort_option(), SortOption::Follow) {
             if let Childrens::Only(child) = plan.childrens.as_mut() {
-                if ensure_index_order(child, required) {
+                if ensure_index_order(child, required, arena) {
                     return true;
                 }
             }
@@ -290,10 +332,14 @@ fn ensure_index_order(plan: &mut LogicalPlan, required: &[SortField]) -> bool {
     false
 }
 
-fn sort_field_matches(required: &SortField, provided: &SortField) -> bool {
+fn sort_field_matches(
+    required: &SortField,
+    provided: &SortField,
+    arena: &crate::planner::PlanArena,
+) -> bool {
     required.asc == provided.asc
         && required.nulls_first == provided.nulls_first
-        && required.expr.eq_ignore_colref_pos(&provided.expr)
+        && required.expr.eq_ignore_colref_pos(&provided.expr, arena)
 }
 
 pub(crate) fn covers<T>(
@@ -336,7 +382,7 @@ pub(crate) fn covers<T>(
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::{EliminateRedundantSort, UseStreamDistinct};
-    use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
+    use crate::catalog::{ColumnCatalog, TableName};
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
     use crate::expression::ScalarExpression;
@@ -354,13 +400,16 @@ mod tests {
     use std::ops::Bound;
     use std::sync::Arc;
     use ulid::Ulid;
-
-    fn make_sort_field(name: &str) -> SortField {
-        make_sort_field_with_position(name, 0)
+    fn make_sort_field(arena: &mut crate::planner::PlanArena, name: &str) -> SortField {
+        make_sort_field_with_position(arena, name, 0)
     }
 
-    fn make_sort_field_with_position(name: &str, position: usize) -> SortField {
-        let column = ColumnRef::from(ColumnCatalog::new_dummy(name.to_string()));
+    fn make_sort_field_with_position(
+        arena: &mut crate::planner::PlanArena,
+        name: &str,
+        position: usize,
+    ) -> SortField {
+        let column = arena.alloc_column(ColumnCatalog::new_dummy(name.to_string()));
         SortField::new(ScalarExpression::column_expr(column, position), true, false)
     }
 
@@ -429,9 +478,11 @@ mod tests {
         (index_info, sort_option)
     }
 
-    fn build_distinct_scan_plan() -> (LogicalPlan, SortOption) {
+    fn build_distinct_scan_plan(
+        arena: &mut crate::planner::PlanArena,
+    ) -> (LogicalPlan, SortOption) {
         let table_name: TableName = ::std::sync::Arc::from("t1");
-        let c1 = ColumnRef::from(ColumnCatalog::new_dummy("c1".to_string()));
+        let c1 = arena.alloc_column(ColumnCatalog::new_dummy("c1".to_string()));
         let c1_id = Ulid::new();
         let columns = vec![c1.clone()];
 
@@ -487,18 +538,22 @@ mod tests {
 
     #[test]
     fn remove_sort_when_index_matches_order() -> Result<(), DatabaseError> {
-        let sort_field = make_sort_field("c1");
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = crate::planner::PlanArena::new(&table_arena);
+        let sort_field = make_sort_field(&mut arena, "c1");
         let mut plan = build_plan(vec![sort_field.clone()], vec![sort_field], 0);
         let rule = EliminateRedundantSort;
 
-        assert!(rule.apply(&mut plan)?);
+        assert!(rule.apply(&mut plan, &mut arena)?);
         assert!(matches!(plan.operator, Operator::Filter(_)));
         Ok(())
     }
 
     #[test]
     fn remove_topk_when_index_matches_order() -> Result<(), DatabaseError> {
-        let sort_field = make_sort_field("c1");
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = crate::planner::PlanArena::new(&table_arena);
+        let sort_field = make_sort_field(&mut arena, "c1");
         let mut plan = build_plan(vec![sort_field.clone()], vec![sort_field.clone()], 0);
         plan.operator = Operator::TopK(TopKOperator {
             sort_fields: vec![sort_field],
@@ -507,7 +562,7 @@ mod tests {
         });
         let rule = EliminateRedundantSort;
 
-        assert!(rule.apply(&mut plan)?);
+        assert!(rule.apply(&mut plan, &mut arena)?);
         match plan.operator {
             Operator::Limit(limit_op) => {
                 assert_eq!(limit_op.limit, Some(10));
@@ -520,23 +575,27 @@ mod tests {
 
     #[test]
     fn remove_sort_when_prefix_can_be_ignored() -> Result<(), DatabaseError> {
-        let c1 = make_sort_field("c1");
-        let c2 = make_sort_field("c2");
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = crate::planner::PlanArena::new(&table_arena);
+        let c1 = make_sort_field(&mut arena, "c1");
+        let c2 = make_sort_field(&mut arena, "c2");
         let mut plan = build_plan(vec![c2.clone()], vec![c1, c2.clone()], 1);
-        super::mark_sort_preserving_indexes(&mut plan, &[c2]);
+        super::mark_sort_preserving_indexes(&mut plan, &[c2], &arena);
         let rule = EliminateRedundantSort;
 
-        assert!(rule.apply(&mut plan)?);
+        assert!(rule.apply(&mut plan, &mut arena)?);
         Ok(())
     }
 
     #[test]
     fn remove_topk_when_index_matches_same_column_with_different_positions(
     ) -> Result<(), DatabaseError> {
-        let required = make_sort_field_with_position("no_o_id", 0);
-        let provided_prefix_1 = make_sort_field_with_position("no_w_id", 0);
-        let provided_prefix_2 = make_sort_field_with_position("no_d_id", 1);
-        let provided_target = make_sort_field_with_position("no_o_id", 2);
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = crate::planner::PlanArena::new(&table_arena);
+        let required = make_sort_field_with_position(&mut arena, "no_o_id", 0);
+        let provided_prefix_1 = make_sort_field_with_position(&mut arena, "no_w_id", 0);
+        let provided_prefix_2 = make_sort_field_with_position(&mut arena, "no_d_id", 1);
+        let provided_target = make_sort_field_with_position(&mut arena, "no_o_id", 2);
 
         let mut plan = build_plan(
             vec![required.clone()],
@@ -550,14 +609,16 @@ mod tests {
         });
 
         let rule = EliminateRedundantSort;
-        assert!(rule.apply(&mut plan)?);
+        assert!(rule.apply(&mut plan, &mut arena)?);
         assert!(matches!(plan.operator, Operator::Limit(_)));
         Ok(())
     }
 
     #[test]
     fn annotate_sets_sort_hint_on_table_scan() -> Result<(), DatabaseError> {
-        let column = ColumnRef::from(ColumnCatalog::new_dummy("c1".to_string()));
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = crate::planner::PlanArena::new(&table_arena);
+        let column = arena.alloc_column(ColumnCatalog::new_dummy("c1".to_string()));
         let sort_field = SortField::new(
             ScalarExpression::column_expr(column.clone(), 0),
             true,
@@ -590,7 +651,7 @@ mod tests {
             Operator::Sort(sort_op) => sort_op.sort_fields.clone(),
             _ => unreachable!("expected sort operator"),
         };
-        super::mark_sort_preserving_indexes(&mut plan, &sort_fields);
+        super::mark_sort_preserving_indexes(&mut plan, &sort_fields, &arena);
 
         let table_plan = plan.childrens.pop_only();
         match table_plan.operator {
@@ -608,13 +669,20 @@ mod tests {
 
     #[test]
     fn annotate_sets_stream_distinct_hint_on_table_scan() -> Result<(), DatabaseError> {
-        let (mut plan, _) = build_distinct_scan_plan();
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = crate::planner::PlanArena::new(&table_arena);
+        let (mut plan, _) = build_distinct_scan_plan(&mut arena);
         let required = match &plan.operator {
             Operator::Aggregate(op) => super::distinct_sort_fields(&op.groupby_exprs),
             _ => unreachable!("expected aggregate operator"),
         };
         if let Childrens::Only(child) = plan.childrens.as_mut() {
-            super::mark_order_hint(child, &required, super::OrderHintKind::StreamDistinct);
+            super::mark_order_hint(
+                child,
+                &required,
+                super::OrderHintKind::StreamDistinct,
+                &arena,
+            );
         }
 
         let child = plan.childrens.pop_only();
@@ -629,7 +697,9 @@ mod tests {
 
     #[test]
     fn use_stream_distinct_when_order_satisfied() -> Result<(), DatabaseError> {
-        let (mut plan, sort_option) = build_distinct_scan_plan();
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = crate::planner::PlanArena::new(&table_arena);
+        let (mut plan, sort_option) = build_distinct_scan_plan(&mut arena);
         if let Childrens::Only(child) = plan.childrens.as_mut() {
             if let Operator::TableScan(scan_op) = &child.operator {
                 let index_info = scan_op.index_infos[0].clone();
@@ -645,7 +715,7 @@ mod tests {
         ));
 
         let rule = UseStreamDistinct;
-        assert!(rule.apply(&mut plan)?);
+        assert!(rule.apply(&mut plan, &mut arena)?);
         assert!(matches!(
             plan.physical_option,
             Some(PhysicalOption {
@@ -658,20 +728,24 @@ mod tests {
 
     #[test]
     fn keep_sort_when_order_not_covered() -> Result<(), DatabaseError> {
-        let c1 = make_sort_field("c1");
-        let c2 = make_sort_field("c2");
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = crate::planner::PlanArena::new(&table_arena);
+        let c1 = make_sort_field(&mut arena, "c1");
+        let c2 = make_sort_field(&mut arena, "c2");
         let mut plan = build_plan(vec![c2.clone()], vec![c1.clone(), c2.clone()], 0);
-        super::mark_sort_preserving_indexes(&mut plan, &[c2]);
+        super::mark_sort_preserving_indexes(&mut plan, &[c2], &arena);
         let rule = EliminateRedundantSort;
 
-        assert!(!rule.apply(&mut plan)?);
+        assert!(!rule.apply(&mut plan, &mut arena)?);
         assert!(matches!(plan.operator, Operator::Sort(_)));
         Ok(())
     }
 
     #[test]
     fn promote_index_to_remove_sort() -> Result<(), DatabaseError> {
-        let column = ColumnRef::from(ColumnCatalog::new_dummy("c_first".to_string()));
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = crate::planner::PlanArena::new(&table_arena);
+        let column = arena.alloc_column(ColumnCatalog::new_dummy("c_first".to_string()));
         let sort_field = SortField::new(
             ScalarExpression::column_expr(column.clone(), 0),
             true,
@@ -725,9 +799,9 @@ mod tests {
             Operator::Sort(sort_op) => sort_op.sort_fields.clone(),
             _ => unreachable!("expected sort operator"),
         };
-        super::mark_sort_preserving_indexes(&mut plan, &sort_fields);
+        super::mark_sort_preserving_indexes(&mut plan, &sort_fields, &arena);
         let rule = EliminateRedundantSort;
-        assert!(rule.apply(&mut plan)?);
+        assert!(rule.apply(&mut plan, &mut arena)?);
         assert!(matches!(plan.operator, Operator::Filter(_)));
 
         let table_plan = plan.childrens.pop_only();

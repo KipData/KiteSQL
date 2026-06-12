@@ -18,20 +18,22 @@ use crate::storage::Transaction;
 use std::io::{Read, Write};
 
 impl ReferenceSerialization for bool {
-    fn encode<W: Write>(
+    fn encode<W: Write, A: crate::planner::MetaArena>(
         &self,
         writer: &mut W,
         is_direct: bool,
         reference_tables: &mut ReferenceTables,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        if *self { 1u8 } else { 0u8 }.encode(writer, is_direct, reference_tables)
+        if *self { 1u8 } else { 0u8 }.encode(writer, is_direct, reference_tables, arena)
     }
 
-    fn decode<T: Transaction, R: Read>(
+    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
         reader: &mut R,
         drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
+        arena: &mut A,
     ) -> Result<Self, DatabaseError> {
-        Ok(u8::decode(reader, drive, reference_tables)? == 1u8)
+        Ok(u8::decode(reader, drive, reference_tables, arena)? == 1u8)
     }
 }

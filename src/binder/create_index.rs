@@ -33,6 +33,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         index_columns: &[IndexColumn],
         if_not_exists: bool,
         is_unique: bool,
+        arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let table_name: TableName = lower_case_name(table_name)?.into();
         let index_name = name
@@ -63,7 +64,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
 
         for index_column in index_columns {
             // TODO: Expression Index
-            match self.bind_expr(&index_column.column.expr)? {
+            match self.bind_expr(&index_column.column.expr, arena)? {
                 ScalarExpression::ColumnRef { column, .. } => columns.push(column),
                 expr => {
                     return Err(DatabaseError::UnsupportedStmt(format!(

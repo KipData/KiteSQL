@@ -19,11 +19,11 @@ use crate::errors::DatabaseError;
 use crate::expression::{AliasType, ScalarExpression};
 use crate::planner::operator::create_view::CreateViewOperator;
 use crate::planner::operator::Operator;
-use crate::planner::{Childrens, LogicalPlan};
+use crate::planner::{Childrens, LogicalPlan, SchemaSlot};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
 use itertools::Itertools;
-use sqlparser::ast::{ObjectName, Query, ViewColumnDef};
+use sqlparser::ast::{ObjectName, Query, SelectItem, SetExpr, ViewColumnDef};
 use ulid::Ulid;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
@@ -33,27 +33,32 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         name: &ObjectName,
         columns: &[ViewColumnDef],
         query: &Query,
+        arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         fn projection_exprs(
             view_name: &TableName,
             mapping_schema: &[ColumnRef],
-            column_names: impl Iterator<Item = String>,
+            arena: &mut crate::planner::PlanArena,
+            mut column_name: impl FnMut(usize, ColumnRef, &crate::planner::PlanArena) -> String,
         ) -> Vec<ScalarExpression> {
-            column_names
+            mapping_schema
+                .iter()
+                .copied()
                 .enumerate()
-                .map(|(i, column_name)| {
-                    let mapping_column = &mapping_schema[i];
+                .map(|(i, mapping_column)| {
+                    let mapping_column_catalog = arena.column(mapping_column);
                     let mut column = ColumnCatalog::new(
-                        column_name,
-                        mapping_column.nullable(),
-                        mapping_column.desc().clone(),
+                        column_name(i, mapping_column, arena),
+                        mapping_column_catalog.nullable(),
+                        mapping_column_catalog.desc().clone(),
                     );
                     column.set_ref_table(view_name.clone(), Ulid::new(), true);
+                    let output_column = arena.alloc_column(column);
 
                     ScalarExpression::Alias {
-                        expr: Box::new(ScalarExpression::column_expr(mapping_column.clone(), i)),
+                        expr: Box::new(ScalarExpression::column_expr(mapping_column, i)),
                         alias: AliasType::Expr(Box::new(ScalarExpression::column_expr(
-                            ColumnRef::from(column),
+                            output_column,
                             i,
                         ))),
                     }
@@ -62,38 +67,55 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         }
 
         let view_name: TableName = lower_case_name(name)?.into();
-        let mut plan = self.bind_query(query)?;
+        let mut plan = self.bind_query(query, arena)?;
 
-        let mapping_schema = plan.output_schema();
+        let mapping_schema = plan.output_schema_to(arena, SchemaSlot::S0).clone();
+
+        if !columns.is_empty() && columns.len() > mapping_schema.len() {
+            return Err(DatabaseError::UnsupportedStmt(format!(
+                "view column count {} exceeds query output count {}",
+                columns.len(),
+                mapping_schema.len()
+            )));
+        }
 
         let exprs: Vec<ScalarExpression> = if columns.is_empty() {
-            projection_exprs(
-                &view_name,
-                mapping_schema,
-                mapping_schema
-                    .iter()
-                    .map(|column| column.name().to_string()),
-            )
+            projection_exprs(&view_name, &mapping_schema, arena, |i, column, arena| {
+                query_output_alias(query, i)
+                    .unwrap_or_else(|| arena.column(column).name().to_string())
+            })
         } else {
             projection_exprs(
                 &view_name,
-                mapping_schema,
-                columns
-                    .iter()
-                    .map(|column| lower_ident(&column.name).into_owned()),
+                &mapping_schema[..columns.len()],
+                arena,
+                |i, _, _| lower_ident(&columns[i].name).into_owned(),
             )
         };
-        plan = self.bind_project(plan, exprs)?;
+        plan = self.bind_project(plan, exprs, arena)?;
+        let schema = plan.output_schema_to(arena, SchemaSlot::S0).clone();
 
         Ok(LogicalPlan::new(
             Operator::CreateView(CreateViewOperator {
                 view: View {
                     name: view_name,
                     plan: Box::new(plan),
+                    schema,
                 },
                 or_replace: *or_replace,
             }),
             Childrens::None,
         ))
+    }
+}
+
+fn query_output_alias(query: &Query, index: usize) -> Option<String> {
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return None;
+    };
+
+    match select.projection.get(index)? {
+        SelectItem::ExprWithAlias { alias, .. } => Some(lower_ident(alias).into_owned()),
+        _ => None,
     }
 }

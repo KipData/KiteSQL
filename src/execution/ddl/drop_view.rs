@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor};
+use crate::execution::{
+    DDLApply, ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor,
+};
 use crate::planner::operator::drop_view::DropViewOperator;
 use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
@@ -32,6 +34,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropView {
     fn into_executor(
         self,
         arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
@@ -43,6 +46,7 @@ impl DropView {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        _: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(DropViewOperator {
             view_name,
@@ -53,10 +57,12 @@ impl DropView {
             return Ok(());
         };
 
-        let mut state = arena.local_state();
-        let (transaction, table_codec, context) = state.write_context_mut();
-        let view_cache = context.view_cache_mut();
-        transaction.drop_view(table_codec, view_cache, view_name.clone(), if_exists)?;
+        let (transaction, table_codec) = arena.transaction_codec_mut();
+        if transaction.drop_view(table_codec, view_name.clone(), if_exists)? {
+            arena.push_ddl_apply(DDLApply::DropView {
+                name: view_name.clone(),
+            });
+        }
 
         TupleBuilder::build_result_into(arena.result_tuple_mut(), format!("{view_name}"));
         arena.resume();

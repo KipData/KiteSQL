@@ -21,21 +21,23 @@ use std::sync::Arc;
 implement_serialization_by_bincode!(String);
 
 impl ReferenceSerialization for Arc<str> {
-    fn encode<W: std::io::Write>(
+    fn encode<W: std::io::Write, A: crate::planner::MetaArena>(
         &self,
         writer: &mut W,
         _: bool,
         _: &mut ReferenceTables,
+        _: &A,
     ) -> Result<(), DatabaseError> {
         bincode::serialize_into(writer, self)?;
 
         Ok(())
     }
 
-    fn decode<T: Transaction, R: std::io::Read>(
+    fn decode<T: Transaction, R: std::io::Read, A: crate::planner::MetaArena>(
         reader: &mut R,
         _: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         _: &ReferenceTables,
+        _: &mut A,
     ) -> Result<Self, DatabaseError> {
         let str: String = bincode::deserialize_from(reader)?;
         Ok(str.into())
@@ -54,12 +56,18 @@ pub(crate) mod test {
         let mut bytes = Vec::new();
         let mut cursor = Cursor::new(&mut bytes);
         let mut reference_tables = ReferenceTables::new();
+        let mut arena = crate::planner::TableArena::default();
 
         let source = "hello".to_string();
-        ReferenceSerialization::encode(&source, &mut cursor, true, &mut reference_tables)?;
+        ReferenceSerialization::encode(&source, &mut cursor, true, &mut reference_tables, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
         assert_eq!(
-            String::decode::<RocksTransaction, _>(&mut cursor, None, &reference_tables)?,
+            String::decode::<RocksTransaction, _, _>(
+                &mut cursor,
+                None,
+                &reference_tables,
+                &mut arena,
+            )?,
             source
         );
 

@@ -15,8 +15,9 @@
 use crate::catalog::{ColumnCatalog, ColumnRef, ColumnRelation};
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
+use crate::planner::{MetaArena, PlanArena};
 use crate::types::index::{IndexMeta, IndexMetaRef, IndexType};
-use crate::types::tuple::SchemaRef;
+use crate::types::tuple::Schema;
 use crate::types::{ColumnId, LogicalType};
 use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
@@ -34,16 +35,16 @@ pub struct TableCatalog {
     /// Mapping from column names to column ids
     column_idxs: BTreeMap<String, (ColumnId, usize)>,
     columns: BTreeMap<ColumnId, usize>,
+    column_refs: Vec<ColumnRef>,
     pub(crate) indexes: Vec<IndexMetaRef>,
 
-    schema_ref: SchemaRef,
     primary_keys: Vec<(usize, ColumnRef)>,
     primary_key_indices: PrimaryKeyIndices,
     primary_key_type: LogicalType,
 }
 
 pub(crate) struct DmlTableSnapshot {
-    pub(crate) schema_ref: SchemaRef,
+    pub(crate) columns: Schema,
     pub(crate) primary_key_indices: PrimaryKeyIndices,
     pub(crate) columns_len: usize,
     pub(crate) index_metas: Vec<(IndexMetaRef, Vec<ScalarExpression>)>,
@@ -66,9 +67,8 @@ impl TableCatalog {
             .find(|meta| matches!(meta.ty, IndexType::Unique) && &meta.column_ids[0] == col_id)
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn get_column_by_id(&self, id: &ColumnId) -> Option<&ColumnRef> {
-        self.columns.get(id).map(|i| &self.schema_ref[*i])
+    pub(crate) fn get_column_by_id(&self, id: &ColumnId) -> Option<ColumnRef> {
+        self.columns.get(id).map(|i| self.column_refs[*i])
     }
 
     #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -76,10 +76,10 @@ impl TableCatalog {
         self.column_idxs.get(name).map(|(id, _)| id)
     }
 
-    pub(crate) fn get_column_by_name(&self, name: &str) -> Option<&ColumnRef> {
+    pub(crate) fn get_column_by_name(&self, name: &str) -> Option<ColumnRef> {
         self.column_idxs
             .get(name)
-            .map(|(_, i)| &self.schema_ref[*i])
+            .map(|(_, i)| self.column_refs[*i])
     }
 
     #[allow(dead_code)]
@@ -88,15 +88,15 @@ impl TableCatalog {
     }
 
     pub(crate) fn columns(&self) -> slice::Iter<'_, ColumnRef> {
-        self.schema_ref.iter()
+        self.column_refs.iter()
+    }
+
+    pub(crate) fn column_ref(&self, index: usize) -> Option<ColumnRef> {
+        self.column_refs.get(index).copied()
     }
 
     pub(crate) fn indexes(&self) -> slice::Iter<'_, IndexMetaRef> {
         self.indexes.iter()
-    }
-
-    pub fn schema_ref(&self) -> &SchemaRef {
-        &self.schema_ref
     }
 
     pub(crate) fn columns_len(&self) -> usize {
@@ -115,14 +115,17 @@ impl TableCatalog {
         &self.primary_key_indices
     }
 
-    pub(crate) fn dml_snapshot(&self) -> Result<DmlTableSnapshot, DatabaseError> {
+    pub(crate) fn dml_snapshot(
+        &self,
+        arena: &mut PlanArena,
+    ) -> Result<DmlTableSnapshot, DatabaseError> {
         let index_metas = self
             .indexes()
-            .map(|index_meta| Ok((index_meta.clone(), index_meta.column_exprs(self)?)))
+            .map(|index_meta| Ok((index_meta.clone(), index_meta.column_exprs(self, arena)?)))
             .collect::<Result<Vec<_>, DatabaseError>>()?;
 
         Ok(DmlTableSnapshot {
-            schema_ref: self.schema_ref.clone(),
+            columns: self.column_refs.clone(),
             primary_key_indices: self.primary_key_indices.clone(),
             columns_len: self.columns_len(),
             index_metas,
@@ -134,6 +137,7 @@ impl TableCatalog {
         &mut self,
         mut col: ColumnCatalog,
         generator: &mut Generator,
+        arena: &mut impl MetaArena,
     ) -> Result<ColumnId, DatabaseError> {
         if self.column_idxs.contains_key(col.name()) {
             return Err(DatabaseError::DuplicateColumn(col.name().to_string()));
@@ -151,12 +155,10 @@ impl TableCatalog {
         };
 
         self.column_idxs
-            .insert(col.name().to_string(), (col_id, self.schema_ref.len()));
-        self.columns.insert(col_id, self.schema_ref.len());
-
-        let mut schema = Vec::clone(&self.schema_ref);
-        schema.push(ColumnRef::from(col));
-        self.schema_ref = Arc::new(schema);
+            .insert(col.name().to_string(), (col_id, self.column_refs.len()));
+        self.columns.insert(col_id, self.column_refs.len());
+        let column_ref = arena.alloc_column(col);
+        self.column_refs.push(column_ref);
 
         Ok(col_id)
     }
@@ -166,6 +168,7 @@ impl TableCatalog {
         name: String,
         column_ids: Vec<ColumnId>,
         ty: IndexType,
+        arena: &impl MetaArena,
     ) -> Result<&IndexMeta, DatabaseError> {
         for index in self.indexes.iter() {
             if index.name == name {
@@ -180,6 +183,7 @@ impl TableCatalog {
         for column_id in column_ids.iter() {
             let val_ty = self
                 .get_column_by_id(column_id)
+                .map(|column| arena.column(column))
                 .ok_or_else(|| DatabaseError::column_not_found(column_id.to_string()))?
                 .datatype()
                 .clone();
@@ -207,6 +211,7 @@ impl TableCatalog {
     pub fn new(
         name: TableName,
         columns: Vec<ColumnCatalog>,
+        arena: &mut impl MetaArena,
     ) -> Result<TableCatalog, DatabaseError> {
         if columns.is_empty() {
             return Err(DatabaseError::ColumnsEmpty);
@@ -215,8 +220,8 @@ impl TableCatalog {
             name,
             column_idxs: BTreeMap::new(),
             columns: BTreeMap::new(),
+            column_refs: vec![],
             indexes: vec![],
-            schema_ref: Arc::new(vec![]),
             primary_keys: vec![],
             primary_key_indices: Default::default(),
             primary_key_type: LogicalType::SqlNull,
@@ -224,78 +229,106 @@ impl TableCatalog {
         let mut generator = Generator::new();
         for col_catalog in columns.into_iter() {
             let _ = table_catalog
-                .add_column(col_catalog, &mut generator)
+                .add_column(col_catalog, &mut generator, arena)
                 .unwrap();
         }
         let (primary_keys, primary_key_indices) =
-            Self::build_primary_keys(&table_catalog.schema_ref);
+            Self::build_primary_keys(&table_catalog.column_refs, arena);
 
-        table_catalog.primary_key_type = Self::build_primary_key_type(&primary_keys);
+        table_catalog.primary_key_type = Self::build_primary_key_type(&primary_keys, arena);
         table_catalog.primary_keys = primary_keys;
         table_catalog.primary_key_indices = primary_key_indices;
 
         Ok(table_catalog)
     }
 
-    fn build_primary_key_type(primary_keys: &[(usize, ColumnRef)]) -> LogicalType {
+    fn build_primary_key_type(
+        primary_keys: &[(usize, ColumnRef)],
+        arena: &impl MetaArena,
+    ) -> LogicalType {
         if primary_keys.len() == 1 {
-            primary_keys[0].1.datatype().clone()
+            arena.column(primary_keys[0].1).datatype().clone()
         } else {
             LogicalType::Tuple(
                 primary_keys
                     .iter()
-                    .map(|(_, column)| column.datatype().clone())
+                    .map(|(_, column)| arena.column(*column).datatype().clone())
                     .collect_vec(),
             )
         }
     }
 
-    pub(crate) fn reload(
+    pub(crate) fn reload<I>(
         name: TableName,
-        column_refs: Vec<ColumnRef>,
+        column_catalogs: I,
         indexes: Vec<IndexMetaRef>,
-    ) -> Result<TableCatalog, DatabaseError> {
+        arena: &mut impl MetaArena,
+    ) -> Result<TableCatalog, DatabaseError>
+    where
+        I: Iterator<Item = ColumnCatalog>,
+    {
+        let (lower_bound, _) = column_catalogs.size_hint();
         let mut column_idxs = BTreeMap::new();
         let mut columns = BTreeMap::new();
+        let mut column_refs = Vec::with_capacity(lower_bound);
 
-        for (i, column_ref) in column_refs.iter().enumerate() {
-            let column_id = column_ref.id().ok_or(DatabaseError::invalid_column(
+        for (i, column_catalog) in column_catalogs.enumerate() {
+            let column_id = column_catalog.id().ok_or(DatabaseError::invalid_column(
                 "column does not belong to table".to_string(),
             ))?;
 
-            column_idxs.insert(column_ref.name().to_string(), (column_id, i));
+            column_idxs.insert(column_catalog.name().to_string(), (column_id, i));
             columns.insert(column_id, i);
+            column_refs.push(arena.alloc_column(column_catalog));
         }
-        let schema_ref = Arc::new(column_refs.clone());
-        let (primary_keys, primary_key_indices) = Self::build_primary_keys(&schema_ref);
-        let primary_key_type = Self::build_primary_key_type(&primary_keys);
+        let (primary_keys, primary_key_indices) = Self::build_primary_keys(&column_refs, arena);
+        let primary_key_type = Self::build_primary_key_type(&primary_keys, arena);
 
         Ok(TableCatalog {
             name,
             column_idxs,
             columns,
+            column_refs,
             indexes,
-            schema_ref,
             primary_keys,
             primary_key_indices,
             primary_key_type,
         })
     }
 
+    pub(crate) fn transplant_to_table_arena(
+        &self,
+        source_arena: &PlanArena,
+    ) -> Result<TableCatalog, DatabaseError> {
+        let column_catalogs = self
+            .columns()
+            .map(|column| source_arena.column(*column).clone())
+            .collect_vec();
+
+        Self::reload(
+            self.name.clone(),
+            column_catalogs.into_iter(),
+            self.indexes.clone(),
+            source_arena.table_arena_cell().borrow_mut(),
+        )
+    }
+
     fn build_primary_keys(
-        schema_ref: &Arc<Vec<ColumnRef>>,
+        columns: &[ColumnRef],
+        arena: &impl MetaArena,
     ) -> (Vec<(usize, ColumnRef)>, PrimaryKeyIndices) {
         let mut primary_keys = Vec::new();
         let mut primary_key_indices = Vec::new();
 
-        for (_, (i, column)) in schema_ref
+        for (_, (i, column)) in columns
             .iter()
             .enumerate()
             .filter_map(|(i, column)| {
-                column
+                arena
+                    .column(*column)
                     .desc()
                     .primary()
-                    .map(|p_i| (p_i, (i, column.clone())))
+                    .map(|p_i| (p_i, (i, *column)))
             })
             .sorted_by_key(|(p_i, _)| *p_i)
         {
@@ -317,8 +350,19 @@ impl TableMeta {
 mod tests {
     use super::*;
     use crate::catalog::ColumnDesc;
+    use crate::planner::TableArenaCell;
     use crate::types::LogicalType;
     use ulid::Generator;
+
+    fn build_table_catalog(
+        name: &str,
+        columns: Vec<ColumnCatalog>,
+    ) -> (TableArenaCell, TableCatalog) {
+        let table_arena = TableArenaCell::default();
+        let table_catalog =
+            TableCatalog::new(name.to_string().into(), columns, table_arena.borrow_mut()).unwrap();
+        (table_arena, table_catalog)
+    }
 
     #[test]
     // | a (Int32) | b (Bool) |
@@ -337,7 +381,7 @@ mod tests {
             ColumnDesc::new(LogicalType::Boolean, None, false, None).unwrap(),
         );
         let col_catalogs = vec![col0, col1];
-        let table_catalog = TableCatalog::new("test".to_string().into(), col_catalogs).unwrap();
+        let (table_arena, table_catalog) = build_table_catalog("test", col_catalogs);
 
         assert!(table_catalog.contains_column("a"));
         assert!(table_catalog.contains_column("b"));
@@ -347,11 +391,15 @@ mod tests {
         let col_b_id = table_catalog.get_column_id_by_name("b").unwrap();
         assert!(col_a_id < col_b_id);
 
-        let column_catalog = table_catalog.get_column_by_id(col_a_id).unwrap();
+        let column_catalog = table_arena
+            .borrow()
+            .column(table_catalog.get_column_by_id(col_a_id).unwrap());
         assert_eq!(column_catalog.name(), "a");
         assert_eq!(*column_catalog.datatype(), LogicalType::Integer,);
 
-        let column_catalog = table_catalog.get_column_by_id(col_b_id).unwrap();
+        let column_catalog = table_arena
+            .borrow()
+            .column(table_catalog.get_column_by_id(col_b_id).unwrap());
         assert_eq!(column_catalog.name(), "b");
         assert_eq!(*column_catalog.datatype(), LogicalType::Boolean,);
     }
@@ -359,8 +407,8 @@ mod tests {
     #[test]
     fn test_add_column_generates_id_after_existing_columns() {
         for _ in 0..256 {
-            let mut table_catalog = TableCatalog::new(
-                "test".to_string().into(),
+            let (table_arena, mut table_catalog) = build_table_catalog(
+                "test",
                 vec![
                     ColumnCatalog::new(
                         "id".into(),
@@ -379,11 +427,10 @@ mod tests {
                         .unwrap(),
                     ),
                 ],
-            )
-            .unwrap();
+            );
             let max_existing_id = table_catalog
                 .columns()
-                .filter_map(|column| column.id())
+                .filter_map(|column| table_arena.borrow().column(*column).id())
                 .max()
                 .unwrap();
             let mut generator = Generator::new();
@@ -395,6 +442,7 @@ mod tests {
                         ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
                     ),
                     &mut generator,
+                    table_arena.borrow_mut(),
                 )
                 .unwrap();
 

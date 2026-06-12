@@ -71,7 +71,7 @@ impl DB for SQLBase {
 fn collect_output(
     mut iter: DatabaseIter<'_, RocksStorage>,
 ) -> Result<DBOutput<DefaultColumnType>, DatabaseError> {
-    let types = vec![DefaultColumnType::Any; iter.schema().len()];
+    let types = vec![DefaultColumnType::Any; iter.schema(|schema| schema.len())];
     let mut rows = Vec::new();
 
     while let Some(tuple) = iter.next_borrowed_tuple()? {

@@ -32,6 +32,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Truncate {
     fn into_executor(
         self,
         arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
         _: ReadExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
@@ -43,12 +44,13 @@ impl Truncate {
     pub(crate) fn next_tuple<'a, T: Transaction>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(TruncateOperator { table_name }) = self.op.take() else {
             arena.finish();
             return Ok(());
         };
-        let mut state = arena.local_state();
+        let mut state = arena.local_state(plan_arena);
         let (transaction, table_codec) = state.transaction_codec_mut();
         transaction.drop_data(table_codec, &table_name)?;
 

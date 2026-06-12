@@ -364,7 +364,7 @@ fn map_lmdb_err(err: impl std::fmt::Display) -> DatabaseError {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::{LmdbConfig, LmdbStorage};
-    use crate::db::DataBaseBuilder;
+    use crate::db::{CatalogKind, DataBaseBuilder};
     use lmdb::EnvironmentFlags;
     use tempfile::TempDir;
 
@@ -376,6 +376,9 @@ mod tests {
 
         kite_sql
             .ddl("create table t1 (a int primary key, b int)")
+            .unwrap();
+        kite_sql
+            .load(CatalogKind::Table("t1".to_string().into()))
             .unwrap();
         kite_sql
             .run("insert into t1 values (1, 10), (2, 20), (3, 30)")
@@ -414,6 +417,9 @@ mod tests {
 
         kite_sql
             .ddl("create table t_metrics (a int primary key, b int)")
+            .unwrap();
+        kite_sql
+            .load(CatalogKind::Table("t_metrics".to_string().into()))
             .unwrap();
         kite_sql
             .run("insert into t_metrics values (1, 10), (2, 20), (3, 30)")
