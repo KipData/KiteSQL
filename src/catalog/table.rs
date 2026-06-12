@@ -27,7 +27,6 @@ use std::{slice, vec};
 use ulid::Generator;
 
 pub type TableName = Arc<str>;
-pub type PrimaryKeyIndices = Arc<Vec<usize>>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableCatalog {
@@ -39,13 +38,13 @@ pub struct TableCatalog {
     pub(crate) indexes: Vec<IndexMetaRef>,
 
     primary_keys: Vec<(usize, ColumnRef)>,
-    primary_key_indices: PrimaryKeyIndices,
+    primary_key_indices: Vec<usize>,
     primary_key_type: LogicalType,
 }
 
-pub(crate) struct DmlTableSnapshot {
+pub(crate) struct DmlTableSnapshot<'a> {
     pub(crate) columns: Schema,
-    pub(crate) primary_key_indices: PrimaryKeyIndices,
+    pub(crate) primary_key_indices: &'a [usize],
     pub(crate) columns_len: usize,
     pub(crate) index_metas: Vec<(IndexMetaRef, Vec<ScalarExpression>)>,
 }
@@ -61,10 +60,15 @@ impl TableCatalog {
         &self.name
     }
 
-    pub(crate) fn get_unique_index(&self, col_id: &ColumnId) -> Option<&IndexMetaRef> {
-        self.indexes
-            .iter()
-            .find(|meta| matches!(meta.ty, IndexType::Unique) && &meta.column_ids[0] == col_id)
+    pub(crate) fn get_unique_index(
+        &self,
+        col_id: &ColumnId,
+        arena: &impl MetaArena,
+    ) -> Option<IndexMetaRef> {
+        self.indexes.iter().copied().find(|meta| {
+            let meta = arena.index(*meta);
+            matches!(meta.ty, IndexType::Unique) && &meta.column_ids[0] == col_id
+        })
     }
 
     pub(crate) fn get_column_by_id(&self, id: &ColumnId) -> Option<ColumnRef> {
@@ -111,22 +115,27 @@ impl TableCatalog {
         &self.primary_key_type
     }
 
-    pub(crate) fn primary_keys_indices(&self) -> &PrimaryKeyIndices {
+    pub(crate) fn primary_key_indices(&self) -> &[usize] {
         &self.primary_key_indices
     }
 
     pub(crate) fn dml_snapshot(
         &self,
         arena: &mut PlanArena,
-    ) -> Result<DmlTableSnapshot, DatabaseError> {
+    ) -> Result<DmlTableSnapshot<'_>, DatabaseError> {
         let index_metas = self
             .indexes()
-            .map(|index_meta| Ok((index_meta.clone(), index_meta.column_exprs(self, arena)?)))
+            .map(|index_meta| {
+                Ok((
+                    *index_meta,
+                    arena.index(*index_meta).column_exprs(self, arena)?,
+                ))
+            })
             .collect::<Result<Vec<_>, DatabaseError>>()?;
 
         Ok(DmlTableSnapshot {
             columns: self.column_refs.clone(),
-            primary_key_indices: self.primary_key_indices.clone(),
+            primary_key_indices: &self.primary_key_indices,
             columns_len: self.columns_len(),
             index_metas,
         })
@@ -168,15 +177,19 @@ impl TableCatalog {
         name: String,
         column_ids: Vec<ColumnId>,
         ty: IndexType,
-        arena: &impl MetaArena,
-    ) -> Result<&IndexMeta, DatabaseError> {
+        arena: &mut impl MetaArena,
+    ) -> Result<IndexMetaRef, DatabaseError> {
         for index in self.indexes.iter() {
-            if index.name == name {
+            if arena.index(*index).name == name {
                 return Err(DatabaseError::DuplicateIndex(name));
             }
         }
 
-        let index_id = self.indexes.last().map(|index| index.id + 1).unwrap_or(0);
+        let index_id = self
+            .indexes
+            .last()
+            .map(|index| arena.index(*index).id + 1)
+            .unwrap_or(0);
         let pk_ty = self.primary_key_type.clone();
 
         let mut val_tys = Vec::with_capacity(column_ids.len());
@@ -204,8 +217,9 @@ impl TableCatalog {
             name,
             ty,
         };
-        self.indexes.push(Arc::new(index));
-        Ok(self.indexes.last().unwrap())
+        let index_ref = arena.alloc_index(index);
+        self.indexes.push(index_ref);
+        Ok(index_ref)
     }
 
     pub fn new(
@@ -258,14 +272,15 @@ impl TableCatalog {
         }
     }
 
-    pub(crate) fn reload<I>(
+    pub(crate) fn reload<I, I2>(
         name: TableName,
         column_catalogs: I,
-        indexes: Vec<IndexMetaRef>,
+        indexes: I2,
         arena: &mut impl MetaArena,
     ) -> Result<TableCatalog, DatabaseError>
     where
         I: Iterator<Item = ColumnCatalog>,
+        I2: Iterator<Item = IndexMeta>,
     {
         let (lower_bound, _) = column_catalogs.size_hint();
         let mut column_idxs = BTreeMap::new();
@@ -281,6 +296,7 @@ impl TableCatalog {
             columns.insert(column_id, i);
             column_refs.push(arena.alloc_column(column_catalog));
         }
+        let indexes = indexes.map(|index| arena.alloc_index(index)).collect();
         let (primary_keys, primary_key_indices) = Self::build_primary_keys(&column_refs, arena);
         let primary_key_type = Self::build_primary_key_type(&primary_keys, arena);
 
@@ -304,11 +320,15 @@ impl TableCatalog {
             .columns()
             .map(|column| source_arena.column(*column).clone())
             .collect_vec();
+        let index_metas = self
+            .indexes()
+            .map(|index| source_arena.index(*index).clone())
+            .collect_vec();
 
         Self::reload(
             self.name.clone(),
             column_catalogs.into_iter(),
-            self.indexes.clone(),
+            index_metas.into_iter(),
             source_arena.table_arena_cell().borrow_mut(),
         )
     }
@@ -316,11 +336,11 @@ impl TableCatalog {
     fn build_primary_keys(
         columns: &[ColumnRef],
         arena: &impl MetaArena,
-    ) -> (Vec<(usize, ColumnRef)>, PrimaryKeyIndices) {
+    ) -> (Vec<(usize, ColumnRef)>, Vec<usize>) {
         let mut primary_keys = Vec::new();
         let mut primary_key_indices = Vec::new();
 
-        for (_, (i, column)) in columns
+        for (i, column) in columns
             .iter()
             .enumerate()
             .filter_map(|(i, column)| {
@@ -328,15 +348,16 @@ impl TableCatalog {
                     .column(*column)
                     .desc()
                     .primary()
-                    .map(|p_i| (p_i, (i, *column)))
+                    .map(|primary_index| (primary_index, i))
             })
-            .sorted_by_key(|(p_i, _)| *p_i)
+            .sorted_by_key(|(primary_index, _)| *primary_index)
+            .map(|(_, i)| (i, columns[i]))
         {
             primary_key_indices.push(i);
             primary_keys.push((i, column));
         }
 
-        (primary_keys, Arc::new(primary_key_indices))
+        (primary_keys, primary_key_indices)
     }
 }
 

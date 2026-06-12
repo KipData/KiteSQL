@@ -98,6 +98,7 @@ impl Analyze {
             table
                 .indexes()
                 .map(|index| {
+                    let index = plan_arena.index(*index);
                     Ok(State {
                         index_id: index.id,
                         exprs: index.column_exprs(table, plan_arena)?,
@@ -185,7 +186,7 @@ impl Analyze {
 
 impl fmt::Display for AnalyzeOperator {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let indexes = self.index_metas.iter().map(|index| &index.name).join(", ");
+        let indexes = self.index_metas.iter().join(", ");
 
         write!(f, "Analyze {} -> [{}]", self.table_name, indexes)?;
 

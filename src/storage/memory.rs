@@ -171,7 +171,7 @@ mod wasm_tests {
         let mut table_cache = crate::storage::TableCache::default();
         let mut table_codec = TableCodec::default();
         let table_arena = TableArenaCell::default();
-        let plan_arena = PlanArena::new(&table_arena);
+        let mut plan_arena = PlanArena::new(&table_arena);
         let source_columns = vec![
             ColumnCatalog::new(
                 "c1".to_string(),
@@ -194,7 +194,7 @@ mod wasm_tests {
             let table = table.transplant_to_table_arena(&plan_arena)?;
             table_cache.insert(table.name().clone(), table);
         }
-        let mut plan_arena = PlanArena::new(&table_arena);
+        let plan_arena = PlanArena::new(&table_arena);
         let table_name: TableName = "test".to_string().into();
 
         transaction.append_tuple(

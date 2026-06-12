@@ -17,7 +17,7 @@ use crate::catalog::{ColumnRef, TableCatalog, TableName};
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::sort::SortField;
-use crate::planner::{Childrens, LogicalPlan};
+use crate::planner::{Childrens, LogicalPlan, PlanArena};
 use crate::storage::Bounds;
 use crate::types::index::IndexInfo;
 use itertools::Itertools;
@@ -43,12 +43,14 @@ impl TableScanOperator {
         table_name: TableName,
         table_catalog: &TableCatalog,
         with_pk: bool,
+        arena: &PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         // Fill all Columns in TableCatalog by default
         let columns = table_catalog.columns().copied().collect_vec();
         let mut index_infos = Vec::with_capacity(table_catalog.indexes.len());
 
-        for index_meta in table_catalog.indexes.iter() {
+        for index_ref in table_catalog.indexes.iter().copied() {
+            let index_meta = arena.index(index_ref);
             let mut sort_fields = Vec::with_capacity(index_meta.column_ids.len());
             for col_id in &index_meta.column_ids {
                 let column_ref = table_catalog.get_column_by_id(col_id).ok_or_else(|| {
@@ -62,7 +64,7 @@ impl TableScanOperator {
             }
 
             index_infos.push(IndexInfo {
-                meta: index_meta.clone(),
+                meta: index_ref,
                 sort_option: SortOption::OrderBy {
                     fields: sort_fields,
                     ignore_prefix_len: 0,

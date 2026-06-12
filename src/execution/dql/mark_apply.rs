@@ -443,9 +443,8 @@ mod tests {
             "right_c1",
             vec![vec![DataValue::Int32(2)], vec![DataValue::Int32(3)]],
         );
-        let left_column = left.output_schema_to(&mut plan_arena, crate::planner::SchemaSlot::S0)[0];
-        let right_column =
-            right.output_schema_to(&mut plan_arena, crate::planner::SchemaSlot::S0)[0];
+        let left_column = left.output_schema(&mut plan_arena)[0];
+        let right_column = right.output_schema(&mut plan_arena)[0];
 
         let predicate = build_equality_predicate(left_column, 0, right_column, 1)?;
 
@@ -495,9 +494,8 @@ mod tests {
             "right_c1",
             vec![vec![DataValue::Null], vec![DataValue::Int32(2)]],
         );
-        let left_column = left.output_schema_to(&mut plan_arena, crate::planner::SchemaSlot::S0)[0];
-        let right_column =
-            right.output_schema_to(&mut plan_arena, crate::planner::SchemaSlot::S0)[0];
+        let left_column = left.output_schema(&mut plan_arena)[0];
+        let right_column = right.output_schema(&mut plan_arena)[0];
 
         let predicate = build_equality_predicate(left_column, 0, right_column, 1)?;
 
@@ -557,12 +555,8 @@ mod tests {
                 vec![DataValue::Int32(2), DataValue::Null],
             ],
         );
-        let left_schema = left
-            .output_schema_to(&mut plan_arena, crate::planner::SchemaSlot::S0)
-            .clone();
-        let right_schema = right
-            .output_schema_to(&mut plan_arena, crate::planner::SchemaSlot::S0)
-            .clone();
+        let left_schema = left.output_schema(&mut plan_arena).clone();
+        let right_schema = right.output_schema(&mut plan_arena).clone();
         let left_value_column = left_schema[0];
         let left_flag_column = left_schema[1];
         let right_value_column = right_schema[0];
@@ -616,10 +610,8 @@ mod tests {
             vec![("right_c1", LogicalType::Integer)],
             vec![vec![DataValue::Int32(2)]],
         );
-        let left_value_column =
-            left.output_schema_to(&mut plan_arena, crate::planner::SchemaSlot::S0)[0];
-        let right_value_column =
-            right.output_schema_to(&mut plan_arena, crate::planner::SchemaSlot::S0)[0];
+        let left_value_column = left.output_schema(&mut plan_arena)[0];
+        let right_value_column = right.output_schema(&mut plan_arena)[0];
         let predicate =
             build_equality_predicate(left_value_column.clone(), 0, right_value_column, 1)?;
         let mut op =
@@ -664,10 +656,8 @@ mod tests {
             vec![("right_c1", LogicalType::Integer)],
             vec![vec![DataValue::Null], vec![DataValue::Int32(2)]],
         );
-        let left_value_column =
-            left.output_schema_to(&mut plan_arena, crate::planner::SchemaSlot::S0)[0];
-        let right_value_column =
-            right.output_schema_to(&mut plan_arena, crate::planner::SchemaSlot::S0)[0];
+        let left_value_column = left.output_schema(&mut plan_arena)[0];
+        let right_value_column = right.output_schema(&mut plan_arena)[0];
         let predicate =
             build_equality_predicate(left_value_column.clone(), 0, right_value_column, 1)?;
         let mut op =
@@ -715,9 +705,8 @@ mod tests {
             "right_c1",
             vec![vec![DataValue::Int32(2)], vec![DataValue::Int32(3)]],
         );
-        let left_column = left.output_schema_to(&mut plan_arena, crate::planner::SchemaSlot::S0)[0];
-        let right_column =
-            right.output_schema_to(&mut plan_arena, crate::planner::SchemaSlot::S0)[0];
+        let left_column = left.output_schema(&mut plan_arena)[0];
+        let right_column = right.output_schema(&mut plan_arena)[0];
 
         let predicate = build_equality_predicate(left_column, 0, right_column, 1)?;
 
@@ -764,9 +753,8 @@ mod tests {
             "right_c1",
             vec![vec![DataValue::Null], vec![DataValue::Int32(2)]],
         );
-        let left_column = left.output_schema_to(&mut plan_arena, crate::planner::SchemaSlot::S0)[0];
-        let right_column =
-            right.output_schema_to(&mut plan_arena, crate::planner::SchemaSlot::S0)[0];
+        let left_column = left.output_schema(&mut plan_arena)[0];
+        let right_column = right.output_schema(&mut plan_arena)[0];
 
         let predicate = build_equality_predicate(left_column, 0, right_column, 1)?;
 
@@ -816,10 +804,8 @@ mod tests {
             ],
             vec![vec![DataValue::Int32(1), DataValue::Null]],
         );
-        let left_column = left.output_schema_to(&mut plan_arena, crate::planner::SchemaSlot::S0)[0];
-        let right_schema = right
-            .output_schema_to(&mut plan_arena, crate::planner::SchemaSlot::S0)
-            .clone();
+        let left_column = left.output_schema(&mut plan_arena)[0];
+        let right_schema = right.output_schema(&mut plan_arena).clone();
         let right_value_column = right_schema[0];
         let right_flag_column = right_schema[1];
 

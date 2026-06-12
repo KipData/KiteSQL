@@ -17,7 +17,7 @@ use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext,
 };
 use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
-use crate::planner::{LogicalPlan, SchemaSlot};
+use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
 
@@ -31,13 +31,13 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarSubquery {
     type Input = (ScalarSubqueryOperator, LogicalPlan);
 
     fn into_executor(
-        (_, input): Self::Input,
+        (_, mut input): Self::Input,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let value_count = input.output_schema_to(plan_arena, SchemaSlot::S0).len();
+        let value_count = input.output_schema(plan_arena).len();
         let input = build_read(arena, plan_arena, input, cache, transaction);
         arena.push(ExecNode::ScalarSubquery(Self {
             input,

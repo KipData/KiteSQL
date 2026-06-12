@@ -21,9 +21,9 @@ use crate::execution::{
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
-use crate::planner::{LogicalPlan, SchemaSlot};
+use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
-use crate::types::tuple::{Schema, SplitTupleRef, Tuple};
+use crate::types::tuple::{SplitTupleRef, Tuple};
 use crate::types::value::DataValue;
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
@@ -37,26 +37,6 @@ struct EqualCondition {
 }
 
 impl EqualCondition {
-    /// Constructs a new `EqualCondition`
-    /// If the `on_left_keys` and `on_right_keys` are empty, it means no equivalent condition
-    /// Note: `on_left_keys` and `on_right_keys` are either all empty or none of them.
-    fn new(
-        on_left_keys: Vec<ScalarExpression>,
-        on_right_keys: Vec<ScalarExpression>,
-        left_schema: &Schema,
-        right_schema: &Schema,
-    ) -> EqualCondition {
-        if !on_left_keys.is_empty() && on_left_keys.len() != on_right_keys.len() {
-            unreachable!("Unexpected join on condition.")
-        }
-        EqualCondition {
-            on_left_keys,
-            on_right_keys,
-            left_len: left_schema.len(),
-            right_len: right_schema.len(),
-        }
-    }
-
     /// Compare left tuple and right tuple on equivalent condition
     /// `left_tuple` must be from the [`NestedLoopJoin::left_input`]
     /// `right_tuple` must be from the [`NestedLoopJoin::right_input`]
@@ -165,14 +145,8 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let left_len = self
-            .left_input_plan
-            .output_schema_to(plan_arena, SchemaSlot::S0)
-            .len();
-        let right_len = self
-            .right_input_plan
-            .output_schema_to(plan_arena, SchemaSlot::S0)
-            .len();
+        let left_len = self.left_input_plan.output_schema(plan_arena).len();
+        let right_len = self.right_input_plan.output_schema(plan_arena).len();
         self.eq_cond.left_len = left_len;
         self.eq_cond.right_len = right_len;
         self.left_input = build_read(
@@ -481,7 +455,7 @@ impl NestedLoopJoin {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
+    use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::db::{CatalogKind, DataBaseBuilder};
     use crate::execution::dql::test::build_integers;
     use crate::execution::try_collect;
@@ -559,8 +533,8 @@ mod test {
             vec![]
         };
 
-        let values_t1 = LogicalPlan {
-            operator: Operator::Values(ValuesOperator {
+        let values_t1 = LogicalPlan::new(
+            Operator::Values(ValuesOperator {
                 rows: vec![
                     vec![
                         DataValue::Int32(0),
@@ -585,12 +559,11 @@ mod test {
                 ],
                 schema_ref: t1_columns,
             }),
-            childrens: Box::new(Childrens::None),
-            physical_option: None,
-        };
+            Childrens::None,
+        );
 
-        let values_t2 = LogicalPlan {
-            operator: Operator::Values(ValuesOperator {
+        let values_t2 = LogicalPlan::new(
+            Operator::Values(ValuesOperator {
                 rows: vec![
                     vec![
                         DataValue::Int32(0),
@@ -615,9 +588,8 @@ mod test {
                 ],
                 schema_ref: t2_columns,
             }),
-            childrens: Box::new(Childrens::None),
-            physical_option: None,
-        };
+            Childrens::None,
+        );
 
         let filter = ScalarExpression::Binary {
             op: crate::expression::BinaryOperator::Gt,
@@ -1165,25 +1137,23 @@ mod test {
             ty: LogicalType::Boolean,
         };
 
-        let left = LogicalPlan {
-            operator: Operator::Values(ValuesOperator {
+        let left = LogicalPlan::new(
+            Operator::Values(ValuesOperator {
                 rows: vec![
                     vec![DataValue::Int32(2), DataValue::Int32(0)],
                     vec![DataValue::Int32(2), DataValue::Int32(5)],
                 ],
                 schema_ref: left_columns,
             }),
-            childrens: Box::new(Childrens::None),
-            physical_option: None,
-        };
-        let right = LogicalPlan {
-            operator: Operator::Values(ValuesOperator {
+            Childrens::None,
+        );
+        let right = LogicalPlan::new(
+            Operator::Values(ValuesOperator {
                 rows: vec![vec![DataValue::Int32(2)]],
                 schema_ref: right_columns,
             }),
-            childrens: Box::new(Childrens::None),
-            physical_option: None,
-        };
+            Childrens::None,
+        );
 
         let plan = LogicalPlan::new(
             Operator::Join(JoinOperator {

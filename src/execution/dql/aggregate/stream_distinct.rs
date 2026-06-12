@@ -82,7 +82,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
+    use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
     use crate::execution::dql::aggregate::stream_distinct::StreamDistinctExecutor;
     use crate::execution::{execute_input, try_collect};

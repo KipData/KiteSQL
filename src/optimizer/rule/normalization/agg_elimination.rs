@@ -398,7 +398,6 @@ mod tests {
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::ops::Bound;
-    use std::sync::Arc;
     use ulid::Ulid;
     fn make_sort_field(arena: &mut crate::planner::PlanArena, name: &str) -> SortField {
         make_sort_field_with_position(arena, name, 0)
@@ -414,11 +413,13 @@ mod tests {
     }
 
     fn build_plan(
+        arena: &mut crate::planner::PlanArena,
         required_fields: Vec<SortField>,
         index_fields: Vec<SortField>,
         ignore_prefix_len: usize,
     ) -> LogicalPlan {
-        let (index_info, index_sort_option) = build_index_info(index_fields, ignore_prefix_len);
+        let (index_info, index_sort_option) =
+            build_index_info(arena, index_fields, ignore_prefix_len);
 
         let mut leaf = LogicalPlan::new(Operator::Dummy, Childrens::None);
         leaf.physical_option = Some(PhysicalOption::new(
@@ -446,6 +447,7 @@ mod tests {
     }
 
     fn build_index_info(
+        arena: &mut crate::planner::PlanArena,
         index_fields: Vec<SortField>,
         ignore_prefix_len: usize,
     ) -> (IndexInfo, SortOption) {
@@ -455,7 +457,7 @@ mod tests {
             ignore_prefix_len,
         };
         let table_name: TableName = ::std::sync::Arc::from("t1");
-        let meta = Arc::new(IndexMeta {
+        let meta = arena.alloc_index(IndexMeta {
             id: 1,
             column_ids: (0..len).map(|_| Ulid::new()).collect(),
             table_name,
@@ -496,7 +498,7 @@ mod tests {
             ignore_prefix_len: 0,
         };
         let index_info = IndexInfo {
-            meta: Arc::new(IndexMeta {
+            meta: arena.alloc_index(IndexMeta {
                 id: 1,
                 column_ids: vec![c1_id],
                 table_name: table_name.clone(),
@@ -541,7 +543,7 @@ mod tests {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut arena = crate::planner::PlanArena::new(&table_arena);
         let sort_field = make_sort_field(&mut arena, "c1");
-        let mut plan = build_plan(vec![sort_field.clone()], vec![sort_field], 0);
+        let mut plan = build_plan(&mut arena, vec![sort_field.clone()], vec![sort_field], 0);
         let rule = EliminateRedundantSort;
 
         assert!(rule.apply(&mut plan, &mut arena)?);
@@ -554,7 +556,12 @@ mod tests {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut arena = crate::planner::PlanArena::new(&table_arena);
         let sort_field = make_sort_field(&mut arena, "c1");
-        let mut plan = build_plan(vec![sort_field.clone()], vec![sort_field.clone()], 0);
+        let mut plan = build_plan(
+            &mut arena,
+            vec![sort_field.clone()],
+            vec![sort_field.clone()],
+            0,
+        );
         plan.operator = Operator::TopK(TopKOperator {
             sort_fields: vec![sort_field],
             limit: 10,
@@ -579,7 +586,7 @@ mod tests {
         let mut arena = crate::planner::PlanArena::new(&table_arena);
         let c1 = make_sort_field(&mut arena, "c1");
         let c2 = make_sort_field(&mut arena, "c2");
-        let mut plan = build_plan(vec![c2.clone()], vec![c1, c2.clone()], 1);
+        let mut plan = build_plan(&mut arena, vec![c2.clone()], vec![c1, c2.clone()], 1);
         super::mark_sort_preserving_indexes(&mut plan, &[c2], &arena);
         let rule = EliminateRedundantSort;
 
@@ -598,6 +605,7 @@ mod tests {
         let provided_target = make_sort_field_with_position(&mut arena, "no_o_id", 2);
 
         let mut plan = build_plan(
+            &mut arena,
             vec![required.clone()],
             vec![provided_prefix_1, provided_prefix_2, provided_target],
             2,
@@ -624,7 +632,7 @@ mod tests {
             true,
             false,
         );
-        let (index_info, _) = build_index_info(vec![sort_field.clone()], 0);
+        let (index_info, _) = build_index_info(&mut arena, vec![sort_field.clone()], 0);
 
         let columns = vec![column];
         let table_name: TableName = ::std::sync::Arc::from("t");
@@ -732,7 +740,12 @@ mod tests {
         let mut arena = crate::planner::PlanArena::new(&table_arena);
         let c1 = make_sort_field(&mut arena, "c1");
         let c2 = make_sort_field(&mut arena, "c2");
-        let mut plan = build_plan(vec![c2.clone()], vec![c1.clone(), c2.clone()], 0);
+        let mut plan = build_plan(
+            &mut arena,
+            vec![c2.clone()],
+            vec![c1.clone(), c2.clone()],
+            0,
+        );
         super::mark_sort_preserving_indexes(&mut plan, &[c2], &arena);
         let rule = EliminateRedundantSort;
 
@@ -751,7 +764,7 @@ mod tests {
             true,
             false,
         );
-        let (mut index_info, _) = build_index_info(vec![sort_field.clone()], 0);
+        let (mut index_info, _) = build_index_info(&mut arena, vec![sort_field.clone()], 0);
         index_info.lookup = Some(IndexLookup::Static(Range::Scope {
             min: Bound::Unbounded,
             max: Bound::Unbounded,

@@ -19,7 +19,7 @@ use crate::execution::{
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::create_index::CreateIndexOperator;
-use crate::planner::{LogicalPlan, SchemaSlot};
+use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::index::Index;
 use crate::types::tuple::Schema;
@@ -53,10 +53,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateIndex {
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        self.input_schema = self
-            .input_plan
-            .output_schema_to(plan_arena, SchemaSlot::S0)
-            .clone();
+        self.input_schema = self.input_plan.take_schema(plan_arena);
         self.input = build_read(
             arena,
             plan_arena,
@@ -87,10 +84,11 @@ impl CreateIndex {
         };
 
         if if_not_exists
-            && arena
-                .table_cache()
-                .get(&table_name)
-                .is_some_and(|table| table.indexes().any(|index| index.name == index_name))
+            && arena.table_cache().get(&table_name).is_some_and(|table| {
+                table
+                    .indexes()
+                    .any(|index| plan_arena.index(*index).name == index_name)
+            })
         {
             arena.finish();
             return Ok(());

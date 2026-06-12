@@ -123,7 +123,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
+    use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
     use crate::execution::dql::aggregate::hash_agg::HashAggExecutor;
     use crate::execution::dql::test::build_integers;
@@ -163,8 +163,8 @@ mod test {
             plan_arena.alloc_column(ColumnCatalog::new("c3".to_string(), true, desc.clone())),
         ];
 
-        let input = LogicalPlan {
-            operator: Operator::Values(ValuesOperator {
+        let input = LogicalPlan::new(
+            Operator::Values(ValuesOperator {
                 rows: vec![
                     vec![
                         DataValue::Int32(0),
@@ -189,9 +189,8 @@ mod test {
                 ],
                 schema_ref: t1_schema.clone(),
             }),
-            childrens: Box::new(Childrens::None),
-            physical_option: None,
-        };
+            Childrens::None,
+        );
         let plan = LogicalPlan::new(
             Operator::Aggregate(AggregateOperator {
                 groupby_exprs: vec![ScalarExpression::column_expr(t1_schema[0].clone(), 0)],

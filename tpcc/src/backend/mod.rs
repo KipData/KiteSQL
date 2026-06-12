@@ -25,7 +25,7 @@ use kite_sql::types::value::DataValue;
 pub type DbParam = (&'static str, DataValue);
 
 pub trait SimpleExecutor {
-    fn execute_batch(&self, sql: &str) -> Result<(), TpccError>;
+    fn execute_batch(&mut self, sql: &str) -> Result<(), TpccError>;
 }
 
 pub trait BackendControl: SimpleExecutor {

@@ -36,7 +36,7 @@ use crate::optimizer::rule::implementation::ImplementationRuleImpl;
 use crate::optimizer::rule::normalization::NormalizationRuleImpl;
 use crate::parser::parse_sql;
 use crate::planner::operator::Operator;
-use crate::planner::{LogicalPlan, PlanArena, SchemaSlot, TableArenaCell};
+use crate::planner::{LogicalPlan, PlanArena, TableArenaCell};
 #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
 use crate::storage::lmdb::{LmdbConfig, LmdbStorage};
 use crate::storage::memory::MemoryStorage;
@@ -551,10 +551,8 @@ impl<S: Storage> State<S> {
     {
         transaction.begin_statement_scope()?;
         match (|| {
-            let (plan, mut plan_arena) = self.build_plan(stmt, params, transaction)?;
-            let schema = plan
-                .output_schema_to(&mut plan_arena, SchemaSlot::S0)
-                .clone();
+            let (mut plan, mut plan_arena) = self.build_plan(stmt, params, transaction)?;
+            let schema = plan.take_schema(&mut plan_arena);
             let mut arena = ExecArena::new();
             let root = build_write_read_context(
                 &mut arena,
@@ -631,9 +629,7 @@ impl<S: Storage> State<S> {
             }
         }
 
-        let schema = plan
-            .output_schema_to(&mut plan_arena, SchemaSlot::S0)
-            .clone();
+        let schema = plan.take_schema(&mut plan_arena);
         let mut arena = ExecArena::new();
         let cache = WriteExecutionContext::new(
             table_cache,
@@ -899,6 +895,7 @@ impl<S: Storage> Database<S> {
                     )?
                     .ok_or(DatabaseError::TableNotFound)?;
                 for index in table.indexes() {
+                    let index = self.state.table_arena.borrow().index(*index);
                     if let Some(meta) =
                         transaction.statistics_meta(&mut table_codec, name.as_ref(), index.id)?
                     {
@@ -1933,35 +1930,30 @@ pub(crate) mod test {
             Ok(ids)
         };
 
-        let assert_mark_in_uses_parameterized_index =
-            |sql: &str, index_name: &str| -> Result<(), DatabaseError> {
-                let explain_plan = collect_plan(sql)?;
-                assert!(
-                    explain_plan.contains("MarkAnyApply"),
-                    "unexpected explain plan: {explain_plan}"
-                );
-                assert!(
-                    explain_plan.contains(&format!("IndexScan By {index_name} => Probe")),
-                    "unexpected explain plan: {explain_plan}"
-                );
-                Ok(())
-            };
+        let assert_mark_in_uses_parameterized_index = |sql: &str| -> Result<(), DatabaseError> {
+            let explain_plan = collect_plan(sql)?;
+            assert!(
+                explain_plan.contains("MarkAnyApply"),
+                "unexpected explain plan: {explain_plan}"
+            );
+            assert!(
+                explain_plan.contains("IndexScan By #") && explain_plan.contains("=> Probe"),
+                "unexpected explain plan: {explain_plan}"
+            );
+            Ok(())
+        };
 
         assert_mark_in_uses_parameterized_index(
             "explain select id from in_outer where a in (select v from in_inner where in_inner.v = in_outer.a)",
-            "in_inner_v_index",
         )?;
         assert_mark_in_uses_parameterized_index(
             "explain select id from in_outer where a not in (select v from in_inner where in_inner.v = in_outer.a)",
-            "in_inner_v_index",
         )?;
         assert_mark_in_uses_parameterized_index(
             "explain select id from in_outer where a in (select v from in_inner_nn where in_inner_nn.v = in_outer.a)",
-            "in_inner_nn_v_index",
         )?;
         assert_mark_in_uses_parameterized_index(
             "explain select id from in_outer where a not in (select v from in_inner_nn where in_inner_nn.v = in_outer.a)",
-            "in_inner_nn_v_index",
         )?;
 
         assert_eq!(
@@ -1991,19 +1983,15 @@ pub(crate) mod test {
 
         assert_mark_in_uses_parameterized_index(
             "explain select id from in_outer_flag where a in (select v from in_inner_flag where in_inner_flag.flag = in_outer_flag.b)",
-            "in_inner_flag_v_index",
         )?;
         assert_mark_in_uses_parameterized_index(
             "explain select id from in_outer_flag where a not in (select v from in_inner_flag where in_inner_flag.flag = in_outer_flag.b)",
-            "in_inner_flag_v_index",
         )?;
         assert_mark_in_uses_parameterized_index(
             "explain select id from in_outer_flag where a in (select v from in_inner_flag_nn where in_inner_flag_nn.flag = in_outer_flag.b)",
-            "in_inner_flag_nn_v_index",
         )?;
         assert_mark_in_uses_parameterized_index(
             "explain select id from in_outer_flag where a not in (select v from in_inner_flag_nn where in_inner_flag_nn.flag = in_outer_flag.b)",
-            "in_inner_flag_nn_v_index",
         )?;
 
         assert_eq!(
@@ -2080,7 +2068,7 @@ pub(crate) mod test {
                 "unexpected explain plan: {explain_plan}"
             );
             assert!(
-                explain_plan.contains("IndexScan By exists_inner_v_index => Probe"),
+                explain_plan.contains("IndexScan By #") && explain_plan.contains("=> Probe"),
                 "unexpected explain plan: {explain_plan}"
             );
             Ok(())

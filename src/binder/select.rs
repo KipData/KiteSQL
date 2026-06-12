@@ -21,7 +21,6 @@ use crate::{
             scalar_apply::ScalarApplyOperator, Operator,
         },
         operator::{join::JoinType, table_scan::TableScanOperator},
-        SchemaSlot,
     },
     types::value::DataValue,
 };
@@ -218,19 +217,6 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             )
     }
 
-    fn bind_project_output_exprs<'c>(
-        &mut self,
-        project_exprs: &[ScalarExpression],
-        exprs: impl IntoIterator<Item = &'c mut ScalarExpression>,
-        arena: &mut crate::planner::PlanArena,
-    ) -> Result<(), DatabaseError> {
-        let mut binder = ProjectionOutputBinder::new(project_exprs, arena);
-        for expr in exprs {
-            binder.visit(expr)?;
-        }
-        Ok(())
-    }
-
     pub(crate) fn resolve_source_columns_in_scope<'context>(
         context: &'context BinderContext<'a, T>,
         table_name: &str,
@@ -340,17 +326,15 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
     }
 
     fn build_join_from_split_scope_predicates(
-        children: LogicalPlan,
-        plan: LogicalPlan,
+        mut children: LogicalPlan,
+        mut plan: LogicalPlan,
         join_ty: JoinType,
         predicates: impl IntoIterator<Item = ScalarExpression>,
         rebind_positions: bool,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        children.output_schema_to(arena, SchemaSlot::S0);
-        plan.output_schema_to(arena, SchemaSlot::S1);
-        let left_schema = arena.schema(SchemaSlot::S0);
-        let right_schema = arena.schema(SchemaSlot::S1);
+        let left_schema = children.output_schema(arena);
+        let right_schema = plan.output_schema(arena);
         let mut on_keys = Vec::new();
         let mut filter = Vec::new();
 
@@ -449,13 +433,13 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
     fn bind_top_level_orderby(
         &mut self,
-        plan: LogicalPlan,
+        mut plan: LogicalPlan,
         orderbys: &[OrderByExpr],
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let saved_aliases = self.context.expr_aliases.clone();
-        plan.output_schema_to(arena, SchemaSlot::S0);
-        for (position, column) in arena.schema(SchemaSlot::S0).iter().enumerate() {
+        let output_schema = plan.output_schema(arena);
+        for (position, column) in output_schema.iter().enumerate() {
             self.context.add_alias(
                 None,
                 arena.column(*column).name().to_string(),
@@ -655,10 +639,8 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         let mut left_cast = vec![];
         let mut right_cast = vec![];
 
-        left_plan.output_schema_to(arena, SchemaSlot::S0);
-        right_plan.output_schema_to(arena, SchemaSlot::S1);
-        let left_schema = arena.schema(SchemaSlot::S0);
-        let right_schema = arena.schema(SchemaSlot::S1);
+        let left_schema = left_plan.output_schema(arena);
+        let right_schema = right_plan.output_schema(arena);
 
         for (position, (left_schema, right_schema)) in
             left_schema.iter().zip(right_schema.iter()).enumerate()
@@ -733,10 +715,8 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             right_plan
         };
 
-        left_plan.output_schema_to(arena, SchemaSlot::S0);
-        right_plan.output_schema_to(arena, SchemaSlot::S1);
-        let mut left_schema = arena.schema(SchemaSlot::S0);
-        let mut right_schema = arena.schema(SchemaSlot::S1);
+        let mut left_schema = left_plan.output_schema(arena);
+        let mut right_schema = right_plan.output_schema(arena);
 
         let left_len = left_schema.len();
 
@@ -753,10 +733,8 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             .all(|(left, right)| arena.column(*left).datatype() == arena.column(*right).datatype())
         {
             (left_plan, right_plan) = self.bind_set_cast(left_plan, right_plan, arena)?;
-            left_plan.output_schema_to(arena, SchemaSlot::S0);
-            right_plan.output_schema_to(arena, SchemaSlot::S1);
-            left_schema = arena.schema(SchemaSlot::S0);
-            right_schema = arena.schema(SchemaSlot::S1);
+            left_schema = left_plan.output_schema(arena);
+            right_schema = right_plan.output_schema(arena);
         }
 
         match op {
@@ -816,10 +794,8 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
                     left_plan = self.bind_distinct(left_plan, left_distinct_exprs)?;
                     right_plan = self.bind_distinct(right_plan, right_distinct_exprs)?;
-                    left_plan.output_schema_to(arena, SchemaSlot::S0);
-                    right_plan.output_schema_to(arena, SchemaSlot::S1);
-                    left_schema = arena.schema(SchemaSlot::S0);
-                    right_schema = arena.schema(SchemaSlot::S1);
+                    left_schema = left_plan.output_schema(arena);
+                    right_schema = right_plan.output_schema(arena);
                 }
 
                 Ok(SetMembershipOperator::build(
@@ -908,7 +884,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         source_name.clone(),
                         arena,
                     )?;
-                    let output_schema = plan.output_schema_to(arena, SchemaSlot::S0).clone();
+                    let output_schema = plan.output_schema(arena).clone();
                     self.context.add_bound_source(
                         table_alias.clone(),
                         Some(table_alias),
@@ -917,7 +893,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     );
                 } else {
                     let passthrough_source = {
-                        let output_schema = plan.output_schema_to(arena, SchemaSlot::S0).clone();
+                        let output_schema = plan.output_schema(arena);
                         let mut names = output_schema
                             .iter()
                             .filter_map(|column| arena.column(*column).table_name().cloned());
@@ -935,7 +911,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     if needs_virtual_source {
                         plan = self.bind_schema_source(plan, source_name.clone(), arena);
                     }
-                    let output_schema = plan.output_schema_to(arena, SchemaSlot::S0).clone();
+                    let output_schema = plan.output_schema(arena).clone();
                     self.context.add_bound_source(
                         source_name.clone(),
                         None,
@@ -968,8 +944,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         )?;
                     }
 
-                    let source =
-                        Source::Schema(plan.output_schema_to(arena, SchemaSlot::S0).clone());
+                    let source = Source::Schema(plan.output_schema(arena).clone());
                     self.context
                         .add_bound_source(table_name, table_alias, joint_type, source);
                     plan
@@ -985,51 +960,45 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
     pub(crate) fn bind_alias(
         &mut self,
-        plan: LogicalPlan,
+        mut plan: LogicalPlan,
         alias_column: &[TableAliasColumnDef],
         table_alias: TableName,
         table_name: TableName,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let input_schema = plan.output_schema_to(arena, SchemaSlot::S0).clone();
-        if !alias_column.is_empty() && alias_column.len() != input_schema.len() {
+        let input_schema = plan.output_schema(arena);
+        let input_schema_len = input_schema.len();
+        if !alias_column.is_empty() && alias_column.len() != input_schema_len {
             return Err(DatabaseError::MisMatch("alias", "columns"));
         }
-        let aliases_with_columns = if alias_column.is_empty() {
-            input_schema
-                .iter()
-                .cloned()
-                .map(|column| (arena.column(column).name().to_string(), column))
-                .collect_vec()
-        } else {
-            alias_column
-                .iter()
-                .map(|column| lower_ident(&column.name).into_owned())
-                .zip(input_schema.iter().cloned())
-                .collect_vec()
-        };
-        let mut alias_exprs = Vec::with_capacity(aliases_with_columns.len());
+        let mut alias_exprs = Vec::with_capacity(input_schema_len);
 
-        for (alias, column) in aliases_with_columns {
-            let source_column = arena.column(column);
-            let mut alias_column = source_column.clone();
+        for (position, column) in input_schema.iter().copied().enumerate() {
+            let alias = if alias_column.is_empty() {
+                arena.column(column).name().to_string()
+            } else {
+                lower_ident(&alias_column[position].name).into_owned()
+            };
+            let (mut alias_column, column_id, is_temp) = {
+                let source_column = arena.column(column);
+                (
+                    source_column.clone(),
+                    source_column.id().unwrap_or(ColumnId::new()),
+                    matches!(
+                        &source_column.summary().relation,
+                        ColumnRelation::Table { is_temp: true, .. }
+                    ),
+                )
+            };
             alias_column.set_name(alias.clone());
-            let is_temp = matches!(
-                &source_column.summary().relation,
-                ColumnRelation::Table { is_temp: true, .. }
-            );
-            alias_column.set_ref_table(
-                table_alias.clone(),
-                source_column.id().unwrap_or(ColumnId::new()),
-                is_temp,
-            );
+            alias_column.set_ref_table(table_alias.clone(), column_id, is_temp);
             let alias_column = arena.alloc_column(alias_column);
 
             let alias_column_expr = ScalarExpression::Alias {
-                expr: Box::new(ScalarExpression::column_expr(column, alias_exprs.len())),
+                expr: Box::new(ScalarExpression::column_expr(column, position)),
                 alias: AliasType::Expr(Box::new(ScalarExpression::column_expr(
                     alias_column,
-                    alias_exprs.len(),
+                    position,
                 ))),
             };
             self.context.add_alias(
@@ -1045,21 +1014,25 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
     fn bind_schema_source(
         &mut self,
-        plan: LogicalPlan,
+        mut plan: LogicalPlan,
         source_name: TableName,
         arena: &mut crate::planner::PlanArena,
     ) -> LogicalPlan {
-        let input_schema = plan.output_schema_to(arena, SchemaSlot::S0).clone();
-        let mut source_exprs = Vec::with_capacity(input_schema.len());
+        let input_schema = plan.output_schema(arena);
+        let input_schema_len = input_schema.len();
+        let mut source_exprs = Vec::with_capacity(input_schema_len);
 
-        for (position, column) in input_schema.iter().cloned().enumerate() {
-            let column_catalog = arena.column(column);
-            let mut source_column = column_catalog.clone();
-            source_column.set_ref_table(
-                source_name.clone(),
-                column_catalog.id().unwrap_or(ColumnId::new()),
-                true,
-            );
+        for (position, column) in input_schema.iter().copied().enumerate() {
+            let source_column = {
+                let column_catalog = arena.column(column);
+                let mut source_column = column_catalog.clone();
+                source_column.set_ref_table(
+                    source_name.clone(),
+                    column_catalog.id().unwrap_or(ColumnId::new()),
+                    true,
+                );
+                source_column
+            };
             let source_column = arena.alloc_column(source_column);
 
             source_exprs.push(ScalarExpression::Alias {
@@ -1096,7 +1069,9 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             .source_and_bind(table_name.clone(), table_alias.as_ref(), join_type, false)?
             .ok_or(DatabaseError::SourceNotFound)?;
         let mut plan = match source {
-            Source::Table(table) => TableScanOperator::build(table_name.clone(), table, with_pk)?,
+            Source::Table(table) => {
+                TableScanOperator::build(table_name.clone(), table, with_pk, arena)?
+            }
             Source::View(view) => LogicalPlan::clone(&view.plan),
             Source::Schema(_) => {
                 return Err(DatabaseError::UnsupportedStmt(
@@ -1107,7 +1082,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
         if let (Some(idents), Some(alias_name)) = (alias_idents, table_alias) {
             plan = self.bind_alias(plan, idents, alias_name.clone(), table_name.clone(), arena)?;
-            let output_schema = plan.output_schema_to(arena, SchemaSlot::S0).clone();
+            let output_schema = plan.output_schema(arena).clone();
             self.context.add_bound_source(
                 table_name,
                 Some(alias_name),
@@ -1233,8 +1208,9 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         {
             let Some((position, column)) = source
                 .schema()
+                .iter()
                 .enumerate()
-                .find(|(_, column)| arena.column(*column).name() == alias_column)
+                .find(|(_, column)| arena.column(**column).name() == alias_column)
             else {
                 continue;
             };
@@ -1242,7 +1218,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 continue;
             }
             exprs.push(ScalarExpression::column_expr(
-                column,
+                *column,
                 position_offset + position,
             ));
             pushed_alias_columns = true;
@@ -1252,12 +1228,12 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             return Ok(());
         }
 
-        for (position, column) in source.schema().enumerate() {
+        for (position, column) in source.schema().iter().enumerate() {
             if !fn_not_on_using(&column) {
                 continue;
             }
             exprs.push(ScalarExpression::column_expr(
-                column,
+                *column,
                 position_offset + position,
             ));
         }
@@ -1266,7 +1242,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
     fn bind_join(
         &mut self,
-        left: LogicalPlan,
+        mut left: LogicalPlan,
         join: &Join,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
@@ -1309,7 +1285,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             temp_table_id,
             ..
         } = &self.context;
-        let (right, context) = {
+        let (mut right, context) = {
             let mut binder = Binder::new(
                 BinderContext::new(
                     table_cache,
@@ -1327,13 +1303,19 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         };
         self.extend(context);
 
-        left.output_schema_to(arena, SchemaSlot::S0);
-        right.output_schema_to(arena, SchemaSlot::S1);
+        let left_len = left.output_schema(arena).len();
+        right.output_schema(arena);
         let mut on = match joint_condition {
-            Some(constraint) => self.bind_join_constraint(join_type, constraint, arena)?,
+            Some(constraint) => self.bind_join_constraint(
+                join_type,
+                constraint,
+                left.output_schema(arena),
+                right.output_schema(arena),
+                arena,
+            )?,
             None => JoinCondition::None,
         };
-        Self::localize_join_condition_from_join_scope(&mut on, arena.schema(SchemaSlot::S0).len())?;
+        Self::localize_join_condition_from_join_scope(&mut on, left_len)?;
 
         Ok(LJoinOperator::build(left, right, on, join_type))
     }
@@ -1364,7 +1346,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                             ));
                         }
                         uses_mark_apply = Some(true);
-                        let left_schema = children.output_schema_to(arena, SchemaSlot::S0).clone();
+                        let left_schema = children.output_schema(arena).clone();
                         let (plan, predicates) = Self::prepare_mark_apply(
                             &mut predicate,
                             &output_column,
@@ -1401,7 +1383,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                             quantified_predicate =
                                 Self::rewrite_correlated_quantified_predicate(quantified_predicate);
                         }
-                        let left_schema = children.output_schema_to(arena, SchemaSlot::S0).clone();
+                        let left_schema = children.output_schema(arena).clone();
                         let (plan, predicates) = Self::prepare_mark_apply(
                             &mut predicate,
                             &output_column,
@@ -1447,7 +1429,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             }
             if matches!(uses_mark_apply, Some(true)) {
                 let passthrough_exprs = children
-                    .output_schema_to(arena, SchemaSlot::S0)
+                    .output_schema(arena)
                     .iter()
                     .cloned()
                     .enumerate()
@@ -1471,7 +1453,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         predicates: &[ScalarExpression],
         arena: &mut crate::planner::PlanArena,
     ) -> Vec<AppendedRightOutput> {
-        let output_schema = plan.output_schema_to(arena, SchemaSlot::S0).clone();
+        let output_schema = plan.output_schema(arena).clone();
         let output_len = output_schema.len();
         if let LogicalPlan {
             operator: Operator::Project(op),
@@ -1482,7 +1464,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             let Childrens::Only(child) = childrens.as_mut() else {
                 return Vec::new();
             };
-            let child_schema = child.output_schema_to(arena, SchemaSlot::S0).clone();
+            let child_schema = child.output_schema(arena);
             let mut appended_outputs = Vec::new();
             op.exprs.extend(
                 child_schema
@@ -1505,6 +1487,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         ScalarExpression::column_expr(*column, position)
                     }),
             );
+            plan.reset_output_schema_cache();
             return appended_outputs;
         }
 
@@ -1547,10 +1530,10 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 )?;
             }
         }
-        let right_schema = plan.output_schema_to(arena, SchemaSlot::S0).clone();
+        let right_schema = plan.output_schema(arena);
         for expr in apply_predicates.iter_mut() {
             RightSidePositionGlobalizer {
-                right_schema: right_schema.as_ref(),
+                right_schema,
                 left_len,
                 arena,
             }
@@ -1793,7 +1776,11 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
         if let Some(sub_queries) = self.context.sub_queries_at_now() {
             for sub_query in sub_queries {
-                let SubQueryType::SubQuery { plan, correlated } = sub_query else {
+                let SubQueryType::SubQuery {
+                    mut plan,
+                    correlated,
+                } = sub_query
+                else {
                     return Err(DatabaseError::UnsupportedStmt(
                         "only scalar subqueries are supported in SELECT list".to_string(),
                     ));
@@ -1805,13 +1792,13 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     ));
                 }
 
-                let left_len = children.output_schema_to(arena, SchemaSlot::S0).len();
-                let right_schema = plan.output_schema_to(arena, SchemaSlot::S0).clone();
+                let left_len = children.output_schema(arena).len();
+                let right_schema = plan.output_schema(arena);
                 for expr in select_list.iter_mut() {
                     RightSidePositionGlobalizer {
-                        right_schema: right_schema.as_ref(),
+                        right_schema,
                         left_len,
-                        arena: arena,
+                        arena,
                     }
                     .visit(expr)?;
                 }
@@ -1956,6 +1943,8 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         &mut self,
         join_type: JoinType,
         constraint: &JoinConstraint,
+        left_schema: &Schema,
+        right_schema: &Schema,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<JoinCondition, DatabaseError> {
         match constraint {
@@ -1965,8 +1954,6 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 // expression that didn't match equi-join pattern
                 let mut filter = vec![];
                 let expr = self.bind_expr(expr, arena)?;
-                let left_schema = arena.schema(SchemaSlot::S0);
-                let right_schema = arena.schema(SchemaSlot::S1);
 
                 Self::extract_join_keys(
                     expr,
@@ -1993,8 +1980,6 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 })
             }
             JoinConstraint::Using(idents) => {
-                let left_schema = arena.schema(SchemaSlot::S0);
-                let right_schema = arena.schema(SchemaSlot::S1);
                 fn find_column<'a>(
                     schema: &'a Schema,
                     name: &'a str,
@@ -2042,8 +2027,6 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             }
             JoinConstraint::None => Ok(JoinCondition::None),
             JoinConstraint::Natural => {
-                let left_schema = arena.schema(SchemaSlot::S0);
-                let right_schema = arena.schema(SchemaSlot::S1);
                 let fn_names = |schema: &Schema| -> HashSet<String> {
                     schema
                         .iter()
@@ -2253,7 +2236,7 @@ mod tests {
         MarkApplyKind, MarkApplyOperator, MarkApplyQuantifier,
     };
     use crate::planner::operator::Operator;
-    use crate::planner::{Childrens, LogicalPlan, PlanArena, SchemaSlot};
+    use crate::planner::{Childrens, LogicalPlan, PlanArena};
     use crate::types::LogicalType;
 
     fn test_column(arena: &mut PlanArena, name: &str, position: usize) -> ScalarExpression {
@@ -2543,7 +2526,8 @@ mod tests {
             panic!("expected join filter")
         };
         let mut arena = PlanArena::new(&table_states.table_arena);
-        let left_len = left.output_schema_to(&mut arena, SchemaSlot::S0).len();
+        let mut left_plan = left.as_ref().clone();
+        let left_len = left_plan.output_schema(&mut arena).len();
 
         let mut positions = Vec::new();
         collect_column_positions(filter, &mut positions);

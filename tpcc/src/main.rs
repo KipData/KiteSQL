@@ -140,28 +140,28 @@ fn main() -> Result<(), TpccError> {
     match args.backend {
         BackendKind::KitesqlRocksdb => {
             reset_db_path(Path::new(&args.path))?;
-            let backend = KiteSqlRocksDbBackend::new(&args.path, args.rocksdb_stats)?;
-            run_tpcc(&backend, &args, &mut rng)
+            let mut backend = KiteSqlRocksDbBackend::new(&args.path, args.rocksdb_stats)?;
+            run_tpcc(&mut backend, &args, &mut rng)
         }
         BackendKind::KitesqlOptimisticRocksdb => {
             reset_db_path(Path::new(&args.path))?;
-            let backend = KiteSqlOptimisticRocksDbBackend::new(&args.path, args.rocksdb_stats)?;
-            run_tpcc(&backend, &args, &mut rng)
+            let mut backend = KiteSqlOptimisticRocksDbBackend::new(&args.path, args.rocksdb_stats)?;
+            run_tpcc(&mut backend, &args, &mut rng)
         }
         BackendKind::KitesqlLmdb => {
             reset_db_path(Path::new(&args.path))?;
-            let backend = KiteSqlLmdbBackend::new(&args.path)?;
-            run_tpcc(&backend, &args, &mut rng)
+            let mut backend = KiteSqlLmdbBackend::new(&args.path)?;
+            run_tpcc(&mut backend, &args, &mut rng)
         }
         BackendKind::Sqlite => {
             reset_db_path(Path::new(&args.path))?;
-            let backend = SqliteBackend::new(&args.path, args.sqlite_profile)?;
-            run_tpcc(&backend, &args, &mut rng)
+            let mut backend = SqliteBackend::new(&args.path, args.sqlite_profile)?;
+            run_tpcc(&mut backend, &args, &mut rng)
         }
         BackendKind::Dual => {
             reset_db_path(Path::new(&args.path))?;
-            let backend = DualBackend::new(&args.path, args.rocksdb_stats)?;
-            run_tpcc(&backend, &args, &mut rng)
+            let mut backend = DualBackend::new(&args.path, args.rocksdb_stats)?;
+            run_tpcc(&mut backend, &args, &mut rng)
         }
     }
 }
@@ -181,7 +181,7 @@ fn reset_db_path(path: &Path) -> Result<(), TpccError> {
 }
 
 fn run_tpcc<B: BackendControl>(
-    backend: &B,
+    backend: &mut B,
     args: &Args,
     rng: &mut ThreadRng,
 ) -> Result<(), TpccError> {

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::PrimaryKeyIndices;
 use crate::errors::DatabaseError;
 use crate::types::tuple::Tuple;
 use crate::types::value::{DataValue, Utf8Type};
@@ -21,11 +20,11 @@ use crate::types::LogicalType;
 
 pub struct TupleBuilder<'a> {
     column_types: Vec<LogicalType>,
-    pk_indices: Option<&'a PrimaryKeyIndices>,
+    pk_indices: Option<&'a [usize]>,
 }
 
 impl<'a> TupleBuilder<'a> {
-    pub fn new(column_types: Vec<LogicalType>, pk_indices: Option<&'a PrimaryKeyIndices>) -> Self {
+    pub fn new(column_types: Vec<LogicalType>, pk_indices: Option<&'a [usize]>) -> Self {
         TupleBuilder {
             column_types,
             pk_indices,

@@ -115,7 +115,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 Ok(LogicalPlan::new(
                     Operator::CopyToFile(CopyToFileOperator { target: ext_source }),
                     Childrens::Only(Box::new(TableScanOperator::build(
-                        table_name, &table, false,
+                        table_name, &table, false, arena,
                     )?)),
                 ))
             } else {

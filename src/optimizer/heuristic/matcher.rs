@@ -89,26 +89,16 @@ mod tests {
 
     #[test]
     fn test_recursive() {
-        let all_dummy_plan = LogicalPlan {
-            operator: Operator::Dummy,
-            childrens: Box::new(Childrens::Twins {
-                left: Box::new(LogicalPlan {
-                    operator: Operator::Dummy,
-                    childrens: Box::new(Childrens::Only(Box::new(LogicalPlan {
-                        operator: Operator::Dummy,
-                        childrens: Box::new(Childrens::None),
-                        physical_option: None,
-                    }))),
-                    physical_option: None,
-                }),
-                right: Box::new(LogicalPlan {
-                    operator: Operator::Dummy,
-                    childrens: Box::new(Childrens::None),
-                    physical_option: None,
-                }),
-            }),
-            physical_option: None,
-        };
+        let all_dummy_plan = LogicalPlan::new(
+            Operator::Dummy,
+            Childrens::Twins {
+                left: Box::new(LogicalPlan::new(
+                    Operator::Dummy,
+                    Childrens::Only(Box::new(LogicalPlan::new(Operator::Dummy, Childrens::None))),
+                )),
+                right: Box::new(LogicalPlan::new(Operator::Dummy, Childrens::None)),
+            },
+        );
 
         let only_dummy_pattern = Pattern {
             predicate: |p| matches!(p, Operator::Dummy),

@@ -19,10 +19,9 @@ use crate::errors::DatabaseError;
 use crate::expression::{AliasType, ScalarExpression};
 use crate::planner::operator::create_view::CreateViewOperator;
 use crate::planner::operator::Operator;
-use crate::planner::{Childrens, LogicalPlan, SchemaSlot};
+use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
-use itertools::Itertools;
 use sqlparser::ast::{ObjectName, Query, SelectItem, SetExpr, ViewColumnDef};
 use ulid::Ulid;
 
@@ -41,35 +40,36 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             arena: &mut crate::planner::PlanArena,
             mut column_name: impl FnMut(usize, ColumnRef, &crate::planner::PlanArena) -> String,
         ) -> Vec<ScalarExpression> {
-            mapping_schema
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(i, mapping_column)| {
+            let mapping_schema_len = mapping_schema.len();
+            let mut exprs = Vec::with_capacity(mapping_schema_len);
+            for (i, mapping_column) in mapping_schema.iter().copied().enumerate() {
+                let output_name = column_name(i, mapping_column, arena);
+                let (nullable, desc) = {
                     let mapping_column_catalog = arena.column(mapping_column);
-                    let mut column = ColumnCatalog::new(
-                        column_name(i, mapping_column, arena),
+                    (
                         mapping_column_catalog.nullable(),
                         mapping_column_catalog.desc().clone(),
-                    );
-                    column.set_ref_table(view_name.clone(), Ulid::new(), true);
-                    let output_column = arena.alloc_column(column);
+                    )
+                };
+                let mut column = ColumnCatalog::new(output_name, nullable, desc);
+                column.set_ref_table(view_name.clone(), Ulid::new(), true);
+                let output_column = arena.alloc_column(column);
 
-                    ScalarExpression::Alias {
-                        expr: Box::new(ScalarExpression::column_expr(mapping_column, i)),
-                        alias: AliasType::Expr(Box::new(ScalarExpression::column_expr(
-                            output_column,
-                            i,
-                        ))),
-                    }
-                })
-                .collect_vec()
+                exprs.push(ScalarExpression::Alias {
+                    expr: Box::new(ScalarExpression::column_expr(mapping_column, i)),
+                    alias: AliasType::Expr(Box::new(ScalarExpression::column_expr(
+                        output_column,
+                        i,
+                    ))),
+                });
+            }
+            exprs
         }
 
         let view_name: TableName = lower_case_name(name)?.into();
         let mut plan = self.bind_query(query, arena)?;
 
-        let mapping_schema = plan.output_schema_to(arena, SchemaSlot::S0).clone();
+        let mapping_schema = plan.output_schema(arena);
 
         if !columns.is_empty() && columns.len() > mapping_schema.len() {
             return Err(DatabaseError::UnsupportedStmt(format!(
@@ -80,7 +80,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         }
 
         let exprs: Vec<ScalarExpression> = if columns.is_empty() {
-            projection_exprs(&view_name, &mapping_schema, arena, |i, column, arena| {
+            projection_exprs(&view_name, mapping_schema, arena, |i, column, arena| {
                 query_output_alias(query, i)
                     .unwrap_or_else(|| arena.column(column).name().to_string())
             })
@@ -93,7 +93,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             )
         };
         plan = self.bind_project(plan, exprs, arena)?;
-        let schema = plan.output_schema_to(arena, SchemaSlot::S0).clone();
+        let schema = plan.output_schema(arena).clone();
 
         Ok(LogicalPlan::new(
             Operator::CreateView(CreateViewOperator {

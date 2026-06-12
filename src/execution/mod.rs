@@ -885,6 +885,7 @@ where
         operator,
         childrens,
         physical_option,
+        ..
     } = plan;
 
     match operator {
@@ -1163,6 +1164,7 @@ fn build_write_inner<'a, T: Transaction + 'a>(
         operator,
         childrens,
         physical_option,
+        ..
     } = plan;
 
     match operator {
@@ -1303,11 +1305,8 @@ fn build_write_inner<'a, T: Transaction + 'a>(
             )
         }
         operator => {
-            let plan = LogicalPlan {
-                operator,
-                childrens,
-                physical_option,
-            };
+            let mut plan = LogicalPlan::new(operator, *childrens);
+            plan.physical_option = physical_option;
             build_read(arena, plan_arena, plan, cache, transaction_ref)
         }
     }

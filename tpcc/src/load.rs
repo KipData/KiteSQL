@@ -51,13 +51,13 @@ fn log_phase(task: &str, current: usize, total: usize, context: &str) {
 }
 
 struct SqlBatch<'a, E> {
-    exec: &'a E,
+    exec: &'a mut E,
     sql: String,
     pending: usize,
 }
 
 impl<'a, E: SimpleExecutor> SqlBatch<'a, E> {
-    fn new(exec: &'a E) -> Self {
+    fn new(exec: &'a mut E) -> Self {
         Self {
             exec,
             sql: String::new(),
@@ -149,7 +149,10 @@ impl Load {
     /// i_data varchar(50)
     ///
     /// primary key (i_id)
-    pub fn load_items(rng: &mut ThreadRng, exec: &impl SimpleExecutor) -> Result<(), TpccError> {
+    pub fn load_items(
+        rng: &mut ThreadRng,
+        exec: &mut impl SimpleExecutor,
+    ) -> Result<(), TpccError> {
         exec.execute_batch("drop table if exists item;")?;
         exec.execute_batch(
             "create table item (
@@ -213,7 +216,7 @@ impl Load {
     /// primary key (w_id)
     pub fn load_warehouses(
         rng: &mut ThreadRng,
-        exec: &impl SimpleExecutor,
+        exec: &mut impl SimpleExecutor,
         num_ware: usize,
     ) -> Result<(), TpccError> {
         exec.execute_batch("drop table if exists warehouse;")?;
@@ -314,7 +317,7 @@ impl Load {
 
     pub fn load_custs(
         rng: &mut ThreadRng,
-        exec: &impl SimpleExecutor,
+        exec: &mut impl SimpleExecutor,
         num_ware: usize,
     ) -> Result<(), TpccError> {
         exec.execute_batch("drop table if exists customer;")?;
@@ -378,7 +381,7 @@ impl Load {
 
     pub fn load_ord(
         rng: &mut ThreadRng,
-        exec: &impl SimpleExecutor,
+        exec: &mut impl SimpleExecutor,
         num_ware: usize,
     ) -> Result<(), TpccError> {
         exec.execute_batch("drop table if exists orders;")?;
@@ -466,7 +469,7 @@ impl Load {
     /// primary key(s_w_id, s_i_id)
     pub fn stock(
         rng: &mut ThreadRng,
-        exec: &impl SimpleExecutor,
+        exec: &mut impl SimpleExecutor,
         w_id: usize,
     ) -> Result<(), TpccError> {
         let pb = ProgressBar::new(MAX_ITEMS as u64);
@@ -563,7 +566,7 @@ impl Load {
     /// primary key (d_w_id, d_id)
     pub fn district(
         rng: &mut ThreadRng,
-        exec: &impl SimpleExecutor,
+        exec: &mut impl SimpleExecutor,
         w_id: usize,
     ) -> Result<(), TpccError> {
         let pb = ProgressBar::new(DIST_PER_WARE as u64);
@@ -652,7 +655,7 @@ impl Load {
     /// h_data varchar(24)
     pub fn load_customers(
         rng: &mut ThreadRng,
-        exec: &impl SimpleExecutor,
+        exec: &mut impl SimpleExecutor,
         d_id: usize,
         w_id: usize,
     ) -> Result<(), TpccError> {
@@ -783,7 +786,7 @@ impl Load {
     /// primary key(ol_w_id, ol_d_id, ol_o_id, ol_number)
     pub fn load_orders(
         rng: &mut ThreadRng,
-        exec: &impl SimpleExecutor,
+        exec: &mut impl SimpleExecutor,
         d_id: usize,
         w_id: usize,
     ) -> Result<(), TpccError> {
@@ -869,7 +872,7 @@ mod tests {
     }
 
     impl SimpleExecutor for RecordingExecutor {
-        fn execute_batch(&self, sql: &str) -> Result<(), TpccError> {
+        fn execute_batch(&mut self, sql: &str) -> Result<(), TpccError> {
             self.calls.borrow_mut().push(sql.to_string());
             Ok(())
         }
@@ -877,8 +880,8 @@ mod tests {
 
     #[test]
     fn sql_batch_groups_statements() {
-        let exec = RecordingExecutor::default();
-        let mut batch = SqlBatch::new(&exec);
+        let mut exec = RecordingExecutor::default();
+        let mut batch = SqlBatch::new(&mut exec);
 
         batch.push("insert 1").unwrap();
         batch.push("insert 2").unwrap();
@@ -892,8 +895,8 @@ mod tests {
 
     #[test]
     fn sql_batch_flushes_at_batch_size() {
-        let exec = RecordingExecutor::default();
-        let mut batch = SqlBatch::new(&exec);
+        let mut exec = RecordingExecutor::default();
+        let mut batch = SqlBatch::new(&mut exec);
 
         for i in 0..=LOAD_BATCH_SIZE {
             batch.push(&format!("insert {i}")).unwrap();

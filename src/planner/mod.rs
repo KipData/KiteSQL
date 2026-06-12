@@ -15,16 +15,15 @@
 mod arena;
 pub mod operator;
 
-use crate::catalog::{ColumnCatalog, TableName};
+use crate::catalog::TableName;
 use crate::planner::operator::set_membership::SetMembershipOperator;
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::operator::{Operator, PhysicalOption};
-use crate::types::tuple::Schema;
-use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
+use std::hash::{Hash, Hasher};
 
-pub use arena::{MetaArena, PlanArena, SchemaSlot, TableArena, TableArenaCell};
+pub use arena::{MetaArena, PlanArena, TableArena, TableArenaCell};
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub enum Childrens {
@@ -92,11 +91,12 @@ impl<'a> Iterator for ChildrensIter<'a> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
+#[derive(Debug)]
 pub struct LogicalPlan {
     pub(crate) operator: Operator,
     pub(crate) childrens: Box<Childrens>,
     pub(crate) physical_option: Option<PhysicalOption>,
+    output_schema: Option<crate::types::tuple::Schema>,
 }
 
 impl LogicalPlan {
@@ -105,6 +105,7 @@ impl LogicalPlan {
             operator,
             childrens: Box::new(childrens),
             physical_option: None,
+            output_schema: None,
         }
     }
 
@@ -142,77 +143,78 @@ impl LogicalPlan {
         }
     }
 
-    pub fn output_schema_to<'arena>(
-        &self,
-        arena: &'arena mut PlanArena,
-        slot: SchemaSlot,
-    ) -> &'arena Schema {
-        match &self.operator {
+    pub fn output_schema<'plan>(
+        &'plan mut self,
+        arena: &mut PlanArena,
+    ) -> &'plan crate::types::tuple::Schema {
+        let LogicalPlan {
+            operator,
+            childrens,
+            output_schema,
+            ..
+        } = self;
+        output_schema.get_or_insert_with(|| Self::compute_output_schema(operator, childrens, arena))
+    }
+
+    pub fn take_schema(&mut self, arena: &mut PlanArena) -> crate::types::tuple::Schema {
+        let LogicalPlan {
+            operator,
+            childrens,
+            output_schema,
+            ..
+        } = self;
+        output_schema
+            .take()
+            .unwrap_or_else(|| Self::compute_output_schema(operator, childrens, arena))
+    }
+
+    fn compute_output_schema(
+        operator: &mut Operator,
+        childrens: &mut Childrens,
+        arena: &mut PlanArena,
+    ) -> crate::types::tuple::Schema {
+        match operator {
             Operator::Filter(_)
             | Operator::Sort(_)
             | Operator::Limit(_)
             | Operator::TopK(_)
-            | Operator::ScalarSubquery(_) => self
-                .childrens
-                .iter()
-                .next()
-                .unwrap()
-                .output_schema_to(arena, slot),
-            Operator::ScalarApply(_) | Operator::Join(_) => {
-                let mut childrens = self.childrens.iter();
-                let left = childrens.next().unwrap();
-                let right = childrens.next().unwrap();
-                left.output_schema_to(arena, SchemaSlot::S0);
-                right.output_schema_to(arena, SchemaSlot::S1);
-
-                match slot {
-                    SchemaSlot::S0 => {
-                        let right = arena.schema(SchemaSlot::S1).clone();
-                        arena.append_schema(SchemaSlot::S0, right);
-                    }
-                    SchemaSlot::S1 => {
-                        let mut columns = arena.schema(SchemaSlot::S0).clone();
-                        columns.extend(arena.schema(SchemaSlot::S1).iter().cloned());
-                        arena.write_schema(SchemaSlot::S1, columns);
-                    }
+            | Operator::ScalarSubquery(_) => match childrens {
+                Childrens::Only(child) => child.output_schema(arena).clone(),
+                _ => unreachable!(),
+            },
+            Operator::ScalarApply(_) | Operator::Join(_) => match childrens {
+                Childrens::Twins { left, right } => {
+                    let mut schema = left.output_schema(arena).clone();
+                    schema.extend_from_slice(right.output_schema(arena));
+                    schema
                 }
-                arena.schema(slot)
-            }
+                _ => unreachable!(),
+            },
             Operator::MarkApply(op) => {
-                if let Some(left) = self.childrens.iter().next() {
-                    left.output_schema_to(arena, slot);
-                } else {
-                    arena.write_schema(slot, std::iter::empty());
-                }
-                arena.append_schema(slot, std::iter::once(op.output_column().clone()));
-                arena.schema(slot)
+                let mut schema = match childrens {
+                    Childrens::Only(left) => left.output_schema(arena).clone(),
+                    Childrens::Twins { left, .. } => left.output_schema(arena).clone(),
+                    Childrens::None => Vec::new(),
+                };
+                schema.push(op.output_column().clone());
+                schema
             }
-            Operator::Aggregate(op) => {
-                let columns = op
-                    .agg_calls
-                    .iter()
-                    .chain(op.groupby_exprs.iter())
-                    .map(|expr| expr.output_column_ref(arena))
-                    .collect_vec();
-                arena.write_schema(slot, columns);
-                arena.schema(slot)
-            }
-            Operator::Project(op) => {
-                let columns = op
-                    .exprs
-                    .iter()
-                    .map(|expr| expr.output_column_ref(arena))
-                    .collect_vec();
-                arena.write_schema(slot, columns);
-                arena.schema(slot)
-            }
-            Operator::TableScan(op) => {
-                arena.write_schema(slot, op.columns.iter().cloned());
-                arena.schema(slot)
-            }
+            Operator::Aggregate(op) => op
+                .agg_calls
+                .iter()
+                .chain(op.groupby_exprs.iter())
+                .map(|expr| expr.output_column_ref(arena))
+                .collect(),
+            Operator::Project(op) => op
+                .exprs
+                .iter()
+                .map(|expr| expr.output_column_ref(arena))
+                .collect(),
+            Operator::TableScan(op) => op.columns.clone(),
             Operator::FunctionScan(op) => {
-                op.table_function.output_schema_into(arena.schema_mut(slot));
-                arena.schema(slot)
+                let mut schema = Vec::new();
+                op.table_function.output_schema_into(&mut schema);
+                schema
             }
             Operator::Values(ValuesOperator { schema_ref, .. })
             | Operator::Union(UnionOperator {
@@ -222,75 +224,57 @@ impl LogicalPlan {
             | Operator::SetMembership(SetMembershipOperator {
                 left_schema_ref: schema_ref,
                 ..
-            }) => {
-                arena.write_schema(slot, schema_ref.iter().cloned());
-                arena.schema(slot)
+            }) => schema_ref.clone(),
+            Operator::Dummy => Vec::new(),
+            Operator::ShowTable => Self::dummy_schema(arena, ["TABLE"]),
+            Operator::ShowView => Self::dummy_schema(arena, ["VIEW"]),
+            Operator::Explain => Self::dummy_schema(arena, ["PLAN"]),
+            Operator::Describe(_) => {
+                Self::dummy_schema(arena, ["FIELD", "TYPE", "LEN", "NULL", "Key", "DEFAULT"])
             }
-            Operator::Dummy => {
-                arena.write_schema(slot, std::iter::empty());
-                arena.schema(slot)
-            }
-            Operator::ShowTable => self.write_dummy_schema(arena, slot, ["TABLE"]),
-            Operator::ShowView => self.write_dummy_schema(arena, slot, ["VIEW"]),
-            Operator::Explain => self.write_dummy_schema(arena, slot, ["PLAN"]),
-            Operator::Describe(_) => self.write_dummy_schema(
-                arena,
-                slot,
-                ["FIELD", "TYPE", "LEN", "NULL", "Key", "DEFAULT"],
-            ),
-            Operator::Insert(_) => self.write_dummy_schema(arena, slot, ["INSERTED"]),
-            Operator::Update(_) => self.write_dummy_schema(arena, slot, ["UPDATED"]),
-            Operator::Delete(_) => self.write_dummy_schema(arena, slot, ["DELETED"]),
-            Operator::Analyze(_) => self.write_dummy_schema(arena, slot, ["STATISTICS_META_PATH"]),
-            Operator::AddColumn(_) => self.write_dummy_schema(arena, slot, ["ADD COLUMN SUCCESS"]),
-            Operator::ChangeColumn(_) => {
-                self.write_dummy_schema(arena, slot, ["CHANGE COLUMN SUCCESS"])
-            }
-            Operator::DropColumn(_) => {
-                self.write_dummy_schema(arena, slot, ["DROP COLUMN SUCCESS"])
-            }
-            Operator::CreateTable(_) => {
-                self.write_dummy_schema(arena, slot, ["CREATE TABLE SUCCESS"])
-            }
-            Operator::CreateIndex(_) => {
-                self.write_dummy_schema(arena, slot, ["CREATE INDEX SUCCESS"])
-            }
-            Operator::CreateView(_) => {
-                self.write_dummy_schema(arena, slot, ["CREATE VIEW SUCCESS"])
-            }
-            Operator::DropTable(_) => self.write_dummy_schema(arena, slot, ["DROP TABLE SUCCESS"]),
-            Operator::DropView(_) => self.write_dummy_schema(arena, slot, ["DROP VIEW SUCCESS"]),
-            Operator::DropIndex(_) => self.write_dummy_schema(arena, slot, ["DROP INDEX SUCCESS"]),
-            Operator::Truncate(_) => {
-                self.write_dummy_schema(arena, slot, ["TRUNCATE TABLE SUCCESS"])
-            }
-            Operator::CopyFromFile(_) => self.write_dummy_schema(arena, slot, ["COPY FROM SOURCE"]),
-            Operator::CopyToFile(_) => self.write_dummy_schema(arena, slot, ["COPY TO TARGET"]),
+            Operator::Insert(_) => Self::dummy_schema(arena, ["INSERTED"]),
+            Operator::Update(_) => Self::dummy_schema(arena, ["UPDATED"]),
+            Operator::Delete(_) => Self::dummy_schema(arena, ["DELETED"]),
+            Operator::Analyze(_) => Self::dummy_schema(arena, ["STATISTICS_META_PATH"]),
+            Operator::AddColumn(_) => Self::dummy_schema(arena, ["ADD COLUMN SUCCESS"]),
+            Operator::ChangeColumn(_) => Self::dummy_schema(arena, ["CHANGE COLUMN SUCCESS"]),
+            Operator::DropColumn(_) => Self::dummy_schema(arena, ["DROP COLUMN SUCCESS"]),
+            Operator::CreateTable(_) => Self::dummy_schema(arena, ["CREATE TABLE SUCCESS"]),
+            Operator::CreateIndex(_) => Self::dummy_schema(arena, ["CREATE INDEX SUCCESS"]),
+            Operator::CreateView(_) => Self::dummy_schema(arena, ["CREATE VIEW SUCCESS"]),
+            Operator::DropTable(_) => Self::dummy_schema(arena, ["DROP TABLE SUCCESS"]),
+            Operator::DropView(_) => Self::dummy_schema(arena, ["DROP VIEW SUCCESS"]),
+            Operator::DropIndex(_) => Self::dummy_schema(arena, ["DROP INDEX SUCCESS"]),
+            Operator::Truncate(_) => Self::dummy_schema(arena, ["TRUNCATE TABLE SUCCESS"]),
+            Operator::CopyFromFile(_) => Self::dummy_schema(arena, ["COPY FROM SOURCE"]),
+            Operator::CopyToFile(_) => Self::dummy_schema(arena, ["COPY TO TARGET"]),
         }
     }
 
-    fn write_dummy_schema<'arena, const N: usize>(
-        &self,
-        arena: &'arena mut PlanArena,
-        slot: SchemaSlot,
-        names: [&str; N],
-    ) -> &'arena Schema {
-        arena.write_schema(slot, std::iter::empty());
-        for name in names {
-            let column = arena.alloc_column(ColumnCatalog::new_dummy(name.to_string()));
-            arena.append_schema(slot, std::iter::once(column));
-        }
-        arena.schema(slot)
-    }
-
-    pub fn with_output_schema_to<R>(
-        &self,
+    fn dummy_schema<const N: usize>(
         arena: &mut PlanArena,
-        slot: SchemaSlot,
-        f: impl FnOnce(&PlanArena, &Schema) -> R,
-    ) -> R {
-        self.output_schema_to(arena, slot);
-        f(arena, arena.schema(slot))
+        names: [&str; N],
+    ) -> crate::types::tuple::Schema {
+        names
+            .into_iter()
+            .map(|name| arena.alloc_dummy(name))
+            .collect()
+    }
+
+    pub fn reset_output_schema_cache(&mut self) {
+        self.output_schema = None;
+    }
+
+    pub fn reset_output_schema_cache_recursive(&mut self) {
+        self.reset_output_schema_cache();
+        match self.childrens.as_mut() {
+            Childrens::Only(child) => child.reset_output_schema_cache_recursive(),
+            Childrens::Twins { left, right } => {
+                left.reset_output_schema_cache_recursive();
+                right.reset_output_schema_cache_recursive();
+            }
+            Childrens::None => (),
+        }
     }
 
     pub fn explain(&self, arena: &mut PlanArena, indentation: usize) -> String {
@@ -301,10 +285,106 @@ impl LogicalPlan {
         }
 
         for child in self.childrens.iter() {
-            result.push('\n');
-            result.push_str(&child.explain(arena, indentation + 2));
+            let child = child.explain(arena, indentation + 2);
+            result.push(' ');
+            result.push_str(child.trim_start());
         }
 
         result
+    }
+}
+
+impl Clone for LogicalPlan {
+    fn clone(&self) -> Self {
+        Self {
+            operator: self.operator.clone(),
+            childrens: self.childrens.clone(),
+            physical_option: self.physical_option.clone(),
+            output_schema: None,
+        }
+    }
+}
+
+impl PartialEq for LogicalPlan {
+    fn eq(&self, other: &Self) -> bool {
+        self.operator == other.operator
+            && self.childrens == other.childrens
+            && self.physical_option == other.physical_option
+    }
+}
+
+impl Eq for LogicalPlan {}
+
+impl Hash for LogicalPlan {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.operator.hash(state);
+        self.childrens.hash(state);
+        self.physical_option.hash(state);
+    }
+}
+
+impl crate::serdes::ReferenceSerialization for LogicalPlan {
+    fn encode<W: std::io::Write, A: crate::planner::MetaArena>(
+        &self,
+        writer: &mut W,
+        is_direct: bool,
+        reference_tables: &mut crate::serdes::ReferenceTables,
+        arena: &A,
+    ) -> Result<(), crate::errors::DatabaseError> {
+        crate::serdes::ReferenceSerialization::encode(
+            &self.operator,
+            writer,
+            is_direct,
+            reference_tables,
+            arena,
+        )?;
+        crate::serdes::ReferenceSerialization::encode(
+            &self.childrens,
+            writer,
+            is_direct,
+            reference_tables,
+            arena,
+        )?;
+        crate::serdes::ReferenceSerialization::encode(
+            &self.physical_option,
+            writer,
+            is_direct,
+            reference_tables,
+            arena,
+        )
+    }
+
+    fn decode<T: crate::storage::Transaction, R: std::io::Read, A: crate::planner::MetaArena>(
+        reader: &mut R,
+        context: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
+        reference_tables: &crate::serdes::ReferenceTables,
+        arena: &mut A,
+    ) -> Result<Self, crate::errors::DatabaseError> {
+        let operator = <Operator as crate::serdes::ReferenceSerialization>::decode(
+            reader,
+            context,
+            reference_tables,
+            arena,
+        )?;
+        let childrens = <Box<Childrens> as crate::serdes::ReferenceSerialization>::decode(
+            reader,
+            context,
+            reference_tables,
+            arena,
+        )?;
+        let physical_option =
+            <Option<PhysicalOption> as crate::serdes::ReferenceSerialization>::decode(
+                reader,
+                context,
+                reference_tables,
+                arena,
+            )?;
+
+        Ok(Self {
+            operator,
+            childrens,
+            physical_option,
+            output_schema: None,
+        })
     }
 }

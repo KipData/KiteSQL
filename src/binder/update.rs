@@ -88,7 +88,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             let mut plan = self.bind_table_ref(to, arena)?;
             let (target_source, target_offset) =
                 Self::resolve_source_columns_in_scope(&self.context, &table_name)?;
-            let target_schema = target_source.schema().collect::<Vec<_>>();
+            let target_schema = target_source.schema().to_vec();
 
             if let Some(predicate) = selection {
                 plan = self.bind_where(plan, predicate, arena)?;
@@ -137,7 +137,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                             if is_joined_update {
                                 UpdateExprTargetRemapper {
                                     target_schema: &target_schema,
-                                    arena: arena,
+                                    arena,
                                 }
                                 .visit(&mut expr)?;
                             }

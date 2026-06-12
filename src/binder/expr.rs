@@ -34,7 +34,7 @@ use crate::expression::function::FunctionSummary;
 use crate::expression::{AliasType, ScalarExpression};
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
 use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
-use crate::planner::{LogicalPlan, PlanArena, SchemaSlot};
+use crate::planner::{LogicalPlan, PlanArena};
 use crate::storage::Transaction;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, ColumnId, LogicalType};
@@ -71,15 +71,16 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         }
     }
 
-    fn find_column_in_schema(
-        schema_ref: impl IntoIterator<Item = ColumnRef>,
+    fn find_column_in_schema<'schema>(
+        schema_ref: impl IntoIterator<Item = &'schema ColumnRef>,
         arena: &PlanArena,
         column_name: &str,
     ) -> Option<(usize, ColumnRef)> {
         schema_ref
             .into_iter()
             .enumerate()
-            .find(|(_, column)| arena.column(*column).name() == column_name)
+            .find(|(_, column)| arena.column(**column).name() == column_name)
+            .map(|(position, column)| (position, *column))
     }
 
     fn find_column_in_scope(
@@ -93,7 +94,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             let source = &bound_source.source;
 
             if let Some((position, column)) =
-                Self::find_column_in_schema(source.schema(), arena, column_name)
+                Self::find_column_in_schema(source.schema().iter(), arena, column_name)
             {
                 return Some(ScalarExpression::column_expr(
                     column,
@@ -486,8 +487,8 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         subquery: &Query,
         arena: &mut PlanArena,
     ) -> Result<(LogicalPlan, ScalarExpression, bool), DatabaseError> {
-        let (sub_query, correlated) = self.bind_subquery(subquery, arena)?;
-        let sub_query_schema = sub_query.output_schema_to(arena, SchemaSlot::S0);
+        let (mut sub_query, correlated) = self.bind_subquery(subquery, arena)?;
+        let sub_query_schema = sub_query.output_schema(arena);
 
         let fn_check = |len: usize| {
             if sub_query_schema.len() != len {
@@ -634,7 +635,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                     }
                 };
             let (position, column) =
-                Self::find_column_in_schema(source.schema(), arena, full_name.1.as_ref())
+                Self::find_column_in_schema(source.schema().iter(), arena, full_name.1.as_ref())
                     .ok_or_else(|| {
                         Self::column_not_found_with_span(idents, full_name.1.as_ref())
                     })?;

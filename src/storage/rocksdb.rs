@@ -770,13 +770,12 @@ mod test {
         IndexImplEnum, IndexImplParams, IndexIter, IndexIterState, InnerIter, IterBounds,
         PrimaryKeyIndexImpl, Storage, Transaction,
     };
-    use crate::types::index::{IndexMeta, IndexType};
+    use crate::types::index::IndexType;
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use itertools::Itertools;
     use std::collections::Bound;
-    use std::sync::Arc;
     use tempfile::TempDir;
 
     #[test]
@@ -948,7 +947,16 @@ mod test {
             .unwrap()
             .clone();
         let plan_arena = PlanArena::new(kite_sql.state.table_arena());
-        let a_column_id = table.get_column_id_by_name("a").unwrap();
+        let index_meta = table
+            .indexes()
+            .copied()
+            .find(|index| {
+                matches!(
+                    plan_arena.index(*index).ty,
+                    IndexType::PrimaryKey { is_multiple: false }
+                )
+            })
+            .ok_or(DatabaseError::InvalidIndex)?;
         let tuple_ids = vec![
             DataValue::Int32(0),
             DataValue::Int32(2),
@@ -962,15 +970,8 @@ mod test {
         let mut iter: IndexIter<'_, _> = IndexIter {
             bounds: IterBounds::new(0, None),
             params: IndexImplParams {
-                index_meta: Arc::new(IndexMeta {
-                    id: 0,
-                    column_ids: vec![*a_column_id],
-                    table_name,
-                    pk_ty: LogicalType::Integer,
-                    value_ty: LogicalType::Integer,
-                    name: "pk_a".to_string(),
-                    ty: IndexType::PrimaryKey { is_multiple: false },
-                }),
+                index_meta,
+                meta_arena: plan_arena.table_arena_cell().borrow(),
                 table_name: table.name.clone(),
                 deserializers,
                 total_len: table.columns_len(),
@@ -1106,7 +1107,7 @@ mod test {
         let unique_index = table
             .indexes
             .iter()
-            .find(|index| matches!(index.ty, IndexType::Unique))
+            .find(|index| matches!(plan_arena.index(**index).ty, IndexType::Unique))
             .unwrap()
             .clone();
         let b_column = table
@@ -1121,7 +1122,7 @@ mod test {
         let composite_index = table
             .indexes
             .iter()
-            .find(|index| index.name == "idx_b_a")
+            .find(|index| plan_arena.index(**index).name == "idx_b_a")
             .unwrap()
             .clone();
         let reordered_columns = vec![a_cover_column.clone(), b_cover_column.clone()];
@@ -1132,12 +1133,14 @@ mod test {
         let a_id = plan_arena.column(a_cover_column).id().unwrap();
         let b_id = plan_arena.column(b_cover_column).id().unwrap();
         let cover_mapping = vec![
-            composite_index
+            plan_arena
+                .index(composite_index)
                 .column_ids
                 .iter()
                 .position(|id| id == &a_id)
                 .unwrap(),
-            composite_index
+            plan_arena
+                .index(composite_index)
                 .column_ids
                 .iter()
                 .position(|id| id == &b_id)
@@ -1197,7 +1200,7 @@ mod test {
         let pk_index = table
             .indexes
             .iter()
-            .find(|index| index.name == "pk_index")
+            .find(|index| plan_arena.index(**index).name == "pk_index")
             .unwrap()
             .clone();
         let pk_columns = vec![a_cover_column.clone()];

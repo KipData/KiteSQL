@@ -85,7 +85,7 @@ impl AddColumn {
 
         let default_value = column.default_value()?;
 
-        let (unique_meta, apply) = {
+        let (unique_index_id, apply) = {
             let (transaction, table_codec) = arena.transaction_codec_mut();
             let (table, col_id) = transaction.add_column(
                 table_codec,
@@ -95,7 +95,9 @@ impl AddColumn {
                 if_not_exists,
             )?;
             let unique_meta = if column.desc().is_unique() {
-                table.get_unique_index(&col_id).cloned()
+                table
+                    .get_unique_index(&col_id, plan_arena)
+                    .map(|index| plan_arena.index(index).id)
             } else {
                 None
             };
@@ -133,12 +135,12 @@ impl AddColumn {
                 Ok(())
             },
             |transaction, table_codec, tuple| {
-                if let (Some(unique_meta), Some(value), Some(tuple_id)) = (
-                    unique_meta.as_ref(),
+                if let (Some(unique_index_id), Some(value), Some(tuple_id)) = (
+                    unique_index_id.as_ref(),
                     default_for_index.as_ref(),
                     tuple.pk.as_ref(),
                 ) {
-                    let index = Index::new(unique_meta.id, value, IndexType::Unique);
+                    let index = Index::new(*unique_index_id, value, IndexType::Unique);
                     transaction.add_index(table_codec, &table_name, index, tuple_id)?;
                 }
                 Ok(())

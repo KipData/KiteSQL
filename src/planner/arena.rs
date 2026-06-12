@@ -13,25 +13,26 @@
 // limitations under the License.
 
 use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
+use crate::types::index::{IndexMeta, IndexMetaRef};
 use crate::types::tuple::Schema;
 use std::cell::UnsafeCell;
 use std::collections::HashSet;
 use std::fmt;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum SchemaSlot {
-    S0,
-    S1,
-}
-
-#[derive(Default)]
 pub struct TableArena {
+    dummy_columns: [ColumnCatalog; DUMMY_COLUMN_COUNT],
     columns: Vec<TableArenaColumn>,
+    indexes: Vec<TableArenaIndex>,
     version: usize,
 }
 
 struct TableArenaColumn {
     catalog: ColumnCatalog,
+    live: bool,
+}
+
+struct TableArenaIndex {
+    meta: IndexMeta,
     live: bool,
 }
 
@@ -47,17 +48,20 @@ unsafe impl Sync for TableArenaCell {}
 #[derive(Debug)]
 pub struct PlanArena<'a> {
     table_arena: &'a TableArenaCell,
+    #[cfg(debug_assertions)]
     table_arena_version: usize,
     columns: Vec<ColumnCatalog>,
-    schema_0: Schema,
-    schema_1: Schema,
+    indexes: Vec<IndexMeta>,
 }
 
 pub trait MetaArena {
     fn alloc_column(&mut self, column: ColumnCatalog) -> ColumnRef;
 
+    fn alloc_index(&mut self, index: IndexMeta) -> IndexMetaRef;
+
     fn alloc_columns<I>(&mut self, columns: I) -> Schema
     where
+        Self: Sized,
         I: IntoIterator<Item = ColumnCatalog>,
     {
         columns
@@ -68,8 +72,42 @@ pub trait MetaArena {
 
     fn column(&self, column: ColumnRef) -> &ColumnCatalog;
 
+    fn index(&self, index: IndexMetaRef) -> &IndexMeta;
+
     fn find_column(&self, column: &ColumnCatalog) -> Option<ColumnRef>;
+
+    fn find_index(&self, index: &IndexMeta) -> Option<IndexMetaRef>;
 }
+
+const DUMMY_COLUMN_NAMES: [&str; DUMMY_COLUMN_COUNT] = [
+    "TABLE",
+    "VIEW",
+    "PLAN",
+    "FIELD",
+    "TYPE",
+    "LEN",
+    "NULL",
+    "Key",
+    "DEFAULT",
+    "INSERTED",
+    "UPDATED",
+    "DELETED",
+    "STATISTICS_META_PATH",
+    "ADD COLUMN SUCCESS",
+    "CHANGE COLUMN SUCCESS",
+    "DROP COLUMN SUCCESS",
+    "CREATE TABLE SUCCESS",
+    "CREATE INDEX SUCCESS",
+    "CREATE VIEW SUCCESS",
+    "DROP TABLE SUCCESS",
+    "DROP VIEW SUCCESS",
+    "DROP INDEX SUCCESS",
+    "TRUNCATE TABLE SUCCESS",
+    "COPY FROM SOURCE",
+    "COPY TO TARGET",
+];
+const DUMMY_COLUMN_COUNT: usize = 25;
+const DUMMY_COLUMN_BASE: usize = usize::MAX - DUMMY_COLUMN_COUNT + 1;
 
 impl TableArenaCell {
     pub(crate) fn new(value: TableArena) -> Self {
@@ -93,6 +131,19 @@ impl Default for TableArenaCell {
     }
 }
 
+impl Default for TableArena {
+    fn default() -> Self {
+        Self {
+            dummy_columns: std::array::from_fn(|i| {
+                ColumnCatalog::new_dummy(DUMMY_COLUMN_NAMES[i].to_string())
+            }),
+            columns: Vec::new(),
+            indexes: Vec::new(),
+            version: 0,
+        }
+    }
+}
+
 impl fmt::Debug for TableArenaCell {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.borrow().fmt(f)
@@ -100,6 +151,14 @@ impl fmt::Debug for TableArenaCell {
 }
 
 impl TableArena {
+    pub(crate) fn alloc_dummy(&self, name: &str) -> ColumnRef {
+        DUMMY_COLUMN_NAMES
+            .iter()
+            .position(|dummy_name| *dummy_name == name)
+            .map(|index| ColumnRef::new(DUMMY_COLUMN_BASE + index))
+            .unwrap_or_else(|| panic!("unknown dummy column: {name}"))
+    }
+
     pub fn alloc_table_column(
         &mut self,
         table_name: TableName,
@@ -113,12 +172,31 @@ impl TableArena {
         <Self as MetaArena>::alloc_column(self, column)
     }
 
+    pub fn alloc_index(&mut self, index: IndexMeta) -> IndexMetaRef {
+        <Self as MetaArena>::alloc_index(self, index)
+    }
+
     pub(crate) fn column(&self, column: ColumnRef) -> &ColumnCatalog {
         <Self as MetaArena>::column(self, column)
     }
 
+    pub(crate) fn index(&self, index: IndexMetaRef) -> &IndexMeta {
+        <Self as MetaArena>::index(self, index)
+    }
+
+    fn dummy_column(&self, column: ColumnRef) -> Option<&ColumnCatalog> {
+        column
+            .pos()
+            .checked_sub(DUMMY_COLUMN_BASE)
+            .and_then(|index| self.dummy_columns.get(index))
+    }
+
     pub(crate) fn columns_len(&self) -> usize {
         self.columns.len()
+    }
+
+    pub(crate) fn indexes_len(&self) -> usize {
+        self.indexes.len()
     }
 
     pub(crate) fn live_columns_len(&self) -> usize {
@@ -158,6 +236,7 @@ impl fmt::Debug for TableArena {
         f.debug_struct("TableArena")
             .field("columns_len", &self.live_columns_len())
             .field("slots_len", &self.columns_len())
+            .field("indexes_len", &self.indexes_len())
             .field("version", &self.version())
             .finish()
     }
@@ -192,12 +271,51 @@ impl MetaArena for TableArena {
         ColumnRef::new(pos)
     }
 
+    fn alloc_index(&mut self, index: IndexMeta) -> IndexMetaRef {
+        if let Some(index_ref) = self.find_index(&index) {
+            return index_ref;
+        }
+
+        if let Some((pos, slot)) = self
+            .indexes
+            .iter_mut()
+            .enumerate()
+            .find(|(_, index)| !index.live)
+        {
+            *slot = TableArenaIndex {
+                meta: index,
+                live: true,
+            };
+            self.increment_version();
+            return IndexMetaRef::new(pos);
+        }
+
+        let pos = self.indexes.len();
+        self.indexes.push(TableArenaIndex {
+            meta: index,
+            live: true,
+        });
+        self.increment_version();
+        IndexMetaRef::new(pos)
+    }
+
     fn column(&self, column: ColumnRef) -> &ColumnCatalog {
+        if let Some(column) = self.dummy_column(column) {
+            return column;
+        }
         let column = &self.columns[column.pos()];
         if !column.live {
             panic!("accessing recycled TableArena column");
         }
         &column.catalog
+    }
+
+    fn index(&self, index: IndexMetaRef) -> &IndexMeta {
+        let index = &self.indexes[index.pos()];
+        if !index.live {
+            panic!("accessing recycled TableArena index");
+        }
+        &index.meta
     }
 
     fn find_column(&self, column: &ColumnCatalog) -> Option<ColumnRef> {
@@ -206,17 +324,25 @@ impl MetaArena for TableArena {
             .position(|candidate| candidate.live && candidate.catalog == *column)
             .map(ColumnRef::new)
     }
+
+    fn find_index(&self, index: &IndexMeta) -> Option<IndexMetaRef> {
+        self.indexes
+            .iter()
+            .position(|candidate| candidate.live && candidate.meta == *index)
+            .map(IndexMetaRef::new)
+    }
 }
 
 impl<'a> PlanArena<'a> {
     pub fn new(table_arena: &'a TableArenaCell) -> Self {
+        #[cfg(debug_assertions)]
         let table_arena_version = table_arena.borrow().version();
         Self {
             table_arena,
+            #[cfg(debug_assertions)]
             table_arena_version,
             columns: Vec::new(),
-            schema_0: Schema::default(),
-            schema_1: Schema::default(),
+            indexes: Vec::new(),
         }
     }
 
@@ -242,11 +368,18 @@ impl<'a> PlanArena<'a> {
                 live: true,
             });
         }
-        if !self.columns.is_empty() {
+        for index in &self.indexes {
+            table_arena.indexes.push(TableArenaIndex {
+                meta: index.clone(),
+                live: true,
+            });
+        }
+        if !self.columns.is_empty() || !self.indexes.is_empty() {
             table_arena.increment_version();
         }
     }
 
+    #[cfg(debug_assertions)]
     fn assert_table_arena_unchanged(&self) {
         let current_version = self.table_arena.borrow().version();
         if current_version != self.table_arena_version {
@@ -254,35 +387,8 @@ impl<'a> PlanArena<'a> {
         }
     }
 
-    pub(crate) fn schema_mut(&mut self, slot: SchemaSlot) -> &mut Schema {
-        match slot {
-            SchemaSlot::S0 => &mut self.schema_0,
-            SchemaSlot::S1 => &mut self.schema_1,
-        }
-    }
-
-    pub(crate) fn write_schema<I>(&mut self, slot: SchemaSlot, columns: I)
-    where
-        I: IntoIterator<Item = ColumnRef>,
-    {
-        let schema = self.schema_mut(slot);
-        schema.clear();
-        schema.extend(columns);
-    }
-
-    pub(crate) fn append_schema<I>(&mut self, slot: SchemaSlot, columns: I)
-    where
-        I: IntoIterator<Item = ColumnRef>,
-    {
-        self.schema_mut(slot).extend(columns);
-    }
-
-    pub(crate) fn schema(&self, slot: SchemaSlot) -> &Schema {
-        match slot {
-            SchemaSlot::S0 => &self.schema_0,
-            SchemaSlot::S1 => &self.schema_1,
-        }
-    }
+    #[cfg(not(debug_assertions))]
+    fn assert_table_arena_unchanged(&self) {}
 
     pub(crate) fn clone_column(&self, column: ColumnRef) -> ColumnCatalog {
         self.column(column).clone()
@@ -312,29 +418,21 @@ impl<'a> PlanArena<'a> {
         <Self as MetaArena>::alloc_column(self, column)
     }
 
+    pub fn alloc_index(&mut self, index: IndexMeta) -> IndexMetaRef {
+        <Self as MetaArena>::alloc_index(self, index)
+    }
+
+    pub(crate) fn alloc_dummy(&mut self, name: &str) -> ColumnRef {
+        self.assert_table_arena_unchanged();
+        self.table_arena.borrow().alloc_dummy(name)
+    }
+
     pub fn column(&self, column: ColumnRef) -> &ColumnCatalog {
         <Self as MetaArena>::column(self, column)
     }
 
-    pub(crate) fn columns(&self) -> impl Iterator<Item = (ColumnRef, &ColumnCatalog)> {
-        self.assert_table_arena_unchanged();
-        let table_arena = self.table_arena.borrow();
-        let table_columns_len = table_arena.columns_len();
-        table_arena
-            .columns
-            .iter()
-            .take(table_columns_len)
-            .enumerate()
-            .filter(|(_, column)| column.live)
-            .map(|(pos, column)| (ColumnRef::new(pos), &column.catalog))
-            .chain(
-                self.columns
-                    .iter()
-                    .enumerate()
-                    .map(move |(offset, column)| {
-                        (ColumnRef::new(table_columns_len + offset), column)
-                    }),
-            )
+    pub fn index(&self, index: IndexMetaRef) -> &IndexMeta {
+        <Self as MetaArena>::index(self, index)
     }
 }
 
@@ -351,9 +449,24 @@ impl MetaArena for PlanArena<'_> {
         ColumnRef::new(pos)
     }
 
+    fn alloc_index(&mut self, index: IndexMeta) -> IndexMetaRef {
+        self.assert_table_arena_unchanged();
+
+        if let Some(index_ref) = self.find_index(&index) {
+            return index_ref;
+        }
+
+        let pos = self.table_arena.borrow().indexes_len() + self.indexes.len();
+        self.indexes.push(index);
+        IndexMetaRef::new(pos)
+    }
+
     fn column(&self, column: ColumnRef) -> &ColumnCatalog {
         self.assert_table_arena_unchanged();
         let table_arena = self.table_arena.borrow();
+        if let Some(column) = table_arena.dummy_column(column) {
+            return column;
+        }
         let table_columns_len = table_arena.columns_len();
         if column.pos() < table_columns_len {
             table_arena.column(column)
@@ -362,10 +475,43 @@ impl MetaArena for PlanArena<'_> {
         }
     }
 
+    fn index(&self, index: IndexMetaRef) -> &IndexMeta {
+        self.assert_table_arena_unchanged();
+        let table_arena = self.table_arena.borrow();
+        let table_indexes_len = table_arena.indexes_len();
+        if index.pos() < table_indexes_len {
+            table_arena.index(index)
+        } else {
+            &self.indexes[index.pos() - table_indexes_len]
+        }
+    }
+
     fn find_column(&self, column: &ColumnCatalog) -> Option<ColumnRef> {
-        self.columns()
-            .find(|(_, candidate)| *candidate == column)
-            .map(|(column, _)| column)
+        self.assert_table_arena_unchanged();
+        let table_arena = self.table_arena.borrow();
+        if column.is_persistent_table_column() {
+            if let Some(column_ref) = table_arena.find_column(column) {
+                return Some(column_ref);
+            }
+        }
+        let table_columns_len = table_arena.columns_len();
+        self.columns
+            .iter()
+            .position(|candidate| candidate == column)
+            .map(|offset| ColumnRef::new(table_columns_len + offset))
+    }
+
+    fn find_index(&self, index: &IndexMeta) -> Option<IndexMetaRef> {
+        self.assert_table_arena_unchanged();
+        let table_arena = self.table_arena.borrow();
+        if let Some(index_ref) = table_arena.find_index(index) {
+            return Some(index_ref);
+        }
+        let table_indexes_len = table_arena.indexes_len();
+        self.indexes
+            .iter()
+            .position(|candidate| candidate == index)
+            .map(|offset| IndexMetaRef::new(table_indexes_len + offset))
     }
 }
 
@@ -380,6 +526,12 @@ mod tests {
             true,
             ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
         )
+    }
+
+    fn table_column(name: &str, is_temp: bool) -> ColumnCatalog {
+        let mut column = column(name);
+        column.set_ref_table("t".to_string().into(), ulid::Ulid::new(), is_temp);
+        column
     }
 
     #[test]
@@ -397,6 +549,23 @@ mod tests {
         assert_eq!(arena.borrow().column(reused).name(), "c");
         assert_eq!(arena.borrow().columns_len(), 2);
         assert_eq!(arena.borrow().live_columns_len(), 2);
+    }
+
+    #[test]
+    fn plan_arena_reuses_only_persistent_table_columns_from_table_arena() {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let persistent = table_column("a", false);
+        let temp = table_column("b", true);
+
+        let persistent_ref = table_arena.borrow_mut().alloc_column(persistent.clone());
+        let temp_table_ref = table_arena.borrow_mut().alloc_column(temp.clone());
+
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        assert_eq!(plan_arena.alloc_column(persistent), persistent_ref);
+
+        let temp_plan_ref = plan_arena.alloc_column(temp);
+        assert_ne!(temp_plan_ref, temp_table_ref);
+        assert!(temp_plan_ref.pos() >= table_arena.borrow().columns_len());
     }
 
     #[test]

@@ -19,7 +19,7 @@ use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor,
 };
 use crate::planner::operator::insert::InsertOperator;
-use crate::planner::{LogicalPlan, SchemaSlot};
+use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::index::Index;
 use crate::types::tuple::{Schema, Tuple};
@@ -68,10 +68,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert {
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        self.input_schema = self
-            .input_plan
-            .output_schema_to(plan_arena, SchemaSlot::S0)
-            .clone();
+        self.input_schema = self.input_plan.take_schema(plan_arena);
         self.input = Some(build_read(
             arena,
             plan_arena,
@@ -111,15 +108,15 @@ impl Insert {
             return Ok(());
         };
 
-        let table = arena
-            .transaction()
-            .table(arena.table_cache(), self.table_name.clone())?
-            .cloned();
-        if let Some(table_snapshot) = table
-            .as_ref()
-            .map(|table| table.dml_snapshot(plan_arena))
-            .transpose()?
-        {
+        let table_cache = arena.read_context().table_cache();
+        let transaction = arena.transaction();
+        let table_snapshot = {
+            transaction
+                .table(table_cache, self.table_name.clone())?
+                .map(|table| table.dml_snapshot(plan_arena))
+                .transpose()?
+        };
+        if let Some(table_snapshot) = table_snapshot {
             if table_snapshot.primary_key_indices.is_empty() {
                 return Err(DatabaseError::not_null());
             }
@@ -163,6 +160,7 @@ impl Insert {
                 let tuple = Tuple::new(Some(pk), values);
 
                 for (index_meta, exprs) in table_snapshot.index_metas.iter() {
+                    let index_meta = plan_arena.index(*index_meta);
                     let values = Projection::projection(&tuple, exprs)?;
                     let Some(value) = DataValue::values_to_tuple(values) else {
                         continue;

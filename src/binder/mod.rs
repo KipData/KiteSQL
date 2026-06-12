@@ -299,7 +299,7 @@ pub struct BinderContext<'a, T: Transaction> {
 }
 
 impl Source<'_> {
-    pub(crate) fn column(&self, name: &str, arena: &mut PlanArena) -> Option<ColumnRef> {
+    pub(crate) fn column(&self, name: &str, arena: &PlanArena) -> Option<ColumnRef> {
         match self {
             Source::Table(table) => table.get_column_by_name(name),
             Source::View(view) => view
@@ -314,11 +314,11 @@ impl Source<'_> {
         }
     }
 
-    pub(crate) fn schema(&self) -> std::iter::Copied<std::slice::Iter<'_, ColumnRef>> {
+    pub(crate) fn schema(&self) -> &[ColumnRef] {
         match self {
-            Source::Table(table) => table.columns().copied(),
-            Source::View(view) => view.schema.iter().copied(),
-            Source::Schema(schema_ref) => schema_ref.iter().copied(),
+            Source::Table(table) => table.columns().as_slice(),
+            Source::View(view) => &view.schema,
+            Source::Schema(schema_ref) => schema_ref,
         }
     }
 
@@ -728,7 +728,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                         "ANALYZE without table is not supported".to_string(),
                     )
                 })?;
-                self.bind_analyze(table_name)?
+                self.bind_analyze(table_name, arena)?
             }
             Statement::Truncate(truncate) => {
                 if truncate.table_names.len() != 1 {

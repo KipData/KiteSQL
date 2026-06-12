@@ -38,6 +38,7 @@ impl ImplementationRule for JoinImplementation {
     fn update_best_option(
         &self,
         op: &Operator,
+        _: &crate::planner::PlanArena,
         _: &StatisticMetaLoader<'_>,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {

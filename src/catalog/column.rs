@@ -36,7 +36,7 @@ pub struct ColumnCatalog {
     in_join: bool,
 }
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub enum ColumnRelation {
     None,
     Table {
@@ -46,7 +46,7 @@ pub enum ColumnRelation {
     },
 }
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq, ReferenceSerialization)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, ReferenceSerialization)]
 pub struct ColumnSummary {
     pub name: String,
     pub relation: ColumnRelation,
@@ -145,6 +145,13 @@ impl ColumnCatalog {
             ColumnRelation::None => None,
             ColumnRelation::Table { table_name, .. } => Some(table_name),
         }
+    }
+
+    pub(crate) fn is_persistent_table_column(&self) -> bool {
+        matches!(
+            self.summary.relation,
+            ColumnRelation::Table { is_temp: false, .. }
+        )
     }
 
     pub fn set_name(&mut self, name: String) {

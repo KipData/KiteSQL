@@ -25,12 +25,11 @@ use crate::expression::ScalarExpression;
 use crate::planner::operator::insert::InsertOperator;
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::operator::Operator;
-use crate::planner::{Childrens, LogicalPlan, SchemaSlot};
+use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::tuple::Schema;
 use crate::types::value::DataValue;
 use sqlparser::ast::{Expr, Ident, ObjectName, Query};
-use std::borrow::Cow;
 use std::slice;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
@@ -61,7 +60,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                     values_len,
                 ));
             }
-            _schema_ref = Some(source.schema().collect());
+            _schema_ref = Some(source.schema().to_vec());
         } else {
             let mut columns = Vec::with_capacity(idents.len());
             for ident in idents {
@@ -149,59 +148,60 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let table_name: TableName = lower_case_name(name)?.into();
-        let table_schema = {
-            let source = self
-                .context
-                .source(&table_name)?
-                .ok_or(DatabaseError::TableNotFound)?;
-            source.schema().collect::<Schema>()
-        };
-
         let mut input_plan = self.bind_query(query, arena)?;
-        let input_schema = input_plan.output_schema_to(arena, SchemaSlot::S0).clone();
+        let input_schema = input_plan.output_schema(arena);
         let input_len = input_schema.len();
 
-        let target_columns = if idents.is_empty() {
-            if input_len > table_schema.len() {
-                return Err(DatabaseError::ValuesLenMismatch(
-                    table_schema.len(),
-                    input_len,
-                ));
-            }
-            Cow::Borrowed(&table_schema[..input_len])
-        } else {
-            let mut columns = Vec::with_capacity(idents.len());
+        let projection = {
             let source = self
                 .context
                 .source(&table_name)?
                 .ok_or(DatabaseError::TableNotFound)?;
-            for ident in idents {
-                let column_name = lower_ident(ident);
-                let column = source.column(&column_name, arena).ok_or_else(|| {
-                    attach_span_from_sqlparser_span_if_absent(
-                        DatabaseError::column_not_found(column_name),
-                        ident.span,
-                    )
-                })?;
-                columns.push(column);
-            }
-            if input_len != columns.len() {
-                return Err(DatabaseError::ValuesLenMismatch(columns.len(), input_len));
-            }
-            Cow::Owned(columns)
-        };
 
-        let projection = input_schema
-            .iter()
-            .enumerate()
-            .zip(target_columns.iter())
-            .map(
-                |((position, input_column), target_column)| ScalarExpression::Alias {
-                    expr: Box::new(ScalarExpression::column_expr(*input_column, position)),
-                    alias: AliasType::Name(arena.column(*target_column).name().to_string()),
-                },
-            )
-            .collect::<Vec<_>>();
+            if idents.is_empty() {
+                let table_schema = source.schema();
+                if input_len > table_schema.len() {
+                    return Err(DatabaseError::ValuesLenMismatch(
+                        table_schema.len(),
+                        input_len,
+                    ));
+                }
+                table_schema[..input_len]
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(|(position, target_column)| ScalarExpression::Alias {
+                        expr: Box::new(ScalarExpression::column_expr(
+                            input_schema[position],
+                            position,
+                        )),
+                        alias: AliasType::Name(arena.column(target_column).name().to_string()),
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                if input_len != idents.len() {
+                    return Err(DatabaseError::ValuesLenMismatch(idents.len(), input_len));
+                }
+                let mut projection = Vec::with_capacity(idents.len());
+                for (position, ident) in idents.iter().enumerate() {
+                    let column_name = lower_ident(ident);
+                    let column = source.column(&column_name, arena).ok_or_else(|| {
+                        attach_span_from_sqlparser_span_if_absent(
+                            DatabaseError::column_not_found(column_name),
+                            ident.span,
+                        )
+                    })?;
+                    projection.push(ScalarExpression::Alias {
+                        expr: Box::new(ScalarExpression::column_expr(
+                            input_schema[position],
+                            position,
+                        )),
+                        alias: AliasType::Name(arena.column(column).name().to_string()),
+                    });
+                }
+                projection
+            }
+        };
         input_plan = self.bind_project(input_plan, projection, arena)?;
 
         Ok(LogicalPlan::new(

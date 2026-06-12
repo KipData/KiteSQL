@@ -344,7 +344,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
+    use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
     use crate::execution::dql::sort::{radix_sort, NullableVec, SortBy};
     use crate::expression::ScalarExpression;
@@ -353,7 +353,6 @@ mod test {
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use bumpalo::Bump;
-    use std::sync::Arc;
 
     #[test]
     fn test_radix_sort() {

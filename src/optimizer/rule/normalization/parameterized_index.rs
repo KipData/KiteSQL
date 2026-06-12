@@ -19,7 +19,7 @@ use crate::optimizer::core::rule::NormalizationRule;
 use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyQuantifier};
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
-use crate::planner::{Childrens, LogicalPlan, SchemaSlot};
+use crate::planner::{Childrens, LogicalPlan};
 use crate::types::index::{IndexLookup, IndexType};
 use crate::types::tuple::Schema;
 
@@ -33,13 +33,11 @@ impl NormalizationRule for ParameterizeMarkApply {
     ) -> Result<bool, DatabaseError> {
         let (op, new_probe) = match (&mut plan.operator, plan.childrens.as_mut()) {
             (Operator::MarkApply(op), Childrens::Twins { left, right }) => {
-                left.output_schema_to(arena, SchemaSlot::S0);
-                right.output_schema_to(arena, SchemaSlot::S1);
                 let probe = find_parameterized_probe(
                     op.kind.clone(),
                     op.predicates(),
-                    arena.schema(SchemaSlot::S0),
-                    arena.schema(SchemaSlot::S1),
+                    left.output_schema(arena),
+                    right.output_schema(arena),
                     arena,
                 );
                 let new_probe = probe.and_then(|(right_column, left_expr)| {
@@ -197,10 +195,11 @@ fn pick_parameterized_index_position(
         .iter()
         .enumerate()
         .filter(|(_, index_info)| {
-            index_info.meta.table_name == *table_name
-                && index_info.meta.column_ids.first().copied() == Some(column_id)
+            let index_meta = arena.index(index_info.meta);
+            index_meta.table_name == *table_name
+                && index_meta.column_ids.first().copied() == Some(column_id)
         })
-        .min_by_key(|(_, index_info)| index_priority(index_info.meta.ty))
+        .min_by_key(|(_, index_info)| index_priority(arena.index(index_info.meta).ty))
         .map(|(position, _)| position)
 }
 

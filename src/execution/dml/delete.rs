@@ -81,6 +81,7 @@ impl Delete {
             table
                 .indexes()
                 .map(|index_meta| {
+                    let index_meta = plan_arena.index(*index_meta);
                     Ok((
                         index_meta.id,
                         index_meta.ty,

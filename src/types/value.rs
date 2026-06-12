@@ -15,7 +15,7 @@
 use super::LogicalType;
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::{BumpBytes, BOUND_MAX_TAG, NOTNULL_TAG, NULL_TAG};
-use crate::types::evaluator::cast_create;
+use crate::types::evaluator::cast::{cast_create, to_char, to_varchar};
 use crate::types::CharLengthUnits;
 use byteorder::ReadBytesExt;
 use chrono::format::{DelayedFormat, StrftimeItems};
@@ -1090,9 +1090,20 @@ impl DataValue {
         if &from == to {
             return Ok(self);
         }
-        let evaluator = cast_create(Cow::Owned(from), Cow::Borrowed(to))?;
 
-        evaluator.eval_cast(&self)
+        match (self, to) {
+            (DataValue::Null, _) => Ok(DataValue::Null),
+            (DataValue::Utf8 { value, .. }, LogicalType::Char(len, unit)) => {
+                to_char(value, *len, *unit)
+            }
+            (DataValue::Utf8 { value, .. }, LogicalType::Varchar(len, unit)) => {
+                to_varchar(value, *len, *unit)
+            }
+            (value, _) => {
+                let evaluator = cast_create(Cow::Owned(from), Cow::Borrowed(to))?;
+                evaluator.eval_cast(&value)
+            }
+        }
     }
 
     #[inline]

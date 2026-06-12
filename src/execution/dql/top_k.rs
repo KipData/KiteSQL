@@ -170,7 +170,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for TopK {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[allow(clippy::mutable_key_type)]
 mod test {
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
+    use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
     use crate::execution::dql::top_k::{top_sort, CmpItem};
     use crate::expression::ScalarExpression;

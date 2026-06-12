@@ -63,16 +63,12 @@ impl CopyFromFile {
             .iter()
             .map(|ty| ty.serializable())
             .collect_vec();
-        let (table_name, primary_keys_indices) = {
-            let table = arena
-                .transaction()
-                .table(arena.table_cache(), op.table.clone())?
-                .ok_or(DatabaseError::TableNotFound)?;
-            (
-                table.name().to_string(),
-                table.primary_keys_indices().clone(),
-            )
-        };
+        let table_cache = arena.read_context().table_cache();
+        let transaction = arena.transaction();
+        let table = transaction
+            .table(table_cache, op.table.clone())?
+            .ok_or(DatabaseError::TableNotFound)?;
+        let table_name = table.name().to_string();
 
         let file = File::open(op.source.path)?;
         let mut buf_reader = BufReader::new(file);
@@ -91,7 +87,7 @@ impl CopyFromFile {
         };
 
         let column_count = op.schema_ref.len();
-        let tuple_builder = TupleBuilder::new(column_types, Some(&primary_keys_indices));
+        let tuple_builder = TupleBuilder::new(column_types, Some(table.primary_key_indices()));
         let mut size = 0_usize;
 
         for record in reader.records() {

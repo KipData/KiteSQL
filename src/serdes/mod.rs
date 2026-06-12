@@ -22,6 +22,7 @@ mod data_value;
 mod evaluator;
 mod function;
 mod hasher;
+mod index;
 mod num;
 mod option;
 mod pair;

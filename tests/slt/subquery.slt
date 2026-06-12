@@ -283,7 +283,7 @@ where exists (
     select 1 from orders where orders.user_id = users.id
 );
 ----
-Columns: #39=users.id, #40=users.age, #44=orders.id, #45=orders.user_id, #46=orders.amount, #48=_temp_table_0_.true Projection [#39] [Project => (Sort Option: Follow)] Filter #48, Is Having: false [Filter => (Sort Option: Follow)] MarkExistsApply TableScan users -> [#39, #40] [SeqScan => (Sort Option: None)] TableScan orders -> [#44, #45, #46] [IndexScan By orders_user_id_index => Probe ? => (Sort Option: OrderBy: (#45 Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [#1] [Project => (Sort Option: Follow)] Filter #15, Is Having: false [Filter => (Sort Option: Follow)] MarkExistsApply TableScan users -> [#1, #2] [SeqScan => (Sort Option: None)] TableScan orders -> [#3, #4, #5] [IndexScan By orders_user_id_index => Probe ? => (Sort Option: OrderBy: (#4 Asc Nulls Last) ignore_prefix_len: 0)]
 
 query I rowsort
 select id from users

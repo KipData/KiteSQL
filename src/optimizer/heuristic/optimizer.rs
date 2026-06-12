@@ -157,6 +157,9 @@ impl<'a> HepOptimizer<'a> {
                 for rule in &pass.rules {
                     applied |= rule.apply(plan, arena)?;
                 }
+                if applied {
+                    plan.reset_output_schema_cache_recursive();
+                }
                 Ok(applied)
             }
             WholeTreePassKind::ExpressionRewrite => {
@@ -175,6 +178,7 @@ impl<'a> HepOptimizer<'a> {
                     has_evaluator_bind,
                     arena,
                 )?;
+                plan.reset_output_schema_cache_recursive();
                 Ok(true)
             }
         }
@@ -260,7 +264,7 @@ impl<'a> HepOptimizer<'a> {
             } else {
                 let mut best_physical_option: BestPhysicalOption = None;
                 for rule in implementation_index.for_matching_operator(operator) {
-                    rule.update_best_option(operator, loader, &mut best_physical_option)?;
+                    rule.update_best_option(operator, arena, loader, &mut best_physical_option)?;
                 }
                 if let Some((option, _)) = best_physical_option {
                     *physical_option = Some(option);
@@ -419,6 +423,7 @@ impl<'a> HepOptimizer<'a> {
             if applied_rule {
                 applied_rules[idx] = true;
                 applied = true;
+                plan.reset_output_schema_cache_recursive();
             }
         }
 
@@ -427,6 +432,9 @@ impl<'a> HepOptimizer<'a> {
                 let child_applied =
                     Self::apply_local_rules_inner(child, rules, applied_rules, arena)?;
                 applied |= child_applied;
+                if child_applied {
+                    plan.reset_output_schema_cache();
+                }
             }
             Childrens::Twins { left, right } => {
                 let left_applied =
@@ -434,6 +442,9 @@ impl<'a> HepOptimizer<'a> {
                 let right_applied =
                     Self::apply_local_rules_inner(right, rules, applied_rules, arena)?;
                 applied |= left_applied || right_applied;
+                if left_applied || right_applied {
+                    plan.reset_output_schema_cache();
+                }
             }
             Childrens::None => {}
         }
@@ -697,6 +708,16 @@ mod tests {
             &mut plan_arena,
         )?;
 
+        let expected_index_meta = plan_arena.alloc_index(IndexMeta {
+            id: 0,
+            column_ids: vec![plan_arena.column(c1_column).id().unwrap()],
+            table_name: "t1".to_string().into(),
+            pk_ty: LogicalType::Integer,
+            value_ty: LogicalType::Integer,
+            name: "pk_index".to_string(),
+            ty: IndexType::PrimaryKey { is_multiple: false },
+        });
+
         assert_eq!(
             best_plan
                 .childrens
@@ -709,15 +730,7 @@ mod tests {
                 .physical_option,
             Some(PhysicalOption::new(
                 PlanImpl::IndexScan(Box::new(IndexInfo {
-                    meta: Arc::new(IndexMeta {
-                        id: 0,
-                        column_ids: vec![plan_arena.column(c1_column).id().unwrap()],
-                        table_name: "t1".to_string().into(),
-                        pk_ty: LogicalType::Integer,
-                        value_ty: LogicalType::Integer,
-                        name: "pk_index".to_string(),
-                        ty: IndexType::PrimaryKey { is_multiple: false },
-                    }),
+                    meta: expected_index_meta,
                     sort_option: SortOption::OrderBy {
                         fields: sort_fields.clone(),
                         ignore_prefix_len: 0,

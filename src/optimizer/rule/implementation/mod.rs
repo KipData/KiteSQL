@@ -240,115 +240,167 @@ impl ImplementationRule for ImplementationRuleImpl {
     fn update_best_option(
         &self,
         operator: &Operator,
+        arena: &crate::planner::PlanArena,
         loader: &StatisticMetaLoader<'_>,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
         match self {
             ImplementationRuleImpl::GroupByAggregate => GroupByAggregateImplementation
-                .update_best_option(operator, loader, best_physical_option)?,
+                .update_best_option(operator, arena, loader, best_physical_option)?,
             ImplementationRuleImpl::SimpleAggregate => SimpleAggregateImplementation
-                .update_best_option(operator, loader, best_physical_option)?,
-            ImplementationRuleImpl::Dummy => {
-                DummyImplementation.update_best_option(operator, loader, best_physical_option)?
-            }
-            ImplementationRuleImpl::Filter => {
-                FilterImplementation.update_best_option(operator, loader, best_physical_option)?
-            }
-            ImplementationRuleImpl::HashJoin => {
-                JoinImplementation.update_best_option(operator, loader, best_physical_option)?
-            }
-            ImplementationRuleImpl::Limit => {
-                LimitImplementation.update_best_option(operator, loader, best_physical_option)?
-            }
+                .update_best_option(operator, arena, loader, best_physical_option)?,
+            ImplementationRuleImpl::Dummy => DummyImplementation.update_best_option(
+                operator,
+                arena,
+                loader,
+                best_physical_option,
+            )?,
+            ImplementationRuleImpl::Filter => FilterImplementation.update_best_option(
+                operator,
+                arena,
+                loader,
+                best_physical_option,
+            )?,
+            ImplementationRuleImpl::HashJoin => JoinImplementation.update_best_option(
+                operator,
+                arena,
+                loader,
+                best_physical_option,
+            )?,
+            ImplementationRuleImpl::Limit => LimitImplementation.update_best_option(
+                operator,
+                arena,
+                loader,
+                best_physical_option,
+            )?,
             ImplementationRuleImpl::MarkApply => MarkApplyImplementation.update_best_option(
                 operator,
+                arena,
                 loader,
                 best_physical_option,
             )?,
             ImplementationRuleImpl::Projection => ProjectionImplementation.update_best_option(
                 operator,
+                arena,
                 loader,
                 best_physical_option,
             )?,
             ImplementationRuleImpl::ScalarApply => ScalarApplyImplementation.update_best_option(
                 operator,
+                arena,
                 loader,
                 best_physical_option,
             )?,
             ImplementationRuleImpl::ScalarSubquery => ScalarSubqueryImplementation
-                .update_best_option(operator, loader, best_physical_option)?,
-            ImplementationRuleImpl::SeqScan => {
-                SeqScanImplementation.update_best_option(operator, loader, best_physical_option)?
-            }
+                .update_best_option(operator, arena, loader, best_physical_option)?,
+            ImplementationRuleImpl::SeqScan => SeqScanImplementation.update_best_option(
+                operator,
+                arena,
+                loader,
+                best_physical_option,
+            )?,
             ImplementationRuleImpl::IndexScan => IndexScanImplementation.update_best_option(
                 operator,
+                arena,
                 loader,
                 best_physical_option,
             )?,
             ImplementationRuleImpl::FunctionScan => FunctionScanImplementation.update_best_option(
                 operator,
+                arena,
                 loader,
                 best_physical_option,
             )?,
-            ImplementationRuleImpl::Sort => {
-                SortImplementation.update_best_option(operator, loader, best_physical_option)?
-            }
-            ImplementationRuleImpl::TopK => {
-                TopKImplementation.update_best_option(operator, loader, best_physical_option)?
-            }
-            ImplementationRuleImpl::Values => {
-                ValuesImplementation.update_best_option(operator, loader, best_physical_option)?
-            }
+            ImplementationRuleImpl::Sort => SortImplementation.update_best_option(
+                operator,
+                arena,
+                loader,
+                best_physical_option,
+            )?,
+            ImplementationRuleImpl::TopK => TopKImplementation.update_best_option(
+                operator,
+                arena,
+                loader,
+                best_physical_option,
+            )?,
+            ImplementationRuleImpl::Values => ValuesImplementation.update_best_option(
+                operator,
+                arena,
+                loader,
+                best_physical_option,
+            )?,
             ImplementationRuleImpl::CopyFromFile => CopyFromFileImplementation.update_best_option(
                 operator,
+                arena,
                 loader,
                 best_physical_option,
             )?,
             ImplementationRuleImpl::CopyToFile => CopyToFileImplementation.update_best_option(
                 operator,
+                arena,
                 loader,
                 best_physical_option,
             )?,
-            ImplementationRuleImpl::Delete => {
-                DeleteImplementation.update_best_option(operator, loader, best_physical_option)?
-            }
-            ImplementationRuleImpl::Insert => {
-                InsertImplementation.update_best_option(operator, loader, best_physical_option)?
-            }
-            ImplementationRuleImpl::Update => {
-                UpdateImplementation.update_best_option(operator, loader, best_physical_option)?
-            }
+            ImplementationRuleImpl::Delete => DeleteImplementation.update_best_option(
+                operator,
+                arena,
+                loader,
+                best_physical_option,
+            )?,
+            ImplementationRuleImpl::Insert => InsertImplementation.update_best_option(
+                operator,
+                arena,
+                loader,
+                best_physical_option,
+            )?,
+            ImplementationRuleImpl::Update => UpdateImplementation.update_best_option(
+                operator,
+                arena,
+                loader,
+                best_physical_option,
+            )?,
             ImplementationRuleImpl::AddColumn => AddColumnImplementation.update_best_option(
                 operator,
+                arena,
                 loader,
                 best_physical_option,
             )?,
             ImplementationRuleImpl::ChangeColumn => ChangeColumnImplementation.update_best_option(
                 operator,
+                arena,
                 loader,
                 best_physical_option,
             )?,
             ImplementationRuleImpl::CreateTable => CreateTableImplementation.update_best_option(
                 operator,
+                arena,
                 loader,
                 best_physical_option,
             )?,
             ImplementationRuleImpl::DropColumn => DropColumnImplementation.update_best_option(
                 operator,
+                arena,
                 loader,
                 best_physical_option,
             )?,
             ImplementationRuleImpl::DropTable => DropTableImplementation.update_best_option(
                 operator,
+                arena,
                 loader,
                 best_physical_option,
             )?,
-            ImplementationRuleImpl::Truncate => {
-                TruncateImplementation.update_best_option(operator, loader, best_physical_option)?
-            }
-            ImplementationRuleImpl::Analyze => {
-                AnalyzeImplementation.update_best_option(operator, loader, best_physical_option)?
-            }
+            ImplementationRuleImpl::Truncate => TruncateImplementation.update_best_option(
+                operator,
+                arena,
+                loader,
+                best_physical_option,
+            )?,
+            ImplementationRuleImpl::Analyze => AnalyzeImplementation.update_best_option(
+                operator,
+                arena,
+                loader,
+                best_physical_option,
+            )?,
         }
 
         Ok(())

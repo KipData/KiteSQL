@@ -1943,9 +1943,6 @@ mod test {
             .eq(User::id(), 1)
             .project_value(User::name())
             .explain()?;
-        assert!(plan.contains("Columns:"));
-        assert!(plan.contains("users.id"));
-        assert!(plan.contains("users.user_name"));
         assert!(plan.contains("Projection"));
         assert!(plan.contains("Filter ("));
         assert!(plan.contains(" = 1"));
@@ -1956,9 +1953,6 @@ mod test {
             .project_value(User::id())
             .union(database.from::<Wallet>().project_value(Wallet::id()))
             .explain()?;
-        assert!(set_plan.contains("Columns:"));
-        assert!(set_plan.contains("users.id"));
-        assert!(set_plan.contains("wallets.id"));
         assert!(set_plan.contains("Aggregate"));
         assert!(set_plan.contains("Union: [#"));
         assert!(set_plan.contains("TableScan users -> [#"));

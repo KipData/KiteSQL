@@ -1004,7 +1004,7 @@ mod tests {
     use crate::errors::DatabaseError;
     use crate::optimizer::core::histogram::HistogramBuilder;
     use crate::optimizer::core::statistics_meta::StatisticsMeta;
-    use crate::planner::{PlanArena, SchemaSlot, TableArenaCell};
+    use crate::planner::{PlanArena, TableArenaCell};
     use crate::serdes::ReferenceTables;
     use crate::storage::rocksdb::RocksTransaction;
     use crate::storage::table_codec::{Bytes, TableCodec};
@@ -1259,10 +1259,8 @@ mod tests {
         let table_functions = Default::default();
         let build_view = |name: &str, sql: &str| -> Result<(View, PlanArena<'_>), DatabaseError> {
             let mut plan_arena = PlanArena::new(&table_state.table_arena);
-            let plan = table_state.plan_with_arena(sql, &mut plan_arena)?;
-            let schema = plan
-                .output_schema_to(&mut plan_arena, SchemaSlot::S0)
-                .clone();
+            let mut plan = table_state.plan_with_arena(sql, &mut plan_arena)?;
+            let schema = plan.output_schema(&mut plan_arena).clone();
             Ok((
                 View {
                     name: name.to_string().into(),

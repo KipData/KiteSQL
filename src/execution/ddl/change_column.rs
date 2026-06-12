@@ -81,6 +81,7 @@ impl ChangeColumn {
             let affected_index_name = old_column_id.and_then(|column_id| {
                 table_catalog
                     .indexes()
+                    .map(|index_meta| plan_arena.index(*index_meta))
                     .find(|index_meta| index_meta.column_ids.contains(&column_id))
                     .map(|index_meta| index_meta.name.clone())
             });

@@ -25,12 +25,25 @@ use kite_sql_serde_macros::ReferenceSerialization;
 use std::collections::Bound;
 use std::fmt;
 use std::fmt::Formatter;
-use std::sync::Arc;
 
 pub type IndexId = u32;
-pub type IndexMetaRef = Arc<IndexMeta>;
 
 pub const INDEX_ID_LEN: usize = 4;
+
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
+pub struct IndexMetaRef {
+    pos: usize,
+}
+
+impl IndexMetaRef {
+    pub(crate) fn new(pos: usize) -> Self {
+        Self { pos }
+    }
+
+    pub(crate) fn pos(self) -> usize {
+        self.pos
+    }
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, ReferenceSerialization)]
 pub enum IndexType {
@@ -138,5 +151,11 @@ impl fmt::Display for IndexInfo {
 impl fmt::Display for IndexMeta {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "{}", self.name)
+    }
+}
+
+impl fmt::Display for IndexMetaRef {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "#{}", self.pos)
     }
 }

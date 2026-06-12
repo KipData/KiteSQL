@@ -18,7 +18,7 @@ use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ReadExecutionContext, ReadExecutor,
 };
 use crate::planner::operator::copy_to_file::CopyToFileOperator;
-use crate::planner::{LogicalPlan, SchemaSlot};
+use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
 use itertools::Itertools;
@@ -49,16 +49,12 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for CopyToFile {
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        self.column_names = self.input_plan.with_output_schema_to(
-            plan_arena,
-            SchemaSlot::S0,
-            |plan_arena, input_schema| {
-                input_schema
-                    .iter()
-                    .map(|column| plan_arena.column(*column).name().to_string())
-                    .collect_vec()
-            },
-        );
+        self.column_names = self
+            .input_plan
+            .take_schema(plan_arena)
+            .into_iter()
+            .map(|column| plan_arena.column(column).name().to_string())
+            .collect_vec();
         self.input = Some(build_read(
             arena,
             plan_arena,
@@ -169,7 +165,12 @@ mod tests {
 
         let executor = CopyToFile {
             op: op.clone(),
-            input_plan: TableScanOperator::build("t1".to_string().into(), table, true)?,
+            input_plan: TableScanOperator::build(
+                "t1".to_string().into(),
+                table,
+                true,
+                &plan_arena,
+            )?,
             column_names: Default::default(),
             input: None,
         };

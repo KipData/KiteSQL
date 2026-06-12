@@ -141,7 +141,7 @@ impl NormalizationRule for SimplifyFilter {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use crate::binder::test::build_t1_table;
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation, ColumnSummary};
+
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::{Range, RangeDetacher};
     use crate::expression::{BinaryOperator, ScalarExpression, UnaryOperator};

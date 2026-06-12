@@ -12,25 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::{Range, RangeDetacher};
 use crate::expression::visitor_mut::{PositionShift, VisitorMut};
 use crate::expression::{BinaryOperator, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
-use crate::optimizer::plan_utils::{
-    left_child, replace_with_only_child, right_child, wrap_child_with,
-};
+use crate::optimizer::plan_utils::{replace_with_only_child, wrap_child_with};
 use crate::planner::operator::filter::FilterOperator;
 use crate::planner::operator::join::{JoinCondition, JoinType};
 use crate::planner::operator::{Operator, SortOption};
-use crate::planner::{Childrens, LogicalPlan, SchemaSlot};
+use crate::planner::{Childrens, LogicalPlan};
 use crate::types::index::{IndexInfo, IndexLookup, IndexMetaRef, IndexType};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use itertools::Itertools;
 use std::ops::Bound;
 use std::{mem, slice};
+
+const EMPTY_SCHEMA: [crate::catalog::ColumnRef; 0] = [];
 
 fn split_conjunctive_predicates(expr: &ScalarExpression) -> Vec<ScalarExpression> {
     match expr {
@@ -64,13 +63,6 @@ fn reduce_filters(filters: Vec<ScalarExpression>, having: bool) -> Option<Filter
             is_optimized: false,
             having,
         })
-}
-
-fn plan_output_columns(
-    plan: &LogicalPlan,
-    arena: &mut crate::planner::PlanArena,
-) -> Vec<ColumnRef> {
-    plan.output_schema_to(arena, SchemaSlot::S0).clone()
 }
 
 fn localize_right_filters(
@@ -124,43 +116,47 @@ impl NormalizationRule for PushPredicateThroughJoin {
             };
             let join_plan = join_plan.as_mut();
 
-            let join_op = match &join_plan.operator {
-                Operator::Join(op) => op,
+            let join_type = match &join_plan.operator {
+                Operator::Join(op) => op.join_type,
                 _ => return Ok(false),
             };
 
             if !matches!(
-                join_op.join_type,
+                join_type,
                 JoinType::Inner | JoinType::LeftOuter | JoinType::RightOuter
             ) {
                 return Ok(false);
             }
 
-            let left_columns = left_child(join_plan)
-                .map(|plan| plan_output_columns(plan, arena))
-                .unwrap_or_default();
-            let right_columns = right_child(join_plan)
-                .map(|plan| plan_output_columns(plan, arena))
-                .unwrap_or_default();
-
             let filter_exprs = split_conjunctive_predicates(&filter_op.predicate);
+            let left_columns: &[crate::catalog::ColumnRef] = match join_plan.childrens.as_mut() {
+                Childrens::Only(left) => left.output_schema(arena),
+                Childrens::Twins { left, .. } => left.output_schema(arena),
+                Childrens::None => &EMPTY_SCHEMA,
+            };
             let (left_filters, rest): (Vec<_>, Vec<_>) = filter_exprs.into_iter().partition(|f| {
                 f.all_referenced_columns(arena, |_, column| left_columns.contains(column))
             });
+            let left_len = left_columns.len();
+
+            let right_columns: &[crate::catalog::ColumnRef] = match join_plan.childrens.as_mut() {
+                Childrens::Twins { right, .. } => right.output_schema(arena),
+                _ => &EMPTY_SCHEMA,
+            };
             let (right_filters, common_filters): (Vec<_>, Vec<_>) =
                 rest.into_iter().partition(|f| {
                     f.all_referenced_columns(arena, |_, column| right_columns.contains(column))
                 });
 
             let mut new_ops = (None, None, None);
-            let replace_filters = match join_op.join_type {
+            let replace_filters = match join_type {
                 JoinType::Inner => {
                     if let Some(left_filter_op) = reduce_filters(left_filters, filter_op.having) {
                         new_ops.0 = Some(Operator::Filter(left_filter_op));
                     }
 
                     let mut right_filters = right_filters;
-                    localize_right_filters(&mut right_filters, left_columns.len())?;
+                    localize_right_filters(&mut right_filters, left_len)?;
                     if let Some(right_filter_op) = reduce_filters(right_filters, filter_op.having) {
                         new_ops.1 = Some(Operator::Filter(right_filter_op));
                     }
@@ -179,7 +175,7 @@ impl NormalizationRule for PushPredicateThroughJoin {
                 }
                 JoinType::RightOuter => {
                     let mut right_filters = right_filters;
-                    localize_right_filters(&mut right_filters, left_columns.len())?;
+                    localize_right_filters(&mut right_filters, left_len)?;
                     if let Some(right_filter_op) = reduce_filters(right_filters, filter_op.having) {
                         new_ops.1 = Some(Operator::Filter(right_filter_op));
                     }
@@ -264,16 +260,19 @@ impl NormalizationRule for PushPredicateIntoScan {
             else {
                 return Err(DatabaseError::InvalidIndex);
             };
-            *lookup = match meta.ty {
+            let index_meta = arena.index(*meta);
+            *lookup = match index_meta.ty {
                 IndexType::PrimaryKey { is_multiple: false }
                 | IndexType::Unique
-                | IndexType::Normal => {
-                    RangeDetacher::new(meta.table_name.as_ref(), &meta.column_ids[0], arena)
-                        .detach(&filter_op.predicate)?
-                        .map(IndexLookup::Static)
-                }
+                | IndexType::Normal => RangeDetacher::new(
+                    index_meta.table_name.as_ref(),
+                    &index_meta.column_ids[0],
+                    arena,
+                )
+                .detach(&filter_op.predicate)?
+                .map(IndexLookup::Static),
                 IndexType::PrimaryKey { is_multiple: true } | IndexType::Composite => {
-                    Self::composite_range(filter_op, meta, ignore_prefix_len, arena)?
+                    Self::composite_range(filter_op, *meta, ignore_prefix_len, arena)?
                         .map(IndexLookup::Static)
                 }
             };
@@ -288,13 +287,14 @@ impl NormalizationRule for PushPredicateIntoScan {
             // try index covered
             let mut mapping_slots = vec![usize::MAX; scan_op.columns.len()];
             let mut needs_mapping = false;
-            let index_column_types = match &meta.value_ty {
+            let index_meta = arena.index(*meta);
+            let index_column_types = match &index_meta.value_ty {
                 LogicalType::Tuple(tys) => tys,
                 ty => slice::from_ref(ty),
             };
-            let mut deserializers = Vec::with_capacity(meta.column_ids.len());
+            let mut deserializers = Vec::with_capacity(index_meta.column_ids.len());
 
-            for (idx, column_id) in meta.column_ids.iter().enumerate() {
+            for (idx, column_id) in index_meta.column_ids.iter().enumerate() {
                 if let Some((scan_idx, column)) =
                     scan_op.columns.iter().enumerate().find(|(_, column)| {
                         arena
@@ -327,10 +327,11 @@ impl NormalizationRule for PushPredicateIntoScan {
 impl PushPredicateIntoScan {
     fn composite_range(
         op: &FilterOperator,
-        meta: &mut IndexMetaRef,
+        meta: IndexMetaRef,
         ignore_prefix_len: &mut usize,
         arena: &crate::planner::PlanArena,
     ) -> Result<Option<Range>, DatabaseError> {
+        let meta = arena.index(meta);
         let mut res = None;
         let mut eq_ranges = Vec::with_capacity(meta.column_ids.len());
         let mut apply_column_count = 0;
@@ -410,17 +411,21 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
             (join_op.join_type, filter_expr)
         };
 
-        let left_columns = left_child(plan)
-            .map(|plan| plan_output_columns(plan, arena))
-            .unwrap_or_default();
-        let right_columns = right_child(plan)
-            .map(|plan| plan_output_columns(plan, arena))
-            .unwrap_or_default();
-
         let filter_exprs = split_conjunctive_predicates(&filter_expr);
+        let left_columns: &[crate::catalog::ColumnRef] = match plan.childrens.as_mut() {
+            Childrens::Only(left) => left.output_schema(arena),
+            Childrens::Twins { left, .. } => left.output_schema(arena),
+            Childrens::None => &EMPTY_SCHEMA,
+        };
         let (left_filters, rest): (Vec<_>, Vec<_>) = filter_exprs.into_iter().partition(|expr| {
             expr.all_referenced_columns(arena, |_, column| left_columns.contains(column))
         });
+        let left_len = left_columns.len();
+
+        let right_columns: &[crate::catalog::ColumnRef] = match plan.childrens.as_mut() {
+            Childrens::Twins { right, .. } => right.output_schema(arena),
+            _ => &EMPTY_SCHEMA,
+        };
         let (right_filters, common_filters): (Vec<_>, Vec<_>) =
             rest.into_iter().partition(|expr| {
                 expr.all_referenced_columns(arena, |_, column| right_columns.contains(column))
@@ -452,7 +457,7 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
         } else {
             (Vec::new(), right_filters)
         };
-        localize_right_filters(&mut right_push, left_columns.len())?;
+        localize_right_filters(&mut right_push, left_len)?;
         if let Some(filter_op) = reduce_filters(right_push, false) {
             new_ops.1 = Some(Operator::Filter(filter_op));
         } else {
@@ -492,7 +497,6 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use std::sync::Arc;
 
     use crate::binder::test::build_t1_table;
     use crate::catalog::{ColumnCatalog, ColumnDesc, TableName};
@@ -599,7 +603,7 @@ mod tests {
 
         let columns = vec![c1_ref.clone(), c2_ref.clone()];
 
-        let index_meta_reordered = Arc::new(IndexMeta {
+        let index_meta_reordered = arena.alloc_index(IndexMeta {
             id: 0,
             column_ids: vec![c2_id, c3_id, c1_id],
             table_name: table_name.clone(),
@@ -612,7 +616,7 @@ mod tests {
             name: "idx_c2_c3_c1".to_string(),
             ty: IndexType::Composite,
         });
-        let index_meta_aligned = Arc::new(IndexMeta {
+        let index_meta_aligned = arena.alloc_index(IndexMeta {
             id: 1,
             column_ids: vec![c1_id, c2_id],
             table_name: table_name.clone(),

@@ -63,7 +63,7 @@ impl BackendControl for DualBackend {
 }
 
 impl SimpleExecutor for DualBackend {
-    fn execute_batch(&self, sql: &str) -> Result<(), TpccError> {
+    fn execute_batch(&mut self, sql: &str) -> Result<(), TpccError> {
         self.kitesql.execute_batch(sql)?;
         if let Some(stmt) = normalize_sqlite_sql(sql) {
             self.sqlite.execute_batch(&stmt)?;

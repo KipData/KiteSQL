@@ -59,6 +59,7 @@ pub trait ImplementationRule: MatchPattern {
     fn update_best_option(
         &self,
         op: &Operator,
+        arena: &PlanArena,
         loader: &StatisticMetaLoader<'_>,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError>;

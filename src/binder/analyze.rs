@@ -24,7 +24,11 @@ use crate::types::value::DataValue;
 use sqlparser::ast::ObjectName;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
-    pub(crate) fn bind_analyze(&mut self, name: &ObjectName) -> Result<LogicalPlan, DatabaseError> {
+    pub(crate) fn bind_analyze(
+        &mut self,
+        name: &ObjectName,
+        arena: &crate::planner::PlanArena,
+    ) -> Result<LogicalPlan, DatabaseError> {
         let table_name: TableName = lower_case_name(name)?.into();
 
         let table = self
@@ -40,7 +44,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             .ok_or(DatabaseError::TableNotFound)?;
         let index_metas = table.indexes.clone();
 
-        let scan_op = TableScanOperator::build(table_name.clone(), table, false)?;
+        let scan_op = TableScanOperator::build(table_name.clone(), table, false, arena)?;
         Ok(LogicalPlan::new(
             Operator::Analyze(AnalyzeOperator {
                 table_name,

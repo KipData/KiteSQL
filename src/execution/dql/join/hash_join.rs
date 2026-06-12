@@ -26,7 +26,7 @@ use crate::execution::{
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
-use crate::planner::{LogicalPlan, SchemaSlot};
+use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
@@ -231,14 +231,8 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
         cache: ReadExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let left_schema_len = self
-            .left_input_plan
-            .output_schema_to(plan_arena, SchemaSlot::S0)
-            .len();
-        let right_schema_len = self
-            .right_input_plan
-            .output_schema_to(plan_arena, SchemaSlot::S0)
-            .len();
+        let left_schema_len = self.left_input_plan.output_schema(plan_arena).len();
+        let right_schema_len = self.right_input_plan.output_schema(plan_arena).len();
         self.left_schema_len = left_schema_len;
         self.right_schema_len = right_schema_len;
         self.left_input = build_read(
@@ -394,7 +388,7 @@ impl HashJoin {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
+    use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
     use crate::execution::dql::join::hash_join::HashJoin;
     use crate::execution::dql::test::build_integers;
@@ -454,8 +448,8 @@ mod test {
             ScalarExpression::column_expr(t2_columns[0].clone(), 0),
         )];
 
-        let values_t1 = LogicalPlan {
-            operator: Operator::Values(ValuesOperator {
+        let values_t1 = LogicalPlan::new(
+            Operator::Values(ValuesOperator {
                 rows: vec![
                     vec![
                         DataValue::Int32(0),
@@ -475,12 +469,11 @@ mod test {
                 ],
                 schema_ref: t1_columns,
             }),
-            childrens: Box::new(Childrens::None),
-            physical_option: None,
-        };
+            Childrens::None,
+        );
 
-        let values_t2 = LogicalPlan {
-            operator: Operator::Values(ValuesOperator {
+        let values_t2 = LogicalPlan::new(
+            Operator::Values(ValuesOperator {
                 rows: vec![
                     vec![
                         DataValue::Int32(0),
@@ -505,9 +498,8 @@ mod test {
                 ],
                 schema_ref: t2_columns,
             }),
-            childrens: Box::new(Childrens::None),
-            physical_option: None,
-        };
+            Childrens::None,
+        );
 
         (on_keys, values_t1, values_t2)
     }
@@ -724,25 +716,23 @@ mod test {
             ty: LogicalType::Boolean,
         };
 
-        let left = LogicalPlan {
-            operator: Operator::Values(ValuesOperator {
+        let left = LogicalPlan::new(
+            Operator::Values(ValuesOperator {
                 rows: vec![
                     vec![DataValue::Int32(2), DataValue::Int32(0)],
                     vec![DataValue::Int32(2), DataValue::Int32(5)],
                 ],
                 schema_ref: left_columns,
             }),
-            childrens: Box::new(Childrens::None),
-            physical_option: None,
-        };
-        let right = LogicalPlan {
-            operator: Operator::Values(ValuesOperator {
+            Childrens::None,
+        );
+        let right = LogicalPlan::new(
+            Operator::Values(ValuesOperator {
                 rows: vec![vec![DataValue::Int32(2)]],
                 schema_ref: right_columns,
             }),
-            childrens: Box::new(Childrens::None),
-            physical_option: None,
-        };
+            Childrens::None,
+        );
 
         let plan = LogicalPlan::new(
             Operator::Join(JoinOperator {

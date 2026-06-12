@@ -25,6 +25,7 @@ macro_rules! single_mapping {
             fn update_best_option(
                 &self,
                 _: &Operator,
+                _: &$crate::planner::PlanArena,
                 _: &StatisticMetaLoader<'_>,
                 best_physical_option: &mut BestPhysicalOption,
             ) -> Result<(), DatabaseError> {
