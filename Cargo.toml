@@ -42,7 +42,6 @@ required-features = ["pprof"]
 
 [dependencies]
 ahash                 = { version = "0.8" }
-bincode               = { version = "1" }
 bumpalo               = { version = "3", features = ["allocator-api2", "collections", "std"] }
 byteorder             = { version = "1" }
 chrono                = { version = "0.4" }
@@ -50,17 +49,16 @@ comfy-table           = { version = "7", default-features = false }
 csv                   = { version = "1" }
 fixedbitset           = { version = "0.4" }
 itertools             = { version = "0.12" }
-ordered-float         = { version = "4", features = ["serde"] }
+ordered-float         = { version = "4" }
 paste                 = { version = "1" }
 pyo3                  = { version = "0.23", features = ["auto-initialize"], optional = true }
 recursive             = { version = "0.1" }
-rust_decimal          = { version = "1" }
-serde                 = { version = "1", features = ["derive", "rc"] }
+rust_decimal          = { version = "1", default-features = false, features = ["std"] }
 kite_sql_serde_macros = { version = "0.2.0", path = "kite_sql_serde_macros" }
-siphasher             = { version = "1", features = ["serde"] }
+siphasher             = { version = "1" }
 sqlparser             = { version = "0.61", default-features = false, features = ["std"] }
 thiserror             = { version = "1" }
-ulid                  = { version = "1", features = ["serde"] }
+ulid                  = { version = "1" }
 
 [target.'cfg(unix)'.dev-dependencies]
 pprof = { version = "0.15", features = ["flamegraph", "criterion"] }
@@ -89,7 +87,6 @@ base64              = { version = "0.21" }
 getrandom           = { version = "0.2", features = ["js"] }
 getrandom_03        = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 js-sys              = { version = "0.3.83" }
-serde-wasm-bindgen  = { version = "0.6.5" }
 once_cell           = { version = "1" }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]

@@ -13,33 +13,62 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::implement_serialization_by_bincode;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use crate::storage::Transaction;
+use std::io::{Read, Write};
 use std::sync::Arc;
 
-implement_serialization_by_bincode!(String);
-
-impl ReferenceSerialization for Arc<str> {
-    fn encode<W: std::io::Write, A: crate::planner::MetaArena>(
+impl ReferenceSerialization for String {
+    fn encode<W: Write, A: crate::planner::MetaArena>(
         &self,
         writer: &mut W,
-        _: bool,
-        _: &mut ReferenceTables,
-        _: &A,
+        is_direct: bool,
+        reference_tables: &mut ReferenceTables,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        bincode::serialize_into(writer, self)?;
+        self.len()
+            .encode(writer, is_direct, reference_tables, arena)?;
+        writer.write_all(self.as_bytes())?;
 
         Ok(())
     }
 
-    fn decode<T: Transaction, R: std::io::Read, A: crate::planner::MetaArena>(
+    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
         reader: &mut R,
-        _: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
-        _: &ReferenceTables,
-        _: &mut A,
+        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
+        reference_tables: &ReferenceTables,
+        arena: &mut A,
     ) -> Result<Self, DatabaseError> {
-        let str: String = bincode::deserialize_from(reader)?;
+        let len = usize::decode(reader, drive, reference_tables, arena)?;
+        let mut bytes = vec![0; len];
+        reader.read_exact(&mut bytes)?;
+
+        Ok(String::from_utf8(bytes)?)
+    }
+}
+
+impl ReferenceSerialization for Arc<str> {
+    fn encode<W: Write, A: crate::planner::MetaArena>(
+        &self,
+        writer: &mut W,
+        is_direct: bool,
+        reference_tables: &mut ReferenceTables,
+        arena: &A,
+    ) -> Result<(), DatabaseError> {
+        self.len()
+            .encode(writer, is_direct, reference_tables, arena)?;
+        writer.write_all(self.as_bytes())?;
+
+        Ok(())
+    }
+
+    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
+        reader: &mut R,
+        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
+        reference_tables: &ReferenceTables,
+        arena: &mut A,
+    ) -> Result<Self, DatabaseError> {
+        let str = String::decode(reader, drive, reference_tables, arena)?;
         Ok(str.into())
     }
 }

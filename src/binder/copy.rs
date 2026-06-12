@@ -24,7 +24,6 @@ use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::Operator;
 use crate::planner::Childrens;
 use kite_sql_serde_macros::ReferenceSerialization;
-use serde::{Deserialize, Serialize};
 use sqlparser::ast::{CopyOption, CopySource, CopyTarget};
 
 #[derive(Debug, PartialEq, PartialOrd, Ord, Hash, Eq, Clone, ReferenceSerialization)]
@@ -34,18 +33,7 @@ pub struct ExtSource {
 }
 
 /// File format.
-#[derive(
-    Debug,
-    PartialEq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Eq,
-    Clone,
-    Serialize,
-    Deserialize,
-    ReferenceSerialization,
-)]
+#[derive(Debug, PartialEq, PartialOrd, Ord, Hash, Eq, Clone, ReferenceSerialization)]
 pub enum FileFormat {
     Csv {
         /// Delimiter to parse.

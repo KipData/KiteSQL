@@ -12,7 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::implement_serialization_by_bincode;
+use crate::errors::DatabaseError;
+use crate::serdes::{ReferenceSerialization, ReferenceTables};
+use crate::storage::Transaction;
 use std::path::PathBuf;
+use std::str::FromStr;
 
-implement_serialization_by_bincode!(PathBuf);
+impl ReferenceSerialization for PathBuf {
+    fn encode<W: std::io::Write, A: crate::planner::MetaArena>(
+        &self,
+        writer: &mut W,
+        is_direct: bool,
+        reference_tables: &mut ReferenceTables,
+        arena: &A,
+    ) -> Result<(), DatabaseError> {
+        self.to_str()
+            .ok_or_else(|| DatabaseError::InvalidValue("path is not valid utf8".to_string()))?
+            .to_string()
+            .encode(writer, is_direct, reference_tables, arena)
+    }
+
+    fn decode<T: Transaction, R: std::io::Read, A: crate::planner::MetaArena>(
+        reader: &mut R,
+        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
+        reference_tables: &ReferenceTables,
+        arena: &mut A,
+    ) -> Result<Self, DatabaseError> {
+        Ok(PathBuf::from_str(&String::decode(
+            reader,
+            drive,
+            reference_tables,
+            arena,
+        )?)?)
+    }
+}

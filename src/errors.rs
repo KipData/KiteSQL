@@ -56,12 +56,6 @@ fn format_not_null_message(column: &Option<String>, span: &Option<SqlErrorSpan>)
 pub enum DatabaseError {
     #[error("agg miss: {0}")]
     AggMiss(String),
-    #[error("bindcode: {0}")]
-    Bincode(
-        #[source]
-        #[from]
-        Box<bincode::ErrorKind>,
-    ),
     #[error("cache size overflow")]
     CacheSizeOverFlow,
     #[error(

@@ -96,13 +96,13 @@ impl MemComparableBuffer for Vec<u8> {
     }
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone)]
 pub enum Utf8Type {
     Variable(Option<u32>),
     Fixed(u32),
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone)]
 pub enum DataValue {
     Null,
     Boolean(bool),

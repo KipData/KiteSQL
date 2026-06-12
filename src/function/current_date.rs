@@ -21,11 +21,9 @@ use crate::types::tuple::TupleLike;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use chrono::{Datelike, Local};
-use serde::Deserialize;
-use serde::Serialize;
 use std::sync::Arc;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
 pub(crate) struct CurrentDate {
     summary: FunctionSummary,
 }

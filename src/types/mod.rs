@@ -21,7 +21,6 @@ pub mod value;
 
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
 use std::any::TypeId;
 use std::borrow::Cow;
 use std::cmp;
@@ -33,7 +32,7 @@ use ulid::Ulid;
 
 pub type ColumnId = Ulid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CharLengthUnits {
     Characters,
     Octets,
@@ -59,18 +58,7 @@ impl std::fmt::Display for CharLengthUnits {
 
 /// Sqlrs type conversion:
 /// sqlparser::ast::DataType -> LogicalType -> arrow::datatypes::DataType
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Hash,
-    PartialOrd,
-    Ord,
-    Serialize,
-    Deserialize,
-    ReferenceSerialization,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, ReferenceSerialization)]
 pub enum LogicalType {
     SqlNull,
     Boolean,

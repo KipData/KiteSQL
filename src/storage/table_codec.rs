@@ -403,7 +403,7 @@ impl TableCodec {
             }
 
             if let Some(tuple_id) = tuple_id {
-                bincode::serialize_into(&mut *value, tuple_id)?;
+                tuple_id.encode_reference_value(&mut *value)?;
             }
 
             f(lower.as_slice(), value.as_slice())
@@ -763,7 +763,7 @@ impl TableCodec {
     }
 
     pub fn decode_index(bytes: &[u8]) -> Result<TupleId, DatabaseError> {
-        Ok(bincode::deserialize_from(&mut Cursor::new(bytes))?)
+        DataValue::decode_reference_value(&mut Cursor::new(bytes))
     }
 
     fn encode_column_value_into(
@@ -1191,7 +1191,8 @@ mod tests {
     #[test]
     fn test_table_codec_index() -> Result<(), DatabaseError> {
         let tuple_id = DataValue::Int32(0);
-        let bytes = bincode::serialize(&tuple_id)?;
+        let mut bytes = Vec::new();
+        tuple_id.encode_reference_value(&mut bytes)?;
 
         assert_eq!(TableCodec::decode_index(&bytes)?, tuple_id);
 

@@ -42,7 +42,7 @@ pub mod simplify;
 pub mod visitor;
 pub mod visitor_mut;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrimWhereField {
     Both,
     Leading,

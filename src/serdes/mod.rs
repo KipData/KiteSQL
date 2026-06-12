@@ -43,38 +43,6 @@ use crate::storage::{TableCache, Transaction};
 use std::io;
 use std::io::{Read, Write};
 
-#[macro_export]
-macro_rules! implement_serialization_by_bincode {
-    ($struct_name:ident) => {
-        impl $crate::serdes::ReferenceSerialization for $struct_name {
-            fn encode<W: std::io::Write, A: $crate::planner::MetaArena>(
-                &self,
-                writer: &mut W,
-                _: bool,
-                _: &mut $crate::serdes::ReferenceTables,
-                _: &A,
-            ) -> Result<(), $crate::errors::DatabaseError> {
-                bincode::serialize_into(writer, self)?;
-
-                Ok(())
-            }
-
-            fn decode<
-                T: $crate::storage::Transaction,
-                R: std::io::Read,
-                A: $crate::planner::MetaArena,
-            >(
-                reader: &mut R,
-                _: Option<&$crate::serdes::ReferenceDecodeContext<'_, T>>,
-                _: &$crate::serdes::ReferenceTables,
-                _: &mut A,
-            ) -> Result<Self, $crate::errors::DatabaseError> {
-                Ok(bincode::deserialize_from(reader)?)
-            }
-        }
-    };
-}
-
 pub trait ReferenceSerialization {
     fn encode<W: Write, A: MetaArena>(
         &self,
