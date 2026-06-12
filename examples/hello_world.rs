@@ -47,7 +47,7 @@ mod app {
         pub c2: String,
     }
 
-    fn run_with_database<S: Storage>(database: Database<S>) -> Result<(), DatabaseError> {
+    fn run_with_database<S: Storage>(mut database: Database<S>) -> Result<(), DatabaseError> {
         database.create_table_if_not_exists::<MyStruct>()?;
         database.insert(&MyStruct {
             c1: 0,

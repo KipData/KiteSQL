@@ -3843,6 +3843,14 @@ impl<Q: StatementSource, M: Model, P> SubquerySource for SetQueryBuilder<Q, M, P
     }
 }
 
+impl private::Sealed for Query {}
+
+impl SubquerySource for Query {
+    fn into_subquery(self) -> Query {
+        self
+    }
+}
+
 impl<Q: StatementSource, M: Model> QueryOperand for FromBuilder<Q, M, ModelProjection> {
     type Source = Q;
     type Model = M;

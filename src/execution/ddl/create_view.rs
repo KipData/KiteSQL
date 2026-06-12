@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
+use crate::execution::{ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor};
 use crate::planner::operator::create_view::CreateViewOperator;
 use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
@@ -32,8 +32,8 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateView {
     fn into_executor(
         self,
         arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
+        _: ReadExecutionContext<'_>,
+        _: &T,
     ) -> ExecId {
         arena.push(ExecNode::CreateView(self))
     }
@@ -49,9 +49,9 @@ impl CreateView {
             return Ok(());
         };
         let view_name = view.name.to_string();
-        arena
-            .transaction_mut()
-            .create_view(arena.view_cache(), view, or_replace)?;
+        let (transaction, context) = arena.write_context_mut();
+        let view_cache = context.view_cache_mut();
+        transaction.create_view(view_cache, view, or_replace)?;
 
         TupleBuilder::build_result_into(arena.result_tuple_mut(), view_name);
         arena.resume();

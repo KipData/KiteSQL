@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
+use crate::execution::{ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor};
 use crate::planner::operator::drop_view::DropViewOperator;
 use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
@@ -32,8 +32,8 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropView {
     fn into_executor(
         self,
         arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
+        _: ReadExecutionContext<'_>,
+        _: &T,
     ) -> ExecId {
         arena.push(ExecNode::DropView(self))
     }
@@ -53,10 +53,9 @@ impl DropView {
             return Ok(());
         };
 
-        let view_cache = arena.view_cache();
-        arena
-            .transaction_mut()
-            .drop_view(view_cache, view_name.clone(), if_exists)?;
+        let (transaction, context) = arena.write_context_mut();
+        let view_cache = context.view_cache_mut();
+        transaction.drop_view(view_cache, view_name.clone(), if_exists)?;
 
         TupleBuilder::build_result_into(arena.result_tuple_mut(), format!("{view_name}"));
         arena.resume();

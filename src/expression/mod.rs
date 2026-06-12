@@ -873,17 +873,15 @@ mod test {
     use crate::function::current_date::CurrentDate;
     use crate::function::numbers::Numbers;
     use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
-    use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
+    use crate::storage::rocksdb::RocksStorage;
+    use crate::storage::rocksdb::RocksTransaction;
     use crate::storage::{Storage, Transaction};
     use crate::types::evaluator::{binary_create, cast_create, unary_create};
     use crate::types::value::{DataValue, Utf8Type};
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
-    use crate::utils::lru::SharedLruCache;
     use std::borrow::Cow;
-    use std::hash::RandomState;
     use std::io::{Cursor, Seek, SeekFrom};
-    use std::sync::Arc;
     use tempfile::TempDir;
 
     #[test]
@@ -941,14 +939,14 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let mut table_cache = crate::storage::TableCache::default();
         let mut scala_functions = ScalaFunctions::default();
         let current_date = CurrentDate::new();
         scala_functions.insert(current_date.summary().clone(), current_date);
         let mut table_functions = TableFunctions::default();
         let numbers = Numbers::new();
         table_functions.insert(numbers.summary().clone(), numbers);
-        build_table(&table_cache, &mut transaction)?;
+        build_table(&mut table_cache, &mut transaction)?;
 
         let mut cursor = Cursor::new(Vec::new());
         let mut reference_tables = ReferenceTables::new();

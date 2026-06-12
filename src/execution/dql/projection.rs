@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
+use crate::execution::{
+    build_read, ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext,
+};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::project::ProjectOperator;
 use crate::planner::LogicalPlan;
@@ -32,8 +34,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection {
     fn into_executor(
         (ProjectOperator { exprs }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        cache: ReadExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
         let input = build_read(arena, input, cache, transaction);
         arena.push(ExecNode::Projection(Projection { exprs, input }))

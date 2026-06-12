@@ -13,7 +13,7 @@ select value1 from alter_users order by id
 11
 22
 
-statement error
+statement ok
 alter table alter_users alter column value1 type int
 
 statement error

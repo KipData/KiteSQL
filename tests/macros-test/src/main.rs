@@ -25,7 +25,7 @@ mod test {
     use kite_sql::expression::function::FunctionSummary;
     use kite_sql::expression::BinaryOperator;
     use kite_sql::expression::ScalarExpression;
-    use kite_sql::orm::{case_when, count_all, func, max, min, sum, QueryValue};
+    use kite_sql::orm::{case_when, count_all, func, max, min, sum, QueryValue, SubquerySource};
     use kite_sql::storage::rocksdb::RocksStorage;
     use kite_sql::types::evaluator::binary_create;
     use kite_sql::types::tuple::{SchemaRef, Tuple};
@@ -309,11 +309,9 @@ mod test {
 
     #[test]
     fn test_result_iter_to_orm_iter() -> Result<(), DatabaseError> {
-        let (_temp_dir, database) = build_test_database()?;
+        let (_temp_dir, mut database) = build_test_database()?;
 
-        database
-            .run("create table users (c1 int primary key, c2 varchar, age int)")?
-            .done()?;
+        database.ddl("create table users (c1 int primary key, c2 varchar, age int)")?;
         database
             .run("insert into users values (1, 'Alice', 18), (2, 'Bob', null)")?
             .done()?;
@@ -346,7 +344,7 @@ mod test {
 
     #[test]
     fn test_model_decimal_ddl() -> Result<(), DatabaseError> {
-        let (_temp_dir, database) = build_test_database()?;
+        let (_temp_dir, mut database) = build_test_database()?;
 
         database.create_table::<Wallet>()?;
         for id in 1..=101 {
@@ -355,7 +353,7 @@ mod test {
                 balance: Decimal::new((id * 100) as i64, 2),
             })?;
         }
-        database.analyze::<Wallet>()?;
+        database.analyze_model::<Wallet>()?;
 
         let mut iter = database.run("describe wallets")?;
         let rows = iter.by_ref().collect::<Result<Vec<_>, _>>()?;
@@ -381,7 +379,7 @@ mod test {
 
     #[test]
     fn test_model_char_ddl() -> Result<(), DatabaseError> {
-        let (_temp_dir, database) = build_test_database()?;
+        let (_temp_dir, mut database) = build_test_database()?;
 
         database.create_table::<CountryCode>()?;
 
@@ -409,7 +407,7 @@ mod test {
 
     #[test]
     fn test_model_migrate() -> Result<(), DatabaseError> {
-        let (_temp_dir, database) = build_test_database()?;
+        let (_temp_dir, mut database) = build_test_database()?;
 
         database.create_table::<MigratingUserV1>()?;
         database.insert(&MigratingUserV1 {
@@ -469,12 +467,12 @@ mod test {
     #[test]
     fn test_orm_query_builder() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("create temp dir for ORM test");
-        let database = DataBaseBuilder::path(temp_dir.path())
+        let mut database = DataBaseBuilder::path(temp_dir.path())
             .register_scala_function(MyOrmFunction::new())
             .build_rocksdb()?;
 
         database.create_table::<User>()?;
-        database.run("drop index users.users_age_index")?.done()?;
+        database.ddl("drop index users.users_age_index")?;
         database.insert(&User {
             id: 1,
             name: "Alice".to_string(),
@@ -1008,7 +1006,7 @@ mod test {
 
     #[test]
     fn test_orm_expression_and_set_query_helpers() -> Result<(), DatabaseError> {
-        let (_temp_dir, database) = build_test_database()?;
+        let (_temp_dir, mut database) = build_test_database()?;
 
         database.create_table::<User>()?;
         database.insert(&User {
@@ -1384,7 +1382,7 @@ mod test {
 
     #[test]
     fn test_orm_group_by_builder() -> Result<(), DatabaseError> {
-        let (_temp_dir, database) = build_test_database()?;
+        let (_temp_dir, mut database) = build_test_database()?;
 
         database.create_table::<EventLog>()?;
         database.insert(&EventLog {
@@ -1505,12 +1503,12 @@ mod test {
 
     #[test]
     fn test_orm_model_lifecycle() -> Result<(), DatabaseError> {
-        let (_temp_dir, database) = build_test_database()?;
+        let (_temp_dir, mut database) = build_test_database()?;
 
         database.create_table::<User>()?;
-        database.run("drop index users.users_age_index")?.done()?;
+        database.ddl("drop index users.users_age_index")?;
         database.create_table_if_not_exists::<User>()?;
-        database.run("drop index users.users_age_index")?.done()?;
+        database.ddl("drop index users.users_age_index")?;
         database.create_table_if_not_exists::<User>()?;
 
         let user = User {
@@ -1545,7 +1543,7 @@ mod test {
                 cache: "".to_string(),
             })?;
         }
-        database.analyze::<User>()?;
+        database.analyze_model::<User>()?;
 
         let mut explain_iter = database.run("explain select age from users where age = 1050")?;
         let explain_rows = explain_iter.by_ref().collect::<Result<Vec<_>, _>>()?;
@@ -1613,7 +1611,7 @@ mod test {
 
     #[test]
     fn test_orm_update_delete_builder() -> Result<(), DatabaseError> {
-        let (_temp_dir, database) = build_test_database()?;
+        let (_temp_dir, mut database) = build_test_database()?;
         database.create_table::<User>()?;
 
         for (id, name, age) in [
@@ -1683,7 +1681,7 @@ mod test {
 
     #[test]
     fn test_orm_insert_query_builder() -> Result<(), DatabaseError> {
-        let (_temp_dir, database) = build_test_database()?;
+        let (_temp_dir, mut database) = build_test_database()?;
         database.create_table::<User>()?;
         database.create_table::<ArchivedUser>()?;
 
@@ -1766,7 +1764,7 @@ mod test {
 
     #[test]
     fn test_orm_extended_write_and_ddl_helpers() -> Result<(), DatabaseError> {
-        let (_temp_dir, database) = build_test_database()?;
+        let (_temp_dir, mut database) = build_test_database()?;
         database.create_table::<User>()?;
 
         database.insert_many([
@@ -1842,12 +1840,11 @@ mod test {
             vec![(1, "Alice"), (2, "Bob"), (3, "Carol"), (4, "Dora")]
         );
 
-        database.create_view(
-            "user_names",
-            database
-                .from::<User>()
-                .project_tuple((User::id(), User::name())),
-        )?;
+        let user_names_query = database
+            .from::<User>()
+            .project_tuple((User::id(), User::name()))
+            .into_subquery();
+        database.create_view("user_names", user_names_query)?;
 
         let mut view_rows = database
             .run("select * from user_names")?
@@ -1857,13 +1854,12 @@ mod test {
         assert_eq!(view_rows.len(), 4);
         assert_eq!(view_rows[0].name, "Alice");
 
-        database.create_or_replace_view(
-            "user_names",
-            database
-                .from::<User>()
-                .eq(User::id(), 2)
-                .project_tuple((User::id(), User::name())),
-        )?;
+        let user_names_query = database
+            .from::<User>()
+            .eq(User::id(), 2)
+            .project_tuple((User::id(), User::name()))
+            .into_subquery();
+        database.create_or_replace_view("user_names", user_names_query)?;
 
         let replaced_view_rows = database
             .run("select * from user_names")?
@@ -1884,15 +1880,14 @@ mod test {
 
     #[test]
     fn test_orm_introspection_helpers() -> Result<(), DatabaseError> {
-        let (_temp_dir, database) = build_test_database()?;
+        let (_temp_dir, mut database) = build_test_database()?;
         database.create_table::<User>()?;
         database.create_table::<Wallet>()?;
-        database.create_view(
-            "user_names",
-            database
-                .from::<User>()
-                .project_tuple((User::id(), User::name())),
-        )?;
+        let user_names_query = database
+            .from::<User>()
+            .project_tuple((User::id(), User::name()))
+            .into_subquery();
+        database.create_view("user_names", user_names_query)?;
 
         let tables = database.show_tables()?.collect::<Result<Vec<_>, _>>()?;
         assert!(tables.iter().any(|name| name == "users"));
@@ -1948,7 +1943,7 @@ mod test {
 
     #[test]
     fn test_orm_drop_index() -> Result<(), DatabaseError> {
-        let (_temp_dir, database) = build_test_database()?;
+        let (_temp_dir, mut database) = build_test_database()?;
 
         database.create_table::<User>()?;
         database.insert(&User {

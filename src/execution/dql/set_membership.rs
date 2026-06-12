@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext, ReadExecutor,
 };
 use crate::planner::operator::set_membership::SetMembershipKind;
 use crate::planner::LogicalPlan;
@@ -52,8 +52,8 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SetMembership {
     fn into_executor(
         mut self,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        cache: ReadExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
         self.left_input = build_read(arena, self.left_plan.take(), cache, transaction);
         self.right_input = build_read(arena, self.right_plan.take(), cache, transaction);
@@ -67,8 +67,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SetMembership {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        cache: ReadExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
         <Self as ReadExecutor<'a, T>>::into_executor(Self::from(input), arena, cache, transaction)
     }

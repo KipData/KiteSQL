@@ -17,7 +17,6 @@ use crate::optimizer::core::pattern::Pattern;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::planner::operator::{Operator, PhysicalOption};
 use crate::planner::LogicalPlan;
-use crate::storage::Transaction;
 use std::cmp::Ordering;
 
 pub type BestPhysicalOption = Option<(PhysicalOption, Option<usize>)>;
@@ -56,11 +55,11 @@ pub fn keep_best_physical_option(
     }
 }
 
-pub trait ImplementationRule<T: Transaction>: MatchPattern {
+pub trait ImplementationRule: MatchPattern {
     fn update_best_option(
         &self,
         op: &Operator,
-        loader: &StatisticMetaLoader<T>,
+        loader: &StatisticMetaLoader<'_>,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError>;
 }

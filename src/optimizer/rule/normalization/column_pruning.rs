@@ -709,7 +709,6 @@ mod tests {
     use crate::planner::operator::join::JoinCondition;
     use crate::planner::operator::Operator;
     use crate::planner::{Childrens, LogicalPlan};
-    use crate::storage::rocksdb::RocksTransaction;
 
     fn optimize_column_pruning(sql: &str) -> Result<LogicalPlan, DatabaseError> {
         let table_state = build_t1_table()?;
@@ -723,7 +722,7 @@ mod tests {
             )
             .build()
             .instantiate(plan)
-            .find_best::<RocksTransaction>(None)
+            .find_best(None)
     }
 
     fn contains_operator(plan: &LogicalPlan, predicate: impl Fn(&Operator) -> bool + Copy) -> bool {
@@ -843,9 +842,7 @@ mod tests {
                 vec![NormalizationRuleImpl::ColumnPruning],
             )
             .build();
-        let best_plan = pipeline
-            .instantiate(plan)
-            .find_best::<RocksTransaction>(None)?;
+        let best_plan = pipeline.instantiate(plan).find_best(None)?;
 
         assert!(matches!(best_plan.childrens.as_ref(), Childrens::Only(_)));
         match best_plan.operator {

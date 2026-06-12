@@ -119,7 +119,6 @@ mod tests {
     use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::Operator;
-    use crate::storage::rocksdb::RocksTransaction;
 
     #[test]
     fn test_limit_project_transpose() -> Result<(), DatabaseError> {
@@ -133,9 +132,7 @@ mod tests {
                 vec![NormalizationRuleImpl::LimitProjectTranspose],
             )
             .build();
-        let best_plan = pipeline
-            .instantiate(plan)
-            .find_best::<RocksTransaction>(None)?;
+        let best_plan = pipeline.instantiate(plan).find_best(None)?;
 
         if let Operator::Project(_) = &best_plan.operator {
         } else {
@@ -166,9 +163,7 @@ mod tests {
                 ],
             )
             .build();
-        let best_plan = pipeline
-            .instantiate(plan)
-            .find_best::<RocksTransaction>(None)?;
+        let best_plan = pipeline.instantiate(plan).find_best(None)?;
 
         let join_op = best_plan.childrens.pop_only().childrens.pop_only();
         if let Operator::Join(_) = &join_op.operator {
@@ -201,9 +196,7 @@ mod tests {
                 ],
             )
             .build();
-        let best_plan = pipeline
-            .instantiate(plan)
-            .find_best::<RocksTransaction>(None)?;
+        let best_plan = pipeline.instantiate(plan).find_best(None)?;
 
         let scan_op = best_plan.childrens.pop_only();
         if let Operator::TableScan(op) = &scan_op.operator {

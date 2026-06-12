@@ -14,7 +14,9 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::create_accumulators;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
+use crate::execution::{
+    build_read, ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext,
+};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::LogicalPlan;
@@ -31,8 +33,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor {
     fn into_executor(
         (AggregateOperator { agg_calls, .. }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        cache: ReadExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
         let input = build_read(arena, input, cache, transaction);
         arena.push(ExecNode::SimpleAgg(SimpleAggExecutor {

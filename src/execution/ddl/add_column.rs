@@ -14,7 +14,7 @@
 
 use super::rewrite_table_in_batches;
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
+use crate::execution::{ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor};
 use crate::planner::operator::alter_table::add_column::AddColumnOperator;
 use crate::storage::Transaction;
 use crate::types::index::{Index, IndexType};
@@ -36,8 +36,8 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for AddColumn {
     fn into_executor(
         self,
         arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
+        _: ReadExecutionContext<'_>,
+        _: &T,
     ) -> ExecId {
         arena.push(ExecNode::AddColumn(self))
     }
@@ -59,12 +59,18 @@ impl AddColumn {
             return Ok(());
         };
 
-        let table_catalog = arena
-            .transaction_mut()
-            .table(table_cache, table_name.clone())?
-            .cloned()
-            .ok_or(DatabaseError::TableNotFound)?;
-        if table_catalog.get_column_by_name(column.name()).is_some() {
+        let (schema, pk_ty, column_exists) = {
+            let table_catalog = arena
+                .transaction()
+                .table(table_cache, table_name.clone())?
+                .ok_or(DatabaseError::TableNotFound)?;
+            (
+                table_catalog.schema_ref().clone(),
+                table_catalog.primary_keys_type().clone(),
+                table_catalog.get_column_by_name(column.name()).is_some(),
+            )
+        };
+        if column_exists {
             if if_not_exists {
                 TupleBuilder::build_result_into(arena.result_tuple_mut(), "1".to_string());
                 arena.resume();
@@ -73,7 +79,6 @@ impl AddColumn {
             return Err(DatabaseError::DuplicateColumn(column.name().to_string()));
         }
 
-        let schema = table_catalog.schema_ref().clone();
         let old_deserializers = schema
             .iter()
             .map(|column_ref| column_ref.datatype().serializable())
@@ -83,21 +88,21 @@ impl AddColumn {
             .map(|column_ref| column_ref.datatype().serializable())
             .chain(::std::iter::once(column.datatype().serializable()))
             .collect_vec();
-        let pk_ty = table_catalog.primary_keys_type().clone();
         let default_value = column.default_value()?;
 
-        let col_id =
-            arena
-                .transaction_mut()
-                .add_column(table_cache, &table_name, &column, if_not_exists)?;
-        let unique_meta = if column.desc().is_unique() {
-            arena
-                .transaction_mut()
-                .table(table_cache, table_name.clone())?
-                .and_then(|table| table.get_unique_index(&col_id))
-                .cloned()
-        } else {
-            None
+        let unique_meta = {
+            let (transaction, context) = arena.write_context_mut();
+            let table_cache = context.table_cache_mut();
+            let col_id =
+                transaction.add_column(table_cache, &table_name, &column, if_not_exists)?;
+            if column.desc().is_unique() {
+                table_cache
+                    .get(&table_name)
+                    .and_then(|table| table.get_unique_index(&col_id))
+                    .cloned()
+            } else {
+                None
+            }
         };
         let default_for_index = default_value.clone();
 

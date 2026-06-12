@@ -15,7 +15,9 @@
 use std::mem;
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
+use crate::execution::{
+    build_read, ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext,
+};
 use crate::planner::operator::scalar_apply::ScalarApplyOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
@@ -33,8 +35,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarApply {
     fn into_executor(
         (_, left_input, right_input): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        cache: ReadExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
         let left_input = build_read(arena, left_input, cache, transaction);
         let right_input = build_read(arena, right_input, cache, transaction);
@@ -97,8 +99,6 @@ mod tests {
     use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
-    use crate::utils::lru::SharedLruCache;
-    use std::hash::RandomState;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -118,17 +118,17 @@ mod tests {
 
     fn build_test_storage() -> Result<
         (
-            Arc<TableCache>,
-            Arc<ViewCache>,
-            Arc<StatisticsMetaCache>,
+            TableCache,
+            ViewCache,
+            StatisticsMetaCache,
             TempDir,
             RocksStorage,
         ),
         DatabaseError,
     > {
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
 
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;

@@ -14,7 +14,7 @@
 
 use super::rewrite_table_in_batches;
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
+use crate::execution::{ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor};
 use crate::planner::operator::alter_table::drop_column::DropColumnOperator;
 use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
@@ -34,8 +34,8 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropColumn {
     fn into_executor(
         self,
         arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
+        _: ReadExecutionContext<'_>,
+        _: &T,
     ) -> ExecId {
         arena.push(ExecNode::DropColumn(self))
     }
@@ -47,7 +47,6 @@ impl DropColumn {
         arena: &mut ExecArena<'a, T>,
     ) -> Result<(), DatabaseError> {
         let table_cache = arena.table_cache();
-        let meta_cache = arena.meta_cache();
         let Some(DropColumnOperator {
             table_name,
             column_name,
@@ -58,12 +57,16 @@ impl DropColumn {
             return Ok(());
         };
 
-        let table_catalog = arena
-            .transaction_mut()
-            .table(table_cache, table_name.clone())?
-            .cloned()
-            .ok_or(DatabaseError::TableNotFound)?;
-        let tuple_columns = table_catalog.schema_ref().clone();
+        let (tuple_columns, pk_ty) = {
+            let table_catalog = arena
+                .transaction()
+                .table(table_cache, table_name.clone())?
+                .ok_or(DatabaseError::TableNotFound)?;
+            (
+                table_catalog.schema_ref().clone(),
+                table_catalog.primary_keys_type().clone(),
+            )
+        };
         if let Some((column_index, is_primary)) = tuple_columns
             .iter()
             .enumerate()
@@ -85,7 +88,6 @@ impl DropColumn {
                 .filter(|(i, _)| *i != column_index)
                 .map(|(_, column)| column.datatype().serializable())
                 .collect_vec();
-            let pk_ty = table_catalog.primary_keys_type().clone();
             rewrite_table_in_batches(
                 arena.transaction_mut(),
                 &table_name,
@@ -99,12 +101,9 @@ impl DropColumn {
                 },
                 |_, _| Ok(()),
             )?;
-            arena.transaction_mut().drop_column(
-                table_cache,
-                meta_cache,
-                &table_name,
-                &column_name,
-            )?;
+            let (transaction, context) = arena.write_context_mut();
+            let (table_cache, meta_cache) = context.table_meta_cache_mut();
+            transaction.drop_column(table_cache, meta_cache, &table_name, &column_name)?;
 
             TupleBuilder::build_result_into(arena.result_tuple_mut(), "1".to_string());
             arena.resume();

@@ -827,8 +827,6 @@ pub mod test {
     use crate::storage::{Storage, TableCache, Transaction, ViewCache};
     use crate::types::ColumnId;
     use crate::types::LogicalType::Integer;
-    use crate::utils::lru::SharedLruCache;
-    use std::hash::RandomState;
     use std::path::PathBuf;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
@@ -836,8 +834,8 @@ pub mod test {
 
     pub(crate) struct TableState<S: Storage> {
         pub(crate) table: TableCatalog,
-        pub(crate) table_cache: Arc<TableCache>,
-        pub(crate) view_cache: Arc<ViewCache>,
+        pub(crate) table_cache: TableCache,
+        pub(crate) view_cache: ViewCache,
         pub(crate) storage: S,
     }
 
@@ -870,9 +868,9 @@ pub mod test {
 
     pub(crate) fn build_t1_table() -> Result<TableState<RocksStorage>, DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let storage = build_test_catalog(&table_cache, temp_dir.path())?;
+        let mut table_cache = crate::storage::TableCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let storage = build_test_catalog(&mut table_cache, temp_dir.path())?;
         let table = {
             let transaction = storage.transaction()?;
             transaction
@@ -890,7 +888,7 @@ pub mod test {
     }
 
     pub(crate) fn build_test_catalog(
-        table_cache: &TableCache,
+        table_cache: &mut TableCache,
         path: impl Into<PathBuf> + Send,
     ) -> Result<RocksStorage, DatabaseError> {
         let storage = RocksStorage::new(path)?;

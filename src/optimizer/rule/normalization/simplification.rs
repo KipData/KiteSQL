@@ -135,7 +135,6 @@ mod test {
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::Operator;
     use crate::planner::LogicalPlan;
-    use crate::storage::rocksdb::RocksTransaction;
     use crate::types::value::DataValue;
     use crate::types::{ColumnId, LogicalType};
     use std::collections::Bound;
@@ -150,7 +149,7 @@ mod test {
             .before_batch(name.to_string(), strategy, rules)
             .build()
             .instantiate(plan)
-            .find_best::<RocksTransaction>(None)
+            .find_best(None)
     }
 
     #[test]
@@ -171,7 +170,7 @@ mod test {
             )
             .build()
             .instantiate(plan)
-            .find_best::<RocksTransaction>(None)?;
+            .find_best(None)?;
         if let Operator::Project(project_op) = best_plan.clone().operator {
             let constant_expr = ScalarExpression::Constant(DataValue::Int32(3));
             if let ScalarExpression::Binary { right_expr, .. } = &project_op.exprs[0] {

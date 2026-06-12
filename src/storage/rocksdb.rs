@@ -783,10 +783,8 @@ mod test {
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
-    use crate::utils::lru::SharedLruCache;
     use itertools::Itertools;
     use std::collections::Bound;
-    use std::hash::RandomState;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -802,12 +800,10 @@ mod test {
     #[test]
     fn test_collect_rocksdb_metrics_snapshot() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path())
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path())
             .storage_statistics(true)
             .build_rocksdb()?;
-        kite_sql
-            .run("create table t_metrics (a int primary key, b int)")?
-            .done()?;
+        kite_sql.ddl("create table t_metrics (a int primary key, b int)")?;
         kite_sql
             .run("insert into t_metrics values (1, 10), (2, 20), (3, 30)")?
             .done()?;
@@ -854,7 +850,7 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let mut table_cache = crate::storage::TableCache::default();
         let columns = Arc::new(vec![
             ColumnRef::from(ColumnCatalog::new(
                 "c1".to_string(),
@@ -873,7 +869,7 @@ mod test {
             .map(|col_ref| ColumnCatalog::clone(col_ref))
             .collect_vec();
         let _ = transaction.create_table(
-            &table_cache,
+            &mut table_cache,
             "test".to_string().into(),
             source_columns,
             false,
@@ -930,11 +926,9 @@ mod test {
     #[test]
     fn test_index_iter_pk() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
-        kite_sql
-            .run("create table t1 (a int primary key)")?
-            .done()?;
+        kite_sql.ddl("create table t1 (a int primary key)")?;
         kite_sql
             .run("insert into t1 (a) values (0), (1), (2), (3), (4)")?
             .done()?;
@@ -968,7 +962,7 @@ mod test {
                     name: "pk_a".to_string(),
                     ty: IndexType::PrimaryKey { is_multiple: false },
                 }),
-                table_name: &table.name,
+                table_name: table.name.clone(),
                 deserializers,
                 total_len: table.columns_len(),
                 tx: &transaction,
@@ -1002,10 +996,8 @@ mod test {
     #[test]
     fn test_read_by_index() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
-        kite_sql
-            .run("create table t1 (a int primary key, b int unique)")?
-            .done()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        kite_sql.ddl("create table t1 (a int primary key, b int unique)")?;
         kite_sql
             .run("insert into t1 (a, b) values (0, 0), (1, 1), (2, 2), (3, 4)")?
             .done()?;
@@ -1072,14 +1064,12 @@ mod test {
     #[test]
     fn test_read_by_index_cover() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
-        kite_sql
-            .run("create table t1 (a int primary key, b int unique)")?
-            .done()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        kite_sql.ddl("create table t1 (a int primary key, b int unique)")?;
         kite_sql
             .run("insert into t1 (a, b) values (0, 0), (1, 1), (2, 2), (3, 4)")?
             .done()?;
-        kite_sql.run("create index idx_b_a on t1(b, a)")?.done()?;
+        kite_sql.ddl("create index idx_b_a on t1(b, a)")?;
 
         let mut transaction = kite_sql.storage.transaction().unwrap();
         let table = transaction

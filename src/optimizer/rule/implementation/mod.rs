@@ -52,7 +52,6 @@ use crate::optimizer::rule::implementation::dql::table_scan::{
 use crate::optimizer::rule::implementation::dql::top_k::TopKImplementation;
 use crate::optimizer::rule::implementation::dql::values::ValuesImplementation;
 use crate::planner::operator::Operator;
-use crate::storage::Transaction;
 
 #[repr(usize)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -237,11 +236,11 @@ impl ImplementationRuleImpl {
     }
 }
 
-impl<T: Transaction> ImplementationRule<T> for ImplementationRuleImpl {
+impl ImplementationRule for ImplementationRuleImpl {
     fn update_best_option(
         &self,
         operator: &Operator,
-        loader: &StatisticMetaLoader<'_, T>,
+        loader: &StatisticMetaLoader<'_>,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
         match self {

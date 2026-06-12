@@ -14,7 +14,9 @@
 
 use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor};
+use crate::execution::{
+    ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext, ReadExecutor,
+};
 use crate::planner::operator::describe::DescribeOperator;
 use crate::storage::Transaction;
 use crate::types::value::{DataValue, Utf8Type};
@@ -59,8 +61,8 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Describe {
     fn into_executor(
         self,
         arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
+        _: ReadExecutionContext<'_>,
+        _: &T,
     ) -> ExecId {
         arena.push(ExecNode::Describe(self))
     }
@@ -72,8 +74,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Describe {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
+        _: ReadExecutionContext<'_>,
+        _: &T,
     ) -> ExecId {
         arena.push(ExecNode::Describe(Describe::from(input)))
     }
@@ -90,7 +92,7 @@ impl Describe {
     ) -> Result<(), DatabaseError> {
         if self.columns.is_none() {
             let table = arena
-                .transaction_mut()
+                .transaction()
                 .table(arena.table_cache(), self.table_name.clone())?
                 .ok_or(DatabaseError::TableNotFound)?;
             self.columns = Some(table.columns().cloned().collect());

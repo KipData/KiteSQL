@@ -15,7 +15,9 @@
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
+use crate::execution::{
+    build_read, ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor,
+};
 use crate::expression::ScalarExpression;
 use crate::optimizer::core::histogram::HistogramBuilder;
 use crate::optimizer::core::statistics_meta::StatisticsMeta;
@@ -62,8 +64,8 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze {
     fn into_executor(
         mut self,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        cache: ReadExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
         self.input = Some(build_read(
             arena,
@@ -85,21 +87,23 @@ impl Analyze {
             return Ok(());
         };
 
-        let mut builders = Vec::new();
-        let table = arena
-            .transaction_mut()
-            .table(arena.table_cache(), self.table_name.clone())?
-            .cloned()
-            .ok_or(DatabaseError::TableNotFound)?;
-
-        for index in table.indexes() {
-            builders.push(State {
-                index_id: index.id,
-                exprs: index.column_exprs(&table)?,
-                builder: HistogramBuilder::new(index, None),
-                histogram_buckets: self.histogram_buckets,
-            });
-        }
+        let mut builders = {
+            let table = arena
+                .transaction()
+                .table(arena.table_cache(), self.table_name.clone())?
+                .ok_or(DatabaseError::TableNotFound)?;
+            table
+                .indexes()
+                .map(|index| {
+                    Ok(State {
+                        index_id: index.id,
+                        exprs: index.column_exprs(table)?,
+                        builder: HistogramBuilder::new(index, None),
+                        histogram_buckets: self.histogram_buckets,
+                    })
+                })
+                .collect::<Result<Vec<_>, DatabaseError>>()?
+        };
 
         while arena.next_tuple(input)? {
             let tuple = arena.result_tuple();
@@ -113,12 +117,10 @@ impl Analyze {
                 }
             }
         }
-        let values = Self::persist_statistics_meta(
-            &self.table_name,
-            builders,
-            arena.meta_cache(),
-            arena.transaction_mut(),
-        )?;
+        let (transaction, context) = arena.write_context_mut();
+        let meta_cache = context.meta_cache_mut();
+        let values =
+            Self::persist_statistics_meta(&self.table_name, builders, meta_cache, transaction)?;
 
         let output = arena.result_tuple_mut();
         output.pk = None;
@@ -139,7 +141,7 @@ impl Analyze {
     fn persist_statistics_meta<U: Transaction>(
         table_name: &TableName,
         builders: Vec<State>,
-        cache: &StatisticsMetaCache,
+        cache: &mut StatisticsMetaCache,
         transaction: &mut U,
     ) -> Result<Vec<DataValue>, DatabaseError> {
         let mut values = Vec::with_capacity(builders.len());
@@ -184,6 +186,7 @@ mod test {
     use crate::execution::dml::analyze::DEFAULT_NUM_OF_BUCKETS;
     use crate::expression::range_detacher::Range;
     use crate::optimizer::core::cm_sketch::COUNT_MIN_SKETCH_STORAGE_PAGE_LEN;
+    use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
     use crate::storage::{InnerIter, Storage, Transaction};
     use crate::types::value::DataValue;
     use std::ops::Bound;
@@ -202,26 +205,23 @@ mod test {
     fn test_statistics_meta_roundtrip() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let buckets = 10;
-        let kite_sql = DataBaseBuilder::path(temp_dir.path())
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path())
             .histogram_buckets(buckets)
             .build_rocksdb()?;
 
-        kite_sql
-            .run("create table t1 (a int primary key, b int)")?
-            .done()?;
-        kite_sql.run("create index b_index on t1 (b)")?.done()?;
-        kite_sql.run("create index p_index on t1 (a, b)")?.done()?;
+        kite_sql.ddl("create table t1 (a int primary key, b int)")?;
+        kite_sql.ddl("create index b_index on t1 (b)")?;
+        kite_sql.ddl("create index p_index on t1 (a, b)")?;
 
         for i in 0..DEFAULT_NUM_OF_BUCKETS + 1 {
             kite_sql
                 .run(format!("insert into t1 values({i}, {})", i % 20))?
                 .done()?;
         }
-        kite_sql.run("analyze table t1")?.done()?;
+        kite_sql.analyze("t1")?;
 
-        let transaction = kite_sql.storage.transaction()?;
         let table_name = "t1".to_string().into();
-        let loader = transaction.meta_loader(kite_sql.state.meta_cache());
+        let loader = StatisticMetaLoader::new(kite_sql.state.meta_cache());
 
         let statistics_meta_pk_index = loader.load(&table_name, 0)?.unwrap();
         assert_eq!(statistics_meta_pk_index.index_id(), 0);
@@ -243,30 +243,25 @@ mod test {
 
     fn test_meta_loader_uses_cache() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
-        kite_sql
-            .run("create table t1 (a int primary key, b int)")?
-            .done()?;
-        kite_sql.run("create index b_index on t1 (b)")?.done()?;
+        kite_sql.ddl("create table t1 (a int primary key, b int)")?;
+        kite_sql.ddl("create index b_index on t1 (b)")?;
 
         for i in 0..DEFAULT_NUM_OF_BUCKETS + 1 {
             kite_sql
                 .run(format!("insert into t1 values({i}, {i})"))?
                 .done()?;
         }
-        kite_sql.run("analyze table t1")?.done()?;
+        kite_sql.analyze("t1")?;
 
         let table_name = "t1".to_string().into();
-        let transaction = kite_sql.storage.transaction()?;
-        let loader = transaction.meta_loader(kite_sql.state.meta_cache());
+        let loader = StatisticMetaLoader::new(kite_sql.state.meta_cache());
         assert!(loader.load(&table_name, 1)?.is_some());
         assert_eq!(
             loader.collect_count(&table_name, 1, &Range::Eq(DataValue::Int32(7)))?,
             Some(1)
         );
-        drop(transaction);
-
         let mut transaction = kite_sql.storage.transaction()?;
         let keys: Vec<Vec<u8>> = unsafe { &*transaction.table_codec() }
             .with_statistics_index_bound("t1", 1, |min, max| {
@@ -281,8 +276,7 @@ mod test {
             transaction.remove(&key)?;
         }
 
-        let transaction = kite_sql.storage.transaction()?;
-        let loader = transaction.meta_loader(kite_sql.state.meta_cache());
+        let loader = StatisticMetaLoader::new(kite_sql.state.meta_cache());
         assert!(loader.load(&table_name, 1)?.is_some());
         assert_eq!(
             loader.collect_count(&table_name, 1, &Range::Eq(DataValue::Int32(7)))?,
@@ -294,47 +288,37 @@ mod test {
 
     fn test_meta_loader_negative_cache() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
-        kite_sql
-            .run("create table t1 (a int primary key, b int)")?
-            .done()?;
-        kite_sql.run("create index b_index on t1 (b)")?.done()?;
+        kite_sql.ddl("create table t1 (a int primary key, b int)")?;
+        kite_sql.ddl("create index b_index on t1 (b)")?;
 
         let table_name = "t1".to_string().into();
-        let transaction = kite_sql.storage.transaction()?;
-        let loader = transaction.meta_loader(kite_sql.state.meta_cache());
+        let loader = StatisticMetaLoader::new(kite_sql.state.meta_cache());
         assert!(loader.load(&table_name, 1)?.is_none());
 
-        let entry = kite_sql
-            .state
-            .meta_cache()
-            .get(&(table_name.clone(), 1))
-            .expect("missing statistics cache entry");
-        assert!(entry.is_none());
+        assert!(!kite_sql.state.meta_cache().contains_key(&(table_name, 1)));
 
         Ok(())
     }
 
     fn test_clean_expired_index() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
-        kite_sql
-            .run("create table t1 (a int primary key, b int)")?
-            .done()?;
-        kite_sql.run("create index b_index on t1 (b)")?.done()?;
-        kite_sql.run("create index p_index on t1 (a, b)")?.done()?;
+        kite_sql.ddl("create table t1 (a int primary key, b int)")?;
+        kite_sql.ddl("create index b_index on t1 (b)")?;
+        kite_sql.ddl("create index p_index on t1 (a, b)")?;
 
         for i in 0..DEFAULT_NUM_OF_BUCKETS + 1 {
             kite_sql
                 .run(format!("insert into t1 values({i}, {i})"))?
                 .done()?;
         }
-        kite_sql.run("analyze table t1")?.done()?;
+        kite_sql.analyze("t1")?;
 
-        let transaction = kite_sql.storage.transaction()?;
-        let count =
+        let count = {
+            let transaction = kite_sql.storage.transaction()?;
             unsafe { &*transaction.table_codec() }.with_statistics_bound("t1", |min, max| {
                 let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
                 let mut count = 0;
@@ -342,11 +326,12 @@ mod test {
                     count += 1;
                 }
                 Ok(count)
-            })?;
+            })?
+        };
         assert!(count > 3);
 
-        kite_sql.run("alter table t1 drop column b")?.done()?;
-        kite_sql.run("analyze table t1")?.done()?;
+        kite_sql.ddl("alter table t1 drop column b")?;
+        kite_sql.analyze("t1")?;
 
         let transaction = kite_sql.storage.transaction()?;
         let keys =
@@ -359,7 +344,7 @@ mod test {
                 Ok(keys)
             })?;
         let table_name = "t1".to_string().into();
-        let loader = transaction.meta_loader(kite_sql.state.meta_cache());
+        let loader = StatisticMetaLoader::new(kite_sql.state.meta_cache());
         let statistics_meta = loader.load(&table_name, 0)?.unwrap();
         let expected_keys = 1
             + 1

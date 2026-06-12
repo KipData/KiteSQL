@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
+use crate::execution::{
+    build_read, ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext,
+};
 use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyOperator, MarkApplyQuantifier};
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
@@ -43,8 +45,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply {
     fn into_executor(
         (op, left_input, right_input): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        cache: ReadExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
         let left_input = build_read(arena, left_input, cache, transaction);
         arena.push(ExecNode::MarkApply(Self {
@@ -103,14 +105,8 @@ impl MarkApply {
             arena.push_runtime_probe(runtime_probe);
         }
 
-        let cache = (
-            arena.table_cache(),
-            arena.view_cache(),
-            arena.meta_cache(),
-            arena.scala_functions(),
-            arena.table_functions(),
-        );
-        let transaction = arena.transaction_mut() as *mut T;
+        let cache = arena.read_context();
+        let transaction = arena.transaction();
         let result = {
             let right_input = build_read(arena, self.right_input_plan.clone(), cache, transaction);
             f(arena, right_input)
@@ -323,9 +319,7 @@ mod tests {
     use crate::types::index::RuntimeIndexProbe;
     use crate::types::tuple::Tuple;
     use crate::types::LogicalType;
-    use crate::utils::lru::SharedLruCache;
     use std::borrow::Cow;
-    use std::hash::RandomState;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -358,17 +352,17 @@ mod tests {
 
     fn build_test_storage() -> Result<
         (
-            Arc<TableCache>,
-            Arc<ViewCache>,
-            Arc<StatisticsMetaCache>,
+            TableCache,
+            ViewCache,
+            StatisticsMetaCache,
             TempDir,
             RocksStorage,
         ),
         DatabaseError,
     > {
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
 
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;

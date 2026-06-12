@@ -31,11 +31,11 @@ impl<S: Storage> Database<S> {
     /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
     /// database.create_table::<User>().unwrap();
     /// ```
-    pub fn create_table<M: Model>(&self) -> Result<(), DatabaseError> {
-        self.execute(M::create_table_statement(), &[])?.done()?;
+    pub fn create_table<M: Model>(&mut self) -> Result<(), DatabaseError> {
+        self.execute_ddl_statement("ORM CREATE TABLE", M::create_table_statement())?;
 
         for statement in M::create_index_statements() {
-            self.execute(statement, &[])?.done()?;
+            self.execute_ddl_statement("ORM CREATE INDEX", statement)?;
         }
 
         Ok(())
@@ -46,12 +46,14 @@ impl<S: Storage> Database<S> {
     /// This is useful for examples, tests and bootstrap flows where rerunning
     /// schema initialization should stay idempotent. Secondary indexes declared
     /// with `#[model(index)]` are created with `IF NOT EXISTS` as well.
-    pub fn create_table_if_not_exists<M: Model>(&self) -> Result<(), DatabaseError> {
-        self.execute(M::create_table_if_not_exists_statement(), &[])?
-            .done()?;
+    pub fn create_table_if_not_exists<M: Model>(&mut self) -> Result<(), DatabaseError> {
+        self.execute_ddl_statement(
+            "ORM CREATE TABLE IF NOT EXISTS",
+            M::create_table_if_not_exists_statement(),
+        )?;
 
         for statement in M::create_index_if_not_exists_statements() {
-            self.execute(statement, &[])?.done()?;
+            self.execute_ddl_statement("ORM CREATE INDEX IF NOT EXISTS", statement)?;
         }
 
         Ok(())
@@ -84,40 +86,39 @@ impl<S: Storage> Database<S> {
 
     /// Creates a view from an ORM query builder.
     pub fn create_view<Q: SubquerySource>(
-        &self,
+        &mut self,
         view_name: &str,
         query: Q,
     ) -> Result<(), DatabaseError> {
-        self.execute(
+        self.execute_ddl_statement(
+            "ORM CREATE VIEW",
             &orm_create_view_statement(view_name, query.into_subquery(), false),
-            &[],
-        )?
-        .done()
+        )
     }
 
     /// Creates or replaces a view from an ORM query builder.
     pub fn create_or_replace_view<Q: SubquerySource>(
-        &self,
+        &mut self,
         view_name: &str,
         query: Q,
     ) -> Result<(), DatabaseError> {
-        self.execute(
+        self.execute_ddl_statement(
+            "ORM CREATE OR REPLACE VIEW",
             &orm_create_view_statement(view_name, query.into_subquery(), true),
-            &[],
-        )?
-        .done()
+        )
     }
 
     /// Drops a view by name.
-    pub fn drop_view(&self, view_name: &str) -> Result<(), DatabaseError> {
-        self.execute(&orm_drop_view_statement(view_name, false), &[])?
-            .done()
+    pub fn drop_view(&mut self, view_name: &str) -> Result<(), DatabaseError> {
+        self.execute_ddl_statement("ORM DROP VIEW", &orm_drop_view_statement(view_name, false))
     }
 
     /// Drops a view by name if it exists.
-    pub fn drop_view_if_exists(&self, view_name: &str) -> Result<(), DatabaseError> {
-        self.execute(&orm_drop_view_statement(view_name, true), &[])?
-            .done()
+    pub fn drop_view_if_exists(&mut self, view_name: &str) -> Result<(), DatabaseError> {
+        self.execute_ddl_statement(
+            "ORM DROP VIEW IF EXISTS",
+            &orm_drop_view_statement(view_name, true),
+        )
     }
 
     /// Migrates an existing table to match the current model definition.
@@ -131,7 +132,7 @@ impl<S: Storage> Database<S> {
     /// to type, nullability and default expressions for non-primary-key columns
     /// when the underlying DDL supports them. Primary-key changes and unique
     /// constraint changes still return an error so you can handle them manually.
-    pub fn migrate<M: Model>(&self) -> Result<(), DatabaseError> {
+    pub fn migrate<M: Model>(&mut self) -> Result<(), DatabaseError> {
         let columns = M::columns();
         if columns.is_empty() {
             return Err(DatabaseError::UnsupportedStmt(
@@ -203,7 +204,7 @@ impl<S: Storage> Database<S> {
                     column.name,
                     &column.ddl_type,
                 )?;
-                self.execute(&statement, &[])?.done()?;
+                self.execute_ddl_statement("ORM ALTER COLUMN TYPE", &statement)?;
             }
 
             if model_column_default(column) != catalog_column_default(current_column) {
@@ -212,7 +213,7 @@ impl<S: Storage> Database<S> {
                     column.name,
                     column.default_expr,
                 )?;
-                self.execute(&statement, &[])?.done()?;
+                self.execute_ddl_statement("ORM ALTER COLUMN DEFAULT", &statement)?;
             }
 
             if column.nullable != current_column.nullable() {
@@ -221,7 +222,7 @@ impl<S: Storage> Database<S> {
                     column.name,
                     column.nullable,
                 );
-                self.execute(&statement, &[])?.done()?;
+                self.execute_ddl_statement("ORM ALTER COLUMN NULLABILITY", &statement)?;
             }
         }
 
@@ -264,7 +265,7 @@ impl<S: Storage> Database<S> {
 
         for (old_name, new_name) in rename_pairs {
             let statement = orm_rename_column_statement(M::table_name(), &old_name, new_name);
-            self.execute(&statement, &[])?.done()?;
+            self.execute_ddl_statement("ORM RENAME COLUMN", &statement)?;
         }
 
         for column in table.columns() {
@@ -282,7 +283,7 @@ impl<S: Storage> Database<S> {
             }
 
             let statement = orm_drop_column_statement(M::table_name(), column.name());
-            self.execute(&statement, &[])?.done()?;
+            self.execute_ddl_statement("ORM DROP COLUMN", &statement)?;
         }
 
         for column in columns {
@@ -299,11 +300,11 @@ impl<S: Storage> Database<S> {
             }
 
             let statement = orm_add_column_statement(M::table_name(), column)?;
-            self.execute(&statement, &[])?.done()?;
+            self.execute_ddl_statement("ORM ADD COLUMN", &statement)?;
         }
 
         for statement in M::create_index_if_not_exists_statements() {
-            self.execute(statement, &[])?.done()?;
+            self.execute_ddl_statement("ORM CREATE INDEX IF NOT EXISTS", statement)?;
         }
 
         Ok(())
@@ -313,17 +314,20 @@ impl<S: Storage> Database<S> {
     ///
     /// Primary-key indexes are managed by the table definition itself and
     /// cannot be dropped independently.
-    pub fn drop_index<M: Model>(&self, index_name: &str) -> Result<(), DatabaseError> {
+    pub fn drop_index<M: Model>(&mut self, index_name: &str) -> Result<(), DatabaseError> {
         let statement = orm_drop_index_statement(M::table_name(), index_name, false);
 
-        self.execute(&statement, &[])?.done()
+        self.execute_ddl_statement("ORM DROP INDEX", &statement)
     }
 
     /// Drops a non-primary-key model index by name if it exists.
-    pub fn drop_index_if_exists<M: Model>(&self, index_name: &str) -> Result<(), DatabaseError> {
+    pub fn drop_index_if_exists<M: Model>(
+        &mut self,
+        index_name: &str,
+    ) -> Result<(), DatabaseError> {
         let statement = orm_drop_index_statement(M::table_name(), index_name, true);
 
-        self.execute(&statement, &[])?.done()
+        self.execute_ddl_statement("ORM DROP INDEX IF EXISTS", &statement)
     }
 
     /// Drops the model table.
@@ -346,16 +350,18 @@ impl<S: Storage> Database<S> {
     /// database.create_table::<User>().unwrap();
     /// database.drop_table::<User>().unwrap();
     /// ```
-    pub fn drop_table<M: Model>(&self) -> Result<(), DatabaseError> {
-        self.execute(M::drop_table_statement(), &[])?.done()
+    pub fn drop_table<M: Model>(&mut self) -> Result<(), DatabaseError> {
+        self.execute_ddl_statement("ORM DROP TABLE", M::drop_table_statement())
     }
 
     /// Drops the model table if it exists.
     ///
     /// This variant is convenient for cleanup code that should succeed even if
     /// the table was already removed.
-    pub fn drop_table_if_exists<M: Model>(&self) -> Result<(), DatabaseError> {
-        self.execute(M::drop_table_if_exists_statement(), &[])?
-            .done()
+    pub fn drop_table_if_exists<M: Model>(&mut self) -> Result<(), DatabaseError> {
+        self.execute_ddl_statement(
+            "ORM DROP TABLE IF EXISTS",
+            M::drop_table_if_exists_statement(),
+        )
     }
 }

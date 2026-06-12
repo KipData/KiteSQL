@@ -113,7 +113,6 @@ pub mod python;
 pub mod serdes;
 pub mod storage;
 pub mod types;
-pub(crate) mod utils;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
 

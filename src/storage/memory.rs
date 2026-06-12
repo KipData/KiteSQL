@@ -166,10 +166,8 @@ mod wasm_tests {
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
-    use crate::utils::lru::SharedLruCache;
     use itertools::Itertools;
     use std::collections::Bound;
-    use std::hash::RandomState;
     use std::sync::Arc;
     use wasm_bindgen_test::*;
 
@@ -177,7 +175,7 @@ mod wasm_tests {
     fn memory_storage_roundtrip() -> Result<(), DatabaseError> {
         let storage = MemoryStorage::new();
         let mut transaction = storage.transaction()?;
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let mut table_cache = crate::storage::TableCache::default();
         let columns = Arc::new(vec![
             ColumnRef::from(ColumnCatalog::new(
                 "c1".to_string(),
@@ -196,7 +194,7 @@ mod wasm_tests {
             .map(|col_ref| ColumnCatalog::clone(col_ref))
             .collect_vec();
         transaction.create_table(
-            &table_cache,
+            &mut table_cache,
             "test".to_string().into(),
             source_columns,
             false,
@@ -248,10 +246,8 @@ mod wasm_tests {
 
     #[wasm_bindgen_test]
     fn memory_storage_read_by_index() -> Result<(), DatabaseError> {
-        let kite_sql = DataBaseBuilder::path("./memory").build_in_memory()?;
-        kite_sql
-            .run("create table t1 (a int primary key, b int)")?
-            .done()?;
+        let mut kite_sql = DataBaseBuilder::path("./memory").build_in_memory()?;
+        kite_sql.ddl("create table t1 (a int primary key, b int)")?;
         kite_sql
             .run("insert into t1 (a, b) values (0, 0), (1, 1), (2, 2), (3, 4)")?
             .done()?;
@@ -298,17 +294,15 @@ mod native_tests {
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
-    use crate::utils::lru::SharedLruCache;
     use itertools::Itertools;
     use std::collections::Bound;
-    use std::hash::RandomState;
     use std::sync::Arc;
 
     #[test]
     fn memory_storage_roundtrip() -> Result<(), DatabaseError> {
         let storage = MemoryStorage::new();
         let mut transaction = storage.transaction()?;
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let mut table_cache = crate::storage::TableCache::default();
         let columns = Arc::new(vec![
             ColumnRef::from(ColumnCatalog::new(
                 "c1".to_string(),
@@ -327,7 +321,7 @@ mod native_tests {
             .map(|col_ref| ColumnCatalog::clone(col_ref))
             .collect_vec();
         transaction.create_table(
-            &table_cache,
+            &mut table_cache,
             "test".to_string().into(),
             source_columns,
             false,
@@ -379,10 +373,8 @@ mod native_tests {
 
     #[test]
     fn memory_storage_read_by_index() -> Result<(), DatabaseError> {
-        let kite_sql = DataBaseBuilder::path("./memory").build_in_memory()?;
-        kite_sql
-            .run("create table t1 (a int primary key, b int)")?
-            .done()?;
+        let mut kite_sql = DataBaseBuilder::path("./memory").build_in_memory()?;
+        kite_sql.ddl("create table t1 (a int primary key, b int)")?;
         kite_sql
             .run("insert into t1 (a, b) values (0, 0), (1, 1), (2, 2), (3, 4)")?
             .done()?;

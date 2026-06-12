@@ -14,7 +14,9 @@
 
 use crate::binder::copy::FileFormat;
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ReadExecutor};
+use crate::execution::{
+    build_read, ExecArena, ExecId, ExecNode, ReadExecutionContext, ReadExecutor,
+};
 use crate::planner::operator::copy_to_file::CopyToFileOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
@@ -40,8 +42,8 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for CopyToFile {
     fn into_executor(
         mut self,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        cache: ReadExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
         self.input = Some(build_read(
             arena,
@@ -190,9 +192,8 @@ mod tests {
         };
 
         let temp_dir = TempDir::new().unwrap();
-        let db = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
-        db.run("create table t1 (a int primary key, b float, c varchar(10))")?
-            .done()?;
+        let mut db = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        db.ddl("create table t1 (a int primary key, b float, c varchar(10))")?;
         db.run("insert into t1 values (1, 1.1, 'foo')")?.done()?;
         db.run("insert into t1 values (2, 2.0, 'fooo')")?.done()?;
         db.run("insert into t1 values (3, 2.1, 'Kite')")?.done()?;

@@ -382,12 +382,10 @@ mod tests {
     fn lmdb_backend_smoke() {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let db_path = temp_dir.path().join("kite_sql.lmdb");
-        let kite_sql = DataBaseBuilder::path(db_path).build_lmdb().unwrap();
+        let mut kite_sql = DataBaseBuilder::path(db_path).build_lmdb().unwrap();
 
         kite_sql
-            .run("create table t1 (a int primary key, b int)")
-            .unwrap()
-            .done()
+            .ddl("create table t1 (a int primary key, b int)")
             .unwrap();
         kite_sql
             .run("insert into t1 values (1, 10), (2, 20), (3, 30)")
@@ -406,22 +404,18 @@ mod tests {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let db_path = temp_dir.path().join("kite_sql.lmdb");
         let storage = LmdbStorage::new(db_path).unwrap();
-        let kite_sql = DataBaseBuilder::path(temp_dir.path())
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path())
             .build_with_storage(storage)
             .unwrap();
 
-        kite_sql
-            .run("create table t1 (a int primary key)")
-            .unwrap()
-            .done()
-            .unwrap();
+        kite_sql.ddl("create table t1 (a int primary key)").unwrap();
     }
 
     #[test]
     fn collect_lmdb_metrics_snapshot() {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let db_path = temp_dir.path().join("kite_sql.lmdb");
-        let kite_sql = DataBaseBuilder::path(db_path)
+        let mut kite_sql = DataBaseBuilder::path(db_path)
             .storage_statistics(true)
             .lmdb_flags(EnvironmentFlags::NO_SYNC)
             .lmdb_map_size(64 * 1024 * 1024)
@@ -429,9 +423,7 @@ mod tests {
             .unwrap();
 
         kite_sql
-            .run("create table t_metrics (a int primary key, b int)")
-            .unwrap()
-            .done()
+            .ddl("create table t_metrics (a int primary key, b int)")
             .unwrap();
         kite_sql
             .run("insert into t_metrics values (1, 10), (2, 20), (3, 30)")
@@ -457,14 +449,10 @@ mod tests {
             },
         )
         .unwrap();
-        let kite_sql = DataBaseBuilder::path(temp_dir.path())
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path())
             .build_with_storage(storage)
             .unwrap();
 
-        kite_sql
-            .run("create table t1 (a int primary key)")
-            .unwrap()
-            .done()
-            .unwrap();
+        kite_sql.ddl("create table t1 (a int primary key)").unwrap();
     }
 }

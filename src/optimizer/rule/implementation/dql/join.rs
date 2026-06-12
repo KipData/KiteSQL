@@ -18,7 +18,6 @@ use crate::optimizer::core::rule::{BestPhysicalOption, ImplementationRule, Match
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::planner::operator::join::{JoinCondition, JoinOperator};
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
-use crate::storage::Transaction;
 use std::sync::LazyLock;
 
 static JOIN_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
@@ -35,11 +34,11 @@ impl MatchPattern for JoinImplementation {
     }
 }
 
-impl<T: Transaction> ImplementationRule<T> for JoinImplementation {
+impl ImplementationRule for JoinImplementation {
     fn update_best_option(
         &self,
         op: &Operator,
-        _: &StatisticMetaLoader<'_, T>,
+        _: &StatisticMetaLoader<'_>,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
         let mut physical_option = PhysicalOption::new(PlanImpl::NestLoopJoin, SortOption::None);

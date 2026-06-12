@@ -163,14 +163,12 @@ pub(crate) mod test {
     use crate::errors::DatabaseError;
     use crate::expression::ScalarExpression;
     use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
-    use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
+    use crate::storage::rocksdb::RocksStorage;
+    use crate::storage::rocksdb::RocksTransaction;
     use crate::storage::{StatisticsMetaCache, Storage, Transaction};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
-    use crate::utils::lru::SharedLruCache;
-    use std::hash::RandomState;
     use std::io::{Cursor, Seek, SeekFrom};
-    use std::sync::Arc;
     use tempfile::TempDir;
     use ulid::Ulid;
 
@@ -179,11 +177,11 @@ pub(crate) mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let meta_cache = StatisticsMetaCache::new(4, 1, RandomState::new())?;
+        let mut table_cache = crate::storage::TableCache::default();
+        let mut meta_cache = StatisticsMetaCache::default();
 
         let table_name: TableName = "t1".to_string().into();
-        build_table(&table_cache, &mut transaction)?;
+        build_table(&mut table_cache, &mut transaction)?;
 
         let mut cursor = Cursor::new(Vec::new());
         let mut reference_tables = ReferenceTables::new();
@@ -225,7 +223,7 @@ pub(crate) mod test {
             );
             cursor.seek(SeekFrom::Start(0))?;
 
-            transaction.drop_column(&table_cache, &meta_cache, &table_name, "c3")?;
+            transaction.drop_column(&mut table_cache, &mut meta_cache, &table_name, "c3")?;
             let context = ReferenceDecodeContext::new(Some((&transaction, &table_cache)));
             assert!(ColumnRef::decode::<RocksTransaction, Cursor<Vec<u8>>>(
                 &mut cursor,

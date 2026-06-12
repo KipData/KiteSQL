@@ -476,6 +476,8 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    use std::sync::Arc;
+
     use crate::binder::test::build_t1_table;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
     use crate::errors::DatabaseError;
@@ -491,22 +493,17 @@ mod tests {
     use crate::planner::operator::table_scan::TableScanOperator;
     use crate::planner::operator::{Operator, SortOption};
     use crate::planner::{Childrens, LogicalPlan};
-    use crate::storage::rocksdb::RocksTransaction;
     use crate::types::index::{IndexInfo, IndexLookup, IndexMeta, IndexType};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::collections::Bound;
-    use std::sync::Arc;
     use ulid::Ulid;
 
     fn apply_pipeline(
         plan: LogicalPlan,
         builder: HepOptimizerPipelineBuilder,
     ) -> Result<LogicalPlan, DatabaseError> {
-        builder
-            .build()
-            .instantiate(plan)
-            .find_best::<RocksTransaction>(None)
+        builder.build().instantiate(plan).find_best(None)
     }
 
     #[test]

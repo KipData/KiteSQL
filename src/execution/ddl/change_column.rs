@@ -14,7 +14,7 @@
 
 use super::{rewrite_table_in_batches, visit_table_in_batches};
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
+use crate::execution::{ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor};
 use crate::planner::operator::alter_table::change_column::{ChangeColumnOperator, NotNullChange};
 use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
@@ -34,8 +34,8 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for ChangeColumn {
     fn into_executor(
         self,
         arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
+        _: ReadExecutionContext<'_>,
+        _: &T,
     ) -> ExecId {
         arena.push(ExecNode::ChangeColumn(self))
     }
@@ -60,12 +60,16 @@ impl ChangeColumn {
             return Ok(());
         };
 
-        let table_catalog = arena
-            .transaction_mut()
-            .table(table_cache, table_name.clone())?
-            .cloned()
-            .ok_or(DatabaseError::TableNotFound)?;
-        let schema = table_catalog.schema_ref().clone();
+        let (schema, pk_ty) = {
+            let table_catalog = arena
+                .transaction()
+                .table(table_cache, table_name.clone())?
+                .ok_or(DatabaseError::TableNotFound)?;
+            (
+                table_catalog.schema_ref().clone(),
+                table_catalog.primary_keys_type().clone(),
+            )
+        };
         let (column_index, old_column) = schema
             .iter()
             .enumerate()
@@ -79,13 +83,17 @@ impl ChangeColumn {
             let Some(column_id) = old_column.id() else {
                 return Err(DatabaseError::column_not_found(old_column_name.clone()));
             };
-            let affected_index = table_catalog
+            let affected_index_name = arena
+                .transaction()
+                .table(table_cache, table_name.clone())?
+                .ok_or(DatabaseError::TableNotFound)?
                 .indexes()
-                .find(|index_meta| index_meta.column_ids.contains(&column_id));
-            if let Some(index_meta) = affected_index {
+                .find(|index_meta| index_meta.column_ids.contains(&column_id))
+                .map(|index_meta| index_meta.name.clone());
+            if let Some(index_name) = affected_index_name {
                 return Err(DatabaseError::UnsupportedStmt(format!(
                     "cannot alter type of indexed column `{}`; drop index `{}` first",
-                    old_column_name, index_meta.name
+                    old_column_name, index_name
                 )));
             }
         }
@@ -94,7 +102,6 @@ impl ChangeColumn {
             .iter()
             .map(|column| column.datatype().serializable())
             .collect_vec();
-        let pk_ty = table_catalog.primary_keys_type().clone();
 
         if needs_data_rewrite {
             let serializers = schema
@@ -144,7 +151,9 @@ impl ChangeColumn {
             )?;
         }
 
-        arena.transaction_mut().change_column(
+        let (transaction, context) = arena.write_context_mut();
+        let table_cache = context.table_cache_mut();
+        transaction.change_column(
             table_cache,
             &table_name,
             &old_column_name,

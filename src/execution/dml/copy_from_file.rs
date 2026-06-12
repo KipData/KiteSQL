@@ -15,7 +15,7 @@
 use crate::binder::copy::FileFormat;
 use crate::catalog::PrimaryKeyIndices;
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
+use crate::execution::{ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor};
 use crate::planner::operator::copy_from_file::CopyFromFileOperator;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
@@ -38,8 +38,8 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CopyFromFile {
     fn into_executor(
         self,
         arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
+        _: ReadExecutionContext<'_>,
+        _: &T,
     ) -> ExecId {
         arena.push(ExecNode::CopyFromFile(self))
     }
@@ -59,11 +59,16 @@ impl CopyFromFile {
             .iter()
             .map(|column| column.datatype().serializable())
             .collect_vec();
-        let table = arena
-            .transaction_mut()
-            .table(arena.table_cache(), op.table.clone())?
-            .ok_or(DatabaseError::TableNotFound)?;
-        let primary_keys_indices = table.primary_keys_indices().clone();
+        let (table_name, primary_keys_indices) = {
+            let table = arena
+                .transaction()
+                .table(arena.table_cache(), op.table.clone())?
+                .ok_or(DatabaseError::TableNotFound)?;
+            (
+                table.name().to_string(),
+                table.primary_keys_indices().clone(),
+            )
+        };
 
         let file = File::open(op.source.path)?;
         let mut buf_reader = BufReader::new(file);
@@ -97,7 +102,7 @@ impl CopyFromFile {
             let chunk = tuple_builder.build_with_row(record.iter())?;
             arena
                 .transaction_mut()
-                .append_tuple(table.name(), chunk, &serializers, false)?;
+                .append_tuple(&table_name, chunk, &serializers, false)?;
             size += 1;
         }
 
@@ -234,9 +239,8 @@ mod tests {
         };
 
         let tmp_dir = TempDir::new()?;
-        let db = DataBaseBuilder::path(tmp_dir.path()).build_rocksdb()?;
-        db.run("create table test_copy (a int primary key, b float, c varchar(10))")?
-            .done()?;
+        let mut db = DataBaseBuilder::path(tmp_dir.path()).build_rocksdb()?;
+        db.ddl("create table test_copy (a int primary key, b float, c varchar(10))")?;
 
         let storage = db.storage;
         let mut transaction = storage.transaction()?;

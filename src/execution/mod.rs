@@ -66,23 +66,144 @@ use crate::types::index::RuntimeIndexProbe;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 
-pub(crate) type ExecutionCaches<'a> = (
-    &'a TableCache,
-    &'a ViewCache,
-    &'a StatisticsMetaCache,
-    &'a ScalaFunctions,
-    &'a TableFunctions,
-);
-
-pub(crate) trait IntoExecutionCaches<'a> {
-    fn into_execution_caches(self) -> ExecutionCaches<'a>;
+#[derive(Clone, Copy)]
+pub(crate) struct ReadExecutionContext<'a> {
+    table_cache: &'a TableCache,
+    view_cache: &'a ViewCache,
+    meta_cache: &'a StatisticsMetaCache,
+    scala_functions: &'a ScalaFunctions,
+    table_functions: &'a TableFunctions,
 }
 
-impl<'a> IntoExecutionCaches<'a> for ExecutionCaches<'a> {
-    fn into_execution_caches(self) -> ExecutionCaches<'a> {
+pub(crate) struct WriteExecutionContext<'a> {
+    table_cache: &'a mut TableCache,
+    view_cache: &'a mut ViewCache,
+    meta_cache: &'a mut StatisticsMetaCache,
+    scala_functions: &'a ScalaFunctions,
+    table_functions: &'a TableFunctions,
+}
+
+impl<'a> ReadExecutionContext<'a> {
+    pub(crate) fn new(
+        table_cache: &'a TableCache,
+        view_cache: &'a ViewCache,
+        meta_cache: &'a StatisticsMetaCache,
+        scala_functions: &'a ScalaFunctions,
+        table_functions: &'a TableFunctions,
+    ) -> Self {
+        Self {
+            table_cache,
+            view_cache,
+            meta_cache,
+            scala_functions,
+            table_functions,
+        }
+    }
+
+    pub(crate) fn table_cache(self) -> &'a TableCache {
+        self.table_cache
+    }
+
+    pub(crate) fn scala_functions(self) -> &'a ScalaFunctions {
+        self.scala_functions
+    }
+
+    pub(crate) fn table_functions(self) -> &'a TableFunctions {
+        self.table_functions
+    }
+}
+
+impl<'a> WriteExecutionContext<'a> {
+    pub(crate) fn new(
+        table_cache: &'a mut TableCache,
+        view_cache: &'a mut ViewCache,
+        meta_cache: &'a mut StatisticsMetaCache,
+        scala_functions: &'a ScalaFunctions,
+        table_functions: &'a TableFunctions,
+    ) -> Self {
+        Self {
+            table_cache,
+            view_cache,
+            meta_cache,
+            scala_functions,
+            table_functions,
+        }
+    }
+
+    fn read(&self) -> ReadExecutionContext<'_> {
+        ReadExecutionContext::new(
+            self.table_cache,
+            self.view_cache,
+            self.meta_cache,
+            self.scala_functions,
+            self.table_functions,
+        )
+    }
+
+    pub(crate) fn table_cache_mut(&mut self) -> &mut TableCache {
+        self.table_cache
+    }
+
+    pub(crate) fn view_cache_mut(&mut self) -> &mut ViewCache {
+        self.view_cache
+    }
+
+    pub(crate) fn meta_cache_mut(&mut self) -> &mut StatisticsMetaCache {
+        self.meta_cache
+    }
+
+    pub(crate) fn table_meta_cache_mut(&mut self) -> (&mut TableCache, &mut StatisticsMetaCache) {
+        (self.table_cache, self.meta_cache)
+    }
+}
+
+enum ExecutionContext<'a> {
+    Read(ReadExecutionContext<'a>),
+    Write(WriteExecutionContext<'a>),
+}
+
+impl<'a> ExecutionContext<'a> {
+    fn read(&self) -> ReadExecutionContext<'_> {
+        match self {
+            ExecutionContext::Read(context) => *context,
+            ExecutionContext::Write(context) => context.read(),
+        }
+    }
+
+    fn is_same_read_context(&self, other: ReadExecutionContext<'_>) -> bool {
+        let current = self.read();
+        std::ptr::eq(current.table_cache, other.table_cache)
+            && std::ptr::eq(current.view_cache, other.view_cache)
+            && std::ptr::eq(current.meta_cache, other.meta_cache)
+            && std::ptr::eq(current.scala_functions, other.scala_functions)
+            && std::ptr::eq(current.table_functions, other.table_functions)
+    }
+}
+
+pub(crate) trait IntoReadExecutionContext<'a> {
+    fn into_read_execution_context(self) -> ReadExecutionContext<'a>;
+}
+
+impl<'a> IntoReadExecutionContext<'a> for ReadExecutionContext<'a> {
+    fn into_read_execution_context(self) -> ReadExecutionContext<'a> {
         self
     }
 }
+
+impl<'a> IntoReadExecutionContext<'a>
+    for (
+        &'a TableCache,
+        &'a ViewCache,
+        &'a StatisticsMetaCache,
+        &'a ScalaFunctions,
+        &'a TableFunctions,
+    )
+{
+    fn into_read_execution_context(self) -> ReadExecutionContext<'a> {
+        ReadExecutionContext::new(self.0, self.1, self.2, self.3, self.4)
+    }
+}
+
 pub(crate) type ExecId = usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,8 +299,8 @@ pub(crate) trait ExecutorNode<'a, T: Transaction + 'a>: Sized {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        context: ReadExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId;
 
     fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError>;
@@ -285,7 +406,7 @@ pub(crate) struct ExecArena<'a, T: Transaction + 'a> {
     nodes: Vec<ExecNode<'a, T>>,
     result: ExecResult,
     projection_tmp: Vec<DataValue>,
-    cache: Option<ExecutionCaches<'a>>,
+    context: Option<ExecutionContext<'a>>,
     transaction: *mut T,
     runtime_probe_stack: Vec<RuntimeIndexProbe>,
 }
@@ -296,7 +417,7 @@ impl<'a, T: Transaction + 'a> Default for ExecArena<'a, T> {
             nodes: Vec::new(),
             result: ExecResult::default(),
             projection_tmp: Vec::new(),
-            cache: None,
+            context: None,
             transaction: std::ptr::null_mut(),
             runtime_probe_stack: Vec::new(),
         }
@@ -304,20 +425,30 @@ impl<'a, T: Transaction + 'a> Default for ExecArena<'a, T> {
 }
 
 impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
-    pub(crate) fn init_context<C>(&mut self, cache: C, transaction: *mut T)
+    pub(crate) fn init_context<C>(&mut self, context: C, transaction: &'a T)
     where
-        C: IntoExecutionCaches<'a>,
+        C: IntoReadExecutionContext<'a>,
     {
-        let cache = cache.into_execution_caches();
-        if let Some(current) = self.cache {
-            debug_assert!(std::ptr::eq(current.0, cache.0));
-            debug_assert!(std::ptr::eq(current.1, cache.1));
-            debug_assert!(std::ptr::eq(current.2, cache.2));
-            debug_assert!(std::ptr::eq(current.3, cache.3));
-            debug_assert!(std::ptr::eq(current.4, cache.4));
-            debug_assert_eq!(self.transaction, transaction);
+        let context = context.into_read_execution_context();
+        if let Some(current) = &self.context {
+            debug_assert!(current.is_same_read_context(context));
+            debug_assert_eq!(self.transaction, transaction as *const T as *mut T);
         } else {
-            self.cache = Some(cache);
+            self.context = Some(ExecutionContext::Read(context));
+            self.transaction = transaction as *const T as *mut T;
+        }
+    }
+
+    pub(crate) fn init_context_mut(
+        &mut self,
+        context: WriteExecutionContext<'a>,
+        transaction: &'a mut T,
+    ) {
+        if let Some(current) = &self.context {
+            debug_assert!(current.is_same_read_context(context.read()));
+            debug_assert_eq!(self.transaction, transaction as *mut T);
+        } else {
+            self.context = Some(ExecutionContext::Write(context));
             self.transaction = transaction;
         }
     }
@@ -328,32 +459,44 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
         id
     }
 
-    pub(crate) fn table_cache(&self) -> &'a TableCache {
-        self.cache.expect("execution arena context initialized").0
+    pub(crate) fn read_context(&self) -> ReadExecutionContext<'a> {
+        match self
+            .context
+            .as_ref()
+            .expect("execution arena context initialized")
+        {
+            ExecutionContext::Read(context) => *context,
+            ExecutionContext::Write(_) => {
+                panic!("stored read execution context required")
+            }
+        }
     }
 
-    pub(crate) fn view_cache(&self) -> &'a ViewCache {
-        self.cache.expect("execution arena context initialized").1
-    }
-
-    pub(crate) fn meta_cache(&self) -> &'a StatisticsMetaCache {
-        self.cache.expect("execution arena context initialized").2
-    }
-
-    pub(crate) fn scala_functions(&self) -> &'a ScalaFunctions {
-        self.cache.expect("execution arena context initialized").3
-    }
-
-    pub(crate) fn table_functions(&self) -> &'a TableFunctions {
-        self.cache.expect("execution arena context initialized").4
+    pub(crate) fn table_cache(&self) -> &TableCache {
+        self.context
+            .as_ref()
+            .expect("execution arena context initialized")
+            .read()
+            .table_cache
     }
 
     pub(crate) fn transaction(&self) -> &'a T {
         unsafe { &*self.transaction }
     }
 
-    pub(crate) fn transaction_mut(&mut self) -> &'a mut T {
+    pub(crate) fn transaction_mut(&mut self) -> &mut T {
         unsafe { &mut *self.transaction }
+    }
+
+    pub(crate) fn write_context_mut(&mut self) -> (&mut T, &mut WriteExecutionContext<'a>) {
+        let context = self
+            .context
+            .as_mut()
+            .expect("execution arena context initialized");
+        let ExecutionContext::Write(context) = context else {
+            panic!("write execution context required")
+        };
+        unsafe { (&mut *self.transaction, context) }
     }
 
     pub(crate) fn push_runtime_probe(&mut self, value: RuntimeIndexProbe) {
@@ -429,8 +572,8 @@ pub(crate) trait ReadExecutor<'a, T: Transaction + 'a>: Sized {
     fn into_executor(
         self,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        cache: ReadExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId;
 }
 
@@ -438,8 +581,8 @@ pub(crate) trait WriteExecutor<'a, T: Transaction + 'a>: Sized {
     fn into_executor(
         self,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        cache: ReadExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId;
 }
 
@@ -454,8 +597,8 @@ macro_rules! impl_read_executor_node_via_from {
             fn into_executor(
                 input: Self::Input,
                 arena: &mut ExecArena<'a, T>,
-                cache: ExecutionCaches<'a>,
-                transaction: *mut T,
+                cache: ReadExecutionContext<'_>,
+                transaction: &T,
             ) -> ExecId {
                 <Self as ReadExecutor<'a, T>>::into_executor(
                     Self::from(input),
@@ -483,8 +626,8 @@ macro_rules! impl_write_executor_node_via_from {
             fn into_executor(
                 input: Self::Input,
                 arena: &mut ExecArena<'a, T>,
-                cache: ExecutionCaches<'a>,
-                transaction: *mut T,
+                cache: ReadExecutionContext<'_>,
+                transaction: &T,
             ) -> ExecId {
                 <Self as WriteExecutor<'a, T>>::into_executor(
                     Self::from(input),
@@ -591,8 +734,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowTables<'a, T> {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
+        _: ReadExecutionContext<'_>,
+        _: &T,
     ) -> ExecId {
         arena.push(ExecNode::ShowTables(input))
     }
@@ -608,8 +751,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowViews<'a, T> {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
+        _: ReadExecutionContext<'_>,
+        _: &T,
     ) -> ExecId {
         arena.push(ExecNode::ShowViews(input))
     }
@@ -619,14 +762,15 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowViews<'a, T> {
     }
 }
 
-pub(crate) fn build_read<'a, T: Transaction + 'a>(
+pub(crate) fn build_read<'a, T>(
     arena: &mut ExecArena<'a, T>,
     plan: LogicalPlan,
-    cache: ExecutionCaches<'a>,
-    transaction: *mut T,
-) -> ExecId {
-    arena.init_context(cache, transaction);
-
+    cache: ReadExecutionContext<'_>,
+    transaction: &T,
+) -> ExecId
+where
+    T: Transaction + 'a,
+{
     let LogicalPlan {
         operator,
         childrens,
@@ -829,14 +973,42 @@ pub(crate) fn build_read<'a, T: Transaction + 'a>(
     }
 }
 
-pub(crate) fn build_write<'a, T: Transaction + 'a>(
+pub(crate) fn build_write<'a, T>(
     arena: &mut ExecArena<'a, T>,
     plan: LogicalPlan,
-    cache: ExecutionCaches<'a>,
-    transaction: *mut T,
-) -> ExecId {
-    arena.init_context(cache, transaction);
+    context: WriteExecutionContext<'a>,
+    transaction: &'a mut T,
+) -> ExecId
+where
+    T: Transaction + 'a,
+{
+    let cache = context.read();
+    let root = build_write_inner(arena, plan, cache, transaction);
+    arena.init_context_mut(context, transaction);
+    root
+}
 
+pub(crate) fn build_write_read_context<'a, T, C>(
+    arena: &mut ExecArena<'a, T>,
+    plan: LogicalPlan,
+    context: C,
+    transaction: &'a mut T,
+) -> ExecId
+where
+    T: Transaction + 'a,
+    C: IntoReadExecutionContext<'a>,
+{
+    let cache = context.into_read_execution_context();
+    arena.init_context(cache, transaction);
+    build_write_inner(arena, plan, cache, transaction)
+}
+
+fn build_write_inner<'a, T: Transaction + 'a>(
+    arena: &mut ExecArena<'a, T>,
+    plan: LogicalPlan,
+    cache: ReadExecutionContext<'_>,
+    transaction_ref: &T,
+) -> ExecId {
     let LogicalPlan {
         operator,
         childrens,
@@ -848,29 +1020,44 @@ pub(crate) fn build_write<'a, T: Transaction + 'a>(
         Operator::Insert(op) => {
             let input = childrens.pop_only();
 
-            <Insert as ExecutorNode<'a, T>>::into_executor((op, input), arena, cache, transaction)
+            <Insert as ExecutorNode<'a, T>>::into_executor(
+                (op, input),
+                arena,
+                cache,
+                transaction_ref,
+            )
         }
         Operator::Update(op) => {
             let input = childrens.pop_only();
 
-            <Update as ExecutorNode<'a, T>>::into_executor((op, input), arena, cache, transaction)
+            <Update as ExecutorNode<'a, T>>::into_executor(
+                (op, input),
+                arena,
+                cache,
+                transaction_ref,
+            )
         }
         Operator::Delete(op) => {
             let input = childrens.pop_only();
 
-            <Delete as ExecutorNode<'a, T>>::into_executor((op, input), arena, cache, transaction)
+            <Delete as ExecutorNode<'a, T>>::into_executor(
+                (op, input),
+                arena,
+                cache,
+                transaction_ref,
+            )
         }
         Operator::AddColumn(op) => {
-            <AddColumn as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
+            <AddColumn as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction_ref)
         }
         Operator::ChangeColumn(op) => {
-            <ChangeColumn as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
+            <ChangeColumn as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction_ref)
         }
         Operator::DropColumn(op) => {
-            <DropColumn as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
+            <DropColumn as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction_ref)
         }
         Operator::CreateTable(op) => {
-            <CreateTable as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
+            <CreateTable as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction_ref)
         }
         Operator::CreateIndex(op) => {
             let input = childrens.pop_only();
@@ -879,26 +1066,26 @@ pub(crate) fn build_write<'a, T: Transaction + 'a>(
                 (op, input),
                 arena,
                 cache,
-                transaction,
+                transaction_ref,
             )
         }
         Operator::CreateView(op) => {
-            <CreateView as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
+            <CreateView as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction_ref)
         }
         Operator::DropTable(op) => {
-            <DropTable as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
+            <DropTable as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction_ref)
         }
         Operator::DropView(op) => {
-            <DropView as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
+            <DropView as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction_ref)
         }
         Operator::DropIndex(op) => {
-            <DropIndex as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
+            <DropIndex as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction_ref)
         }
         Operator::Truncate(op) => {
-            <Truncate as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
+            <Truncate as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction_ref)
         }
         Operator::CopyFromFile(op) => {
-            <CopyFromFile as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction)
+            <CopyFromFile as ExecutorNode<'a, T>>::into_executor(op, arena, cache, transaction_ref)
         }
         Operator::CopyToFile(op) => {
             let input = childrens.pop_only();
@@ -907,13 +1094,18 @@ pub(crate) fn build_write<'a, T: Transaction + 'a>(
                 (op, input),
                 arena,
                 cache,
-                transaction,
+                transaction_ref,
             )
         }
         Operator::Analyze(op) => {
             let input = childrens.pop_only();
 
-            <Analyze as ExecutorNode<'a, T>>::into_executor((op, input), arena, cache, transaction)
+            <Analyze as ExecutorNode<'a, T>>::into_executor(
+                (op, input),
+                arena,
+                cache,
+                transaction_ref,
+            )
         }
         operator => {
             let plan = LogicalPlan {
@@ -922,7 +1114,7 @@ pub(crate) fn build_write<'a, T: Transaction + 'a>(
                 physical_option,
                 _output_schema_ref,
             };
-            build_read(arena, plan, cache, transaction)
+            build_read(arena, plan, cache, transaction_ref)
         }
     }
 }
@@ -936,9 +1128,9 @@ mod test_utils {
     static EMPTY_TABLE_FUNCTIONS: std::sync::LazyLock<TableFunctions> =
         std::sync::LazyLock::new(TableFunctions::default);
 
-    impl<'a> IntoExecutionCaches<'a> for (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache) {
-        fn into_execution_caches(self) -> ExecutionCaches<'a> {
-            (
+    impl<'a> IntoReadExecutionContext<'a> for (&'a TableCache, &'a ViewCache, &'a StatisticsMetaCache) {
+        fn into_read_execution_context(self) -> ReadExecutionContext<'a> {
+            ReadExecutionContext::new(
                 self.0,
                 self.1,
                 self.2,
@@ -948,34 +1140,16 @@ mod test_utils {
         }
     }
 
-    impl<'a> IntoExecutionCaches<'a>
-        for (
-            &'a std::sync::Arc<TableCache>,
-            &'a std::sync::Arc<ViewCache>,
-            &'a std::sync::Arc<StatisticsMetaCache>,
-        )
-    {
-        fn into_execution_caches(self) -> ExecutionCaches<'a> {
-            (
-                self.0.as_ref(),
-                self.1.as_ref(),
-                self.2.as_ref(),
-                &EMPTY_SCALA_FUNCTIONS,
-                &EMPTY_TABLE_FUNCTIONS,
-            )
-        }
-    }
-
     pub(crate) fn execute<'a, T, E>(
         executor: E,
-        cache: impl IntoExecutionCaches<'a>,
-        transaction: *mut T,
+        cache: impl IntoReadExecutionContext<'a>,
+        transaction: &'a T,
     ) -> Executor<'a, T>
     where
         T: Transaction + 'a,
         E: ReadExecutor<'a, T>,
     {
-        let cache = cache.into_execution_caches();
+        let cache = cache.into_read_execution_context();
         let mut arena = ExecArena::default();
         arena.init_context(cache, transaction);
         let root = executor.into_executor(&mut arena, cache, transaction);
@@ -984,14 +1158,14 @@ mod test_utils {
 
     pub(crate) fn execute_mut<'a, T, E>(
         executor: E,
-        cache: impl IntoExecutionCaches<'a>,
-        transaction: *mut T,
+        cache: impl IntoReadExecutionContext<'a>,
+        transaction: &'a T,
     ) -> Executor<'a, T>
     where
         T: Transaction + 'a,
         E: WriteExecutor<'a, T>,
     {
-        let cache = cache.into_execution_caches();
+        let cache = cache.into_read_execution_context();
         let mut arena = ExecArena::default();
         arena.init_context(cache, transaction);
         let root = executor.into_executor(&mut arena, cache, transaction);
@@ -1000,14 +1174,14 @@ mod test_utils {
 
     pub(crate) fn execute_input<'a, T, E>(
         input: E::Input,
-        cache: impl IntoExecutionCaches<'a>,
-        transaction: *mut T,
+        cache: impl IntoReadExecutionContext<'a>,
+        transaction: &'a T,
     ) -> Executor<'a, T>
     where
         T: Transaction + 'a,
         E: ExecutorNode<'a, T>,
     {
-        let cache = cache.into_execution_caches();
+        let cache = cache.into_read_execution_context();
         let mut arena = ExecArena::default();
         arena.init_context(cache, transaction);
         let root = E::into_executor(input, &mut arena, cache, transaction);
@@ -1017,14 +1191,14 @@ mod test_utils {
     #[allow(dead_code)]
     pub(crate) fn execute_input_mut<'a, T, E>(
         input: E::Input,
-        cache: impl IntoExecutionCaches<'a>,
-        transaction: *mut T,
+        cache: impl IntoReadExecutionContext<'a>,
+        transaction: &'a T,
     ) -> Executor<'a, T>
     where
         T: Transaction + 'a,
         E: ExecutorNode<'a, T>,
     {
-        let cache = cache.into_execution_caches();
+        let cache = cache.into_read_execution_context();
         let mut arena = ExecArena::default();
         arena.init_context(cache, transaction);
         let root = E::into_executor(input, &mut arena, cache, transaction);

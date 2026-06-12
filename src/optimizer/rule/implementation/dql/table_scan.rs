@@ -17,7 +17,6 @@ use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
 use crate::optimizer::core::rule::{BestPhysicalOption, ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
-use crate::storage::Transaction;
 use crate::types::index::{IndexLookup, IndexType};
 use std::sync::LazyLock;
 
@@ -35,11 +34,11 @@ impl MatchPattern for SeqScanImplementation {
     }
 }
 
-impl<T: Transaction> ImplementationRule<T> for SeqScanImplementation {
+impl ImplementationRule for SeqScanImplementation {
     fn update_best_option(
         &self,
         op: &Operator,
-        loader: &StatisticMetaLoader<T>,
+        loader: &StatisticMetaLoader<'_>,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
         if let Operator::TableScan(scan_op) = op {
@@ -72,11 +71,11 @@ impl MatchPattern for IndexScanImplementation {
     }
 }
 
-impl<T: Transaction> ImplementationRule<T> for IndexScanImplementation {
+impl ImplementationRule for IndexScanImplementation {
     fn update_best_option(
         &self,
         op: &Operator,
-        loader: &StatisticMetaLoader<'_, T>,
+        loader: &StatisticMetaLoader<'_>,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
         if let Operator::TableScan(scan_op) = op {

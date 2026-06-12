@@ -29,7 +29,6 @@ use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
 use crate::planner::{Childrens, LogicalPlan};
-use crate::storage::Transaction;
 use std::array;
 use std::ops::Not;
 
@@ -60,9 +59,9 @@ impl<'a> HepOptimizer<'a> {
         }
     }
 
-    pub fn find_best<T: Transaction>(
+    pub fn find_best(
         mut self,
-        loader: Option<&StatisticMetaLoader<'_, T>>,
+        loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<LogicalPlan, DatabaseError> {
         let mut applied_rules = Vec::with_capacity(self.max_local_rules_len);
         Self::apply_batches(&mut self.plan, self.before_batches, &mut applied_rules)?;
@@ -215,9 +214,9 @@ impl<'a> HepOptimizer<'a> {
         Ok(())
     }
 
-    fn annotate_hints_and_physical_options<'plan, T: Transaction>(
+    fn annotate_hints_and_physical_options<'plan>(
         plan: &'plan mut LogicalPlan,
-        loader: &StatisticMetaLoader<'_, T>,
+        loader: &StatisticMetaLoader<'_>,
         implementation_index: &ImplementationRuleIndex,
         inherited_sort_hints: &'plan ScanHintApplier<'plan>,
         inherited_stream_distinct_hints: &'plan ScanHintApplier<'plan>,
@@ -579,6 +578,7 @@ mod tests {
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
     use crate::expression::ScalarExpression;
+    use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
     use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::implementation::ImplementationRuleImpl;
@@ -597,20 +597,16 @@ mod tests {
     #[test]
     fn test_find_best_selects_cheapest_scan() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let database = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
-        database
-            .run("create table t1 (c1 int primary key, c2 int)")?
-            .done()?;
-        database
-            .run("create table t2 (c3 int primary key, c4 int)")?
-            .done()?;
+        let mut database = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        database.ddl("create table t1 (c1 int primary key, c2 int)")?;
+        database.ddl("create table t2 (c3 int primary key, c4 int)")?;
 
         for i in 0..1000 {
             database
                 .run(format!("insert into t1 values({}, {})", i, i + 1).as_str())?
                 .done()?;
         }
-        database.run("analyze table t1")?.done()?;
+        database.analyze("t1")?;
 
         let transaction = database.storage.transaction()?;
         let c1_column = transaction
@@ -667,7 +663,7 @@ mod tests {
 
         let best_plan = pipeline
             .instantiate(plan)
-            .find_best(Some(&transaction.meta_loader(database.state.meta_cache())))?;
+            .find_best(Some(&StatisticMetaLoader::new(database.state.meta_cache())))?;
 
         assert_eq!(
             best_plan

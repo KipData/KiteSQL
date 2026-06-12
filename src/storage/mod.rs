@@ -28,7 +28,7 @@ use crate::expression::ScalarExpression;
 use crate::optimizer::core::cm_sketch::{
     CountMinSketch, CountMinSketchPage, COUNT_MIN_SKETCH_STORAGE_PAGE_LEN,
 };
-use crate::optimizer::core::statistics_meta::{StatisticMetaLoader, StatisticsMeta};
+use crate::optimizer::core::statistics_meta::StatisticsMeta;
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
 use crate::serdes::ReferenceTables;
 use crate::storage::table_codec::{
@@ -39,7 +39,7 @@ use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::{Tuple, TupleId};
 use crate::types::value::{DataValue, TupleMappingRef};
 use crate::types::{ColumnId, LogicalType};
-use crate::utils::lru::SharedLruCache;
+use ahash::HashMap;
 use itertools::Itertools;
 use std::borrow::Cow;
 use std::collections::Bound;
@@ -53,9 +53,9 @@ use std::sync::Arc;
 pub type KeyValueRef<'a> = (&'a [u8], &'a [u8]);
 use ulid::Generator;
 
-pub(crate) type StatisticsMetaCache = SharedLruCache<(TableName, IndexId), Option<StatisticsMeta>>;
-pub(crate) type TableCache = SharedLruCache<TableName, TableCatalog>;
-pub(crate) type ViewCache = SharedLruCache<TableName, View>;
+pub(crate) type StatisticsMetaCache = HashMap<(TableName, IndexId), StatisticsMeta>;
+pub(crate) type TableCache = HashMap<TableName, TableCatalog>;
+pub(crate) type ViewCache = HashMap<TableName, View>;
 
 /// Transaction isolation levels supported by KiteSQL.
 ///
@@ -179,7 +179,7 @@ pub trait Transaction: Sized {
     /// The projections is column indices.
     fn read<'a>(
         &'a self,
-        table_cache: &'a TableCache,
+        table_cache: &TableCache,
         table_name: TableName,
         bounds: Bounds,
         columns: Vec<ColumnRef>,
@@ -208,7 +208,7 @@ pub trait Transaction: Sized {
     #[allow(clippy::too_many_arguments)]
     fn read_by_index<'a, R>(
         &'a self,
-        table_cache: &'a TableCache,
+        table_cache: &TableCache,
         table_name: TableName,
         (offset_option, limit_option): Bounds,
         columns: Vec<ColumnRef>,
@@ -224,7 +224,6 @@ pub trait Transaction: Sized {
         let table = self
             .table(table_cache, table_name.clone())?
             .ok_or(DatabaseError::TableNotFound)?;
-        let table_name = table.name.as_ref();
         let offset = offset_option.unwrap_or(0);
 
         let is_primary_index = matches!(index_meta.ty, IndexType::PrimaryKey { .. });
@@ -251,6 +250,7 @@ pub trait Transaction: Sized {
                 (IndexImplEnum::instance(index_meta.ty), deserializers, None)
             }
         };
+        let total_len = table.columns_len();
 
         Ok(IndexIter {
             bounds: IterBounds::new(offset, limit_option),
@@ -258,7 +258,7 @@ pub trait Transaction: Sized {
                 index_meta,
                 table_name,
                 deserializers,
-                total_len: table.columns_len(),
+                total_len,
                 tx: self,
                 cover_mapping,
                 with_pk,
@@ -313,7 +313,7 @@ pub trait Transaction: Sized {
 
     fn add_index_meta(
         &mut self,
-        table_cache: &TableCache,
+        table_cache: &mut TableCache,
         table_name: &TableName,
         index_name: String,
         column_ids: Vec<ColumnId>,
@@ -321,15 +321,13 @@ pub trait Transaction: Sized {
     ) -> Result<IndexId, DatabaseError> {
         if let Some(mut table) = self.table(table_cache, table_name.clone())?.cloned() {
             let index_meta = table.add_index_meta(index_name, column_ids, ty)?;
+            let index_id = index_meta.id;
             let value = unsafe { &*self.table_codec() }.encode_index_meta_value(index_meta)?;
-            unsafe { &*self.table_codec() }.with_index_meta_key(
-                table_name,
-                index_meta.id,
-                |key| self.set(key, value.as_slice()),
-            )?;
-            table_cache.remove(table_name);
+            unsafe { &*self.table_codec() }
+                .with_index_meta_key(table_name, index_id, |key| self.set(key, value.as_slice()))?;
+            table_cache.insert(table_name.clone(), table);
 
-            Ok(index_meta.id)
+            Ok(index_id)
         } else {
             Err(DatabaseError::TableNotFound)
         }
@@ -404,7 +402,7 @@ pub trait Transaction: Sized {
 
     fn rewrite_table_metadata(
         &mut self,
-        table_cache: &TableCache,
+        table_cache: &mut TableCache,
         table: &TableCatalog,
     ) -> Result<(), DatabaseError> {
         let table_name = table.name().clone();
@@ -433,7 +431,7 @@ pub trait Transaction: Sized {
                 |key| self.set(key, value.as_slice()),
             )?;
         }
-        table_cache.remove(table.name());
+        table_cache.insert(table.name().clone(), table.clone());
 
         Ok(())
     }
@@ -441,7 +439,7 @@ pub trait Transaction: Sized {
     #[allow(clippy::too_many_arguments)]
     fn change_column(
         &mut self,
-        table_cache: &TableCache,
+        table_cache: &mut TableCache,
         table_name: &TableName,
         old_column_name: &str,
         new_column_name: &str,
@@ -522,7 +520,7 @@ pub trait Transaction: Sized {
 
     fn add_column(
         &mut self,
-        table_cache: &TableCache,
+        table_cache: &mut TableCache,
         table_name: &TableName,
         column: &ColumnCatalog,
         if_not_exists: bool,
@@ -563,7 +561,7 @@ pub trait Transaction: Sized {
                 .encode_column_value(column, &mut ReferenceTables::new())?;
             unsafe { &*self.table_codec() }
                 .with_column_key(column, |key| self.set(key, value.as_slice()))?;
-            table_cache.remove(table_name);
+            table_cache.insert(table_name.clone(), table);
 
             Ok(col_id)
         } else {
@@ -573,8 +571,8 @@ pub trait Transaction: Sized {
 
     fn drop_column(
         &mut self,
-        table_cache: &TableCache,
-        meta_cache: &StatisticsMetaCache,
+        table_cache: &mut TableCache,
+        meta_cache: &mut StatisticsMetaCache,
         table_name: &TableName,
         column_name: &str,
     ) -> Result<(), DatabaseError> {
@@ -601,7 +599,11 @@ pub trait Transaction: Sized {
 
                 self.remove_statistics_meta(meta_cache, table_name, index_meta.id)?;
             }
-            table_cache.remove(table_name);
+            if let Some(table) = self.load_table(table_name.clone())? {
+                table_cache.insert(table_name.clone(), table);
+            } else {
+                table_cache.remove(table_name);
+            }
 
             Ok(())
         } else {
@@ -611,7 +613,7 @@ pub trait Transaction: Sized {
 
     fn create_view(
         &mut self,
-        view_cache: &ViewCache,
+        view_cache: &mut ViewCache,
         view: View,
         or_replace: bool,
     ) -> Result<(), DatabaseError> {
@@ -627,14 +629,14 @@ pub trait Transaction: Sized {
         }
         unsafe { &*self.table_codec() }
             .with_view_key(&view.name, |key| self.set(key, value.as_slice()))?;
-        let _ = view_cache.put(view.name.clone(), view);
+        view_cache.insert(view.name.clone(), view);
 
         Ok(())
     }
 
     fn create_table(
         &mut self,
-        table_cache: &TableCache,
+        table_cache: &mut TableCache,
         table_name: TableName,
         columns: Vec<ColumnCatalog>,
         if_not_exists: bool,
@@ -668,7 +670,7 @@ pub trait Transaction: Sized {
                 .with_column_key(column, |key| self.set(key, value.as_slice()))?;
         }
         debug_assert_eq!(reference_tables.len(), 1);
-        table_cache.put(table_name.clone(), table_catalog);
+        table_cache.insert(table_name.clone(), table_catalog);
 
         Ok(table_name)
     }
@@ -688,7 +690,7 @@ pub trait Transaction: Sized {
 
     fn drop_view(
         &mut self,
-        view_cache: &ViewCache,
+        view_cache: &mut ViewCache,
         view_name: TableName,
         if_exists: bool,
     ) -> Result<(), DatabaseError> {
@@ -712,8 +714,8 @@ pub trait Transaction: Sized {
 
     fn drop_index(
         &mut self,
-        table_cache: &TableCache,
-        meta_cache: &StatisticsMetaCache,
+        table_cache: &mut TableCache,
+        meta_cache: &mut StatisticsMetaCache,
         table_name: TableName,
         index_name: &str,
         if_exists: bool,
@@ -748,14 +750,18 @@ pub trait Transaction: Sized {
 
         self.remove_statistics_meta(meta_cache, &table_name, index_id)?;
 
-        table_cache.remove(&table_name);
+        if let Some(table) = self.load_table(table_name.clone())? {
+            table_cache.insert(table_name.clone(), table);
+        } else {
+            table_cache.remove(&table_name);
+        }
 
         Ok(())
     }
 
     fn drop_table(
         &mut self,
-        table_cache: &TableCache,
+        table_cache: &mut TableCache,
         table_name: TableName,
         if_exists: bool,
     ) -> Result<(), DatabaseError> {
@@ -807,21 +813,28 @@ pub trait Transaction: Sized {
         table_functions: &'a TableFunctions,
         view_name: TableName,
     ) -> Result<Option<&'a View>, DatabaseError> {
-        if let Some(view) = view_cache.get(&view_name) {
-            return Ok(Some(view));
-        }
+        let _ = (table_cache, scala_functions, table_functions);
+        Ok(view_cache.get(&view_name))
+    }
+
+    fn load_view(
+        &self,
+        table_cache: &TableCache,
+        scala_functions: &ScalaFunctions,
+        table_functions: &TableFunctions,
+        view_name: TableName,
+    ) -> Result<Option<View>, DatabaseError> {
         unsafe { &*self.table_codec() }.with_view_key(&view_name, |key| {
             let Some(bytes) = self.get_borrowed(key)? else {
                 return Ok(None);
             };
-            Ok(Some(view_cache.get_or_insert(view_name.clone(), |_| {
-                TableCodec::decode_view(
-                    bytes.as_ref(),
-                    (self, table_cache),
-                    scala_functions,
-                    table_functions,
-                )
-            })?))
+            TableCodec::decode_view(
+                bytes.as_ref(),
+                (self, table_cache),
+                scala_functions,
+                table_functions,
+            )
+            .map(Some)
         })
     }
 
@@ -843,21 +856,16 @@ pub trait Transaction: Sized {
     }
 
     fn table<'a>(
-        &'a self,
+        &self,
         table_cache: &'a TableCache,
         table_name: TableName,
     ) -> Result<Option<&'a TableCatalog>, DatabaseError> {
-        if let Some(table) = table_cache.get(&table_name) {
-            return Ok(Some(table));
-        }
+        Ok(table_cache.get(&table_name))
+    }
 
-        // `TableCache` is not theoretically used in `table_collect` because ColumnCatalog should not depend on other Column
+    fn load_table(&self, table_name: TableName) -> Result<Option<TableCatalog>, DatabaseError> {
         self.table_collect(&table_name)?
-            .map(|(columns, indexes)| {
-                table_cache.get_or_insert(table_name.clone(), |_| {
-                    TableCatalog::reload(table_name, columns, indexes)
-                })
-            })
+            .map(|(columns, indexes)| TableCatalog::reload(table_name, columns, indexes))
             .transpose()
     }
 
@@ -871,7 +879,7 @@ pub trait Transaction: Sized {
 
     fn save_statistics_meta(
         &mut self,
-        meta_cache: &StatisticsMetaCache,
+        meta_cache: &mut StatisticsMetaCache,
         table_name: &TableName,
         statistics_meta: StatisticsMeta,
     ) -> Result<(), DatabaseError> {
@@ -914,7 +922,7 @@ pub trait Transaction: Sized {
             )?;
         }
 
-        meta_cache.put((table_name.clone(), index_id), Some(cached_meta));
+        meta_cache.insert((table_name.clone(), index_id), cached_meta);
 
         Ok(())
     }
@@ -969,7 +977,7 @@ pub trait Transaction: Sized {
 
     fn remove_statistics_meta(
         &mut self,
-        meta_cache: &StatisticsMetaCache,
+        meta_cache: &mut StatisticsMetaCache,
         table_name: &TableName,
         index_id: IndexId,
     ) -> Result<(), DatabaseError> {
@@ -982,16 +990,6 @@ pub trait Transaction: Sized {
         meta_cache.remove(&(table_name.clone(), index_id));
 
         Ok(())
-    }
-
-    fn meta_loader<'a>(
-        &'a self,
-        meta_cache: &'a StatisticsMetaCache,
-    ) -> StatisticMetaLoader<'a, Self>
-    where
-        Self: Sized,
-    {
-        StatisticMetaLoader::new(self, meta_cache)
     }
 
     #[allow(clippy::type_complexity)]
@@ -1277,7 +1275,7 @@ impl TupleMapping {
 
 struct IndexImplParams<'a, T: Transaction> {
     index_meta: IndexMetaRef,
-    table_name: &'a str,
+    table_name: TableName,
     deserializers: Vec<TupleValueSerializableImpl>,
     total_len: usize,
     tx: &'a T,
@@ -1301,19 +1299,23 @@ impl<T: Transaction> IndexImplParams<'_, T> {
         tuple_id: &TupleId,
         tuple: &mut Tuple,
     ) -> Result<bool, DatabaseError> {
-        unsafe { &*self.table_codec() }.with_tuple_key_unchecked(self.table_name, tuple_id, |key| {
-            let Some(bytes) = self.tx.get_borrowed(key)? else {
-                return Ok(false);
-            };
-            TableCodec::decode_tuple_into(
-                tuple,
-                &self.deserializers,
-                Some(tuple_id.clone()),
-                bytes.as_ref(),
-                self.total_len,
-            )?;
-            Ok(true)
-        })
+        unsafe { &*self.table_codec() }.with_tuple_key_unchecked(
+            self.table_name.as_ref(),
+            tuple_id,
+            |key| {
+                let Some(bytes) = self.tx.get_borrowed(key)? else {
+                    return Ok(false);
+                };
+                TableCodec::decode_tuple_into(
+                    tuple,
+                    &self.deserializers,
+                    Some(tuple_id.clone()),
+                    bytes.as_ref(),
+                    self.total_len,
+                )?;
+                Ok(true)
+            },
+        )
     }
 }
 
@@ -1412,7 +1414,7 @@ impl<T: Transaction> IndexImpl<T> for PrimaryKeyIndexImpl {
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
         let tuple_id = value.clone();
         let found = unsafe { &*params.table_codec() }.with_tuple_key_unchecked(
-            params.table_name,
+            params.table_name.as_ref(),
             value,
             |key| {
                 let Some(bytes) = params.tx.get_borrowed(key)? else {
@@ -1443,7 +1445,7 @@ impl<T: Transaction> IndexImpl<T> for PrimaryKeyIndexImpl {
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
         unsafe { &*params.table_codec() }.with_tuple_key_unchecked(
-            params.table_name,
+            params.table_name.as_ref(),
             value,
             |key| {
                 out.clear();
@@ -1489,7 +1491,7 @@ impl<T: Transaction> IndexImpl<T> for UniqueIndexImpl {
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
         let index = Index::new(params.index_meta.id, value, IndexType::Unique);
         let Some(bytes) = unsafe { &*params.table_codec() }.with_index_key(
-            params.table_name,
+            params.table_name.as_ref(),
             &index,
             None,
             |key| params.tx.get_borrowed(key),
@@ -1514,11 +1516,16 @@ impl<T: Transaction> IndexImpl<T> for UniqueIndexImpl {
     ) -> Result<(), DatabaseError> {
         let index = Index::new(params.index_meta.id, value, IndexType::Unique);
 
-        unsafe { &*params.table_codec() }.with_index_key(params.table_name, &index, None, |key| {
-            out.clear();
-            out.extend_from_slice(key);
-            Ok(())
-        })
+        unsafe { &*params.table_codec() }.with_index_key(
+            params.table_name.as_ref(),
+            &index,
+            None,
+            |key| {
+                out.clear();
+                out.extend_from_slice(key);
+                Ok(())
+            },
+        )
     }
 }
 
@@ -1552,10 +1559,15 @@ impl<T: Transaction> IndexImpl<T> for NormalIndexImpl {
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
         let index = Index::new(params.index_meta.id, value, IndexType::Normal);
-        unsafe { &*params.table_codec() }.with_index_key(params.table_name, &index, None, |key| {
-            encode_bound_key(out, key, is_upper);
-            Ok(())
-        })
+        unsafe { &*params.table_codec() }.with_index_key(
+            params.table_name.as_ref(),
+            &index,
+            None,
+            |key| {
+                encode_bound_key(out, key, is_upper);
+                Ok(())
+            },
+        )
     }
 }
 
@@ -1589,10 +1601,15 @@ impl<T: Transaction> IndexImpl<T> for CompositeIndexImpl {
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
         let index = Index::new(params.index_meta.id, value, IndexType::Composite);
-        unsafe { &*params.table_codec() }.with_index_key(params.table_name, &index, None, |key| {
-            encode_bound_key(out, key, is_upper);
-            Ok(())
-        })
+        unsafe { &*params.table_codec() }.with_index_key(
+            params.table_name.as_ref(),
+            &index,
+            None,
+            |key| {
+                encode_bound_key(out, key, is_upper);
+                Ok(())
+            },
+        )
     }
 }
 
@@ -1642,10 +1659,15 @@ impl<T: Transaction> IndexImpl<T> for CoveredIndexImpl {
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
         let index = Index::new(params.index_meta.id, value, params.index_meta.ty);
-        unsafe { &*params.table_codec() }.with_index_key(params.table_name, &index, None, |key| {
-            encode_bound_key(out, key, is_upper);
-            Ok(())
-        })
+        unsafe { &*params.table_codec() }.with_index_key(
+            params.table_name.as_ref(),
+            &index,
+            None,
+            |key| {
+                encode_bound_key(out, key, is_upper);
+                Ok(())
+            },
+        )
     }
 }
 
@@ -1972,9 +1994,7 @@ mod test {
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::{ColumnId, LogicalType};
-    use crate::utils::lru::SharedLruCache;
     use std::collections::Bound;
-    use std::hash::RandomState;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -2032,9 +2052,9 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let mut table_cache = crate::storage::TableCache::default();
 
-        build_table(&table_cache, &mut transaction)?;
+        build_table(&mut table_cache, &mut transaction)?;
 
         let fn_assert = |transaction: &mut RocksTransaction,
                          table_cache: &TableCache|
@@ -2118,10 +2138,13 @@ mod test {
             Ok(())
         };
         fn_assert(&mut transaction, &table_cache)?;
-        fn_assert(
-            &mut transaction,
-            &Arc::new(SharedLruCache::new(4, 1, RandomState::new())?),
-        )?;
+        let mut reloaded_table_cache = crate::storage::TableCache::default();
+        let table_name = "t1".to_string().into();
+        let table = transaction
+            .load_table(table_name)?
+            .ok_or(DatabaseError::TableNotFound)?;
+        reloaded_table_cache.insert("t1".to_string().into(), table);
+        fn_assert(&mut transaction, &reloaded_table_cache)?;
 
         Ok(())
     }
@@ -2132,9 +2155,9 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let mut table_cache = crate::storage::TableCache::default();
 
-        build_table(&table_cache, &mut transaction)?;
+        build_table(&mut table_cache, &mut transaction)?;
 
         let tuples = build_tuples();
         for tuple in tuples.iter().cloned() {
@@ -2223,9 +2246,9 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let mut table_cache = crate::storage::TableCache::default();
 
-        build_table(&table_cache, &mut transaction)?;
+        build_table(&mut table_cache, &mut transaction)?;
         let (c2_column_id, c3_column_id) = {
             let t1_table = transaction
                 .table(&table_cache, "t1".to_string().into())?
@@ -2238,14 +2261,14 @@ mod test {
         };
 
         let _ = transaction.add_index_meta(
-            &table_cache,
+            &mut table_cache,
             &"t1".to_string().into(),
             "i1".to_string(),
             vec![c3_column_id],
             IndexType::Normal,
         )?;
         let _ = transaction.add_index_meta(
-            &table_cache,
+            &mut table_cache,
             &"t1".to_string().into(),
             "i2".to_string(),
             vec![c3_column_id, c2_column_id],
@@ -2278,10 +2301,13 @@ mod test {
             Ok(())
         };
         fn_assert(&mut transaction, &table_cache)?;
-        fn_assert(
-            &mut transaction,
-            &Arc::new(SharedLruCache::new(4, 1, RandomState::new())?),
-        )?;
+        let mut reloaded_table_cache = crate::storage::TableCache::default();
+        let table_name = "t1".to_string().into();
+        let table = transaction
+            .load_table(table_name)?
+            .ok_or(DatabaseError::TableNotFound)?;
+        reloaded_table_cache.insert("t1".to_string().into(), table);
+        fn_assert(&mut transaction, &reloaded_table_cache)?;
         {
             let mut iter = table_codec.with_index_meta_bound("t1", |min, max| {
                 transaction.range(Bound::Included(min), Bound::Included(max))
@@ -2295,10 +2321,10 @@ mod test {
             dbg!(value);
             assert!(iter.try_next()?.is_none());
         }
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let mut meta_cache = crate::storage::StatisticsMetaCache::default();
         match transaction.drop_index(
-            &table_cache,
-            &meta_cache,
+            &mut table_cache,
+            &mut meta_cache,
             "t1".to_string().into(),
             "pk_index",
             false,
@@ -2307,8 +2333,8 @@ mod test {
             _ => unreachable!(),
         }
         transaction.drop_index(
-            &table_cache,
-            &meta_cache,
+            &mut table_cache,
+            &mut meta_cache,
             "t1".to_string().into(),
             "i1",
             false,
@@ -2343,7 +2369,7 @@ mod test {
     fn test_index_insert_delete() -> Result<(), DatabaseError> {
         fn build_index_iter<'a>(
             transaction: &'a RocksTransaction<'a>,
-            table_cache: &'a Arc<TableCache>,
+            table_cache: &'a TableCache,
             index_column_id: ColumnId,
         ) -> Result<IndexIter<'a, RocksTransaction<'a>>, DatabaseError> {
             transaction.read_by_index(
@@ -2374,16 +2400,16 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let mut table_cache = crate::storage::TableCache::default();
 
-        build_table(&table_cache, &mut transaction)?;
+        build_table(&mut table_cache, &mut transaction)?;
         let t1_table = transaction
             .table(&table_cache, "t1".to_string().into())?
             .unwrap();
         let c3_column_id = *t1_table.get_column_id_by_name("c3").unwrap();
 
         let _ = transaction.add_index_meta(
-            &table_cache,
+            &mut table_cache,
             &"t1".to_string().into(),
             "i1".to_string(),
             vec![c3_column_id],
@@ -2479,7 +2505,7 @@ mod test {
         let table_codec = TableCodec::default();
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let mut table_cache = crate::storage::TableCache::default();
         let serializers = [
             LogicalType::Integer.serializable(),
             LogicalType::Boolean.serializable(),
@@ -2505,13 +2531,13 @@ mod test {
 
         let index_id = {
             let mut setup_tx = storage.transaction()?;
-            build_table(&table_cache, &mut setup_tx)?;
+            build_table(&mut table_cache, &mut setup_tx)?;
             let table = setup_tx
                 .table(&table_cache, "t1".to_string().into())?
                 .unwrap();
             let c3_column_id = *table.get_column_id_by_name("c3").unwrap();
             let index_id = setup_tx.add_index_meta(
-                &table_cache,
+                &mut table_cache,
                 &"t1".to_string().into(),
                 "i1".to_string(),
                 vec![c3_column_id],
@@ -2595,10 +2621,10 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let meta_cache = StatisticsMetaCache::new(4, 1, RandomState::new())?;
+        let mut table_cache = crate::storage::TableCache::default();
+        let mut meta_cache = StatisticsMetaCache::default();
 
-        build_table(&table_cache, &mut transaction)?;
+        build_table(&mut table_cache, &mut transaction)?;
         let table_name: TableName = "t1".to_string().into();
 
         let new_column = ColumnCatalog::new(
@@ -2607,14 +2633,14 @@ mod test {
             ColumnDesc::new(LogicalType::Integer, None, false, None)?,
         );
         let new_column_id =
-            transaction.add_column(&table_cache, &table_name, &new_column, false)?;
+            transaction.add_column(&mut table_cache, &table_name, &new_column, false)?;
         {
             assert!(transaction
-                .add_column(&table_cache, &table_name, &new_column, false,)
+                .add_column(&mut table_cache, &table_name, &new_column, false,)
                 .is_err());
             assert_eq!(
                 new_column_id,
-                transaction.add_column(&table_cache, &table_name, &new_column, true,)?
+                transaction.add_column(&mut table_cache, &table_name, &new_column, true,)?
             );
         }
         {
@@ -2638,7 +2664,7 @@ mod test {
                 Some(&ColumnRef::from(new_column))
             );
         }
-        transaction.drop_column(&table_cache, &meta_cache, &table_name, "c4")?;
+        transaction.drop_column(&mut table_cache, &mut meta_cache, &table_name, "c4")?;
         {
             let table = transaction
                 .table(&table_cache, table_name.clone())?
@@ -2664,14 +2690,15 @@ mod test {
             ),
         };
         let mut transaction = table_state.storage.transaction()?;
-        transaction.create_view(&table_state.view_cache, view.clone(), true)?;
+        let mut view_cache = table_state.view_cache.clone();
+        transaction.create_view(&mut view_cache, view.clone(), true)?;
 
         assert_eq!(
             &view,
             transaction
                 .view(
                     &table_state.table_cache,
-                    &table_state.view_cache,
+                    &view_cache,
                     &scala_functions,
                     &table_functions,
                     view_name.clone(),
@@ -2682,8 +2709,8 @@ mod test {
             &view,
             transaction
                 .view(
-                    &Arc::new(SharedLruCache::new(4, 1, RandomState::new())?),
-                    &table_state.view_cache,
+                    &crate::storage::TableCache::default(),
+                    &view_cache,
                     &scala_functions,
                     &table_functions,
                     view_name.clone(),
@@ -2691,12 +2718,12 @@ mod test {
                 .unwrap()
         );
 
-        transaction.drop_view(&table_state.view_cache, view_name.clone(), false)?;
-        transaction.drop_view(&table_state.view_cache, view_name.clone(), true)?;
+        transaction.drop_view(&mut view_cache, view_name.clone(), false)?;
+        transaction.drop_view(&mut view_cache, view_name.clone(), true)?;
         assert!(transaction
             .view(
                 &table_state.table_cache,
-                &table_state.view_cache,
+                &view_cache,
                 &scala_functions,
                 &table_functions,
                 view_name,

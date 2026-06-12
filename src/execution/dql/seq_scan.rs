@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor};
+use crate::execution::{
+    ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext, ReadExecutor,
+};
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::storage::{Iter, Transaction, TupleIter};
 
@@ -35,8 +37,8 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SeqScan<'a, T> {
     fn into_executor(
         self,
         arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
+        _: ReadExecutionContext<'_>,
+        _: &T,
     ) -> ExecId {
         arena.push(ExecNode::SeqScan(self))
     }
@@ -48,8 +50,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SeqScan<'a, T> {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
+        _: ReadExecutionContext<'_>,
+        _: &T,
     ) -> ExecId {
         arena.push(ExecNode::SeqScan(SeqScan::from(input)))
     }
@@ -73,7 +75,7 @@ impl<'a, T: Transaction + 'a> SeqScan<'a, T> {
                 arena.finish();
                 return Ok(());
             };
-            self.iter = Some(arena.transaction_mut().read(
+            self.iter = Some(arena.transaction().read(
                 arena.table_cache(),
                 table_name,
                 limit,

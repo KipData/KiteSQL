@@ -233,7 +233,6 @@ mod tests {
     use crate::planner::operator::project::ProjectOperator;
     use crate::planner::operator::Operator;
     use crate::planner::{Childrens, LogicalPlan};
-    use crate::storage::rocksdb::RocksTransaction;
 
     fn column_expr(name: &str, position: usize) -> ScalarExpression {
         ScalarExpression::column_expr(
@@ -254,9 +253,7 @@ mod tests {
                 vec![NormalizationRuleImpl::CollapseProject],
             )
             .build();
-        let best_plan = pipeline
-            .instantiate(plan)
-            .find_best::<RocksTransaction>(None)?;
+        let best_plan = pipeline.instantiate(plan).find_best(None)?;
 
         if let Operator::Project(op) = &best_plan.operator {
             assert_eq!(op.exprs.len(), 1);
@@ -293,9 +290,7 @@ mod tests {
                 vec![NormalizationRuleImpl::CollapseProject],
             )
             .build();
-        let best_plan = pipeline
-            .instantiate(plan)
-            .find_best::<RocksTransaction>(None)?;
+        let best_plan = pipeline.instantiate(plan).find_best(None)?;
         if let Operator::Project(op) = &best_plan.operator {
             assert_eq!(op.exprs.len(), 1);
         } else {
@@ -357,9 +352,7 @@ mod tests {
                 vec![NormalizationRuleImpl::CombineFilter],
             )
             .build();
-        let best_plan = pipeline
-            .instantiate(plan)
-            .find_best::<RocksTransaction>(None)?;
+        let best_plan = pipeline.instantiate(plan).find_best(None)?;
 
         let filter_op = best_plan.childrens.pop_only();
         if let Operator::Filter(op) = &filter_op.operator {
@@ -388,9 +381,7 @@ mod tests {
             )
             .build();
 
-        let best_plan = pipeline
-            .instantiate(plan)
-            .find_best::<RocksTransaction>(None)?;
+        let best_plan = pipeline.instantiate(plan).find_best(None)?;
 
         let agg_op = best_plan.childrens.pop_only();
         if let Operator::Aggregate(_) = &agg_op.operator {

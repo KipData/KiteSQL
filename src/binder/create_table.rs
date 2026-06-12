@@ -188,8 +188,6 @@ mod tests {
     use crate::storage::Storage;
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
-    use crate::utils::lru::SharedLruCache;
-    use std::hash::RandomState;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -199,8 +197,8 @@ mod tests {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let transaction = storage.transaction()?;
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let table_cache = crate::storage::TableCache::default();
+        let view_cache = crate::storage::ViewCache::default();
         let scala_functions = Default::default();
         let table_functions = Default::default();
 

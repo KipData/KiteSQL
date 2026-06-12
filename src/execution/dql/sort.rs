@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
+use crate::execution::{
+    build_read, ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext,
+};
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::LogicalPlan;
 use crate::storage::table_codec::BumpBytes;
@@ -287,8 +289,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort {
     fn into_executor(
         (SortOperator { sort_fields, limit }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        cache: ReadExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
         let input = build_read(arena, input, cache, transaction);
         arena.push(ExecNode::Sort(Sort {

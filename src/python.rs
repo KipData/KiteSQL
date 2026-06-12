@@ -131,6 +131,26 @@ impl PythonDatabaseInner {
             }
         }
     }
+
+    fn ddl(&mut self, sql: &str) -> Result<(), DatabaseError> {
+        match self {
+            #[cfg(feature = "lmdb")]
+            PythonDatabaseInner::Lmdb(db) => db.ddl(sql),
+            PythonDatabaseInner::Memory(db) => db.ddl(sql),
+            #[cfg(feature = "rocksdb")]
+            PythonDatabaseInner::Rocks(db) => db.ddl(sql),
+        }
+    }
+
+    fn analyze(&mut self, table_name: &str) -> Result<(), DatabaseError> {
+        match self {
+            #[cfg(feature = "lmdb")]
+            PythonDatabaseInner::Lmdb(db) => db.analyze(table_name),
+            PythonDatabaseInner::Memory(db) => db.analyze(table_name),
+            #[cfg(feature = "rocksdb")]
+            PythonDatabaseInner::Rocks(db) => db.analyze(table_name),
+        }
+    }
 }
 
 enum PythonResultIterInner {
@@ -234,6 +254,14 @@ impl PythonDatabase {
         iter.done().map_err(to_py_err)?;
 
         Ok(())
+    }
+
+    pub fn ddl(&mut self, sql: &str) -> PyResult<()> {
+        self.inner.ddl(sql).map_err(to_py_err)
+    }
+
+    pub fn analyze(&mut self, table_name: &str) -> PyResult<()> {
+        self.inner.analyze(table_name).map_err(to_py_err)
     }
 }
 
@@ -377,8 +405,8 @@ mod tests {
                 c_str!(
                     r#"
 db = kite_sql.Database.in_memory() if backend == "memory" else kite_sql.Database(db_path, backend)
-db.execute("drop table if exists my_struct")
-db.execute("create table my_struct (c1 int primary key, c2 int)")
+db.ddl("drop table if exists my_struct")
+db.ddl("create table my_struct (c1 int primary key, c2 int)")
 db.execute("insert into my_struct values(0, 0), (1, 1)")
 
 iter_obj = db.run("select * from my_struct")
@@ -405,7 +433,7 @@ while row is not None:
 stream.finish()
 assert streamed == [[0, 0], [1, 11]]
 
-db.execute("drop table my_struct")
+db.ddl("drop table my_struct")
 "#
                 ),
             )?;
@@ -423,8 +451,8 @@ db.execute("drop table my_struct")
                 c_str!(
                     r#"
 db = kite_sql.Database.in_memory() if backend == "memory" else kite_sql.Database(db_path, backend)
-db.execute("drop table if exists t1")
-db.execute("create table t1(id int primary key, c1 int, c2 int)")
+db.ddl("drop table if exists t1")
+db.ddl("create table t1(id int primary key, c1 int, c2 int)")
 
 for i in range(2000):
     id_v = i * 3
@@ -432,10 +460,10 @@ for i in range(2000):
     c2_v = id_v + 2
     db.execute(f"insert into t1 values({id_v}, {c1_v}, {c2_v})")
 
-db.execute("create unique index u_c1_index on t1 (c1)")
-db.execute("create index c2_index on t1 (c2)")
-db.execute("create index p_index on t1 (c1, c2)")
-db.execute("analyze table t1")
+db.ddl("create unique index u_c1_index on t1 (c1)")
+db.ddl("create index c2_index on t1 (c2)")
+db.ddl("create index p_index on t1 (c1, c2)")
+db.analyze("t1")
 
 def row_vals(row):
     ints = row["values"]
@@ -473,7 +501,43 @@ db.execute("delete from t1 where c1 = 7")
 after_delete = db.run("select * from t1 where c2 = 123456").rows()
 assert len(after_delete) == 0
 
-db.execute("drop table t1")
+db.ddl("drop table t1")
+"#
+                ),
+            )?;
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_python_mutations_use_explicit_api() -> PyResult<()> {
+        Python::with_gil(|py| {
+            let module = register_module(py)?;
+            run_script_on_all_backends(
+                py,
+                &module,
+                c_str!(
+                    r#"
+db = kite_sql.Database.in_memory() if backend == "memory" else kite_sql.Database(db_path, backend)
+
+try:
+    db.execute("create table explicit_api(id int primary key)")
+    raise AssertionError("expected execute to reject DDL")
+except RuntimeError as exc:
+    assert "Database::ddl" in str(exc)
+
+db.ddl("create table explicit_api(id int primary key)")
+for i in range(200):
+    db.execute(f"insert into explicit_api values ({i})")
+
+try:
+    db.execute("analyze table explicit_api")
+    raise AssertionError("expected execute to reject ANALYZE")
+except RuntimeError as exc:
+    assert "Database::analyze" in str(exc)
+
+db.analyze("explicit_api")
+db.ddl("drop table explicit_api")
 "#
                 ),
             )?;

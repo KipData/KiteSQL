@@ -15,7 +15,9 @@
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
+use crate::execution::{
+    build_read, ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor,
+};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::delete::DeleteOperator;
 use crate::planner::LogicalPlan;
@@ -45,8 +47,8 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Delete {
     fn into_executor(
         mut self,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        cache: ReadExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
         self.input = Some(build_read(
             arena,
@@ -68,18 +70,30 @@ impl Delete {
             return Ok(());
         };
 
-        let table = arena
-            .transaction_mut()
-            .table(arena.table_cache(), self.table_name.clone())?
-            .ok_or(DatabaseError::TableNotFound)?;
+        let index_templates = {
+            let table = arena
+                .transaction()
+                .table(arena.table_cache(), self.table_name.clone())?
+                .ok_or(DatabaseError::TableNotFound)?;
+            table
+                .indexes()
+                .map(|index_meta| {
+                    Ok((
+                        index_meta.id,
+                        index_meta.ty,
+                        index_meta.column_exprs(table)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, DatabaseError>>()?
+        };
         let mut indexes: HashMap<IndexId, Value> = HashMap::new();
 
         let mut deleted_count = 0;
 
         while arena.next_tuple(input)? {
             let tuple = arena.result_tuple().clone();
-            for index_meta in table.indexes() {
-                if let Some(Value { exprs, values, .. }) = indexes.get_mut(&index_meta.id) {
+            for (index_id, index_ty, exprs) in index_templates.iter() {
+                if let Some(Value { exprs, values, .. }) = indexes.get_mut(index_id) {
                     let Some(data_value) =
                         DataValue::values_to_tuple(Projection::projection(&tuple, exprs)?)
                     else {
@@ -87,21 +101,20 @@ impl Delete {
                     };
                     values.push(data_value);
                 } else {
-                    let mut values = Vec::with_capacity(table.indexes().len());
-                    let exprs = index_meta.column_exprs(table)?;
                     let Some(data_value) =
-                        DataValue::values_to_tuple(Projection::projection(&tuple, &exprs)?)
+                        DataValue::values_to_tuple(Projection::projection(&tuple, exprs)?)
                     else {
                         continue;
                     };
+                    let mut values = Vec::with_capacity(index_templates.len());
                     values.push(data_value);
 
                     indexes.insert(
-                        index_meta.id,
+                        *index_id,
                         Value {
-                            exprs,
+                            exprs: exprs.clone(),
                             values,
-                            index_ty: index_meta.ty,
+                            index_ty: *index_ty,
                         },
                     );
                 }

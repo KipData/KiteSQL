@@ -813,7 +813,6 @@ mod test {
     use crate::planner::operator::filter::FilterOperator;
     use crate::planner::operator::Operator;
     use crate::planner::LogicalPlan;
-    use crate::storage::rocksdb::RocksTransaction;
     use crate::types::evaluator::binary_create;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -827,9 +826,7 @@ mod test {
                 vec![NormalizationRuleImpl::SimplifyFilter],
             )
             .build();
-        let best_plan = pipeline
-            .instantiate(plan)
-            .find_best::<RocksTransaction>(None)?;
+        let best_plan = pipeline.instantiate(plan).find_best(None)?;
         if let Operator::Filter(filter_op) = best_plan.childrens.pop_only().operator {
             Ok(Some(filter_op))
         } else {

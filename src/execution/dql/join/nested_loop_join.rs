@@ -17,7 +17,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext, ReadExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
@@ -159,8 +159,8 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
     fn into_executor(
         mut self,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        cache: ReadExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
         self.left_input = build_read(arena, self.left_input_plan.take(), cache, transaction);
         arena.push(ExecNode::NestedLoopJoin(self))
@@ -173,8 +173,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        cache: ReadExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
         <Self as ReadExecutor<'a, T>>::into_executor(Self::from(input), arena, cache, transaction)
     }
@@ -189,14 +189,8 @@ impl NestedLoopJoin {
         &mut self,
         arena: &mut ExecArena<'a, T>,
     ) -> ExecId {
-        let cache = (
-            arena.table_cache(),
-            arena.view_cache(),
-            arena.meta_cache(),
-            arena.scala_functions(),
-            arena.table_functions(),
-        );
-        let transaction = arena.transaction_mut() as *mut T;
+        let cache = arena.read_context();
+        let transaction = arena.transaction();
         // Fixme: Executor reset
         build_read(arena, self.right_input_plan.clone(), cache, transaction)
     }
@@ -448,6 +442,8 @@ impl NestedLoopJoin {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
+    use std::sync::Arc;
+
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
     use crate::db::DataBaseBuilder;
@@ -460,15 +456,12 @@ mod test {
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
     use crate::planner::Childrens;
-    use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
+    use crate::storage::rocksdb::RocksStorage;
     use crate::storage::Storage;
     use crate::types::evaluator::binary_create;
     use crate::types::LogicalType;
-    use crate::utils::lru::SharedLruCache;
     use std::borrow::Cow;
     use std::collections::HashSet;
-    use std::hash::RandomState;
-    use std::sync::Arc;
     use tempfile::TempDir;
 
     fn optimize_exprs(plan: LogicalPlan) -> Result<LogicalPlan, DatabaseError> {
@@ -480,7 +473,7 @@ mod test {
             )
             .build()
             .instantiate(plan)
-            .find_best::<RocksTransaction>(None)
+            .find_best(None)
     }
 
     fn tuple_to_strings(tuple: &Tuple) -> Vec<Option<String>> {
@@ -633,9 +626,9 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
         let (keys, left, right, filter) = build_join_values(true);
         let plan = LogicalPlan::new(
             Operator::Join(JoinOperator {
@@ -682,9 +675,9 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
         let (keys, left, right, filter) = build_join_values(true);
         let plan = LogicalPlan::new(
             Operator::Join(JoinOperator {
@@ -760,9 +753,9 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
         let (keys, left, right, filter) = build_join_values(true);
         let plan = LogicalPlan::new(
             Operator::Join(JoinOperator {
@@ -809,9 +802,9 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
         let (keys, left, right, _) = build_join_values(true);
         let plan = LogicalPlan::new(
             Operator::Join(JoinOperator {
@@ -873,9 +866,9 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
         let (keys, left, right, _) = build_join_values(false);
         let plan = LogicalPlan::new(
             Operator::Join(JoinOperator {
@@ -912,9 +905,9 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
         let (keys, left, right, filter) = build_join_values(true);
         let plan = LogicalPlan::new(
             Operator::Join(JoinOperator {
@@ -985,9 +978,9 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
         let (keys, left, right, filter) = build_join_values(true);
         let plan = LogicalPlan::new(
             Operator::Join(JoinOperator {
@@ -1087,9 +1080,9 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
 
         let desc = ColumnDesc::new(LogicalType::Integer, None, false, None)?;
         let left_columns = vec![
@@ -1178,7 +1171,7 @@ mod test {
     #[test]
     fn test_right_join_using_binds_visible_column_to_right_side() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let db = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+        let mut db = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
 
         let setup_sql = [
             "DROP TABLE IF EXISTS str1",
@@ -1190,7 +1183,11 @@ mod test {
         ];
 
         for sql in setup_sql {
-            db.run(sql)?.done()?;
+            if sql.starts_with("DROP ") || sql.starts_with("CREATE ") {
+                db.ddl(sql)?;
+            } else {
+                db.run(sql)?.done()?;
+            }
         }
 
         let mut iter = db.run(

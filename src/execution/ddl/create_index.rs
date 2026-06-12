@@ -14,7 +14,9 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
+use crate::execution::{
+    build_read, ExecArena, ExecId, ExecNode, ReadExecutionContext, WriteExecutor,
+};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::create_index::CreateIndexOperator;
 use crate::planner::LogicalPlan;
@@ -47,8 +49,8 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateIndex {
     fn into_executor(
         mut self,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        cache: ReadExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
         self.input = build_read(arena, self.input_plan.take(), cache, transaction);
         arena.push(ExecNode::CreateIndex(self))
@@ -60,8 +62,6 @@ impl CreateIndex {
         &mut self,
         arena: &mut ExecArena<'a, T>,
     ) -> Result<(), DatabaseError> {
-        let table_cache = arena.table_cache();
-
         let Some(CreateIndexOperator {
             table_name,
             index_name,
@@ -85,23 +85,21 @@ impl CreateIndex {
                 })
             })
             .unzip();
-        let index_id = match arena.transaction_mut().add_index_meta(
-            table_cache,
-            &table_name,
-            index_name,
-            column_ids,
-            ty,
-        ) {
-            Ok(index_id) => index_id,
-            Err(DatabaseError::DuplicateIndex(index_name)) => {
-                if if_not_exists {
-                    arena.finish();
-                    return Ok(());
-                } else {
-                    return Err(DatabaseError::DuplicateIndex(index_name));
+        let index_id = {
+            let (transaction, context) = arena.write_context_mut();
+            let table_cache = context.table_cache_mut();
+            match transaction.add_index_meta(table_cache, &table_name, index_name, column_ids, ty) {
+                Ok(index_id) => index_id,
+                Err(DatabaseError::DuplicateIndex(index_name)) => {
+                    if if_not_exists {
+                        arena.finish();
+                        return Ok(());
+                    } else {
+                        return Err(DatabaseError::DuplicateIndex(index_name));
+                    }
                 }
+                Err(err) => return Err(err),
             }
-            Err(err) => return Err(err),
         };
 
         while arena.next_tuple(self.input)? {

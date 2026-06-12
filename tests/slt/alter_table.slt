@@ -49,7 +49,7 @@ create table t2(id int primary key, v1 int)
 statement ok
 insert into t2 values (1,1)
 
-statement error
+statement ok
 alter table t2 add column v2 int default 0 unique
 
 query IIII rowsort
