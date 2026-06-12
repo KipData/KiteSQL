@@ -166,7 +166,7 @@ Checkpoint support and feature-gating details are documented in [docs/features.m
 import { WasmDatabase } from "./pkg/kite_sql.js";
 
 const db = new WasmDatabase();
-await db.execute("create table demo(id int primary key, v int)");
+await db.ddl("create table demo(id int primary key, v int)");
 await db.execute("insert into demo values (1, 2), (2, 4)");
 const rows = db.run("select * from demo").rows();
 console.log(rows.map((r) => r.values.map((v) => v.Int32 ?? v)));

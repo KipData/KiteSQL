@@ -173,6 +173,14 @@ impl WasmDatabase {
         while iter.next_borrowed_tuple().map_err(to_js_err)?.is_some() {}
         Ok(())
     }
+
+    pub fn ddl(&mut self, sql: &str) -> Result<(), JsValue> {
+        self.inner.ddl(sql).map_err(to_js_err)
+    }
+
+    pub fn analyze(&mut self, table_name: &str) -> Result<(), JsValue> {
+        self.inner.analyze(table_name).map_err(to_js_err)
+    }
 }
 
 #[wasm_bindgen]

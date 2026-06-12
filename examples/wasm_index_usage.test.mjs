@@ -38,8 +38,8 @@ const { WasmDatabase } = require("../pkg/kite_sql.js");
 async function main() {
   const db = new WasmDatabase();
 
-  await db.execute("drop table if exists t1");
-  await db.execute("create table t1(id int primary key, c1 int, c2 int)");
+  await db.ddl("drop table if exists t1");
+  await db.ddl("create table t1(id int primary key, c1 int, c2 int)");
 
   // Insert data in bulk (20k rows) without reading from disk.
   // Each row matches the old CSV pattern: id = i*3, c1 = i*3+1, c2 = i*3+2.
@@ -51,10 +51,10 @@ async function main() {
   }
 
   // Add indexes and analyze
-  await db.execute("create unique index u_c1_index on t1 (c1)");
-  await db.execute("create index c2_index on t1 (c2)");
-  await db.execute("create index p_index on t1 (c1, c2)");
-  await db.execute("analyze table t1");
+  await db.ddl("create unique index u_c1_index on t1 (c1)");
+  await db.ddl("create index c2_index on t1 (c2)");
+  await db.ddl("create index p_index on t1 (c1, c2)");
+  await db.analyze("t1");
 
   const rowVals = (row) => {
     const ints = row.values.map((v) => v.Int32 ?? v);
@@ -101,7 +101,7 @@ async function main() {
   const afterDelete = db.run("select * from t1 where c2 = 123456").rows().map(rowVals);
   assert.equal(afterDelete.length, 0);
 
-  await db.execute("drop table t1");
+  await db.ddl("drop table t1");
   console.log("wasm index usage test passed");
 }
 
