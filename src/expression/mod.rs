@@ -21,8 +21,8 @@ use crate::expression::visitor::{walk_expr, Visitor};
 use crate::expression::visitor_mut::VisitorMut;
 use crate::planner::{MetaArena, PlanArena};
 use crate::types::evaluator::{
-    binary_create, cast_create, unary_create, BinaryEvaluatorBox, CastEvaluatorBox,
-    UnaryEvaluatorBox,
+    binary_create, cast_create, unary_create, BinaryEvaluatorRef, CastEvaluatorRef,
+    UnaryEvaluatorRef,
 };
 use crate::types::value::DataValue;
 use crate::types::{CharLengthUnits, LogicalType};
@@ -83,7 +83,7 @@ pub enum ScalarExpression {
     TypeCast {
         expr: Box<ScalarExpression>,
         ty: LogicalType,
-        evaluator: Option<CastEvaluatorBox>,
+        evaluator: Option<CastEvaluatorRef>,
     },
     IsNull {
         negated: bool,
@@ -92,14 +92,14 @@ pub enum ScalarExpression {
     Unary {
         op: UnaryOperator,
         expr: Box<ScalarExpression>,
-        evaluator: Option<UnaryEvaluatorBox>,
+        evaluator: Option<UnaryEvaluatorRef>,
         ty: LogicalType,
     },
     Binary {
         op: BinaryOperator,
         left_expr: Box<ScalarExpression>,
         right_expr: Box<ScalarExpression>,
-        evaluator: Option<BinaryEvaluatorBox>,
+        evaluator: Option<BinaryEvaluatorRef>,
         ty: LogicalType,
     },
     AggCall {
@@ -175,7 +175,7 @@ impl VisitorMut<'_> for BindEvaluator<'_, '_> {
         &mut self,
         expr: &'_ mut ScalarExpression,
         ty: &'_ mut LogicalType,
-        evaluator: &'_ mut Option<CastEvaluatorBox>,
+        evaluator: &'_ mut Option<CastEvaluatorRef>,
     ) -> Result<(), DatabaseError> {
         self.visit(expr)?;
         let from = expr.return_type(self.arena);
@@ -192,7 +192,7 @@ impl VisitorMut<'_> for BindEvaluator<'_, '_> {
         &mut self,
         op: &'_ mut UnaryOperator,
         expr: &'_ mut ScalarExpression,
-        evaluator: &'_ mut Option<UnaryEvaluatorBox>,
+        evaluator: &'_ mut Option<UnaryEvaluatorRef>,
         _ty: &'_ mut LogicalType,
     ) -> Result<(), DatabaseError> {
         self.visit(expr)?;
@@ -222,7 +222,7 @@ impl VisitorMut<'_> for BindEvaluator<'_, '_> {
         op: &'_ mut BinaryOperator,
         left_expr: &'_ mut ScalarExpression,
         right_expr: &'_ mut ScalarExpression,
-        evaluator: &'_ mut Option<BinaryEvaluatorBox>,
+        evaluator: &'_ mut Option<BinaryEvaluatorRef>,
         _ty: &'_ mut LogicalType,
     ) -> Result<(), DatabaseError> {
         self.visit(left_expr)?;
@@ -953,7 +953,7 @@ impl TryFrom<SqlBinaryOperator> for BinaryOperator {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRelation, ColumnSummary};
+    use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::db::test::build_table;
     use crate::db::{ScalaFunctions, TableFunctions};
     use crate::errors::DatabaseError;
@@ -1113,14 +1113,10 @@ mod test {
         fn_assert(
             &mut cursor,
             ScalarExpression::column_expr(
-                plan_arena.alloc_column(ColumnCatalog::direct_new(
-                    ColumnSummary {
-                        name: "c4".to_string(),
-                        relation: ColumnRelation::None,
-                    },
+                plan_arena.alloc_column(ColumnCatalog::new(
+                    "c4".to_string(),
                     false,
                     ColumnDesc::new(LogicalType::Boolean, None, false, None)?,
-                    false,
                 )),
                 1,
             ),

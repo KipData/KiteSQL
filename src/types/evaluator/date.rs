@@ -21,42 +21,40 @@ use chrono::NaiveDate;
 
 numeric_binary_evaluator_definition!(Date, DataValue::Date32);
 crate::define_cast_evaluator!(
-    Date32ToCharCastEvaluator {
+    date32_to_char_cast_eval {
         len: u32,
-        unit: CharLengthUnits,
-        to: LogicalType
+        unit: CharLengthUnits
     },
     DataValue::Date32(value) => |this| {
         to_char(
-            DataValue::format_date(*value).ok_or_else(|| cast_fail(LogicalType::Date, this.to.clone()))?,
+            DataValue::format_date(*value).ok_or_else(|| {
+                cast_fail(LogicalType::Date, LogicalType::Char(this.len, this.unit))
+            })?,
             this.len,
             this.unit,
         )
     }
 );
 crate::define_cast_evaluator!(
-    Date32ToVarcharCastEvaluator {
+    date32_to_varchar_cast_eval {
         len: Option<u32>,
-        unit: CharLengthUnits,
-        to: LogicalType
+        unit: CharLengthUnits
     },
     DataValue::Date32(value) => |this| {
         to_varchar(
-            DataValue::format_date(*value).ok_or_else(|| cast_fail(LogicalType::Date, this.to.clone()))?,
+            DataValue::format_date(*value).ok_or_else(|| {
+                cast_fail(LogicalType::Date, LogicalType::Varchar(this.len, this.unit))
+            })?,
             this.len,
             this.unit,
         )
     }
 );
-crate::define_cast_evaluator!(
-    Date32ToDatetimeCastEvaluator {
-        to: LogicalType
-    },
-    DataValue::Date32(value) => |this| {
+crate::define_cast_evaluator!(date32_to_datetime_cast_eval, DataValue::Date32(value) => {
         let value = NaiveDate::from_num_days_from_ce_opt(*value)
-            .ok_or_else(|| cast_fail(LogicalType::Date, this.to.clone()))?
+            .ok_or_else(|| cast_fail(LogicalType::Date, LogicalType::DateTime))?
             .and_hms_opt(0, 0, 0)
-            .ok_or_else(|| cast_fail(LogicalType::Date, this.to.clone()))?
+            .ok_or_else(|| cast_fail(LogicalType::Date, LogicalType::DateTime))?
             .and_utc()
             .timestamp();
 
@@ -67,7 +65,6 @@ crate::define_cast_evaluator!(
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
-    use crate::types::evaluator::CastEvaluator;
     use crate::types::value::Utf8Type;
     use chrono::Datelike;
 
@@ -79,13 +76,7 @@ mod test {
                 .num_days_from_ce(),
         );
         assert_eq!(
-            Date32ToCharCastEvaluator {
-                len: 10,
-                unit: CharLengthUnits::Characters,
-                to: LogicalType::Char(10, CharLengthUnits::Characters),
-            }
-            .eval_cast(&value)
-            .unwrap(),
+            date32_to_char_cast_eval(10, CharLengthUnits::Characters, &value).unwrap(),
             DataValue::Utf8 {
                 value: "2024-01-02".to_string(),
                 ty: Utf8Type::Fixed(10),
@@ -93,13 +84,7 @@ mod test {
             }
         );
         assert_eq!(
-            Date32ToVarcharCastEvaluator {
-                len: Some(10),
-                unit: CharLengthUnits::Characters,
-                to: LogicalType::Varchar(Some(10), CharLengthUnits::Characters),
-            }
-            .eval_cast(&value)
-            .unwrap(),
+            date32_to_varchar_cast_eval(Some(10), CharLengthUnits::Characters, &value).unwrap(),
             DataValue::Utf8 {
                 value: "2024-01-02".to_string(),
                 ty: Utf8Type::Variable(Some(10)),
@@ -107,11 +92,7 @@ mod test {
             }
         );
         assert_eq!(
-            Date32ToDatetimeCastEvaluator {
-                to: LogicalType::DateTime,
-            }
-            .eval_cast(&value)
-            .unwrap(),
+            date32_to_datetime_cast_eval(&value).unwrap(),
             DataValue::Date64(
                 NaiveDate::from_ymd_opt(2024, 1, 2)
                     .unwrap()

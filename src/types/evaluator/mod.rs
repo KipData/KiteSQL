@@ -40,44 +40,24 @@ pub use self::cast::cast_create;
 pub use self::unary::unary_create;
 
 use crate::errors::DatabaseError;
-use crate::expression::{BinaryOperator, UnaryOperator};
 use crate::types::value::DataValue;
-use crate::types::LogicalType;
-use std::fmt::Debug;
-use std::hash::{Hash, Hasher};
-use std::ops::Deref;
-use std::sync::Arc;
+use crate::types::CharLengthUnits;
 
-pub trait BinaryEvaluator: Send + Sync + Debug {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError>;
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum BinaryEvaluatorParams {
+    Unit,
+    Like { escape_char: Option<char> },
 }
 
-pub trait UnaryEvaluator: Send + Sync + Debug {
-    fn unary_eval(&self, value: &DataValue) -> DataValue;
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct BinaryEvaluatorRef {
+    pub pos: u16,
+    pub params: BinaryEvaluatorParams,
 }
 
-pub trait CastEvaluator: Send + Sync + Debug {
-    fn eval_cast(&self, value: &DataValue) -> Result<DataValue, DatabaseError>;
-}
-
-#[derive(Clone, Debug)]
-pub struct BinaryEvaluatorBox {
-    pub evaluator: Arc<dyn BinaryEvaluator>,
-    pub ty: LogicalType,
-    pub op: BinaryOperator,
-}
-
-impl Deref for BinaryEvaluatorBox {
-    type Target = dyn BinaryEvaluator;
-
-    fn deref(&self) -> &Self::Target {
-        self.evaluator.as_ref()
-    }
-}
-
-impl BinaryEvaluatorBox {
-    pub fn new(evaluator: Arc<dyn BinaryEvaluator>, ty: LogicalType, op: BinaryOperator) -> Self {
-        Self { evaluator, ty, op }
+impl BinaryEvaluatorRef {
+    pub fn new(pos: u16, params: BinaryEvaluatorParams) -> Self {
+        Self { pos, params }
     }
 
     pub fn binary_eval(
@@ -85,97 +65,61 @@ impl BinaryEvaluatorBox {
         left: &DataValue,
         right: &DataValue,
     ) -> Result<DataValue, DatabaseError> {
-        self.evaluator.binary_eval(left, right)
+        binary::eval_binary(self.pos, &self.params, left, right)
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct UnaryEvaluatorBox {
-    pub evaluator: Arc<dyn UnaryEvaluator>,
-    pub ty: LogicalType,
-    pub op: UnaryOperator,
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct UnaryEvaluatorRef {
+    pub pos: u16,
 }
 
-impl UnaryEvaluatorBox {
-    pub fn new(evaluator: Arc<dyn UnaryEvaluator>, ty: LogicalType, op: UnaryOperator) -> Self {
-        Self { evaluator, ty, op }
+impl UnaryEvaluatorRef {
+    pub fn new(pos: u16) -> Self {
+        Self { pos }
     }
 
     pub fn unary_eval(&self, value: &DataValue) -> DataValue {
-        self.evaluator.unary_eval(value)
+        unary::eval_unary(self.pos, value)
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct CastEvaluatorBox {
-    pub evaluator: Arc<dyn CastEvaluator>,
-    pub from: LogicalType,
-    pub to: LogicalType,
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CastEvaluatorRef {
+    pub pos: u16,
+    pub params: CastEvaluatorParams,
 }
 
-impl Deref for CastEvaluatorBox {
-    type Target = dyn CastEvaluator;
-
-    fn deref(&self) -> &Self::Target {
-        self.evaluator.as_ref()
-    }
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum CastEvaluatorParams {
+    Identity,
+    Unit,
+    String {
+        len: Option<u32>,
+        unit: CharLengthUnits,
+    },
+    Decimal {
+        precision: Option<u8>,
+        scale: Option<u8>,
+    },
+    Precision {
+        precision: Option<u64>,
+    },
+    Timestamp {
+        precision: Option<u64>,
+        zone: bool,
+    },
+    Tuple {
+        evaluators: Vec<CastEvaluatorRef>,
+    },
 }
 
-impl CastEvaluatorBox {
-    pub fn new(evaluator: Arc<dyn CastEvaluator>, from: LogicalType, to: LogicalType) -> Self {
-        Self {
-            evaluator,
-            from,
-            to,
-        }
+impl CastEvaluatorRef {
+    pub fn new(pos: u16, params: CastEvaluatorParams) -> Self {
+        Self { pos, params }
     }
 
-    pub fn eval_cast(&self, value: &DataValue) -> Result<DataValue, DatabaseError> {
-        self.evaluator.eval_cast(value)
-    }
-}
-
-impl PartialEq for BinaryEvaluatorBox {
-    fn eq(&self, _: &Self) -> bool {
-        // FIXME
-        true
-    }
-}
-
-impl Eq for BinaryEvaluatorBox {}
-
-impl Hash for BinaryEvaluatorBox {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write_i8(42)
-    }
-}
-
-impl PartialEq for UnaryEvaluatorBox {
-    fn eq(&self, _: &Self) -> bool {
-        // FIXME
-        true
-    }
-}
-
-impl Eq for UnaryEvaluatorBox {}
-
-impl Hash for UnaryEvaluatorBox {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write_i8(42)
-    }
-}
-
-impl PartialEq for CastEvaluatorBox {
-    fn eq(&self, _: &Self) -> bool {
-        // FIXME
-        true
-    }
-}
-
-impl Eq for CastEvaluatorBox {}
-
-impl Hash for CastEvaluatorBox {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write_i8(42)
+    pub fn pos(&self) -> u16 {
+        self.pos
     }
 }

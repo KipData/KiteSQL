@@ -18,7 +18,7 @@ use crate::expression::range_detacher::Range;
 use crate::expression::BinaryOperator;
 use crate::optimizer::core::cm_sketch::CountMinSketch;
 use crate::storage::table_codec::BumpBytes;
-use crate::types::evaluator::{binary_create, BinaryEvaluatorBox};
+use crate::types::evaluator::{binary_create, BinaryEvaluatorRef};
 use crate::types::index::{IndexId, IndexMeta};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
@@ -45,10 +45,10 @@ pub struct HistogramBuilder {
 
 #[derive(Debug)]
 struct BoundComparator {
-    lt: BinaryEvaluatorBox,
-    lte: BinaryEvaluatorBox,
-    gt: BinaryEvaluatorBox,
-    gte: BinaryEvaluatorBox,
+    lt: BinaryEvaluatorRef,
+    lte: BinaryEvaluatorRef,
+    gt: BinaryEvaluatorRef,
+    gte: BinaryEvaluatorRef,
 }
 
 #[derive(Debug, Clone, PartialEq, ReferenceSerialization)]

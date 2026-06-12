@@ -23,7 +23,6 @@ crate::define_integer_cast_evaluators!(Int32, Int32, i32, LogicalType::Integer);
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
-    use crate::types::evaluator::{BinaryEvaluator, CastEvaluator};
     use crate::types::value::Utf8Type;
     use crate::types::CharLengthUnits;
     use ordered_float::OrderedFloat;
@@ -32,27 +31,19 @@ mod test {
     #[test]
     fn test_int32_binary_evaluators() {
         assert_eq!(
-            Int32PlusBinaryEvaluator
-                .binary_eval(&DataValue::Int32(1), &DataValue::Int32(1))
-                .unwrap(),
+            int32_plus_binary_eval(&DataValue::Int32(1), &DataValue::Int32(1)).unwrap(),
             DataValue::Int32(2)
         );
         assert_eq!(
-            Int32MinusBinaryEvaluator
-                .binary_eval(&DataValue::Int32(1), &DataValue::Int32(1))
-                .unwrap(),
+            int32_minus_binary_eval(&DataValue::Int32(1), &DataValue::Int32(1)).unwrap(),
             DataValue::Int32(0)
         );
         assert_eq!(
-            Int32EqBinaryEvaluator
-                .binary_eval(&DataValue::Int32(1), &DataValue::Int32(1))
-                .unwrap(),
+            int32_eq_binary_eval(&DataValue::Int32(1), &DataValue::Int32(1)).unwrap(),
             DataValue::Boolean(true)
         );
         assert_eq!(
-            Int32GtBinaryEvaluator
-                .binary_eval(&DataValue::Int32(1), &DataValue::Int32(0))
-                .unwrap(),
+            int32_gt_binary_eval(&DataValue::Int32(1), &DataValue::Int32(0)).unwrap(),
             DataValue::Boolean(true)
         );
     }
@@ -62,56 +53,51 @@ mod test {
         let value = DataValue::Int32(1);
 
         assert_eq!(
-            Int32ToBooleanCastEvaluator.eval_cast(&value).unwrap(),
+            int32_to_boolean_cast_eval(&value).unwrap(),
             DataValue::Boolean(true)
         );
         assert_eq!(
-            Int32ToTinyintCastEvaluator.eval_cast(&value).unwrap(),
+            int32_to_tinyint_cast_eval(&value).unwrap(),
             DataValue::Int8(1)
         );
         assert_eq!(
-            Int32ToUTinyintCastEvaluator.eval_cast(&value).unwrap(),
+            int32_to_utinyint_cast_eval(&value).unwrap(),
             DataValue::UInt8(1)
         );
         assert_eq!(
-            Int32ToSmallintCastEvaluator.eval_cast(&value).unwrap(),
+            int32_to_smallint_cast_eval(&value).unwrap(),
             DataValue::Int16(1)
         );
         assert_eq!(
-            Int32ToUSmallintCastEvaluator.eval_cast(&value).unwrap(),
+            int32_to_usmallint_cast_eval(&value).unwrap(),
             DataValue::UInt16(1)
         );
         assert_eq!(
-            Int32ToIntegerCastEvaluator.eval_cast(&value).unwrap(),
+            int32_to_integer_cast_eval(&value).unwrap(),
             DataValue::Int32(1)
         );
         assert_eq!(
-            Int32ToUIntegerCastEvaluator.eval_cast(&value).unwrap(),
+            int32_to_uinteger_cast_eval(&value).unwrap(),
             DataValue::UInt32(1)
         );
         assert_eq!(
-            Int32ToBigintCastEvaluator.eval_cast(&value).unwrap(),
+            int32_to_bigint_cast_eval(&value).unwrap(),
             DataValue::Int64(1)
         );
         assert_eq!(
-            Int32ToUBigintCastEvaluator.eval_cast(&value).unwrap(),
+            int32_to_ubigint_cast_eval(&value).unwrap(),
             DataValue::UInt64(1)
         );
         assert_eq!(
-            Int32ToFloatCastEvaluator.eval_cast(&value).unwrap(),
+            int32_to_float_cast_eval(&value).unwrap(),
             DataValue::Float32(OrderedFloat(1.0))
         );
         assert_eq!(
-            Int32ToDoubleCastEvaluator.eval_cast(&value).unwrap(),
+            int32_to_double_cast_eval(&value).unwrap(),
             DataValue::Float64(OrderedFloat(1.0))
         );
         assert_eq!(
-            Int32ToCharCastEvaluator {
-                len: 1,
-                unit: CharLengthUnits::Characters,
-            }
-            .eval_cast(&value)
-            .unwrap(),
+            int32_to_char_cast_eval(1, CharLengthUnits::Characters, &value).unwrap(),
             DataValue::Utf8 {
                 value: "1".to_string(),
                 ty: Utf8Type::Fixed(1),
@@ -119,12 +105,7 @@ mod test {
             }
         );
         assert_eq!(
-            Int32ToVarcharCastEvaluator {
-                len: Some(1),
-                unit: CharLengthUnits::Characters,
-            }
-            .eval_cast(&value)
-            .unwrap(),
+            int32_to_varchar_cast_eval(Some(1), CharLengthUnits::Characters, &value).unwrap(),
             DataValue::Utf8 {
                 value: "1".to_string(),
                 ty: Utf8Type::Variable(Some(1)),
@@ -132,9 +113,7 @@ mod test {
             }
         );
         assert_eq!(
-            Int32ToDecimalCastEvaluator { scale: Some(1) }
-                .eval_cast(&value)
-                .unwrap(),
+            int32_to_decimal_cast_eval(Some(1), &value).unwrap(),
             DataValue::Decimal(Decimal::new(10, 1))
         );
     }

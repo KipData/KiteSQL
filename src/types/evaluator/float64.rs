@@ -15,241 +15,168 @@
 use crate::errors::DatabaseError;
 use crate::types::evaluator::cast::{cast_fail, to_char, to_varchar};
 use crate::types::evaluator::DataValue;
-use crate::types::evaluator::{BinaryEvaluator, UnaryEvaluator};
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use std::hint;
-
-#[derive(Debug)]
-pub struct Float64PlusUnaryEvaluator;
-#[derive(Debug)]
-pub struct Float64MinusUnaryEvaluator;
-impl UnaryEvaluator for Float64PlusUnaryEvaluator {
-    fn unary_eval(&self, value: &DataValue) -> DataValue {
-        value.clone()
+pub fn float64_plus_unary_eval(value: &DataValue) -> DataValue {
+    value.clone()
+}
+pub fn float64_minus_unary_eval(value: &DataValue) -> DataValue {
+    match value {
+        DataValue::Float64(value) => DataValue::Float64(-value),
+        DataValue::Null => DataValue::Null,
+        _ => unsafe { hint::unreachable_unchecked() },
     }
 }
-impl UnaryEvaluator for Float64MinusUnaryEvaluator {
-    fn unary_eval(&self, value: &DataValue) -> DataValue {
-        match value {
-            DataValue::Float64(value) => DataValue::Float64(-value),
-            DataValue::Null => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
+
+macro_rules! float64_binary {
+    ($name:ident, $body:expr) => {
+        pub fn $name(left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+            Ok(match (left, right) {
+                (DataValue::Float64(v1), DataValue::Float64(v2)) => $body(v1, v2),
+                (DataValue::Float64(_), DataValue::Null)
+                | (DataValue::Null, DataValue::Float64(_))
+                | (DataValue::Null, DataValue::Null) => DataValue::Null,
+                _ => unsafe { hint::unreachable_unchecked() },
+            })
         }
-    }
+    };
 }
 
-#[derive(Debug)]
-pub struct Float64PlusBinaryEvaluator;
-#[derive(Debug)]
-pub struct Float64MinusBinaryEvaluator;
-#[derive(Debug)]
-pub struct Float64MultiplyBinaryEvaluator;
-#[derive(Debug)]
-pub struct Float64DivideBinaryEvaluator;
-#[derive(Debug)]
-pub struct Float64GtBinaryEvaluator;
-#[derive(Debug)]
-pub struct Float64GtEqBinaryEvaluator;
-#[derive(Debug)]
-pub struct Float64LtBinaryEvaluator;
-#[derive(Debug)]
-pub struct Float64LtEqBinaryEvaluator;
-#[derive(Debug)]
-pub struct Float64EqBinaryEvaluator;
-#[derive(Debug)]
-pub struct Float64NotEqBinaryEvaluator;
-#[derive(Debug)]
-pub struct Float64ModBinaryEvaluator;
-impl BinaryEvaluator for Float64PlusBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Float64(v1), DataValue::Float64(v2)) => DataValue::Float64(*v1 + *v2),
-            (DataValue::Float64(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Float64(_))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
+float64_binary!(
+    float64_plus_binary_eval,
+    |v1: &ordered_float::OrderedFloat<f64>, v2: &ordered_float::OrderedFloat<f64>| {
+        DataValue::Float64(*v1 + *v2)
     }
-}
-impl BinaryEvaluator for Float64MinusBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Float64(v1), DataValue::Float64(v2)) => DataValue::Float64(*v1 - *v2),
-            (DataValue::Float64(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Float64(_))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
+);
+float64_binary!(
+    float64_minus_binary_eval,
+    |v1: &ordered_float::OrderedFloat<f64>, v2: &ordered_float::OrderedFloat<f64>| {
+        DataValue::Float64(*v1 - *v2)
     }
-}
+);
 
-crate::define_cast_evaluator!(Float64ToFloatCastEvaluator, DataValue::Float64(value) => {
+crate::define_cast_evaluator!(float64_to_float_cast_eval, DataValue::Float64(value) => {
     Ok(DataValue::Float32(ordered_float::OrderedFloat(value.0 as f32)))
 });
-crate::define_cast_evaluator!(Float64ToDoubleCastEvaluator, DataValue::Float64(value) => {
+crate::define_cast_evaluator!(float64_to_double_cast_eval, DataValue::Float64(value) => {
     Ok(DataValue::Float64(*value))
 });
-crate::define_cast_evaluator!(Float64ToTinyintCastEvaluator, DataValue::Float64(value) => {
+crate::define_cast_evaluator!(float64_to_tinyint_cast_eval, DataValue::Float64(value) => {
     Ok(DataValue::Int8(crate::float_to_int_cast!(value.into_inner(), i8, f64)?))
 });
-crate::define_cast_evaluator!(Float64ToSmallintCastEvaluator, DataValue::Float64(value) => {
+crate::define_cast_evaluator!(float64_to_smallint_cast_eval, DataValue::Float64(value) => {
     Ok(DataValue::Int16(crate::float_to_int_cast!(value.into_inner(), i16, f64)?))
 });
-crate::define_cast_evaluator!(Float64ToIntegerCastEvaluator, DataValue::Float64(value) => {
+crate::define_cast_evaluator!(float64_to_integer_cast_eval, DataValue::Float64(value) => {
     Ok(DataValue::Int32(crate::float_to_int_cast!(value.into_inner(), i32, f64)?))
 });
-crate::define_cast_evaluator!(Float64ToBigintCastEvaluator, DataValue::Float64(value) => {
+crate::define_cast_evaluator!(float64_to_bigint_cast_eval, DataValue::Float64(value) => {
     Ok(DataValue::Int64(crate::float_to_int_cast!(value.into_inner(), i64, f64)?))
 });
-crate::define_cast_evaluator!(Float64ToUTinyintCastEvaluator, DataValue::Float64(value) => {
+crate::define_cast_evaluator!(float64_to_utinyint_cast_eval, DataValue::Float64(value) => {
     Ok(DataValue::UInt8(crate::float_to_int_cast!(value.into_inner(), u8, f64)?))
 });
-crate::define_cast_evaluator!(Float64ToUSmallintCastEvaluator, DataValue::Float64(value) => {
+crate::define_cast_evaluator!(float64_to_usmallint_cast_eval, DataValue::Float64(value) => {
     Ok(DataValue::UInt16(crate::float_to_int_cast!(value.into_inner(), u16, f64)?))
 });
-crate::define_cast_evaluator!(Float64ToUIntegerCastEvaluator, DataValue::Float64(value) => {
+crate::define_cast_evaluator!(float64_to_uinteger_cast_eval, DataValue::Float64(value) => {
     Ok(DataValue::UInt32(crate::float_to_int_cast!(value.into_inner(), u32, f64)?))
 });
-crate::define_cast_evaluator!(Float64ToUBigintCastEvaluator, DataValue::Float64(value) => {
+crate::define_cast_evaluator!(float64_to_ubigint_cast_eval, DataValue::Float64(value) => {
     Ok(DataValue::UInt64(crate::float_to_int_cast!(value.into_inner(), u64, f64)?))
 });
 crate::define_cast_evaluator!(
-    Float64ToCharCastEvaluator {
+    float64_to_char_cast_eval {
         len: u32,
         unit: CharLengthUnits
     },
     DataValue::Float64(value) => |this| to_char(value.to_string(), this.len, this.unit)
 );
 crate::define_cast_evaluator!(
-    Float64ToVarcharCastEvaluator {
+    float64_to_varchar_cast_eval {
         len: Option<u32>,
         unit: CharLengthUnits
     },
     DataValue::Float64(value) => |this| to_varchar(value.to_string(), this.len, this.unit)
 );
 crate::define_cast_evaluator!(
-    Float64ToDecimalCastEvaluator {
+    float64_to_decimal_cast_eval {
+        precision: Option<u8>,
         scale: Option<u8>,
-        to: LogicalType
     },
     DataValue::Float64(value) => |this| {
         let mut decimal = Decimal::from_f64(value.0).ok_or_else(|| {
-            cast_fail(LogicalType::Double, this.to.clone())
+            cast_fail(
+                LogicalType::Double,
+                LogicalType::Decimal(this.precision, this.scale),
+            )
         })?;
         DataValue::decimal_round_f(&this.scale, &mut decimal);
 
         Ok(DataValue::Decimal(decimal))
     }
 );
-impl BinaryEvaluator for Float64MultiplyBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Float64(v1), DataValue::Float64(v2)) => DataValue::Float64(*v1 * *v2),
-            (DataValue::Float64(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Float64(_))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
+float64_binary!(
+    float64_multiply_binary_eval,
+    |v1: &ordered_float::OrderedFloat<f64>, v2: &ordered_float::OrderedFloat<f64>| {
+        DataValue::Float64(*v1 * *v2)
     }
-}
-impl BinaryEvaluator for Float64DivideBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Float64(v1), DataValue::Float64(v2)) => {
-                DataValue::Float64(ordered_float::OrderedFloat(**v1 / **v2))
-            }
-            (DataValue::Float64(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Float64(_))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
+);
+float64_binary!(
+    float64_divide_binary_eval,
+    |v1: &ordered_float::OrderedFloat<f64>, v2: &ordered_float::OrderedFloat<f64>| {
+        DataValue::Float64(ordered_float::OrderedFloat(v1.0 / v2.0))
     }
-}
-impl BinaryEvaluator for Float64GtBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Float64(v1), DataValue::Float64(v2)) => DataValue::Boolean(v1 > v2),
-            (DataValue::Float64(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Float64(_))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
+);
+float64_binary!(
+    float64_gt_binary_eval,
+    |v1: &ordered_float::OrderedFloat<f64>, v2: &ordered_float::OrderedFloat<f64>| {
+        DataValue::Boolean(v1 > v2)
     }
-}
-impl BinaryEvaluator for Float64GtEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Float64(v1), DataValue::Float64(v2)) => DataValue::Boolean(v1 >= v2),
-            (DataValue::Float64(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Float64(_))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
+);
+float64_binary!(
+    float64_gt_eq_binary_eval,
+    |v1: &ordered_float::OrderedFloat<f64>, v2: &ordered_float::OrderedFloat<f64>| {
+        DataValue::Boolean(v1 >= v2)
     }
-}
-impl BinaryEvaluator for Float64LtBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Float64(v1), DataValue::Float64(v2)) => DataValue::Boolean(v1 < v2),
-            (DataValue::Float64(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Float64(_))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
+);
+float64_binary!(
+    float64_lt_binary_eval,
+    |v1: &ordered_float::OrderedFloat<f64>, v2: &ordered_float::OrderedFloat<f64>| {
+        DataValue::Boolean(v1 < v2)
     }
-}
-impl BinaryEvaluator for Float64LtEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Float64(v1), DataValue::Float64(v2)) => DataValue::Boolean(v1 <= v2),
-            (DataValue::Float64(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Float64(_))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
+);
+float64_binary!(
+    float64_lt_eq_binary_eval,
+    |v1: &ordered_float::OrderedFloat<f64>, v2: &ordered_float::OrderedFloat<f64>| {
+        DataValue::Boolean(v1 <= v2)
     }
-}
-impl BinaryEvaluator for Float64EqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Float64(v1), DataValue::Float64(v2)) => DataValue::Boolean(v1 == v2),
-            (DataValue::Float64(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Float64(_))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
+);
+float64_binary!(
+    float64_eq_binary_eval,
+    |v1: &ordered_float::OrderedFloat<f64>, v2: &ordered_float::OrderedFloat<f64>| {
+        DataValue::Boolean(v1 == v2)
     }
-}
-impl BinaryEvaluator for Float64NotEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Float64(v1), DataValue::Float64(v2)) => DataValue::Boolean(v1 != v2),
-            (DataValue::Float64(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Float64(_))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
+);
+float64_binary!(
+    float64_not_eq_binary_eval,
+    |v1: &ordered_float::OrderedFloat<f64>, v2: &ordered_float::OrderedFloat<f64>| {
+        DataValue::Boolean(v1 != v2)
     }
-}
-impl BinaryEvaluator for Float64ModBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Float64(v1), DataValue::Float64(v2)) => DataValue::Float64(*v1 % *v2),
-            (DataValue::Float64(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Float64(_))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
+);
+float64_binary!(
+    float64_mod_binary_eval,
+    |v1: &ordered_float::OrderedFloat<f64>, v2: &ordered_float::OrderedFloat<f64>| {
+        DataValue::Float64(*v1 % *v2)
     }
-}
+);
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
-    use crate::types::evaluator::{BinaryEvaluator, CastEvaluator};
     use crate::types::value::Utf8Type;
     use crate::types::CharLengthUnits;
     use rust_decimal::Decimal;
@@ -259,61 +186,55 @@ mod test {
         let value = DataValue::Float64(ordered_float::OrderedFloat(1.5));
 
         assert_eq!(
-            Float64MultiplyBinaryEvaluator
-                .binary_eval(
-                    &DataValue::Float64(ordered_float::OrderedFloat(1.5)),
-                    &DataValue::Float64(ordered_float::OrderedFloat(2.0)),
-                )
-                .unwrap(),
+            float64_multiply_binary_eval(
+                &DataValue::Float64(ordered_float::OrderedFloat(1.5)),
+                &DataValue::Float64(ordered_float::OrderedFloat(2.0)),
+            )
+            .unwrap(),
             DataValue::Float64(ordered_float::OrderedFloat(3.0))
         );
         assert_eq!(
-            Float64ToFloatCastEvaluator.eval_cast(&value).unwrap(),
+            float64_to_float_cast_eval(&value).unwrap(),
             DataValue::Float32(ordered_float::OrderedFloat(1.5))
         );
         assert_eq!(
-            Float64ToDoubleCastEvaluator.eval_cast(&value).unwrap(),
+            float64_to_double_cast_eval(&value).unwrap(),
             DataValue::Float64(ordered_float::OrderedFloat(1.5))
         );
         assert_eq!(
-            Float64ToTinyintCastEvaluator.eval_cast(&value).unwrap(),
+            float64_to_tinyint_cast_eval(&value).unwrap(),
             DataValue::Int8(1)
         );
         assert_eq!(
-            Float64ToSmallintCastEvaluator.eval_cast(&value).unwrap(),
+            float64_to_smallint_cast_eval(&value).unwrap(),
             DataValue::Int16(1)
         );
         assert_eq!(
-            Float64ToIntegerCastEvaluator.eval_cast(&value).unwrap(),
+            float64_to_integer_cast_eval(&value).unwrap(),
             DataValue::Int32(1)
         );
         assert_eq!(
-            Float64ToBigintCastEvaluator.eval_cast(&value).unwrap(),
+            float64_to_bigint_cast_eval(&value).unwrap(),
             DataValue::Int64(1)
         );
         assert_eq!(
-            Float64ToUTinyintCastEvaluator.eval_cast(&value).unwrap(),
+            float64_to_utinyint_cast_eval(&value).unwrap(),
             DataValue::UInt8(1)
         );
         assert_eq!(
-            Float64ToUSmallintCastEvaluator.eval_cast(&value).unwrap(),
+            float64_to_usmallint_cast_eval(&value).unwrap(),
             DataValue::UInt16(1)
         );
         assert_eq!(
-            Float64ToUIntegerCastEvaluator.eval_cast(&value).unwrap(),
+            float64_to_uinteger_cast_eval(&value).unwrap(),
             DataValue::UInt32(1)
         );
         assert_eq!(
-            Float64ToUBigintCastEvaluator.eval_cast(&value).unwrap(),
+            float64_to_ubigint_cast_eval(&value).unwrap(),
             DataValue::UInt64(1)
         );
         assert_eq!(
-            Float64ToCharCastEvaluator {
-                len: 3,
-                unit: CharLengthUnits::Characters,
-            }
-            .eval_cast(&value)
-            .unwrap(),
+            float64_to_char_cast_eval(3, CharLengthUnits::Characters, &value).unwrap(),
             DataValue::Utf8 {
                 value: "1.5".to_string(),
                 ty: Utf8Type::Fixed(3),
@@ -321,12 +242,7 @@ mod test {
             }
         );
         assert_eq!(
-            Float64ToVarcharCastEvaluator {
-                len: Some(3),
-                unit: CharLengthUnits::Characters,
-            }
-            .eval_cast(&value)
-            .unwrap(),
+            float64_to_varchar_cast_eval(Some(3), CharLengthUnits::Characters, &value).unwrap(),
             DataValue::Utf8 {
                 value: "1.5".to_string(),
                 ty: Utf8Type::Variable(Some(3)),
@@ -334,12 +250,7 @@ mod test {
             }
         );
         assert_eq!(
-            Float64ToDecimalCastEvaluator {
-                scale: Some(1),
-                to: LogicalType::Decimal(None, Some(1)),
-            }
-            .eval_cast(&value)
-            .unwrap(),
+            float64_to_decimal_cast_eval(None, Some(1), &value).unwrap(),
             DataValue::Decimal(Decimal::new(15, 1))
         );
     }

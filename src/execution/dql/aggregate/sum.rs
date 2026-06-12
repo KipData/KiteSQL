@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::Accumulator;
 use crate::expression::BinaryOperator;
-use crate::types::evaluator::{binary_create, BinaryEvaluatorBox};
+use crate::types::evaluator::{binary_create, BinaryEvaluatorRef};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use ahash::RandomState;
@@ -24,7 +24,7 @@ use std::collections::HashSet;
 
 pub struct SumAccumulator {
     result: DataValue,
-    evaluator: BinaryEvaluatorBox,
+    evaluator: BinaryEvaluatorRef,
 }
 
 impl SumAccumulator {

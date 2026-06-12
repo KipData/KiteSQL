@@ -35,7 +35,6 @@ mod test {
     use kite_sql::{from_tuple, scala_function, table_function, Model, Projection};
     use rust_decimal::Decimal;
     use sqlparser::ast::DataType as SqlDataType;
-    use std::sync::Arc;
     use tempfile::TempDir;
 
     fn build_tuple(arena: &mut impl MetaArena) -> (Tuple, Schema) {
@@ -1584,7 +1583,7 @@ mod test {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            explain_plan.contains("IndexScan By users_age_index"),
+            explain_plan.contains("IndexScan By #") && explain_plan.contains("Covered"),
             "unexpected explain plan: {explain_plan}"
         );
 

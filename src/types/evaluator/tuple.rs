@@ -13,23 +13,10 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+use crate::types::evaluator::CastEvaluatorRef;
 use crate::types::evaluator::DataValue;
-use crate::types::evaluator::{BinaryEvaluator, CastEvaluator, CastEvaluatorBox};
 use std::cmp::Ordering;
 use std::hint;
-
-#[derive(Debug)]
-pub struct TupleEqBinaryEvaluator;
-#[derive(Debug)]
-pub struct TupleNotEqBinaryEvaluator;
-#[derive(Debug)]
-pub struct TupleGtBinaryEvaluator;
-#[derive(Debug)]
-pub struct TupleGtEqBinaryEvaluator;
-#[derive(Debug)]
-pub struct TupleLtBinaryEvaluator;
-#[derive(Debug)]
-pub struct TupleLtEqBinaryEvaluator;
 
 fn tuple_cmp(
     (v1, v1_is_upper): (&Vec<DataValue>, &bool),
@@ -61,112 +48,72 @@ fn tuple_cmp(
     }
     Some(order)
 }
-impl BinaryEvaluator for TupleEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Tuple(v1, ..), DataValue::Tuple(v2, ..)) => DataValue::Boolean(*v1 == *v2),
-            (DataValue::Null, DataValue::Boolean(_))
-            | (DataValue::Boolean(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
+pub fn tuple_eq_binary_eval(
+    left: &DataValue,
+    right: &DataValue,
+) -> Result<DataValue, DatabaseError> {
+    Ok(match (left, right) {
+        (DataValue::Tuple(v1, ..), DataValue::Tuple(v2, ..)) => DataValue::Boolean(*v1 == *v2),
+        (DataValue::Null, DataValue::Boolean(_))
+        | (DataValue::Boolean(_), DataValue::Null)
+        | (DataValue::Null, DataValue::Null) => DataValue::Null,
+        _ => unsafe { hint::unreachable_unchecked() },
+    })
 }
-impl BinaryEvaluator for TupleNotEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Tuple(v1, ..), DataValue::Tuple(v2, ..)) => DataValue::Boolean(*v1 != *v2),
-            (DataValue::Null, DataValue::Boolean(_))
-            | (DataValue::Boolean(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-
-#[derive(Debug)]
-pub struct TupleCastEvaluator {
-    pub element_evaluators: Vec<CastEvaluatorBox>,
+pub fn tuple_not_eq_binary_eval(
+    left: &DataValue,
+    right: &DataValue,
+) -> Result<DataValue, DatabaseError> {
+    Ok(match (left, right) {
+        (DataValue::Tuple(v1, ..), DataValue::Tuple(v2, ..)) => DataValue::Boolean(*v1 != *v2),
+        (DataValue::Null, DataValue::Boolean(_))
+        | (DataValue::Boolean(_), DataValue::Null)
+        | (DataValue::Null, DataValue::Null) => DataValue::Null,
+        _ => unsafe { hint::unreachable_unchecked() },
+    })
 }
 
-impl CastEvaluator for TupleCastEvaluator {
-    fn eval_cast(&self, value: &DataValue) -> Result<DataValue, DatabaseError> {
-        match value {
-            DataValue::Null => Ok(DataValue::Null),
-            DataValue::Tuple(values, is_upper) => {
-                let mut casted = Vec::with_capacity(values.len());
-
-                for (value, evaluator) in values.iter().zip(self.element_evaluators.iter()) {
-                    casted.push(evaluator.eval_cast(value)?);
+macro_rules! tuple_order_binary {
+    ($name:ident, $is_order:ident) => {
+        pub fn $name(left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+            Ok(match (left, right) {
+                (DataValue::Tuple(v1, is_upper1), DataValue::Tuple(v2, is_upper2)) => {
+                    tuple_cmp((v1, is_upper1), (v2, is_upper2))
+                        .map(|order| DataValue::Boolean(order.$is_order()))
+                        .unwrap_or(DataValue::Null)
                 }
-
-                Ok(DataValue::Tuple(casted, *is_upper))
-            }
-            _ => unsafe { hint::unreachable_unchecked() },
+                (DataValue::Null, DataValue::Boolean(_))
+                | (DataValue::Boolean(_), DataValue::Null)
+                | (DataValue::Null, DataValue::Null) => DataValue::Null,
+                _ => unsafe { hint::unreachable_unchecked() },
+            })
         }
-    }
-}
-impl BinaryEvaluator for TupleGtBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Tuple(v1, is_upper1), DataValue::Tuple(v2, is_upper2)) => {
-                tuple_cmp((v1, is_upper1), (v2, is_upper2))
-                    .map(|order| DataValue::Boolean(order.is_gt()))
-                    .unwrap_or(DataValue::Null)
-            }
-            (DataValue::Null, DataValue::Boolean(_))
-            | (DataValue::Boolean(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for TupleGtEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Tuple(v1, is_upper1), DataValue::Tuple(v2, is_upper2)) => {
-                tuple_cmp((v1, is_upper1), (v2, is_upper2))
-                    .map(|order| DataValue::Boolean(order.is_ge()))
-                    .unwrap_or(DataValue::Null)
-            }
-            (DataValue::Null, DataValue::Boolean(_))
-            | (DataValue::Boolean(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for TupleLtBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Tuple(v1, is_upper1), DataValue::Tuple(v2, is_upper2)) => {
-                tuple_cmp((v1, is_upper1), (v2, is_upper2))
-                    .map(|order| DataValue::Boolean(order.is_lt()))
-                    .unwrap_or(DataValue::Null)
-            }
-            (DataValue::Null, DataValue::Boolean(_))
-            | (DataValue::Boolean(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for TupleLtEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Tuple(v1, is_upper1), DataValue::Tuple(v2, is_upper2)) => {
-                tuple_cmp((v1, is_upper1), (v2, is_upper2))
-                    .map(|order| DataValue::Boolean(order.is_le()))
-                    .unwrap_or(DataValue::Null)
-            }
-            (DataValue::Null, DataValue::Boolean(_))
-            | (DataValue::Boolean(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
+    };
 }
 
+tuple_order_binary!(tuple_gt_binary_eval, is_gt);
+tuple_order_binary!(tuple_gt_eq_binary_eval, is_ge);
+tuple_order_binary!(tuple_lt_binary_eval, is_lt);
+tuple_order_binary!(tuple_lt_eq_binary_eval, is_le);
+
+pub(crate) fn eval_tuple_cast(
+    element_evaluators: &[CastEvaluatorRef],
+    value: &DataValue,
+) -> Result<DataValue, DatabaseError> {
+    match value {
+        DataValue::Null => Ok(DataValue::Null),
+        DataValue::Tuple(values, is_upper) => {
+            let mut casted = Vec::with_capacity(values.len());
+
+            for (value, evaluator) in values.iter().zip(element_evaluators.iter()) {
+                casted.push(evaluator.eval(value)?);
+            }
+
+            Ok(DataValue::Tuple(casted, *is_upper))
+        }
+        _ => unsafe { hint::unreachable_unchecked() },
+    }
+}
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
@@ -176,7 +123,7 @@ mod test {
     use std::borrow::Cow;
 
     #[test]
-    fn test_tuple_cast_evaluator() {
+    fn test_tuple_cast_eval() {
         let evaluator = cast_create(
             Cow::Owned(LogicalType::Tuple(vec![
                 LogicalType::Integer,
@@ -191,7 +138,7 @@ mod test {
 
         assert_eq!(
             evaluator
-                .eval_cast(&DataValue::Tuple(
+                .eval(&DataValue::Tuple(
                     vec![
                         DataValue::Int32(1),
                         DataValue::Utf8 {

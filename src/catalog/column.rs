@@ -81,20 +81,6 @@ impl ColumnCatalog {
         }
     }
 
-    pub(crate) fn direct_new(
-        summary: ColumnSummary,
-        nullable: bool,
-        column_desc: ColumnDesc,
-        in_join: bool,
-    ) -> ColumnCatalog {
-        ColumnCatalog {
-            summary,
-            nullable,
-            desc: column_desc,
-            in_join,
-        }
-    }
-
     pub(crate) fn new_dummy(column_name: String) -> ColumnCatalog {
         ColumnCatalog {
             summary: ColumnSummary {

@@ -14,32 +14,17 @@
 
 use crate::errors::DatabaseError;
 use crate::types::evaluator::DataValue;
-use crate::types::evaluator::{BinaryEvaluator, CastEvaluator};
 
 /// Tips:
 /// - Null values operate as null values
-#[derive(Debug)]
-pub struct NullBinaryEvaluator;
-impl BinaryEvaluator for NullBinaryEvaluator {
-    fn binary_eval(&self, _: &DataValue, _: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(DataValue::Null)
-    }
+pub fn null_binary_eval(_: &DataValue, _: &DataValue) -> Result<DataValue, DatabaseError> {
+    Ok(DataValue::Null)
 }
-
-#[derive(Debug)]
-pub struct ToSqlNullCastEvaluator;
-impl CastEvaluator for ToSqlNullCastEvaluator {
-    fn eval_cast(&self, _value: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(DataValue::Null)
-    }
+pub fn to_sql_null_cast_eval(_value: &DataValue) -> Result<DataValue, DatabaseError> {
+    Ok(DataValue::Null)
 }
-
-#[derive(Debug)]
-pub struct NullCastEvaluator;
-impl CastEvaluator for NullCastEvaluator {
-    fn eval_cast(&self, _value: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(DataValue::Null)
-    }
+pub fn null_cast_eval(_value: &DataValue) -> Result<DataValue, DatabaseError> {
+    Ok(DataValue::Null)
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -49,14 +34,9 @@ mod test {
     #[test]
     fn test_null_cast_evaluators() {
         assert_eq!(
-            ToSqlNullCastEvaluator
-                .eval_cast(&DataValue::Int32(1))
-                .unwrap(),
+            to_sql_null_cast_eval(&DataValue::Int32(1)).unwrap(),
             DataValue::Null
         );
-        assert_eq!(
-            NullCastEvaluator.eval_cast(&DataValue::Null).unwrap(),
-            DataValue::Null
-        );
+        assert_eq!(null_cast_eval(&DataValue::Null).unwrap(), DataValue::Null);
     }
 }

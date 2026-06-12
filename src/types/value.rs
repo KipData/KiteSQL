@@ -1101,7 +1101,7 @@ impl DataValue {
             }
             (value, _) => {
                 let evaluator = cast_create(Cow::Owned(from), Cow::Borrowed(to))?;
-                evaluator.eval_cast(&value)
+                evaluator.eval(&value)
             }
         }
     }

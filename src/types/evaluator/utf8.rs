@@ -14,7 +14,6 @@
 
 use crate::errors::DatabaseError;
 use crate::types::evaluator::cast::{cast_fail, to_char, to_varchar};
-use crate::types::evaluator::BinaryEvaluator;
 use crate::types::evaluator::DataValue;
 use crate::types::value::Utf8Type;
 use crate::types::CharLengthUnits;
@@ -25,126 +24,86 @@ use rust_decimal::Decimal;
 use std::hint;
 use std::str::FromStr;
 
-#[derive(Debug)]
-pub struct Utf8GtBinaryEvaluator;
-#[derive(Debug)]
-pub struct Utf8GtEqBinaryEvaluator;
-#[derive(Debug)]
-pub struct Utf8LtBinaryEvaluator;
-#[derive(Debug)]
-pub struct Utf8LtEqBinaryEvaluator;
-#[derive(Debug)]
-pub struct Utf8EqBinaryEvaluator;
-#[derive(Debug)]
-pub struct Utf8NotEqBinaryEvaluator;
-#[derive(Debug)]
-pub struct Utf8StringConcatBinaryEvaluator;
-#[derive(Debug)]
-pub struct Utf8LikeBinaryEvaluator {
-    pub(crate) escape_char: Option<char>,
-}
-#[derive(Debug)]
-pub struct Utf8NotLikeBinaryEvaluator {
-    pub(crate) escape_char: Option<char>,
-}
-impl BinaryEvaluator for Utf8GtBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Utf8 { value: v1, .. }, DataValue::Utf8 { value: v2, .. }) => {
-                DataValue::Boolean(v1 > v2)
-            }
-            (DataValue::Utf8 { .. }, DataValue::Null)
-            | (DataValue::Null, DataValue::Utf8 { .. })
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for Utf8GtEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Utf8 { value: v1, .. }, DataValue::Utf8 { value: v2, .. }) => {
-                DataValue::Boolean(v1 >= v2)
-            }
-            (DataValue::Utf8 { .. }, DataValue::Null)
-            | (DataValue::Null, DataValue::Utf8 { .. })
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for Utf8LtBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Utf8 { value: v1, .. }, DataValue::Utf8 { value: v2, .. }) => {
-                DataValue::Boolean(v1 < v2)
-            }
-            (DataValue::Utf8 { .. }, DataValue::Null)
-            | (DataValue::Null, DataValue::Utf8 { .. })
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
+macro_rules! utf8_binary {
+    ($name:ident, $body:expr) => {
+        pub fn $name(left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+            Ok(match (left, right) {
+                (DataValue::Utf8 { value: v1, .. }, DataValue::Utf8 { value: v2, .. }) => {
+                    $body(v1, v2)
+                }
+                (DataValue::Utf8 { .. }, DataValue::Null)
+                | (DataValue::Null, DataValue::Utf8 { .. })
+                | (DataValue::Null, DataValue::Null) => DataValue::Null,
+                _ => unsafe { hint::unreachable_unchecked() },
+            })
+        }
+    };
 }
 
-crate::define_cast_evaluator!(
-    Utf8ToBooleanCastEvaluator {
-        from: LogicalType
-    },
-    DataValue::Utf8 { value, .. } => {
+utf8_binary!(utf8_gt_binary_eval, |v1: &String, v2: &String| {
+    DataValue::Boolean(v1 > v2)
+});
+utf8_binary!(utf8_gt_eq_binary_eval, |v1: &String, v2: &String| {
+    DataValue::Boolean(v1 >= v2)
+});
+utf8_binary!(utf8_lt_binary_eval, |v1: &String, v2: &String| {
+    DataValue::Boolean(v1 < v2)
+});
+
+crate::define_cast_evaluator!(utf8_to_boolean_cast_eval, DataValue::Utf8 { value, .. } => {
         Ok(DataValue::Boolean(bool::from_str(value)?))
     }
 );
-crate::define_cast_evaluator!(Utf8ToTinyintCastEvaluator, DataValue::Utf8 { value, .. } => {
+crate::define_cast_evaluator!(utf8_to_tinyint_cast_eval, DataValue::Utf8 { value, .. } => {
     Ok(DataValue::Int8(i8::from_str(value)?))
 });
-crate::define_cast_evaluator!(Utf8ToUTinyintCastEvaluator, DataValue::Utf8 { value, .. } => {
+crate::define_cast_evaluator!(utf8_to_utinyint_cast_eval, DataValue::Utf8 { value, .. } => {
     Ok(DataValue::UInt8(u8::from_str(value)?))
 });
-crate::define_cast_evaluator!(Utf8ToSmallintCastEvaluator, DataValue::Utf8 { value, .. } => {
+crate::define_cast_evaluator!(utf8_to_smallint_cast_eval, DataValue::Utf8 { value, .. } => {
     Ok(DataValue::Int16(i16::from_str(value)?))
 });
-crate::define_cast_evaluator!(Utf8ToUSmallintCastEvaluator, DataValue::Utf8 { value, .. } => {
+crate::define_cast_evaluator!(utf8_to_usmallint_cast_eval, DataValue::Utf8 { value, .. } => {
     Ok(DataValue::UInt16(u16::from_str(value)?))
 });
-crate::define_cast_evaluator!(Utf8ToIntegerCastEvaluator, DataValue::Utf8 { value, .. } => {
+crate::define_cast_evaluator!(utf8_to_integer_cast_eval, DataValue::Utf8 { value, .. } => {
     Ok(DataValue::Int32(i32::from_str(value)?))
 });
-crate::define_cast_evaluator!(Utf8ToUIntegerCastEvaluator, DataValue::Utf8 { value, .. } => {
+crate::define_cast_evaluator!(utf8_to_uinteger_cast_eval, DataValue::Utf8 { value, .. } => {
     Ok(DataValue::UInt32(u32::from_str(value)?))
 });
-crate::define_cast_evaluator!(Utf8ToBigintCastEvaluator, DataValue::Utf8 { value, .. } => {
+crate::define_cast_evaluator!(utf8_to_bigint_cast_eval, DataValue::Utf8 { value, .. } => {
     Ok(DataValue::Int64(i64::from_str(value)?))
 });
-crate::define_cast_evaluator!(Utf8ToUBigintCastEvaluator, DataValue::Utf8 { value, .. } => {
+crate::define_cast_evaluator!(utf8_to_ubigint_cast_eval, DataValue::Utf8 { value, .. } => {
     Ok(DataValue::UInt64(u64::from_str(value)?))
 });
-crate::define_cast_evaluator!(Utf8ToFloatCastEvaluator, DataValue::Utf8 { value, .. } => {
+crate::define_cast_evaluator!(utf8_to_float_cast_eval, DataValue::Utf8 { value, .. } => {
     Ok(DataValue::Float32(OrderedFloat(f32::from_str(value)?)))
 });
-crate::define_cast_evaluator!(Utf8ToDoubleCastEvaluator, DataValue::Utf8 { value, .. } => {
+crate::define_cast_evaluator!(utf8_to_double_cast_eval, DataValue::Utf8 { value, .. } => {
     Ok(DataValue::Float64(OrderedFloat(f64::from_str(value)?)))
 });
 crate::define_cast_evaluator!(
-    Utf8ToCharCastEvaluator {
+    utf8_to_char_cast_eval {
         len: u32,
         unit: CharLengthUnits
     },
     DataValue::Utf8 { value, .. } => |this| to_char(value.clone(), this.len, this.unit)
 );
 crate::define_cast_evaluator!(
-    Utf8ToVarcharCastEvaluator {
+    utf8_to_varchar_cast_eval {
         len: Option<u32>,
         unit: CharLengthUnits
     },
     DataValue::Utf8 { value, .. } => |this| to_varchar(value.clone(), this.len, this.unit)
 );
-crate::define_cast_evaluator!(Utf8ToDateCastEvaluator, DataValue::Utf8 { value, .. } => {
+crate::define_cast_evaluator!(utf8_to_date_cast_eval, DataValue::Utf8 { value, .. } => {
     Ok(DataValue::Date32(
         NaiveDate::parse_from_str(value, crate::types::value::DATE_FMT)?.num_days_from_ce(),
     ))
 });
-crate::define_cast_evaluator!(Utf8ToDatetimeCastEvaluator, DataValue::Utf8 { value, .. } => {
+crate::define_cast_evaluator!(utf8_to_datetime_cast_eval, DataValue::Utf8 { value, .. } => {
     let value = NaiveDateTime::parse_from_str(value, crate::types::value::DATE_TIME_FMT)
         .or_else(|_| {
             NaiveDate::parse_from_str(value, crate::types::value::DATE_FMT)
@@ -156,7 +115,7 @@ crate::define_cast_evaluator!(Utf8ToDatetimeCastEvaluator, DataValue::Utf8 { val
     Ok(DataValue::Date64(value))
 });
 crate::define_cast_evaluator!(
-    Utf8ToTimeCastEvaluator {
+    utf8_to_time_cast_eval {
         precision: Option<u64>
     },
     DataValue::Utf8 { value, .. } => |this| {
@@ -180,13 +139,13 @@ crate::define_cast_evaluator!(
     }
 );
 crate::define_cast_evaluator!(
-    Utf8ToTimestampCastEvaluator {
+    utf8_to_timestamp_cast_eval {
         precision: Option<u64>,
-        zone: bool,
-        to: LogicalType
+        zone: bool
     },
     DataValue::Utf8 { value, .. } => |this| {
         let precision = this.precision.unwrap_or(0);
+        let target_type = || LogicalType::TimeStamp(this.precision, this.zone);
         let fmt = match (precision, this.zone) {
             (0, false) => crate::types::value::DATE_TIME_FMT,
             (0, true) => crate::types::value::TIME_STAMP_FMT_WITHOUT_PRECISION,
@@ -206,14 +165,14 @@ crate::define_cast_evaluator!(
         if !this.zone {
             let value = NaiveDateTime::parse_from_str(&complete_value, fmt)?.and_utc();
             let value = match precision {
-                3 => value.timestamp_millis(),
-                6 => value.timestamp_micros(),
-                9 => value
-                    .timestamp_nanos_opt()
-                    .ok_or_else(|| cast_fail(this.to.clone(), this.to.clone()))?,
-                0 => value.timestamp(),
-                _ => unreachable!(),
-            };
+            3 => value.timestamp_millis(),
+            6 => value.timestamp_micros(),
+            9 => value
+                .timestamp_nanos_opt()
+                .ok_or_else(|| cast_fail(target_type(), target_type()))?,
+            0 => value.timestamp(),
+            _ => unreachable!(),
+        };
 
             return Ok(DataValue::Time64(value, precision, false));
         }
@@ -224,7 +183,7 @@ crate::define_cast_evaluator!(
             6 => value.map(|date_time| date_time.timestamp_micros())?,
             9 => value
                 .map(|date_time| date_time.timestamp_nanos_opt())?
-                .ok_or_else(|| cast_fail(this.to.clone(), this.to.clone()))?,
+                .ok_or_else(|| cast_fail(target_type(), target_type()))?,
             0 => value.map(|date_time| date_time.timestamp())?,
             _ => unreachable!(),
         };
@@ -232,90 +191,57 @@ crate::define_cast_evaluator!(
         Ok(DataValue::Time64(value, precision, this.zone))
     }
 );
-crate::define_cast_evaluator!(Utf8ToDecimalCastEvaluator, DataValue::Utf8 { value, .. } => {
+crate::define_cast_evaluator!(utf8_to_decimal_cast_eval, DataValue::Utf8 { value, .. } => {
     Ok(DataValue::Decimal(Decimal::from_str(value)?))
 });
-impl BinaryEvaluator for Utf8LtEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Utf8 { value: v1, .. }, DataValue::Utf8 { value: v2, .. }) => {
-                DataValue::Boolean(v1 <= v2)
-            }
-            (DataValue::Utf8 { .. }, DataValue::Null)
-            | (DataValue::Null, DataValue::Utf8 { .. })
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
+utf8_binary!(utf8_lt_eq_binary_eval, |v1: &String, v2: &String| {
+    DataValue::Boolean(v1 <= v2)
+});
+utf8_binary!(utf8_eq_binary_eval, |v1: &String, v2: &String| {
+    DataValue::Boolean(v1 == v2)
+});
+utf8_binary!(utf8_not_eq_binary_eval, |v1: &String, v2: &String| {
+    DataValue::Boolean(v1 != v2)
+});
+utf8_binary!(
+    utf8_string_concat_binary_eval,
+    |v1: &String, v2: &String| {
+        DataValue::Utf8 {
+            value: v1.clone() + v2,
+            ty: Utf8Type::Variable(None),
+            unit: CharLengthUnits::Characters,
+        }
     }
+);
+pub fn utf8_like_binary_eval(
+    escape_char: Option<char>,
+    left: &DataValue,
+    right: &DataValue,
+) -> Result<DataValue, DatabaseError> {
+    Ok(match (left, right) {
+        (DataValue::Utf8 { value, .. }, DataValue::Utf8 { value: pattern, .. }) => {
+            DataValue::Boolean(string_like(value, pattern, escape_char))
+        }
+        (DataValue::Utf8 { .. }, DataValue::Null)
+        | (DataValue::Null, DataValue::Utf8 { .. })
+        | (DataValue::Null, DataValue::Null) => DataValue::Null,
+        _ => unsafe { hint::unreachable_unchecked() },
+    })
 }
-impl BinaryEvaluator for Utf8EqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Utf8 { value: v1, .. }, DataValue::Utf8 { value: v2, .. }) => {
-                DataValue::Boolean(v1 == v2)
-            }
-            (DataValue::Utf8 { .. }, DataValue::Null)
-            | (DataValue::Null, DataValue::Utf8 { .. })
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for Utf8NotEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Utf8 { value: v1, .. }, DataValue::Utf8 { value: v2, .. }) => {
-                DataValue::Boolean(v1 != v2)
-            }
-            (DataValue::Utf8 { .. }, DataValue::Null)
-            | (DataValue::Null, DataValue::Utf8 { .. })
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for Utf8StringConcatBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Utf8 { value: v1, .. }, DataValue::Utf8 { value: v2, .. }) => {
-                DataValue::Utf8 {
-                    value: v1.clone() + v2,
-                    ty: Utf8Type::Variable(None),
-                    unit: CharLengthUnits::Characters,
-                }
-            }
-            (DataValue::Utf8 { .. }, DataValue::Null)
-            | (DataValue::Null, DataValue::Utf8 { .. })
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for Utf8LikeBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Utf8 { value, .. }, DataValue::Utf8 { value: pattern, .. }) => {
-                DataValue::Boolean(string_like(value, pattern, self.escape_char))
-            }
-            (DataValue::Utf8 { .. }, DataValue::Null)
-            | (DataValue::Null, DataValue::Utf8 { .. })
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for Utf8NotLikeBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Utf8 { value, .. }, DataValue::Utf8 { value: pattern, .. }) => {
-                DataValue::Boolean(!string_like(value, pattern, self.escape_char))
-            }
-            (DataValue::Utf8 { .. }, DataValue::Null)
-            | (DataValue::Null, DataValue::Utf8 { .. })
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
+pub fn utf8_not_like_binary_eval(
+    escape_char: Option<char>,
+    left: &DataValue,
+    right: &DataValue,
+) -> Result<DataValue, DatabaseError> {
+    Ok(match (left, right) {
+        (DataValue::Utf8 { value, .. }, DataValue::Utf8 { value: pattern, .. }) => {
+            DataValue::Boolean(!string_like(value, pattern, escape_char))
+        }
+        (DataValue::Utf8 { .. }, DataValue::Null)
+        | (DataValue::Null, DataValue::Utf8 { .. })
+        | (DataValue::Null, DataValue::Null) => DataValue::Null,
+        _ => unsafe { hint::unreachable_unchecked() },
+    })
 }
 
 fn string_like(value: &str, pattern: &str, escape_char: Option<char>) -> bool {
@@ -407,7 +333,6 @@ fn next_char_at(input: &str, index: usize) -> Option<(char, usize)> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
-    use crate::types::evaluator::{BinaryEvaluator, CastEvaluator};
 
     fn utf8(value: &str) -> DataValue {
         DataValue::Utf8 {
@@ -420,27 +345,19 @@ mod test {
     #[test]
     fn test_utf8_binary_evaluators() {
         assert_eq!(
-            Utf8LtBinaryEvaluator
-                .binary_eval(&utf8("a"), &utf8("b"))
-                .unwrap(),
+            utf8_lt_binary_eval(&utf8("a"), &utf8("b")).unwrap(),
             DataValue::Boolean(true)
         );
         assert_eq!(
-            Utf8StringConcatBinaryEvaluator
-                .binary_eval(&utf8("ab"), &utf8("cd"))
-                .unwrap(),
+            utf8_string_concat_binary_eval(&utf8("ab"), &utf8("cd")).unwrap(),
             utf8("abcd")
         );
         assert_eq!(
-            Utf8LikeBinaryEvaluator { escape_char: None }
-                .binary_eval(&utf8("kite"), &utf8("ki%"))
-                .unwrap(),
+            utf8_like_binary_eval(None, &utf8("kite"), &utf8("ki%")).unwrap(),
             DataValue::Boolean(true)
         );
         assert_eq!(
-            Utf8NotLikeBinaryEvaluator { escape_char: None }
-                .binary_eval(&utf8("kite"), &utf8("ki%"))
-                .unwrap(),
+            utf8_not_like_binary_eval(None, &utf8("kite"), &utf8("ki%")).unwrap(),
             DataValue::Boolean(false)
         );
     }
@@ -496,60 +413,51 @@ mod test {
     #[test]
     fn test_utf8_cast_evaluators() {
         assert_eq!(
-            Utf8ToBooleanCastEvaluator {
-                from: LogicalType::Varchar(None, CharLengthUnits::Characters),
-            }
-            .eval_cast(&utf8("true"))
-            .unwrap(),
+            utf8_to_boolean_cast_eval(&utf8("true")).unwrap(),
             DataValue::Boolean(true)
         );
         assert_eq!(
-            Utf8ToTinyintCastEvaluator.eval_cast(&utf8("1")).unwrap(),
+            utf8_to_tinyint_cast_eval(&utf8("1")).unwrap(),
             DataValue::Int8(1)
         );
         assert_eq!(
-            Utf8ToUTinyintCastEvaluator.eval_cast(&utf8("1")).unwrap(),
+            utf8_to_utinyint_cast_eval(&utf8("1")).unwrap(),
             DataValue::UInt8(1)
         );
         assert_eq!(
-            Utf8ToSmallintCastEvaluator.eval_cast(&utf8("1")).unwrap(),
+            utf8_to_smallint_cast_eval(&utf8("1")).unwrap(),
             DataValue::Int16(1)
         );
         assert_eq!(
-            Utf8ToUSmallintCastEvaluator.eval_cast(&utf8("1")).unwrap(),
+            utf8_to_usmallint_cast_eval(&utf8("1")).unwrap(),
             DataValue::UInt16(1)
         );
         assert_eq!(
-            Utf8ToIntegerCastEvaluator.eval_cast(&utf8("1")).unwrap(),
+            utf8_to_integer_cast_eval(&utf8("1")).unwrap(),
             DataValue::Int32(1)
         );
         assert_eq!(
-            Utf8ToUIntegerCastEvaluator.eval_cast(&utf8("1")).unwrap(),
+            utf8_to_uinteger_cast_eval(&utf8("1")).unwrap(),
             DataValue::UInt32(1)
         );
         assert_eq!(
-            Utf8ToBigintCastEvaluator.eval_cast(&utf8("1")).unwrap(),
+            utf8_to_bigint_cast_eval(&utf8("1")).unwrap(),
             DataValue::Int64(1)
         );
         assert_eq!(
-            Utf8ToUBigintCastEvaluator.eval_cast(&utf8("1")).unwrap(),
+            utf8_to_ubigint_cast_eval(&utf8("1")).unwrap(),
             DataValue::UInt64(1)
         );
         assert_eq!(
-            Utf8ToFloatCastEvaluator.eval_cast(&utf8("1.5")).unwrap(),
+            utf8_to_float_cast_eval(&utf8("1.5")).unwrap(),
             DataValue::Float32(OrderedFloat(1.5))
         );
         assert_eq!(
-            Utf8ToDoubleCastEvaluator.eval_cast(&utf8("1.5")).unwrap(),
+            utf8_to_double_cast_eval(&utf8("1.5")).unwrap(),
             DataValue::Float64(OrderedFloat(1.5))
         );
         assert_eq!(
-            Utf8ToCharCastEvaluator {
-                len: 2,
-                unit: CharLengthUnits::Characters,
-            }
-            .eval_cast(&utf8("ab"))
-            .unwrap(),
+            utf8_to_char_cast_eval(2, CharLengthUnits::Characters, &utf8("ab")).unwrap(),
             DataValue::Utf8 {
                 value: "ab".to_string(),
                 ty: Utf8Type::Fixed(2),
@@ -557,12 +465,7 @@ mod test {
             }
         );
         assert_eq!(
-            Utf8ToVarcharCastEvaluator {
-                len: Some(2),
-                unit: CharLengthUnits::Characters,
-            }
-            .eval_cast(&utf8("ab"))
-            .unwrap(),
+            utf8_to_varchar_cast_eval(Some(2), CharLengthUnits::Characters, &utf8("ab")).unwrap(),
             DataValue::Utf8 {
                 value: "ab".to_string(),
                 ty: Utf8Type::Variable(Some(2)),
@@ -570,9 +473,7 @@ mod test {
             }
         );
         assert_eq!(
-            Utf8ToDateCastEvaluator
-                .eval_cast(&utf8("2024-01-02"))
-                .unwrap(),
+            utf8_to_date_cast_eval(&utf8("2024-01-02")).unwrap(),
             DataValue::Date32(
                 chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
                     .unwrap()
@@ -580,9 +481,7 @@ mod test {
             )
         );
         assert_eq!(
-            Utf8ToDatetimeCastEvaluator
-                .eval_cast(&utf8("2024-01-02 03:04:05"))
-                .unwrap(),
+            utf8_to_datetime_cast_eval(&utf8("2024-01-02 03:04:05")).unwrap(),
             DataValue::Date64(
                 chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
                     .unwrap()
@@ -593,15 +492,11 @@ mod test {
             )
         );
         assert_eq!(
-            Utf8ToTimeCastEvaluator { precision: Some(0) }
-                .eval_cast(&utf8("03:04:05"))
-                .unwrap(),
+            utf8_to_time_cast_eval(Some(0), &utf8("03:04:05")).unwrap(),
             DataValue::Time32(DataValue::pack(3 * 3600 + 4 * 60 + 5, 0, 0), 0)
         );
         assert_eq!(
-            Utf8ToTimeCastEvaluator { precision: Some(3) }
-                .eval_cast(&utf8("03:04:05.123"))
-                .unwrap(),
+            utf8_to_time_cast_eval(Some(3), &utf8("03:04:05.123")).unwrap(),
             {
                 let time = chrono::NaiveTime::parse_from_str(
                     "03:04:05.123",
@@ -615,13 +510,7 @@ mod test {
             }
         );
         assert_eq!(
-            Utf8ToTimestampCastEvaluator {
-                precision: Some(3),
-                zone: false,
-                to: LogicalType::TimeStamp(Some(3), false),
-            }
-            .eval_cast(&utf8("2024-01-02 03:04:05.123"))
-            .unwrap(),
+            utf8_to_timestamp_cast_eval(Some(3), false, &utf8("2024-01-02 03:04:05.123")).unwrap(),
             DataValue::Time64(
                 chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
                     .unwrap()
@@ -634,13 +523,7 @@ mod test {
             )
         );
         assert_eq!(
-            Utf8ToTimestampCastEvaluator {
-                precision: Some(0),
-                zone: true,
-                to: LogicalType::TimeStamp(Some(0), true),
-            }
-            .eval_cast(&utf8("2024-01-02 03:04:05+00:00"))
-            .unwrap(),
+            utf8_to_timestamp_cast_eval(Some(0), true, &utf8("2024-01-02 03:04:05+00:00")).unwrap(),
             DataValue::Time64(
                 chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
                     .unwrap()
@@ -653,9 +536,7 @@ mod test {
             )
         );
         assert_eq!(
-            Utf8ToDecimalCastEvaluator
-                .eval_cast(&utf8("12.34"))
-                .unwrap(),
+            utf8_to_decimal_cast_eval(&utf8("12.34")).unwrap(),
             DataValue::Decimal(Decimal::from_str("12.34").unwrap())
         );
     }

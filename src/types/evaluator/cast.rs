@@ -23,22 +23,21 @@ use crate::types::evaluator::int16::*;
 use crate::types::evaluator::int32::*;
 use crate::types::evaluator::int64::*;
 use crate::types::evaluator::int8::*;
-use crate::types::evaluator::null::{NullCastEvaluator, ToSqlNullCastEvaluator};
+use crate::types::evaluator::null::{null_cast_eval, to_sql_null_cast_eval};
 use crate::types::evaluator::time32::*;
 use crate::types::evaluator::time64::*;
-use crate::types::evaluator::tuple::TupleCastEvaluator;
+use crate::types::evaluator::tuple::eval_tuple_cast;
 use crate::types::evaluator::uint16::*;
 use crate::types::evaluator::uint32::*;
 use crate::types::evaluator::uint64::*;
 use crate::types::evaluator::uint8::*;
 use crate::types::evaluator::utf8::*;
-use crate::types::evaluator::{CastEvaluator, CastEvaluatorBox};
+use crate::types::evaluator::{CastEvaluatorParams, CastEvaluatorRef};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
 use paste::paste;
 use std::borrow::Cow;
-use std::sync::Arc;
 
 pub(crate) fn cast_fail(from: LogicalType, to: LogicalType) -> DatabaseError {
     DatabaseError::CastFail {
@@ -46,6 +45,59 @@ pub(crate) fn cast_fail(from: LogicalType, to: LogicalType) -> DatabaseError {
         to,
         span: None,
     }
+}
+
+const CAST_TYPE_STRIDE: u16 = 32;
+const CAST_SQL_NULL: u16 = 0;
+const CAST_BOOLEAN: u16 = 1;
+const CAST_TINYINT: u16 = 2;
+const CAST_UTINYINT: u16 = 3;
+const CAST_SMALLINT: u16 = 4;
+const CAST_USMALLINT: u16 = 5;
+const CAST_INTEGER: u16 = 6;
+const CAST_UINTEGER: u16 = 7;
+const CAST_BIGINT: u16 = 8;
+const CAST_UBIGINT: u16 = 9;
+const CAST_FLOAT: u16 = 10;
+const CAST_DOUBLE: u16 = 11;
+const CAST_CHAR: u16 = 12;
+const CAST_VARCHAR: u16 = 13;
+const CAST_DATE: u16 = 14;
+const CAST_DATETIME: u16 = 15;
+const CAST_TIME: u16 = 16;
+const CAST_TIMESTAMP: u16 = 17;
+const CAST_DECIMAL: u16 = 18;
+const CAST_TUPLE: u16 = 19;
+
+// Cast positions are serialized ABI. Type codes above must never be reordered
+// or reused; new cast families should append a new code and keep old positions.
+fn cast_type_code(ty: &LogicalType) -> u16 {
+    match ty {
+        LogicalType::SqlNull => CAST_SQL_NULL,
+        LogicalType::Boolean => CAST_BOOLEAN,
+        LogicalType::Tinyint => CAST_TINYINT,
+        LogicalType::UTinyint => CAST_UTINYINT,
+        LogicalType::Smallint => CAST_SMALLINT,
+        LogicalType::USmallint => CAST_USMALLINT,
+        LogicalType::Integer => CAST_INTEGER,
+        LogicalType::UInteger => CAST_UINTEGER,
+        LogicalType::Bigint => CAST_BIGINT,
+        LogicalType::UBigint => CAST_UBIGINT,
+        LogicalType::Float => CAST_FLOAT,
+        LogicalType::Double => CAST_DOUBLE,
+        LogicalType::Char(_, _) => CAST_CHAR,
+        LogicalType::Varchar(_, _) => CAST_VARCHAR,
+        LogicalType::Date => CAST_DATE,
+        LogicalType::DateTime => CAST_DATETIME,
+        LogicalType::Time(_) => CAST_TIME,
+        LogicalType::TimeStamp(_, _) => CAST_TIMESTAMP,
+        LogicalType::Decimal(_, _) => CAST_DECIMAL,
+        LogicalType::Tuple(_) => CAST_TUPLE,
+    }
+}
+
+fn cast_pos(from: &LogicalType, to: &LogicalType) -> u16 {
+    cast_type_code(from) * CAST_TYPE_STRIDE + cast_type_code(to)
 }
 
 pub(crate) fn to_char(
@@ -139,95 +191,69 @@ macro_rules! decimal_to_int_cast {
 #[macro_export]
 macro_rules! define_cast_evaluator {
     ($name:ident, $pattern:pat => $body:block) => {
-        #[derive(Debug)]
-        pub struct $name;
-        impl $crate::types::evaluator::CastEvaluator for $name {
-            fn eval_cast(
-                &self,
-                value: &$crate::types::value::DataValue,
-            ) -> Result<$crate::types::value::DataValue, $crate::errors::DatabaseError> {
-                match value {
-                    $crate::types::value::DataValue::Null => Ok($crate::types::value::DataValue::Null),
-                    $pattern => $body,
-                    _ => unsafe { std::hint::unreachable_unchecked() },
-                }
+        pub fn $name(
+            value: &$crate::types::value::DataValue,
+        ) -> Result<$crate::types::value::DataValue, $crate::errors::DatabaseError> {
+            match value {
+                $crate::types::value::DataValue::Null => Ok($crate::types::value::DataValue::Null),
+                $pattern => $body,
+                _ => unsafe { std::hint::unreachable_unchecked() },
             }
         }
     };
     ($name:ident, $pattern:pat => |$this:ident| $body:expr) => {
-        #[derive(Debug)]
-        pub struct $name;
-        impl $crate::types::evaluator::CastEvaluator for $name {
-            fn eval_cast(
-                &self,
-                value: &$crate::types::value::DataValue,
-            ) -> Result<$crate::types::value::DataValue, $crate::errors::DatabaseError> {
-                match value {
-                    $crate::types::value::DataValue::Null => Ok($crate::types::value::DataValue::Null),
-                    $pattern => {
-                        let $this = self;
-                        $body
-                    }
-                    _ => unsafe { std::hint::unreachable_unchecked() },
+        pub fn $name(
+            value: &$crate::types::value::DataValue,
+        ) -> Result<$crate::types::value::DataValue, $crate::errors::DatabaseError> {
+            match value {
+                $crate::types::value::DataValue::Null => Ok($crate::types::value::DataValue::Null),
+                $pattern => {
+                    let $this = ();
+                    $body
                 }
+                _ => unsafe { std::hint::unreachable_unchecked() },
             }
         }
     };
     ($name:ident, $pattern:pat => |$this:ident| $body:block) => {
-        #[derive(Debug)]
-        pub struct $name;
-        impl $crate::types::evaluator::CastEvaluator for $name {
-            fn eval_cast(
-                &self,
-                value: &$crate::types::value::DataValue,
-            ) -> Result<$crate::types::value::DataValue, $crate::errors::DatabaseError> {
-                match value {
-                    $crate::types::value::DataValue::Null => Ok($crate::types::value::DataValue::Null),
-                    $pattern => {
-                        let $this = self;
-                        $body
-                    }
-                    _ => unsafe { std::hint::unreachable_unchecked() },
+        pub fn $name(
+            value: &$crate::types::value::DataValue,
+        ) -> Result<$crate::types::value::DataValue, $crate::errors::DatabaseError> {
+            match value {
+                $crate::types::value::DataValue::Null => Ok($crate::types::value::DataValue::Null),
+                $pattern => {
+                    let $this = ();
+                    $body
                 }
+                _ => unsafe { std::hint::unreachable_unchecked() },
             }
         }
     };
     ($name:ident { $($field:ident : $field_ty:ty),+ $(,)? }, $pattern:pat => |$this:ident| $body:expr) => {
-        #[derive(Debug)]
-        pub struct $name {
-            $(pub $field: $field_ty),+
-        }
-        impl $crate::types::evaluator::CastEvaluator for $name {
-            fn eval_cast(
-                &self,
-                value: &$crate::types::value::DataValue,
-            ) -> Result<$crate::types::value::DataValue, $crate::errors::DatabaseError> {
-                match value {
-                    $crate::types::value::DataValue::Null => Ok($crate::types::value::DataValue::Null),
-                    $pattern => {
-                        let $this = self;
-                        $body
-                    }
-                    _ => unsafe { std::hint::unreachable_unchecked() },
-                }
+        pub fn $name(
+            $($field: $field_ty,)+
+            value: &$crate::types::value::DataValue,
+        ) -> Result<$crate::types::value::DataValue, $crate::errors::DatabaseError> {
+            struct This {
+                $($field: $field_ty),+
+            }
+            let $this = This { $($field),+ };
+            match value {
+                $crate::types::value::DataValue::Null => Ok($crate::types::value::DataValue::Null),
+                $pattern => $body,
+                _ => unsafe { std::hint::unreachable_unchecked() },
             }
         }
     };
     ($name:ident { $($field:ident : $field_ty:ty),+ $(,)? }, $pattern:pat => $body:block) => {
-        #[derive(Debug)]
-        pub struct $name {
-            $(pub $field: $field_ty),+
-        }
-        impl $crate::types::evaluator::CastEvaluator for $name {
-            fn eval_cast(
-                &self,
-                value: &$crate::types::value::DataValue,
-            ) -> Result<$crate::types::value::DataValue, $crate::errors::DatabaseError> {
-                match value {
-                    $crate::types::value::DataValue::Null => Ok($crate::types::value::DataValue::Null),
-                    $pattern => $body,
-                    _ => unsafe { std::hint::unreachable_unchecked() },
-                }
+        pub fn $name(
+            $($field: $field_ty,)+
+            value: &$crate::types::value::DataValue,
+        ) -> Result<$crate::types::value::DataValue, $crate::errors::DatabaseError> {
+            match value {
+                $crate::types::value::DataValue::Null => Ok($crate::types::value::DataValue::Null),
+                $pattern => $body,
+                _ => unsafe { std::hint::unreachable_unchecked() },
             }
         }
     };
@@ -237,41 +263,41 @@ macro_rules! define_cast_evaluator {
 macro_rules! define_integer_cast_evaluators {
     ($prefix:ident, $variant:ident, $src_ty:ty, $from_ty:expr) => {
         paste::paste! {
-            $crate::define_cast_evaluator!([<$prefix ToBooleanCastEvaluator>], $crate::types::value::DataValue::$variant(value) => {
+            $crate::define_cast_evaluator!([<$prefix:snake _to_boolean_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
                 $crate::numeric_to_boolean_cast!(*value, $from_ty)
             });
-            $crate::define_cast_evaluator!([<$prefix ToTinyintCastEvaluator>], $crate::types::value::DataValue::$variant(value) => {
+            $crate::define_cast_evaluator!([<$prefix:snake _to_tinyint_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
                 Ok($crate::types::value::DataValue::Int8(i8::try_from(*value)?))
             });
-            $crate::define_cast_evaluator!([<$prefix ToUTinyintCastEvaluator>], $crate::types::value::DataValue::$variant(value) => {
+            $crate::define_cast_evaluator!([<$prefix:snake _to_utinyint_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
                 Ok($crate::types::value::DataValue::UInt8(u8::try_from(*value)?))
             });
-            $crate::define_cast_evaluator!([<$prefix ToSmallintCastEvaluator>], $crate::types::value::DataValue::$variant(value) => {
+            $crate::define_cast_evaluator!([<$prefix:snake _to_smallint_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
                 Ok($crate::types::value::DataValue::Int16(i16::try_from(*value)?))
             });
-            $crate::define_cast_evaluator!([<$prefix ToUSmallintCastEvaluator>], $crate::types::value::DataValue::$variant(value) => {
+            $crate::define_cast_evaluator!([<$prefix:snake _to_usmallint_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
                 Ok($crate::types::value::DataValue::UInt16(u16::try_from(*value)?))
             });
-            $crate::define_cast_evaluator!([<$prefix ToIntegerCastEvaluator>], $crate::types::value::DataValue::$variant(value) => {
+            $crate::define_cast_evaluator!([<$prefix:snake _to_integer_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
                 Ok($crate::types::value::DataValue::Int32(i32::try_from(*value)?))
             });
-            $crate::define_cast_evaluator!([<$prefix ToUIntegerCastEvaluator>], $crate::types::value::DataValue::$variant(value) => {
+            $crate::define_cast_evaluator!([<$prefix:snake _to_uinteger_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
                 Ok($crate::types::value::DataValue::UInt32(u32::try_from(*value)?))
             });
-            $crate::define_cast_evaluator!([<$prefix ToBigintCastEvaluator>], $crate::types::value::DataValue::$variant(value) => {
+            $crate::define_cast_evaluator!([<$prefix:snake _to_bigint_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
                 Ok($crate::types::value::DataValue::Int64(i64::try_from(*value)?))
             });
-            $crate::define_cast_evaluator!([<$prefix ToUBigintCastEvaluator>], $crate::types::value::DataValue::$variant(value) => {
+            $crate::define_cast_evaluator!([<$prefix:snake _to_ubigint_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
                 Ok($crate::types::value::DataValue::UInt64(u64::try_from(*value)?))
             });
-            $crate::define_cast_evaluator!([<$prefix ToFloatCastEvaluator>], $crate::types::value::DataValue::$variant(value) => {
+            $crate::define_cast_evaluator!([<$prefix:snake _to_float_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
                 Ok($crate::types::value::DataValue::Float32(ordered_float::OrderedFloat(*value as f32)))
             });
-            $crate::define_cast_evaluator!([<$prefix ToDoubleCastEvaluator>], $crate::types::value::DataValue::$variant(value) => {
+            $crate::define_cast_evaluator!([<$prefix:snake _to_double_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
                 Ok($crate::types::value::DataValue::Float64(ordered_float::OrderedFloat(*value as f64)))
             });
             $crate::define_cast_evaluator!(
-                [<$prefix ToCharCastEvaluator>] {
+                [<$prefix:snake _to_char_cast_eval>] {
                     len: u32,
                     unit: crate::types::CharLengthUnits
                 },
@@ -280,7 +306,7 @@ macro_rules! define_integer_cast_evaluators {
                 }
             );
             $crate::define_cast_evaluator!(
-                [<$prefix ToVarcharCastEvaluator>] {
+                [<$prefix:snake _to_varchar_cast_eval>] {
                     len: Option<u32>,
                     unit: crate::types::CharLengthUnits
                 },
@@ -289,7 +315,7 @@ macro_rules! define_integer_cast_evaluators {
                 }
             );
             $crate::define_cast_evaluator!(
-                [<$prefix ToDecimalCastEvaluator>] {
+                [<$prefix:snake _to_decimal_cast_eval>] {
                     scale: Option<u8>
                 },
                 $crate::types::value::DataValue::$variant(value) => |this| {
@@ -306,38 +332,38 @@ macro_rules! define_integer_cast_evaluators {
 macro_rules! define_float_cast_evaluators {
     ($prefix:ident, $variant:ident, $src_ty:ty, $from_ty:expr, $into_decimal:ident) => {
         paste::paste! {
-            $crate::define_cast_evaluator!([<$prefix ToFloatCastEvaluator>], $crate::types::value::DataValue::$variant(value) => {
+            $crate::define_cast_evaluator!([<$prefix:snake _to_float_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
                 Ok($crate::types::value::DataValue::$variant(*value))
             });
-            $crate::define_cast_evaluator!([<$prefix ToDoubleCastEvaluator>], $crate::types::value::DataValue::$variant(value) => {
+            $crate::define_cast_evaluator!([<$prefix:snake _to_double_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
                 Ok($crate::types::value::DataValue::Float64(ordered_float::OrderedFloat(value.0 as f64)))
             });
-            $crate::define_cast_evaluator!([<$prefix ToTinyintCastEvaluator>], $crate::types::value::DataValue::$variant(value) => {
+            $crate::define_cast_evaluator!([<$prefix:snake _to_tinyint_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
                 Ok($crate::types::value::DataValue::Int8($crate::float_to_int_cast!(value.into_inner(), i8, $src_ty)?))
             });
-            $crate::define_cast_evaluator!([<$prefix ToSmallintCastEvaluator>], $crate::types::value::DataValue::$variant(value) => {
+            $crate::define_cast_evaluator!([<$prefix:snake _to_smallint_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
                 Ok($crate::types::value::DataValue::Int16($crate::float_to_int_cast!(value.into_inner(), i16, $src_ty)?))
             });
-            $crate::define_cast_evaluator!([<$prefix ToIntegerCastEvaluator>], $crate::types::value::DataValue::$variant(value) => {
+            $crate::define_cast_evaluator!([<$prefix:snake _to_integer_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
                 Ok($crate::types::value::DataValue::Int32($crate::float_to_int_cast!(value.into_inner(), i32, $src_ty)?))
             });
-            $crate::define_cast_evaluator!([<$prefix ToBigintCastEvaluator>], $crate::types::value::DataValue::$variant(value) => {
+            $crate::define_cast_evaluator!([<$prefix:snake _to_bigint_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
                 Ok($crate::types::value::DataValue::Int64($crate::float_to_int_cast!(value.into_inner(), i64, $src_ty)?))
             });
-            $crate::define_cast_evaluator!([<$prefix ToUTinyintCastEvaluator>], $crate::types::value::DataValue::$variant(value) => {
+            $crate::define_cast_evaluator!([<$prefix:snake _to_utinyint_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
                 Ok($crate::types::value::DataValue::UInt8($crate::float_to_int_cast!(value.into_inner(), u8, $src_ty)?))
             });
-            $crate::define_cast_evaluator!([<$prefix ToUSmallintCastEvaluator>], $crate::types::value::DataValue::$variant(value) => {
+            $crate::define_cast_evaluator!([<$prefix:snake _to_usmallint_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
                 Ok($crate::types::value::DataValue::UInt16($crate::float_to_int_cast!(value.into_inner(), u16, $src_ty)?))
             });
-            $crate::define_cast_evaluator!([<$prefix ToUIntegerCastEvaluator>], $crate::types::value::DataValue::$variant(value) => {
+            $crate::define_cast_evaluator!([<$prefix:snake _to_uinteger_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
                 Ok($crate::types::value::DataValue::UInt32($crate::float_to_int_cast!(value.into_inner(), u32, $src_ty)?))
             });
-            $crate::define_cast_evaluator!([<$prefix ToUBigintCastEvaluator>], $crate::types::value::DataValue::$variant(value) => {
+            $crate::define_cast_evaluator!([<$prefix:snake _to_ubigint_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
                 Ok($crate::types::value::DataValue::UInt64($crate::float_to_int_cast!(value.into_inner(), u64, $src_ty)?))
             });
             $crate::define_cast_evaluator!(
-                [<$prefix ToCharCastEvaluator>] {
+                [<$prefix:snake _to_char_cast_eval>] {
                     len: u32,
                     unit: crate::types::CharLengthUnits
                 },
@@ -346,7 +372,7 @@ macro_rules! define_float_cast_evaluators {
                 }
             );
             $crate::define_cast_evaluator!(
-                [<$prefix ToVarcharCastEvaluator>] {
+                [<$prefix:snake _to_varchar_cast_eval>] {
                     len: Option<u32>,
                     unit: crate::types::CharLengthUnits
                 },
@@ -355,13 +381,16 @@ macro_rules! define_float_cast_evaluators {
                 }
             );
             $crate::define_cast_evaluator!(
-                [<$prefix ToDecimalCastEvaluator>] {
+                [<$prefix:snake _to_decimal_cast_eval>] {
+                    precision: Option<u8>,
                     scale: Option<u8>,
-                    to: $crate::types::LogicalType
                 },
                 $crate::types::value::DataValue::$variant(value) => |this| {
                     let mut decimal = rust_decimal::Decimal::$into_decimal(value.0).ok_or_else(|| {
-                        $crate::types::evaluator::cast::cast_fail($from_ty, this.to.clone())
+                        $crate::types::evaluator::cast::cast_fail(
+                            $from_ty,
+                            $crate::types::LogicalType::Decimal(this.precision, this.scale),
+                        )
                     })?;
                     $crate::types::value::DataValue::decimal_round_f(&this.scale, &mut decimal);
                     Ok($crate::types::value::DataValue::Decimal(decimal))
@@ -370,44 +399,100 @@ macro_rules! define_float_cast_evaluators {
         }
     };
 }
-
-#[derive(Debug)]
-pub struct IdentityCastEvaluator;
-impl CastEvaluator for IdentityCastEvaluator {
-    fn eval_cast(&self, value: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(value.clone())
-    }
+pub fn identity_cast_eval(value: &DataValue) -> Result<DataValue, DatabaseError> {
+    Ok(value.clone())
 }
 
-macro_rules! box_cast {
-    ($from:expr, $to:expr, $evaluator:expr) => {
-        Ok(CastEvaluatorBox::new(
-            Arc::new($evaluator),
-            $from.clone(),
-            $to.clone(),
+macro_rules! cast_ref {
+    ($from:expr, $to:expr) => {{
+        Ok(CastEvaluatorRef::new(
+            cast_pos($from, $to),
+            CastEvaluatorParams::Unit,
         ))
-    };
+    }};
+}
+
+macro_rules! cast_string_ref {
+    ($from:expr, $to:expr, $len:expr, $unit:expr) => {{
+        Ok(CastEvaluatorRef::new(
+            cast_pos($from, $to),
+            CastEvaluatorParams::String {
+                len: $len,
+                unit: $unit,
+            },
+        ))
+    }};
+}
+
+macro_rules! cast_decimal_ref {
+    ($from:expr, $to:expr, $precision:expr, $scale:expr) => {{
+        Ok(CastEvaluatorRef::new(
+            cast_pos($from, $to),
+            CastEvaluatorParams::Decimal {
+                precision: $precision,
+                scale: $scale,
+            },
+        ))
+    }};
+}
+
+macro_rules! cast_precision_ref {
+    ($from:expr, $to:expr, $precision:expr) => {{
+        Ok(CastEvaluatorRef::new(
+            cast_pos($from, $to),
+            CastEvaluatorParams::Precision {
+                precision: $precision,
+            },
+        ))
+    }};
+}
+
+macro_rules! cast_timestamp_ref {
+    ($from:expr, $to:expr, $precision:expr, $zone:expr) => {{
+        Ok(CastEvaluatorRef::new(
+            cast_pos($from, $to),
+            CastEvaluatorParams::Timestamp {
+                precision: $precision,
+                zone: $zone,
+            },
+        ))
+    }};
 }
 
 macro_rules! build_integer_cast {
-    ($prefix:ident, $to:expr, $from:expr) => {{
+    ($cast:ident, $prefix:ident, $to:expr, $from:expr) => {{
         paste! {
             match $to {
-                LogicalType::SqlNull => box_cast!($from, $to, ToSqlNullCastEvaluator),
-                LogicalType::Boolean => box_cast!($from, $to, [<$prefix ToBooleanCastEvaluator>]),
-                LogicalType::Tinyint => box_cast!($from, $to, [<$prefix ToTinyintCastEvaluator>]),
-                LogicalType::UTinyint => box_cast!($from, $to, [<$prefix ToUTinyintCastEvaluator>]),
-                LogicalType::Smallint => box_cast!($from, $to, [<$prefix ToSmallintCastEvaluator>]),
-                LogicalType::USmallint => box_cast!($from, $to, [<$prefix ToUSmallintCastEvaluator>]),
-                LogicalType::Integer => box_cast!($from, $to, [<$prefix ToIntegerCastEvaluator>]),
-                LogicalType::UInteger => box_cast!($from, $to, [<$prefix ToUIntegerCastEvaluator>]),
-                LogicalType::Bigint => box_cast!($from, $to, [<$prefix ToBigintCastEvaluator>]),
-                LogicalType::UBigint => box_cast!($from, $to, [<$prefix ToUBigintCastEvaluator>]),
-                LogicalType::Float => box_cast!($from, $to, [<$prefix ToFloatCastEvaluator>]),
-                LogicalType::Double => box_cast!($from, $to, [<$prefix ToDoubleCastEvaluator>]),
-                LogicalType::Char(len, unit) => box_cast!($from, $to, [<$prefix ToCharCastEvaluator>] { len: *len, unit: *unit }),
-                LogicalType::Varchar(len, unit) => box_cast!($from, $to, [<$prefix ToVarcharCastEvaluator>] { len: *len, unit: *unit }),
-                LogicalType::Decimal(_, scale) => box_cast!($from, $to, [<$prefix ToDecimalCastEvaluator>] { scale: *scale }),
+                LogicalType::SqlNull => $cast!($from, $to),
+                LogicalType::Boolean => $cast!($from, $to),
+                LogicalType::Tinyint => $cast!($from, $to),
+                LogicalType::UTinyint => $cast!($from, $to),
+                LogicalType::Smallint => $cast!($from, $to),
+                LogicalType::USmallint => $cast!($from, $to),
+                LogicalType::Integer => $cast!($from, $to),
+                LogicalType::UInteger => $cast!($from, $to),
+                LogicalType::Bigint => $cast!($from, $to),
+                LogicalType::UBigint => $cast!($from, $to),
+                LogicalType::Float => $cast!($from, $to),
+                LogicalType::Double => $cast!($from, $to),
+                LogicalType::Char(len, unit) => cast_string_ref!(
+                    $from,
+                    $to,
+                    Some(*len),
+                    *unit
+                ),
+                LogicalType::Varchar(len, unit) => cast_string_ref!(
+                    $from,
+                    $to,
+                    *len,
+                    *unit
+                ),
+                LogicalType::Decimal(precision, scale) => cast_decimal_ref!(
+                    $from,
+                    $to,
+                    *precision,
+                    *scale
+                ),
                 _ => Err(cast_fail($from.clone(), $to.clone())),
             }
         }
@@ -417,489 +502,285 @@ macro_rules! build_integer_cast {
 pub fn cast_create(
     from: Cow<'_, LogicalType>,
     to: Cow<'_, LogicalType>,
-) -> Result<CastEvaluatorBox, DatabaseError> {
+) -> Result<CastEvaluatorRef, DatabaseError> {
     let from = from.as_ref();
     let to = to.as_ref();
     if from == to {
-        return box_cast!(from, to, IdentityCastEvaluator);
+        return Ok(CastEvaluatorRef::new(
+            cast_pos(from, to),
+            CastEvaluatorParams::Identity,
+        ));
     }
 
     match (from, to) {
-        (LogicalType::SqlNull, _) => box_cast!(from, to, NullCastEvaluator),
-        (_, LogicalType::SqlNull) => box_cast!(from, to, ToSqlNullCastEvaluator),
+        (LogicalType::SqlNull, _) => cast_ref!(from, to),
+        (_, LogicalType::SqlNull) => cast_ref!(from, to),
         (LogicalType::Boolean, LogicalType::Tinyint) => {
-            box_cast!(from, to, BooleanToTinyintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Boolean, LogicalType::UTinyint) => {
-            box_cast!(from, to, BooleanToUTinyintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Boolean, LogicalType::Smallint) => {
-            box_cast!(from, to, BooleanToSmallintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Boolean, LogicalType::USmallint) => {
-            box_cast!(from, to, BooleanToUSmallintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Boolean, LogicalType::Integer) => {
-            box_cast!(from, to, BooleanToIntegerCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Boolean, LogicalType::UInteger) => {
-            box_cast!(from, to, BooleanToUIntegerCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Boolean, LogicalType::Bigint) => {
-            box_cast!(from, to, BooleanToBigintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Boolean, LogicalType::UBigint) => {
-            box_cast!(from, to, BooleanToUBigintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Boolean, LogicalType::Float) => {
-            box_cast!(from, to, BooleanToFloatCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Boolean, LogicalType::Double) => {
-            box_cast!(from, to, BooleanToDoubleCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Boolean, LogicalType::Char(len, unit)) => {
-            box_cast!(
-                from,
-                to,
-                BooleanToCharCastEvaluator {
-                    len: *len,
-                    unit: *unit
-                }
-            )
+            cast_string_ref!(from, to, Some(*len), *unit)
         }
         (LogicalType::Boolean, LogicalType::Varchar(len, unit)) => {
-            box_cast!(
-                from,
-                to,
-                BooleanToVarcharCastEvaluator {
-                    len: *len,
-                    unit: *unit
-                }
-            )
+            cast_string_ref!(from, to, *len, *unit)
         }
-        (LogicalType::Tinyint, _) => build_integer_cast!(Int8, to, from),
-        (LogicalType::Smallint, _) => build_integer_cast!(Int16, to, from),
-        (LogicalType::Integer, _) => build_integer_cast!(Int32, to, from),
-        (LogicalType::Bigint, _) => build_integer_cast!(Int64, to, from),
-        (LogicalType::UTinyint, _) => build_integer_cast!(UInt8, to, from),
-        (LogicalType::USmallint, _) => build_integer_cast!(UInt16, to, from),
-        (LogicalType::UInteger, _) => build_integer_cast!(UInt32, to, from),
-        (LogicalType::UBigint, _) => build_integer_cast!(UInt64, to, from),
+        (LogicalType::Tinyint, _) => build_integer_cast!(cast_ref, Int8, to, from),
+        (LogicalType::Smallint, _) => build_integer_cast!(cast_ref, Int16, to, from),
+        (LogicalType::Integer, _) => build_integer_cast!(cast_ref, Int32, to, from),
+        (LogicalType::Bigint, _) => build_integer_cast!(cast_ref, Int64, to, from),
+        (LogicalType::UTinyint, _) => build_integer_cast!(cast_ref, UInt8, to, from),
+        (LogicalType::USmallint, _) => build_integer_cast!(cast_ref, UInt16, to, from),
+        (LogicalType::UInteger, _) => build_integer_cast!(cast_ref, UInt32, to, from),
+        (LogicalType::UBigint, _) => build_integer_cast!(cast_ref, UInt64, to, from),
         (LogicalType::Float, LogicalType::Tinyint) => {
-            box_cast!(from, to, Float32ToTinyintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Float, LogicalType::UTinyint) => {
-            box_cast!(from, to, Float32ToUTinyintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Float, LogicalType::Smallint) => {
-            box_cast!(from, to, Float32ToSmallintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Float, LogicalType::USmallint) => {
-            box_cast!(from, to, Float32ToUSmallintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Float, LogicalType::Integer) => {
-            box_cast!(from, to, Float32ToIntegerCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Float, LogicalType::UInteger) => {
-            box_cast!(from, to, Float32ToUIntegerCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Float, LogicalType::Bigint) => {
-            box_cast!(from, to, Float32ToBigintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Float, LogicalType::UBigint) => {
-            box_cast!(from, to, Float32ToUBigintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Float, LogicalType::Double) => {
-            box_cast!(from, to, Float32ToDoubleCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Float, LogicalType::Char(len, unit)) => {
-            box_cast!(
-                from,
-                to,
-                Float32ToCharCastEvaluator {
-                    len: *len,
-                    unit: *unit
-                }
-            )
+            cast_string_ref!(from, to, Some(*len), *unit)
         }
         (LogicalType::Float, LogicalType::Varchar(len, unit)) => {
-            box_cast!(
-                from,
-                to,
-                Float32ToVarcharCastEvaluator {
-                    len: *len,
-                    unit: *unit
-                }
-            )
+            cast_string_ref!(from, to, *len, *unit)
         }
-        (LogicalType::Float, LogicalType::Decimal(_, scale)) => {
-            box_cast!(
-                from,
-                to,
-                Float32ToDecimalCastEvaluator {
-                    scale: *scale,
-                    to: to.clone()
-                }
-            )
+        (LogicalType::Float, LogicalType::Decimal(precision, scale)) => {
+            cast_decimal_ref!(from, to, *precision, *scale)
         }
         (LogicalType::Double, LogicalType::Float) => {
-            box_cast!(from, to, Float64ToFloatCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Double, LogicalType::Tinyint) => {
-            box_cast!(from, to, Float64ToTinyintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Double, LogicalType::UTinyint) => {
-            box_cast!(from, to, Float64ToUTinyintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Double, LogicalType::Smallint) => {
-            box_cast!(from, to, Float64ToSmallintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Double, LogicalType::USmallint) => {
-            box_cast!(from, to, Float64ToUSmallintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Double, LogicalType::Integer) => {
-            box_cast!(from, to, Float64ToIntegerCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Double, LogicalType::UInteger) => {
-            box_cast!(from, to, Float64ToUIntegerCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Double, LogicalType::Bigint) => {
-            box_cast!(from, to, Float64ToBigintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Double, LogicalType::UBigint) => {
-            box_cast!(from, to, Float64ToUBigintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Double, LogicalType::Char(len, unit)) => {
-            box_cast!(
-                from,
-                to,
-                Float64ToCharCastEvaluator {
-                    len: *len,
-                    unit: *unit
-                }
-            )
+            cast_string_ref!(from, to, Some(*len), *unit)
         }
         (LogicalType::Double, LogicalType::Varchar(len, unit)) => {
-            box_cast!(
-                from,
-                to,
-                Float64ToVarcharCastEvaluator {
-                    len: *len,
-                    unit: *unit
-                }
-            )
+            cast_string_ref!(from, to, *len, *unit)
         }
-        (LogicalType::Double, LogicalType::Decimal(_, scale)) => {
-            box_cast!(
-                from,
-                to,
-                Float64ToDecimalCastEvaluator {
-                    scale: *scale,
-                    to: to.clone()
-                }
-            )
+        (LogicalType::Double, LogicalType::Decimal(precision, scale)) => {
+            cast_decimal_ref!(from, to, *precision, *scale)
         }
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Boolean) => {
-            box_cast!(from, to, Utf8ToBooleanCastEvaluator { from: from.clone() })
+            cast_ref!(from, to)
         }
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Tinyint) => {
-            box_cast!(from, to, Utf8ToTinyintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::UTinyint) => {
-            box_cast!(from, to, Utf8ToUTinyintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Smallint) => {
-            box_cast!(from, to, Utf8ToSmallintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::USmallint) => {
-            box_cast!(from, to, Utf8ToUSmallintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Integer) => {
-            box_cast!(from, to, Utf8ToIntegerCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::UInteger) => {
-            box_cast!(from, to, Utf8ToUIntegerCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Bigint) => {
-            box_cast!(from, to, Utf8ToBigintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::UBigint) => {
-            box_cast!(from, to, Utf8ToUBigintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Float) => {
-            box_cast!(from, to, Utf8ToFloatCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Double) => {
-            box_cast!(from, to, Utf8ToDoubleCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Char(len, unit)) => {
-            box_cast!(
-                from,
-                to,
-                Utf8ToCharCastEvaluator {
-                    len: *len,
-                    unit: *unit
-                }
-            )
+            cast_string_ref!(from, to, Some(*len), *unit)
         }
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Varchar(len, unit)) => {
-            box_cast!(
-                from,
-                to,
-                Utf8ToVarcharCastEvaluator {
-                    len: *len,
-                    unit: *unit
-                }
-            )
+            cast_string_ref!(from, to, *len, *unit)
         }
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Date) => {
-            box_cast!(from, to, Utf8ToDateCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::DateTime) => {
-            box_cast!(from, to, Utf8ToDatetimeCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Time(precision)) => {
-            box_cast!(
-                from,
-                to,
-                Utf8ToTimeCastEvaluator {
-                    precision: *precision
-                }
-            )
+            cast_precision_ref!(from, to, *precision)
         }
         (
             LogicalType::Char(_, _) | LogicalType::Varchar(_, _),
             LogicalType::TimeStamp(precision, zone),
         ) => {
-            box_cast!(
-                from,
-                to,
-                Utf8ToTimestampCastEvaluator {
-                    precision: *precision,
-                    zone: *zone,
-                    to: to.clone()
-                }
-            )
+            cast_timestamp_ref!(from, to, *precision, *zone)
         }
         (LogicalType::Char(_, _) | LogicalType::Varchar(_, _), LogicalType::Decimal(_, _)) => {
-            box_cast!(from, to, Utf8ToDecimalCastEvaluator)
+            cast_ref!(from, to)
         }
-        (LogicalType::Date, LogicalType::Char(len, unit)) => {
-            box_cast!(
-                from,
-                to,
-                Date32ToCharCastEvaluator {
-                    len: *len,
-                    unit: *unit,
-                    to: to.clone()
-                }
-            )
+        (LogicalType::Date, LogicalType::Char(_, _)) => {
+            cast_string_ref!(from, to, Some(char_params(to).0), char_params(to).1)
         }
-        (LogicalType::Date, LogicalType::Varchar(len, unit)) => {
-            box_cast!(
-                from,
-                to,
-                Date32ToVarcharCastEvaluator {
-                    len: *len,
-                    unit: *unit,
-                    to: to.clone()
-                }
-            )
+        (LogicalType::Date, LogicalType::Varchar(_, _)) => {
+            let (len, unit) = varchar_params(to);
+            cast_string_ref!(from, to, len, unit)
         }
         (LogicalType::Date, LogicalType::DateTime) => {
-            box_cast!(from, to, Date32ToDatetimeCastEvaluator { to: to.clone() })
+            cast_ref!(from, to)
         }
-        (LogicalType::DateTime, LogicalType::Char(len, unit)) => {
-            box_cast!(
-                from,
-                to,
-                Date64ToCharCastEvaluator {
-                    len: *len,
-                    unit: *unit,
-                    to: to.clone()
-                }
-            )
+        (LogicalType::DateTime, LogicalType::Char(_, _)) => {
+            cast_string_ref!(from, to, Some(char_params(to).0), char_params(to).1)
         }
-        (LogicalType::DateTime, LogicalType::Varchar(len, unit)) => {
-            box_cast!(
-                from,
-                to,
-                Date64ToVarcharCastEvaluator {
-                    len: *len,
-                    unit: *unit,
-                    to: to.clone()
-                }
-            )
+        (LogicalType::DateTime, LogicalType::Varchar(_, _)) => {
+            let (len, unit) = varchar_params(to);
+            cast_string_ref!(from, to, len, unit)
         }
         (LogicalType::DateTime, LogicalType::Date) => {
-            box_cast!(from, to, Date64ToDateCastEvaluator { to: to.clone() })
+            cast_ref!(from, to)
         }
         (LogicalType::DateTime, LogicalType::Time(precision)) => {
-            box_cast!(
-                from,
-                to,
-                Date64ToTimeCastEvaluator {
-                    precision: *precision,
-                    to: to.clone()
-                }
-            )
+            cast_precision_ref!(from, to, *precision)
         }
         (LogicalType::DateTime, LogicalType::TimeStamp(precision, zone)) => {
-            box_cast!(
-                from,
-                to,
-                Date64ToTimestampCastEvaluator {
-                    precision: *precision,
-                    zone: *zone
-                }
-            )
+            cast_timestamp_ref!(from, to, *precision, *zone)
         }
-        (LogicalType::Time(_), LogicalType::Char(len, unit)) => {
-            box_cast!(
-                from,
-                to,
-                Time32ToCharCastEvaluator {
-                    len: *len,
-                    unit: *unit,
-                    to: to.clone()
-                }
-            )
+        (LogicalType::Time(_), LogicalType::Char(_, _)) => {
+            cast_string_ref!(from, to, Some(char_params(to).0), char_params(to).1)
         }
-        (LogicalType::Time(_), LogicalType::Varchar(len, unit)) => {
-            box_cast!(
-                from,
-                to,
-                Time32ToVarcharCastEvaluator {
-                    len: *len,
-                    unit: *unit,
-                    to: to.clone()
-                }
-            )
+        (LogicalType::Time(_), LogicalType::Varchar(_, _)) => {
+            let (len, unit) = varchar_params(to);
+            cast_string_ref!(from, to, len, unit)
         }
         (LogicalType::Time(_), LogicalType::Time(precision)) => {
-            box_cast!(
-                from,
-                to,
-                Time32ToTimeCastEvaluator {
-                    precision: *precision
-                }
-            )
+            cast_precision_ref!(from, to, *precision)
         }
-        (LogicalType::TimeStamp(_, _), LogicalType::Char(len, unit)) => {
-            box_cast!(
-                from,
-                to,
-                Time64ToCharCastEvaluator {
-                    len: *len,
-                    unit: *unit,
-                    to: to.clone()
-                }
-            )
+        (LogicalType::TimeStamp(_, _), LogicalType::Char(_, _)) => {
+            cast_string_ref!(from, to, Some(char_params(to).0), char_params(to).1)
         }
-        (LogicalType::TimeStamp(_, _), LogicalType::Varchar(len, unit)) => {
-            box_cast!(
-                from,
-                to,
-                Time64ToVarcharCastEvaluator {
-                    len: *len,
-                    unit: *unit,
-                    to: to.clone()
-                }
-            )
+        (LogicalType::TimeStamp(_, _), LogicalType::Varchar(_, _)) => {
+            let (len, unit) = varchar_params(to);
+            cast_string_ref!(from, to, len, unit)
         }
         (LogicalType::TimeStamp(_, _), LogicalType::Date) => {
-            box_cast!(
-                from,
-                to,
-                Time64ToDateCastEvaluator {
-                    from: from.clone(),
-                    to: to.clone()
-                }
-            )
+            cast_ref!(from, to)
         }
         (LogicalType::TimeStamp(_, _), LogicalType::DateTime) => {
-            box_cast!(
-                from,
-                to,
-                Time64ToDatetimeCastEvaluator {
-                    from: from.clone(),
-                    to: to.clone()
-                }
-            )
+            cast_ref!(from, to)
         }
         (LogicalType::TimeStamp(_, _), LogicalType::Time(precision)) => {
-            box_cast!(
-                from,
-                to,
-                Time64ToTimeCastEvaluator {
-                    precision: *precision,
-                    from: from.clone(),
-                    to: to.clone()
-                }
-            )
+            cast_precision_ref!(from, to, *precision)
         }
         (LogicalType::TimeStamp(_, _), LogicalType::TimeStamp(precision, zone)) => {
-            box_cast!(
-                from,
-                to,
-                Time64ToTimestampCastEvaluator {
-                    precision: *precision,
-                    zone: *zone
-                }
-            )
+            cast_timestamp_ref!(from, to, *precision, *zone)
         }
         (LogicalType::Decimal(_, _), LogicalType::Float) => {
-            box_cast!(from, to, DecimalToFloatCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Decimal(_, _), LogicalType::Double) => {
-            box_cast!(from, to, DecimalToDoubleCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Decimal(_, _), LogicalType::Decimal(_, _)) => {
-            box_cast!(from, to, DecimalToDecimalCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Decimal(_, _), LogicalType::Char(len, unit)) => {
-            box_cast!(
-                from,
-                to,
-                DecimalToCharCastEvaluator {
-                    len: *len,
-                    unit: *unit
-                }
-            )
+            cast_string_ref!(from, to, Some(*len), *unit)
         }
         (LogicalType::Decimal(_, _), LogicalType::Varchar(len, unit)) => {
-            box_cast!(
-                from,
-                to,
-                DecimalToVarcharCastEvaluator {
-                    len: *len,
-                    unit: *unit
-                }
-            )
+            cast_string_ref!(from, to, *len, *unit)
         }
         (LogicalType::Decimal(_, _), LogicalType::Tinyint) => {
-            box_cast!(from, to, DecimalToTinyintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Decimal(_, _), LogicalType::Smallint) => {
-            box_cast!(from, to, DecimalToSmallintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Decimal(_, _), LogicalType::Integer) => {
-            box_cast!(from, to, DecimalToIntegerCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Decimal(_, _), LogicalType::Bigint) => {
-            box_cast!(from, to, DecimalToBigintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Decimal(_, _), LogicalType::UTinyint) => {
-            box_cast!(from, to, DecimalToUTinyintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Decimal(_, _), LogicalType::USmallint) => {
-            box_cast!(from, to, DecimalToUSmallintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Decimal(_, _), LogicalType::UInteger) => {
-            box_cast!(from, to, DecimalToUIntegerCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Decimal(_, _), LogicalType::UBigint) => {
-            box_cast!(from, to, DecimalToUBigintCastEvaluator)
+            cast_ref!(from, to)
         }
         (LogicalType::Tuple(from_types), LogicalType::Tuple(to_types)) => {
             let evaluators = from_types
@@ -907,31 +788,348 @@ pub fn cast_create(
                 .zip(to_types.iter())
                 .map(|(from, to)| cast_create(Cow::Borrowed(from), Cow::Borrowed(to)))
                 .collect::<Result<Vec<_>, _>>()?;
-            box_cast!(
-                from,
-                to,
-                TupleCastEvaluator {
-                    element_evaluators: evaluators
-                }
-            )
+            Ok(CastEvaluatorRef::new(
+                cast_pos(from, to),
+                CastEvaluatorParams::Tuple { evaluators },
+            ))
         }
         _ => Err(cast_fail(from.clone(), to.clone())),
     }
 }
 
+fn char_params(ty: &LogicalType) -> (u32, CharLengthUnits) {
+    let LogicalType::Char(len, unit) = ty else {
+        unreachable!("cast target must be char")
+    };
+    (*len, *unit)
+}
+
+fn varchar_params(ty: &LogicalType) -> (Option<u32>, CharLengthUnits) {
+    let LogicalType::Varchar(len, unit) = ty else {
+        unreachable!("cast target must be varchar")
+    };
+    (*len, *unit)
+}
+
+fn string_param(params: &CastEvaluatorParams) -> (Option<u32>, CharLengthUnits) {
+    let CastEvaluatorParams::String { len, unit } = params else {
+        unreachable!("cast evaluator must have string parameters")
+    };
+    (*len, *unit)
+}
+
+fn decimal_param(params: &CastEvaluatorParams) -> (Option<u8>, Option<u8>) {
+    let CastEvaluatorParams::Decimal { precision, scale } = params else {
+        unreachable!("cast evaluator must have decimal parameters")
+    };
+    (*precision, *scale)
+}
+
+fn precision_param(params: &CastEvaluatorParams) -> Option<u64> {
+    let CastEvaluatorParams::Precision { precision } = params else {
+        unreachable!("cast evaluator must have precision parameter")
+    };
+    *precision
+}
+
+fn timestamp_param(params: &CastEvaluatorParams) -> (Option<u64>, bool) {
+    let CastEvaluatorParams::Timestamp { precision, zone } = params else {
+        unreachable!("cast evaluator must have timestamp parameters")
+    };
+    (*precision, *zone)
+}
+
+macro_rules! eval_integer_cast_by_pos {
+    ($prefix:ident, $to_code:expr, $params:expr, $value:expr) => {{
+        let params = $params;
+        paste! {
+            match $to_code {
+                CAST_SQL_NULL => to_sql_null_cast_eval($value),
+                CAST_BOOLEAN => [<$prefix:snake _to_boolean_cast_eval>]($value),
+                CAST_TINYINT => [<$prefix:snake _to_tinyint_cast_eval>]($value),
+                CAST_UTINYINT => [<$prefix:snake _to_utinyint_cast_eval>]($value),
+                CAST_SMALLINT => [<$prefix:snake _to_smallint_cast_eval>]($value),
+                CAST_USMALLINT => [<$prefix:snake _to_usmallint_cast_eval>]($value),
+                CAST_INTEGER => [<$prefix:snake _to_integer_cast_eval>]($value),
+                CAST_UINTEGER => [<$prefix:snake _to_uinteger_cast_eval>]($value),
+                CAST_BIGINT => [<$prefix:snake _to_bigint_cast_eval>]($value),
+                CAST_UBIGINT => [<$prefix:snake _to_ubigint_cast_eval>]($value),
+                CAST_FLOAT => [<$prefix:snake _to_float_cast_eval>]($value),
+                CAST_DOUBLE => [<$prefix:snake _to_double_cast_eval>]($value),
+                CAST_CHAR => {
+                    let (len, unit) = string_param(params);
+                    let len = len.expect("char cast must have fixed length");
+                    [<$prefix:snake _to_char_cast_eval>](len, unit, $value)
+                }
+                CAST_VARCHAR => {
+                    let (len, unit) = string_param(params);
+                    [<$prefix:snake _to_varchar_cast_eval>](len, unit, $value)
+                }
+                CAST_DECIMAL => {
+                    let (_, scale) = decimal_param(params);
+                    [<$prefix:snake _to_decimal_cast_eval>](scale, $value)
+                }
+                _ => unreachable!("invalid integer cast evaluator position"),
+            }
+        }
+    }};
+}
+
+impl CastEvaluatorRef {
+    pub fn eval(&self, value: &DataValue) -> Result<DataValue, DatabaseError> {
+        let params = &self.params;
+        let from_code = self.pos / CAST_TYPE_STRIDE;
+        let to_code = self.pos % CAST_TYPE_STRIDE;
+
+        macro_rules! run {
+            ($evaluator:ident) => {
+                $evaluator(value)
+            };
+            ($evaluator:ident { $($field:ident),+ $(,)? }) => {
+                $evaluator($($field,)+ value)
+            };
+            ($evaluator:ident { $($field:ident : $field_value:expr),+ $(,)? }) => {
+                $evaluator($($field_value,)+ value)
+            };
+        }
+
+        if matches!(params, CastEvaluatorParams::Identity) {
+            return run!(identity_cast_eval);
+        }
+
+        match (from_code, to_code) {
+            (CAST_SQL_NULL, _) => run!(null_cast_eval),
+            (_, CAST_SQL_NULL) => run!(to_sql_null_cast_eval),
+            (CAST_BOOLEAN, CAST_TINYINT) => run!(boolean_to_tinyint_cast_eval),
+            (CAST_BOOLEAN, CAST_UTINYINT) => run!(boolean_to_utinyint_cast_eval),
+            (CAST_BOOLEAN, CAST_SMALLINT) => run!(boolean_to_smallint_cast_eval),
+            (CAST_BOOLEAN, CAST_USMALLINT) => run!(boolean_to_usmallint_cast_eval),
+            (CAST_BOOLEAN, CAST_INTEGER) => run!(boolean_to_integer_cast_eval),
+            (CAST_BOOLEAN, CAST_UINTEGER) => run!(boolean_to_uinteger_cast_eval),
+            (CAST_BOOLEAN, CAST_BIGINT) => run!(boolean_to_bigint_cast_eval),
+            (CAST_BOOLEAN, CAST_UBIGINT) => run!(boolean_to_ubigint_cast_eval),
+            (CAST_BOOLEAN, CAST_FLOAT) => run!(boolean_to_float_cast_eval),
+            (CAST_BOOLEAN, CAST_DOUBLE) => run!(boolean_to_double_cast_eval),
+            (CAST_BOOLEAN, CAST_CHAR) => {
+                let (len, unit) = string_param(params);
+                let len = len.expect("char cast must have fixed length");
+                run!(boolean_to_char_cast_eval { len, unit })
+            }
+            (CAST_BOOLEAN, CAST_VARCHAR) => {
+                let (len, unit) = string_param(params);
+                run!(boolean_to_varchar_cast_eval { len, unit })
+            }
+            (CAST_TINYINT, _) => eval_integer_cast_by_pos!(Int8, to_code, params, value),
+            (CAST_SMALLINT, _) => eval_integer_cast_by_pos!(Int16, to_code, params, value),
+            (CAST_INTEGER, _) => eval_integer_cast_by_pos!(Int32, to_code, params, value),
+            (CAST_BIGINT, _) => eval_integer_cast_by_pos!(Int64, to_code, params, value),
+            (CAST_UTINYINT, _) => eval_integer_cast_by_pos!(Uint8, to_code, params, value),
+            (CAST_USMALLINT, _) => eval_integer_cast_by_pos!(Uint16, to_code, params, value),
+            (CAST_UINTEGER, _) => eval_integer_cast_by_pos!(Uint32, to_code, params, value),
+            (CAST_UBIGINT, _) => eval_integer_cast_by_pos!(Uint64, to_code, params, value),
+            (CAST_FLOAT, CAST_TINYINT) => run!(float32_to_tinyint_cast_eval),
+            (CAST_FLOAT, CAST_UTINYINT) => run!(float32_to_utinyint_cast_eval),
+            (CAST_FLOAT, CAST_SMALLINT) => run!(float32_to_smallint_cast_eval),
+            (CAST_FLOAT, CAST_USMALLINT) => run!(float32_to_usmallint_cast_eval),
+            (CAST_FLOAT, CAST_INTEGER) => run!(float32_to_integer_cast_eval),
+            (CAST_FLOAT, CAST_UINTEGER) => run!(float32_to_uinteger_cast_eval),
+            (CAST_FLOAT, CAST_BIGINT) => run!(float32_to_bigint_cast_eval),
+            (CAST_FLOAT, CAST_UBIGINT) => run!(float32_to_ubigint_cast_eval),
+            (CAST_FLOAT, CAST_DOUBLE) => run!(float32_to_double_cast_eval),
+            (CAST_FLOAT, CAST_CHAR) => {
+                let (len, unit) = string_param(params);
+                let len = len.expect("char cast must have fixed length");
+                run!(float32_to_char_cast_eval { len, unit })
+            }
+            (CAST_FLOAT, CAST_VARCHAR) => {
+                let (len, unit) = string_param(params);
+                run!(float32_to_varchar_cast_eval { len, unit })
+            }
+            (CAST_FLOAT, CAST_DECIMAL) => {
+                let (precision, scale) = decimal_param(params);
+                run!(float32_to_decimal_cast_eval { precision, scale })
+            }
+            (CAST_DOUBLE, CAST_FLOAT) => run!(float64_to_float_cast_eval),
+            (CAST_DOUBLE, CAST_TINYINT) => run!(float64_to_tinyint_cast_eval),
+            (CAST_DOUBLE, CAST_UTINYINT) => run!(float64_to_utinyint_cast_eval),
+            (CAST_DOUBLE, CAST_SMALLINT) => run!(float64_to_smallint_cast_eval),
+            (CAST_DOUBLE, CAST_USMALLINT) => run!(float64_to_usmallint_cast_eval),
+            (CAST_DOUBLE, CAST_INTEGER) => run!(float64_to_integer_cast_eval),
+            (CAST_DOUBLE, CAST_UINTEGER) => run!(float64_to_uinteger_cast_eval),
+            (CAST_DOUBLE, CAST_BIGINT) => run!(float64_to_bigint_cast_eval),
+            (CAST_DOUBLE, CAST_UBIGINT) => run!(float64_to_ubigint_cast_eval),
+            (CAST_DOUBLE, CAST_CHAR) => {
+                let (len, unit) = string_param(params);
+                let len = len.expect("char cast must have fixed length");
+                run!(float64_to_char_cast_eval { len, unit })
+            }
+            (CAST_DOUBLE, CAST_VARCHAR) => {
+                let (len, unit) = string_param(params);
+                run!(float64_to_varchar_cast_eval { len, unit })
+            }
+            (CAST_DOUBLE, CAST_DECIMAL) => {
+                let (precision, scale) = decimal_param(params);
+                run!(float64_to_decimal_cast_eval { precision, scale })
+            }
+            (CAST_CHAR | CAST_VARCHAR, CAST_BOOLEAN) => {
+                run!(utf8_to_boolean_cast_eval)
+            }
+            (CAST_CHAR | CAST_VARCHAR, CAST_TINYINT) => run!(utf8_to_tinyint_cast_eval),
+            (CAST_CHAR | CAST_VARCHAR, CAST_UTINYINT) => run!(utf8_to_utinyint_cast_eval),
+            (CAST_CHAR | CAST_VARCHAR, CAST_SMALLINT) => run!(utf8_to_smallint_cast_eval),
+            (CAST_CHAR | CAST_VARCHAR, CAST_USMALLINT) => run!(utf8_to_usmallint_cast_eval),
+            (CAST_CHAR | CAST_VARCHAR, CAST_INTEGER) => run!(utf8_to_integer_cast_eval),
+            (CAST_CHAR | CAST_VARCHAR, CAST_UINTEGER) => run!(utf8_to_uinteger_cast_eval),
+            (CAST_CHAR | CAST_VARCHAR, CAST_BIGINT) => run!(utf8_to_bigint_cast_eval),
+            (CAST_CHAR | CAST_VARCHAR, CAST_UBIGINT) => run!(utf8_to_ubigint_cast_eval),
+            (CAST_CHAR | CAST_VARCHAR, CAST_FLOAT) => run!(utf8_to_float_cast_eval),
+            (CAST_CHAR | CAST_VARCHAR, CAST_DOUBLE) => run!(utf8_to_double_cast_eval),
+            (CAST_CHAR | CAST_VARCHAR, CAST_CHAR) => {
+                let (len, unit) = string_param(params);
+                let len = len.expect("char cast must have fixed length");
+                run!(utf8_to_char_cast_eval { len, unit })
+            }
+            (CAST_CHAR | CAST_VARCHAR, CAST_VARCHAR) => {
+                let (len, unit) = string_param(params);
+                run!(utf8_to_varchar_cast_eval { len, unit })
+            }
+            (CAST_CHAR | CAST_VARCHAR, CAST_DATE) => run!(utf8_to_date_cast_eval),
+            (CAST_CHAR | CAST_VARCHAR, CAST_DATETIME) => run!(utf8_to_datetime_cast_eval),
+            (CAST_CHAR | CAST_VARCHAR, CAST_TIME) => run!(utf8_to_time_cast_eval {
+                precision: precision_param(params)
+            }),
+            (CAST_CHAR | CAST_VARCHAR, CAST_TIMESTAMP) => {
+                let (precision, zone) = timestamp_param(params);
+                run!(utf8_to_timestamp_cast_eval { precision, zone })
+            }
+            (CAST_CHAR | CAST_VARCHAR, CAST_DECIMAL) => run!(utf8_to_decimal_cast_eval),
+            (CAST_DATE, CAST_CHAR) => {
+                let (len, unit) = string_param(params);
+                let len = len.expect("char cast must have fixed length");
+                run!(date32_to_char_cast_eval { len, unit })
+            }
+            (CAST_DATE, CAST_VARCHAR) => {
+                let (len, unit) = string_param(params);
+                run!(date32_to_varchar_cast_eval { len, unit })
+            }
+            (CAST_DATE, CAST_DATETIME) => run!(date32_to_datetime_cast_eval),
+            (CAST_DATETIME, CAST_CHAR) => {
+                let (len, unit) = string_param(params);
+                let len = len.expect("char cast must have fixed length");
+                run!(date64_to_char_cast_eval { len, unit })
+            }
+            (CAST_DATETIME, CAST_VARCHAR) => {
+                let (len, unit) = string_param(params);
+                run!(date64_to_varchar_cast_eval { len, unit })
+            }
+            (CAST_DATETIME, CAST_DATE) => run!(date64_to_date_cast_eval),
+            (CAST_DATETIME, CAST_TIME) => run!(date64_to_time_cast_eval {
+                precision: precision_param(params)
+            }),
+            (CAST_DATETIME, CAST_TIMESTAMP) => {
+                let (precision, zone) = timestamp_param(params);
+                run!(date64_to_timestamp_cast_eval { precision, zone })
+            }
+            (CAST_TIME, CAST_CHAR) => {
+                let (len, unit) = string_param(params);
+                let len = len.expect("char cast must have fixed length");
+                run!(time32_to_char_cast_eval { len, unit })
+            }
+            (CAST_TIME, CAST_VARCHAR) => {
+                let (len, unit) = string_param(params);
+                run!(time32_to_varchar_cast_eval { len, unit })
+            }
+            (CAST_TIME, CAST_TIME) => run!(time32_to_time_cast_eval {
+                precision: precision_param(params)
+            }),
+            (CAST_TIMESTAMP, CAST_CHAR) => {
+                let (len, unit) = string_param(params);
+                let len = len.expect("char cast must have fixed length");
+                run!(time64_to_char_cast_eval { len, unit })
+            }
+            (CAST_TIMESTAMP, CAST_VARCHAR) => {
+                let (len, unit) = string_param(params);
+                run!(time64_to_varchar_cast_eval { len, unit })
+            }
+            (CAST_TIMESTAMP, CAST_DATE) => run!(time64_to_date_cast_eval),
+            (CAST_TIMESTAMP, CAST_DATETIME) => run!(time64_to_datetime_cast_eval),
+            (CAST_TIMESTAMP, CAST_TIME) => run!(time64_to_time_cast_eval {
+                precision: precision_param(params)
+            }),
+            (CAST_TIMESTAMP, CAST_TIMESTAMP) => {
+                let (precision, zone) = timestamp_param(params);
+                run!(time64_to_timestamp_cast_eval { precision, zone })
+            }
+            (CAST_DECIMAL, CAST_FLOAT) => run!(decimal_to_float_cast_eval),
+            (CAST_DECIMAL, CAST_DOUBLE) => run!(decimal_to_double_cast_eval),
+            (CAST_DECIMAL, CAST_DECIMAL) => run!(decimal_to_decimal_cast_eval),
+            (CAST_DECIMAL, CAST_CHAR) => {
+                let (len, unit) = string_param(params);
+                let len = len.expect("char cast must have fixed length");
+                run!(decimal_to_char_cast_eval { len, unit })
+            }
+            (CAST_DECIMAL, CAST_VARCHAR) => {
+                let (len, unit) = string_param(params);
+                run!(decimal_to_varchar_cast_eval { len, unit })
+            }
+            (CAST_DECIMAL, CAST_TINYINT) => run!(decimal_to_tinyint_cast_eval),
+            (CAST_DECIMAL, CAST_SMALLINT) => run!(decimal_to_smallint_cast_eval),
+            (CAST_DECIMAL, CAST_INTEGER) => run!(decimal_to_integer_cast_eval),
+            (CAST_DECIMAL, CAST_BIGINT) => run!(decimal_to_bigint_cast_eval),
+            (CAST_DECIMAL, CAST_UTINYINT) => run!(decimal_to_utinyint_cast_eval),
+            (CAST_DECIMAL, CAST_USMALLINT) => run!(decimal_to_usmallint_cast_eval),
+            (CAST_DECIMAL, CAST_UINTEGER) => run!(decimal_to_uinteger_cast_eval),
+            (CAST_DECIMAL, CAST_UBIGINT) => run!(decimal_to_ubigint_cast_eval),
+            (CAST_TUPLE, CAST_TUPLE) => {
+                let CastEvaluatorParams::Tuple { evaluators } = params else {
+                    unreachable!("tuple cast must have tuple parameters")
+                };
+                eval_tuple_cast(evaluators, value)
+            }
+            _ => unreachable!("invalid cast evaluator position"),
+        }
+    }
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
-    use super::cast_create;
+    use super::*;
     use crate::errors::DatabaseError;
     use crate::serdes::{ReferenceSerialization, ReferenceTables};
     use crate::storage::rocksdb::RocksTransaction;
-    use crate::types::evaluator::CastEvaluatorBox;
+    use crate::types::evaluator::CastEvaluatorRef;
     use crate::types::LogicalType;
     use std::borrow::Cow;
     use std::io::{Cursor, Seek, SeekFrom};
 
-    fn create(from: LogicalType, to: LogicalType) -> Result<CastEvaluatorBox, DatabaseError> {
+    fn create(from: LogicalType, to: LogicalType) -> Result<CastEvaluatorRef, DatabaseError> {
         cast_create(Cow::Owned(from), Cow::Owned(to))
+    }
+
+    #[test]
+    fn test_cast_evaluator_positions_are_stable() -> Result<(), DatabaseError> {
+        assert_eq!(
+            create(LogicalType::Integer, LogicalType::Bigint)?.pos(),
+            CAST_INTEGER * CAST_TYPE_STRIDE + CAST_BIGINT
+        );
+        assert_eq!(
+            create(
+                LogicalType::Varchar(None, crate::types::CharLengthUnits::Characters),
+                LogicalType::Date
+            )?
+            .pos(),
+            CAST_VARCHAR * CAST_TYPE_STRIDE + CAST_DATE
+        );
+        assert_eq!(
+            create(
+                LogicalType::TimeStamp(Some(3), true),
+                LogicalType::Time(Some(0))
+            )?
+            .pos(),
+            CAST_TIMESTAMP * CAST_TYPE_STRIDE + CAST_TIME
+        );
+
+        Ok(())
     }
 
     #[test]
@@ -945,7 +1143,7 @@ mod test {
         cursor.seek(SeekFrom::Start(0))?;
 
         assert_eq!(
-            CastEvaluatorBox::decode::<RocksTransaction, _, _>(
+            CastEvaluatorRef::decode::<RocksTransaction, _, _>(
                 &mut cursor,
                 None,
                 &reference_tables,

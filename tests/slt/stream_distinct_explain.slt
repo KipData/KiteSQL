@@ -14,7 +14,7 @@ analyze table distinct_t;
 query T
 explain select distinct c1 from distinct_t where c1 < 10 and c1 > 0;
 ----
-Projection [#2] [Project => (Sort Option: Follow)] Aggregate [] -> Group By [#2] [StreamDistinct => (Sort Option: Follow)] Filter ((#2 < 10) && (#2 > 0)), Is Having: false [Filter => (Sort Option: Follow)] TableScan distinct_t -> [#2] [IndexScan By distinct_t_c1_index => (0, 10) Covered => (Sort Option: OrderBy: (#2 Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [#2] [Project => (Sort Option: Follow)] Aggregate [] -> Group By [#2] [StreamDistinct => (Sort Option: Follow)] Filter ((#2 < 10) && (#2 > 0)), Is Having: false [Filter => (Sort Option: Follow)] TableScan distinct_t -> [#2] [IndexScan By #1 => (0, 10) Covered => (Sort Option: OrderBy: (#2 Asc Nulls Last) ignore_prefix_len: 0)]
 
 statement ok
 drop index distinct_t.distinct_t_c1_index;

@@ -210,11 +210,8 @@ pub(crate) mod test {
             cursor.seek(SeekFrom::Start(0))?;
         }
         {
-            let not_ref_column = plan_arena.alloc_column(ColumnCatalog::direct_new(
-                ColumnSummary {
-                    name: "c3".to_string(),
-                    relation: ColumnRelation::None,
-                },
+            let not_ref_column = plan_arena.alloc_column(ColumnCatalog::new(
+                "c3".to_string(),
                 false,
                 ColumnDesc::new(
                     LogicalType::Integer,
@@ -222,7 +219,6 @@ pub(crate) mod test {
                     false,
                     Some(ScalarExpression::Constant(DataValue::UInt64(42))),
                 )?,
-                false,
             ));
             not_ref_column.encode(&mut cursor, false, &mut reference_tables, &plan_arena)?;
             cursor.seek(SeekFrom::Start(0))?;
