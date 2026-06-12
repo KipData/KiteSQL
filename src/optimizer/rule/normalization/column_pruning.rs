@@ -264,6 +264,7 @@ impl ColumnPruning {
         arena: &mut crate::planner::PlanArena,
     ) {
         removed_positions.truncate(output_start);
+        removed_positions.reserve(exprs.len());
         let mut position = 0;
         exprs.retain(|expr| {
             let keep = Self::output_column_is_required(expr, column_references, arena);
@@ -567,6 +568,7 @@ impl ColumnPruning {
             Operator::TableScan(op) => {
                 if !all_referenced {
                     outcome.removed_positions.truncate(output_start);
+                    outcome.removed_positions.reserve(op.columns.len());
                     let mut position = 0;
                     op.columns.retain(|column| {
                         let current_position = position;
