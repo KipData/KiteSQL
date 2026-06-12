@@ -357,13 +357,12 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         }
         if let Some(table) = table_name.or(bind_table_name) {
             let (source, position_offset) =
-                match Self::resolve_source_columns_in_scope(&self.context, &table) {
+                match Self::resolve_source_columns_in_scope(&self.context, table) {
                     Ok(source) => source,
                     Err(err) => {
                         if let Some(parent) = self.parent {
                             self.context.mark_outer_ref();
-                            Self::resolve_source_columns_in_scope(parent, &table)
-                                .map_err(|_| err)?
+                            Self::resolve_source_columns_in_scope(parent, table).map_err(|_| err)?
                         } else {
                             return Err(err);
                         }

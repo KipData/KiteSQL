@@ -218,11 +218,12 @@ impl PythonDatabase {
                     .map_err(to_py_err)?,
             ),
             other => {
-                let mut expected = Vec::new();
-                #[cfg(feature = "rocksdb")]
-                expected.push("rocksdb");
-                #[cfg(feature = "lmdb")]
-                expected.push("lmdb");
+                let expected = [
+                    #[cfg(feature = "rocksdb")]
+                    "rocksdb",
+                    #[cfg(feature = "lmdb")]
+                    "lmdb",
+                ];
                 return Err(PyValueError::new_err(format!(
                     "unsupported backend '{other}', expected {}",
                     expected.join(" or ")

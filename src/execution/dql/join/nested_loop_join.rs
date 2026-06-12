@@ -499,8 +499,8 @@ mod test {
 
         let on_keys = if eq {
             vec![(
-                ScalarExpression::column_expr(t1_columns[1].clone(), 1),
-                ScalarExpression::column_expr(t2_columns[1].clone(), 1),
+                ScalarExpression::column_expr(t1_columns[1], 1),
+                ScalarExpression::column_expr(t2_columns[1], 1),
             )]
         } else {
             vec![]
@@ -608,7 +608,7 @@ mod test {
     fn test_nested_inner_join() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
+        let transaction = storage.transaction()?;
         let meta_cache = crate::storage::StatisticsMetaCache::default();
         let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
@@ -637,7 +637,7 @@ mod test {
             (op, left, right),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
-            &mut transaction,
+            &transaction,
         );
         let tuples = try_collect(executor)?;
 
@@ -660,7 +660,7 @@ mod test {
     fn test_nested_left_out_join() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
+        let transaction = storage.transaction()?;
         let meta_cache = crate::storage::StatisticsMetaCache::default();
         let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
@@ -689,7 +689,7 @@ mod test {
             (op, left, right),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
-            &mut transaction,
+            &transaction,
         );
         let tuples = try_collect(executor)?;
 
@@ -741,7 +741,7 @@ mod test {
     fn test_nested_cross_join_with_on() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
+        let transaction = storage.transaction()?;
         let meta_cache = crate::storage::StatisticsMetaCache::default();
         let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
@@ -770,7 +770,7 @@ mod test {
             (op, left, right),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
-            &mut transaction,
+            &transaction,
         );
         let tuples = try_collect(executor)?;
 
@@ -793,7 +793,7 @@ mod test {
     fn test_nested_cross_join_without_filter() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
+        let transaction = storage.transaction()?;
         let meta_cache = crate::storage::StatisticsMetaCache::default();
         let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
@@ -822,7 +822,7 @@ mod test {
             (op, left, right),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
-            &mut transaction,
+            &transaction,
         );
         let tuples = try_collect(executor)?;
 
@@ -860,7 +860,7 @@ mod test {
     fn test_nested_cross_join_without_on() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
+        let transaction = storage.transaction()?;
         let meta_cache = crate::storage::StatisticsMetaCache::default();
         let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
@@ -889,7 +889,7 @@ mod test {
             (op, left, right),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
-            &mut transaction,
+            &transaction,
         );
         let tuples = try_collect(executor)?;
 
@@ -902,7 +902,7 @@ mod test {
     fn test_nested_right_out_join() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
+        let transaction = storage.transaction()?;
         let meta_cache = crate::storage::StatisticsMetaCache::default();
         let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
@@ -931,7 +931,7 @@ mod test {
             (op, left, right),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
-            &mut transaction,
+            &transaction,
         );
         let tuples = try_collect(executor)?;
 
@@ -978,7 +978,7 @@ mod test {
     fn test_nested_full_join() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
+        let transaction = storage.transaction()?;
         let meta_cache = crate::storage::StatisticsMetaCache::default();
         let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
@@ -1007,7 +1007,7 @@ mod test {
             (op, left, right),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
-            &mut transaction,
+            &transaction,
         );
         let tuples = try_collect(executor)?;
 
@@ -1083,7 +1083,7 @@ mod test {
     fn test_nested_right_join_filter_only_left_columns() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
+        let transaction = storage.transaction()?;
         let meta_cache = crate::storage::StatisticsMetaCache::default();
         let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
@@ -1099,12 +1099,12 @@ mod test {
             vec![plan_arena.alloc_column(ColumnCatalog::new("rk".to_string(), true, desc.clone()))];
 
         let on_keys = vec![(
-            ScalarExpression::column_expr(left_columns[0].clone(), 0),
-            ScalarExpression::column_expr(right_columns[0].clone(), 0),
+            ScalarExpression::column_expr(left_columns[0], 0),
+            ScalarExpression::column_expr(right_columns[0], 0),
         )];
         let filter_expr = ScalarExpression::Binary {
             op: crate::expression::BinaryOperator::Gt,
-            left_expr: Box::new(ScalarExpression::column_expr(left_columns[1].clone(), 1)),
+            left_expr: Box::new(ScalarExpression::column_expr(left_columns[1], 1)),
             right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(1))),
             evaluator: None,
             ty: LogicalType::Boolean,
@@ -1151,7 +1151,7 @@ mod test {
             (op, left, right),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
-            &mut transaction,
+            &transaction,
         );
         let tuples = try_collect(executor)?;
 

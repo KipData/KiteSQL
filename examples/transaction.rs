@@ -41,10 +41,8 @@ mod app {
     pub fn run() -> Result<(), DatabaseError> {
         reset_example_dir()?;
         // Optimistic transactions are currently backed by RocksDB.
-        let database = DataBaseBuilder::path(EXAMPLE_DB_PATH).build_optimistic()?;
-        database
-            .run("create table if not exists t1 (c1 int primary key, c2 int)")?
-            .done()?;
+        let mut database = DataBaseBuilder::path(EXAMPLE_DB_PATH).build_optimistic()?;
+        database.ddl("create table if not exists t1 (c1 int primary key, c2 int)")?;
         let mut transaction = database.new_transaction()?;
 
         transaction
@@ -65,6 +63,7 @@ mod app {
             Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(1)])
         );
         assert!(iter.next().is_none());
+        iter.done()?;
 
         let mut tx2 = database.new_transaction()?;
         tx2.run("update t1 set c2 = 99 where c1 = 0")?.done()?;
@@ -79,7 +78,7 @@ mod app {
         );
         drop(tx2);
 
-        database.run("drop table t1")?.done()?;
+        database.ddl("drop table t1")?;
 
         Ok(())
     }

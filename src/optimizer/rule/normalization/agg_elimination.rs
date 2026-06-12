@@ -486,10 +486,10 @@ mod tests {
         let table_name: TableName = ::std::sync::Arc::from("t1");
         let c1 = arena.alloc_column(ColumnCatalog::new_dummy("c1".to_string()));
         let c1_id = Ulid::new();
-        let columns = vec![c1.clone()];
+        let columns = vec![c1];
 
         let sort_fields = vec![SortField::new(
-            ScalarExpression::column_expr(c1.clone(), 0),
+            ScalarExpression::column_expr(c1, 0),
             true,
             false,
         )];
@@ -627,11 +627,7 @@ mod tests {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut arena = crate::planner::PlanArena::new(&table_arena);
         let column = arena.alloc_column(ColumnCatalog::new_dummy("c1".to_string()));
-        let sort_field = SortField::new(
-            ScalarExpression::column_expr(column.clone(), 0),
-            true,
-            false,
-        );
+        let sort_field = SortField::new(ScalarExpression::column_expr(column, 0), true, false);
         let (index_info, _) = build_index_info(&mut arena, vec![sort_field.clone()], 0);
 
         let columns = vec![column];
@@ -759,11 +755,7 @@ mod tests {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut arena = crate::planner::PlanArena::new(&table_arena);
         let column = arena.alloc_column(ColumnCatalog::new_dummy("c_first".to_string()));
-        let sort_field = SortField::new(
-            ScalarExpression::column_expr(column.clone(), 0),
-            true,
-            false,
-        );
+        let sort_field = SortField::new(ScalarExpression::column_expr(column, 0), true, false);
         let (mut index_info, _) = build_index_info(&mut arena, vec![sort_field.clone()], 0);
         index_info.lookup = Some(IndexLookup::Static(Range::Scope {
             min: Bound::Unbounded,

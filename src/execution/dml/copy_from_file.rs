@@ -176,7 +176,7 @@ mod tests {
             schema_ref: columns,
         };
 
-        let mut transaction = db.storage.transaction()?;
+        let transaction = db.storage.transaction()?;
         let mut executor = crate::execution::execute_input_mut::<_, CopyFromFile>(
             op,
             (
@@ -185,7 +185,7 @@ mod tests {
                 db.state.meta_cache(),
             ),
             plan_arena,
-            &mut transaction,
+            &transaction,
         );
 
         let result = executor.next().expect("copy from file should yield once")?;

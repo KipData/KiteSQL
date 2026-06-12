@@ -397,7 +397,7 @@ mod test {
                 nulls_first,
             }]
         };
-        let _schema = vec![plan_arena.alloc_column(ColumnCatalog::new(
+        let _schema = [plan_arena.alloc_column(ColumnCatalog::new(
             "c1".to_string(),
             true,
             ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
@@ -563,7 +563,7 @@ mod test {
                     },
                 ]
             };
-        let _schema = vec![
+        let _schema = [
             plan_arena.alloc_column(ColumnCatalog::new(
                 "c1".to_string(),
                 true,

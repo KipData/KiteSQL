@@ -548,7 +548,7 @@ impl CheckpointableStorage for RocksStorage {
                 return Err(err);
             }
 
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(not(feature = "unsafe_txdb_checkpoint"))]
@@ -1027,7 +1027,7 @@ mod test {
                     "t1".to_string().into(),
                     (Some(0), Some(1)),
                     table.columns().cloned().collect(),
-                    table.indexes[0].clone(),
+                    table.indexes[0],
                     vec![Range::Scope {
                         min: Bound::Excluded(DataValue::Int32(0)),
                         max: Bound::Unbounded,
@@ -1055,7 +1055,7 @@ mod test {
                     "t1".to_string().into(),
                     (Some(0), Some(1)),
                     columns,
-                    table.indexes[0].clone(),
+                    table.indexes[0],
                     vec![Range::Scope {
                         min: Bound::Excluded(DataValue::Int32(3)),
                         max: Bound::Unbounded,
@@ -1094,38 +1094,34 @@ mod test {
             .clone();
         let plan_arena = PlanArena::new(kite_sql.state.table_arena());
         let columns_vec: Vec<_> = table.columns().cloned().collect();
-        let a_cover_column = columns_vec
+        let a_cover_column = *columns_vec
             .iter()
             .find(|column| plan_arena.column(**column).name() == "a")
-            .unwrap()
-            .clone();
-        let b_cover_column = columns_vec
+            .unwrap();
+        let b_cover_column = *columns_vec
             .iter()
             .find(|column| plan_arena.column(**column).name() == "b")
-            .unwrap()
-            .clone();
-        let unique_index = table
+            .unwrap();
+        let unique_index = *table
             .indexes
             .iter()
             .find(|index| matches!(plan_arena.index(**index).ty, IndexType::Unique))
-            .unwrap()
-            .clone();
+            .unwrap();
         let b_column = table
             .columns()
             .cloned()
             .find(|column| plan_arena.column(*column).name() == "b")
             .unwrap();
-        let columns = vec![b_column.clone()];
+        let columns = vec![b_column];
         let covered_deserializers = vec![plan_arena.column(b_column).datatype().serializable()];
 
         // ensure cover mapping can reorder index values to match scan order
-        let composite_index = table
+        let composite_index = *table
             .indexes
             .iter()
             .find(|index| plan_arena.index(**index).name == "idx_b_a")
-            .unwrap()
-            .clone();
-        let reordered_columns = vec![a_cover_column.clone(), b_cover_column.clone()];
+            .unwrap();
+        let reordered_columns = vec![a_cover_column, b_cover_column];
         let reordered_deserializers = vec![
             plan_arena.column(a_cover_column).datatype().serializable(),
             plan_arena.column(b_cover_column).datatype().serializable(),
@@ -1197,13 +1193,12 @@ mod test {
         assert_eq!(tuples[0].values, vec![covered_value]);
 
         // primary key index should ignore covered-deserializer hint and still return rows
-        let pk_index = table
+        let pk_index = *table
             .indexes
             .iter()
             .find(|index| plan_arena.index(**index).name == "pk_index")
-            .unwrap()
-            .clone();
-        let pk_columns = vec![a_cover_column.clone()];
+            .unwrap();
+        let pk_columns = vec![a_cover_column];
         let pk_deserializers = vec![plan_arena.column(a_cover_column).datatype().serializable()];
         let mut iter = transaction.read_by_index(
             kite_sql.state.table_cache(),

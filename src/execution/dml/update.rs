@@ -138,7 +138,7 @@ impl<'a> ExecutorNode<'a> for Update {
                 }
 
                 tuple.pk = Some(Tuple::primary_projection(
-                    &table_snapshot.primary_key_indices,
+                    table_snapshot.primary_key_indices,
                     &tuple.values,
                 ));
                 let new_pk = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;

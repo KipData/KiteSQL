@@ -99,7 +99,7 @@ impl<'a> ExecutorNode<'a> for IndexScan {
             self.cursor = Some(runtime.open_index_scan(
                 plan_arena,
                 op,
-                self.index_by.clone(),
+                self.index_by,
                 ranges,
                 self.covered_deserializers.take(),
                 self.cover_mapping.take(),

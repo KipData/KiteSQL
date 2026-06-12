@@ -568,9 +568,8 @@ mod tests {
         let right_flag_column = right_schema[1];
 
         let probe_predicate =
-            build_equality_predicate(left_value_column.clone(), 0, right_value_column, 2)?;
-        let flag_predicate =
-            build_equality_predicate(left_flag_column.clone(), 1, right_flag_column, 3)?;
+            build_equality_predicate(left_value_column, 0, right_value_column, 2)?;
+        let flag_predicate = build_equality_predicate(left_flag_column, 1, right_flag_column, 3)?;
         let mut op = MarkApplyOperator::new_exists(
             build_marker_column(&mut plan_arena),
             vec![probe_predicate, flag_predicate],
@@ -618,8 +617,7 @@ mod tests {
         );
         let left_value_column = left.output_schema(&mut plan_arena)[0];
         let right_value_column = right.output_schema(&mut plan_arena)[0];
-        let predicate =
-            build_equality_predicate(left_value_column.clone(), 0, right_value_column, 1)?;
+        let predicate = build_equality_predicate(left_value_column, 0, right_value_column, 1)?;
         let mut op =
             MarkApplyOperator::new_in(build_marker_column(&mut plan_arena), vec![predicate]);
         op.set_parameterized_probe(Some(ScalarExpression::column_expr(left_value_column, 0)));
@@ -665,8 +663,7 @@ mod tests {
         );
         let left_value_column = left.output_schema(&mut plan_arena)[0];
         let right_value_column = right.output_schema(&mut plan_arena)[0];
-        let predicate =
-            build_equality_predicate(left_value_column.clone(), 0, right_value_column, 1)?;
+        let predicate = build_equality_predicate(left_value_column, 0, right_value_column, 1)?;
         let mut op =
             MarkApplyOperator::new_in(build_marker_column(&mut plan_arena), vec![predicate]);
         op.set_parameterized_probe(Some(ScalarExpression::column_expr(left_value_column, 0)));
@@ -719,7 +716,7 @@ mod tests {
         let predicate = build_equality_predicate(left_column, 0, right_column, 1)?;
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
-        let mut transaction = storage.transaction()?;
+        let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, MarkApply>(
             (
                 MarkApplyOperator::new_in(build_marker_column(&mut plan_arena), vec![predicate]),
@@ -728,7 +725,7 @@ mod tests {
             ),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
-            &mut transaction,
+            &transaction,
         ))?;
 
         assert_eq!(
@@ -767,7 +764,7 @@ mod tests {
         let predicate = build_equality_predicate(left_column, 0, right_column, 1)?;
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
-        let mut transaction = storage.transaction()?;
+        let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, MarkApply>(
             (
                 MarkApplyOperator::new_in(build_marker_column(&mut plan_arena), vec![predicate]),
@@ -776,7 +773,7 @@ mod tests {
             ),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
-            &mut transaction,
+            &transaction,
         ))?;
 
         assert_eq!(
@@ -830,7 +827,7 @@ mod tests {
         };
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
-        let mut transaction = storage.transaction()?;
+        let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, MarkApply>(
             (
                 MarkApplyOperator::new_in(
@@ -842,7 +839,7 @@ mod tests {
             ),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
-            &mut transaction,
+            &transaction,
         ))?;
 
         assert_eq!(

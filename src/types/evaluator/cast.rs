@@ -325,7 +325,7 @@ macro_rules! define_integer_cast_evaluators {
             $crate::define_cast_evaluator!(
                 [<$prefix:snake _to_char_cast_eval>] {
                     len: u32,
-                    unit: crate::types::CharLengthUnits
+                    unit: $crate::types::CharLengthUnits
                 },
                 $crate::types::value::DataValue::$variant(value) => |this| {
                     $crate::types::evaluator::cast::to_char(value.to_string(), this.len, this.unit)
@@ -334,7 +334,7 @@ macro_rules! define_integer_cast_evaluators {
             $crate::define_cast_evaluator!(
                 [<$prefix:snake _to_varchar_cast_eval>] {
                     len: Option<u32>,
-                    unit: crate::types::CharLengthUnits
+                    unit: $crate::types::CharLengthUnits
                 },
                 $crate::types::value::DataValue::$variant(value) => |this| {
                     $crate::types::evaluator::cast::to_varchar(value.to_string(), this.len, this.unit)
@@ -392,7 +392,7 @@ macro_rules! define_float_cast_evaluators {
             $crate::define_cast_evaluator!(
                 [<$prefix:snake _to_char_cast_eval>] {
                     len: u32,
-                    unit: crate::types::CharLengthUnits
+                    unit: $crate::types::CharLengthUnits
                 },
                 $crate::types::value::DataValue::$variant(value) => |this| {
                     $crate::types::evaluator::cast::to_char(value.to_string(), this.len, this.unit)
@@ -401,7 +401,7 @@ macro_rules! define_float_cast_evaluators {
             $crate::define_cast_evaluator!(
                 [<$prefix:snake _to_varchar_cast_eval>] {
                     len: Option<u32>,
-                    unit: crate::types::CharLengthUnits
+                    unit: $crate::types::CharLengthUnits
                 },
                 $crate::types::value::DataValue::$variant(value) => |this| {
                     $crate::types::evaluator::cast::to_varchar(value.to_string(), this.len, this.unit)

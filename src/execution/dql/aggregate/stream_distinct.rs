@@ -162,7 +162,7 @@ mod tests {
             Childrens::None,
         );
         let agg = AggregateOperator {
-            groupby_exprs: vec![ScalarExpression::column_expr(schema_ref[0].clone(), 0)],
+            groupby_exprs: vec![ScalarExpression::column_expr(schema_ref[0], 0)],
             agg_calls: vec![],
             is_distinct: true,
         };
@@ -173,12 +173,12 @@ mod tests {
         };
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
-        let mut transaction = storage.transaction()?;
+        let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, StreamDistinctExecutor>(
             (agg, plan.childrens.pop_only()),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
-            &mut transaction,
+            &transaction,
         ))?;
 
         let actual = tuples
@@ -216,8 +216,8 @@ mod tests {
         );
         let agg = AggregateOperator {
             groupby_exprs: vec![
-                ScalarExpression::column_expr(schema_ref[0].clone(), 0),
-                ScalarExpression::column_expr(schema_ref[1].clone(), 1),
+                ScalarExpression::column_expr(schema_ref[0], 0),
+                ScalarExpression::column_expr(schema_ref[1], 1),
             ],
             agg_calls: vec![],
             is_distinct: true,
@@ -229,12 +229,12 @@ mod tests {
         };
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
-        let mut transaction = storage.transaction()?;
+        let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, StreamDistinctExecutor>(
             (agg, plan.childrens.pop_only()),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
-            &mut transaction,
+            &transaction,
         ))?;
 
         let actual = tuples.into_iter().map(|tuple| tuple.values).collect_vec();

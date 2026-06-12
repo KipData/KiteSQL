@@ -168,12 +168,12 @@ mod tests {
         ));
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
-        let mut transaction = storage.transaction()?;
+        let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, ScalarApply>(
             (ScalarApplyOperator, left, right),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
-            &mut transaction,
+            &transaction,
         ))?;
 
         let actual = tuples
@@ -209,12 +209,12 @@ mod tests {
         ));
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
-        let mut transaction = storage.transaction()?;
+        let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, ScalarApply>(
             (ScalarApplyOperator, left, right),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
-            &mut transaction,
+            &transaction,
         ))?;
 
         assert_eq!(

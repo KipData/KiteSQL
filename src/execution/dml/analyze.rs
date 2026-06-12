@@ -117,7 +117,7 @@ impl<'a> ExecutorNode<'a> for Analyze {
         while runtime.next_tuple(input, plan_arena)? {
             let tuple = runtime.result_tuple();
             for State { exprs, builder, .. } in builders.iter_mut() {
-                let values = Projection::projection(tuple, &exprs)?;
+                let values = Projection::projection(tuple, exprs)?;
 
                 if values.len() == 1 {
                     builder.append(&values[0])?;

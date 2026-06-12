@@ -509,6 +509,7 @@ pub(crate) struct ExecArena {
     projection_tmp: Vec<DataValue>,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum RuntimeCursor<'a, T: Transaction + 'a> {
     SeqScan(TupleIter<'a, T>),
     IndexScan(IndexIter<'a, T>),
@@ -1291,7 +1292,7 @@ where
                     return <IndexScan as ReadExecutor<'a, T>>::into_executor(
                         (
                             op,
-                            index_info.meta.clone(),
+                            index_info.meta,
                             lookup,
                             index_info.covered_deserializers.clone(),
                             index_info.cover_mapping.clone(),
@@ -1630,6 +1631,7 @@ mod test_utils {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn execute<'a, T, E>(
         executor: E,
         cache: impl IntoReadExecutionContext<'a>,
@@ -1657,6 +1659,7 @@ mod test_utils {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn execute_mut<'a, T, E>(
         executor: E,
         cache: impl IntoReadExecutionContext<'a>,

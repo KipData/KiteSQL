@@ -77,6 +77,11 @@ impl LogicalType {
     pub fn type_trans<T: 'static>() -> Option<LogicalType> {
         let type_id = TypeId::of::<T>();
 
+        #[cfg(feature = "decimal")]
+        if type_id == TypeId::of::<Decimal>() {
+            return Some(LogicalType::Decimal(None, None));
+        }
+
         if type_id == TypeId::of::<bool>() {
             Some(LogicalType::Boolean)
         } else if type_id == TypeId::of::<i8>() {
@@ -99,17 +104,6 @@ impl LogicalType {
             Some(LogicalType::Float)
         } else if type_id == TypeId::of::<f64>() {
             Some(LogicalType::Double)
-        } else if {
-            #[cfg(feature = "decimal")]
-            {
-                type_id == TypeId::of::<Decimal>()
-            }
-            #[cfg(not(feature = "decimal"))]
-            {
-                false
-            }
-        } {
-            Some(LogicalType::Decimal(None, None))
         } else if type_id == TypeId::of::<String>() {
             Some(LogicalType::Varchar(None, CharLengthUnits::Characters))
         } else {

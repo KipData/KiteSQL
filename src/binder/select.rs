@@ -433,6 +433,7 @@ where
     T: Transaction,
     A: AsRef<[(&'static str, DataValue)]>,
 {
+    #[allow(clippy::wrong_self_convention)]
     pub(crate) fn from_plan(
         self,
         plan: LogicalPlan,
@@ -504,26 +505,27 @@ where
                 |binder, orderby| bind_sort_field(binder, self.arena, orderby),
             )?;
         }
-
         if !self.binder.context.agg_calls.is_empty()
             || !self.binder.context.group_by_exprs.is_empty()
         {
             let agg_calls = std::mem::take(&mut self.binder.context.agg_calls);
             let group_by_exprs = std::mem::take(&mut self.binder.context.group_by_exprs);
+            let output_exprs = self
+                .select_list
+                .iter_mut()
+                .chain(having_orderby.0.iter_mut())
+                .chain(
+                    having_orderby
+                        .1
+                        .iter_mut()
+                        .flat_map(|fields| fields.iter_mut().map(|field| &mut field.expr)),
+                );
             self.binder.bind_aggregate_output_exprs_with_outputs(
                 &agg_calls,
                 &group_by_exprs,
-                self.select_list.iter_mut(),
+                output_exprs,
                 self.arena,
             )?;
-            if let Some(orderby) = having_orderby.1.as_mut() {
-                self.binder.bind_aggregate_output_exprs_with_outputs(
-                    &agg_calls,
-                    &group_by_exprs,
-                    orderby.iter_mut().map(|field| &mut field.expr),
-                    self.arena,
-                )?;
-            }
             self.plan = self
                 .binder
                 .bind_aggregate(self.plan, agg_calls, group_by_exprs)?;
@@ -1062,7 +1064,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 let source_column = arena.column(column);
                 (
                     source_column.clone(),
-                    source_column.id().unwrap_or(ColumnId::new()),
+                    source_column.id().unwrap_or_default(),
                     matches!(
                         &source_column.summary().relation,
                         ColumnRelation::Table { is_temp: true, .. }
@@ -1107,7 +1109,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 let mut source_column = column_catalog.clone();
                 source_column.set_ref_table(
                     source_name.clone(),
-                    column_catalog.id().unwrap_or(ColumnId::new()),
+                    column_catalog.id().unwrap_or_default(),
                     true,
                 );
                 source_column
@@ -1303,7 +1305,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             else {
                 continue;
             };
-            if !fn_not_on_using(&column) {
+            if !fn_not_on_using(column) {
                 continue;
             }
             exprs.push(ScalarExpression::column_expr(
@@ -1318,7 +1320,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         }
 
         for (position, column) in source.schema().iter().enumerate() {
-            if !fn_not_on_using(&column) {
+            if !fn_not_on_using(column) {
                 continue;
             }
             exprs.push(ScalarExpression::column_expr(
@@ -1523,6 +1525,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         Vec::new()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prepare_mark_apply(
         predicate: &mut ScalarExpression,
         output_column: &ColumnRef,
@@ -2270,11 +2273,11 @@ mod tests {
             true,
             ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
         ));
-        let right_schema = vec![right_column.clone()];
+        let right_schema = vec![right_column];
         let mut expr = ScalarExpression::Binary {
             op: crate::expression::BinaryOperator::Eq,
             left_expr: Box::new(ScalarExpression::column_expr(left_column, 0)),
-            right_expr: Box::new(ScalarExpression::column_expr(right_column.clone(), 0)),
+            right_expr: Box::new(ScalarExpression::column_expr(right_column, 0)),
             evaluator: None,
             ty: LogicalType::Boolean,
         };

@@ -508,7 +508,7 @@ impl<S: Storage> State<S> {
             BinderContext::new(
                 self.table_cache(),
                 self.view_cache(),
-                &*transaction,
+                transaction,
                 self.scala_functions(),
                 self.table_functions(),
             ),
@@ -1832,7 +1832,7 @@ pub(crate) mod test {
         let collect_ids = |sql: &str| -> Result<Vec<i32>, DatabaseError> {
             let mut iter = kite_sql.run(sql)?;
             let mut ids = Vec::new();
-            while let Some(row) = iter.next() {
+            for row in iter.by_ref() {
                 let row = row?;
                 ids.push(row.values[0].i32().unwrap());
             }
@@ -1964,7 +1964,7 @@ pub(crate) mod test {
         let collect_ids = |sql: &str| -> Result<Vec<i32>, DatabaseError> {
             let mut iter = kite_sql.run(sql)?;
             let mut ids = Vec::new();
-            while let Some(row) = iter.next() {
+            for row in iter.by_ref() {
                 let row = row?;
                 ids.push(row.values[0].i32().unwrap());
             }

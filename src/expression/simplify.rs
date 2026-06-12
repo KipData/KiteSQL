@@ -600,7 +600,7 @@ impl ScalarExpression {
 
     pub(crate) fn unpack_bound_col(&self, is_deep: bool) -> Option<(ColumnRef, usize)> {
         match self {
-            ScalarExpression::ColumnRef { column, position } => Some((column.clone(), *position)),
+            ScalarExpression::ColumnRef { column, position } => Some((*column, *position)),
             ScalarExpression::Alias { expr, .. } => expr.unpack_bound_col(is_deep),
             ScalarExpression::Unary { expr, .. } => expr.unpack_bound_col(is_deep),
             ScalarExpression::Binary {

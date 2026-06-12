@@ -123,6 +123,7 @@ impl TableArenaCell {
         unsafe { &*self.value.get() }
     }
 
+    #[allow(clippy::mut_from_ref)]
     pub(crate) fn borrow_mut(&self) -> &mut TableArena {
         unsafe { &mut *self.value.get() }
     }
@@ -446,6 +447,7 @@ impl<'a> PlanArena<'a> {
         <Self as MetaArena>::column(self, column)
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn index(&self, index: IndexMetaRef) -> &IndexMeta {
         <Self as MetaArena>::index(self, index)
     }

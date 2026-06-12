@@ -89,8 +89,8 @@ impl ApplyOutcome {
 }
 
 impl ColumnPruning {
-    fn extend_operator_referenced_columns<'a>(
-        operator: &'a Operator,
+    fn extend_operator_referenced_columns(
+        operator: &Operator,
         referenced_columns: &mut ReferencedColumns,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<(), DatabaseError> {

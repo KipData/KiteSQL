@@ -64,7 +64,7 @@ impl<'a> ExecutorNode<'a> for Values {
         for (i, value) in values.iter_mut().enumerate() {
             let ty = plan_arena.column(self.schema_ref[i]).datatype();
 
-            *value = mem::replace(value, DataValue::Null).cast(&ty)?;
+            *value = mem::replace(value, DataValue::Null).cast(ty)?;
         }
 
         let output = runtime.result_tuple_mut();

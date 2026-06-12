@@ -196,7 +196,7 @@ impl LogicalPlan {
                     Childrens::Twins { left, .. } => left.output_schema(arena).clone(),
                     Childrens::None => Vec::new(),
                 };
-                schema.push(op.output_column().clone());
+                schema.push(*op.output_column());
                 schema
             }
             Operator::Aggregate(op) => op
@@ -288,6 +288,7 @@ impl LogicalPlan {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     pub fn explain(&self, arena: &mut PlanArena, indentation: usize) -> String {
         let mut result = format!("{:indent$}{}", "", self.operator, indent = indentation);
 

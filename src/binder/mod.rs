@@ -181,11 +181,11 @@ impl UsingColumn {
     }
 
     fn left_expr(&self) -> ScalarExpression {
-        ScalarExpression::column_expr(self.left_column.clone(), self.left_position)
+        ScalarExpression::column_expr(self.left_column, self.left_position)
     }
 
     fn right_expr(&self) -> ScalarExpression {
-        ScalarExpression::column_expr(self.right_column.clone(), self.right_position)
+        ScalarExpression::column_expr(self.right_column, self.right_position)
     }
 
     pub(crate) fn visible_expr(
@@ -529,9 +529,9 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
         }
         let using_column = UsingColumn::new(
             join_type,
-            left_column.clone(),
+            *left_column,
             left_position,
-            right_column.clone(),
+            *right_column,
             right_position,
         );
         self.using.insert(name, using_column);

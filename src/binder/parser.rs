@@ -1341,6 +1341,7 @@ where
     T: Transaction,
     A: AsRef<[(&'static str, DataValue)]>,
 {
+    #[allow(clippy::wrong_self_convention)]
     pub(crate) fn from_sql(
         self,
         from: Vec<TableWithJoins>,

@@ -414,7 +414,7 @@ impl Histogram {
                 &mut bucket_idxs,
                 &mut count,
                 sketch,
-                &comparator,
+                comparator,
             )?;
             if is_dummy {
                 return Ok(0);

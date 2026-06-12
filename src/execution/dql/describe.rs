@@ -96,7 +96,7 @@ impl<'a> ExecutorNode<'a> for Describe {
 
         self.cursor += 1;
         let column = plan_arena.column(column_ref);
-        let default = describe_default(&column, plan_arena);
+        let default = describe_default(column, plan_arena);
         let mapping = column_ref.to_string();
 
         let output = runtime.result_tuple_mut();

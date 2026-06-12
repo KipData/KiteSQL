@@ -162,7 +162,7 @@ impl<'a> ExecutorNode<'a> for Insert {
                     }
                     values.push(value)
                 }
-                let pk = Tuple::primary_projection(&table_snapshot.primary_key_indices, &values);
+                let pk = Tuple::primary_projection(table_snapshot.primary_key_indices, &values);
                 let tuple = Tuple::new(Some(pk), values);
 
                 for (index_meta, exprs) in table_snapshot.index_metas.iter() {

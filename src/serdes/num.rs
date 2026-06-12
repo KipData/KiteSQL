@@ -23,7 +23,7 @@ use std::mem::size_of;
 macro_rules! implement_num_serialization {
     ($struct_name:ident) => {
         impl ReferenceSerialization for $struct_name {
-            fn encode<W: Write, A: crate::planner::MetaArena>(
+            fn encode<W: Write, A: $crate::planner::MetaArena>(
                 &self,
                 writer: &mut W,
                 _: bool,
@@ -35,9 +35,9 @@ macro_rules! implement_num_serialization {
                 Ok(())
             }
 
-            fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
+            fn decode<T: Transaction, R: Read, A: $crate::planner::MetaArena>(
                 reader: &mut R,
-                _: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
+                _: Option<&$crate::serdes::ReferenceDecodeContext<'_, T>>,
                 _: &ReferenceTables,
                 _: &mut A,
             ) -> Result<Self, DatabaseError> {

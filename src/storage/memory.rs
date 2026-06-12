@@ -412,7 +412,7 @@ mod native_tests {
             .table(kite_sql.state.table_cache(), table_name.clone())?
             .unwrap()
             .clone();
-        let pk_index = table.indexes().next().unwrap().clone();
+        let pk_index = *table.indexes().next().unwrap();
         let plan_arena = PlanArena::new(kite_sql.state.table_arena());
         let mut iter = transaction.read_by_index(
             kite_sql.state.table_cache(),

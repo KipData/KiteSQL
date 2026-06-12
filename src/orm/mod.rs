@@ -404,6 +404,7 @@ macro_rules! impl_quantified_subquery_methods {
     };
 }
 
+#[allow(clippy::type_complexity)]
 struct ExprBindScopeHandle<'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
@@ -448,6 +449,7 @@ where
         CtxExpression { expr, scope: self }
     }
 
+    #[allow(clippy::mut_from_ref)]
     fn binder(&self) -> &mut Binder<'bind, 'parent, T, A> {
         // SAFETY: ExprBindScopeHandle is created only from an active ExprBindScope
         // during synchronous ORM binding. CtxExpression is !Send and !Sync, and
@@ -457,6 +459,7 @@ where
         unsafe { &mut *self.binder.as_ptr() }
     }
 
+    #[allow(clippy::mut_from_ref)]
     fn arena(&self) -> &mut PlanArena<'arena> {
         // SAFETY: See binder(); the arena pointer has the same scope-bound
         // lifetime and is accessed only through ORM expression binding methods.
@@ -688,6 +691,7 @@ where
         )
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn not(self) -> Result<Self, DatabaseError> {
         self.scope.unary(expression::UnaryOperator::Not, self.expr)
     }
@@ -918,7 +922,7 @@ where
         >,
     ) -> Result<LogicalPlan, DatabaseError>,
 {
-    static EMPTY_BIND_PARAMS: &[(&'static str, DataValue)] = &[];
+    static EMPTY_BIND_PARAMS: &[(&str, DataValue)] = &[];
     executor.execute(EMPTY_BIND_PARAMS, |binder, arena| {
         let mut context = OrmContext { binder, arena };
         build(&mut context)
@@ -939,7 +943,7 @@ where
         >,
     ) -> Result<LogicalPlan, DatabaseError>,
 {
-    static EMPTY_BIND_PARAMS: &[(&'static str, DataValue)] = &[];
+    static EMPTY_BIND_PARAMS: &[(&str, DataValue)] = &[];
     executor.explain(EMPTY_BIND_PARAMS, |binder, arena| {
         let mut context = OrmContext { binder, arena };
         build(&mut context)
@@ -1012,6 +1016,7 @@ where
         self.from_source(QuerySource::model::<M>().with_alias(alias), true)
     }
 
+    #[allow(clippy::wrong_self_convention)]
     fn from_source<'scope, M: Model>(
         &'scope mut self,
         source: QuerySource,
@@ -1921,7 +1926,6 @@ where
                         .into_orm_scalar(),
                 );
             }
-            ()
         })?;
         Ok(self.select_list(select_list))
     }

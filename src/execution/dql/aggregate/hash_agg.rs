@@ -155,7 +155,7 @@ mod test {
 
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path()).unwrap();
-        let mut transaction = storage.transaction()?;
+        let transaction = storage.transaction()?;
         let desc = ColumnDesc::new(LogicalType::Integer, None, false, None)?;
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
@@ -196,11 +196,11 @@ mod test {
         );
         let plan = LogicalPlan::new(
             Operator::Aggregate(AggregateOperator {
-                groupby_exprs: vec![ScalarExpression::column_expr(t1_schema[0].clone(), 0)],
+                groupby_exprs: vec![ScalarExpression::column_expr(t1_schema[0], 0)],
                 agg_calls: vec![ScalarExpression::AggCall {
                     distinct: false,
                     kind: AggKind::Sum,
-                    args: vec![ScalarExpression::column_expr(t1_schema[1].clone(), 1)],
+                    args: vec![ScalarExpression::column_expr(t1_schema[1], 1)],
                     ty: LogicalType::Integer,
                 }],
                 is_distinct: false,
@@ -226,7 +226,7 @@ mod test {
             (op, plan.childrens.pop_only()),
             (&table_cache, &view_cache, &meta_cache),
             plan_arena,
-            &mut transaction,
+            &transaction,
         ))?;
 
         assert_eq!(tuples.len(), 2);

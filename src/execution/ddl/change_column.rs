@@ -102,8 +102,7 @@ impl<'a> ExecutorNode<'a> for ChangeColumn {
             };
             if let Some(index_name) = affected_index_name {
                 return Err(DatabaseError::UnsupportedStmt(format!(
-                    "cannot alter type of indexed column `{}`; drop index `{}` first",
-                    old_column_name, index_name
+                    "cannot alter type of indexed column `{old_column_name}`; drop index `{index_name}` first"
                 )));
             }
         }

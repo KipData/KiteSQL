@@ -601,7 +601,7 @@ mod tests {
         );
         c3.set_ref_table(table_name.clone(), c3_id, false);
 
-        let columns = vec![c1_ref.clone(), c2_ref.clone()];
+        let columns = vec![c1_ref, c2_ref];
 
         let index_meta_reordered = arena.alloc_index(IndexMeta {
             id: 0,
@@ -664,14 +664,14 @@ mod tests {
 
         let c1_gt = ScalarExpression::Binary {
             op: BinaryOperator::Gt,
-            left_expr: Box::new(ScalarExpression::column_expr(c1_ref.clone(), 0)),
+            left_expr: Box::new(ScalarExpression::column_expr(c1_ref, 0)),
             right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(0))),
             evaluator: None,
             ty: LogicalType::Boolean,
         };
         let c2_gt = ScalarExpression::Binary {
             op: BinaryOperator::Gt,
-            left_expr: Box::new(ScalarExpression::column_expr(c2_ref.clone(), 1)),
+            left_expr: Box::new(ScalarExpression::column_expr(c2_ref, 1)),
             right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(0))),
             evaluator: None,
             ty: LogicalType::Boolean,

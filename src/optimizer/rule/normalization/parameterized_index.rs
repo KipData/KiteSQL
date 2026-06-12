@@ -34,7 +34,7 @@ impl NormalizationRule for ParameterizeMarkApply {
         let (op, new_probe) = match (&mut plan.operator, plan.childrens.as_mut()) {
             (Operator::MarkApply(op), Childrens::Twins { left, right }) => {
                 let probe = find_parameterized_probe(
-                    op.kind.clone(),
+                    op.kind,
                     op.predicates(),
                     left.output_schema(arena),
                     right.output_schema(arena),

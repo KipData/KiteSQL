@@ -175,6 +175,7 @@ pub trait Transaction: Sized {
     /// The bounds is applied to the whole data batches, not per batch.
     ///
     /// The projections is column indices.
+    #[allow(clippy::too_many_arguments)]
     fn read<'a>(
         &'a self,
         table_codec: &mut TableCodec,
@@ -432,7 +433,7 @@ pub trait Transaction: Sized {
         })?;
 
         for column in table.columns().map(|column| arena.column(*column)) {
-            table_codec.with_column(&column, true, |key, value| self.set(key, value))?;
+            table_codec.with_column(column, true, |key, value| self.set(key, value))?;
         }
         for index_meta in table.indexes() {
             let index_meta = arena.index(*index_meta);
@@ -584,7 +585,7 @@ pub trait Transaction: Sized {
         }
 
         let column = plan_arena.column(table.get_column_by_id(&col_id).unwrap());
-        table_codec.with_column(&column, true, |key, value| self.set(key, value))?;
+        table_codec.with_column(column, true, |key, value| self.set(key, value))?;
 
         Ok((table, col_id))
     }
@@ -602,7 +603,7 @@ pub trait Transaction: Sized {
         let column_id = {
             let column = plan_arena.column(table_catalog.get_column_by_name(column_name).unwrap());
             let column_id = column.id().unwrap();
-            table_codec.with_column(&column, false, |key, _| self.remove(key))?;
+            table_codec.with_column(column, false, |key, _| self.remove(key))?;
             column_id
         };
 
@@ -676,7 +677,7 @@ pub trait Transaction: Sized {
             .columns()
             .map(|column| plan_arena.column(*column))
         {
-            table_codec.with_column(&column, true, |key, value| self.set(key, value))?;
+            table_codec.with_column(column, true, |key, value| self.set(key, value))?;
         }
 
         Ok(Some(table_catalog))

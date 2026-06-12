@@ -164,7 +164,7 @@ mod tests {
         db.run("insert into t1 values (3, 2.1, 'Kite')")?.done()?;
 
         let plan_arena = crate::planner::PlanArena::new(db.state.table_arena());
-        let mut transaction = db.storage.transaction()?;
+        let transaction = db.storage.transaction()?;
         let table = transaction
             .table(db.state.table_cache(), "t1".to_string().into())?
             .unwrap();
@@ -179,7 +179,7 @@ mod tests {
                 db.state.meta_cache(),
             ),
             plan_arena,
-            &mut transaction,
+            &transaction,
         );
 
         let tuple = executor.next().expect("executor should yield once")?;
