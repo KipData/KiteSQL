@@ -28,9 +28,6 @@ use std::cmp;
 
 use crate::errors::DatabaseError;
 use kite_sql_serde_macros::ReferenceSerialization;
-#[cfg(feature = "decimal")]
-use sqlparser::ast::ExactNumberInfo;
-use sqlparser::ast::TimezoneInfo;
 use ulid::Ulid;
 
 pub type ColumnId = Ulid;
@@ -39,15 +36,6 @@ pub type ColumnId = Ulid;
 pub enum CharLengthUnits {
     Characters,
     Octets,
-}
-
-impl From<sqlparser::ast::CharLengthUnits> for CharLengthUnits {
-    fn from(value: sqlparser::ast::CharLengthUnits) -> Self {
-        match value {
-            sqlparser::ast::CharLengthUnits::Characters => Self::Characters,
-            sqlparser::ast::CharLengthUnits::Octets => Self::Octets,
-        }
-    }
 }
 
 impl std::fmt::Display for CharLengthUnits {
@@ -59,8 +47,6 @@ impl std::fmt::Display for CharLengthUnits {
     }
 }
 
-/// Sqlrs type conversion:
-/// sqlparser::ast::DataType -> LogicalType -> arrow::datatypes::DataType
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, ReferenceSerialization)]
 pub enum LogicalType {
     SqlNull,
@@ -420,170 +406,6 @@ impl LogicalType {
                 matches!(to, LogicalType::Varchar(..) | LogicalType::Char(..))
             }
             LogicalType::Decimal(_, _) | LogicalType::Tuple(_) => false,
-        }
-    }
-}
-
-/// sqlparser datatype to logical type
-impl TryFrom<sqlparser::ast::DataType> for LogicalType {
-    type Error = DatabaseError;
-
-    fn try_from(value: sqlparser::ast::DataType) -> Result<Self, Self::Error> {
-        match value {
-            sqlparser::ast::DataType::Char(char_len)
-            | sqlparser::ast::DataType::Character(char_len) => {
-                let mut len = 1;
-                let mut char_unit = None;
-                if let Some(char_len) = char_len {
-                    match char_len {
-                        sqlparser::ast::CharacterLength::IntegerLength { length, unit } => {
-                            len = cmp::max(len, length);
-                            char_unit = unit;
-                        }
-                        sqlparser::ast::CharacterLength::Max => {
-                            return Err(DatabaseError::UnsupportedStmt(
-                                "CHAR(MAX) is not supported".to_string(),
-                            ));
-                        }
-                    }
-                }
-                Ok(LogicalType::Char(
-                    len as u32,
-                    char_unit
-                        .map(Into::into)
-                        .unwrap_or(CharLengthUnits::Characters),
-                ))
-            }
-            sqlparser::ast::DataType::CharVarying(varchar_len)
-            | sqlparser::ast::DataType::CharacterVarying(varchar_len)
-            | sqlparser::ast::DataType::Varchar(varchar_len) => {
-                let mut len = None;
-                let mut char_unit = None;
-                if let Some(varchar_len) = varchar_len {
-                    match varchar_len {
-                        sqlparser::ast::CharacterLength::IntegerLength { length, unit } => {
-                            len = Some(length as u32);
-                            char_unit = unit;
-                        }
-                        sqlparser::ast::CharacterLength::Max => {
-                            return Err(DatabaseError::UnsupportedStmt(
-                                "VARCHAR(MAX) is not supported".to_string(),
-                            ));
-                        }
-                    }
-                }
-                Ok(LogicalType::Varchar(
-                    len,
-                    char_unit
-                        .map(Into::into)
-                        .unwrap_or(CharLengthUnits::Characters),
-                ))
-            }
-            sqlparser::ast::DataType::String(_) | sqlparser::ast::DataType::Text => {
-                Ok(LogicalType::Varchar(None, CharLengthUnits::Characters))
-            }
-            sqlparser::ast::DataType::Float(_)
-            | sqlparser::ast::DataType::Float4
-            | sqlparser::ast::DataType::Float32
-            | sqlparser::ast::DataType::Real => Ok(LogicalType::Float),
-            sqlparser::ast::DataType::Double(_)
-            | sqlparser::ast::DataType::DoublePrecision
-            | sqlparser::ast::DataType::Float8
-            | sqlparser::ast::DataType::Float64 => Ok(LogicalType::Double),
-            sqlparser::ast::DataType::TinyInt(_) => Ok(LogicalType::Tinyint),
-            sqlparser::ast::DataType::TinyIntUnsigned(_) | sqlparser::ast::DataType::UTinyInt => {
-                Ok(LogicalType::UTinyint)
-            }
-            sqlparser::ast::DataType::SmallInt(_) | sqlparser::ast::DataType::Int2(_) => {
-                Ok(LogicalType::Smallint)
-            }
-            sqlparser::ast::DataType::SmallIntUnsigned(_)
-            | sqlparser::ast::DataType::Int2Unsigned(_)
-            | sqlparser::ast::DataType::USmallInt => Ok(LogicalType::USmallint),
-            sqlparser::ast::DataType::Int(_)
-            | sqlparser::ast::DataType::Integer(_)
-            | sqlparser::ast::DataType::Int4(_)
-            | sqlparser::ast::DataType::Int32 => Ok(LogicalType::Integer),
-            sqlparser::ast::DataType::IntUnsigned(_)
-            | sqlparser::ast::DataType::IntegerUnsigned(_)
-            | sqlparser::ast::DataType::Int4Unsigned(_)
-            | sqlparser::ast::DataType::Unsigned
-            | sqlparser::ast::DataType::UnsignedInteger
-            | sqlparser::ast::DataType::UInt32 => Ok(LogicalType::UInteger),
-            sqlparser::ast::DataType::BigInt(_)
-            | sqlparser::ast::DataType::Int8(_)
-            | sqlparser::ast::DataType::Int64 => Ok(LogicalType::Bigint),
-            sqlparser::ast::DataType::BigIntUnsigned(_)
-            | sqlparser::ast::DataType::Int8Unsigned(_)
-            | sqlparser::ast::DataType::UBigInt
-            | sqlparser::ast::DataType::UInt64 => Ok(LogicalType::UBigint),
-            sqlparser::ast::DataType::Boolean => Ok(LogicalType::Boolean),
-            sqlparser::ast::DataType::Date => Ok(LogicalType::Date),
-            sqlparser::ast::DataType::Datetime(precision) => {
-                if precision.is_some() {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "time's precision".to_string(),
-                    ));
-                }
-                Ok(LogicalType::DateTime)
-            }
-            sqlparser::ast::DataType::Time(precision, info) => {
-                match precision {
-                    Some(0..5) | None => (),
-                    _ => {
-                        return Err(DatabaseError::UnsupportedStmt(
-                            "time's precision must be less than 5".to_string(),
-                        ))
-                    }
-                }
-                if !matches!(info, TimezoneInfo::None) {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "time's zone is not supported".to_string(),
-                    ));
-                }
-                Ok(LogicalType::Time(precision))
-            }
-            sqlparser::ast::DataType::Timestamp(precision, info) => {
-                let mut zone = false;
-                match precision {
-                    Some(3 | 6 | 9) | None => (),
-                    _ => {
-                        return Err(DatabaseError::UnsupportedStmt(
-                            "timestamp's precision must be 3,6,9".to_string(),
-                        ))
-                    }
-                }
-                if matches!(info, TimezoneInfo::WithTimeZone) {
-                    zone = true;
-                }
-                Ok(LogicalType::TimeStamp(precision, zone))
-            }
-            sqlparser::ast::DataType::Decimal(info)
-            | sqlparser::ast::DataType::DecimalUnsigned(info)
-            | sqlparser::ast::DataType::Dec(info)
-            | sqlparser::ast::DataType::DecUnsigned(info)
-            | sqlparser::ast::DataType::Numeric(info) => {
-                #[cfg(feature = "decimal")]
-                {
-                    match info {
-                        ExactNumberInfo::None => Ok(Self::Decimal(None, None)),
-                        ExactNumberInfo::Precision(p) => Ok(Self::Decimal(Some(p as u8), None)),
-                        ExactNumberInfo::PrecisionAndScale(p, s) => {
-                            Ok(Self::Decimal(Some(p as u8), Some(s as u8)))
-                        }
-                    }
-                }
-                #[cfg(not(feature = "decimal"))]
-                {
-                    let _ = info;
-                    Err(DatabaseError::UnsupportedStmt(
-                        "DECIMAL requires the `decimal` feature".to_string(),
-                    ))
-                }
-            }
-            other => Err(DatabaseError::UnsupportedStmt(format!(
-                "unsupported data type: {other}"
-            ))),
         }
     }
 }

@@ -36,14 +36,13 @@ impl DB for SQLBase {
             let is_last = statements.peek().is_none();
             match command_type(&statement)? {
                 CommandType::DDL => {
-                    self.db
-                        .execute_ddl_statement("SQLLOGICTEST DDL", &statement)?;
+                    self.db.ddl(statement.to_string())?;
                     if is_last {
                         println!(" |— time spent: {:?}", start.elapsed());
                         return Ok(DBOutput::StatementComplete(0));
                     }
                 }
-                _ if matches!(statement, Statement::Analyze(_)) => {
+                CommandType::Analyze => {
                     execute_analyze_statement(&mut self.db, &statement)?;
                     if is_last {
                         println!(" |— time spent: {:?}", start.elapsed());

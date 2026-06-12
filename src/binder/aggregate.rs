@@ -14,7 +14,6 @@
 
 use ahash::RandomState;
 use itertools::Itertools;
-use sqlparser::ast::{Expr, OrderByExpr};
 use std::collections::HashSet;
 
 use super::{Binder, QueryBindStep};
@@ -55,17 +54,11 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         Ok(())
     }
 
-    pub fn extract_group_by_aggregate(
+    pub fn extract_group_by_aggregate_exprs(
         &mut self,
         select_list: &mut [ScalarExpression],
-        groupby: Vec<Expr>,
-        arena: &mut crate::planner::PlanArena,
+        mut group_by_exprs: Vec<ScalarExpression>,
     ) -> Result<(), DatabaseError> {
-        let mut group_by_exprs = Vec::with_capacity(groupby.len());
-        for expr in groupby {
-            group_by_exprs.push(self.bind_expr(expr, arena)?);
-        }
-
         self.validate_groupby_illegal_column(select_list, &group_by_exprs)?;
 
         for expr in group_by_exprs.iter_mut() {
@@ -74,41 +67,30 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         Ok(())
     }
 
-    pub fn extract_having_orderby_aggregate(
+    pub fn extract_having_orderby_aggregate_exprs<I, F>(
         &mut self,
-        having: Option<Expr>,
-        orderbys: Vec<OrderByExpr>,
-        arena: &mut crate::planner::PlanArena,
-    ) -> Result<(Option<ScalarExpression>, Option<Vec<SortField>>), DatabaseError> {
-        // Extract having expression.
-        let return_having = if let Some(having) = having {
-            let mut having = self.bind_expr(having, arena)?;
-            self.visit_column_agg_expr(&mut having)?;
-
-            Some(having)
-        } else {
-            None
-        };
-
-        // Extract orderby expression.
-        let return_orderby = if !orderbys.is_empty() {
-            let mut return_orderby = vec![];
-            for orderby in orderbys {
-                let OrderByExpr { expr, options, .. } = orderby;
-                let mut expr = self.bind_expr(expr, arena)?;
-                self.visit_column_agg_expr(&mut expr)?;
-
-                return_orderby.push(SortField::new(
-                    expr,
-                    options.asc.is_none_or(|asc| asc),
-                    options.nulls_first.unwrap_or(false),
-                ));
+        mut having: Option<ScalarExpression>,
+        orderby: Option<I>,
+        mut bind_sort_field: F,
+    ) -> Result<(Option<ScalarExpression>, Option<Vec<SortField>>), DatabaseError>
+    where
+        I: IntoIterator,
+        F: FnMut(&mut Self, I::Item) -> Result<SortField, DatabaseError>,
+    {
+        if let Some(having) = having.as_mut() {
+            self.visit_column_agg_expr(having)?;
+        }
+        let mut return_orderby = None;
+        if let Some(orderby) = orderby {
+            let mut fields = Vec::new();
+            for orderby in orderby {
+                let mut field = bind_sort_field(self, orderby)?;
+                self.visit_column_agg_expr(&mut field.expr)?;
+                fields.push(field);
             }
-            Some(return_orderby)
-        } else {
-            None
-        };
-        Ok((return_having, return_orderby))
+            return_orderby = Some(fields);
+        }
+        Ok((having, return_orderby))
     }
 
     pub fn bind_aggregate_output_exprs<'c>(
@@ -495,7 +477,11 @@ impl<'a, 'p> AggregateOutputBinder<'a, 'p> {
         }
     }
 
-    fn output_ref(&mut self, expr: &ScalarExpression) -> Option<ScalarExpression> {
+    fn output_ref(
+        &mut self,
+        expr: &ScalarExpression,
+    ) -> Result<Option<ScalarExpression>, DatabaseError> {
+        let output_count = self.agg_calls.len() + self.group_by_exprs.len();
         self.agg_calls
             .iter()
             .chain(self.group_by_exprs.iter())
@@ -508,9 +494,17 @@ impl<'a, 'p> AggregateOutputBinder<'a, 'p> {
                     .iter()
                     .chain(self.group_by_exprs.iter())
                     .nth(position)
-                    .unwrap();
-                ScalarExpression::column_expr(output_expr.output_column_ref(self.arena), position)
+                    .ok_or_else(|| {
+                        DatabaseError::InvalidValue(format!(
+                            "aggregate output position {position} is out of bounds for {output_count} output expressions"
+                        ))
+                    })?;
+                Ok(ScalarExpression::column_expr(
+                    output_expr.output_column_ref(self.arena),
+                    position,
+                ))
             })
+            .transpose()
     }
 }
 
@@ -524,7 +518,7 @@ impl<'a> VisitorMut<'a> for AggregateOutputBinder<'_, '_> {
             return self.visit(inner_expr);
         }
 
-        if let Some(output_ref) = self.output_ref(expr) {
+        if let Some(output_ref) = self.output_ref(expr)? {
             *expr = output_ref;
             return Ok(());
         }

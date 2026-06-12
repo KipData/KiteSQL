@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::binder::{command_type, Binder, BinderContext, CommandType};
+#[cfg(feature = "parser")]
+pub use crate::binder::{prepare, prepare_all, Statement};
+use crate::binder::{Binder, BinderContext};
+use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::execution::{
     build_write, build_write_read_context, DDLApply, ExecArena, Executor, WriteExecutionContext,
@@ -34,7 +37,6 @@ use crate::optimizer::heuristic::batch::HepBatchStrategy;
 use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
 use crate::optimizer::rule::implementation::ImplementationRuleImpl;
 use crate::optimizer::rule::normalization::NormalizationRuleImpl;
-use crate::parser::parse_sql;
 use crate::planner::operator::Operator;
 use crate::planner::{LogicalPlan, PlanArena, TableArenaCell};
 #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
@@ -50,70 +52,42 @@ use crate::storage::{
 use crate::types::tuple::{Schema, SchemaView, Tuple};
 use crate::types::value::DataValue;
 use ahash::HashMap;
-use sqlparser::ast::{Analyze, Ident, ObjectName};
 use std::collections::HashSet;
 use std::marker::PhantomData;
 use std::mem;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 pub(crate) type ScalaFunctions = HashMap<FunctionSummary, Arc<dyn ScalarFunctionImpl>>;
 pub(crate) type TableFunctions = HashMap<FunctionSummary, TableFunctionCatalog>;
-
-/// Parsed SQL statement type used by KiteSQL execution APIs.
-///
-/// This is a type alias for `sqlparser::ast::Statement`. In most cases you do
-/// not need to construct it manually; use [`prepare`] or [`prepare_all`] to
-/// parse SQL text into statements.
-pub type Statement = sqlparser::ast::Statement;
-
-/// Parses a single SQL statement into a reusable [`Statement`].
-///
-/// This is useful when you want to parse once and execute the same statement
-/// multiple times with different parameters. If the input contains multiple
-/// statements, only the last one is returned.
-///
-/// # Examples
-///
-/// ```rust
-/// use kite_sql::db::prepare;
-///
-/// let statement = prepare("select * from users where id = $1").unwrap();
-/// println!("{statement:?}");
-/// ```
-pub fn prepare<T: AsRef<str>>(sql: T) -> Result<Statement, DatabaseError> {
-    let mut stmts = prepare_all(sql)?;
-    stmts.pop().ok_or(DatabaseError::EmptyStatement)
-}
-
-/// Parses one or more SQL statements into a vector of [`Statement`] values.
-///
-/// Returns [`DatabaseError::EmptyStatement`] when the input is empty or only
-/// contains whitespace.
-///
-/// # Examples
-///
-/// ```rust
-/// use kite_sql::db::prepare_all;
-///
-/// let statements = prepare_all("select 1; select 2;").unwrap();
-/// assert_eq!(statements.len(), 2);
-/// ```
-pub fn prepare_all<T: AsRef<str>>(sql: T) -> Result<Vec<Statement>, DatabaseError> {
-    let stmts = parse_sql(sql)?;
-    if stmts.is_empty() {
-        return Err(DatabaseError::EmptyStatement);
-    }
-    Ok(stmts)
-}
 
 pub enum CatalogKind {
     Table(crate::catalog::TableName),
     View(crate::catalog::TableName),
     ScalarFunction(Arc<dyn ScalarFunctionImpl>),
     TableFunction(Arc<dyn TableFunctionImpl>),
+}
+
+pub(crate) trait BindSource {
+    type Iter: ResultIter;
+    type Transaction: Transaction;
+
+    fn execute<A, F>(self, params: A, build: F) -> Result<Self::Iter, DatabaseError>
+    where
+        A: AsRef<[(&'static str, DataValue)]>,
+        F: for<'bind> FnOnce(
+            &mut Binder<'bind, '_, Self::Transaction, A>,
+            &mut PlanArena<'_>,
+        ) -> Result<LogicalPlan, DatabaseError>;
+
+    fn explain<A, F>(self, params: A, build: F) -> Result<String, DatabaseError>
+    where
+        A: AsRef<[(&'static str, DataValue)]>,
+        F: for<'bind> FnOnce(
+            &mut Binder<'bind, '_, Self::Transaction, A>,
+            &mut PlanArena<'_>,
+        ) -> Result<LogicalPlan, DatabaseError>;
 }
 
 /// Builder for creating a [`Database`] instance.
@@ -417,7 +391,7 @@ fn default_optimizer_pipeline() -> HepOptimizerPipeline {
             ImplementationRuleImpl::Delete,
             ImplementationRuleImpl::Insert,
             ImplementationRuleImpl::Update,
-            // DLL
+            // DDL
             ImplementationRuleImpl::AddColumn,
             ImplementationRuleImpl::ChangeColumn,
             ImplementationRuleImpl::CreateTable,
@@ -511,33 +485,32 @@ impl<S: Storage> State<S> {
             .recycle_unreferenced_positions(live_columns);
     }
 
-    fn build_plan<'a, A: AsRef<[(&'static str, DataValue)]>>(
+    pub(crate) fn build_plan<'a, 'txn, A: AsRef<[(&'static str, DataValue)]>, F>(
         &'a self,
-        stmt: Statement,
         params: A,
-        transaction: &<S as Storage>::TransactionType<'_>,
-    ) -> Result<(LogicalPlan, PlanArena<'a>), DatabaseError> {
+        transaction: &<S as Storage>::TransactionType<'txn>,
+        build: F,
+    ) -> Result<(LogicalPlan, PlanArena<'a>), DatabaseError>
+    where
+        S: 'txn,
+        F: for<'bind> FnOnce(
+            &mut Binder<'bind, '_, <S as Storage>::TransactionType<'txn>, A>,
+            &mut PlanArena<'a>,
+        ) -> Result<LogicalPlan, DatabaseError>,
+    {
         let mut plan_arena = PlanArena::new(self.table_arena());
-        let mut binder = Binder::new(
+        let mut binder: Binder<'_, '_, <S as Storage>::TransactionType<'txn>, A> = Binder::new(
             BinderContext::new(
                 self.table_cache(),
                 self.view_cache(),
                 transaction,
                 self.scala_functions(),
                 self.table_functions(),
-                Arc::new(AtomicUsize::new(0)),
             ),
             &params,
             None,
         );
-        /// Build a logical plan.
-        ///
-        /// SELECT a,b FROM t1 ORDER BY a LIMIT 1;
-        /// Scan(t1)
-        ///   Sort(a)
-        ///     Limit(1)
-        ///       Project(a,b)
-        let source_plan = binder.bind(stmt, &mut plan_arena)?;
+        let source_plan = build(&mut binder, &mut plan_arena)?;
         drop(binder);
         let mut best_plan = self.optimizer_pipeline.instantiate(source_plan).find_best(
             Some(&StatisticMetaLoader::new(self.meta_cache())),
@@ -553,11 +526,11 @@ impl<S: Storage> State<S> {
         Ok((best_plan, plan_arena))
     }
 
-    fn execute<'a, 'txn, A: AsRef<[(&'static str, DataValue)]>>(
+    pub(crate) fn execute<'a, 'txn, A, F>(
         &'a self,
         transaction: &'a mut S::TransactionType<'txn>,
-        stmt: Statement,
         params: A,
+        build: F,
     ) -> Result<
         (
             Schema,
@@ -568,10 +541,15 @@ impl<S: Storage> State<S> {
     >
     where
         S: 'txn,
+        A: AsRef<[(&'static str, DataValue)]>,
+        F: for<'bind> FnOnce(
+            &mut Binder<'bind, '_, S::TransactionType<'txn>, A>,
+            &mut PlanArena<'a>,
+        ) -> Result<LogicalPlan, DatabaseError>,
     {
         transaction.begin_statement_scope()?;
         match (|| {
-            let (mut plan, mut plan_arena) = self.build_plan(stmt, params, transaction)?;
+            let (mut plan, mut plan_arena) = self.build_plan(params, transaction, build)?;
             let schema = plan.take_schema(&mut plan_arena);
             let mut arena = ExecArena::new();
             let root = build_write_read_context(
@@ -596,11 +574,11 @@ impl<S: Storage> State<S> {
         }
     }
 
-    fn execute_mut<'a, 'txn, A: AsRef<[(&'static str, DataValue)]>>(
+    pub(crate) fn execute_mut<'a, 'txn, A, F>(
         &'a mut self,
         transaction: &'a mut S::TransactionType<'txn>,
-        stmt: Statement,
         params: A,
+        build: F,
     ) -> Result<
         (
             Schema,
@@ -611,6 +589,11 @@ impl<S: Storage> State<S> {
     >
     where
         S: 'txn,
+        A: AsRef<[(&'static str, DataValue)]>,
+        F: for<'bind> FnOnce(
+            &mut Binder<'bind, '_, S::TransactionType<'txn>, A>,
+            &mut PlanArena<'a>,
+        ) -> Result<LogicalPlan, DatabaseError>,
     {
         transaction.begin_statement_scope()?;
         let State {
@@ -632,12 +615,11 @@ impl<S: Storage> State<S> {
                 transaction,
                 scala_functions,
                 table_functions,
-                Arc::new(AtomicUsize::new(0)),
             ),
             &params,
             None,
         );
-        let source_plan = binder.bind(stmt, &mut plan_arena)?;
+        let source_plan = build(&mut binder, &mut plan_arena)?;
         drop(binder);
         let mut plan = optimizer_pipeline
             .instantiate(source_plan)
@@ -668,13 +650,8 @@ impl<S: Storage> State<S> {
 /// Main database handle for executing SQL and creating transactions.
 pub struct Database<S: Storage> {
     pub(crate) storage: S,
-    transaction_isolation: TransactionIsolationLevel,
+    pub(crate) transaction_isolation: TransactionIsolationLevel,
     pub(crate) state: State<S>,
-}
-
-fn mutates_catalog_or_statistics(statement: &Statement) -> Result<bool, DatabaseError> {
-    Ok(matches!(command_type(statement)?, CommandType::DDL)
-        || matches!(statement, Statement::Analyze(_)))
 }
 
 impl DDLApply {
@@ -735,162 +712,64 @@ impl DDLApply {
 }
 
 impl<S: Storage> Database<S> {
-    /// Runs one or more SQL statements and returns an iterator for the final result set.
-    ///
-    /// Earlier statements in the same SQL string are executed eagerly. The last
-    /// statement is exposed as a streaming iterator.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use kite_sql::db::{DataBaseBuilder, ResultIter};
-    ///
-    /// let mut database = DataBaseBuilder::path(".").build_in_memory().unwrap();
-    /// database.ddl("create table t (id int primary key)").unwrap();
-    /// let mut iter = database.run("select * from t").unwrap();
-    /// iter.schema(|schema| assert_eq!(schema.len(), 1));
-    /// iter.done().unwrap();
-    /// ```
-    pub fn run<T: AsRef<str>>(&self, sql: T) -> Result<DatabaseIter<'_, S>, DatabaseError> {
-        let sql = sql.as_ref();
-        let statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
-        let has_catalog_mutation = statements
-            .iter()
-            .try_fold(false, |has_mutation, stmt| {
-                Ok::<_, DatabaseError>(has_mutation || mutates_catalog_or_statistics(stmt)?)
-            })
-            .map_err(|err| err.with_sql_context(sql))?;
-
-        if has_catalog_mutation {
-            return Err(DatabaseError::UnsupportedStmt(
-                "DDL and ANALYZE require `Database::ddl` or `Database::analyze`".to_string(),
-            )
-            .with_sql_context(sql));
-        }
-
-        let transaction = Box::into_raw(Box::new(
-            self.storage
-                .transaction_with_isolation(self.transaction_isolation)?,
-        ));
-        let mut statements = statements.into_iter().peekable();
-
-        while let Some(statement) = statements.next() {
-            let (schema, plan_arena, executor) =
-                match self
-                    .state
-                    .execute(unsafe { &mut *transaction }, statement, &[])
-                {
-                    Ok(result) => result,
-                    Err(err) => {
-                        unsafe { drop(Box::from_raw(transaction)) };
-                        return Err(err.with_sql_context(sql));
-                    }
-                };
-
-            if statements.peek().is_some() {
-                if let Err(err) =
-                    TransactionIter::new(schema, plan_arena, executor, transaction).done()
-                {
-                    unsafe { drop(Box::from_raw(transaction)) };
-                    return Err(err.with_sql_context(sql));
-                }
-            } else {
-                let inner = Box::into_raw(Box::new(TransactionIter::new(
-                    schema,
-                    plan_arena,
-                    executor,
-                    transaction,
-                )));
-                return Ok(DatabaseIter { transaction, inner });
-            }
-        }
-
-        unsafe { drop(Box::from_raw(transaction)) };
-        Err(DatabaseError::EmptyStatement.with_sql_context(sql))
-    }
-
-    /// Executes a prepared [`Statement`] inside the current transaction.
-    pub fn execute<A: AsRef<[(&'static str, DataValue)]>>(
-        &self,
-        statement: Statement,
+    pub(crate) fn execute_mut<A, F>(
+        &mut self,
+        context: &str,
         params: A,
-    ) -> Result<DatabaseIter<'_, S>, DatabaseError> {
-        if mutates_catalog_or_statistics(&statement)? {
-            return Err(DatabaseError::UnsupportedStmt(
-                "DDL and ANALYZE require `Database::ddl` or `Database::analyze`".to_string(),
-            ));
-        }
+        build: F,
+    ) -> Result<(), DatabaseError>
+    where
+        A: AsRef<[(&'static str, DataValue)]>,
+        F: for<'a, 'txn, 'bind> FnOnce(
+            &mut Binder<'bind, '_, S::TransactionType<'txn>, A>,
+            &mut PlanArena<'a>,
+        ) -> Result<LogicalPlan, DatabaseError>,
+    {
         let transaction = Box::into_raw(Box::new(
             self.storage
                 .transaction_with_isolation(self.transaction_isolation)?,
         ));
+        let state = std::ptr::from_mut(&mut self.state);
         let (schema, plan_arena, executor) =
-            match self
-                .state
-                .execute(unsafe { &mut *transaction }, statement, params)
-            {
+            match unsafe { (&mut *state).execute_mut(&mut *transaction, params, build) } {
                 Ok(result) => result,
                 Err(err) => {
                     unsafe { drop(Box::from_raw(transaction)) };
-                    return Err(err);
+                    return Err(err.with_sql_context(context));
                 }
             };
-        let inner = Box::into_raw(Box::new(TransactionIter::new(
-            schema,
-            plan_arena,
-            executor,
-            transaction,
-        )));
-        Ok(DatabaseIter { transaction, inner })
-    }
+        let (plan_arena, apply) =
+            match TransactionIter::new(schema, plan_arena, executor, transaction)
+                .done_with_ddl_apply()
+            {
+                Ok(apply) => apply,
+                Err(err) => {
+                    unsafe { drop(Box::from_raw(transaction)) };
+                    return Err(err.with_sql_context(context));
+                }
+            };
 
-    pub fn ddl<T: AsRef<str>>(&mut self, sql: T) -> Result<(), DatabaseError> {
-        let sql = sql.as_ref();
-        let statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
-        self.drain_mutation_statements(
-            sql,
-            statements.into_iter(),
-            |statement| Ok(matches!(command_type(statement)?, CommandType::DDL)),
-            "`Database::ddl` only accepts DDL statements",
-        )
-    }
+        if let Err(err) = unsafe { Box::from_raw(transaction).commit() } {
+            return Err(err.with_sql_context(context));
+        }
 
-    #[cfg(feature = "orm")]
-    #[doc(hidden)]
-    pub fn execute_ddl_statement(
-        &mut self,
-        context: &'static str,
-        statement: &Statement,
-    ) -> Result<(), DatabaseError> {
-        self.drain_mutation_statements(
-            context,
-            std::iter::once(statement.clone()),
-            |statement| Ok(matches!(command_type(statement)?, CommandType::DDL)),
-            "`Database::execute_ddl_statement` only accepts DDL statements",
-        )
+        let mut catalog_changed = false;
+        for apply in apply {
+            catalog_changed |= unsafe { apply.apply_to(&mut *state, &plan_arena) }
+                .map_err(|err| err.with_sql_context(context))?;
+        }
+        if catalog_changed {
+            unsafe { (&mut *state).recycle_table_arena() };
+        }
+        Ok(())
     }
 
     pub fn analyze(&mut self, table_name: impl AsRef<str>) -> Result<(), DatabaseError> {
         let context = "ANALYZE";
-        let statements = vec![Statement::Analyze(Analyze {
-            table_name: Some(ObjectName::from(Ident::with_quote(
-                '"',
-                table_name.as_ref(),
-            ))),
-            partitions: None,
-            for_columns: false,
-            columns: Vec::new(),
-            cache_metadata: false,
-            noscan: false,
-            compute_statistics: false,
-            has_table_keyword: true,
-        })];
-        self.drain_mutation_statements(
-            context,
-            statements.into_iter(),
-            |statement| Ok(matches!(statement, Statement::Analyze(_))),
-            "`Database::analyze` only accepts ANALYZE statements",
-        )
+        let table_name: TableName = table_name.as_ref().into();
+        self.execute_mut(context, &[], move |binder, arena| {
+            binder.bind_analyze(table_name, arena)
+        })
     }
 
     pub fn load(&mut self, kind: CatalogKind) -> Result<(), DatabaseError> {
@@ -946,60 +825,6 @@ impl<S: Storage> Database<S> {
         }
     }
 
-    fn drain_mutation_statements(
-        &mut self,
-        sql: &str,
-        statements: impl Iterator<Item = Statement>,
-        accepts: impl Fn(&Statement) -> Result<bool, DatabaseError>,
-        unsupported: &'static str,
-    ) -> Result<(), DatabaseError> {
-        for statement in statements {
-            if !accepts(&statement)? {
-                return Err(
-                    DatabaseError::UnsupportedStmt(unsupported.to_string()).with_sql_context(sql)
-                );
-            }
-
-            let transaction = Box::into_raw(Box::new(
-                self.storage
-                    .transaction_with_isolation(self.transaction_isolation)?,
-            ));
-            let state = std::ptr::from_mut(&mut self.state);
-            let (schema, plan_arena, executor) =
-                match unsafe { (&mut *state).execute_mut(&mut *transaction, statement, &[]) } {
-                    Ok(result) => result,
-                    Err(err) => {
-                        unsafe { drop(Box::from_raw(transaction)) };
-                        return Err(err.with_sql_context(sql));
-                    }
-                };
-            let (plan_arena, apply) =
-                match TransactionIter::new(schema, plan_arena, executor, transaction)
-                    .done_with_ddl_apply()
-                {
-                    Ok(apply) => apply,
-                    Err(err) => {
-                        unsafe { drop(Box::from_raw(transaction)) };
-                        return Err(err.with_sql_context(sql));
-                    }
-                };
-
-            if let Err(err) = unsafe { Box::from_raw(transaction).commit() } {
-                return Err(err.with_sql_context(sql));
-            }
-
-            let mut catalog_changed = false;
-            for apply in apply {
-                catalog_changed |= unsafe { apply.apply_to(&mut *state, &plan_arena) }
-                    .map_err(|err| err.with_sql_context(sql))?;
-            }
-            if catalog_changed {
-                unsafe { (&mut *state).recycle_table_arena() };
-            }
-        }
-        Ok(())
-    }
-
     /// Opens a new explicit transaction.
     ///
     /// Statements executed through the returned transaction share the same
@@ -1029,6 +854,59 @@ impl<S: Storage> Database<S> {
     #[inline]
     pub fn transaction_isolation(&self) -> TransactionIsolationLevel {
         self.transaction_isolation
+    }
+}
+
+impl<'a, S: Storage> BindSource for &'a Database<S> {
+    type Iter = DatabaseIter<'a, S>;
+    type Transaction = S::TransactionType<'a>;
+
+    fn execute<A, F>(self, params: A, build: F) -> Result<Self::Iter, DatabaseError>
+    where
+        A: AsRef<[(&'static str, DataValue)]>,
+        F: for<'bind> FnOnce(
+            &mut Binder<'bind, '_, Self::Transaction, A>,
+            &mut PlanArena<'_>,
+        ) -> Result<LogicalPlan, DatabaseError>,
+    {
+        let transaction = Box::into_raw(Box::new(
+            self.storage
+                .transaction_with_isolation(self.transaction_isolation)?,
+        ));
+        let (schema, plan_arena, executor) =
+            match self
+                .state
+                .execute(unsafe { &mut *transaction }, params, build)
+            {
+                Ok(result) => result,
+                Err(err) => {
+                    unsafe { drop(Box::from_raw(transaction)) };
+                    return Err(err);
+                }
+            };
+        let inner = Box::into_raw(Box::new(TransactionIter::new(
+            schema,
+            plan_arena,
+            executor,
+            transaction,
+        )));
+        Ok(DatabaseIter { transaction, inner })
+    }
+
+    fn explain<A, F>(self, params: A, build: F) -> Result<String, DatabaseError>
+    where
+        A: AsRef<[(&'static str, DataValue)]>,
+        F: for<'bind> FnOnce(
+            &mut Binder<'bind, '_, Self::Transaction, A>,
+            &mut PlanArena<'_>,
+        ) -> Result<LogicalPlan, DatabaseError>,
+    {
+        let mut transaction = self
+            .storage
+            .transaction_with_isolation(self.transaction_isolation)?;
+        transaction.begin_statement_scope()?;
+        let (plan, mut arena) = self.state.build_plan(params, &transaction, build)?;
+        Ok(plan.explain(&mut arena, 0))
     }
 }
 
@@ -1127,10 +1005,10 @@ where
     }
 }
 
-/// Raw result iterator returned by [`Database::run`] and [`Database::execute`].
+/// Raw result iterator returned by database execution APIs.
 pub struct DatabaseIter<'a, S: Storage + 'a> {
-    transaction: *mut S::TransactionType<'a>,
-    inner: *mut TransactionIter<'a, S::TransactionType<'a>>,
+    pub(crate) transaction: *mut S::TransactionType<'a>,
+    pub(crate) inner: *mut TransactionIter<'a, S::TransactionType<'a>>,
 }
 
 impl<S: Storage> Drop for DatabaseIter<'_, S> {
@@ -1191,56 +1069,11 @@ impl<S: Storage> BorrowResultIter for DatabaseIter<'_, S> {
 
 /// Explicit transaction handle created by [`Database::new_transaction`].
 pub struct DBTransaction<'a, S: Storage + 'a> {
-    inner: S::TransactionType<'a>,
-    state: &'a State<S>,
+    pub(crate) inner: S::TransactionType<'a>,
+    pub(crate) state: &'a State<S>,
 }
 
 impl<'txn, S: Storage> DBTransaction<'txn, S> {
-    /// Runs SQL inside the current transaction and returns the final result iterator.
-    pub fn run<'a, T: AsRef<str>>(
-        &'a mut self,
-        sql: T,
-    ) -> Result<TransactionIter<'a, S::TransactionType<'txn>>, DatabaseError> {
-        let sql = sql.as_ref();
-        let mut statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
-        let last_statement = statements
-            .pop()
-            .ok_or_else(|| DatabaseError::EmptyStatement.with_sql_context(sql))?;
-
-        for statement in statements {
-            self.execute(statement, &[])
-                .map_err(|err| err.with_sql_context(sql))?
-                .done()
-                .map_err(|err| err.with_sql_context(sql))?;
-        }
-
-        self.execute(last_statement, &[])
-            .map_err(|err| err.with_sql_context(sql))
-    }
-
-    /// Executes a prepared [`Statement`] inside the current transaction.
-    pub fn execute<'a, A: AsRef<[(&'static str, DataValue)]>>(
-        &'a mut self,
-        statement: Statement,
-        params: A,
-    ) -> Result<TransactionIter<'a, S::TransactionType<'txn>>, DatabaseError> {
-        if matches!(command_type(&statement)?, CommandType::DDL) {
-            return Err(DatabaseError::UnsupportedStmt(
-                "`DDL` is not allowed to execute within a transaction".to_string(),
-            ));
-        }
-        let transaction = std::ptr::from_mut(&mut self.inner);
-        let (schema, plan_arena, executor) =
-            self.state
-                .execute(unsafe { &mut *transaction }, statement, params)?;
-        Ok(TransactionIter::new(
-            schema,
-            plan_arena,
-            executor,
-            transaction,
-        ))
-    }
-
     /// Commits the current transaction.
     pub fn commit(self) -> Result<(), DatabaseError> {
         self.inner.commit()?;
@@ -1249,7 +1082,45 @@ impl<'txn, S: Storage> DBTransaction<'txn, S> {
     }
 }
 
-/// Raw result iterator returned by [`DBTransaction::run`] and [`DBTransaction::execute`].
+impl<'a, 'txn, S: Storage> BindSource for &'a mut DBTransaction<'txn, S> {
+    type Iter = TransactionIter<'a, S::TransactionType<'txn>>;
+    type Transaction = S::TransactionType<'txn>;
+
+    fn execute<A, F>(self, params: A, build: F) -> Result<Self::Iter, DatabaseError>
+    where
+        A: AsRef<[(&'static str, DataValue)]>,
+        F: for<'bind> FnOnce(
+            &mut Binder<'bind, '_, Self::Transaction, A>,
+            &mut PlanArena<'_>,
+        ) -> Result<LogicalPlan, DatabaseError>,
+    {
+        let transaction = std::ptr::from_mut(&mut self.inner);
+        let (schema, plan_arena, executor) =
+            self.state
+                .execute(unsafe { &mut *transaction }, params, build)?;
+        Ok(TransactionIter::new(
+            schema,
+            plan_arena,
+            executor,
+            transaction,
+        ))
+    }
+
+    fn explain<A, F>(self, params: A, build: F) -> Result<String, DatabaseError>
+    where
+        A: AsRef<[(&'static str, DataValue)]>,
+        F: for<'bind> FnOnce(
+            &mut Binder<'bind, '_, Self::Transaction, A>,
+            &mut PlanArena<'_>,
+        ) -> Result<LogicalPlan, DatabaseError>,
+    {
+        self.inner.begin_statement_scope()?;
+        let (plan, mut arena) = self.state.build_plan(params, &self.inner, build)?;
+        Ok(plan.explain(&mut arena, 0))
+    }
+}
+
+/// Raw result iterator returned by transaction execution APIs.
 pub struct TransactionIter<'a, T: Transaction + 'a> {
     executor: Option<Executor<'a, T>>,
     plan_arena: Option<PlanArena<'a>>,
@@ -1260,7 +1131,7 @@ pub struct TransactionIter<'a, T: Transaction + 'a> {
 }
 
 impl<'a, T: Transaction + 'a> TransactionIter<'a, T> {
-    fn new(
+    pub(crate) fn new(
         schema: Schema,
         plan_arena: PlanArena<'a>,
         executor: Executor<'a, T>,
@@ -1404,9 +1275,11 @@ pub(crate) mod test {
     use crate::types::LogicalType;
     use chrono::{Datelike, Local};
     use std::io::ErrorKind;
+    #[cfg(feature = "unsafe_txdb_checkpoint")]
     use std::sync::atomic::AtomicUsize;
     #[cfg(feature = "unsafe_txdb_checkpoint")]
     use std::sync::atomic::Ordering;
+    #[cfg(feature = "unsafe_txdb_checkpoint")]
     use std::sync::Arc;
     #[cfg(feature = "unsafe_txdb_checkpoint")]
     use std::thread;
@@ -1575,14 +1448,16 @@ pub(crate) mod test {
                 &transaction,
                 kite_sql.state.scala_functions(),
                 kite_sql.state.table_functions(),
-                Arc::new(AtomicUsize::new(0)),
             ),
             &[],
             None,
         );
         let mut source_plan_arena = PlanArena::new(kite_sql.state.table_arena());
         let source_plan = binder.bind(stmt.clone(), &mut source_plan_arena)?;
-        let (best_plan, _best_plan_arena) = kite_sql.state.build_plan(stmt, [], &transaction)?;
+        let (best_plan, _best_plan_arena) =
+            kite_sql
+                .state
+                .build_plan([], &transaction, |binder, arena| binder.bind(stmt, arena))?;
 
         let join_plan = match source_plan.operator {
             Operator::Project(_) => source_plan.childrens.pop_only(),
@@ -1656,14 +1531,16 @@ pub(crate) mod test {
                 &transaction,
                 kite_sql.state.scala_functions(),
                 kite_sql.state.table_functions(),
-                Arc::new(AtomicUsize::new(0)),
             ),
             &[],
             None,
         );
         let mut source_plan_arena = PlanArena::new(kite_sql.state.table_arena());
         let source_plan = binder.bind(stmt.clone(), &mut source_plan_arena)?;
-        let (best_plan, _best_plan_arena) = kite_sql.state.build_plan(stmt, [], &transaction)?;
+        let (best_plan, _best_plan_arena) =
+            kite_sql
+                .state
+                .build_plan([], &transaction, |binder, arena| binder.bind(stmt, arena))?;
 
         let join_plan = match source_plan.operator {
             Operator::Project(_) => source_plan.childrens.pop_only(),
@@ -1757,7 +1634,10 @@ pub(crate) mod test {
             "SELECT o.x, t.y FROM onecolumn o INNER JOIN twocolumn t ON (o.x=t.x AND t.y=53)",
         )?;
         let transaction = kite_sql.storage.transaction()?;
-        let (best_plan, _best_plan_arena) = kite_sql.state.build_plan(stmt, [], &transaction)?;
+        let (best_plan, _best_plan_arena) =
+            kite_sql
+                .state
+                .build_plan([], &transaction, |binder, arena| binder.bind(stmt, arena))?;
         let join_plan = match best_plan.operator {
             Operator::Project(_) => best_plan.childrens.pop_only(),
             Operator::Join(_) => best_plan,

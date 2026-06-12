@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::binder::{lower_case_name, Binder, Source};
-use crate::catalog::TableName;
+use crate::binder::{Binder, Source};
+use crate::catalog::{ColumnRef, TableName};
 use crate::errors::DatabaseError;
-use crate::expression::ScalarExpression;
 use crate::planner::operator::create_index::CreateIndexOperator;
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::Operator;
@@ -23,59 +22,44 @@ use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::index::IndexType;
 use crate::types::value::DataValue;
-use sqlparser::ast::{IndexColumn, ObjectName};
-use std::borrow::Cow;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
-    pub(crate) fn bind_create_index(
+    pub(crate) fn bind_create_index_source(
         &mut self,
-        table_name: ObjectName,
-        name: Option<ObjectName>,
-        index_columns: Vec<IndexColumn>,
-        if_not_exists: bool,
-        is_unique: bool,
+        table_name: TableName,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name: TableName = lower_case_name(&table_name)?.into();
-        let index_name = name
-            .ok_or(DatabaseError::InvalidIndex)
-            .and_then(|name| lower_case_name(&name).map(Cow::into_owned))?;
-        let ty = if is_unique {
-            IndexType::Unique
-        } else if index_columns.len() == 1 {
-            IndexType::Normal
-        } else {
-            IndexType::Composite
-        };
-
         let source = self
             .context
             .source_and_bind(table_name.clone(), None, None, false)?
             .ok_or(DatabaseError::SourceNotFound)?;
-        let plan = match source {
+        match source {
             Source::Table(table) => {
-                TableScanOperator::build(table_name.clone(), table, true, arena)?
+                TableScanOperator::build(table_name.clone(), table, true, arena)
             }
-            Source::View(view) => LogicalPlan::clone(&view.plan),
-            Source::Schema(_) => {
-                return Err(DatabaseError::UnsupportedStmt(
-                    "derived source cannot be rebound as a base relation".to_string(),
-                ))
-            }
-        };
-        let mut columns = Vec::with_capacity(index_columns.len());
-
-        for index_column in index_columns {
-            // TODO: Expression Index
-            match self.bind_expr(index_column.column.expr, arena)? {
-                ScalarExpression::ColumnRef { column, .. } => columns.push(column),
-                expr => {
-                    return Err(DatabaseError::UnsupportedStmt(format!(
-                        "'CREATE INDEX' by {expr}"
-                    )))
-                }
-            }
+            Source::View(view) => Ok(LogicalPlan::clone(&view.plan)),
+            Source::Schema(_) => Err(DatabaseError::UnsupportedStmt(
+                "derived source cannot be rebound as a base relation".to_string(),
+            )),
         }
+    }
+
+    pub(crate) fn bind_create_index(
+        &mut self,
+        table_name: TableName,
+        index_name: String,
+        columns: Vec<ColumnRef>,
+        if_not_exists: bool,
+        is_unique: bool,
+        input: LogicalPlan,
+    ) -> Result<LogicalPlan, DatabaseError> {
+        let ty = if is_unique {
+            IndexType::Unique
+        } else if columns.len() == 1 {
+            IndexType::Normal
+        } else {
+            IndexType::Composite
+        };
 
         Ok(LogicalPlan::new(
             Operator::CreateIndex(CreateIndexOperator {
@@ -85,7 +69,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 if_not_exists,
                 ty,
             }),
-            Childrens::Only(Box::new(plan)),
+            Childrens::Only(Box::new(input)),
         ))
     }
 }

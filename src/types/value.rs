@@ -1390,34 +1390,6 @@ impl From<Option<&NaiveTime>> for DataValue {
     }
 }
 
-impl TryFrom<&sqlparser::ast::Value> for DataValue {
-    type Error = DatabaseError;
-
-    fn try_from(value: &sqlparser::ast::Value) -> Result<Self, Self::Error> {
-        Ok(match value {
-            sqlparser::ast::Value::Number(n, _) => {
-                // use i32 to handle most cases
-                if let Ok(v) = n.parse::<i32>() {
-                    v.into()
-                } else if let Ok(v) = n.parse::<i64>() {
-                    v.into()
-                } else if let Ok(v) = n.parse::<f64>() {
-                    v.into()
-                } else if let Ok(v) = n.parse::<f32>() {
-                    v.into()
-                } else {
-                    return Err(DatabaseError::InvalidValue(n.to_string()));
-                }
-            }
-            sqlparser::ast::Value::SingleQuotedString(s)
-            | sqlparser::ast::Value::DoubleQuotedString(s) => s.clone().into(),
-            sqlparser::ast::Value::Boolean(b) => (*b).into(),
-            sqlparser::ast::Value::Null => Self::Null,
-            v => return Err(DatabaseError::UnsupportedStmt(format!("{v:?}"))),
-        })
-    }
-}
-
 macro_rules! format_float_option {
     ($F:expr, $EXPR:expr) => {{
         let formatted_string = format!("{:?}", $EXPR);

@@ -25,7 +25,10 @@ mod test {
     use kite_sql::expression::function::FunctionSummary;
     use kite_sql::expression::BinaryOperator;
     use kite_sql::expression::ScalarExpression;
-    use kite_sql::orm::{case_when, count_all, func, max, min, sum, QueryValue, SubquerySource};
+    use kite_sql::orm::{
+        case_when, count_all, func, max, min, sum, BoundExpressionOps, OrmQueryResultExt,
+        QueryValue, SubquerySource,
+    };
     use kite_sql::planner::{MetaArena, PlanArena, TableArena, TableArenaCell};
     use kite_sql::storage::rocksdb::RocksStorage;
     use kite_sql::types::evaluator::binary_create;
@@ -34,7 +37,6 @@ mod test {
     use kite_sql::types::{CharLengthUnits, LogicalType};
     use kite_sql::{from_tuple, scala_function, table_function, Model, Projection};
     use rust_decimal::Decimal;
-    use sqlparser::ast::DataType as SqlDataType;
     use tempfile::TempDir;
 
     fn build_tuple(arena: &mut impl MetaArena) -> (Tuple, Schema) {
@@ -297,6 +299,14 @@ mod test {
 
     #[test]
     fn test_model_mapping() {
+        assert_eq!(
+            <DerivedStruct as kite_sql::orm::Model>::fields()
+                .iter()
+                .map(|field| (field.column, field.column_index))
+                .collect::<Vec<_>>(),
+            vec![("c1", 0), ("c2", 1), ("age", 2)]
+        );
+
         let table_arena = TableArenaCell::default();
         let mut plan_arena = PlanArena::new(&table_arena);
         let (_, mut schema) = build_tuple(&mut plan_arena);
@@ -545,38 +555,131 @@ mod test {
         })?;
 
         let adults = database
-            .from::<User>()
-            .and(User::age().gte(18), User::name().like("A%"))
-            .fetch()?
+            .bind(|ctx| {
+                ctx.from::<User>()?.filter(|e| {
+                    let adult = e.column(User::age())?.gte(18)?;
+                    let a_prefix = e.column(User::name())?.like("A%")?;
+                    adult.and(a_prefix)
+                })
+            })?
+            .orm::<User>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(adults.len(), 1);
         assert_eq!(adults[0].name, "Alice");
 
-        let quoted = database.from::<User>().eq(User::name(), "A'lex").get()?;
+        let adult_projection = database
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        let adult = e.column(User::age())?.gte(18)?;
+                        let a_prefix = e.column(User::name())?.like("A%")?;
+                        adult.and(a_prefix)
+                    })?
+                    .desc_by(User::age())?
+                    .project_scalars((User::id(), User::name()))
+            })?
+            .project_tuple::<(i32, String)>()
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
+        assert_eq!(adult_projection, vec![(1, "Alice".to_string())]);
+
+        let joined_amounts = database
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .inner_join::<Order>(|e| e.column(User::id())?.eq(e.column(Order::user_id())?))?
+                    .project_scalars((User::name(), Order::amount()))?
+                    .asc_by(Order::id())
+            })?
+            .project_tuple::<(String, i32)>()
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
+        assert_eq!(
+            joined_amounts,
+            vec![
+                ("Alice".to_string(), 100),
+                ("Alice".to_string(), 200),
+                ("Bob".to_string(), 300),
+            ]
+        );
+
+        let union_ids = database
+            .bind(|ctx| {
+                ctx.union(
+                    true,
+                    |ctx| ctx.from::<User>()?.project_scalar(User::id()),
+                    |ctx| ctx.from::<Order>()?.project_scalar(Order::user_id()),
+                )
+            })?
+            .project_value::<i32>()
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
+        assert_eq!(union_ids, vec![1, 2, 3, 1, 1, 2]);
+
+        let quoted = database
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| e.column(User::name())?.eq("A'lex"))
+            })?
+            .orm::<User>()
+            .next()
+            .transpose()?;
         assert_eq!(quoted.unwrap().id, 3);
 
         let ordered = database
-            .from::<User>()
-            .not(User::age().is_null())
-            .desc(User::age())
-            .limit(1)
-            .get()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| Ok(e.column(User::age())?.is_not_null()))?
+                    .desc_by(User::age())?
+                    .limit(1)
+            })?
+            .orm::<User>()
+            .next()
+            .transpose()?
             .unwrap();
         assert_eq!(ordered.id, 2);
 
-        let count = database.from::<User>().is_not_null(User::age()).count()?;
+        let count = database
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| Ok(e.column(User::age())?.is_not_null()))?
+                    .count()
+            })?
+            .project_value::<i32>()
+            .next()
+            .transpose()?
+            .unwrap() as usize;
         assert_eq!(count, 2);
 
-        let exists = database.from::<User>().eq(User::id(), 2).exists()?;
+        let exists = database
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| e.column(User::id())?.eq(2))?
+                    .exists()
+            })?
+            .next()
+            .transpose()?
+            .is_some();
         assert!(exists);
-        let missing = database.from::<User>().eq(User::id(), 99).exists()?;
+        let missing = database
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| e.column(User::id())?.eq(99))?
+                    .exists()
+            })?
+            .next()
+            .transpose()?
+            .is_some();
         assert!(!missing);
 
         let two_users = database
-            .from::<User>()
-            .or(User::id().eq(1), User::id().eq(2))
-            .asc(User::id())
-            .fetch()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        let id = e.column(User::id())?;
+                        let eq_one = id.clone().eq(1)?;
+                        let eq_two = id.eq(2)?;
+                        eq_one.or(eq_two)
+                    })?
+                    .asc_by(User::id())
+            })?
+            .orm::<User>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             two_users.iter().map(|user| user.id).collect::<Vec<_>>(),
@@ -585,17 +688,29 @@ mod test {
 
         assert_eq!(
             database
-                .from::<User>()
-                .and(User::age().is_not_null(), User::name().not_like("B%"))
-                .count()?,
+                .bind(|ctx| {
+                    ctx.from::<User>()?
+                        .filter(|e| {
+                            let age_present = e.column(User::age())?.is_not_null();
+                            let not_b = e.column(User::name())?.not_like("B%")?;
+                            age_present.and(not_b)
+                        })?
+                        .count()
+                })?
+                .project_value::<i32>()
+                .next()
+                .transpose()?
+                .unwrap() as usize,
             1
         );
 
         let in_list = database
-            .from::<User>()
-            .in_list(User::id(), [1, 3])
-            .asc(User::id())
-            .fetch()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| e.column(User::id())?.in_list([1, 3]))?
+                    .asc_by(User::id())
+            })?
+            .orm::<User>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             in_list.iter().map(|user| user.id).collect::<Vec<_>>(),
@@ -603,10 +718,16 @@ mod test {
         );
 
         let either_named_a_or_missing_age = database
-            .from::<User>()
-            .or(User::name().like("A%"), User::age().is_null())
-            .asc(User::id())
-            .fetch()?
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| {
+                        let a_name = e.column(User::name())?.like("A%")?;
+                        let missing_age = e.column(User::age())?.is_null();
+                        a_name.or(missing_age)
+                    })?
+                    .asc_by(User::id())
+            })?
+            .orm::<User>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             either_named_a_or_missing_age
@@ -625,7 +746,7 @@ mod test {
 
         let cast_to_matched = database
             .from::<User>()
-            .eq(User::id().cast_to(SqlDataType::BigInt(None)), 3_i64)
+            .eq(User::id().cast_to(LogicalType::Bigint), 3_i64)
             .get()?
             .unwrap();
         assert_eq!(cast_to_matched.id, 3);
@@ -806,16 +927,29 @@ mod test {
             })
         );
 
-        let aliased_total_users = database
-            .from::<User>()
-            .project_value(count_all().alias("total_users"))
-            .raw()?;
+        let aliased_total_users = database.bind(|ctx| {
+            ctx.from::<User>()?.project_value(|e| {
+                let count = e.count_all()?;
+                Ok(e.alias(count, "total_users"))
+            })
+        })?;
         aliased_total_users.schema(|schema| {
             assert_eq!(schema.get(0).unwrap().name(), "total_users");
         });
         aliased_total_users.done()?;
 
-        let projected_schema = database.from::<User>().project::<UserSummary>().raw()?;
+        let projected_schema = database.bind(|ctx| {
+            ctx.from::<User>()?.project_tuple(|e| {
+                let id = e.column(User::id())?;
+                let name = e.column(User::name())?;
+                let age = e.column(User::age())?;
+                Ok(vec![
+                    e.alias(id, "id"),
+                    e.alias(name, "display_name"),
+                    e.alias(age, "age"),
+                ])
+            })
+        })?;
         assert_eq!(
             projected_schema.schema(|schema| {
                 schema
@@ -1018,7 +1152,12 @@ mod test {
         );
 
         let mut tx = database.new_transaction()?;
-        let in_tx = tx.from::<User>().eq(User::id(), 2).get()?.unwrap();
+        let in_tx = tx
+            .bind(|ctx| ctx.from::<User>()?.filter(|e| e.column(User::id())?.eq(2)))?
+            .orm::<User>()
+            .next()
+            .transpose()?
+            .unwrap();
         assert_eq!(in_tx.name, "Bob");
         tx.commit()?;
 
@@ -1594,18 +1733,27 @@ mod test {
         assert_eq!(defaulted.age, Some(18));
 
         database
-            .from::<User>()
-            .eq(User::id(), 1)
-            .update()
-            .set(User::name(), "Bob")
-            .set(User::age(), None::<i32>)
-            .execute()?;
+            .bind(|ctx| {
+                ctx.mutate::<User>()?
+                    .filter(|e| e.column(User::id())?.eq(1))?
+                    .update(|u| {
+                        u.set_value(User::name(), "Bob")?;
+                        u.set_value(User::age(), None::<i32>)
+                    })
+            })?
+            .done()?;
 
         let updated = database.get::<User>(&1)?.unwrap();
         assert_eq!(updated.name, "Bob");
         assert_eq!(updated.age, None);
 
-        database.from::<User>().eq(User::id(), 1).delete()?;
+        database
+            .bind(|ctx| {
+                ctx.mutate::<User>()?
+                    .filter(|e| e.column(User::id())?.eq(1))?
+                    .delete()
+            })?
+            .done()?;
         assert!(database.get::<User>(&1)?.is_none());
 
         database.insert(&User {
@@ -1626,7 +1774,13 @@ mod test {
             Err(DatabaseError::DuplicateUniqueValue)
         ));
 
-        database.from::<User>().eq(User::id(), 2).delete()?;
+        database
+            .bind(|ctx| {
+                ctx.mutate::<User>()?
+                    .filter(|e| e.column(User::id())?.eq(2))?
+                    .delete()
+            })?
+            .done()?;
         assert!(database.get::<User>(&2)?.is_none());
 
         database.drop_table::<User>()?;
@@ -1654,49 +1808,63 @@ mod test {
         }
 
         database
-            .from::<User>()
-            .alias("u")
-            .eq(User::id().qualify("u"), 1)
-            .update()
-            .set(User::name(), "BuilderAlice")
-            .set(User::age(), None::<i32>)
-            .execute()?;
+            .bind(|ctx| {
+                ctx.mutate_as::<User>("u")?
+                    .filter(|e| e.qualified_column("u", User::id())?.eq(1))?
+                    .update(|u| {
+                        u.set_value(User::name(), "BuilderAlice")?;
+                        u.set_value(User::age(), None::<i32>)
+                    })
+            })?
+            .done()?;
 
         let updated = database.get::<User>(&1)?.unwrap();
         assert_eq!(updated.name, "BuilderAlice");
         assert_eq!(updated.age, None);
 
         database
-            .from::<User>()
-            .eq(User::id(), 2)
-            .update()
-            .set_expr(User::age(), User::id().add(20))
-            .execute()?;
+            .bind(|ctx| {
+                ctx.mutate::<User>()?
+                    .filter(|e| e.column(User::id())?.eq(2))?
+                    .update(|u| {
+                        u.set_expr(User::age(), |e| {
+                            let id = e.column(User::id())?;
+                            e.binary(id, BinaryOperator::Plus, e.value(20))
+                        })
+                    })
+            })?
+            .done()?;
 
         assert_eq!(database.get::<User>(&2)?.unwrap().age, Some(22));
 
         database
-            .from::<User>()
-            .alias("u")
-            .eq(User::name().qualify("u"), "Carol")
-            .delete()?;
+            .bind(|ctx| {
+                ctx.mutate_as::<User>("u")?
+                    .filter(|e| e.qualified_column("u", User::name())?.eq("Carol"))?
+                    .delete()
+            })?
+            .done()?;
         assert!(database.get::<User>(&3)?.is_none());
 
-        let empty_update = database.from::<User>().eq(User::id(), 1).update().execute();
+        let empty_update = database.bind(|ctx| {
+            ctx.mutate::<User>()?
+                .filter(|e| e.column(User::id())?.eq(1))?
+                .update(|_| Ok(()))
+        });
         assert!(matches!(empty_update, Err(DatabaseError::ColumnsEmpty)));
 
-        let ordered_delete = database.from::<User>().asc(User::id()).delete();
+        let ordered_delete =
+            database.bind(|ctx| ctx.mutate::<User>()?.asc_by(User::id())?.delete());
         assert!(matches!(
             ordered_delete,
             Err(DatabaseError::UnsupportedStmt(message)) if message.contains("order by")
         ));
 
-        let limited_update = database
-            .from::<User>()
-            .limit(1)
-            .update()
-            .set(User::name(), "ignored")
-            .execute();
+        let limited_update = database.bind(|ctx| {
+            ctx.mutate::<User>()?
+                .limit(1)
+                .update(|u| u.set_value(User::name(), "ignored"))
+        });
         assert!(matches!(
             limited_update,
             Err(DatabaseError::UnsupportedStmt(message)) if message.contains("limit")
@@ -1720,12 +1888,17 @@ mod test {
             })?;
         }
 
-        database.from::<ArchivedUser>().insert::<User>()?;
+        database
+            .bind(|ctx| {
+                ctx.insert_select::<User, _, _>(std::iter::empty::<String>(), |ctx| {
+                    ctx.from::<ArchivedUser>()
+                })
+            })?
+            .done()?;
 
         let inserted_users = database
-            .from::<User>()
-            .asc(User::id())
-            .fetch()?
+            .bind(|ctx| ctx.from::<User>()?.asc_by(User::id()))?
+            .orm::<User>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(inserted_users.len(), 2);
         assert_eq!(inserted_users[0].name, "Alice");
@@ -1733,31 +1906,37 @@ mod test {
 
         create_model_table::<UserNameSnapshot>(&mut database)?;
         database
-            .from::<ArchivedUser>()
-            .project_tuple((ArchivedUser::id(), ArchivedUser::name()))
-            .insert_into::<UserNameSnapshot, _>((
-                UserNameSnapshot::id(),
-                UserNameSnapshot::name(),
-            ))?;
+            .bind(|ctx| {
+                ctx.insert_select::<UserNameSnapshot, _, _>(["id", "user_name"], |ctx| {
+                    ctx.from::<ArchivedUser>()?
+                        .project_scalars((ArchivedUser::id(), ArchivedUser::name()))
+                })
+            })?
+            .done()?;
 
         let snapshots = database
-            .from::<UserNameSnapshot>()
-            .asc(UserNameSnapshot::id())
-            .fetch()?
+            .bind(|ctx| {
+                ctx.from::<UserNameSnapshot>()?
+                    .asc_by(UserNameSnapshot::id())
+            })?
+            .orm::<UserNameSnapshot>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(snapshots.len(), 2);
         assert_eq!(snapshots[0].name, "Alice");
         assert_eq!(snapshots[1].name, "Bob");
 
         database
-            .from::<ArchivedUser>()
-            .eq(ArchivedUser::id(), 2)
-            .overwrite::<User>()?;
+            .bind(|ctx| {
+                ctx.overwrite_select::<User, _, _>(std::iter::empty::<String>(), |ctx| {
+                    ctx.from::<ArchivedUser>()?
+                        .filter(|e| e.column(ArchivedUser::id())?.eq(2))
+                })
+            })?
+            .done()?;
 
         let overwritten_users = database
-            .from::<User>()
-            .asc(User::id())
-            .fetch()?
+            .bind(|ctx| ctx.from::<User>()?.asc_by(User::id()))?
+            .orm::<User>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(overwritten_users.len(), 2);
         assert_eq!(overwritten_users[0].id, 1);
@@ -1766,18 +1945,21 @@ mod test {
         assert_eq!(overwritten_users[1].name, "Bob");
 
         database
-            .from::<ArchivedUser>()
-            .eq(ArchivedUser::id(), 1)
-            .project_tuple((ArchivedUser::id(), ArchivedUser::name()))
-            .overwrite_into::<UserNameSnapshot, _>((
-                UserNameSnapshot::id(),
-                UserNameSnapshot::name(),
-            ))?;
+            .bind(|ctx| {
+                ctx.overwrite_select::<UserNameSnapshot, _, _>(["id", "user_name"], |ctx| {
+                    ctx.from::<ArchivedUser>()?
+                        .filter(|e| e.column(ArchivedUser::id())?.eq(1))?
+                        .project_scalars((ArchivedUser::id(), ArchivedUser::name()))
+                })
+            })?
+            .done()?;
 
         let overwritten_snapshots = database
-            .from::<UserNameSnapshot>()
-            .asc(UserNameSnapshot::id())
-            .fetch()?
+            .bind(|ctx| {
+                ctx.from::<UserNameSnapshot>()?
+                    .asc_by(UserNameSnapshot::id())
+            })?
+            .orm::<UserNameSnapshot>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(overwritten_snapshots.len(), 2);
         assert_eq!(overwritten_snapshots[0].id, 1);
@@ -1899,7 +2081,13 @@ mod test {
         database.drop_view_if_exists("user_names")?;
 
         database.truncate::<User>()?;
-        assert_eq!(database.from::<User>().count()?, 0);
+        let count = database
+            .bind(|ctx| ctx.from::<User>()?.count())?
+            .project_value::<i32>()
+            .next()
+            .transpose()?
+            .unwrap() as usize;
+        assert_eq!(count, 0);
 
         Ok(())
     }

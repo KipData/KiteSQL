@@ -33,7 +33,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         ));
     };
 
-    let mut projected_values = Vec::new();
+    let mut projection_exprs = Vec::new();
     let mut assignments = Vec::new();
 
     for field in data_struct.fields {
@@ -62,13 +62,16 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             .predicates
             .push(parse_quote!(#field_ty : ::kite_sql::orm::FromDataValue));
 
-        projected_values.push(if rename.is_some() {
+        projection_exprs.push(if rename.is_some() {
             quote! {
-                ::kite_sql::orm::projection_value(#source_name_lit, #relation_expr, #field_name_lit)
+                {
+                    let expr = scope.column_ref(#relation_expr, #source_name_lit)?;
+                    scope.alias(expr, #field_name_lit)
+                }
             }
         } else {
             quote! {
-                ::kite_sql::orm::projection_column(#source_name_lit, #relation_expr)
+                scope.column_ref(#relation_expr, #source_name_lit)?
             }
         });
         assignments.push(quote! {
@@ -88,8 +91,15 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         impl #impl_generics ::kite_sql::orm::Projection for #struct_name #ty_generics
         #where_clause
         {
-            fn projected_values<M: ::kite_sql::orm::Model>(relation: &str) -> ::std::vec::Vec<::kite_sql::orm::ProjectedValue> {
-                vec![#(#projected_values),*]
+            fn bind_projection<'ctx, 'bind, 'parent, 'arena, T, A>(
+                scope: &mut ::kite_sql::orm::ExprBindScope<'ctx, 'bind, 'parent, 'arena, T, A>,
+                relation: &str,
+            ) -> ::std::result::Result<::std::vec::Vec<::kite_sql::expression::ScalarExpression>, ::kite_sql::errors::DatabaseError>
+            where
+                T: ::kite_sql::storage::Transaction,
+                A: AsRef<[(&'static str, ::kite_sql::types::value::DataValue)]>,
+            {
+                Ok(::std::vec![#(#projection_exprs),*])
             }
         }
 

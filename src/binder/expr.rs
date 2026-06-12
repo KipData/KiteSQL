@@ -17,16 +17,8 @@ use crate::errors::DatabaseError;
 use crate::expression;
 use crate::expression::agg::AggKind;
 use itertools::Itertools;
-use sqlparser::ast::{
-    BinaryOperator, DataType, DuplicateTreatment, Expr, Function, FunctionArg, FunctionArgExpr,
-    FunctionArguments, Ident, Query, Spanned, TypedString, UnaryOperator, Value,
-};
-use std::borrow::Cow;
-use std::slice;
 
-use super::{
-    attach_span_if_absent, lower_ident, Binder, BinderContext, QueryBindStep, SubQueryType,
-};
+use super::{Binder, BinderContext, QueryBindStep, SubQueryType};
 use crate::expression::function::scala::{ArcScalarFunctionImpl, ScalarFunction};
 use crate::expression::function::table::TableFunction;
 use crate::expression::function::FunctionSummary;
@@ -47,29 +39,6 @@ macro_rules! try_default {
 }
 
 impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T, A> {
-    fn parse_like_escape_char(escape_char: Option<Value>) -> Result<Option<char>, DatabaseError> {
-        match escape_char {
-            None => Ok(None),
-            Some(value) => match value {
-                Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
-                    let mut chars = s.chars();
-                    let ch = chars.next().ok_or(DatabaseError::InvalidValue(
-                        "escape character must not be empty".to_string(),
-                    ))?;
-                    if chars.next().is_some() {
-                        return Err(DatabaseError::InvalidValue(
-                            "escape character must be a single character".to_string(),
-                        ));
-                    }
-                    Ok(Some(ch))
-                }
-                _ => Err(DatabaseError::InvalidValue(
-                    "escape character must be a quoted string".to_string(),
-                )),
-            },
-        }
-    }
-
     fn find_column_in_schema<'schema>(
         schema_ref: impl IntoIterator<Item = &'schema ColumnRef>,
         arena: &PlanArena,
@@ -106,295 +75,211 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
 
         None
     }
+    pub(crate) fn bind_temp_table(
+        &mut self,
+        expr: ScalarExpression,
+        sub_query: LogicalPlan,
+        arena: &mut PlanArena,
+    ) -> Result<(ScalarExpression, LogicalPlan), DatabaseError> {
+        let (exprs, is_tuple) = match expr {
+            ScalarExpression::Tuple(exprs) => (exprs, true),
+            expr => (vec![expr], false),
+        };
+        let mut alias_exprs = Vec::with_capacity(exprs.len());
+        let mut alias_refs = Vec::with_capacity(exprs.len());
 
-    fn column_not_found_with_span(idents: &[Ident], column_name: &str) -> DatabaseError {
-        let err = DatabaseError::column_not_found(column_name.to_string());
-        match idents.last() {
-            Some(ident) => attach_span_if_absent(err, ident.span),
-            None => err,
+        for (position, expr) in exprs.into_iter().enumerate() {
+            let (alias_expr, alias_ref) = self.bind_temp_table_alias(expr, position, arena);
+            if !is_tuple {
+                let alias_plan = Self::build_project_plan(sub_query, vec![alias_expr.clone()]);
+                return Ok((alias_expr, alias_plan));
+            }
+            alias_exprs.push(alias_expr);
+            alias_refs.push(alias_ref);
         }
+
+        let alias_plan = Self::build_project_plan(sub_query, alias_exprs);
+        Ok((ScalarExpression::Tuple(alias_refs), alias_plan))
     }
 
-    pub(crate) fn bind_expr(
+    pub(crate) fn bind_temp_table_alias(
         &mut self,
-        expr: Expr,
+        expr: ScalarExpression,
+        position: usize,
         arena: &mut PlanArena,
-    ) -> Result<ScalarExpression, DatabaseError> {
-        let expr_span = expr.span();
-        match expr {
-            Expr::Identifier(ident) => {
-                self.bind_column_ref_from_identifiers(slice::from_ref(&ident), None, arena)
-            }
-            Expr::CompoundIdentifier(idents) => {
-                self.bind_column_ref_from_identifiers(&idents, None, arena)
-            }
-            Expr::BinaryOp { left, right, op } => {
-                self.bind_binary_op_internal(*left, *right, op, arena)
-            }
-            Expr::Value(v) => {
-                let value = if let Value::Placeholder(name) = &v.value {
-                    self.args
-                        .as_ref()
-                        .iter()
-                        .find_map(|(key, value)| (key == name).then(|| value.clone()))
-                        .ok_or_else(|| {
-                            attach_span_if_absent(
-                                DatabaseError::parameter_not_found(name.to_string()),
-                                &v,
-                            )
-                        })?
-                } else {
-                    (&v.value)
-                        .try_into()
-                        .map_err(|err| attach_span_if_absent(err, &v))?
-                };
-                Ok(ScalarExpression::Constant(value))
-            }
-            Expr::Function(func) => self.bind_function(func, arena),
-            Expr::Nested(expr) => self.bind_expr(*expr, arena),
-            Expr::UnaryOp { expr, op } => self.bind_unary_op_internal(*expr, op, arena),
-            Expr::Like {
-                negated,
-                expr,
-                pattern,
-                escape_char,
-                any: _,
-            } => self.bind_like(negated, *expr, *pattern, escape_char, arena),
-            Expr::IsNull(expr) => self.bind_is_null(*expr, false, arena),
-            Expr::IsNotNull(expr) => self.bind_is_null(*expr, true, arena),
-            Expr::InList {
-                expr,
-                list,
-                negated,
-            } => self.bind_is_in(*expr, list, negated, arena),
-            Expr::Cast {
-                expr, data_type, ..
-            } => self.bind_cast(*expr, data_type, arena),
-            Expr::TypedString(TypedString {
-                data_type, value, ..
-            }) => {
-                let logical_type = LogicalType::try_from(data_type.clone())?;
-                let raw = value.into_string().ok_or_else(|| {
-                    DatabaseError::InvalidValue("typed string literal must be a string".to_string())
-                })?;
-                let value = DataValue::Utf8 {
-                    value: raw,
-                    ty: Utf8Type::Variable(None),
-                    unit: CharLengthUnits::Characters,
-                }
-                .cast(&logical_type)
-                .map_err(|err| attach_span_if_absent(err, expr_span))?;
+    ) -> (ScalarExpression, ScalarExpression) {
+        let output_column = expr.output_column_ref(arena);
+        let mut alias_column = arena.clone_column(output_column);
+        alias_column.set_ref_table(arena.temp_table(), ColumnId::new(), true);
 
-                Ok(ScalarExpression::Constant(value))
-            }
-            Expr::Between {
-                expr,
-                negated,
-                low,
-                high,
-            } => Ok(ScalarExpression::Between {
-                negated,
-                expr: Box::new(self.bind_expr(*expr, arena)?),
-                left_expr: Box::new(self.bind_expr(*low, arena)?),
-                right_expr: Box::new(self.bind_expr(*high, arena)?),
-            }),
-            Expr::Substring {
-                expr,
-                substring_for,
-                substring_from,
-                ..
-            } => {
-                let mut for_expr = None;
-                let mut from_expr = None;
+        let alias_column = arena.alloc_column(alias_column);
+        let alias_ref = ScalarExpression::column_expr(alias_column, position);
+        (
+            ScalarExpression::Alias {
+                expr: Box::new(expr),
+                alias: AliasType::Expr(Box::new(alias_ref.clone())),
+            },
+            alias_ref,
+        )
+    }
 
-                if let Some(expr) = substring_for {
-                    for_expr = Some(Box::new(self.bind_expr(*expr, arena)?))
-                }
-                if let Some(expr) = substring_from {
-                    from_expr = Some(Box::new(self.bind_expr(*expr, arena)?))
-                }
-
-                Ok(ScalarExpression::SubString {
-                    expr: Box::new(self.bind_expr(*expr, arena)?),
-                    for_expr,
-                    from_expr,
-                })
-            }
-            Expr::Position { expr, r#in } => Ok(ScalarExpression::Position {
-                expr: Box::new(self.bind_expr(*expr, arena)?),
-                in_expr: Box::new(self.bind_expr(*r#in, arena)?),
-            }),
-            Expr::Trim {
-                expr,
-                trim_what,
-                trim_where,
-                ..
-            } => {
-                let mut trim_what_expr = None;
-                if let Some(trim_what) = trim_what {
-                    trim_what_expr = Some(Box::new(self.bind_expr(*trim_what, arena)?))
-                }
-                Ok(ScalarExpression::Trim {
-                    expr: Box::new(self.bind_expr(*expr, arena)?),
-                    trim_what_expr,
-                    trim_where: trim_where.map(Into::into),
-                })
-            }
-            Expr::Exists { subquery, negated } => {
-                let (sub_query, correlated) = self.bind_subquery(*subquery, arena)?;
-                let (_, marker_ref) = self.bind_temp_table_alias(
-                    ScalarExpression::Constant(DataValue::Boolean(true)),
-                    0,
-                    arena,
-                );
-                let output_column = marker_ref.output_column_ref(arena);
-                self.context.sub_query(SubQueryType::ExistsSubQuery {
-                    plan: sub_query,
-                    correlated,
-                    output_column,
-                });
-                if negated {
-                    Ok(ScalarExpression::Unary {
-                        op: expression::UnaryOperator::Not,
-                        expr: Box::new(marker_ref),
-                        evaluator: None,
-                        ty: LogicalType::Boolean,
-                    })
-                } else {
-                    Ok(marker_ref)
-                }
-            }
-            Expr::Subquery(subquery) => {
-                let (sub_query, column, correlated) =
-                    self.bind_subquery_with_output(None, *subquery, arena)?;
-                let sub_query = ScalarSubqueryOperator::build(sub_query);
-                let (expr, sub_query) = if !self.context.is_step(&QueryBindStep::Where) {
-                    self.bind_temp_table(column, sub_query, arena)?
-                } else {
-                    (column, sub_query)
-                };
-                self.context.sub_query(SubQueryType::SubQuery {
-                    plan: sub_query,
-                    correlated,
-                });
-                Ok(expr)
-            }
-            Expr::InSubquery {
-                expr,
-                subquery,
-                negated,
-            } => self.bind_quantified_subquery(
-                MarkApplyQuantifier::Any,
-                negated,
-                *expr,
-                BinaryOperator::Eq,
-                *subquery,
-                arena,
+    pub(crate) fn bind_subquery_plan<'arena, F>(
+        &mut self,
+        arena: &mut PlanArena<'arena>,
+        build: F,
+    ) -> Result<(LogicalPlan, bool), DatabaseError>
+    where
+        F: FnOnce(
+            &mut Binder<'a, '_, T, A>,
+            &mut PlanArena<'arena>,
+        ) -> Result<LogicalPlan, DatabaseError>,
+    {
+        let BinderContext {
+            table_cache,
+            view_cache,
+            transaction,
+            scala_functions,
+            table_functions,
+            ..
+        } = &self.context;
+        let mut binder = Binder::new(
+            BinderContext::new(
+                table_cache,
+                view_cache,
+                *transaction,
+                scala_functions,
+                table_functions,
             ),
-            Expr::Tuple(exprs) => {
-                let mut bond_exprs = Vec::with_capacity(exprs.len());
-
-                for expr in exprs {
-                    bond_exprs.push(self.bind_expr(expr, arena)?);
-                }
-                Ok(ScalarExpression::Tuple(bond_exprs))
-            }
-            Expr::Case {
-                operand,
-                conditions,
-                else_result,
-                ..
-            } => {
-                let fn_check_ty = |ty: &mut LogicalType, result_ty| {
-                    if result_ty != LogicalType::SqlNull {
-                        if ty == &LogicalType::SqlNull {
-                            *ty = result_ty;
-                        } else if ty != &result_ty {
-                            return Err(DatabaseError::Incomparable(ty.clone(), result_ty));
-                        }
-                    }
-
-                    Ok(())
-                };
-                let mut operand_expr = None;
-                let mut ty = LogicalType::SqlNull;
-                if let Some(expr) = operand {
-                    operand_expr = Some(Box::new(self.bind_expr(*expr, arena)?));
-                }
-                let mut expr_pairs = Vec::with_capacity(conditions.len());
-                for when in conditions {
-                    let result = self.bind_expr(when.result, arena)?;
-                    let result_ty = result.return_type(arena).into_owned();
-
-                    fn_check_ty(&mut ty, result_ty)?;
-                    expr_pairs.push((self.bind_expr(when.condition, arena)?, result))
-                }
-
-                let mut else_expr = None;
-                if let Some(expr) = else_result {
-                    let temp_expr = Box::new(self.bind_expr(*expr, arena)?);
-                    let else_ty = temp_expr.return_type(arena).into_owned();
-
-                    fn_check_ty(&mut ty, else_ty)?;
-                    else_expr = Some(temp_expr);
-                }
-
-                Ok(ScalarExpression::CaseWhen {
-                    operand_expr,
-                    expr_pairs,
-                    else_expr,
-                    ty,
-                })
-            }
-            Expr::AnyOp {
-                left,
-                compare_op,
-                right,
-                ..
-            } => {
-                self.bind_quantified_op(MarkApplyQuantifier::Any, *left, compare_op, *right, arena)
-            }
-            Expr::AllOp {
-                left,
-                compare_op,
-                right,
-            } => {
-                self.bind_quantified_op(MarkApplyQuantifier::All, *left, compare_op, *right, arena)
-            }
-            expr => Err(DatabaseError::UnsupportedStmt(expr.to_string())),
-        }
+            self.args,
+            Some(&self.context),
+        );
+        let sub_query = build(&mut binder, arena)?;
+        let correlated = binder.context.has_outer_refs();
+        Ok((sub_query, correlated))
     }
 
-    fn bind_quantified_op(
+    pub(crate) fn bind_subquery_plan_with_output<'arena, F>(
         &mut self,
-        quantifier: MarkApplyQuantifier,
-        left: Expr,
-        compare_op: BinaryOperator,
-        right: Expr,
-        arena: &mut PlanArena,
-    ) -> Result<ScalarExpression, DatabaseError> {
-        let Expr::Subquery(subquery) = right else {
-            return Err(DatabaseError::UnsupportedStmt(format!(
-                "{quantifier:?} only supports subquery operands"
-            )));
+        value_ty: Option<&LogicalType>,
+        arena: &mut PlanArena<'arena>,
+        build: F,
+    ) -> Result<(LogicalPlan, ScalarExpression, bool), DatabaseError>
+    where
+        F: FnOnce(
+            &mut Binder<'a, '_, T, A>,
+            &mut PlanArena<'arena>,
+        ) -> Result<LogicalPlan, DatabaseError>,
+    {
+        let (mut sub_query, correlated) = self.bind_subquery_plan(arena, build)?;
+        let sub_query_schema = sub_query.output_schema(arena);
+
+        let fn_check = |len: usize| {
+            if sub_query_schema.len() != len {
+                return Err(DatabaseError::MisMatch(
+                    "expects only one expression to be returned",
+                    "the expression returned by the subquery",
+                ));
+            }
+            Ok(())
         };
 
-        self.bind_quantified_subquery(quantifier, false, left, compare_op, *subquery, arena)
+        let expr = if let Some(LogicalType::Tuple(tys)) = value_ty {
+            fn_check(tys.len())?;
+
+            let columns = sub_query_schema
+                .iter()
+                .enumerate()
+                .map(|(position, column)| ScalarExpression::column_expr(*column, position))
+                .collect::<Vec<_>>();
+            ScalarExpression::Tuple(columns)
+        } else {
+            fn_check(1)?;
+
+            ScalarExpression::column_expr(sub_query_schema[0], 0)
+        };
+        Ok((sub_query, expr, correlated))
     }
 
-    fn bind_quantified_subquery(
+    pub(crate) fn bind_scalar_subquery_plan<'arena, F>(
+        &mut self,
+        arena: &mut PlanArena<'arena>,
+        build: F,
+    ) -> Result<ScalarExpression, DatabaseError>
+    where
+        F: FnOnce(
+            &mut Binder<'a, '_, T, A>,
+            &mut PlanArena<'arena>,
+        ) -> Result<LogicalPlan, DatabaseError>,
+    {
+        let (sub_query, column, correlated) =
+            self.bind_subquery_plan_with_output(None, arena, build)?;
+        let sub_query = ScalarSubqueryOperator::build(sub_query);
+        let (expr, sub_query) = if !self.context.is_step(&QueryBindStep::Where) {
+            self.bind_temp_table(column, sub_query, arena)?
+        } else {
+            (column, sub_query)
+        };
+        self.context.sub_query(SubQueryType::SubQuery {
+            plan: sub_query,
+            correlated,
+        });
+        Ok(expr)
+    }
+
+    pub(crate) fn bind_exists_subquery_plan<'arena, F>(
+        &mut self,
+        negated: bool,
+        arena: &mut PlanArena<'arena>,
+        build: F,
+    ) -> Result<ScalarExpression, DatabaseError>
+    where
+        F: FnOnce(
+            &mut Binder<'a, '_, T, A>,
+            &mut PlanArena<'arena>,
+        ) -> Result<LogicalPlan, DatabaseError>,
+    {
+        let (sub_query, correlated) = self.bind_subquery_plan(arena, build)?;
+        let (_, marker_ref) = self.bind_temp_table_alias(
+            ScalarExpression::Constant(DataValue::Boolean(true)),
+            0,
+            arena,
+        );
+        let output_column = marker_ref.output_column_ref(arena);
+        self.context.sub_query(SubQueryType::ExistsSubQuery {
+            plan: sub_query,
+            correlated,
+            output_column,
+        });
+        if negated {
+            Ok(ScalarExpression::Unary {
+                op: expression::UnaryOperator::Not,
+                expr: Box::new(marker_ref),
+                evaluator: None,
+                ty: LogicalType::Boolean,
+            })
+        } else {
+            Ok(marker_ref)
+        }
+    }
+
+    pub(crate) fn bind_quantified_subquery_plan<'arena, F>(
         &mut self,
         quantifier: MarkApplyQuantifier,
         negated: bool,
-        expr: Expr,
-        compare_op: BinaryOperator,
-        subquery: Query,
-        arena: &mut PlanArena,
-    ) -> Result<ScalarExpression, DatabaseError> {
-        let left_expr = self.bind_expr(expr, arena)?;
+        left_expr: ScalarExpression,
+        compare_op: expression::BinaryOperator,
+        arena: &mut PlanArena<'arena>,
+        build: F,
+    ) -> Result<ScalarExpression, DatabaseError>
+    where
+        F: FnOnce(
+            &mut Binder<'a, '_, T, A>,
+            &mut PlanArena<'arena>,
+        ) -> Result<LogicalPlan, DatabaseError>,
+    {
         let left_ty = left_expr.return_type(arena).into_owned();
         let (sub_query, column, correlated) =
-            self.bind_subquery_with_output(Some(&left_ty), subquery, arena)?;
+            self.bind_subquery_plan_with_output(Some(&left_ty), arena, build)?;
 
         if !self.context.is_step(&QueryBindStep::Where) {
             return Err(DatabaseError::UnsupportedStmt(
@@ -404,7 +289,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
 
         let (alias_expr, sub_query) = self.bind_temp_table(column, sub_query, arena)?;
         let predicate = ScalarExpression::Binary {
-            op: compare_op.try_into()?,
+            op: compare_op,
             left_expr: Box::new(left_expr),
             right_expr: Box::new(alias_expr),
             evaluator: None,
@@ -437,212 +322,46 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         }
     }
 
-    fn bind_temp_table(
+    pub(crate) fn bind_column_ref_by_name(
         &mut self,
-        expr: ScalarExpression,
-        sub_query: LogicalPlan,
-        arena: &mut PlanArena,
-    ) -> Result<(ScalarExpression, LogicalPlan), DatabaseError> {
-        let (exprs, is_tuple) = match expr {
-            ScalarExpression::Tuple(exprs) => (exprs, true),
-            expr => (vec![expr], false),
-        };
-        let mut alias_exprs = Vec::with_capacity(exprs.len());
-        let mut alias_refs = Vec::with_capacity(exprs.len());
-
-        for (position, expr) in exprs.into_iter().enumerate() {
-            let (alias_expr, alias_ref) = self.bind_temp_table_alias(expr, position, arena);
-            if !is_tuple {
-                let alias_plan = Self::build_project_plan(sub_query, vec![alias_expr.clone()]);
-                return Ok((alias_expr, alias_plan));
-            }
-            alias_exprs.push(alias_expr);
-            alias_refs.push(alias_ref);
-        }
-
-        let alias_plan = Self::build_project_plan(sub_query, alias_exprs);
-        Ok((ScalarExpression::Tuple(alias_refs), alias_plan))
-    }
-
-    fn bind_temp_table_alias(
-        &mut self,
-        expr: ScalarExpression,
-        position: usize,
-        arena: &mut PlanArena,
-    ) -> (ScalarExpression, ScalarExpression) {
-        let output_column = expr.output_column_ref(arena);
-        let mut alias_column = arena.clone_column(output_column);
-        alias_column.set_ref_table(self.context.temp_table(), ColumnId::new(), true);
-
-        let alias_column = arena.alloc_column(alias_column);
-        let alias_ref = ScalarExpression::column_expr(alias_column, position);
-        (
-            ScalarExpression::Alias {
-                expr: Box::new(expr),
-                alias: AliasType::Expr(Box::new(alias_ref.clone())),
-            },
-            alias_ref,
-        )
-    }
-
-    fn bind_subquery_with_output(
-        &mut self,
-        value_ty: Option<&LogicalType>,
-        subquery: Query,
-        arena: &mut PlanArena,
-    ) -> Result<(LogicalPlan, ScalarExpression, bool), DatabaseError> {
-        let (mut sub_query, correlated) = self.bind_subquery(subquery, arena)?;
-        let sub_query_schema = sub_query.output_schema(arena);
-
-        let fn_check = |len: usize| {
-            if sub_query_schema.len() != len {
-                return Err(DatabaseError::MisMatch(
-                    "expects only one expression to be returned",
-                    "the expression returned by the subquery",
-                ));
-            }
-            Ok(())
-        };
-
-        let expr = if let Some(LogicalType::Tuple(tys)) = value_ty {
-            fn_check(tys.len())?;
-
-            let columns = sub_query_schema
-                .iter()
-                .enumerate()
-                .map(|(position, column)| ScalarExpression::column_expr(column.clone(), position))
-                .collect::<Vec<_>>();
-            ScalarExpression::Tuple(columns)
-        } else {
-            fn_check(1)?;
-
-            ScalarExpression::column_expr(sub_query_schema[0].clone(), 0)
-        };
-        Ok((sub_query, expr, correlated))
-    }
-
-    fn bind_subquery(
-        &mut self,
-        subquery: Query,
-        arena: &mut PlanArena,
-    ) -> Result<(LogicalPlan, bool), DatabaseError> {
-        let BinderContext {
-            table_cache,
-            view_cache,
-            transaction,
-            scala_functions,
-            table_functions,
-            temp_table_id,
-            ..
-        } = &self.context;
-        let mut binder = Binder::new(
-            BinderContext::new(
-                table_cache,
-                view_cache,
-                *transaction,
-                scala_functions,
-                table_functions,
-                temp_table_id.clone(),
-            ),
-            self.args,
-            Some(&self.context),
-        );
-        let sub_query = binder.bind_query(subquery, arena)?;
-        let correlated = binder.context.has_outer_refs();
-        Ok((sub_query, correlated))
-    }
-
-    pub fn bind_like(
-        &mut self,
-        negated: bool,
-        expr: Expr,
-        pattern: Expr,
-        escape_char: Option<Value>,
-        arena: &mut PlanArena,
-    ) -> Result<ScalarExpression, DatabaseError> {
-        let left_expr = Box::new(self.bind_expr(expr, arena)?);
-        let right_expr = Box::new(self.bind_expr(pattern, arena)?);
-        let escape_char = Self::parse_like_escape_char(escape_char)?;
-        let op = if negated {
-            expression::BinaryOperator::NotLike(escape_char)
-        } else {
-            expression::BinaryOperator::Like(escape_char)
-        };
-        Ok(ScalarExpression::Binary {
-            op,
-            left_expr,
-            right_expr,
-            evaluator: None,
-            ty: LogicalType::Boolean,
-        })
-    }
-
-    pub fn bind_column_ref_from_identifiers(
-        &mut self,
-        idents: &[Ident],
+        table_name: Option<&str>,
+        column_name: &str,
         bind_table_name: Option<&str>,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
-        let full_name = match idents {
-            [column] => (None, lower_ident(column)),
-            [table, column] => (Some(lower_ident(table)), lower_ident(column)),
-            _ => {
-                let invalid_name = idents
-                    .iter()
-                    .map(|ident| ident.value.clone())
-                    .join(".")
-                    .to_string();
-                let err = DatabaseError::invalid_column(invalid_name);
-                return Err(match idents.last() {
-                    Some(ident) => attach_span_if_absent(err, ident.span),
-                    None => err,
-                });
-            }
-        };
-        if full_name.0.is_none() {
+        if table_name.is_none() {
             if let Some((_, expr)) = self
                 .context
                 .expr_aliases
                 .iter()
-                .find(|((table, column), _)| table.is_none() && column == full_name.1.as_ref())
+                .find(|((table, column), _)| table.is_none() && column == column_name)
             {
                 return Ok(ScalarExpression::Alias {
                     expr: Box::new(expr.clone()),
-                    alias: AliasType::Name(full_name.1.into_owned()),
+                    alias: AliasType::Name(column_name.to_string()),
                 });
             }
         }
         if self.context.allow_default {
-            try_default!(&full_name.0, full_name.1);
+            try_default!(&table_name, column_name);
         }
-        if let Some(table) = full_name.0.as_deref().or(bind_table_name) {
+        if let Some(table) = table_name.or(bind_table_name) {
             let (source, position_offset) =
                 match Self::resolve_source_columns_in_scope(&self.context, &table) {
                     Ok(source) => source,
                     Err(err) => {
                         if let Some(parent) = self.parent {
                             self.context.mark_outer_ref();
-                            Self::resolve_source_columns_in_scope(parent, &table).map_err(|_| {
-                                if let [table_ident, _] = idents {
-                                    attach_span_if_absent(err, table_ident.span)
-                                } else {
-                                    err
-                                }
-                            })?
+                            Self::resolve_source_columns_in_scope(parent, &table)
+                                .map_err(|_| err)?
                         } else {
-                            return Err(if let [table_ident, _] = idents {
-                                attach_span_if_absent(err, table_ident.span)
-                            } else {
-                                err
-                            });
+                            return Err(err);
                         }
                     }
                 };
             let (position, column) =
-                Self::find_column_in_schema(source.schema().iter(), arena, full_name.1.as_ref())
-                    .ok_or_else(|| {
-                        Self::column_not_found_with_span(idents, full_name.1.as_ref())
-                    })?;
+                Self::find_column_in_schema(source.schema().iter(), arena, column_name)
+                    .ok_or_else(|| DatabaseError::column_not_found(column_name.to_string()))?;
 
             Ok(ScalarExpression::column_expr(
                 column,
@@ -654,15 +373,11 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 |context: &BinderContext<'a, T>| -> Result<Option<ScalarExpression>, DatabaseError> {
                     Ok(context
                         .using
-                        .get(full_name.1.as_ref())
+                        .get(column_name)
                         .map(|using_column| using_column.visible_expr(arena))
                         .transpose()?
                         .or_else(|| {
-                            Self::find_column_in_scope(
-                                context,
-                                arena,
-                                full_name.1.as_ref(),
-                            )
+                            Self::find_column_in_scope(context, arena, column_name)
                         }))
                 };
             let mut got_column = find_visible_column(&self.context)?;
@@ -674,34 +389,30 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             }
             match got_column {
                 Some(column) => Ok(column),
-                None => Err(Self::column_not_found_with_span(
-                    idents,
-                    full_name.1.as_ref(),
-                )),
+                None => Err(DatabaseError::column_not_found(column_name.to_string())),
             }
         }
     }
 
-    fn bind_binary_op_internal(
+    pub(crate) fn bind_binary_op_expr(
         &mut self,
-        left: Expr,
-        right: Expr,
-        op: BinaryOperator,
+        left_expr: ScalarExpression,
+        right_expr: ScalarExpression,
+        op: expression::BinaryOperator,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
-        let left_expr = Box::new(self.bind_expr(left, arena)?);
-        let right_expr = Box::new(self.bind_expr(right, arena)?);
-
+        let left_expr = Box::new(left_expr);
+        let right_expr = Box::new(right_expr);
         let left_ty = left_expr.return_type(arena);
         let right_ty = right_expr.return_type(arena);
         let ty = match &op {
-            BinaryOperator::Plus
-            | BinaryOperator::Minus
-            | BinaryOperator::Multiply
-            | BinaryOperator::Modulo => {
+            expression::BinaryOperator::Plus
+            | expression::BinaryOperator::Minus
+            | expression::BinaryOperator::Multiply
+            | expression::BinaryOperator::Modulo => {
                 LogicalType::max_logical_type(&left_ty, &right_ty)?.into_owned()
             }
-            BinaryOperator::Divide => {
+            expression::BinaryOperator::Divide => {
                 if let LogicalType::Decimal(precision, scale) =
                     LogicalType::max_logical_type(&left_ty, &right_ty)?.into_owned()
                 {
@@ -710,21 +421,24 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                     LogicalType::Double
                 }
             }
-            BinaryOperator::Gt
-            | BinaryOperator::Lt
-            | BinaryOperator::GtEq
-            | BinaryOperator::LtEq
-            | BinaryOperator::Eq
-            | BinaryOperator::NotEq
-            | BinaryOperator::And
-            | BinaryOperator::Or
-            | BinaryOperator::Xor => LogicalType::Boolean,
-            BinaryOperator::StringConcat => LogicalType::Varchar(None, CharLengthUnits::Characters),
+            expression::BinaryOperator::Gt
+            | expression::BinaryOperator::Lt
+            | expression::BinaryOperator::GtEq
+            | expression::BinaryOperator::LtEq
+            | expression::BinaryOperator::Eq
+            | expression::BinaryOperator::NotEq
+            | expression::BinaryOperator::Like(_)
+            | expression::BinaryOperator::NotLike(_)
+            | expression::BinaryOperator::And
+            | expression::BinaryOperator::Or => LogicalType::Boolean,
+            expression::BinaryOperator::StringConcat => {
+                LogicalType::Varchar(None, CharLengthUnits::Characters)
+            }
             op => return Err(DatabaseError::UnsupportedStmt(format!("{op}"))),
         };
 
         Ok(ScalarExpression::Binary {
-            op: op.try_into()?,
+            op,
             left_expr,
             right_expr,
             evaluator: None,
@@ -732,66 +446,34 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         })
     }
 
-    fn bind_unary_op_internal(
+    pub(crate) fn bind_unary_op_expr(
         &mut self,
-        expr: Expr,
-        op: UnaryOperator,
+        expr: ScalarExpression,
+        op: expression::UnaryOperator,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
-        let expr = Box::new(self.bind_expr(expr, arena)?);
-        let ty = if let UnaryOperator::Not = op {
+        let expr = Box::new(expr);
+        let ty = if let expression::UnaryOperator::Not = op {
             LogicalType::Boolean
         } else {
             expr.return_type(arena).into_owned()
         };
 
         Ok(ScalarExpression::Unary {
-            op: op.try_into()?,
+            op,
             expr,
             evaluator: None,
             ty,
         })
     }
 
-    fn bind_function(
+    pub(crate) fn bind_function_call(
         &mut self,
-        func: Function,
+        function_name: String,
+        mut args: Vec<ScalarExpression>,
+        is_distinct: bool,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
-        let func_span = func.span();
-        let Function { name, args, .. } = func;
-        let (func_args, is_distinct) = match args {
-            FunctionArguments::List(args) => (
-                args.args,
-                matches!(args.duplicate_treatment, Some(DuplicateTreatment::Distinct)),
-            ),
-            FunctionArguments::None => (Vec::new(), false),
-            FunctionArguments::Subquery(_) => {
-                return Err(DatabaseError::UnsupportedStmt(
-                    "subquery function args are not supported".to_string(),
-                ))
-            }
-        };
-        let mut args = Vec::with_capacity(func_args.len());
-
-        for arg in func_args {
-            let arg_expr = match arg {
-                FunctionArg::Named { arg, .. } => arg,
-                FunctionArg::ExprNamed { arg, .. } => arg,
-                FunctionArg::Unnamed(arg) => arg,
-            };
-            match arg_expr {
-                FunctionArgExpr::Expr(expr) => args.push(self.bind_expr(expr, arena)?),
-                FunctionArgExpr::Wildcard => args.push(Self::wildcard_expr()),
-                expr => {
-                    return Err(DatabaseError::UnsupportedStmt(format!(
-                        "function arg: {expr:#?}"
-                    )))
-                }
-            }
-        }
-        let function_name = name.to_string().to_lowercase();
-
         match function_name.as_str() {
             "count" => {
                 if args.len() != 1 {
@@ -954,13 +636,10 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             }));
         }
 
-        Err(attach_span_if_absent(
-            DatabaseError::function_not_found(summary.name.to_string()),
-            func_span,
-        ))
+        Err(DatabaseError::function_not_found(summary.name.to_string()))
     }
 
-    fn return_type(
+    pub(crate) fn return_type(
         expr_1: &ScalarExpression,
         expr_2: &ScalarExpression,
         arena: &PlanArena,
@@ -975,51 +654,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         }
     }
 
-    fn bind_is_null(
-        &mut self,
-        expr: Expr,
-        negated: bool,
-        arena: &mut PlanArena,
-    ) -> Result<ScalarExpression, DatabaseError> {
-        Ok(ScalarExpression::IsNull {
-            negated,
-            expr: Box::new(self.bind_expr(expr, arena)?),
-        })
-    }
-
-    fn bind_is_in(
-        &mut self,
-        expr: Expr,
-        list: Vec<Expr>,
-        negated: bool,
-        arena: &mut PlanArena,
-    ) -> Result<ScalarExpression, DatabaseError> {
-        let args = list
-            .into_iter()
-            .map(|expr| self.bind_expr(expr, arena))
-            .try_collect()?;
-
-        Ok(ScalarExpression::In {
-            negated,
-            expr: Box::new(self.bind_expr(expr, arena)?),
-            args,
-        })
-    }
-
-    fn bind_cast(
-        &mut self,
-        expr: Expr,
-        ty: DataType,
-        arena: &mut PlanArena,
-    ) -> Result<ScalarExpression, DatabaseError> {
-        ScalarExpression::type_cast(
-            self.bind_expr(expr, arena)?,
-            Cow::Owned(LogicalType::try_from(ty)?),
-            arena,
-        )
-    }
-
-    fn wildcard_expr() -> ScalarExpression {
+    pub(crate) fn wildcard_expr() -> ScalarExpression {
         ScalarExpression::Constant(DataValue::Utf8 {
             value: "*".to_string(),
             ty: Utf8Type::Variable(None),

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::binder::{lower_case_name, lower_ident, Binder};
+use crate::binder::Binder;
 use crate::catalog::view::View;
 use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
 use crate::errors::DatabaseError;
@@ -22,22 +22,18 @@ use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
-use sqlparser::ast::{CreateView, Query, SelectItem, SetExpr};
 use ulid::Ulid;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_create_view(
         &mut self,
-        create: CreateView,
+        view_name: TableName,
+        or_replace: bool,
+        mut plan: LogicalPlan,
+        column_names: Vec<String>,
+        output_aliases: Vec<Option<String>>,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let CreateView {
-            or_replace,
-            name,
-            columns,
-            query,
-            ..
-        } = create;
         fn projection_exprs(
             view_name: &TableName,
             mapping_schema: &[ColumnRef],
@@ -70,21 +66,17 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             exprs
         }
 
-        let output_aliases = query_output_aliases(&query);
-        let view_name: TableName = lower_case_name(&name)?.into();
-        let mut plan = self.bind_query(*query, arena)?;
-
         let mapping_schema = plan.output_schema(arena);
 
-        if !columns.is_empty() && columns.len() > mapping_schema.len() {
+        if !column_names.is_empty() && column_names.len() > mapping_schema.len() {
             return Err(DatabaseError::UnsupportedStmt(format!(
                 "view column count {} exceeds query output count {}",
-                columns.len(),
+                column_names.len(),
                 mapping_schema.len()
             )));
         }
 
-        let exprs: Vec<ScalarExpression> = if columns.is_empty() {
+        let exprs: Vec<ScalarExpression> = if column_names.is_empty() {
             projection_exprs(&view_name, mapping_schema, arena, |i, column, arena| {
                 output_aliases
                     .get(i)
@@ -94,9 +86,9 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         } else {
             projection_exprs(
                 &view_name,
-                &mapping_schema[..columns.len()],
+                &mapping_schema[..column_names.len()],
                 arena,
-                |i, _, _| lower_ident(&columns[i].name).into_owned(),
+                |i, _, _| column_names[i].clone(),
             )
         };
         plan = self.bind_project(plan, exprs, arena)?;
@@ -114,19 +106,4 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             Childrens::None,
         ))
     }
-}
-
-fn query_output_aliases(query: &Query) -> Vec<Option<String>> {
-    let SetExpr::Select(select) = query.body.as_ref() else {
-        return Vec::new();
-    };
-
-    select
-        .projection
-        .iter()
-        .map(|item| match item {
-            SelectItem::ExprWithAlias { alias, .. } => Some(lower_ident(alias).into_owned()),
-            _ => None,
-        })
-        .collect()
 }

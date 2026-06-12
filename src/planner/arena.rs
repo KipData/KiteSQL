@@ -51,6 +51,7 @@ pub struct PlanArena<'a> {
     #[cfg(debug_assertions)]
     table_arena_version: usize,
     allocated_columns_len: usize,
+    temp_table_id: usize,
     columns: Vec<ColumnCatalog>,
     indexes: Vec<IndexMeta>,
 }
@@ -344,6 +345,7 @@ impl<'a> PlanArena<'a> {
             #[cfg(debug_assertions)]
             table_arena_version,
             allocated_columns_len: 0,
+            temp_table_id: 0,
             columns: Vec::new(),
             indexes: Vec::new(),
         }
@@ -432,6 +434,12 @@ impl<'a> PlanArena<'a> {
     pub(crate) fn alloc_dummy(&mut self, name: &str) -> ColumnRef {
         self.assert_table_arena_unchanged();
         self.table_arena.borrow().alloc_dummy(name)
+    }
+
+    pub(crate) fn temp_table(&mut self) -> TableName {
+        let table_name = format!("_temp_table_{}_", self.temp_table_id);
+        self.temp_table_id += 1;
+        table_name.into()
     }
 
     pub fn column(&self, column: ColumnRef) -> &ColumnCatalog {

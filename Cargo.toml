@@ -2,7 +2,7 @@
 
 [package]
 name          = "kite_sql"
-version       = "0.2.1"
+version       = "0.3.0"
 edition       = "2021"
 build         = "build.rs"
 authors       = ["Kould <kould2333@gmail.com>", "Xwg <loloxwg@gmail.com>"]
@@ -24,17 +24,18 @@ doctest = false
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["macros", "rocksdb"]
+default = ["macros", "parser", "rocksdb"]
 copy    = ["dep:csv"]
 decimal = ["dep:rust_decimal"]
 macros  = []
-orm     = []
+orm     = ["macros"]
+parser  = ["dep:sqlparser"]
 rocksdb = ["dep:rocksdb"]
 unsafe_txdb_checkpoint = ["rocksdb", "dep:librocksdb-sys"]
 lmdb    = ["dep:lmdb", "dep:lmdb-sys"]
 pprof   = ["pprof/criterion", "pprof/flamegraph"]
 python  = ["dep:pyo3"]
-shell   = ["dep:comfy-table", "dep:rustyline"]
+shell   = ["parser", "dep:comfy-table", "dep:rustyline"]
 
 [[bench]]
 name    = "query_bench"
@@ -54,7 +55,6 @@ paste                 = { version = "1" }
 recursive             = { version = "0.1" }
 kite_sql_serde_macros = { version = "0.2.0", path = "kite_sql_serde_macros" }
 siphasher             = { version = "1" }
-sqlparser             = { version = "0.61", default-features = false, features = ["std"] }
 ulid                  = { version = "1" }
 
 # Optional dependencies for features
@@ -62,6 +62,7 @@ comfy-table           = { version = "7", default-features = false, optional = tr
 csv                   = { version = "1", optional = true }
 pyo3                  = { version = "0.23", features = ["auto-initialize"], optional = true }
 rust_decimal          = { version = "1", default-features = false, features = ["std"], optional = true }
+sqlparser             = { version = "0.61", default-features = false, features = ["std"], optional = true }
 
 [target.'cfg(unix)'.dev-dependencies]
 pprof = { version = "0.15", features = ["flamegraph", "criterion"] }

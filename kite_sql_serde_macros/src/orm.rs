@@ -12,12 +12,12 @@ struct OrmOpts {
     generics: Generics,
     table: Option<String>,
     #[darling(default, multiple, rename = "index")]
-    indexes: Vec<OrmIndexOpts>,
+    indexes: Vec<ModelIndexOpts>,
     data: Data<(), OrmFieldOpts>,
 }
 
 #[derive(Debug, FromMeta)]
-struct OrmIndexOpts {
+struct ModelIndexOpts {
     name: String,
     columns: String,
     #[darling(default)]
@@ -36,7 +36,7 @@ struct OrmFieldOpts {
     decimal_precision: Option<u8>,
     decimal_scale: Option<u8>,
     #[darling(rename = "default")]
-    default_expr: Option<String>,
+    default_literal: Option<String>,
     #[darling(default)]
     skip: bool,
     #[darling(default)]
@@ -73,8 +73,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
     let mut field_getters = Vec::new();
     let mut column_names = Vec::new();
     let mut placeholder_names = Vec::new();
-    let mut create_index_statements = Vec::new();
-    let mut create_index_if_not_exists_statements = Vec::new();
+    let mut orm_indexes = Vec::new();
     let mut persisted_columns = Vec::new();
     let mut index_names = BTreeSet::new();
     index_names.insert("pk_index".to_string());
@@ -121,7 +120,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                     "char field cannot be skipped",
                 ));
             }
-            if field.default_expr.is_some() {
+            if field.default_literal.is_some() {
                 return Err(Error::new_spanned(
                     field_name,
                     "default field cannot be skipped",
@@ -152,8 +151,8 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                 "decimal_scale requires decimal_precision",
             ));
         }
-        let default_expr = field
-            .default_expr
+        let default_literal = field
+            .default_literal
             .map(|value| LitStr::new(&value, Span::call_site()));
         let field_name_string = field_name.to_string();
         let column_name = field.rename.unwrap_or_else(|| field_name_string.clone());
@@ -163,6 +162,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         let is_primary_key = field.primary_key;
         let is_unique = field.unique;
         let is_index = field.index;
+        let column_index = orm_columns.len();
 
         persisted_columns.push((field_name_string, column_name.clone()));
         column_names.push(column_name.clone());
@@ -204,23 +204,23 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                 .push(parse_quote!(#field_ty : ::kite_sql::orm::DecimalType));
         }
 
-        let ddl_type = if let Some(varchar_len) = varchar_len {
-            quote! { ::std::format!("varchar({})", #varchar_len) }
+        let data_type = if let Some(varchar_len) = varchar_len {
+            quote! { ::kite_sql::types::LogicalType::Varchar(Some(#varchar_len), ::kite_sql::types::CharLengthUnits::Characters) }
         } else if let Some(char_len) = char_len {
-            quote! { ::std::format!("char({})", #char_len) }
+            quote! { ::kite_sql::types::LogicalType::Char(#char_len, ::kite_sql::types::CharLengthUnits::Characters) }
         } else if let Some(decimal_precision) = decimal_precision {
             if let Some(decimal_scale) = decimal_scale {
-                quote! { ::std::format!("decimal({}, {})", #decimal_precision, #decimal_scale) }
+                quote! { ::kite_sql::types::LogicalType::Decimal(Some(#decimal_precision), Some(#decimal_scale)) }
             } else {
-                quote! { ::std::format!("decimal({})", #decimal_precision) }
+                quote! { ::kite_sql::types::LogicalType::Decimal(Some(#decimal_precision), None) }
             }
         } else {
-            quote! { <#field_ty as ::kite_sql::orm::ModelColumnType>::ddl_type() }
+            quote! { <#field_ty as ::kite_sql::orm::ModelColumnType>::logical_type() }
         };
-        let default_expr_tokens = if let Some(default_expr) = &default_expr {
-            quote! { Some(#default_expr) }
+        let default_tokens = if let Some(default_literal) = &default_literal {
+            quote! { Some(::kite_sql::types::value::DataValue::from(#default_literal.to_string())) }
         } else {
-            quote! { None }
+            quote! { None::<::kite_sql::types::value::DataValue> }
         };
 
         assignments.push(quote! {
@@ -234,6 +234,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         orm_fields.push(quote! {
             ::kite_sql::orm::OrmField {
                 column: #column_name_lit,
+                column_index: #column_index,
                 placeholder: #placeholder_lit,
                 primary_key: #is_primary_key,
                 unique: #is_unique,
@@ -246,13 +247,32 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             }
         });
         orm_columns.push(quote! {
-            ::kite_sql::orm::OrmColumn {
-                name: #column_name_lit,
-                ddl_type: #ddl_type,
-                nullable: <#field_ty as ::kite_sql::orm::ModelColumnType>::nullable(),
-                primary_key: #is_primary_key,
-                unique: #is_unique,
-                default_expr: #default_expr_tokens,
+            {
+                let data_type = #data_type;
+                let default = #default_tokens
+                    .map(|value| {
+                        ::kite_sql::expression::ScalarExpression::Constant(
+                            value
+                                .cast(&data_type)
+                                .expect("failed to cast ORM default value to column type"),
+                        )
+                    });
+                let desc = ::kite_sql::catalog::column::ColumnDesc::new(
+                    data_type,
+                    #is_primary_key.then_some(#column_index),
+                    #is_unique,
+                    default,
+                )
+                    .expect("failed to build ORM column descriptor");
+                ::kite_sql::catalog::column::ColumnCatalog::new(
+                    #column_name_lit.to_string(),
+                    if #is_primary_key {
+                        false
+                    } else {
+                        <#field_ty as ::kite_sql::orm::ModelColumnType>::nullable()
+                    },
+                    desc,
+                )
             }
         });
         if is_unique {
@@ -274,23 +294,8 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                     format!("duplicate ORM index name: {index_name}"),
                 ));
             }
-            create_index_statements.push(quote! {
-                ::kite_sql::orm::orm_create_index_statement(
-                    #table_name_lit,
-                    #index_name_lit,
-                    &[#column_name_for_index],
-                    false,
-                    false,
-                )
-            });
-            create_index_if_not_exists_statements.push(quote! {
-                ::kite_sql::orm::orm_create_index_statement(
-                    #table_name_lit,
-                    #index_name_lit,
-                    &[#column_name_for_index],
-                    false,
-                    true,
-                )
+            orm_indexes.push(quote! {
+                (#index_name_lit, &[#column_name_for_index], false)
             });
         }
     }
@@ -358,23 +363,8 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             .map(|column| LitStr::new(column, Span::call_site()))
             .collect::<Vec<_>>();
         let is_unique = index.unique;
-        create_index_statements.push(quote! {
-            ::kite_sql::orm::orm_create_index_statement(
-                #table_name_lit,
-                #index_name_lit,
-                &[#(#index_columns),*],
-                #is_unique,
-                false,
-            )
-        });
-        create_index_if_not_exists_statements.push(quote! {
-            ::kite_sql::orm::orm_create_index_statement(
-                #table_name_lit,
-                #index_name_lit,
-                &[#(#index_columns),*],
-                #is_unique,
-                true,
-            )
+        orm_indexes.push(quote! {
+            (#index_name_lit, &[#(#index_columns),*], #is_unique)
         });
     }
 
@@ -430,13 +420,19 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                 ]
             }
 
-            fn columns() -> &'static [::kite_sql::orm::OrmColumn] {
-                static ORM_COLUMNS: ::std::sync::LazyLock<::std::vec::Vec<::kite_sql::orm::OrmColumn>> = ::std::sync::LazyLock::new(|| {
+            fn columns() -> &'static [::kite_sql::catalog::column::ColumnCatalog] {
+                static ORM_COLUMNS: ::std::sync::LazyLock<::std::vec::Vec<::kite_sql::catalog::column::ColumnCatalog>> = ::std::sync::LazyLock::new(|| {
                     vec![
                         #(#orm_columns),*
                     ]
                 });
                 ORM_COLUMNS.as_slice()
+            }
+
+            fn indexes() -> &'static [(&'static str, &'static [&'static str], bool)] {
+                &[
+                    #(#orm_indexes),*
+                ]
             }
 
             fn params(&self) -> Vec<(&'static str, ::kite_sql::types::value::DataValue)> {
@@ -447,100 +443,6 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 
             fn primary_key(&self) -> &Self::PrimaryKey {
                 #primary_key_value
-            }
-
-            fn select_statement() -> &'static ::kite_sql::db::Statement {
-                static SELECT_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
-                    ::kite_sql::orm::orm_select_statement(
-                        #table_name_lit,
-                        <#struct_name #ty_generics as ::kite_sql::orm::Model>::fields(),
-                    )
-                });
-                &SELECT_STATEMENT
-            }
-
-            fn insert_statement() -> &'static ::kite_sql::db::Statement {
-                static INSERT_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
-                    ::kite_sql::orm::orm_insert_statement(
-                        #table_name_lit,
-                        <#struct_name #ty_generics as ::kite_sql::orm::Model>::fields(),
-                    )
-                });
-                &INSERT_STATEMENT
-            }
-
-            fn find_statement() -> &'static ::kite_sql::db::Statement {
-                static FIND_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
-                    ::kite_sql::orm::orm_find_statement(
-                        #table_name_lit,
-                        <#struct_name #ty_generics as ::kite_sql::orm::Model>::fields(),
-                        <#struct_name #ty_generics as ::kite_sql::orm::Model>::primary_key_field(),
-                    )
-                });
-                &FIND_STATEMENT
-            }
-
-            fn create_table_statement() -> &'static ::kite_sql::db::Statement {
-                static CREATE_TABLE_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
-                    ::kite_sql::orm::orm_create_table_statement(
-                        #table_name_lit,
-                        <#struct_name #ty_generics as ::kite_sql::orm::Model>::columns(),
-                        false,
-                    )
-                        .expect("failed to build ORM create table statement")
-                });
-                &CREATE_TABLE_STATEMENT
-            }
-
-            fn create_table_if_not_exists_statement() -> &'static ::kite_sql::db::Statement {
-                static CREATE_TABLE_IF_NOT_EXISTS_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
-                    ::kite_sql::orm::orm_create_table_statement(
-                        #table_name_lit,
-                        <#struct_name #ty_generics as ::kite_sql::orm::Model>::columns(),
-                        true,
-                    )
-                        .expect("failed to build ORM create table if not exists statement")
-                });
-                &CREATE_TABLE_IF_NOT_EXISTS_STATEMENT
-            }
-
-            fn create_index_statements() -> &'static [::kite_sql::db::Statement] {
-                static CREATE_INDEX_STATEMENTS: ::std::sync::LazyLock<::std::vec::Vec<::kite_sql::db::Statement>> = ::std::sync::LazyLock::new(|| {
-                    vec![
-                        #(#create_index_statements),*
-                    ]
-                });
-                CREATE_INDEX_STATEMENTS.as_slice()
-            }
-
-            fn create_index_if_not_exists_statements() -> &'static [::kite_sql::db::Statement] {
-                static CREATE_INDEX_IF_NOT_EXISTS_STATEMENTS: ::std::sync::LazyLock<::std::vec::Vec<::kite_sql::db::Statement>> = ::std::sync::LazyLock::new(|| {
-                    vec![
-                        #(#create_index_if_not_exists_statements),*
-                    ]
-                });
-                CREATE_INDEX_IF_NOT_EXISTS_STATEMENTS.as_slice()
-            }
-
-            fn drop_table_statement() -> &'static ::kite_sql::db::Statement {
-                static DROP_TABLE_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
-                    ::kite_sql::orm::orm_drop_table_statement(#table_name_lit, false)
-                });
-                &DROP_TABLE_STATEMENT
-            }
-
-            fn drop_table_if_exists_statement() -> &'static ::kite_sql::db::Statement {
-                static DROP_TABLE_IF_EXISTS_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
-                    ::kite_sql::orm::orm_drop_table_statement(#table_name_lit, true)
-                });
-                &DROP_TABLE_IF_EXISTS_STATEMENT
-            }
-
-            fn analyze_statement() -> &'static ::kite_sql::db::Statement {
-                static ANALYZE_STATEMENT: ::std::sync::LazyLock<::kite_sql::db::Statement> = ::std::sync::LazyLock::new(|| {
-                    ::kite_sql::orm::orm_analyze_statement(#table_name_lit)
-                });
-                &ANALYZE_STATEMENT
             }
         }
     })

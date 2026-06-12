@@ -1,6 +1,44 @@
 use super::*;
 
 impl<S: Storage> Database<S> {
+    /// Executes a binder-backed plan built inside a closure.
+    pub fn bind<F, P>(&self, build: F) -> Result<DatabaseIter<'_, S>, DatabaseError>
+    where
+        F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
+            &'ctx mut OrmContext<
+                'ctx,
+                'bind,
+                'parent,
+                'arena,
+                S::TransactionType<'_>,
+                &'static [(&'static str, DataValue)],
+            >,
+        ) -> Result<P, DatabaseError>,
+        P: TryInto<LogicalPlan>,
+        P::Error: Into<DatabaseError>,
+    {
+        bind_orm_context(self, build)
+    }
+
+    /// Explains a binder-backed plan built inside a closure.
+    pub fn explain<F, P>(&self, build: F) -> Result<String, DatabaseError>
+    where
+        F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
+            &'ctx mut OrmContext<
+                'ctx,
+                'bind,
+                'parent,
+                'arena,
+                S::TransactionType<'_>,
+                &'static [(&'static str, DataValue)],
+            >,
+        ) -> Result<P, DatabaseError>,
+        P: TryInto<LogicalPlan>,
+        P::Error: Into<DatabaseError>,
+    {
+        explain_orm_context(self, build)
+    }
+
     /// Loads a single model by primary key.
     ///
     /// The key type is taken from `M::PrimaryKey`, so `database.get::<User>(&1)`
@@ -58,29 +96,6 @@ impl<S: Storage> Database<S> {
         orm_list::<_, M>(self)
     }
 
-    /// Starts a typed single-table query builder for the given model.
-    ///
-    /// ```rust
-    /// use kite_sql::db::DataBaseBuilder;
-    /// use kite_sql::Model;
-    ///
-    /// #[derive(Default, Debug, PartialEq, Model)]
-    /// #[model(table = "users")]
-    /// struct User {
-    ///     #[model(primary_key)]
-    ///     id: i32,
-    ///     name: String,
-    /// }
-    ///
-    /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
-    /// database.create_table::<User>().unwrap();
-    /// let count = database.from::<User>().count().unwrap();
-    /// assert_eq!(count, 0);
-    /// ```
-    pub fn from<M: Model>(&self) -> FromBuilder<&Database<S>, M> {
-        FromBuilder::from_inner(QueryBuilder::new(self))
-    }
-
     /// Lists all table names.
     ///
     /// ```rust
@@ -104,7 +119,7 @@ impl<S: Storage> Database<S> {
         &self,
     ) -> Result<ProjectValueIter<DatabaseIter<'_, S>, String>, DatabaseError> {
         Ok(ProjectValueIter::new(
-            self.execute(orm_show_tables_statement(), &[])?,
+            self.bind(|ctx| ctx.binder.bind_show_tables())?,
         ))
     }
 
@@ -113,7 +128,7 @@ impl<S: Storage> Database<S> {
         &self,
     ) -> Result<ProjectValueIter<DatabaseIter<'_, S>, String>, DatabaseError> {
         Ok(ProjectValueIter::new(
-            self.execute(orm_show_views_statement(), &[])?,
+            self.bind(|ctx| ctx.binder.bind_show_views())?,
         ))
     }
 
@@ -140,12 +155,53 @@ impl<S: Storage> Database<S> {
         &self,
     ) -> Result<OrmIter<DatabaseIter<'_, S>, DescribeColumn>, DatabaseError> {
         Ok(self
-            .execute(orm_describe_statement(M::table_name()), &[])?
+            .bind(|ctx| ctx.binder.bind_describe(M::table_name().into()))?
             .orm::<DescribeColumn>())
     }
 }
 
 impl<'a, S: Storage> DBTransaction<'a, S> {
+    /// Executes a binder-backed plan inside the current transaction.
+    pub fn bind<F, P>(
+        &mut self,
+        build: F,
+    ) -> Result<TransactionIter<'_, S::TransactionType<'a>>, DatabaseError>
+    where
+        F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
+            &'ctx mut OrmContext<
+                'ctx,
+                'bind,
+                'parent,
+                'arena,
+                S::TransactionType<'a>,
+                &'static [(&'static str, DataValue)],
+            >,
+        ) -> Result<P, DatabaseError>,
+        P: TryInto<LogicalPlan>,
+        P::Error: Into<DatabaseError>,
+    {
+        bind_orm_context(self, build)
+    }
+
+    /// Explains a binder-backed plan inside the current transaction.
+    pub fn explain<F, P>(&mut self, build: F) -> Result<String, DatabaseError>
+    where
+        F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
+            &'ctx mut OrmContext<
+                'ctx,
+                'bind,
+                'parent,
+                'arena,
+                S::TransactionType<'a>,
+                &'static [(&'static str, DataValue)],
+            >,
+        ) -> Result<P, DatabaseError>,
+        P: TryInto<LogicalPlan>,
+        P::Error: Into<DatabaseError>,
+    {
+        explain_orm_context(self, build)
+    }
+
     /// Loads a single model by primary key inside the current transaction.
     pub fn get<M: Model>(&mut self, key: &M::PrimaryKey) -> Result<Option<M>, DatabaseError> {
         orm_get::<_, M>(self, key)
@@ -158,18 +214,13 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
         orm_list::<_, M>(self)
     }
 
-    /// Starts a typed single-table query builder inside the current transaction.
-    pub fn from<M: Model>(&mut self) -> FromBuilder<&mut DBTransaction<'a, S>, M> {
-        FromBuilder::from_inner(QueryBuilder::new(self))
-    }
-
     /// Lists all table names inside the current transaction.
     pub fn show_tables(
         &mut self,
     ) -> Result<ProjectValueIter<TransactionIter<'_, S::TransactionType<'a>>, String>, DatabaseError>
     {
         Ok(ProjectValueIter::new(
-            self.execute(orm_show_tables_statement(), &[])?,
+            self.bind(|ctx| ctx.binder.bind_show_tables())?,
         ))
     }
 
@@ -179,7 +230,7 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
     ) -> Result<ProjectValueIter<TransactionIter<'_, S::TransactionType<'a>>, String>, DatabaseError>
     {
         Ok(ProjectValueIter::new(
-            self.execute(orm_show_views_statement(), &[])?,
+            self.bind(|ctx| ctx.binder.bind_show_views())?,
         ))
     }
 
@@ -189,7 +240,7 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
     ) -> Result<OrmIter<TransactionIter<'_, S::TransactionType<'a>>, DescribeColumn>, DatabaseError>
     {
         Ok(self
-            .execute(orm_describe_statement(M::table_name()), &[])?
+            .bind(|ctx| ctx.binder.bind_describe(M::table_name().into()))?
             .orm::<DescribeColumn>())
     }
 }

@@ -55,7 +55,8 @@ For the full ORM guide, see [`src/orm/README.md`](src/orm/README.md).
 ```rust
 use kite_sql::db::DataBaseBuilder;
 use kite_sql::errors::DatabaseError;
-use kite_sql::{Model, Projection};
+use kite_sql::orm::{BoundExpressionOps, OrmQueryResultExt};
+use kite_sql::Model;
 
 #[derive(Default, Debug, PartialEq, Model)]
 #[model(table = "users")]
@@ -71,15 +72,8 @@ struct User {
     age: Option<i32>,
 }
 
-#[derive(Default, Debug, PartialEq, Projection)]
-struct UserSummary {
-    id: i32,
-    #[projection(rename = "user_name")]
-    display_name: String,
-}
-
 fn main() -> Result<(), DatabaseError> {
-    let database = DataBaseBuilder::path("./data").build_rocksdb()?;
+    let mut database = DataBaseBuilder::path("./data").build_rocksdb()?;
     // Or: let database = DataBaseBuilder::path("./data").build_lmdb()?;
 
     database.migrate::<User>()?;
@@ -100,24 +94,30 @@ fn main() -> Result<(), DatabaseError> {
     ])?;
 
     database
-        .from::<User>()
-        .eq(User::id(), 1)
-        .update()
-        .set(User::age(), Some(19))
-        .execute()?;
+        .bind(|ctx| {
+            ctx.mutate::<User>()?
+                .filter(|e| e.column(User::id())?.eq(1))?
+                .update(|u| u.set_value(User::age(), Some(19)))
+        })?
+        .done()?;
 
     database
-        .from::<User>()
-        .eq(User::id(), 2)
-        .delete()?;
+        .bind(|ctx| {
+            ctx.mutate::<User>()?
+                .filter(|e| e.column(User::id())?.eq(2))?
+                .delete()
+        })?
+        .done()?;
 
     let users = database
-        .from::<User>()
-        .gte(User::age(), 18)
-        .project::<UserSummary>()
-        .asc(User::name())
-        .limit(10)
-        .fetch()?;
+        .bind(|ctx| {
+            ctx.from::<User>()?
+                .filter(|e| e.column(User::age())?.gte(18))?
+                .project_scalars((User::id(), User::name()))?
+                .asc_by(User::name())?
+                .limit(10)
+        })?
+        .project_tuple::<(i32, String)>();
 
     for user in users {
         println!("{:?}", user?);
@@ -138,6 +138,7 @@ fn main() -> Result<(), DatabaseError> {
 - Transaction isolation is documented in [`docs/transaction-isolation.md`](docs/transaction-isolation.md).
 - Cargo features:
   - `rocksdb` is enabled by default
+  - `parser` is enabled by default and provides the SQL parser frontend
   - `lmdb` is optional
   - `unsafe_txdb_checkpoint` enables experimental checkpoint support for RocksDB `TransactionDB`
   - `cargo check --no-default-features --features lmdb` builds an LMDB-only native configuration

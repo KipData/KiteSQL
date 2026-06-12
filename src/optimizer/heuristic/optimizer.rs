@@ -633,8 +633,6 @@ mod tests {
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::ops::Bound;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::Arc;
     use tempfile::TempDir;
 
     #[test]
@@ -672,7 +670,6 @@ mod tests {
                 &transaction,
                 &scala_functions,
                 &table_functions,
-                Arc::new(AtomicUsize::new(0)),
             ),
             &[],
             None,

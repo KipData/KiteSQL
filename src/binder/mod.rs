@@ -29,26 +29,26 @@ mod drop_view;
 mod explain;
 pub mod expr;
 mod insert;
+#[cfg(feature = "parser")]
+mod parser;
 mod select;
 mod show_table;
 mod show_view;
 mod truncate;
 mod update;
 
-use sqlparser::ast::{
-    DescribeAlias, FromTable, Ident, ObjectName, ObjectNamePart, ObjectType, SetExpr, Spanned,
-    Statement, TableObject,
-};
-use sqlparser::tokenizer::Span;
-use std::borrow::Cow;
+#[cfg(feature = "parser")]
+pub use parser::{command_type, prepare, prepare_all, CommandType, Statement};
+#[cfg(feature = "orm")]
+pub use select::{BindPlanFrom, BindPlanSelectList};
+#[cfg(feature = "orm")]
+pub(crate) use select::{JoinConstraintInput, TableAliasInput};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 
 use crate::catalog::view::View;
 use crate::catalog::{ColumnRef, TableCatalog, TableName};
 use crate::db::{ScalaFunctions, TableFunctions};
-use crate::errors::{DatabaseError, SqlErrorSpan};
+use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::JoinType;
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
@@ -63,78 +63,11 @@ pub enum InputRefType {
     GroupBy,
 }
 
-pub enum CommandType {
-    DQL,
-    DML,
-    DDL,
-}
-
-pub(crate) trait AttachSpanSource {
-    fn sql_error_span(self) -> Option<SqlErrorSpan>;
-}
-
-impl<T: Spanned + ?Sized> AttachSpanSource for &T {
-    fn sql_error_span(self) -> Option<SqlErrorSpan> {
-        self.span().sql_error_span()
-    }
-}
-
-impl AttachSpanSource for Span {
-    fn sql_error_span(self) -> Option<SqlErrorSpan> {
-        if self == Span::empty() {
-            return None;
-        }
-
-        let start = self.start.column as usize;
-        let mut end = self.end.column as usize;
-        if end <= start {
-            end = start.saturating_add(1);
-        }
-
-        Some(SqlErrorSpan {
-            start,
-            end,
-            line: self.start.line as usize,
-            highlight: None,
-        })
-    }
-}
-
-pub(crate) fn attach_span_if_absent<T: AttachSpanSource>(
-    err: DatabaseError,
-    source: T,
-) -> DatabaseError {
-    if err.sql_error_span().is_some() {
-        return err;
-    }
-
-    match source.sql_error_span() {
-        Some(span) => err.with_span(span),
-        None => err,
-    }
-}
-
-pub fn command_type(stmt: &Statement) -> Result<CommandType, DatabaseError> {
-    match stmt {
-        Statement::CreateTable(_)
-        | Statement::CreateIndex(_)
-        | Statement::CreateView(_)
-        | Statement::AlterTable(_)
-        | Statement::Drop { .. } => Ok(CommandType::DDL),
-        Statement::Query(_)
-        | Statement::Explain { .. }
-        | Statement::ExplainTable { .. }
-        | Statement::ShowTables { .. }
-        | Statement::ShowViews { .. } => Ok(CommandType::DQL),
-        Statement::Analyze(_)
-        | Statement::Truncate(_)
-        | Statement::Update(_)
-        | Statement::Delete(_)
-        | Statement::Insert(_) => Ok(CommandType::DML),
-        #[cfg(feature = "copy")]
-        Statement::Copy { .. } => Ok(CommandType::DML),
-        stmt => Err(DatabaseError::UnsupportedStmt(stmt.to_string())),
-    }
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum SetOperatorKind {
+    Union,
+    Except,
+    Intersect,
 }
 
 // Tips: only query now!
@@ -297,7 +230,6 @@ pub struct BinderContext<'a, T: Transaction> {
     sub_queries: HashMap<QueryBindStep, Vec<SubQueryType>>,
     has_outer_refs: bool,
 
-    temp_table_id: Arc<AtomicUsize>,
     pub(crate) allow_default: bool,
 }
 
@@ -341,7 +273,6 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
         transaction: &'a T,
         scala_functions: &'a ScalaFunctions,
         table_functions: &'a TableFunctions,
-        temp_table_id: Arc<AtomicUsize>,
     ) -> Self {
         BinderContext {
             scala_functions,
@@ -358,19 +289,14 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
             bind_step: QueryBindStep::From,
             sub_queries: Default::default(),
             has_outer_refs: false,
-            temp_table_id,
             allow_default: false,
         }
     }
 
-    pub fn temp_table(&mut self) -> TableName {
-        format!(
-            "_temp_table_{}_",
-            self.temp_table_id.fetch_add(1, Ordering::SeqCst)
-        )
-        .into()
-    }
-
+    /// Creates a child context that starts with the current binding scope.
+    ///
+    /// This is used for nested query bodies that should be able to resolve the
+    /// same local sources and aliases while keeping their mutations isolated.
     pub(crate) fn fork(&self) -> Self {
         BinderContext {
             scala_functions: self.scala_functions,
@@ -387,9 +313,22 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
             bind_step: self.bind_step,
             sub_queries: Default::default(),
             has_outer_refs: false,
-            temp_table_id: self.temp_table_id.clone(),
             allow_default: self.allow_default,
         }
+    }
+
+    /// Creates a child context with shared catalogs but without local bindings.
+    ///
+    /// This is used while binding an independent input, such as the right side
+    /// of a join, before merging its newly bound sources into the parent scope.
+    pub(crate) fn fork_empty(&self) -> Self {
+        BinderContext::new(
+            self.table_cache,
+            self.view_cache,
+            self.transaction,
+            self.scala_functions,
+            self.table_functions,
+        )
     }
 
     pub fn step(&mut self, bind_step: QueryBindStep) {
@@ -607,7 +546,7 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
 
 pub struct Binder<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> {
     pub(crate) context: BinderContext<'a, T>,
-    args: &'a A,
+    pub(crate) args: &'a A,
     with_pk: Option<TableName>,
     pub(crate) parent: Option<&'parent BinderContext<'a, T>>,
 }
@@ -630,6 +569,10 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
         self.with_pk = Some(table_name);
     }
 
+    pub fn clear_with_pk(&mut self) {
+        self.with_pk = None;
+    }
+
     pub fn is_scan_with_pk(&self, table_name: &TableName) -> bool {
         if let Some(with_pk_table) = self.with_pk.as_ref() {
             return with_pk_table == table_name;
@@ -637,187 +580,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
         false
     }
 
-    fn bind_inner(
-        &mut self,
-        stmt: Statement,
-        arena: &mut PlanArena,
-    ) -> Result<LogicalPlan, DatabaseError> {
-        let span = stmt.span();
-        let plan = match stmt {
-            Statement::Query(query) => self.bind_query(*query, arena)?,
-            Statement::AlterTable(alter) => {
-                if alter.operations.len() != 1 {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "only a single ALTER TABLE operation is supported".to_string(),
-                    ));
-                }
-                let operation = alter.operations.into_iter().next().unwrap();
-                self.bind_alter_table(alter.name, operation, arena)?
-            }
-            Statement::CreateTable(create) => self.bind_create_table(
-                create.name,
-                create.columns,
-                create.constraints,
-                create.if_not_exists,
-                arena,
-            )?,
-            Statement::Drop {
-                object_type,
-                mut names,
-                if_exists,
-                ..
-            } => {
-                if names.len() > 1 {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "only Drop a single `Table` or `View` is allowed".to_string(),
-                    ));
-                }
-                match object_type {
-                    ObjectType::Table => self.bind_drop_table(names.remove(0), if_exists)?,
-                    ObjectType::View => self.bind_drop_view(names.remove(0), if_exists)?,
-                    ObjectType::Index => self.bind_drop_index(names.remove(0), if_exists)?,
-                    _ => {
-                        return Err(DatabaseError::UnsupportedStmt(
-                            "only `Table` and `View` are allowed to be Dropped".to_string(),
-                        ))
-                    }
-                }
-            }
-            Statement::Insert(insert) => {
-                let sqlparser::ast::Insert {
-                    table,
-                    columns,
-                    overwrite,
-                    source,
-                    ..
-                } = insert;
-                let table_name = match table {
-                    TableObject::TableName(table_name) => table_name,
-                    TableObject::TableFunction(_) => {
-                        return Err(DatabaseError::UnsupportedStmt(
-                            "insert into table function is not supported".to_string(),
-                        ))
-                    }
-                };
-                let source = source.ok_or_else(|| {
-                    DatabaseError::UnsupportedStmt(
-                        "insert without source is not supported".to_string(),
-                    )
-                })?;
-                if matches!(source.body.as_ref(), SetExpr::Values(_)) {
-                    let query = *source;
-                    let values = match *query.body {
-                        SetExpr::Values(values) => values,
-                        body => {
-                            return Err(DatabaseError::UnsupportedStmt(format!(
-                                "insert source: {body:?}"
-                            )))
-                        }
-                    };
-                    self.bind_insert(table_name, columns, values.rows, overwrite, false, arena)?
-                } else {
-                    self.bind_insert_query(table_name, columns, *source, overwrite, arena)?
-                }
-            }
-            Statement::Update(update) => {
-                self.bind_update(update.table, update.selection, update.assignments, arena)?
-            }
-            Statement::Delete(delete) => {
-                let from = match delete.from {
-                    FromTable::WithFromKeyword(from) | FromTable::WithoutKeyword(from) => from,
-                };
-                let table = from
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| DatabaseError::invalid_table("DELETE without FROM"))?;
-
-                self.bind_delete(table, delete.selection, arena)?
-            }
-            Statement::Analyze(analyze) => {
-                let table_name = analyze.table_name.ok_or_else(|| {
-                    DatabaseError::UnsupportedStmt(
-                        "ANALYZE without table is not supported".to_string(),
-                    )
-                })?;
-                self.bind_analyze(table_name, arena)?
-            }
-            Statement::Truncate(truncate) => {
-                if truncate.table_names.len() != 1 {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "only truncate a single table is supported".to_string(),
-                    ));
-                }
-                self.bind_truncate(truncate.table_names.into_iter().next().unwrap().name)?
-            }
-            Statement::ShowTables { .. } => self.bind_show_tables()?,
-            Statement::ShowViews { .. } => self.bind_show_views()?,
-            #[cfg(feature = "copy")]
-            Statement::Copy {
-                source,
-                to,
-                target,
-                options,
-                ..
-            } => self.bind_copy(source, to, target, options, arena)?,
-            #[cfg(not(feature = "copy"))]
-            Statement::Copy { .. } => {
-                return Err(DatabaseError::UnsupportedStmt(
-                    "COPY requires the `copy` feature".to_string(),
-                ))
-            }
-            Statement::Explain { statement, .. } => {
-                let plan = self.bind_inner(*statement, arena)?;
-
-                self.bind_explain(plan)?
-            }
-            Statement::ExplainTable {
-                describe_alias: DescribeAlias::Describe | DescribeAlias::Desc,
-                table_name,
-                ..
-            } => self.bind_describe(table_name)?,
-            Statement::CreateIndex(create) => self.bind_create_index(
-                create.table_name,
-                create.name,
-                create.columns,
-                create.if_not_exists,
-                create.unique,
-                arena,
-            )?,
-            Statement::CreateView(create) => self.bind_create_view(create, arena)?,
-            _ => return Err(DatabaseError::UnsupportedStmt(stmt.to_string())),
-        };
-        Ok(plan).map_err(|err| attach_span_if_absent(err, span))
-    }
-
-    pub fn bind(
-        &mut self,
-        stmt: Statement,
-        arena: &mut PlanArena,
-    ) -> Result<LogicalPlan, DatabaseError> {
-        self.bind_inner(stmt, arena)
-    }
-
-    pub fn bind_set_expr(
-        &mut self,
-        set_expr: SetExpr,
-        arena: &mut PlanArena,
-    ) -> Result<LogicalPlan, DatabaseError> {
-        match set_expr {
-            SetExpr::Select(select) => self.bind_select(*select, None, arena),
-            SetExpr::Query(query) => self.bind_query(*query, arena),
-            SetExpr::SetOperation {
-                op,
-                set_quantifier,
-                left,
-                right,
-            } => self.bind_set_operation(op, set_quantifier, *left, *right, arena),
-            expr => Err(DatabaseError::UnsupportedStmt(format!(
-                "set expression: {expr:?}"
-            ))),
-        }
-    }
-
-    fn extend(&mut self, context: BinderContext<'a, T>) {
+    pub(crate) fn extend(&mut self, context: BinderContext<'a, T>) {
         for bound_source in context.bind_table {
             self.context.add_bound_source(
                 bound_source.table_name,
@@ -833,33 +596,6 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
             self.context.table_aliases.insert(key, table_name);
         }
     }
-}
-
-fn lower_ident(ident: &Ident) -> Cow<'_, str> {
-    let value = &ident.value;
-
-    if value.chars().any(char::is_uppercase) {
-        Cow::Owned(value.to_lowercase())
-    } else {
-        Cow::Borrowed(value)
-    }
-}
-
-fn lower_name_part(part: &ObjectNamePart) -> Result<Cow<'_, str>, DatabaseError> {
-    part.as_ident()
-        .map(lower_ident)
-        .ok_or_else(|| attach_span_if_absent(DatabaseError::invalid_table(part.to_string()), part))
-}
-
-/// Convert an object name into lower case
-fn lower_case_name(name: &ObjectName) -> Result<Cow<'_, str>, DatabaseError> {
-    if name.0.len() == 1 {
-        return lower_name_part(&name.0[0]);
-    }
-    Err(attach_span_if_absent(
-        DatabaseError::invalid_table(name.to_string()),
-        name,
-    ))
 }
 
 pub(crate) fn is_valid_identifier(s: &str) -> bool {
@@ -879,8 +615,6 @@ pub mod test {
     use crate::types::ColumnId;
     use crate::types::LogicalType::Integer;
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::Arc;
     use tempfile::TempDir;
 
     pub(crate) struct TableState<S: Storage> {
@@ -912,7 +646,6 @@ pub mod test {
                     &transaction,
                     &scala_functions,
                     &table_functions,
-                    Arc::new(AtomicUsize::new(0)),
                 ),
                 &[],
                 None,

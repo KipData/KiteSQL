@@ -16,6 +16,7 @@ use crate::expression::{BinaryOperator, UnaryOperator};
 use crate::types::tuple::TupleId;
 use crate::types::LogicalType;
 use chrono::ParseError;
+#[cfg(feature = "parser")]
 use sqlparser::parser::ParserError;
 use std::convert::Infallible;
 use std::error::Error;
@@ -116,6 +117,7 @@ pub enum DatabaseError {
     ParseDate(ParseError),
     ParseFloat(ParseFloatError),
     ParseInt(ParseIntError),
+    #[cfg(feature = "parser")]
     ParserSql(ParserError),
     PrimaryKeyNotFound,
     PrimaryKeyTooManyLayers,
@@ -218,6 +220,7 @@ impl fmt::Display for DatabaseError {
             Self::ParseDate(err) => write!(f, "parser date: {err}"),
             Self::ParseFloat(err) => write!(f, "parser float: {err}"),
             Self::ParseInt(err) => write!(f, "parser int: {err}"),
+            #[cfg(feature = "parser")]
             Self::ParserSql(err) => write!(f, "parser sql: {err}"),
             Self::PrimaryKeyNotFound => f.write_str("must contain primary key!"),
             Self::PrimaryKeyTooManyLayers => {
@@ -279,6 +282,7 @@ impl Error for DatabaseError {
             Self::ParseDate(err) => Some(err),
             Self::ParseFloat(err) => Some(err),
             Self::ParseInt(err) => Some(err),
+            #[cfg(feature = "parser")]
             Self::ParserSql(err) => Some(err),
             #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
             Self::Lmdb(err) => Some(err),
@@ -311,6 +315,7 @@ impl_from_database_error!(ParseBoolError, ParseBool);
 impl_from_database_error!(ParseError, ParseDate);
 impl_from_database_error!(ParseFloatError, ParseFloat);
 impl_from_database_error!(ParseIntError, ParseInt);
+#[cfg(feature = "parser")]
 impl_from_database_error!(ParserError, ParserSql);
 #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
 impl_from_database_error!(lmdb::Error, Lmdb);

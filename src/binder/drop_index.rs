@@ -12,33 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::binder::{attach_span_if_absent, lower_name_part, Binder};
+use crate::binder::Binder;
+use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::planner::operator::drop_index::DropIndexOperator;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
-use sqlparser::ast::ObjectName;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_drop_index(
         &mut self,
-        name: ObjectName,
+        table_name: TableName,
+        index_name: String,
         if_exists: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name = name.0.first().ok_or_else(|| {
-            attach_span_if_absent(DatabaseError::invalid_table(name.to_string()), &name)
-        })?;
-        let index_name = name.0.get(1).ok_or(DatabaseError::InvalidIndex)?;
-
-        let table_name = lower_name_part(table_name)?.into();
-        let index_name = lower_name_part(index_name)?;
-
         Ok(LogicalPlan::new(
             Operator::DropIndex(DropIndexOperator {
                 table_name,
-                index_name: index_name.into_owned(),
+                index_name,
                 if_exists,
             }),
             Childrens::None,

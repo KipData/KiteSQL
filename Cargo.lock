@@ -1095,7 +1095,7 @@ dependencies = [
 
 [[package]]
 name = "kite_sql"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "ahash 0.8.12",
  "base64",

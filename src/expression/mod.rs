@@ -26,12 +26,15 @@ use crate::types::evaluator::{
 };
 use crate::types::value::DataValue;
 use crate::types::{CharLengthUnits, LogicalType};
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
-use sqlparser::ast::{BinaryOperator as SqlBinaryOperator, UnaryOperator as SqlUnaryOperator};
+#[cfg(feature = "decimal")]
+use rust_decimal::Decimal;
 use std::borrow::Cow;
 use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
+use std::sync::Arc;
 use std::{fmt, mem};
 
 pub mod agg;
@@ -47,16 +50,6 @@ pub enum TrimWhereField {
     Both,
     Leading,
     Trailing,
-}
-
-impl From<sqlparser::ast::TrimWhereField> for TrimWhereField {
-    fn from(value: sqlparser::ast::TrimWhereField) -> Self {
-        match value {
-            sqlparser::ast::TrimWhereField::Both => Self::Both,
-            sqlparser::ast::TrimWhereField::Leading => Self::Leading,
-            sqlparser::ast::TrimWhereField::Trailing => Self::Trailing,
-        }
-    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
@@ -164,6 +157,113 @@ pub enum ScalarExpression {
         else_expr: Option<Box<ScalarExpression>>,
         ty: LogicalType,
     },
+}
+
+impl From<DataValue> for ScalarExpression {
+    fn from(value: DataValue) -> Self {
+        ScalarExpression::Constant(value)
+    }
+}
+
+macro_rules! impl_scalar_expression_from_data_value {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl From<$ty> for ScalarExpression {
+                fn from(value: $ty) -> Self {
+                    ScalarExpression::Constant(DataValue::from(value))
+                }
+            }
+        )+
+    };
+}
+
+impl_scalar_expression_from_data_value!(
+    bool,
+    i8,
+    i16,
+    i32,
+    i64,
+    u8,
+    u16,
+    u32,
+    u64,
+    f32,
+    f64,
+    String,
+    Option<bool>,
+    Option<i8>,
+    Option<i16>,
+    Option<i32>,
+    Option<i64>,
+    Option<u8>,
+    Option<u16>,
+    Option<u32>,
+    Option<u64>,
+    Option<f32>,
+    Option<f64>,
+    Option<String>,
+);
+#[cfg(feature = "decimal")]
+impl_scalar_expression_from_data_value!(Decimal, Option<Decimal>);
+
+impl From<&str> for ScalarExpression {
+    fn from(value: &str) -> Self {
+        ScalarExpression::Constant(DataValue::from(value.to_string()))
+    }
+}
+
+impl From<Option<&str>> for ScalarExpression {
+    fn from(value: Option<&str>) -> Self {
+        ScalarExpression::Constant(value.map(str::to_string).into())
+    }
+}
+
+impl From<Arc<str>> for ScalarExpression {
+    fn from(value: Arc<str>) -> Self {
+        ScalarExpression::Constant(DataValue::from(value.to_string()))
+    }
+}
+
+impl From<Option<Arc<str>>> for ScalarExpression {
+    fn from(value: Option<Arc<str>>) -> Self {
+        ScalarExpression::Constant(value.map(|value| value.to_string()).into())
+    }
+}
+
+impl From<NaiveDate> for ScalarExpression {
+    fn from(value: NaiveDate) -> Self {
+        ScalarExpression::Constant(DataValue::from(&value))
+    }
+}
+
+impl From<Option<NaiveDate>> for ScalarExpression {
+    fn from(value: Option<NaiveDate>) -> Self {
+        ScalarExpression::Constant(DataValue::from(value.as_ref()))
+    }
+}
+
+impl From<NaiveDateTime> for ScalarExpression {
+    fn from(value: NaiveDateTime) -> Self {
+        ScalarExpression::Constant(DataValue::from(&value))
+    }
+}
+
+impl From<Option<NaiveDateTime>> for ScalarExpression {
+    fn from(value: Option<NaiveDateTime>) -> Self {
+        ScalarExpression::Constant(DataValue::from(value.as_ref()))
+    }
+}
+
+impl From<NaiveTime> for ScalarExpression {
+    fn from(value: NaiveTime) -> Self {
+        ScalarExpression::Constant(DataValue::from(&value))
+    }
+}
+
+impl From<Option<NaiveTime>> for ScalarExpression {
+    fn from(value: Option<NaiveTime>) -> Self {
+        ScalarExpression::Constant(DataValue::from(value.as_ref()))
+    }
 }
 
 pub struct BindEvaluator<'a, 'p> {
@@ -836,19 +936,6 @@ pub enum UnaryOperator {
     Not,
 }
 
-impl TryFrom<SqlUnaryOperator> for UnaryOperator {
-    type Error = DatabaseError;
-
-    fn try_from(value: SqlUnaryOperator) -> Result<Self, Self::Error> {
-        match value {
-            SqlUnaryOperator::Plus => Ok(UnaryOperator::Plus),
-            SqlUnaryOperator::Minus => Ok(UnaryOperator::Minus),
-            SqlUnaryOperator::Not => Ok(UnaryOperator::Not),
-            op => Err(DatabaseError::UnsupportedStmt(format!("{op}"))),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ReferenceSerialization)]
 pub enum BinaryOperator {
     Plus,
@@ -922,31 +1009,6 @@ impl fmt::Display for UnaryOperator {
             UnaryOperator::Plus => write!(f, "+"),
             UnaryOperator::Minus => write!(f, "-"),
             UnaryOperator::Not => write!(f, "!"),
-        }
-    }
-}
-
-impl TryFrom<SqlBinaryOperator> for BinaryOperator {
-    type Error = DatabaseError;
-
-    fn try_from(value: SqlBinaryOperator) -> Result<Self, Self::Error> {
-        match value {
-            SqlBinaryOperator::Plus => Ok(BinaryOperator::Plus),
-            SqlBinaryOperator::Minus => Ok(BinaryOperator::Minus),
-            SqlBinaryOperator::Multiply => Ok(BinaryOperator::Multiply),
-            SqlBinaryOperator::Divide => Ok(BinaryOperator::Divide),
-            SqlBinaryOperator::Modulo => Ok(BinaryOperator::Modulo),
-            SqlBinaryOperator::StringConcat => Ok(BinaryOperator::StringConcat),
-            SqlBinaryOperator::Gt => Ok(BinaryOperator::Gt),
-            SqlBinaryOperator::Lt => Ok(BinaryOperator::Lt),
-            SqlBinaryOperator::GtEq => Ok(BinaryOperator::GtEq),
-            SqlBinaryOperator::LtEq => Ok(BinaryOperator::LtEq),
-            SqlBinaryOperator::Spaceship => Ok(BinaryOperator::Spaceship),
-            SqlBinaryOperator::Eq => Ok(BinaryOperator::Eq),
-            SqlBinaryOperator::NotEq => Ok(BinaryOperator::NotEq),
-            SqlBinaryOperator::And => Ok(BinaryOperator::And),
-            SqlBinaryOperator::Or => Ok(BinaryOperator::Or),
-            op => Err(DatabaseError::UnsupportedStmt(format!("{op}"))),
         }
     }
 }
