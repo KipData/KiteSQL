@@ -230,7 +230,15 @@ impl LogicalPlan {
             Operator::ShowView => Self::dummy_schema(arena, ["VIEW"]),
             Operator::Explain => Self::dummy_schema(arena, ["PLAN"]),
             Operator::Describe(_) => {
-                Self::dummy_schema(arena, ["FIELD", "TYPE", "LEN", "NULL", "Key", "DEFAULT"])
+                Self::dummy_schema(arena, [
+                    "FIELD",
+                    "TYPE",
+                    "LEN",
+                    "NULL",
+                    "Key",
+                    "DEFAULT",
+                    "COLUMN_REF",
+                ])
             }
             Operator::Insert(_) => Self::dummy_schema(arena, ["INSERTED"]),
             Operator::Update(_) => Self::dummy_schema(arena, ["UPDATED"]),

@@ -89,6 +89,7 @@ const DUMMY_COLUMN_NAMES: [&str; DUMMY_COLUMN_COUNT] = [
     "NULL",
     "Key",
     "DEFAULT",
+    "COLUMN_REF",
     "INSERTED",
     "UPDATED",
     "DELETED",
@@ -106,7 +107,7 @@ const DUMMY_COLUMN_NAMES: [&str; DUMMY_COLUMN_COUNT] = [
     "COPY FROM SOURCE",
     "COPY TO TARGET",
 ];
-const DUMMY_COLUMN_COUNT: usize = 25;
+const DUMMY_COLUMN_COUNT: usize = 26;
 const DUMMY_COLUMN_BASE: usize = usize::MAX - DUMMY_COLUMN_COUNT + 1;
 
 impl TableArenaCell {

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::{ColumnCatalog, TableName};
+use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
 use crate::errors::DatabaseError;
 use crate::execution::{
     ExecArena, ExecId, ExecNode, ExecutorNode, ReadExecutionContext, ReadExecutor,
@@ -43,7 +43,7 @@ static EMPTY_KEY_TYPE: LazyLock<DataValue> = LazyLock::new(|| DataValue::Utf8 {
 
 pub struct Describe {
     table_name: TableName,
-    columns: Option<Vec<ColumnCatalog>>,
+    columns: Option<Vec<ColumnRef>>,
     cursor: usize,
 }
 
@@ -105,28 +105,30 @@ impl Describe {
             self.columns = Some(
                 table
                     .columns()
-                    .map(|column| plan_arena.column(*column).clone())
+                    .copied()
                     .collect(),
             );
         }
 
-        let Some(column) = self
+        let Some(column_ref) = self
             .columns
             .as_ref()
             .and_then(|columns| columns.get(self.cursor))
-            .cloned()
+            .copied()
         else {
             arena.finish();
             return Ok(());
         };
 
         self.cursor += 1;
+        let column = plan_arena.column(column_ref);
         let default = describe_default(&column, plan_arena);
+        let mapping = column_ref.to_string();
 
         let output = arena.result_tuple_mut();
         output.pk = None;
         output.values.clear();
-        fill_describe_row(&mut output.values, &column, default);
+        fill_describe_row(&mut output.values, column, default, mapping);
 
         arena.resume();
         Ok(())
@@ -142,7 +144,12 @@ fn describe_default(column: &ColumnCatalog, arena: &crate::planner::PlanArena) -
         .unwrap_or_else(|| "null".to_string())
 }
 
-fn fill_describe_row(values: &mut Vec<DataValue>, column: &ColumnCatalog, default: String) {
+fn fill_describe_row(
+    values: &mut Vec<DataValue>,
+    column: &ColumnCatalog,
+    default: String,
+    mapping: String,
+) {
     let datatype = column.datatype();
 
     values.push(DataValue::Utf8 {
@@ -171,6 +178,11 @@ fn fill_describe_row(values: &mut Vec<DataValue>, column: &ColumnCatalog, defaul
     values.push(key_value(column));
     values.push(DataValue::Utf8 {
         value: default,
+        ty: Utf8Type::Variable(None),
+        unit: CharLengthUnits::Characters,
+    });
+    values.push(DataValue::Utf8 {
+        value: mapping,
         ty: Utf8Type::Variable(None),
         unit: CharLengthUnits::Characters,
     });

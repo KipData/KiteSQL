@@ -1,12 +1,12 @@
 statement ok
 create table t9 (c1 int primary key, c2 int default 0, c3 varchar unique);
 
-query TTTTI
+query TTTTTTT
 describe t9;
 ----
-c1 Integer 4 false PRIMARY null
-c2 Integer 4 true EMPTY 0
-c3 Varchar(None, CHARACTERS) variable true UNIQUE null
+c1 Integer 4 false PRIMARY null #1
+c2 Integer 4 true EMPTY 0 #2
+c3 Varchar(None, CHARACTERS) variable true UNIQUE null #3
 
 statement ok
 drop table t9;
@@ -14,12 +14,12 @@ drop table t9;
 statement ok
 create table t9_m (c1 int primary key, c2 int primary key, c3 varchar unique);
 
-query TTTTI
+query TTTTTTT
 describe t9_m;
 ----
-c1 Integer 4 false PRIMARY null
-c2 Integer 4 false PRIMARY null
-c3 Varchar(None, CHARACTERS) variable true UNIQUE null
+c1 Integer 4 false PRIMARY null #1
+c2 Integer 4 false PRIMARY null #2
+c3 Varchar(None, CHARACTERS) variable true UNIQUE null #3
 
 statement ok
 drop table t9_m;
