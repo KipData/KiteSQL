@@ -171,7 +171,7 @@ impl<'a, S: Storage> KiteSqlRocksTransaction<'a, S> {
             return Err(TpccError::InvalidBackend);
         };
         Ok(KiteSqlTxnResult::new(
-            self.inner.execute(statement.clone(), params)?,
+            self.inner.execute(statement, params)?,
         ))
     }
 }

@@ -51,7 +51,7 @@ pub(super) use sqlparser::ast::{
 #[cfg(feature = "copy")]
 pub(super) use sqlparser::ast::{CopyOption, CopySource, CopyTarget};
 use sqlparser::tokenizer::Span;
-use std::borrow::Cow;
+use std::borrow::{Borrow, Cow};
 use std::cmp;
 use std::slice;
 
@@ -158,17 +158,23 @@ fn statement_mutates_catalog_or_statistics(statement: &Statement) -> Result<bool
 
 impl<S: Storage> Database<S> {
     /// Executes a prepared [`Statement`] inside a database-owned transaction.
-    pub fn execute<A: AsRef<[(&'static str, DataValue)]>>(
+    pub fn execute<A, St>(
         &self,
-        statement: Statement,
+        statement: St,
         params: A,
-    ) -> Result<DatabaseIter<'_, S>, DatabaseError> {
-        if statement_mutates_catalog_or_statistics(&statement)? {
+    ) -> Result<DatabaseIter<'_, S>, DatabaseError>
+    where
+        A: AsRef<[(&'static str, DataValue)]>,
+        St: Borrow<Statement>,
+    {
+        if statement_mutates_catalog_or_statistics(statement.borrow())? {
             return Err(DatabaseError::UnsupportedStmt(
                 "DDL and ANALYZE require `Database::ddl` or `Database::analyze`".to_string(),
             ));
         }
-        BindSource::execute(self, params, |binder, arena| binder.bind(statement, arena))
+        BindSource::execute(self, params, |binder, arena| {
+            binder.bind(statement.borrow(), arena)
+        })
     }
 
     pub fn ddl<T: AsRef<str>>(&mut self, sql: T) -> Result<(), DatabaseError> {
@@ -183,7 +189,7 @@ impl<S: Storage> Database<S> {
                 .with_sql_context(sql));
             }
 
-            self.execute_mut(sql, &[], |binder, arena| binder.bind(statement, arena))?;
+            self.execute_mut(sql, &[], |binder, arena| binder.bind(&statement, arena))?;
         }
 
         Ok(())
@@ -235,7 +241,7 @@ impl<S: Storage> Database<S> {
                 match self
                     .state
                     .execute(unsafe { &mut *transaction }, &[], |binder, arena| {
-                        binder.bind(statement, arena)
+                        binder.bind(&statement, arena)
                     }) {
                     Ok(result) => result,
                     Err(err) => {
@@ -269,20 +275,26 @@ impl<S: Storage> Database<S> {
 
 impl<'txn, S: Storage> DBTransaction<'txn, S> {
     /// Executes a prepared [`Statement`] inside the current transaction.
-    pub fn execute<'a, A: AsRef<[(&'static str, DataValue)]>>(
+    pub fn execute<'a, A, St>(
         &'a mut self,
-        statement: Statement,
+        statement: St,
         params: A,
-    ) -> Result<TransactionIter<'a, S::TransactionType<'txn>>, DatabaseError> {
+    ) -> Result<TransactionIter<'a, S::TransactionType<'txn>>, DatabaseError>
+    where
+        A: AsRef<[(&'static str, DataValue)]>,
+        St: Borrow<Statement>,
+    {
         if matches!(
-            command_type(&statement)?,
+            command_type(statement.borrow())?,
             CommandType::DDL | CommandType::Analyze
         ) {
             return Err(DatabaseError::UnsupportedStmt(
                 "`DDL` and `ANALYZE` are not allowed to execute within a transaction".to_string(),
             ));
         }
-        BindSource::execute(self, params, |binder, arena| binder.bind(statement, arena))
+        BindSource::execute(self, params, |binder, arena| {
+            binder.bind(statement.borrow(), arena)
+        })
     }
 
     /// Runs SQL inside the current transaction and returns the final result iterator.
@@ -297,13 +309,13 @@ impl<'txn, S: Storage> DBTransaction<'txn, S> {
             .ok_or_else(|| DatabaseError::EmptyStatement.with_sql_context(sql))?;
 
         for statement in statements {
-            self.execute(statement, &[])
+            self.execute(&statement, &[])
                 .map_err(|err| err.with_sql_context(sql))?
                 .done()
                 .map_err(|err| err.with_sql_context(sql))?;
         }
 
-        self.execute(last_statement, &[])
+        self.execute(&last_statement, &[])
             .map_err(|err| err.with_sql_context(sql))
     }
 }
@@ -352,24 +364,24 @@ where
     T: Transaction,
     A: AsRef<[(&'static str, DataValue)]>,
 {
-    fn statement(self, stmt: Statement) -> Result<BindStatementComplete, DatabaseError> {
+    fn statement(self, stmt: &Statement) -> Result<BindStatementComplete, DatabaseError> {
         let span = stmt.span();
         (|| {
             let plan = match stmt {
-                Statement::Query(query) => self.binder.bind_query(*query, self.arena)?,
-                Statement::AlterTable(alter) => self.alter_table(alter)?,
-                Statement::CreateTable(create) => self.create_table(create)?,
+                Statement::Query(query) => self.binder.bind_query(query, self.arena)?,
+                Statement::AlterTable(alter) => self.alter_table(alter.clone())?,
+                Statement::CreateTable(create) => self.create_table(create.clone())?,
                 Statement::Drop {
                     object_type,
                     names,
                     if_exists,
                     ..
-                } => self.drop_object(object_type, names, if_exists)?,
+                } => self.drop_object(*object_type, names.clone(), *if_exists)?,
                 Statement::Insert(insert) => self.insert(insert)?,
                 Statement::Update(update) => self.update(update)?,
                 Statement::Delete(delete) => self.delete(delete)?,
-                Statement::Analyze(analyze) => self.analyze(analyze)?,
-                Statement::Truncate(truncate) => self.truncate(truncate)?,
+                Statement::Analyze(analyze) => self.analyze(analyze.clone())?,
+                Statement::Truncate(truncate) => self.truncate(truncate.clone())?,
                 Statement::ShowTables { .. } => self.binder.bind_show_tables()?,
                 Statement::ShowViews { .. } => self.binder.bind_show_views()?,
                 #[cfg(feature = "copy")]
@@ -379,21 +391,23 @@ where
                     target,
                     options,
                     ..
-                } => self.copy(source, to, target, options)?,
+                } => self.copy(source.clone(), *to, target.clone(), options.clone())?,
                 #[cfg(not(feature = "copy"))]
                 Statement::Copy { .. } => {
                     return Err(DatabaseError::UnsupportedStmt(
                         "COPY requires the `copy` feature".to_string(),
                     ))
                 }
-                Statement::Explain { statement, .. } => self.explain(*statement)?,
+                Statement::Explain { statement, .. } => self.explain(statement)?,
                 Statement::ExplainTable {
                     describe_alias: DescribeAlias::Describe | DescribeAlias::Desc,
                     table_name,
                     ..
-                } => self.binder.bind_describe(sql_table_name(table_name)?)?,
-                Statement::CreateIndex(create) => self.create_index(create)?,
-                Statement::CreateView(create) => self.create_view(create)?,
+                } => self
+                    .binder
+                    .bind_describe(sql_table_name(table_name.clone())?)?,
+                Statement::CreateIndex(create) => self.create_index(create.clone())?,
+                Statement::CreateView(create) => self.create_view(create.clone())?,
                 _ => return Err(DatabaseError::UnsupportedStmt(stmt.to_string())),
             };
 
@@ -653,7 +667,7 @@ where
         expr: Expr,
         ty: &LogicalType,
     ) -> Result<ScalarExpression, DatabaseError> {
-        let mut expr = self.binder.bind_expr(expr, self.arena)?;
+        let mut expr = self.binder.bind_expr(&expr, self.arena)?;
 
         if expr.any_referenced_column(self.arena, |_, _| true) {
             return Err(DatabaseError::UnsupportedStmt(
@@ -767,7 +781,7 @@ where
                 }
                 ColumnOption::Unique(_) => column_desc.set_unique(),
                 ColumnOption::Default(expr) => {
-                    let mut expr = self.binder.bind_expr(expr, self.arena)?;
+                    let mut expr = self.binder.bind_expr(&expr, self.arena)?;
 
                     if expr.any_referenced_column(self.arena, |_, _| true) {
                         return Err(DatabaseError::UnsupportedStmt(
@@ -833,7 +847,7 @@ where
         for index_column in create.columns {
             match self
                 .binder
-                .bind_expr(index_column.column.expr, self.arena)?
+                .bind_expr(&index_column.column.expr, self.arena)?
             {
                 ScalarExpression::ColumnRef { column, .. } => columns.push(column),
                 expr => {
@@ -868,7 +882,7 @@ where
             .into_iter()
             .map(|column| lower_ident(&column.name).into_owned())
             .collect();
-        let plan = self.binder.bind_query(*query, self.arena)?;
+        let plan = self.binder.bind_query(query.as_ref(), self.arena)?;
 
         self.binder.bind_create_view(
             view_name,
@@ -931,13 +945,13 @@ where
                         "'COPY FROM query'".to_string(),
                     ));
                 }
-                let input_plan = self.binder.bind_query(*query, self.arena)?;
+                let input_plan = self.binder.bind_query(query.as_ref(), self.arena)?;
                 self.binder.bind_copy_to_file(ext_source, input_plan)
             }
         }
     }
 
-    fn insert(mut self, insert: sqlparser::ast::Insert) -> Result<LogicalPlan, DatabaseError> {
+    fn insert(mut self, insert: &sqlparser::ast::Insert) -> Result<LogicalPlan, DatabaseError> {
         let sqlparser::ast::Insert {
             table,
             columns,
@@ -946,7 +960,7 @@ where
             ..
         } = insert;
         let table_name = match table {
-            TableObject::TableName(table_name) => table_name,
+            TableObject::TableName(table_name) => table_name.clone(),
             TableObject::TableFunction(_) => {
                 return Err(DatabaseError::UnsupportedStmt(
                     "insert into table function is not supported".to_string(),
@@ -954,30 +968,21 @@ where
             }
         };
         let table_name = sql_table_name(table_name)?;
-        let source = source.ok_or_else(|| {
+        let source = source.as_ref().ok_or_else(|| {
             DatabaseError::UnsupportedStmt("insert without source is not supported".to_string())
         })?;
-        if matches!(source.body.as_ref(), SetExpr::Values(_)) {
-            let query = *source;
-            let values = match *query.body {
-                SetExpr::Values(values) => values,
-                body => {
-                    return Err(DatabaseError::UnsupportedStmt(format!(
-                        "insert source: {body:?}"
-                    )))
-                }
-            };
-            self.insert_values(table_name, columns, values.rows, overwrite, false)
+        if let SetExpr::Values(values) = source.body.as_ref() {
+            self.insert_values(table_name, columns, &values.rows, *overwrite, false)
         } else {
-            self.insert_query(table_name, columns, *source, overwrite)
+            self.insert_query(table_name, columns, source, *overwrite)
         }
     }
 
     fn insert_values(
         &mut self,
         table_name: TableName,
-        idents: Vec<Ident>,
-        expr_rows: Vec<Vec<Expr>>,
+        idents: &[Ident],
+        expr_rows: &[Vec<Expr>],
         is_overwrite: bool,
         is_mapping_by_name: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
@@ -999,7 +1004,7 @@ where
             source.schema().to_vec()
         } else {
             let mut columns = Vec::with_capacity(idents.len());
-            for ident in &idents {
+            for ident in idents {
                 match self.binder.bind_column_ref_from_identifiers(
                     slice::from_ref(ident),
                     Some(table_name.as_ref()),
@@ -1022,7 +1027,7 @@ where
             }
             let mut row = Vec::with_capacity(expr_row.len());
 
-            for (i, expr) in expr_row.into_iter().enumerate() {
+            for (i, expr) in expr_row.iter().enumerate() {
                 let span = expr.span();
                 let mut expression = self.binder.bind_expr(expr, self.arena)?;
 
@@ -1082,8 +1087,8 @@ where
     fn insert_query(
         &mut self,
         table_name: TableName,
-        idents: Vec<Ident>,
-        query: Query,
+        idents: &[Ident],
+        query: &Query,
         is_overwrite: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
         let mut input_plan = self.binder.bind_query(query, self.arena)?;
@@ -1149,9 +1154,9 @@ where
             .bind_insert_query(table_name, input_plan, is_overwrite)
     }
 
-    fn update(self, update: sqlparser::ast::Update) -> Result<LogicalPlan, DatabaseError> {
+    fn update(self, update: &sqlparser::ast::Update) -> Result<LogicalPlan, DatabaseError> {
         self.binder.context.allow_default = true;
-        let to = update.table;
+        let to = &update.table;
         if let TableFactor::Table { name, .. } = &to.relation {
             let is_joined_update = !to.joins.is_empty();
             let table_name = sql_table_name(name.clone())?;
@@ -1165,7 +1170,7 @@ where
                 )?;
             let target_schema = target_source.schema().to_vec();
 
-            if let Some(predicate) = update.selection {
+            if let Some(predicate) = update.selection.as_ref() {
                 plan = self.binder.bind_where(plan, predicate, self.arena)?;
             }
             let mut value_exprs = Vec::with_capacity(update.assignments.len());
@@ -1173,53 +1178,54 @@ where
             if update.assignments.is_empty() {
                 return Err(DatabaseError::ColumnsEmpty);
             }
-            for Assignment { target, value } in update.assignments {
+            for Assignment { target, value } in &update.assignments {
                 let expression = self.binder.bind_expr(value, self.arena)?;
-                let mut bind_assignment =
-                    |name: ObjectName, expression: ScalarExpression| -> Result<(), DatabaseError> {
-                        let ident = single_ident_from_object_name(name)?;
+                let mut bind_assignment = |name: &ObjectName,
+                                           expression: ScalarExpression|
+                 -> Result<(), DatabaseError> {
+                    let ident = single_ident_from_object_name(name)?;
 
-                        let column = {
-                            match self.binder.bind_column_ref_from_identifiers(
-                                slice::from_ref(&ident),
-                                Some(table_name.as_ref()),
-                                self.arena,
-                            )? {
-                                ScalarExpression::ColumnRef { column, .. } => column,
-                                _ => {
-                                    return Err(attach_span_if_absent(
-                                        DatabaseError::invalid_column(ident.to_string()),
-                                        ident.span,
-                                    ))
-                                }
-                            }
-                        };
-
-                        let mut expr = if matches!(expression, ScalarExpression::Empty) {
-                            let column_catalog = self.arena.column(column);
-                            let default_value = column_catalog
-                                .default_value()?
-                                .ok_or(DatabaseError::DefaultNotExist)?;
-                            ScalarExpression::Constant(default_value)
-                        } else {
-                            expression
-                        };
-                        let column_catalog = self.arena.column(column);
-                        expr = ScalarExpression::type_cast(
-                            expr,
-                            Cow::Borrowed(column_catalog.datatype()),
+                    let column = {
+                        match self.binder.bind_column_ref_from_identifiers(
+                            slice::from_ref(&ident),
+                            Some(table_name.as_ref()),
                             self.arena,
-                        )?;
-                        if is_joined_update {
-                            UpdateExprTargetRemapper {
-                                target_schema: &target_schema,
-                                arena: self.arena,
+                        )? {
+                            ScalarExpression::ColumnRef { column, .. } => column,
+                            _ => {
+                                return Err(attach_span_if_absent(
+                                    DatabaseError::invalid_column(ident.to_string()),
+                                    ident.span,
+                                ))
                             }
-                            .visit(&mut expr)?;
                         }
-                        value_exprs.push((column, expr));
-                        Ok(())
                     };
+
+                    let mut expr = if matches!(expression, ScalarExpression::Empty) {
+                        let column_catalog = self.arena.column(column);
+                        let default_value = column_catalog
+                            .default_value()?
+                            .ok_or(DatabaseError::DefaultNotExist)?;
+                        ScalarExpression::Constant(default_value)
+                    } else {
+                        expression
+                    };
+                    let column_catalog = self.arena.column(column);
+                    expr = ScalarExpression::type_cast(
+                        expr,
+                        Cow::Borrowed(column_catalog.datatype()),
+                        self.arena,
+                    )?;
+                    if is_joined_update {
+                        UpdateExprTargetRemapper {
+                            target_schema: &target_schema,
+                            arena: self.arena,
+                        }
+                        .visit(&mut expr)?;
+                    }
+                    value_exprs.push((column, expr));
+                    Ok(())
+                };
 
                 match target {
                     AssignmentTarget::ColumnName(name) => bind_assignment(name, expression)?,
@@ -1229,7 +1235,7 @@ where
                             return Err(DatabaseError::ValuesLenMismatch(expected, 1));
                         };
                         let got = exprs.len();
-                        let mut names = names.into_iter();
+                        let mut names = names.iter();
                         let mut exprs = exprs.into_iter();
 
                         loop {
@@ -1268,12 +1274,12 @@ where
         }
     }
 
-    fn delete(self, delete: sqlparser::ast::Delete) -> Result<LogicalPlan, DatabaseError> {
-        let from = match delete.from {
+    fn delete(self, delete: &sqlparser::ast::Delete) -> Result<LogicalPlan, DatabaseError> {
+        let from = match &delete.from {
             FromTable::WithFromKeyword(from) | FromTable::WithoutKeyword(from) => from,
         };
         let table = from
-            .into_iter()
+            .iter()
             .next()
             .ok_or_else(|| DatabaseError::invalid_table("DELETE without FROM"))?;
 
@@ -1291,7 +1297,7 @@ where
             self.binder.with_pk(table_name.clone());
             let mut plan = self.binder.bind_table_ref_sql(table, self.arena)?;
 
-            if let Some(predicate) = delete.selection {
+            if let Some(predicate) = delete.selection.as_ref() {
                 plan = self.binder.bind_where(plan, predicate, self.arena)?;
             }
 
@@ -1323,7 +1329,7 @@ where
         )?)
     }
 
-    fn explain(self, statement: Statement) -> Result<LogicalPlan, DatabaseError> {
+    fn explain(self, statement: &Statement) -> Result<LogicalPlan, DatabaseError> {
         let BindStatementStart { binder, arena } = self;
         let plan = binder.bind(statement, arena)?;
         binder.bind_explain(plan)
@@ -1344,9 +1350,9 @@ where
     #[allow(clippy::wrong_self_convention)]
     pub(crate) fn from_sql(
         self,
-        from: Vec<TableWithJoins>,
+        from: &[TableWithJoins],
     ) -> Result<BindPlanFrom<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
-        let mut froms = from.into_iter();
+        let mut froms = from.iter();
         let mut plan = if let Some(from) = froms.next() {
             let mut plan = self.binder.bind_table_ref_sql(from, self.arena)?;
 
@@ -1375,7 +1381,7 @@ where
 {
     pub(crate) fn select_list_from_sql(
         self,
-        projection: Vec<SelectItem>,
+        projection: &[SelectItem],
     ) -> Result<BindPlanSelectList<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
         let select_list = with_query_bind_step!(self.binder, QueryBindStep::Project, {
             self.binder.normalize_select_item(projection, self.arena)?
@@ -1392,7 +1398,7 @@ where
 {
     pub(crate) fn where_sql(
         self,
-        selection: Option<Expr>,
+        selection: Option<&Expr>,
     ) -> Result<BindPlanFiltered<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
         let predicate = if let Some(predicate) = selection {
             Some(with_query_bind_step!(self.binder, QueryBindStep::Where, {
@@ -1413,9 +1419,9 @@ where
 {
     pub(crate) fn aggregate_sql(
         self,
-        group_by: GroupByExpr,
-        having: Option<Expr>,
-        orderby: Option<Vec<OrderByExpr>>,
+        group_by: &GroupByExpr,
+        having: Option<&Expr>,
+        orderby: Option<&[OrderByExpr]>,
     ) -> Result<BindPlanAggregated<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
         let group_by = with_query_bind_step!(self.binder, QueryBindStep::Agg, {
             match group_by {
@@ -1426,7 +1432,7 @@ where
                         ));
                     }
                     group_by_exprs
-                        .into_iter()
+                        .iter()
                         .map(|expr| self.binder.bind_expr(expr, self.arena))
                         .collect::<Result<Vec<_>, DatabaseError>>()?
                 }
@@ -1464,7 +1470,7 @@ where
 {
     pub(crate) fn distinct_sql(
         self,
-        distinct: Option<Distinct>,
+        distinct: Option<&Distinct>,
     ) -> Result<BindPlanDistinct<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
         self.distinct(matches!(distinct, Some(Distinct::Distinct)))
     }
@@ -1477,10 +1483,10 @@ where
 {
     pub(crate) fn select_into_sql(
         self,
-        into: Option<SelectInto>,
+        into: Option<&SelectInto>,
     ) -> Result<BindPlanComplete, DatabaseError> {
         self.insert_into(
-            into.map(|SelectInto { name, .. }| lower_case_name(&name).map(Into::into))
+            into.map(|SelectInto { name, .. }| lower_case_name(name).map(Into::into))
                 .transpose()?,
         )
     }
@@ -1817,15 +1823,15 @@ pub(super) fn lower_case_name(name: &ObjectName) -> Result<Cow<'_, str>, Databas
     ))
 }
 
-fn single_ident_from_object_name(name: ObjectName) -> Result<Ident, DatabaseError> {
+fn single_ident_from_object_name(name: &ObjectName) -> Result<Ident, DatabaseError> {
     if name.0.len() != 1 {
         return Err(attach_span_if_absent(
             DatabaseError::invalid_column(name.to_string()),
-            &name,
+            name,
         ));
     }
-    match name.0.into_iter().next() {
-        Some(ObjectNamePart::Identifier(ident)) => Ok(ident),
+    match name.0.first() {
+        Some(ObjectNamePart::Identifier(ident)) => Ok(ident.clone()),
         Some(part) => Err(DatabaseError::invalid_column(part.to_string())),
         None => Err(DatabaseError::invalid_column(String::new())),
     }
@@ -1909,7 +1915,7 @@ fn copy_file_format(options: Vec<CopyOption>) -> Result<FileFormat, DatabaseErro
 impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, 'parent, T, A> {
     fn bind_table_ref_sql(
         &mut self,
-        from: TableWithJoins,
+        from: &TableWithJoins,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         self.context.step(QueryBindStep::From);
@@ -1925,29 +1931,34 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
 
     fn bind_single_table_ref_sql(
         &mut self,
-        table: TableFactor,
+        table: &TableFactor,
         joint_type: Option<JoinType>,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         match table {
             TableFactor::Table { name, alias, .. } => self.bind_base_table_ref(
                 joint_type,
-                sql_table_name(name)?,
-                sql_optional_table_alias(alias),
+                sql_table_name(name.clone())?,
+                sql_optional_table_alias(alias.clone()),
                 arena,
             ),
             TableFactor::Derived {
                 subquery, alias, ..
             } => {
                 let mut binder = Binder::new(self.context.fork(), self.args, Some(&self.context));
-                let plan = binder.bind_query(*subquery, arena)?;
-                self.bind_derived_source(plan, sql_optional_table_alias(alias), joint_type, arena)
+                let plan = binder.bind_query(subquery, arena)?;
+                self.bind_derived_source(
+                    plan,
+                    sql_optional_table_alias(alias.clone()),
+                    joint_type,
+                    arena,
+                )
             }
             TableFactor::TableFunction { expr, alias } => {
                 let expr = self.bind_expr(expr, arena)?;
                 self.bind_table_function_source(
                     expr,
-                    sql_optional_table_alias(alias),
+                    sql_optional_table_alias(alias.clone()),
                     joint_type,
                     arena,
                 )
@@ -1959,7 +1970,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
     fn bind_join_sql(
         &mut self,
         left: LogicalPlan,
-        join: Join,
+        join: &Join,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let Join {
@@ -2009,15 +2020,15 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
 
     fn bind_join_constraint_sql(
         &mut self,
-        constraint: JoinConstraint,
+        constraint: &JoinConstraint,
         arena: &mut PlanArena,
     ) -> Result<JoinConstraintInput, DatabaseError> {
         match constraint {
             JoinConstraint::On(expr) => Ok(JoinConstraintInput::On(self.bind_expr(expr, arena)?)),
             JoinConstraint::Using(names) => Ok(JoinConstraintInput::Using(
                 names
-                    .into_iter()
-                    .map(|name| lower_case_name(&name).map(Cow::into_owned))
+                    .iter()
+                    .map(|name| lower_case_name(name).map(Cow::into_owned))
                     .collect::<Result<_, _>>()?,
             )),
             JoinConstraint::Natural => Ok(JoinConstraintInput::Natural),
@@ -2025,7 +2036,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
         }
     }
 
-    fn parse_like_escape_char(escape_char: Option<Value>) -> Result<Option<char>, DatabaseError> {
+    fn parse_like_escape_char(escape_char: &Option<Value>) -> Result<Option<char>, DatabaseError> {
         match escape_char {
             None => Ok(None),
             Some(value) => match value {
@@ -2050,21 +2061,21 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
 
     pub(crate) fn bind_expr(
         &mut self,
-        expr: Expr,
+        expr: &Expr,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
         let expr_span = expr.span();
         match expr {
             Expr::Identifier(ident) => {
-                self.bind_column_ref_from_identifiers(slice::from_ref(&ident), None, arena)
+                self.bind_column_ref_from_identifiers(slice::from_ref(ident), None, arena)
             }
             Expr::CompoundIdentifier(idents) => {
-                self.bind_column_ref_from_identifiers(&idents, None, arena)
+                self.bind_column_ref_from_identifiers(idents, None, arena)
             }
             Expr::BinaryOp { left, right, op } => {
-                let left_expr = self.bind_expr(*left, arena)?;
-                let right_expr = self.bind_expr(*right, arena)?;
-                self.bind_binary_op_expr(left_expr, right_expr, op.try_into()?, arena)
+                let left_expr = self.bind_expr(left, arena)?;
+                let right_expr = self.bind_expr(right, arena)?;
+                self.bind_binary_op_expr(left_expr, right_expr, op.clone().try_into()?, arena)
             }
             Expr::Value(v) => {
                 let value = if let Value::Placeholder(name) = &v.value {
@@ -2075,21 +2086,21 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                         .ok_or_else(|| {
                             attach_span_if_absent(
                                 DatabaseError::parameter_not_found(name.to_string()),
-                                &v,
+                                v,
                             )
                         })?
                 } else {
                     (&v.value)
                         .try_into()
-                        .map_err(|err| attach_span_if_absent(err, &v))?
+                        .map_err(|err| attach_span_if_absent(err, v))?
                 };
                 Ok(ScalarExpression::Constant(value))
             }
             Expr::Function(func) => self.bind_function_sql(func, arena),
-            Expr::Nested(expr) => self.bind_expr(*expr, arena),
+            Expr::Nested(expr) => self.bind_expr(expr, arena),
             Expr::UnaryOp { expr, op } => {
-                let expr = self.bind_expr(*expr, arena)?;
-                self.bind_unary_op_expr(expr, op.try_into()?, arena)
+                let expr = self.bind_expr(expr, arena)?;
+                self.bind_unary_op_expr(expr, (*op).try_into()?, arena)
             }
             Expr::Like {
                 negated,
@@ -2098,10 +2109,10 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 escape_char,
                 any: _,
             } => {
-                let left_expr = Box::new(self.bind_expr(*expr, arena)?);
-                let right_expr = Box::new(self.bind_expr(*pattern, arena)?);
+                let left_expr = Box::new(self.bind_expr(expr, arena)?);
+                let right_expr = Box::new(self.bind_expr(pattern, arena)?);
                 let escape_char = Self::parse_like_escape_char(escape_char)?;
-                let op = if negated {
+                let op = if *negated {
                     expression::BinaryOperator::NotLike(escape_char)
                 } else {
                     expression::BinaryOperator::Like(escape_char)
@@ -2116,11 +2127,11 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
             }
             Expr::IsNull(expr) => Ok(ScalarExpression::IsNull {
                 negated: false,
-                expr: Box::new(self.bind_expr(*expr, arena)?),
+                expr: Box::new(self.bind_expr(expr, arena)?),
             }),
             Expr::IsNotNull(expr) => Ok(ScalarExpression::IsNull {
                 negated: true,
-                expr: Box::new(self.bind_expr(*expr, arena)?),
+                expr: Box::new(self.bind_expr(expr, arena)?),
             }),
             Expr::InList {
                 expr,
@@ -2128,27 +2139,27 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 negated,
             } => {
                 let args = list
-                    .into_iter()
+                    .iter()
                     .map(|expr| self.bind_expr(expr, arena))
                     .try_collect()?;
                 Ok(ScalarExpression::In {
-                    negated,
-                    expr: Box::new(self.bind_expr(*expr, arena)?),
+                    negated: *negated,
+                    expr: Box::new(self.bind_expr(expr, arena)?),
                     args,
                 })
             }
             Expr::Cast {
                 expr, data_type, ..
             } => ScalarExpression::type_cast(
-                self.bind_expr(*expr, arena)?,
-                Cow::Owned(LogicalType::try_from(data_type)?),
+                self.bind_expr(expr, arena)?,
+                Cow::Owned(LogicalType::try_from(data_type.clone())?),
                 arena,
             ),
             Expr::TypedString(TypedString {
                 data_type, value, ..
             }) => {
                 let logical_type = LogicalType::try_from(data_type.clone())?;
-                let raw = value.into_string().ok_or_else(|| {
+                let raw = value.clone().into_string().ok_or_else(|| {
                     DatabaseError::InvalidValue("typed string literal must be a string".to_string())
                 })?;
                 let value = DataValue::Utf8 {
@@ -2167,10 +2178,10 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 low,
                 high,
             } => Ok(ScalarExpression::Between {
-                negated,
-                expr: Box::new(self.bind_expr(*expr, arena)?),
-                left_expr: Box::new(self.bind_expr(*low, arena)?),
-                right_expr: Box::new(self.bind_expr(*high, arena)?),
+                negated: *negated,
+                expr: Box::new(self.bind_expr(expr, arena)?),
+                left_expr: Box::new(self.bind_expr(low, arena)?),
+                right_expr: Box::new(self.bind_expr(high, arena)?),
             }),
             Expr::Substring {
                 expr,
@@ -2182,21 +2193,21 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 let mut from_expr = None;
 
                 if let Some(expr) = substring_for {
-                    for_expr = Some(Box::new(self.bind_expr(*expr, arena)?))
+                    for_expr = Some(Box::new(self.bind_expr(expr, arena)?))
                 }
                 if let Some(expr) = substring_from {
-                    from_expr = Some(Box::new(self.bind_expr(*expr, arena)?))
+                    from_expr = Some(Box::new(self.bind_expr(expr, arena)?))
                 }
 
                 Ok(ScalarExpression::SubString {
-                    expr: Box::new(self.bind_expr(*expr, arena)?),
+                    expr: Box::new(self.bind_expr(expr, arena)?),
                     for_expr,
                     from_expr,
                 })
             }
             Expr::Position { expr, r#in } => Ok(ScalarExpression::Position {
-                expr: Box::new(self.bind_expr(*expr, arena)?),
-                in_expr: Box::new(self.bind_expr(*r#in, arena)?),
+                expr: Box::new(self.bind_expr(expr, arena)?),
+                in_expr: Box::new(self.bind_expr(r#in, arena)?),
             }),
             Expr::Trim {
                 expr,
@@ -2206,21 +2217,21 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
             } => {
                 let mut trim_what_expr = None;
                 if let Some(trim_what) = trim_what {
-                    trim_what_expr = Some(Box::new(self.bind_expr(*trim_what, arena)?))
+                    trim_what_expr = Some(Box::new(self.bind_expr(trim_what, arena)?))
                 }
                 Ok(ScalarExpression::Trim {
-                    expr: Box::new(self.bind_expr(*expr, arena)?),
+                    expr: Box::new(self.bind_expr(expr, arena)?),
                     trim_what_expr,
-                    trim_where: trim_where.map(Into::into),
+                    trim_where: (*trim_where).map(Into::into),
                 })
             }
             Expr::Exists { subquery, negated } => {
-                self.bind_exists_subquery_plan(negated, arena, |binder, arena| {
-                    binder.bind_query(*subquery, arena)
+                self.bind_exists_subquery_plan(*negated, arena, |binder, arena| {
+                    binder.bind_query(subquery, arena)
                 })
             }
             Expr::Subquery(subquery) => self.bind_scalar_subquery_plan(arena, |binder, arena| {
-                binder.bind_query(*subquery, arena)
+                binder.bind_query(subquery, arena)
             }),
             Expr::InSubquery {
                 expr,
@@ -2228,10 +2239,10 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 negated,
             } => self.bind_quantified_subquery(
                 MarkApplyQuantifier::Any,
-                negated,
-                *expr,
-                BinaryOperator::Eq,
-                *subquery,
+                *negated,
+                expr,
+                &BinaryOperator::Eq,
+                subquery,
                 arena,
             ),
             Expr::Tuple(exprs) => {
@@ -2262,20 +2273,20 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 let mut operand_expr = None;
                 let mut ty = LogicalType::SqlNull;
                 if let Some(expr) = operand {
-                    operand_expr = Some(Box::new(self.bind_expr(*expr, arena)?));
+                    operand_expr = Some(Box::new(self.bind_expr(expr, arena)?));
                 }
                 let mut expr_pairs = Vec::with_capacity(conditions.len());
                 for when in conditions {
-                    let result = self.bind_expr(when.result, arena)?;
+                    let result = self.bind_expr(&when.result, arena)?;
                     let result_ty = result.return_type(arena).into_owned();
 
                     fn_check_ty(&mut ty, result_ty)?;
-                    expr_pairs.push((self.bind_expr(when.condition, arena)?, result))
+                    expr_pairs.push((self.bind_expr(&when.condition, arena)?, result))
                 }
 
                 let mut else_expr = None;
                 if let Some(expr) = else_result {
-                    let temp_expr = Box::new(self.bind_expr(*expr, arena)?);
+                    let temp_expr = Box::new(self.bind_expr(expr, arena)?);
                     let else_ty = temp_expr.return_type(arena).into_owned();
 
                     fn_check_ty(&mut ty, else_ty)?;
@@ -2294,16 +2305,12 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 compare_op,
                 right,
                 ..
-            } => {
-                self.bind_quantified_op(MarkApplyQuantifier::Any, *left, compare_op, *right, arena)
-            }
+            } => self.bind_quantified_op(MarkApplyQuantifier::Any, left, compare_op, right, arena),
             Expr::AllOp {
                 left,
                 compare_op,
                 right,
-            } => {
-                self.bind_quantified_op(MarkApplyQuantifier::All, *left, compare_op, *right, arena)
-            }
+            } => self.bind_quantified_op(MarkApplyQuantifier::All, left, compare_op, right, arena),
             expr => Err(DatabaseError::UnsupportedStmt(expr.to_string())),
         }
     }
@@ -2311,9 +2318,9 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
     fn bind_quantified_op(
         &mut self,
         quantifier: MarkApplyQuantifier,
-        left: Expr,
-        compare_op: BinaryOperator,
-        right: Expr,
+        left: &Expr,
+        compare_op: &BinaryOperator,
+        right: &Expr,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
         let Expr::Subquery(subquery) = right else {
@@ -2322,16 +2329,16 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
             )));
         };
 
-        self.bind_quantified_subquery(quantifier, false, left, compare_op, *subquery, arena)
+        self.bind_quantified_subquery(quantifier, false, left, compare_op, subquery, arena)
     }
 
     fn bind_quantified_subquery(
         &mut self,
         quantifier: MarkApplyQuantifier,
         negated: bool,
-        expr: Expr,
-        compare_op: BinaryOperator,
-        subquery: Query,
+        expr: &Expr,
+        compare_op: &BinaryOperator,
+        subquery: &Query,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
         let left_expr = self.bind_expr(expr, arena)?;
@@ -2339,7 +2346,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
             quantifier,
             negated,
             left_expr,
-            compare_op.try_into()?,
+            compare_op.clone().try_into()?,
             arena,
             |binder, arena| binder.bind_query(subquery, arena),
         )
@@ -2381,17 +2388,17 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
 
     pub(crate) fn bind_function_sql(
         &mut self,
-        func: Function,
+        func: &Function,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
         let func_span = func.span();
         let Function { name, args, .. } = func;
         let (func_args, is_distinct) = match args {
             FunctionArguments::List(args) => (
-                args.args,
+                args.args.as_slice(),
                 matches!(args.duplicate_treatment, Some(DuplicateTreatment::Distinct)),
             ),
-            FunctionArguments::None => (Vec::new(), false),
+            FunctionArguments::None => (&[][..], false),
             FunctionArguments::Subquery(_) => {
                 return Err(DatabaseError::UnsupportedStmt(
                     "subquery function args are not supported".to_string(),
@@ -2424,18 +2431,18 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
 
     pub fn bind_set_expr(
         &mut self,
-        set_expr: SetExpr,
+        set_expr: &SetExpr,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         match set_expr {
-            SetExpr::Select(select) => self.bind_select(*select, None, arena),
-            SetExpr::Query(query) => self.bind_query(*query, arena),
+            SetExpr::Select(select) => self.bind_select(select, None, arena),
+            SetExpr::Query(query) => self.bind_query(query, arena),
             SetExpr::SetOperation {
                 op,
                 set_quantifier,
                 left,
                 right,
-            } => self.bind_set_operation(op, set_quantifier, *left, *right, arena),
+            } => self.bind_set_operation(op, set_quantifier, left, right, arena),
             expr => Err(DatabaseError::UnsupportedStmt(format!(
                 "set expression: {expr:?}"
             ))),
@@ -2444,10 +2451,10 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
 
     fn bind_set_operation(
         &mut self,
-        op: SetOperator,
-        set_quantifier: SetQuantifier,
-        left: SetExpr,
-        right: SetExpr,
+        op: &SetOperator,
+        set_quantifier: &SetQuantifier,
+        left: &SetExpr,
+        right: &SetExpr,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let is_all = match set_quantifier {
@@ -2492,8 +2499,8 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
 
     pub(crate) fn bind_select(
         &mut self,
-        select: Select,
-        orderby: Option<Vec<OrderByExpr>>,
+        select: &Select,
+        orderby: Option<&[OrderByExpr]>,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let Select {
@@ -2510,20 +2517,20 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
             .build_plan(arena)
             .from_sql(from)?
             .select_list_from_sql(projection)?
-            .where_sql(selection)?
-            .aggregate_sql(group_by, having, orderby)?
+            .where_sql(selection.as_ref())?
+            .aggregate_sql(group_by, having.as_ref(), orderby)?
             .having()?
-            .distinct_sql(distinct)?
+            .distinct_sql(distinct.as_ref())?
             .order_by()?
             .project()?
-            .select_into_sql(into)?
+            .select_into_sql(into.as_ref())?
             .finish())
     }
 
     /// FIXME: temp values need to register BindContext.bind_table
     fn bind_temp_values(
         &mut self,
-        expr_rows: Vec<Vec<Expr>>,
+        expr_rows: &[Vec<Expr>],
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let values_len = expr_rows[0].len();
@@ -2538,7 +2545,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
 
             let mut row = Vec::with_capacity(values_len);
 
-            for (col_index, expr) in expr_row.into_iter().enumerate() {
+            for (col_index, expr) in expr_row.iter().enumerate() {
                 let mut expression = self.bind_expr(expr, arena)?;
                 ConstantCalculator::new(arena).visit(&mut expression)?;
 
@@ -2583,7 +2590,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
     fn bind_top_level_orderby(
         &mut self,
         mut plan: LogicalPlan,
-        orderbys: Vec<OrderByExpr>,
+        orderbys: &[OrderByExpr],
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let saved_aliases = self.context.expr_aliases.clone();
@@ -2617,7 +2624,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
     pub(crate) fn bind_where(
         &mut self,
         children: LogicalPlan,
-        predicate: Expr,
+        predicate: &Expr,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let predicate = with_query_bind_step!(self, QueryBindStep::Where, {
@@ -2629,7 +2636,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
 
     pub(crate) fn normalize_select_item(
         &mut self,
-        items: Vec<SelectItem>,
+        items: &[SelectItem],
         arena: &mut PlanArena,
     ) -> Result<Vec<ScalarExpression>, DatabaseError> {
         let mut select_items = vec![];
@@ -2639,7 +2646,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 SelectItem::UnnamedExpr(expr) => select_items.push(self.bind_expr(expr, arena)?),
                 SelectItem::ExprWithAlias { expr, alias } => {
                     let expr = self.bind_expr(expr, arena)?;
-                    let alias_name = lower_ident(&alias).into_owned();
+                    let alias_name = lower_ident(alias).into_owned();
 
                     self.context
                         .add_alias(None, alias_name.clone(), expr.clone());
@@ -2678,7 +2685,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 SelectItem::QualifiedWildcard(table_name, _) => {
                     let table_name: TableName = match table_name {
                         SelectItemQualifiedWildcardKind::ObjectName(name) => {
-                            lower_case_name(&name)?.into()
+                            lower_case_name(name)?.into()
                         }
                         SelectItemQualifiedWildcardKind::Expr(expr) => {
                             return Err(DatabaseError::UnsupportedStmt(format!(
@@ -2702,25 +2709,18 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
 
     pub(crate) fn bind_query(
         &mut self,
-        query: Query,
+        query: &Query,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let Query {
-            with,
-            body,
-            order_by,
-            limit_clause,
-            ..
-        } = query;
         let origin_step = self.context.step_now();
 
-        if let Some(_with) = with {
+        if let Some(_with) = &query.with {
             // TODO support with clause.
         }
 
-        let mut order_by_exprs = if let Some(order_by) = order_by {
-            match order_by.kind {
-                OrderByKind::Expressions(exprs) => Some(exprs),
+        let order_by_exprs = if let Some(order_by) = &query.order_by {
+            match &order_by.kind {
+                OrderByKind::Expressions(exprs) => Some(exprs.as_slice()),
                 OrderByKind::All(_) => {
                     return Err(DatabaseError::UnsupportedStmt(
                         "ORDER BY ALL is not supported".to_string(),
@@ -2730,17 +2730,17 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
         } else {
             None
         };
-        let is_plain_select = matches!(body.as_ref(), SetExpr::Select(_));
-        let mut plan = match *body {
-            SetExpr::Select(select) => self.bind_select(*select, order_by_exprs.take(), arena),
-            SetExpr::Query(query) => self.bind_query(*query, arena),
+        let is_plain_select = matches!(query.body.as_ref(), SetExpr::Select(_));
+        let mut plan = match query.body.as_ref() {
+            SetExpr::Select(select) => self.bind_select(select, order_by_exprs, arena),
+            SetExpr::Query(query) => self.bind_query(query, arena),
             SetExpr::SetOperation {
                 op,
                 set_quantifier,
                 left,
                 right,
-            } => self.bind_set_operation(op, set_quantifier, *left, *right, arena),
-            SetExpr::Values(values) => self.bind_temp_values(values.rows, arena),
+            } => self.bind_set_operation(op, set_quantifier, left, right, arena),
+            SetExpr::Values(values) => self.bind_temp_values(&values.rows, arena),
             expr => {
                 return Err(DatabaseError::UnsupportedStmt(format!(
                     "query body: {expr:?}"
@@ -2754,7 +2754,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
             }
         }
 
-        if let Some(limit_clause) = limit_clause {
+        if let Some(limit_clause) = &query.limit_clause {
             plan = self.bind_limit(plan, limit_clause, arena)?;
         }
 
@@ -2764,7 +2764,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
 
     fn bind_non_negative_limit_value(
         &mut self,
-        expr: Expr,
+        expr: &Expr,
         arena: &mut PlanArena,
     ) -> Result<usize, DatabaseError> {
         let span = expr.span();
@@ -2785,7 +2785,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
     fn bind_limit(
         &mut self,
         children: LogicalPlan,
-        limit: LimitClause,
+        limit: &LimitClause,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let mut limit_value = None;
@@ -2808,7 +2808,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
 
                 if let Some(offset_ast) = offset_expr {
                     offset_value =
-                        Some(self.bind_non_negative_limit_value(offset_ast.value, arena)?);
+                        Some(self.bind_non_negative_limit_value(&offset_ast.value, arena)?);
                 }
             }
             LimitClause::OffsetCommaLimit {
@@ -2835,7 +2835,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
 
     pub fn bind(
         &mut self,
-        stmt: Statement,
+        stmt: &Statement,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         Ok(self.build_statement(arena).statement(stmt)?.finish())

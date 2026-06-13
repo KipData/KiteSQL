@@ -831,17 +831,7 @@ where
     T: Transaction + 'a,
 {
     arena.init_context(cache, transaction);
-    let root = build_write_inner(arena, plan_arena, plan, cache, transaction);
-    root
-}
-
-fn build_write_inner<'a, T: Transaction + 'a>(
-    arena: &mut ExecArena<'a, T>,
-    plan_arena: &mut PlanArena<'a>,
-    plan: LogicalPlan,
-    cache: ExecutionContext<'_>,
-    transaction_ref: &T,
-) -> ExecId {
+    let transaction_ref: &T = transaction;
     let LogicalPlan {
         operator,
         childrens,

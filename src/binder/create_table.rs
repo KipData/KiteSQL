@@ -93,11 +93,10 @@ mod tests {
             None,
         );
         let stmt = crate::parser::parse_sql(sql).unwrap();
+        let stmt = stmt.into_iter().next().unwrap();
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
-        let plan1 = binder
-            .bind(stmt.into_iter().next().unwrap(), &mut plan_arena)
-            .unwrap();
+        let plan1 = binder.bind(&stmt, &mut plan_arena).unwrap();
 
         match plan1.operator {
             Operator::CreateTable(op) => {

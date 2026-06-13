@@ -1450,11 +1450,11 @@ pub(crate) mod test {
             None,
         );
         let mut source_plan_arena = PlanArena::new(kite_sql.state.table_arena());
-        let source_plan = binder.bind(stmt.clone(), &mut source_plan_arena)?;
+        let source_plan = binder.bind(&stmt, &mut source_plan_arena)?;
         let (best_plan, _best_plan_arena) =
             kite_sql
                 .state
-                .build_plan([], &transaction, |binder, arena| binder.bind(stmt, arena))?;
+                .build_plan([], &transaction, |binder, arena| binder.bind(&stmt, arena))?;
 
         let join_plan = match source_plan.operator {
             Operator::Project(_) => source_plan.childrens.pop_only(),
@@ -1533,11 +1533,11 @@ pub(crate) mod test {
             None,
         );
         let mut source_plan_arena = PlanArena::new(kite_sql.state.table_arena());
-        let source_plan = binder.bind(stmt.clone(), &mut source_plan_arena)?;
+        let source_plan = binder.bind(&stmt, &mut source_plan_arena)?;
         let (best_plan, _best_plan_arena) =
             kite_sql
                 .state
-                .build_plan([], &transaction, |binder, arena| binder.bind(stmt, arena))?;
+                .build_plan([], &transaction, |binder, arena| binder.bind(&stmt, arena))?;
 
         let join_plan = match source_plan.operator {
             Operator::Project(_) => source_plan.childrens.pop_only(),
@@ -1634,7 +1634,7 @@ pub(crate) mod test {
         let (best_plan, _best_plan_arena) =
             kite_sql
                 .state
-                .build_plan([], &transaction, |binder, arena| binder.bind(stmt, arena))?;
+                .build_plan([], &transaction, |binder, arena| binder.bind(&stmt, arena))?;
         let join_plan = match best_plan.operator {
             Operator::Project(_) => best_plan.childrens.pop_only(),
             Operator::Join(_) => best_plan,

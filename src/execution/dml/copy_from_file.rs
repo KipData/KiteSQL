@@ -185,7 +185,7 @@ mod tests {
         let transaction = db.storage.transaction()?;
         let mut executor = crate::execution::execute_mut(
             CopyFromFile::from(op),
-            (
+            crate::execution::test_utils::empty_context(
                 db.state.table_cache(),
                 db.state.view_cache(),
                 db.state.meta_cache(),

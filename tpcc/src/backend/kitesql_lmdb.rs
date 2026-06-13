@@ -98,7 +98,7 @@ impl<'a> KiteSqlLmdbTransactionWrapper<'a> {
             return Err(TpccError::InvalidBackend);
         };
         Ok(KiteSqlTxnResult::new(
-            self.inner.execute(statement.clone(), params)?,
+            self.inner.execute(statement, params)?,
         ))
     }
 }
