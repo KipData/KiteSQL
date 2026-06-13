@@ -13,9 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{
-    ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext, ReadExecutor,
-};
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::expression::function::table::TableFunction;
 use crate::planner::operator::function_scan::FunctionScanOperator;
 use crate::storage::Transaction;
@@ -36,23 +34,24 @@ impl From<FunctionScanOperator> for FunctionScan {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for FunctionScan {
-    type Input = FunctionScanOperator;
+    type Input = Self;
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena,
+        arena: &mut ExecArena<'a, T>,
         _plan_arena: &mut crate::planner::PlanArena<'a>,
-        _: ReadExecutionContext<'_>,
+        _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::FunctionScan(FunctionScan::from(input)))
+        let executor = input;
+        arena.push(ExecNode::FunctionScan(executor))
     }
 }
 
-impl<'a> ExecutorNode<'a> for FunctionScan {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for FunctionScan {
     fn next_tuple(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
+        arena: &mut ExecArena<'a, T>,
         _: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if self.iter.is_none() {
@@ -62,10 +61,10 @@ impl<'a> ExecutorNode<'a> for FunctionScan {
 
         let tuple = self.iter.as_mut().and_then(Iterator::next).transpose()?;
         let Some(tuple) = tuple else {
-            runtime.finish();
+            arena.finish();
             return Ok(());
         };
-        runtime.produce_tuple(tuple);
+        arena.produce_tuple(tuple);
         Ok(())
     }
 }

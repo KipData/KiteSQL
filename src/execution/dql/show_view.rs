@@ -13,58 +13,68 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{
-    ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext, ReadExecutor,
-    RuntimeCursorId,
-};
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
+use crate::storage::{Transaction, ViewIter};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
 
-pub struct ShowViews {
-    pub(crate) cursor: Option<RuntimeCursorId>,
+pub struct ShowViews<'a, T: Transaction + 'a> {
+    pub(crate) metas: Option<ViewIter<'a, T>>,
 }
 
-impl<'a, T: crate::storage::Transaction + 'a> ReadExecutor<'a, T> for ShowViews {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ShowViews<'a, T> {
     type Input = Self;
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena,
+        arena: &mut ExecArena<'a, T>,
         _: &mut crate::planner::PlanArena<'a>,
-        _: ReadExecutionContext<'_>,
+        _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
         arena.push(ExecNode::ShowViews(input))
     }
 }
 
-impl<'a> ExecutorNode<'a> for ShowViews {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowViews<'a, T> {
     fn next_tuple(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
-        if self.cursor.is_none() {
-            self.cursor = Some(runtime.open_view_iter(plan_arena)?);
+        if self.metas.is_none() {
+            let context = arena.context();
+            let mut state = arena.local_state(plan_arena);
+            let (transaction, table_codec) = state.transaction_codec();
+            self.metas = Some(transaction.views(
+                table_codec,
+                context.table_cache(),
+                plan_arena.table_arena_cell(),
+                context.scala_functions(),
+                context.table_functions(),
+            )?);
         }
 
-        let Some(view_name) =
-            runtime.next_view_name(self.cursor.expect("view cursor initialized"))?
+        let Some(view) = self
+            .metas
+            .as_mut()
+            .expect("show views iterator initialized")
+            .try_next()?
         else {
-            runtime.finish();
+            arena.finish();
             return Ok(());
         };
 
-        let output = runtime.result_tuple_mut();
+        let output = arena.result_tuple_mut();
         output.pk = None;
         output.values.clear();
         output.values.push(DataValue::Utf8 {
-            value: view_name,
+            value: view.name.to_string(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         });
 
-        runtime.resume();
+        arena.resume();
         Ok(())
     }
 }

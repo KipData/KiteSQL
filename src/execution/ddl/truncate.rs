@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext, WriteExecutor,
+    ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
 };
 use crate::planner::operator::truncate::TruncateOperator;
 use crate::storage::Transaction;
@@ -31,32 +31,36 @@ impl From<TruncateOperator> for Truncate {
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Truncate {
-    type Input = crate::planner::operator::truncate::TruncateOperator;
+    type Input = Self;
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena,
+        arena: &mut ExecArena<'a, T>,
         _plan_arena: &mut crate::planner::PlanArena<'a>,
-        _: ReadExecutionContext<'_>,
+        _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::Truncate(Self::from(input)))
+        let executor = input;
+        arena.push(ExecNode::Truncate(executor))
     }
 }
-impl<'a> ExecutorNode<'a> for Truncate {
+
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Truncate {
     fn next_tuple(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
-        _: &mut crate::planner::PlanArena<'a>,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(TruncateOperator { table_name }) = self.op.take() else {
-            runtime.finish();
+            arena.finish();
             return Ok(());
         };
-        runtime.transaction_drop_data(&table_name)?;
+        let mut state = arena.local_state(plan_arena);
+        let (transaction, table_codec) = state.transaction_codec_mut();
+        transaction.drop_data(table_codec, &table_name)?;
 
-        TupleBuilder::build_result_into(runtime.result_tuple_mut(), format!("{table_name}"));
-        runtime.resume();
+        TupleBuilder::build_result_into(arena.result_tuple_mut(), format!("{table_name}"));
+        arena.resume();
         Ok(())
     }
 }

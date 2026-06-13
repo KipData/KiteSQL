@@ -15,7 +15,7 @@
 use crate::binder::copy::FileFormat;
 use crate::errors::DatabaseError;
 use crate::execution::{
-    ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext, WriteExecutor,
+    ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
 };
 use crate::planner::operator::copy_from_file::CopyFromFileOperator;
 use crate::storage::Transaction;
@@ -35,26 +35,28 @@ impl From<CopyFromFileOperator> for CopyFromFile {
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CopyFromFile {
-    type Input = crate::planner::operator::copy_from_file::CopyFromFileOperator;
+    type Input = Self;
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena,
+        arena: &mut ExecArena<'a, T>,
         _plan_arena: &mut crate::planner::PlanArena<'a>,
-        _: ReadExecutionContext<'_>,
+        _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::CopyFromFile(Self::from(input)))
+        let executor = input;
+        arena.push(ExecNode::CopyFromFile(executor))
     }
 }
-impl<'a> ExecutorNode<'a> for CopyFromFile {
+
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyFromFile {
     fn next_tuple(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(op) = self.op.take() else {
-            runtime.finish();
+            arena.finish();
             return Ok(());
         };
         let column_types = op
@@ -66,8 +68,10 @@ impl<'a> ExecutorNode<'a> for CopyFromFile {
             .iter()
             .map(|ty| ty.serializable())
             .collect_vec();
-        let table = runtime
-            .transaction_table(op.table.clone())?
+        let table_cache = arena.context().table_cache();
+        let transaction = arena.transaction();
+        let table = transaction
+            .table(table_cache, op.table.clone())?
             .ok_or(DatabaseError::TableNotFound)?;
         let table_name = table.name().to_string();
 
@@ -101,12 +105,14 @@ impl<'a> ExecutorNode<'a> for CopyFromFile {
             }
 
             let chunk = tuple_builder.build_with_row(record.iter())?;
-            runtime.transaction_append_tuple(&table_name, chunk, &serializers, false)?;
+            let mut state = arena.local_state(plan_arena);
+            let (transaction, table_codec) = state.transaction_codec_mut();
+            transaction.append_tuple(table_codec, &table_name, chunk, &serializers, false)?;
             size += 1;
         }
 
-        TupleBuilder::build_result_into(runtime.result_tuple_mut(), size.to_string());
-        runtime.resume();
+        TupleBuilder::build_result_into(arena.result_tuple_mut(), size.to_string());
+        arena.resume();
         Ok(())
     }
 }
@@ -177,8 +183,8 @@ mod tests {
         };
 
         let transaction = db.storage.transaction()?;
-        let mut executor = crate::execution::execute_input_mut::<_, CopyFromFile>(
-            op,
+        let mut executor = crate::execution::execute_mut(
+            CopyFromFile::from(op),
             (
                 db.state.table_cache(),
                 db.state.view_cache(),

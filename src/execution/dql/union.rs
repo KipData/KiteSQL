@@ -14,8 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
-    ReadExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
@@ -40,45 +39,51 @@ impl From<(LogicalPlan, LogicalPlan)> for Union {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Union {
-    type Input = (LogicalPlan, LogicalPlan);
+    type Input = Self;
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
-        cache: ReadExecutionContext<'_>,
+        cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let mut exec = Self::from(input);
-        exec.left_input = build_read(arena, plan_arena, exec.left_plan.take(), cache, transaction);
-        exec.right_input = build_read(
+        let mut executor = input;
+        executor.left_input = build_read(
             arena,
             plan_arena,
-            exec.right_plan.take(),
+            executor.left_plan.take(),
             cache,
             transaction,
         );
-        arena.push(ExecNode::Union(exec))
+        executor.right_input = build_read(
+            arena,
+            plan_arena,
+            executor.right_plan.take(),
+            cache,
+            transaction,
+        );
+        arena.push(ExecNode::Union(executor))
     }
 }
 
-impl<'a> ExecutorNode<'a> for Union {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Union {
     fn next_tuple(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if self.reading_left {
-            if runtime.next_tuple(self.left_input, plan_arena)? {
-                runtime.resume();
+            if arena.next_tuple(self.left_input, plan_arena)? {
+                arena.resume();
                 return Ok(());
             }
             self.reading_left = false;
         }
-        if runtime.next_tuple(self.right_input, plan_arena)? {
-            runtime.resume();
+        if arena.next_tuple(self.right_input, plan_arena)? {
+            arena.resume();
         } else {
-            runtime.finish();
+            arena.finish();
         }
         Ok(())
     }

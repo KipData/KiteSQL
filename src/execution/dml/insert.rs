@@ -16,8 +16,7 @@ use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
-    WriteExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
 };
 use crate::planner::operator::insert::InsertOperator;
 use crate::planner::LogicalPlan;
@@ -61,6 +60,29 @@ impl From<(InsertOperator, LogicalPlan)> for Insert {
     }
 }
 
+impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert {
+    type Input = Self;
+
+    fn into_executor(
+        input: Self::Input,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+        cache: ExecutionContext<'_>,
+        transaction: &T,
+    ) -> ExecId {
+        let mut executor = input;
+        executor.input_schema = executor.input_plan.take_schema(plan_arena);
+        executor.input = Some(build_read(
+            arena,
+            plan_arena,
+            executor.input_plan.take(),
+            cache,
+            transaction,
+        ));
+        arena.push(ExecNode::Insert(executor))
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, Hash)]
 enum MappingKey<'a> {
     Name(&'a str),
@@ -80,45 +102,22 @@ impl Insert {
     }
 }
 
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert {
-    type Input = (
-        crate::planner::operator::insert::InsertOperator,
-        LogicalPlan,
-    );
-
-    fn into_executor(
-        input: Self::Input,
-        arena: &mut ExecArena,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
-        cache: ReadExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let mut exec = Self::from(input);
-        exec.input_schema = exec.input_plan.take_schema(plan_arena);
-        exec.input = Some(build_read(
-            arena,
-            plan_arena,
-            exec.input_plan.take(),
-            cache,
-            transaction,
-        ));
-        arena.push(ExecNode::Insert(exec))
-    }
-}
-impl<'a> ExecutorNode<'a> for Insert {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert {
     fn next_tuple(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(input) = self.input.take() else {
-            runtime.finish();
+            arena.finish();
             return Ok(());
         };
 
+        let table_cache = arena.context().table_cache();
+        let transaction = arena.transaction();
         let table_snapshot = {
-            runtime
-                .transaction_table(self.table_name.clone())?
+            transaction
+                .table(table_cache, self.table_name.clone())?
                 .map(|table| table.dml_snapshot(plan_arena))
                 .transpose()?
         };
@@ -134,8 +133,8 @@ impl<'a> ExecutorNode<'a> for Insert {
                 .collect_vec();
             let mut inserted_count = 0;
 
-            while runtime.next_tuple(input, plan_arena)? {
-                let values = runtime.result_tuple().values.clone();
+            while arena.next_tuple(input, plan_arena)? {
+                let values = arena.result_tuple().values.clone();
 
                 let mut tuple_map = HashMap::new();
                 for (i, value) in values.into_iter().enumerate() {
@@ -173,9 +172,14 @@ impl<'a> ExecutorNode<'a> for Insert {
                     };
                     let tuple_id = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
                     let index = Index::new(index_meta.id, &value, index_meta.ty);
-                    runtime.transaction_add_index(&self.table_name, index, tuple_id)?;
+                    let mut state = arena.local_state(plan_arena);
+                    let (transaction, table_codec) = state.transaction_codec_mut();
+                    transaction.add_index(table_codec, &self.table_name, index, tuple_id)?;
                 }
-                runtime.transaction_append_tuple(
+                let mut state = arena.local_state(plan_arena);
+                let (transaction, table_codec) = state.transaction_codec_mut();
+                transaction.append_tuple(
+                    table_codec,
                     &self.table_name,
                     tuple,
                     &serializers,
@@ -184,12 +188,12 @@ impl<'a> ExecutorNode<'a> for Insert {
                 inserted_count += 1;
             }
 
-            TupleBuilder::build_result_into(runtime.result_tuple_mut(), inserted_count.to_string());
-            runtime.resume();
+            TupleBuilder::build_result_into(arena.result_tuple_mut(), inserted_count.to_string());
+            arena.resume();
             Ok(())
         } else {
-            TupleBuilder::build_result_into(runtime.result_tuple_mut(), "0".to_string());
-            runtime.resume();
+            TupleBuilder::build_result_into(arena.result_tuple_mut(), "0".to_string());
+            arena.resume();
             Ok(())
         }
     }

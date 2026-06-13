@@ -14,8 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
-    ReadExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
@@ -37,9 +36,9 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor {
 
     fn into_executor(
         (op, input): Self::Input,
-        arena: &mut ExecArena,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
-        cache: ReadExecutionContext<'_>,
+        cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
         let input = build_read(arena, plan_arena, input, cache, transaction);
@@ -52,18 +51,18 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor {
     }
 }
 
-impl<'a> ExecutorNode<'a> for StreamDistinctExecutor {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor {
     fn next_tuple(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         loop {
-            if !runtime.next_tuple(self.input, plan_arena)? {
-                runtime.finish();
+            if !arena.next_tuple(self.input, plan_arena)? {
+                arena.finish();
                 return Ok(());
             }
-            std::mem::swap(&mut self.scratch, runtime.result_tuple_mut());
+            std::mem::swap(&mut self.scratch, arena.result_tuple_mut());
             let tuple = &self.scratch;
             let group_keys = self
                 .groupby_exprs
@@ -73,10 +72,10 @@ impl<'a> ExecutorNode<'a> for StreamDistinctExecutor {
 
             if self.last_keys.as_ref() != Some(&group_keys) {
                 self.last_keys = Some(group_keys.clone());
-                let output = runtime.result_tuple_mut();
+                let output = arena.result_tuple_mut();
                 output.pk.clone_from(&tuple.pk);
                 output.values = group_keys;
-                runtime.resume();
+                arena.resume();
                 return Ok(());
             }
         }
@@ -176,7 +175,7 @@ mod tests {
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, StreamDistinctExecutor>(
             (agg, plan.childrens.pop_only()),
-            (&table_cache, &view_cache, &meta_cache),
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &transaction,
         ))?;
@@ -232,7 +231,7 @@ mod tests {
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, StreamDistinctExecutor>(
             (agg, plan.childrens.pop_only()),
-            (&table_cache, &view_cache, &meta_cache),
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &transaction,
         ))?;

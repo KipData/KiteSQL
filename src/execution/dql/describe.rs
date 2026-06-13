@@ -14,9 +14,7 @@
 
 use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
 use crate::errors::DatabaseError;
-use crate::execution::{
-    ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext, ReadExecutor,
-};
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::planner::operator::describe::DescribeOperator;
 use crate::storage::Transaction;
 use crate::types::value::{DataValue, Utf8Type};
@@ -58,28 +56,30 @@ impl From<DescribeOperator> for Describe {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Describe {
-    type Input = DescribeOperator;
+    type Input = Self;
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena,
+        arena: &mut ExecArena<'a, T>,
         _plan_arena: &mut crate::planner::PlanArena<'a>,
-        _: ReadExecutionContext<'_>,
+        _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::Describe(Describe::from(input)))
+        let executor = input;
+        arena.push(ExecNode::Describe(executor))
     }
 }
 
-impl<'a> ExecutorNode<'a> for Describe {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Describe {
     fn next_tuple(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if self.columns.is_none() {
-            let table = runtime
-                .transaction_table(self.table_name.clone())?
+            let table = arena
+                .transaction()
+                .table(arena.table_cache(), self.table_name.clone())?
                 .ok_or(DatabaseError::TableNotFound)?;
             self.columns = Some(table.columns().copied().collect());
         }
@@ -90,7 +90,7 @@ impl<'a> ExecutorNode<'a> for Describe {
             .and_then(|columns| columns.get(self.cursor))
             .copied()
         else {
-            runtime.finish();
+            arena.finish();
             return Ok(());
         };
 
@@ -99,12 +99,12 @@ impl<'a> ExecutorNode<'a> for Describe {
         let default = describe_default(column, plan_arena);
         let mapping = column_ref.to_string();
 
-        let output = runtime.result_tuple_mut();
+        let output = arena.result_tuple_mut();
         output.pk = None;
         output.values.clear();
         fill_describe_row(&mut output.values, column, default, mapping);
 
-        runtime.resume();
+        arena.resume();
         Ok(())
     }
 }

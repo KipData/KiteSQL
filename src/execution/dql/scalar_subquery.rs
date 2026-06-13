@@ -14,8 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
-    ReadExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
 use crate::planner::LogicalPlan;
@@ -33,9 +32,9 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ScalarSubquery {
 
     fn into_executor(
         (_, mut input): Self::Input,
-        arena: &mut ExecArena,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
-        cache: ReadExecutionContext<'_>,
+        cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
         let value_count = input.output_schema(plan_arena).len();
@@ -48,37 +47,37 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ScalarSubquery {
     }
 }
 
-impl<'a> ExecutorNode<'a> for ScalarSubquery {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarSubquery {
     fn next_tuple(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if self.returned {
-            runtime.finish();
+            arena.finish();
             return Ok(());
         }
         self.returned = true;
 
-        let has_first = runtime.next_tuple(self.input, plan_arena)?;
+        let has_first = arena.next_tuple(self.input, plan_arena)?;
         if !has_first {
-            let output = runtime.result_tuple_mut();
+            let output = arena.result_tuple_mut();
             output.pk = None;
             output.values.clear();
             output
                 .values
                 .extend((0..self.value_count).map(|_| DataValue::Null));
-            runtime.resume();
+            arena.resume();
             return Ok(());
         }
 
-        if runtime.next_tuple(self.input, plan_arena)? {
+        if arena.next_tuple(self.input, plan_arena)? {
             return Err(DatabaseError::InvalidValue(
                 "scalar subquery returned more than one row".to_string(),
             ));
         }
 
-        runtime.resume();
+        arena.resume();
         Ok(())
     }
 }

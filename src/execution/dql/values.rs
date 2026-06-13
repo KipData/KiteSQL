@@ -13,9 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{
-    ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext, ReadExecutor,
-};
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::planner::operator::values::ValuesOperator;
 use crate::storage::Transaction;
 use crate::types::tuple::Schema;
@@ -37,27 +35,28 @@ impl From<ValuesOperator> for Values {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Values {
-    type Input = ValuesOperator;
+    type Input = Self;
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena,
+        arena: &mut ExecArena<'a, T>,
         _plan_arena: &mut crate::planner::PlanArena<'a>,
-        _: ReadExecutionContext<'_>,
+        _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::Values(Values::from(input)))
+        let executor = input;
+        arena.push(ExecNode::Values(executor))
     }
 }
 
-impl<'a> ExecutorNode<'a> for Values {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values {
     fn next_tuple(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(mut values) = self.rows.next() else {
-            runtime.finish();
+            arena.finish();
             return Ok(());
         };
 
@@ -67,10 +66,10 @@ impl<'a> ExecutorNode<'a> for Values {
             *value = mem::replace(value, DataValue::Null).cast(ty)?;
         }
 
-        let output = runtime.result_tuple_mut();
+        let output = arena.result_tuple_mut();
         output.pk = None;
         output.values = values;
-        runtime.resume();
+        arena.resume();
         Ok(())
     }
 }

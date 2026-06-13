@@ -22,8 +22,7 @@ use crate::execution::dql::join::hash::{
 };
 use crate::execution::dql::sort::BumpVec;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
-    ReadExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
@@ -140,9 +139,9 @@ impl HashJoin {
         Ok(())
     }
 
-    fn initialize_build<'a>(
+    fn initialize_build<'a, T: Transaction + 'a>(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if !matches!(self.state, HashJoinState::Build) {
@@ -157,8 +156,8 @@ impl HashJoin {
         let mut build_buf = BumpVec::with_capacity_in(self.on_left_keys.len(), &self.bump);
         let mut build_count = 0usize;
 
-        while runtime.next_tuple(self.left_input, plan_arena)? {
-            let tuple = runtime.result_tuple().clone();
+        while arena.next_tuple(self.left_input, plan_arena)? {
+            let tuple = arena.result_tuple().clone();
             Self::eval_keys(&self.on_left_keys, &tuple, &mut build_buf)?;
 
             match build_map.get_mut(&build_buf) {
@@ -225,49 +224,49 @@ pub(crate) struct BuildState {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
-    type Input = (JoinOperator, LogicalPlan, LogicalPlan);
+    type Input = Self;
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
-        cache: ReadExecutionContext<'_>,
+        cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let mut exec = Self::from(input);
-        let left_schema_len = exec.left_input_plan.output_schema(plan_arena).len();
-        let right_schema_len = exec.right_input_plan.output_schema(plan_arena).len();
-        exec.left_schema_len = left_schema_len;
-        exec.right_schema_len = right_schema_len;
-        exec.left_input = build_read(
+        let mut executor = input;
+        let left_schema_len = executor.left_input_plan.output_schema(plan_arena).len();
+        let right_schema_len = executor.right_input_plan.output_schema(plan_arena).len();
+        executor.left_schema_len = left_schema_len;
+        executor.right_schema_len = right_schema_len;
+        executor.left_input = build_read(
             arena,
             plan_arena,
-            exec.left_input_plan.take(),
+            executor.left_input_plan.take(),
             cache,
             transaction,
         );
-        exec.right_input = build_read(
+        executor.right_input = build_read(
             arena,
             plan_arena,
-            exec.right_input_plan.take(),
+            executor.right_input_plan.take(),
             cache,
             transaction,
         );
-        arena.push(ExecNode::HashJoin(exec))
+        arena.push(ExecNode::HashJoin(executor))
     }
 }
 
-impl<'a> ExecutorNode<'a> for HashJoin {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashJoin {
     fn next_tuple(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if let Some(err) = self.init_error.take() {
             return Err(err);
         }
 
-        self.initialize_build(runtime, plan_arena)?;
+        self.initialize_build(arena, plan_arena)?;
         let mut state = std::mem::replace(&mut self.state, HashJoinState::End);
 
         loop {
@@ -281,10 +280,10 @@ impl<'a> ExecutorNode<'a> for HashJoin {
                 } => {
                     let probe_finished = loop {
                         if probe_state.is_none() {
-                            if !runtime.next_tuple(self.right_input, plan_arena)? {
+                            if !arena.next_tuple(self.right_input, plan_arena)? {
                                 break true;
                             }
-                            let tuple = runtime.result_tuple().clone();
+                            let tuple = arena.result_tuple().clone();
                             Self::eval_keys(&self.on_right_keys, &tuple, &mut probe_buf)?;
                             probe_state = Some(ProbeState {
                                 is_keys_has_null: probe_buf.iter().any(DataValue::is_null),
@@ -318,7 +317,7 @@ impl<'a> ExecutorNode<'a> for HashJoin {
                                 probe_buf,
                                 probe_state,
                             };
-                            runtime.produce_tuple(tuple);
+                            arena.produce_tuple(tuple);
                             return Ok(());
                         }
 
@@ -347,14 +346,14 @@ impl<'a> ExecutorNode<'a> for HashJoin {
                             join_impl,
                             left_drop,
                         };
-                        runtime.produce_tuple(tuple);
+                        arena.produce_tuple(tuple);
                         return Ok(());
                     }
                     state = HashJoinState::End;
                 }
                 HashJoinState::End => {
                     self.state = HashJoinState::End;
-                    runtime.finish();
+                    arena.finish();
                     return Ok(());
                 }
             }
@@ -511,9 +510,9 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = crate::execution::execute_input::<_, HashJoin>(
-            (op, left, right),
-            (&table_cache, &view_cache, &meta_cache),
+        let executor = crate::execution::execute(
+            HashJoin::from((op, left, right)),
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &transaction,
         );
@@ -569,9 +568,10 @@ mod test {
         };
         let (left, right) = plan.childrens.pop_twins();
         {
-            let tuples = try_collect(crate::execution::execute_input::<_, HashJoin>(
-                (op.clone(), left.clone(), right.clone()),
-                (&table_cache, &view_cache, &meta_cache),
+            let executor = HashJoin::from((op.clone(), left.clone(), right.clone()));
+            let tuples = try_collect(crate::execution::execute(
+                executor,
+                crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
                 plan_arena,
                 &transaction,
             ))?;
@@ -630,9 +630,9 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = crate::execution::execute_input::<_, HashJoin>(
-            (op, left, right),
-            (&table_cache, &view_cache, &meta_cache),
+        let executor = crate::execution::execute(
+            HashJoin::from((op, left, right)),
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &transaction,
         );
@@ -729,9 +729,9 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = crate::execution::execute_input::<_, HashJoin>(
-            (op, left, right),
-            (&table_cache, &view_cache, &meta_cache),
+        let executor = crate::execution::execute(
+            HashJoin::from((op, left, right)),
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &transaction,
         );
@@ -781,9 +781,9 @@ mod test {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
-        let executor = crate::execution::execute_input::<_, HashJoin>(
-            (op, left, right),
-            (&table_cache, &view_cache, &meta_cache),
+        let executor = crate::execution::execute(
+            HashJoin::from((op, left, right)),
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &transaction,
         );

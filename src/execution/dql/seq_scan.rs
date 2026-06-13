@@ -13,59 +13,79 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{
-    ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext, ReadExecutor,
-    RuntimeCursorId,
-};
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::planner::operator::table_scan::TableScanOperator;
-use crate::storage::Transaction;
+use crate::storage::{Iter, Transaction, TupleIter};
 
-pub(crate) struct SeqScan {
+pub(crate) struct SeqScan<'a, T: Transaction + 'a> {
     op: Option<TableScanOperator>,
-    cursor: Option<RuntimeCursorId>,
+    iter: Option<TupleIter<'a, T>>,
 }
 
-impl From<TableScanOperator> for SeqScan {
+impl<'a, T: Transaction + 'a> From<TableScanOperator> for SeqScan<'a, T> {
     fn from(op: TableScanOperator) -> Self {
-        Self {
+        SeqScan {
             op: Some(op),
-            cursor: None,
+            iter: None,
         }
     }
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SeqScan {
-    type Input = TableScanOperator;
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SeqScan<'a, T> {
+    type Input = Self;
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena,
+        arena: &mut ExecArena<'a, T>,
         _plan_arena: &mut crate::planner::PlanArena<'a>,
-        _: ReadExecutionContext<'_>,
+        _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::SeqScan(SeqScan::from(input)))
+        let executor = input;
+        arena.push(ExecNode::SeqScan(executor))
     }
 }
 
-impl<'a> ExecutorNode<'a> for SeqScan {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SeqScan<'a, T> {
     fn next_tuple(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
-        if self.cursor.is_none() {
-            let Some(op) = self.op.take() else {
-                runtime.finish();
+        if self.iter.is_none() {
+            let Some(TableScanOperator {
+                table_name,
+                columns,
+                limit,
+                with_pk,
+                ..
+            }) = self.op.take()
+            else {
+                arena.finish();
                 return Ok(());
             };
-            self.cursor = Some(runtime.open_seq_scan(plan_arena, op)?);
+            let state = arena.local_state(plan_arena);
+            self.iter = Some(state.transaction().read(
+                state.table_codec,
+                state.plan_arena,
+                state.context.table_cache,
+                table_name,
+                limit,
+                columns,
+                with_pk,
+            )?);
         }
 
-        if runtime.next_scan_tuple(self.cursor.expect("seq scan cursor initialized"))? {
-            runtime.resume();
+        let state = arena.local_state(plan_arena);
+        if self
+            .iter
+            .as_mut()
+            .expect("seq scan iterator initialized")
+            .next_tuple_into(state.table_codec, &mut state.result.tuple)?
+        {
+            arena.resume();
         } else {
-            runtime.finish();
+            arena.finish();
         }
         Ok(())
     }

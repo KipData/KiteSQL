@@ -14,8 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
-    ReadExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::set_membership::SetMembershipKind;
 use crate::planner::LogicalPlan;
@@ -50,58 +49,64 @@ impl From<(SetMembershipKind, LogicalPlan, LogicalPlan)> for SetMembership {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SetMembership {
-    type Input = (SetMembershipKind, LogicalPlan, LogicalPlan);
+    type Input = Self;
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
-        cache: ReadExecutionContext<'_>,
+        cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let mut exec = Self::from(input);
-        exec.left_input = build_read(arena, plan_arena, exec.left_plan.take(), cache, transaction);
-        exec.right_input = build_read(
+        let mut executor = input;
+        executor.left_input = build_read(
             arena,
             plan_arena,
-            exec.right_plan.take(),
+            executor.left_plan.take(),
             cache,
             transaction,
         );
-        arena.push(ExecNode::SetMembership(exec))
+        executor.right_input = build_read(
+            arena,
+            plan_arena,
+            executor.right_plan.take(),
+            cache,
+            transaction,
+        );
+        arena.push(ExecNode::SetMembership(executor))
     }
 }
 
-impl<'a> ExecutorNode<'a> for SetMembership {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SetMembership {
     fn next_tuple(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if !self.built {
-            while runtime.next_tuple(self.right_input, plan_arena)? {
+            while arena.next_tuple(self.right_input, plan_arena)? {
                 *self
                     .right_counts
-                    .entry(runtime.result_tuple().clone())
+                    .entry(arena.result_tuple().clone())
                     .or_insert(0) += 1;
             }
             self.built = true;
         }
 
         loop {
-            if !runtime.next_tuple(self.left_input, plan_arena)? {
-                runtime.finish();
+            if !arena.next_tuple(self.left_input, plan_arena)? {
+                arena.finish();
                 return Ok(());
             }
 
-            let matched = self.consume_right_match(runtime.result_tuple());
+            let matched = self.consume_right_match(arena.result_tuple());
             let should_emit = match self.kind {
                 SetMembershipKind::Except => !matched,
                 SetMembershipKind::Intersect => matched,
             };
 
             if should_emit {
-                runtime.resume();
+                arena.resume();
                 return Ok(());
             }
         }

@@ -16,15 +16,15 @@ use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
 use crate::execution::{
-    build_read, DDLApply, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode,
-    ReadExecutionContext, WriteExecutor,
+    build_read, DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode,
+    WriteExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::optimizer::core::histogram::HistogramBuilder;
 use crate::optimizer::core::statistics_meta::StatisticsMeta;
 use crate::planner::operator::analyze::AnalyzeOperator;
 use crate::planner::LogicalPlan;
-use crate::storage::Transaction;
+use crate::storage::{table_codec::TableCodec, Transaction};
 use crate::types::index::IndexId;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
@@ -62,43 +62,42 @@ impl From<(AnalyzeOperator, LogicalPlan)> for Analyze {
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze {
-    type Input = (
-        crate::planner::operator::analyze::AnalyzeOperator,
-        LogicalPlan,
-    );
+    type Input = Self;
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
-        cache: ReadExecutionContext<'_>,
+        cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let mut exec = Self::from(input);
-        exec.input = Some(build_read(
+        let mut executor = input;
+        executor.input = Some(build_read(
             arena,
             plan_arena,
-            exec.input_plan.take(),
+            executor.input_plan.take(),
             cache,
             transaction,
         ));
-        arena.push(ExecNode::Analyze(exec))
+        arena.push(ExecNode::Analyze(executor))
     }
 }
-impl<'a> ExecutorNode<'a> for Analyze {
+
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Analyze {
     fn next_tuple(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(input) = self.input.take() else {
-            runtime.finish();
+            arena.finish();
             return Ok(());
         };
 
         let mut builders = {
-            let table = runtime
-                .transaction_table(self.table_name.clone())?
+            let table = arena
+                .transaction()
+                .table(arena.table_cache(), self.table_name.clone())?
                 .ok_or(DatabaseError::TableNotFound)?;
             table
                 .indexes()
@@ -114,8 +113,8 @@ impl<'a> ExecutorNode<'a> for Analyze {
                 .collect::<Result<Vec<_>, DatabaseError>>()?
         };
 
-        while runtime.next_tuple(input, plan_arena)? {
-            let tuple = runtime.result_tuple();
+        while arena.next_tuple(input, plan_arena)? {
+            let tuple = arena.result_tuple();
             for State { exprs, builder, .. } in builders.iter_mut() {
                 let values = Projection::projection(tuple, exprs)?;
 
@@ -126,12 +125,20 @@ impl<'a> ExecutorNode<'a> for Analyze {
                 }
             }
         }
-        let values = Self::persist_statistics_meta(&self.table_name, builders, runtime)?;
+        let mut state = arena.local_state(plan_arena);
+        let (transaction, table_codec, ddl_apply) = state.write_transaction_codec_ddl_apply_mut();
+        let values = Self::persist_statistics_meta(
+            &self.table_name,
+            builders,
+            ddl_apply,
+            transaction,
+            table_codec,
+        )?;
 
-        let output = runtime.result_tuple_mut();
+        let output = arena.result_tuple_mut();
         output.pk = None;
         output.values = values;
-        runtime.resume();
+        arena.resume();
         Ok(())
     }
 }
@@ -144,10 +151,12 @@ struct State {
 }
 
 impl Analyze {
-    fn persist_statistics_meta<'a>(
+    fn persist_statistics_meta<U: Transaction>(
         table_name: &TableName,
         builders: Vec<State>,
-        runtime: &mut dyn ExecRuntime<'a>,
+        applies: &mut Vec<DDLApply>,
+        transaction: &mut U,
+        table_codec: &mut TableCodec,
     ) -> Result<Vec<DataValue>, DatabaseError> {
         let mut values = Vec::with_capacity(builders.len());
 
@@ -162,8 +171,8 @@ impl Analyze {
                 builder.build(histogram_buckets.unwrap_or(DEFAULT_NUM_OF_BUCKETS))?;
             let meta = StatisticsMeta::new(histogram, sketch);
 
-            runtime.transaction_save_statistics_meta(table_name, meta.clone())?;
-            runtime.push_ddl_apply(DDLApply::UpsertStatisticsMeta {
+            transaction.save_statistics_meta(table_codec, table_name, meta.clone())?;
+            applies.push(DDLApply::UpsertStatisticsMeta {
                 table_name: table_name.clone(),
                 index_id,
                 meta,

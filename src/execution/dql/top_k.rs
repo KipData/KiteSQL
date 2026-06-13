@@ -15,8 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::execution::dql::sort::BumpVec;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
-    ReadExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::top_k::TopKOperator;
@@ -111,9 +110,9 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for TopK {
             },
             input,
         ): Self::Input,
-        arena: &mut ExecArena,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
-        cache: ReadExecutionContext<'_>,
+        cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
         let input = build_read(arena, plan_arena, input, cache, transaction);
@@ -128,23 +127,23 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for TopK {
     }
 }
 
-impl<'a> ExecutorNode<'a> for TopK {
-    #[allow(clippy::mutable_key_type)]
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for TopK {
     fn next_tuple(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if self.output.is_none() {
             let keep_count = self.offset.unwrap_or(0) + self.limit;
+            #[allow(clippy::mutable_key_type)]
             let mut set = BTreeSet::new();
 
-            while runtime.next_tuple(self.input, plan_arena)? {
+            while arena.next_tuple(self.input, plan_arena)? {
                 top_sort(
                     &self.arena,
                     &self.sort_fields,
                     &mut set,
-                    runtime.result_tuple().clone(),
+                    arena.result_tuple().clone(),
                     keep_count,
                 )?;
             }
@@ -162,9 +161,9 @@ impl<'a> ExecutorNode<'a> for TopK {
         }
 
         if let Some(item) = self.output.as_mut().and_then(std::iter::Iterator::next) {
-            runtime.produce_tuple(item.tuple);
+            arena.produce_tuple(item.tuple);
         } else {
-            runtime.finish();
+            arena.finish();
         }
         Ok(())
     }

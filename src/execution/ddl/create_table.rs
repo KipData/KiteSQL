@@ -14,8 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    DDLApply, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
-    WriteExecutor,
+    DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
 };
 use crate::planner::operator::create_table::CreateTableOperator;
 use crate::storage::Transaction;
@@ -32,22 +31,24 @@ impl From<CreateTableOperator> for CreateTable {
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateTable {
-    type Input = crate::planner::operator::create_table::CreateTableOperator;
+    type Input = Self;
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena,
+        arena: &mut ExecArena<'a, T>,
         _plan_arena: &mut crate::planner::PlanArena<'a>,
-        _: ReadExecutionContext<'_>,
+        _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::CreateTable(Self::from(input)))
+        let executor = input;
+        arena.push(ExecNode::CreateTable(executor))
     }
 }
-impl<'a> ExecutorNode<'a> for CreateTable {
+
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateTable {
     fn next_tuple(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(CreateTableOperator {
@@ -56,22 +57,24 @@ impl<'a> ExecutorNode<'a> for CreateTable {
             if_not_exists,
         }) = self.op.take()
         else {
-            runtime.finish();
+            arena.finish();
             return Ok(());
         };
 
-        let table = runtime.transaction_create_table(
+        let (transaction, table_codec) = arena.transaction_codec_mut();
+        let table = transaction.create_table(
+            table_codec,
             plan_arena,
             table_name.clone(),
             columns,
             if_not_exists,
         )?;
         if let Some(table) = table {
-            runtime.push_ddl_apply(DDLApply::upsert_table(table, false));
+            arena.push_ddl_apply(DDLApply::upsert_table(table, false));
         }
 
-        TupleBuilder::build_result_into(runtime.result_tuple_mut(), format!("{table_name}"));
-        runtime.resume();
+        TupleBuilder::build_result_into(arena.result_tuple_mut(), format!("{table_name}"));
+        arena.resume();
         Ok(())
     }
 }

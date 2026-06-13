@@ -16,8 +16,7 @@ use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::execution::dql::projection::Projection;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
-    WriteExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::delete::DeleteOperator;
@@ -45,43 +44,42 @@ impl From<(DeleteOperator, LogicalPlan)> for Delete {
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Delete {
-    type Input = (
-        crate::planner::operator::delete::DeleteOperator,
-        LogicalPlan,
-    );
+    type Input = Self;
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
-        cache: ReadExecutionContext<'_>,
+        cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let mut exec = Self::from(input);
-        exec.input = Some(build_read(
+        let mut executor = input;
+        executor.input = Some(build_read(
             arena,
             plan_arena,
-            exec.input_plan.take(),
+            executor.input_plan.take(),
             cache,
             transaction,
         ));
-        arena.push(ExecNode::Delete(exec))
+        arena.push(ExecNode::Delete(executor))
     }
 }
-impl<'a> ExecutorNode<'a> for Delete {
+
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Delete {
     fn next_tuple(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(input) = self.input.take() else {
-            runtime.finish();
+            arena.finish();
             return Ok(());
         };
 
         let index_templates = {
-            let table = runtime
-                .transaction_table(self.table_name.clone())?
+            let table = arena
+                .transaction()
+                .table(arena.table_cache(), self.table_name.clone())?
                 .ok_or(DatabaseError::TableNotFound)?;
             table
                 .indexes()
@@ -99,8 +97,8 @@ impl<'a> ExecutorNode<'a> for Delete {
 
         let mut deleted_count = 0;
 
-        while runtime.next_tuple(input, plan_arena)? {
-            let tuple = runtime.result_tuple().clone();
+        while arena.next_tuple(input, plan_arena)? {
+            let tuple = arena.result_tuple().clone();
             for (index_id, index_ty, exprs) in index_templates.iter() {
                 if let Some(Value { exprs, values, .. }) = indexes.get_mut(index_id) {
                     let Some(data_value) =
@@ -137,7 +135,10 @@ impl<'a> ExecutorNode<'a> for Delete {
                 ) in indexes.iter_mut()
                 {
                     for value in values {
-                        runtime.transaction_del_index(
+                        let mut state = arena.local_state(plan_arena);
+                        let (transaction, table_codec) = state.transaction_codec_mut();
+                        transaction.del_index(
+                            table_codec,
                             &self.table_name,
                             &Index::new(*index_id, value, *index_ty),
                             tuple_id,
@@ -145,13 +146,15 @@ impl<'a> ExecutorNode<'a> for Delete {
                     }
                 }
 
-                runtime.transaction_remove_tuple(&self.table_name, tuple_id)?;
+                let mut state = arena.local_state(plan_arena);
+                let (transaction, table_codec) = state.transaction_codec_mut();
+                transaction.remove_tuple(table_codec, &self.table_name, tuple_id)?;
                 deleted_count += 1;
             }
         }
 
-        TupleBuilder::build_result_into(runtime.result_tuple_mut(), deleted_count.to_string());
-        runtime.resume();
+        TupleBuilder::build_result_into(arena.result_tuple_mut(), deleted_count.to_string());
+        arena.resume();
         Ok(())
     }
 }

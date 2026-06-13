@@ -13,58 +13,61 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{
-    ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext, ReadExecutor,
-    RuntimeCursorId,
-};
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
+use crate::storage::{TableIter, Transaction};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
 
-pub struct ShowTables {
-    pub(crate) cursor: Option<RuntimeCursorId>,
+pub struct ShowTables<'a, T: Transaction + 'a> {
+    pub(crate) metas: Option<TableIter<'a, T>>,
 }
 
-impl<'a, T: crate::storage::Transaction + 'a> ReadExecutor<'a, T> for ShowTables {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ShowTables<'a, T> {
     type Input = Self;
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena,
+        arena: &mut ExecArena<'a, T>,
         _: &mut crate::planner::PlanArena<'a>,
-        _: ReadExecutionContext<'_>,
+        _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
         arena.push(ExecNode::ShowTables(input))
     }
 }
 
-impl<'a> ExecutorNode<'a> for ShowTables {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowTables<'a, T> {
     fn next_tuple(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
-        _: &mut crate::planner::PlanArena<'a>,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
-        if self.cursor.is_none() {
-            self.cursor = Some(runtime.open_table_iter()?);
+        if self.metas.is_none() {
+            let mut state = arena.local_state(plan_arena);
+            let (transaction, table_codec) = state.transaction_codec();
+            self.metas = Some(transaction.tables(table_codec)?);
         }
 
-        let Some(table_name) =
-            runtime.next_table_name(self.cursor.expect("table cursor initialized"))?
+        let Some(table) = self
+            .metas
+            .as_mut()
+            .expect("show tables iterator initialized")
+            .try_next()?
         else {
-            runtime.finish();
+            arena.finish();
             return Ok(());
         };
 
-        let output = runtime.result_tuple_mut();
+        let output = arena.result_tuple_mut();
         output.pk = None;
         output.values.clear();
         output.values.push(DataValue::Utf8 {
-            value: table_name,
+            value: table.table_name.to_string(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         });
 
-        runtime.resume();
+        arena.resume();
         Ok(())
     }
 }

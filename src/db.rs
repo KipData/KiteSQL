@@ -17,10 +17,7 @@ pub use crate::binder::{prepare, prepare_all, Statement};
 use crate::binder::{Binder, BinderContext};
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
-use crate::execution::{
-    build_write, build_write_read_context, DDLApply, ExecArena, ExecuteRuntime, Executor,
-    WriteExecutionContext,
-};
+use crate::execution::{build_write, DDLApply, ExecArena, ExecutionContext, Executor};
 use crate::expression::function::scala::ScalarFunctionImpl;
 use crate::expression::function::table::{
     ArcTableFunctionImpl, TableFunctionCatalog, TableFunctionImpl,
@@ -557,23 +554,15 @@ impl<S: Storage> State<S> {
             let (mut plan, mut plan_arena) = self.build_plan(params, transaction, build)?;
             let schema = plan.take_schema(&mut plan_arena);
             let mut arena = ExecArena::new();
-            let read_context = (
+            let read_context = ExecutionContext::new(
                 &self.table_cache,
                 &self.view_cache,
                 &self.meta_cache,
                 &self.scala_functions,
                 &self.table_functions,
             );
-            let root = build_write_read_context(
-                &mut arena,
-                &mut plan_arena,
-                plan,
-                read_context,
-                transaction,
-            );
-            let mut runtime = ExecuteRuntime::new(arena);
-            runtime.init_context(read_context, transaction);
-            let executor = Executor::new(runtime, root);
+            let root = build_write(&mut arena, &mut plan_arena, plan, read_context, transaction);
+            let executor = Executor::new(arena, root);
 
             Ok((schema, plan_arena, executor))
         })() {
@@ -641,17 +630,15 @@ impl<S: Storage> State<S> {
 
         let schema = plan.take_schema(&mut plan_arena);
         let mut arena = ExecArena::new();
-        let cache = WriteExecutionContext::new(
+        let cache = ExecutionContext::new(
             table_cache,
             view_cache,
             meta_cache,
             scala_functions,
             table_functions,
         );
-        let root = build_write(&mut arena, &mut plan_arena, plan, &cache, &*transaction);
-        let mut runtime = ExecuteRuntime::new(arena);
-        runtime.init_context_mut(cache, transaction);
-        let executor = Executor::new(runtime, root);
+        let root = build_write(&mut arena, &mut plan_arena, plan, cache, transaction);
+        let executor = Executor::new(arena, root);
 
         Ok((schema, plan_arena, executor))
     }

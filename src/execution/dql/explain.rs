@@ -13,9 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{
-    ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext, ReadExecutor,
-};
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::value::{DataValue, Utf8Type};
@@ -36,35 +34,33 @@ impl From<LogicalPlan> for Explain {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Explain {
-    type Input = LogicalPlan;
+    type Input = Self;
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena,
+        arena: &mut ExecArena<'a, T>,
         _plan_arena: &mut crate::planner::PlanArena<'a>,
-        _: ReadExecutionContext<'_>,
+        _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::Explain(Explain {
-            plan: input,
-            emitted: false,
-        }))
+        let executor = input;
+        arena.push(ExecNode::Explain(executor))
     }
 }
 
-impl<'a> ExecutorNode<'a> for Explain {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Explain {
     fn next_tuple(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if self.emitted {
-            runtime.finish();
+            arena.finish();
             return Ok(());
         }
 
         let plan = self.plan.explain(plan_arena, 0);
-        let output = runtime.result_tuple_mut();
+        let output = arena.result_tuple_mut();
         output.pk = None;
         output.values.clear();
         output.values.push(DataValue::Utf8 {
@@ -74,7 +70,7 @@ impl<'a> ExecutorNode<'a> for Explain {
         });
 
         self.emitted = true;
-        runtime.resume();
+        arena.resume();
         Ok(())
     }
 }

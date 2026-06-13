@@ -15,8 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::create_accumulators;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
-    ReadExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
@@ -33,9 +32,9 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SimpleAggExecutor {
 
     fn into_executor(
         (AggregateOperator { agg_calls, .. }, input): Self::Input,
-        arena: &mut ExecArena,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
-        cache: ReadExecutionContext<'_>,
+        cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
         let input = build_read(arena, plan_arena, input, cache, transaction);
@@ -47,21 +46,21 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SimpleAggExecutor {
     }
 }
 
-impl<'a> ExecutorNode<'a> for SimpleAggExecutor {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor {
     fn next_tuple(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if self.returned {
-            runtime.finish();
+            arena.finish();
             return Ok(());
         }
 
         let mut accs = create_accumulators(&self.agg_calls)?;
 
-        while runtime.next_tuple(self.input, plan_arena)? {
-            let tuple = runtime.result_tuple();
+        while arena.next_tuple(self.input, plan_arena)? {
+            let tuple = arena.result_tuple();
             for (acc, expr) in accs.iter_mut().zip(self.agg_calls.iter()) {
                 let ScalarExpression::AggCall { args, .. } = expr else {
                     unreachable!()
@@ -78,7 +77,7 @@ impl<'a> ExecutorNode<'a> for SimpleAggExecutor {
             }
         }
 
-        let output = runtime.result_tuple_mut();
+        let output = arena.result_tuple_mut();
         output.pk = None;
         output.values.clear();
         output.values.reserve(accs.len());
@@ -86,7 +85,7 @@ impl<'a> ExecutorNode<'a> for SimpleAggExecutor {
             output.values.push(acc.evaluate()?);
         }
         self.returned = true;
-        runtime.resume();
+        arena.resume();
         Ok(())
     }
 }

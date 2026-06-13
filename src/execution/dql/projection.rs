@@ -14,8 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
-    ReadExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::project::ProjectOperator;
@@ -34,9 +33,9 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Projection {
 
     fn into_executor(
         (ProjectOperator { exprs }, input): Self::Input,
-        arena: &mut ExecArena,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
-        cache: ReadExecutionContext<'_>,
+        cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
         let input = build_read(arena, plan_arena, input, cache, transaction);
@@ -44,19 +43,26 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Projection {
     }
 }
 
-impl<'a> ExecutorNode<'a> for Projection {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection {
     fn next_tuple(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
-        if !runtime.next_tuple(self.input, plan_arena)? {
-            runtime.finish();
+        if !arena.next_tuple(self.input, plan_arena)? {
+            arena.finish();
             return Ok(());
         }
 
-        runtime.project_tuple(&self.exprs)?;
-        runtime.resume();
+        arena.with_projection_tmp(|tuple, projection_tmp| {
+            projection_tmp.clear();
+            projection_tmp.reserve(self.exprs.len());
+            for expr in self.exprs.iter() {
+                projection_tmp.push(expr.eval(Some(tuple))?);
+            }
+            Ok::<_, DatabaseError>(())
+        })?;
+        arena.resume();
         Ok(())
     }
 }

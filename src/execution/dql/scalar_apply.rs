@@ -16,8 +16,7 @@ use std::mem;
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecRuntime, ExecutorNode, ReadExecutionContext,
-    ReadExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::scalar_apply::ScalarApplyOperator;
 use crate::planner::LogicalPlan;
@@ -35,9 +34,9 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ScalarApply {
 
     fn into_executor(
         (_, left_input, right_input): Self::Input,
-        arena: &mut ExecArena,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
-        cache: ReadExecutionContext<'_>,
+        cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
         let left_input = build_read(arena, plan_arena, left_input, cache, transaction);
@@ -50,50 +49,45 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ScalarApply {
     }
 }
 
-impl<'a> ExecutorNode<'a> for ScalarApply {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarApply {
     fn next_tuple(
         &mut self,
-        runtime: &mut dyn ExecRuntime<'a>,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
-        Self::load_right_once(
-            &mut self.cached_right,
-            self.right_input,
-            runtime,
-            plan_arena,
-        )?;
+        Self::load_right_once(&mut self.cached_right, self.right_input, arena, plan_arena)?;
 
         let right_tuple = self
             .cached_right
             .as_ref()
             .expect("scalar apply right tuple initialized");
-        if !runtime.next_tuple(self.left_input, plan_arena)? {
-            runtime.finish();
+        if !arena.next_tuple(self.left_input, plan_arena)? {
+            arena.finish();
             return Ok(());
         }
-        runtime
+        arena
             .result_tuple_mut()
             .values
             .extend(right_tuple.values.iter().cloned());
-        runtime.resume();
+        arena.resume();
         Ok(())
     }
 }
 
 impl ScalarApply {
-    fn load_right_once<'a>(
+    fn load_right_once<'a, T: Transaction + 'a>(
         cached_right: &mut Option<Tuple>,
         right_input: ExecId,
-        runtime: &mut dyn ExecRuntime<'a>,
+        arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if cached_right.is_none() {
-            if !runtime.next_tuple(right_input, plan_arena)? {
+            if !arena.next_tuple(right_input, plan_arena)? {
                 return Err(DatabaseError::InvalidValue(
                     "scalar apply right input returned no rows".to_string(),
                 ));
             }
-            *cached_right = Some(mem::take(runtime.result_tuple_mut()));
+            *cached_right = Some(mem::take(arena.result_tuple_mut()));
         }
 
         Ok(())
@@ -171,7 +165,7 @@ mod tests {
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, ScalarApply>(
             (ScalarApplyOperator, left, right),
-            (&table_cache, &view_cache, &meta_cache),
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &transaction,
         ))?;
@@ -212,7 +206,7 @@ mod tests {
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, ScalarApply>(
             (ScalarApplyOperator, left, right),
-            (&table_cache, &view_cache, &meta_cache),
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &transaction,
         ))?;
