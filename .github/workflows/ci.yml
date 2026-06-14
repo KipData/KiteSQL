@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
 
 env:
@@ -12,120 +14,73 @@ jobs:
   # 1
   check:
     name: Rust project check
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
-      - name: Install latest nightly
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-          components: rustfmt, clippy
-
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v2
-
-      # `cargo check` command here will use installed `nightly`
-      # as it is set as an "override" for current directory
+      - name: Use preinstalled tools
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "$HOME/actions-runner/externals/node20/bin" >> "$GITHUB_PATH"
 
       - name: Run cargo check
         run: make cargo-check
 
-
       - name: Run cargo build
         run: make build
-
 
       - name: Run cargo test
         run: make test
   # 2
   fmt:
     name: Rust fmt
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
-      - name: Install latest nightly
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-          components: rustfmt, clippy
-
-      # `cargo check` command here will use installed `nightly`
-      # as it is set as an "override" for current directory
+      - name: Use preinstalled tools
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "$HOME/actions-runner/externals/node20/bin" >> "$GITHUB_PATH"
 
       - name: Run cargo fmt
         run: make fmt
   # 3
   e2e:
     name: Rust e2e sqllogictest
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
-      - name: Install latest nightly
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-          components: rustfmt, clippy
-
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v2
-
-      # `cargo check` command here will use installed `nightly`
-      # as it is set as an "override" for current directory
+      - name: Use preinstalled tools
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "$HOME/actions-runner/externals/node20/bin" >> "$GITHUB_PATH"
 
       - name: Run sqllogictest suite
         run: make test-slt
   # 4
   wasm-tests:
     name: Wasm cargo tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
 
-      - name: Install stable with wasm target
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          target: wasm32-unknown-unknown
-          override: true
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@v0.4.0
-        with:
-          version: latest
+      - name: Use preinstalled tools
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "$HOME/actions-runner/externals/node20/bin" >> "$GITHUB_PATH"
 
       - name: Run wasm-bindgen tests (wasm32 target)
         run: make test-wasm
   # 5
   wasm-examples:
     name: Wasm examples (nodejs)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
 
-      - name: Install stable with wasm target
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          target: wasm32-unknown-unknown
-          override: true
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@v0.4.0
-        with:
-          version: latest
+      - name: Use preinstalled tools
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "$HOME/actions-runner/externals/node20/bin" >> "$GITHUB_PATH"
 
       - name: Build wasm package
         run: make wasm-build
@@ -135,35 +90,28 @@ jobs:
   # 6
   native-examples:
     name: Native examples
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
 
-      - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
+      - name: Use preinstalled tools
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "$HOME/actions-runner/externals/node20/bin" >> "$GITHUB_PATH"
 
       - name: Run native examples
         run: make native-examples
   # 7
   python-tests:
     name: Python bindings tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
 
-      - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      - name: Use preinstalled tools
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "$HOME/actions-runner/externals/node20/bin" >> "$GITHUB_PATH"
 
       - name: Run python binding tests
         run: make test-python
