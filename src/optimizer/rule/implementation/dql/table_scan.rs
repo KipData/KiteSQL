@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+use crate::expression::range_detacher::Range;
 use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
 use crate::optimizer::core::rule::{BestPhysicalOption, ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
@@ -96,6 +97,7 @@ impl ImplementationRule for IndexScanImplementation {
                 if let Some(mut row_count) =
                     loader.collect_count(&scan_op.table_name, index_meta.id, range)?
                 {
+                    row_count = adjust_index_row_count(index_meta.ty, range, row_count);
                     if index_info.covered_deserializers.is_none()
                         && !matches!(index_meta.ty, IndexType::PrimaryKey { .. })
                     {
@@ -118,9 +120,19 @@ impl ImplementationRule for IndexScanImplementation {
                     //        |
                     //        └────────────────────── hint_sum
                     //         2    4    8   16   32
-                    let hint_sum = index_info.sort_elimination_hint.unwrap_or(0)
-                        + index_info.stream_distinct_hint.unwrap_or(0);
+                    let hint_sum = index_info
+                        .sort_elimination_hint
+                        .map(|hint| hint.cover_num())
+                        .unwrap_or(0)
+                        + index_info
+                            .stream_distinct_hint
+                            .map(|hint| hint.cover_num())
+                            .unwrap_or(0);
                     if hint_sum > 0 {
+                        // TODO: use histogram correlation to refine the cost of ordered index
+                        // scans. A hint here means an ancestor has an ordering requirement that
+                        // index_info.sort_option can satisfy; correlation can estimate whether the
+                        // underlying row access is closer to sequential IO or random IO.
                         let rows = row_count.max(1) as f64;
                         let raw_bonus = rows * rows.log2();
                         let hint_weight = (hint_sum as f64).log2().max(1.0);
@@ -145,5 +157,30 @@ impl ImplementationRule for IndexScanImplementation {
         } else {
             unreachable!("invalid operator!")
         }
+    }
+}
+
+fn adjust_index_row_count(index_type: IndexType, range: &Range, row_count: usize) -> usize {
+    let row_count = unique_eq_row_count(index_type, range).unwrap_or(row_count);
+    if row_count == 0 && !matches!(range, Range::Dummy) {
+        1
+    } else {
+        row_count
+    }
+}
+
+fn unique_eq_row_count(index_type: IndexType, range: &Range) -> Option<usize> {
+    match range {
+        Range::Dummy => Some(0),
+        Range::Eq(value)
+            if !value.is_null()
+                && matches!(index_type, IndexType::PrimaryKey { .. } | IndexType::Unique) =>
+        {
+            Some(1)
+        }
+        Range::SortedRanges(ranges) => ranges.iter().try_fold(0usize, |count, range| {
+            unique_eq_row_count(index_type, range).map(|row_count| count + row_count)
+        }),
+        _ => None,
     }
 }

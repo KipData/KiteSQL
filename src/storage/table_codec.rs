@@ -1004,7 +1004,7 @@ mod tests {
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRelation, TableCatalog, TableMeta};
     use crate::errors::DatabaseError;
     use crate::iter_ext::Itertools;
-    use crate::optimizer::core::histogram::HistogramBuilder;
+    use crate::optimizer::core::histogram::{HistogramBuilder, ANALYZE_STATISTICS_RELATIVE_ERROR};
     use crate::optimizer::core::statistics_meta::StatisticsMeta;
     use crate::planner::{PlanArena, TableArenaCell};
     use crate::serdes::ReferenceTables;
@@ -1102,10 +1102,10 @@ mod tests {
             name: "pk_c1".to_string(),
             ty: IndexType::PrimaryKey { is_multiple: false },
         };
-        let mut builder = HistogramBuilder::new(&index_meta, Some(8));
+        let mut builder = HistogramBuilder::new(&index_meta, ANALYZE_STATISTICS_RELATIVE_ERROR)?;
 
         for value in 0..4 {
-            builder.append(&DataValue::Int32(value))?;
+            builder.append(DataValue::Int32(value))?;
         }
         let (histogram, sketch) = builder.build(2)?;
         let (root, buckets, _) = StatisticsMeta::new(histogram, sketch.clone()).into_parts();

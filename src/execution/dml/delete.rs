@@ -102,7 +102,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Delete {
                         transaction.del_index(
                             table_codec,
                             &self.table_name,
-                            &Index::new(*index_id, value, *index_ty),
+                            &Index::new(*index_id, &value, *index_ty),
                             tuple_id,
                         )
                     })?;

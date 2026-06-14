@@ -413,7 +413,7 @@ pub(crate) fn with_projection_tmp_value<'a, T: Transaction + 'a>(
     arena: &mut ExecArena<'a, T>,
     tuple: Option<&dyn TupleLike>,
     exprs: &[ScalarExpression],
-    f: impl FnOnce(&mut ExecArena<'a, T>, &DataValue) -> Result<(), DatabaseError>,
+    f: impl FnOnce(&mut ExecArena<'a, T>, DataValue) -> Result<(), DatabaseError>,
 ) -> Result<(), DatabaseError> {
     arena.with_projection_tmp(|arena, projection_tmp| {
         {
@@ -424,16 +424,16 @@ pub(crate) fn with_projection_tmp_value<'a, T: Transaction + 'a>(
             }
         }
 
-        if projection_tmp.len() > 1 {
-            let value = DataValue::Tuple(std::mem::take(projection_tmp), false);
-            let ret = f(arena, &value);
-            let DataValue::Tuple(values, _) = value else {
-                unreachable!()
-            };
-            *projection_tmp = values;
-            ret?;
-        } else if let Some(value) = projection_tmp.first() {
-            f(arena, value)?;
+        match projection_tmp.len() {
+            0 => {}
+            1 => {
+                let value = projection_tmp.pop().expect("projection has one value");
+                f(arena, value)?;
+            }
+            _ => {
+                let value = DataValue::Tuple(std::mem::take(projection_tmp), false);
+                f(arena, value)?;
+            }
         }
         Ok(())
     })

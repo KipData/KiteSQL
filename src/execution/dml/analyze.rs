@@ -20,7 +20,7 @@ use crate::execution::{
 };
 use crate::expression::ScalarExpression;
 use crate::iter_ext::Itertools;
-use crate::optimizer::core::histogram::HistogramBuilder;
+use crate::optimizer::core::histogram::{HistogramBuilder, ANALYZE_STATISTICS_RELATIVE_ERROR};
 use crate::optimizer::core::statistics_meta::StatisticsMeta;
 use crate::planner::operator::analyze::AnalyzeOperator;
 use crate::planner::LogicalPlan;
@@ -105,7 +105,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Analyze {
                     Ok(State {
                         index_id: index.id,
                         exprs: index.column_exprs(table, plan_arena)?,
-                        builder: HistogramBuilder::new(index, None),
+                        builder: HistogramBuilder::new(index, ANALYZE_STATISTICS_RELATIVE_ERROR)?,
                         histogram_buckets: self.histogram_buckets,
                     })
                 })

@@ -141,12 +141,11 @@ impl StatisticsMeta {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::errors::DatabaseError;
-    use crate::optimizer::core::histogram::HistogramBuilder;
+    use crate::optimizer::core::histogram::{HistogramBuilder, ANALYZE_STATISTICS_RELATIVE_ERROR};
     use crate::optimizer::core::statistics_meta::StatisticsMeta;
     use crate::types::index::{IndexMeta, IndexType};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
-    use std::sync::Arc;
 
     #[test]
     fn test_into_parts_and_from_parts() -> Result<(), DatabaseError> {
@@ -160,25 +159,25 @@ mod tests {
             ty: IndexType::PrimaryKey { is_multiple: false },
         };
 
-        let mut builder = HistogramBuilder::new(&index, Some(15));
+        let mut builder = HistogramBuilder::new(&index, ANALYZE_STATISTICS_RELATIVE_ERROR)?;
 
-        builder.append(&Arc::new(DataValue::Int32(14)))?;
-        builder.append(&Arc::new(DataValue::Int32(13)))?;
-        builder.append(&Arc::new(DataValue::Int32(12)))?;
-        builder.append(&Arc::new(DataValue::Int32(11)))?;
-        builder.append(&Arc::new(DataValue::Int32(10)))?;
-        builder.append(&Arc::new(DataValue::Int32(4)))?;
-        builder.append(&Arc::new(DataValue::Int32(3)))?;
-        builder.append(&Arc::new(DataValue::Int32(2)))?;
-        builder.append(&Arc::new(DataValue::Int32(1)))?;
-        builder.append(&Arc::new(DataValue::Int32(0)))?;
-        builder.append(&Arc::new(DataValue::Int32(9)))?;
-        builder.append(&Arc::new(DataValue::Int32(8)))?;
-        builder.append(&Arc::new(DataValue::Int32(7)))?;
-        builder.append(&Arc::new(DataValue::Int32(6)))?;
-        builder.append(&Arc::new(DataValue::Int32(5)))?;
-        builder.append(&Arc::new(DataValue::Null))?;
-        builder.append(&Arc::new(DataValue::Null))?;
+        builder.append(DataValue::Int32(14))?;
+        builder.append(DataValue::Int32(13))?;
+        builder.append(DataValue::Int32(12))?;
+        builder.append(DataValue::Int32(11))?;
+        builder.append(DataValue::Int32(10))?;
+        builder.append(DataValue::Int32(4))?;
+        builder.append(DataValue::Int32(3))?;
+        builder.append(DataValue::Int32(2))?;
+        builder.append(DataValue::Int32(1))?;
+        builder.append(DataValue::Int32(0))?;
+        builder.append(DataValue::Int32(9))?;
+        builder.append(DataValue::Int32(8))?;
+        builder.append(DataValue::Int32(7))?;
+        builder.append(DataValue::Int32(6))?;
+        builder.append(DataValue::Int32(5))?;
+        builder.append(DataValue::Null)?;
+        builder.append(DataValue::Null)?;
 
         let (histogram, sketch) = builder.build(4)?;
         let expected_estimate = sketch.estimate(&DataValue::Int32(7));

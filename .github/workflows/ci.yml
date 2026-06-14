@@ -15,67 +15,71 @@ jobs:
   # 1
   check:
     name: Rust project check
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - name: Use preinstalled tools
-        run: |
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          echo "$HOME/actions-runner/externals/node20/bin" >> "$GITHUB_PATH"
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
 
       - name: Run cargo test
         run: make test
   # 2
   fmt:
     name: Rust fmt
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - name: Use preinstalled tools
-        run: |
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          echo "$HOME/actions-runner/externals/node20/bin" >> "$GITHUB_PATH"
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
 
       - name: Run cargo fmt
         run: make fmt
   # 3
   e2e:
     name: Rust e2e sqllogictest
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - name: Use preinstalled tools
-        run: |
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          echo "$HOME/actions-runner/externals/node20/bin" >> "$GITHUB_PATH"
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
 
       - name: Run sqllogictest suite
         run: make test-slt
   # 4
   wasm-tests:
     name: Wasm cargo tests
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Use preinstalled tools
-        run: |
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          echo "$HOME/actions-runner/externals/node20/bin" >> "$GITHUB_PATH"
+      - uses: taiki-e/install-action@wasm-pack
 
       - name: Run wasm-bindgen tests (wasm32 target)
         run: make test-wasm
   # 5
   wasm-examples:
     name: Wasm examples (nodejs)
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Use preinstalled tools
-        run: |
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          echo "$HOME/actions-runner/externals/node20/bin" >> "$GITHUB_PATH"
+      - uses: taiki-e/install-action@wasm-pack
 
       - name: Build wasm package
         run: make wasm-build
@@ -85,28 +89,25 @@ jobs:
   # 6
   native-examples:
     name: Native examples
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-
-      - name: Use preinstalled tools
-        run: |
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          echo "$HOME/actions-runner/externals/node20/bin" >> "$GITHUB_PATH"
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
 
       - name: Run native examples
         run: make native-examples
   # 7
   python-tests:
     name: Python bindings tests
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-
-      - name: Use preinstalled tools
-        run: |
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          echo "$HOME/actions-runner/externals/node20/bin" >> "$GITHUB_PATH"
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: Swatinem/rust-cache@v2
 
       - name: Run python binding tests
-        run: make test-python
+        run: PYO3_PYTHON="$(which python)" make test-python
