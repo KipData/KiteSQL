@@ -17,8 +17,8 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v2
+      - name: Use preinstalled Rust
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Run cargo check
         run: make cargo-check
@@ -34,6 +34,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
+      - name: Use preinstalled Rust
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       - name: Run cargo fmt
         run: make fmt
   # 3
@@ -42,8 +45,8 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v2
+      - name: Use preinstalled Rust
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Run sqllogictest suite
         run: make test-slt
@@ -53,6 +56,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
+
+      - name: Use preinstalled Rust
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -72,6 +78,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
+
+      - name: Use preinstalled Rust
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -95,6 +104,9 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
+      - name: Use preinstalled Rust
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       - name: Run native examples
         run: make native-examples
   # 7
@@ -103,6 +115,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
+
+      - name: Use preinstalled Rust
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Setup Python
         uses: actions/setup-python@v5
