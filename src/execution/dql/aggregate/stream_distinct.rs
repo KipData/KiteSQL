@@ -17,12 +17,12 @@ use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::expression::ScalarExpression;
+use crate::iter_ext::Itertools;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
-use itertools::Itertools;
 
 pub struct StreamDistinctExecutor {
     groupby_exprs: Vec<ScalarExpression>,
@@ -89,6 +89,7 @@ mod tests {
     use crate::execution::dql::aggregate::stream_distinct::StreamDistinctExecutor;
     use crate::execution::{execute_input, try_collect};
     use crate::expression::ScalarExpression;
+    use crate::iter_ext::Itertools;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
     use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
@@ -100,7 +101,6 @@ mod tests {
     use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
-    use itertools::Itertools;
     use tempfile::TempDir;
 
     #[allow(clippy::type_complexity)]

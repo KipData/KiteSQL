@@ -13,11 +13,11 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::optimizer::core::cm_sketch::FastHasher;
+use crate::serdes::stable_hash::StableHasher;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use crate::storage::Transaction;
 
-impl ReferenceSerialization for FastHasher {
+impl ReferenceSerialization for StableHasher {
     fn encode<W: std::io::Write, A: crate::planner::MetaArena>(
         &self,
         writer: &mut W,
@@ -39,6 +39,6 @@ impl ReferenceSerialization for FastHasher {
         let key0 = u64::decode(reader, drive, reference_tables, arena)?;
         let key1 = u64::decode(reader, drive, reference_tables, arena)?;
 
-        Ok(FastHasher::new_with_keys(key0, key1))
+        Ok(StableHasher::new_with_keys(key0, key1))
     }
 }

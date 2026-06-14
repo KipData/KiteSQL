@@ -36,8 +36,8 @@ pub(crate) mod values;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod test {
+    use crate::iter_ext::Itertools;
     use crate::types::value::DataValue;
-    use itertools::Itertools;
 
     pub(crate) fn build_integers(ints: Vec<Option<i32>>) -> Vec<DataValue> {
         ints.into_iter()

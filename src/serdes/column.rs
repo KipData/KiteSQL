@@ -145,7 +145,6 @@ pub(crate) mod test {
     use crate::types::LogicalType;
     use std::io::{Cursor, Seek, SeekFrom};
     use tempfile::TempDir;
-    use ulid::Ulid;
 
     #[test]
     fn test_column_serialization() -> Result<(), DatabaseError> {
@@ -246,7 +245,7 @@ pub(crate) mod test {
         let summary = ColumnSummary {
             name: "c1".to_string(),
             relation: ColumnRelation::Table {
-                column_id: Ulid::new(),
+                column_id: 1,
                 table_name: "t1".to_string().into(),
                 is_temp: false,
             },
@@ -285,7 +284,7 @@ pub(crate) mod test {
         assert_eq!(none_relation, decode_relation);
         cursor.seek(SeekFrom::Start(0))?;
         let table_relation = ColumnRelation::Table {
-            column_id: Ulid::new(),
+            column_id: 1,
             table_name: "t1".to_string().into(),
             is_temp: false,
         };

@@ -16,7 +16,6 @@ use crate::errors::DatabaseError;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use kite_sql_serde_macros::ReferenceSerialization;
 use ordered_float::OrderedFloat;
 #[cfg(feature = "decimal")]
@@ -303,79 +302,106 @@ fn write_spaces<W: Write>(writer: &mut W, mut len: usize) -> Result<(), Database
     Ok(())
 }
 
+macro_rules! define_le_io {
+    ($(($write_fn:ident, $read_fn:ident, $ty:ty)),* $(,)?) => {
+        $(
+            fn $write_fn<W: Write + ?Sized>(writer: &mut W, value: $ty) -> std::io::Result<()> {
+                writer.write_all(&value.to_le_bytes())
+            }
+
+            fn $read_fn<R: Read + ?Sized>(reader: &mut R) -> std::io::Result<$ty> {
+                let mut bytes = [0u8; std::mem::size_of::<$ty>()];
+                reader.read_exact(&mut bytes)?;
+                Ok(<$ty>::from_le_bytes(bytes))
+            }
+        )*
+    };
+}
+
+define_le_io!(
+    (write_i8, read_i8, i8),
+    (write_i16_le, read_i16_le, i16),
+    (write_i32_le, read_i32_le, i32),
+    (write_i64_le, read_i64_le, i64),
+    (write_u8, read_u8, u8),
+    (write_u16_le, read_u16_le, u16),
+    (write_u32_le, read_u32_le, u32),
+    (write_u64_le, read_u64_le, u64),
+    (write_f32_le, read_f32_le, f32),
+    (write_f64_le, read_f64_le, f64),
+);
+
 // Int
 impl_tuple_value_serializable!(
     Int8Serializable,
     Int8,
-    |writer: &mut dyn Write, &value| writer.write_i8(value),
-    |reader: &mut Cursor<&[u8]>| reader.read_i8()
+    |writer: &mut dyn Write, &value| write_i8(writer, value),
+    |reader: &mut Cursor<&[u8]>| read_i8(reader)
 );
 impl_tuple_value_serializable!(
     Int16Serializable,
     Int16,
-    |writer: &mut dyn Write, &value| writer.write_i16::<LittleEndian>(value),
-    |reader: &mut Cursor<&[u8]>| reader.read_i16::<LittleEndian>()
+    |writer: &mut dyn Write, &value| write_i16_le(writer, value),
+    |reader: &mut Cursor<&[u8]>| read_i16_le(reader)
 );
 impl_tuple_value_serializable!(
     Int32Serializable,
     Int32,
-    |writer: &mut dyn Write, &value| writer.write_i32::<LittleEndian>(value),
-    |reader: &mut Cursor<&[u8]>| reader.read_i32::<LittleEndian>()
+    |writer: &mut dyn Write, &value| write_i32_le(writer, value),
+    |reader: &mut Cursor<&[u8]>| read_i32_le(reader)
 );
 impl_tuple_value_serializable!(
     Int64Serializable,
     Int64,
-    |writer: &mut dyn Write, &value| writer.write_i64::<LittleEndian>(value),
-    |reader: &mut Cursor<&[u8]>| reader.read_i64::<LittleEndian>()
+    |writer: &mut dyn Write, &value| write_i64_le(writer, value),
+    |reader: &mut Cursor<&[u8]>| read_i64_le(reader)
 );
 
 // Uint
 impl_tuple_value_serializable!(
     UInt8Serializable,
     UInt8,
-    |writer: &mut dyn Write, &value| writer.write_u8(value),
-    |reader: &mut Cursor<&[u8]>| reader.read_u8()
+    |writer: &mut dyn Write, &value| write_u8(writer, value),
+    |reader: &mut Cursor<&[u8]>| read_u8(reader)
 );
 impl_tuple_value_serializable!(
     UInt16Serializable,
     UInt16,
-    |writer: &mut dyn Write, &value| writer.write_u16::<LittleEndian>(value),
-    |reader: &mut Cursor<&[u8]>| reader.read_u16::<LittleEndian>()
+    |writer: &mut dyn Write, &value| write_u16_le(writer, value),
+    |reader: &mut Cursor<&[u8]>| read_u16_le(reader)
 );
 impl_tuple_value_serializable!(
     UInt32Serializable,
     UInt32,
-    |writer: &mut dyn Write, &value| writer.write_u32::<LittleEndian>(value),
-    |reader: &mut Cursor<&[u8]>| reader.read_u32::<LittleEndian>()
+    |writer: &mut dyn Write, &value| write_u32_le(writer, value),
+    |reader: &mut Cursor<&[u8]>| read_u32_le(reader)
 );
 impl_tuple_value_serializable!(
     UInt64Serializable,
     UInt64,
-    |writer: &mut dyn Write, &value| writer.write_u64::<LittleEndian>(value),
-    |reader: &mut Cursor<&[u8]>| reader.read_u64::<LittleEndian>()
+    |writer: &mut dyn Write, &value| write_u64_le(writer, value),
+    |reader: &mut Cursor<&[u8]>| read_u64_le(reader)
 );
 
 // Float
 impl_tuple_value_serializable!(
     Float32Serializable,
     Float32,
-    |writer: &mut dyn Write, value: &OrderedFloat::<f32>| writer
-        .write_f32::<LittleEndian>(value.into_inner()),
-    |reader: &mut Cursor<&[u8]>| reader.read_f32::<LittleEndian>().map(OrderedFloat::<f32>)
+    |writer: &mut dyn Write, value: &OrderedFloat::<f32>| write_f32_le(writer, value.into_inner()),
+    |reader: &mut Cursor<&[u8]>| read_f32_le(reader).map(OrderedFloat::<f32>)
 );
 impl_tuple_value_serializable!(
     Float64Serializable,
     Float64,
-    |writer: &mut dyn Write, value: &OrderedFloat::<f64>| writer
-        .write_f64::<LittleEndian>(value.into_inner()),
-    |reader: &mut Cursor<&[u8]>| reader.read_f64::<LittleEndian>().map(OrderedFloat::<f64>)
+    |writer: &mut dyn Write, value: &OrderedFloat::<f64>| write_f64_le(writer, value.into_inner()),
+    |reader: &mut Cursor<&[u8]>| read_f64_le(reader).map(OrderedFloat::<f64>)
 );
 
 impl_tuple_value_serializable!(
     BooleanSerializable,
     Boolean,
-    |writer: &mut dyn Write, &value| writer.write_u8(value as u8),
-    |reader: &mut Cursor<&[u8]>| reader.read_u8().map(|v| v != 0)
+    |writer: &mut dyn Write, &value| write_u8(writer, value as u8),
+    |reader: &mut Cursor<&[u8]>| read_u8(reader).map(|v| v != 0)
 );
 
 impl TupleValueSerializable for CharSerializable {
@@ -394,7 +420,7 @@ impl TupleValueSerializable for CharSerializable {
                 let bytes = value.as_bytes();
                 let spaces_len = chars_len.saturating_sub(value.chars().count());
 
-                writer.write_u32::<LittleEndian>((bytes.len() + spaces_len) as u32)?;
+                write_u32_le(writer, (bytes.len() + spaces_len) as u32)?;
                 writer.write_all(bytes)?;
                 write_spaces(writer, spaces_len)?;
             }
@@ -413,7 +439,7 @@ impl TupleValueSerializable for CharSerializable {
     fn from_raw(&self, reader: &mut Cursor<&[u8]>) -> Result<DataValue, DatabaseError> {
         // https://dev.mysql.com/doc/refman/8.0/en/char.html#:~:text=If%20a%20given%20value%20is%20stored%20into%20the%20CHAR(4)%20and%20VARCHAR(4)%20columns%2C%20the%20values%20retrieved%20from%20the%20columns%20are%20not%20always%20the%20same%20because%20trailing%20spaces%20are%20removed%20from%20CHAR%20columns%20upon%20retrieval.%20The%20following%20example%20illustrates%20this%20difference%3A
         let len = match self.unit {
-            CharLengthUnits::Characters => reader.read_u32::<LittleEndian>()?,
+            CharLengthUnits::Characters => read_u32_le(reader)?,
             CharLengthUnits::Octets => self.len,
         } as usize;
         let mut bytes = vec![0; len];
@@ -444,13 +470,13 @@ impl TupleValueSerializable for VarcharSerializable {
         };
         let bytes = value.as_bytes();
 
-        writer.write_u32::<LittleEndian>(bytes.len() as u32)?;
+        write_u32_le(writer, bytes.len() as u32)?;
         writer.write_all(bytes)?;
         Ok(())
     }
 
     fn from_raw(&self, reader: &mut Cursor<&[u8]>) -> Result<DataValue, DatabaseError> {
-        let len = reader.read_u32::<LittleEndian>()? as usize;
+        let len = read_u32_le(reader)? as usize;
         let mut bytes = vec![0; len];
         reader.read_exact(&mut bytes)?;
 
@@ -465,14 +491,14 @@ impl TupleValueSerializable for VarcharSerializable {
 impl_tuple_value_serializable!(
     DateSerializable,
     Date32,
-    |writer: &mut dyn Write, &value| writer.write_i32::<LittleEndian>(value),
-    |reader: &mut Cursor<&[u8]>| reader.read_i32::<LittleEndian>()
+    |writer: &mut dyn Write, &value| write_i32_le(writer, value),
+    |reader: &mut Cursor<&[u8]>| read_i32_le(reader)
 );
 impl_tuple_value_serializable!(
     DateTimeSerializable,
     Date64,
-    |writer: &mut dyn Write, &value| writer.write_i64::<LittleEndian>(value),
-    |reader: &mut Cursor<&[u8]>| reader.read_i64::<LittleEndian>()
+    |writer: &mut dyn Write, &value| write_i64_le(writer, value),
+    |reader: &mut Cursor<&[u8]>| read_i64_le(reader)
 );
 
 impl TupleValueSerializable for TimeSerializable {
@@ -480,16 +506,13 @@ impl TupleValueSerializable for TimeSerializable {
         let DataValue::Time32(v, ..) = value else {
             unsafe { std::hint::unreachable_unchecked() }
         };
-        writer.write_u32::<LittleEndian>(*v)?;
+        write_u32_le(writer, *v)?;
         Ok(())
     }
 
     fn from_raw(&self, reader: &mut Cursor<&[u8]>) -> Result<DataValue, DatabaseError> {
         let precision = self.precision.unwrap_or_default();
-        Ok(DataValue::Time32(
-            reader.read_u32::<LittleEndian>()?,
-            precision,
-        ))
+        Ok(DataValue::Time32(read_u32_le(reader)?, precision))
     }
 }
 
@@ -498,14 +521,14 @@ impl TupleValueSerializable for TimeStampSerializable {
         let DataValue::Time64(v, ..) = value else {
             unsafe { std::hint::unreachable_unchecked() }
         };
-        writer.write_i64::<LittleEndian>(*v)?;
+        write_i64_le(writer, *v)?;
         Ok(())
     }
 
     fn from_raw(&self, reader: &mut Cursor<&[u8]>) -> Result<DataValue, DatabaseError> {
         let precision = self.precision.unwrap_or_default();
         Ok(DataValue::Time64(
-            reader.read_i64::<LittleEndian>()?,
+            read_i64_le(reader)?,
             precision,
             self.zone,
         ))
@@ -566,7 +589,7 @@ impl TupleValueSerializable for SkipVariable {
     }
 
     fn from_raw(&self, reader: &mut Cursor<&[u8]>) -> Result<DataValue, DatabaseError> {
-        let len = reader.read_u32::<LittleEndian>()? as usize;
+        let len = read_u32_le(reader)? as usize;
         reader.seek(SeekFrom::Current(len as i64))?;
         Ok(DataValue::Null)
     }

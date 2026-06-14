@@ -25,6 +25,7 @@ use crate::db::{ScalaFunctions, TableFunctions};
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::Range;
 use crate::expression::ScalarExpression;
+use crate::iter_ext::Itertools;
 use crate::optimizer::core::cm_sketch::{
     CountMinSketch, CountMinSketchPage, COUNT_MIN_SKETCH_STORAGE_PAGE_LEN,
 };
@@ -38,10 +39,8 @@ use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::{Tuple, TupleId};
 use crate::types::value::{DataValue, TupleMappingRef};
 use crate::types::{ColumnId, LogicalType};
-use ahash::HashMap;
-use itertools::Itertools;
 use std::borrow::{Borrow, Cow};
-use std::collections::Bound;
+use std::collections::{Bound, HashMap};
 use std::fmt::{self, Display, Formatter};
 use std::io::Cursor;
 use std::mem;
@@ -49,7 +48,6 @@ use std::ops::SubAssign;
 use std::path::Path;
 
 pub type KeyValueRef<'a> = (&'a [u8], &'a [u8]);
-use ulid::Generator;
 
 pub(crate) type StatisticsMetaCache = HashMap<(TableName, IndexId), StatisticsMeta>;
 pub(crate) type TableCache = HashMap<TableName, TableCatalog>;
@@ -568,8 +566,7 @@ pub trait Transaction: Sized {
                 };
             }
         }
-        let mut generator = Generator::new();
-        let col_id = table.add_column(column.clone(), &mut generator, plan_arena)?;
+        let col_id = table.add_column(column.clone(), plan_arena)?;
 
         if column.desc().is_unique() {
             let meta_ref = table.add_index_meta(

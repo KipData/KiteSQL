@@ -17,10 +17,10 @@ use crate::errors::DatabaseError;
 use crate::execution::{
     DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
 };
+use crate::iter_ext::Itertools;
 use crate::planner::operator::alter_table::drop_column::DropColumnOperator;
 use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
-use itertools::Itertools;
 
 pub struct DropColumn {
     op: Option<DropColumnOperator>,

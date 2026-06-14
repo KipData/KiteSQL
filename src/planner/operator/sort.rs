@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::expression::ScalarExpression;
-use itertools::Itertools;
+use crate::iter_ext::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::fmt::Formatter;

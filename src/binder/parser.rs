@@ -27,6 +27,7 @@ use crate::expression;
 use crate::expression::simplify::ConstantCalculator;
 use crate::expression::visitor_mut::VisitorMut;
 use crate::expression::{AliasType, ScalarExpression};
+use crate::iter_ext::Itertools;
 use crate::parser::parse_sql;
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
 use crate::planner::operator::join::{JoinCondition, JoinOperator as LJoinOperator, JoinType};
@@ -38,7 +39,6 @@ use crate::planner::{Childrens, LogicalPlan, PlanArena};
 use crate::storage::{Storage, Transaction};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, ColumnId, LogicalType};
-use itertools::Itertools;
 pub(super) use sqlparser::ast::{
     AlterColumnOperation, AlterTableOperation, Assignment, AssignmentTarget, BinaryOperator,
     ColumnDef, ColumnOption, CreateView, DataType, DescribeAlias, Distinct, DuplicateTreatment,
@@ -2669,7 +2669,6 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                             )
                         })
                         .map(|bound_source| bound_source.visible_name())
-                        .unique()
                         .cloned()
                         .collect_vec();
                     for visible_name in visible_names {

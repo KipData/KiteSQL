@@ -188,15 +188,9 @@ macro_rules! table_function {
                 &self.summary
             }
 
-            fn output_schema_into(
-                &self,
-                table_name: &::kite_sql::catalog::table::TableName,
-                table_arena: &mut ::kite_sql::planner::TableArena,
-                schema: &mut ::kite_sql::types::tuple::Schema,
-            ) {
+            fn output_schema_into(&self, table_arena: &mut ::kite_sql::planner::TableArena, schema: &mut ::kite_sql::types::tuple::Schema) {
                 $({
-                    schema.push(table_arena.alloc_table_column(
-                        table_name.clone(),
+                    schema.push(table_arena.alloc_column(
                         ::kite_sql::catalog::column::ColumnCatalog::new(stringify!($output_name).to_lowercase(), true, ::kite_sql::catalog::column::ColumnDesc::new($output_ty, None, false, None).unwrap()),
                     ));
                 })*

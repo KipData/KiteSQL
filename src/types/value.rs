@@ -14,16 +14,15 @@
 
 use super::LogicalType;
 use crate::errors::DatabaseError;
+use crate::iter_ext::Itertools;
 use crate::storage::table_codec::{BumpBytes, BOUND_MAX_TAG, NOTNULL_TAG, NULL_TAG};
 use crate::types::evaluator::cast::{cast_create, to_char, to_varchar};
 use crate::types::CharLengthUnits;
-use byteorder::ReadBytesExt;
 #[cfg(feature = "time")]
 use chrono::{
     format::{DelayedFormat, StrftimeItems},
     DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc,
 };
-use itertools::Itertools;
 use ordered_float::OrderedFloat;
 #[cfg(feature = "decimal")]
 use rust_decimal::Decimal;
@@ -35,6 +34,16 @@ use std::io::Read;
 #[cfg(feature = "decimal")]
 use std::mem;
 use std::{cmp, fmt};
+
+trait ReadByteExt: Read {
+    fn read_u8(&mut self) -> std::io::Result<u8> {
+        let mut byte = [0u8; 1];
+        self.read_exact(&mut byte)?;
+        Ok(byte[0])
+    }
+}
+
+impl<R: Read + ?Sized> ReadByteExt for R {}
 
 #[cfg(feature = "time")]
 mod chrono_value {
@@ -384,26 +393,78 @@ impl Hash for DataValue {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         use DataValue::*;
         match self {
-            Boolean(v) => v.hash(state),
-            Float32(v) => v.hash(state),
-            Float64(v) => v.hash(state),
-            Int8(v) => v.hash(state),
-            Int16(v) => v.hash(state),
-            Int32(v) => v.hash(state),
-            Int64(v) => v.hash(state),
-            UInt8(v) => v.hash(state),
-            UInt16(v) => v.hash(state),
-            UInt32(v) => v.hash(state),
-            UInt64(v) => v.hash(state),
-            Utf8 { value: v, .. } => v.hash(state),
-            Null => 1.hash(state),
-            Date32(v) => v.hash(state),
-            Date64(v) => v.hash(state),
-            Time32(v, ..) => v.hash(state),
-            Time64(v, ..) => v.hash(state),
+            Null => 0u8.hash(state),
+            Boolean(v) => {
+                1u8.hash(state);
+                v.hash(state);
+            }
+            Float32(v) => {
+                2u8.hash(state);
+                v.hash(state);
+            }
+            Float64(v) => {
+                3u8.hash(state);
+                v.hash(state);
+            }
+            Int8(v) => {
+                4u8.hash(state);
+                v.hash(state);
+            }
+            Int16(v) => {
+                5u8.hash(state);
+                v.hash(state);
+            }
+            Int32(v) => {
+                6u8.hash(state);
+                v.hash(state);
+            }
+            Int64(v) => {
+                7u8.hash(state);
+                v.hash(state);
+            }
+            UInt8(v) => {
+                8u8.hash(state);
+                v.hash(state);
+            }
+            UInt16(v) => {
+                9u8.hash(state);
+                v.hash(state);
+            }
+            UInt32(v) => {
+                10u8.hash(state);
+                v.hash(state);
+            }
+            UInt64(v) => {
+                11u8.hash(state);
+                v.hash(state);
+            }
+            Utf8 { value: v, .. } => {
+                12u8.hash(state);
+                v.hash(state);
+            }
+            Date32(v) => {
+                13u8.hash(state);
+                v.hash(state);
+            }
+            Date64(v) => {
+                14u8.hash(state);
+                v.hash(state);
+            }
+            Time32(v, ..) => {
+                15u8.hash(state);
+                v.hash(state);
+            }
+            Time64(v, ..) => {
+                16u8.hash(state);
+                v.hash(state);
+            }
             #[cfg(feature = "decimal")]
-            Decimal(v) => v.hash(state),
+            Decimal(v) => {
+                17u8.hash(state);
+                v.hash(state);
+            }
             Tuple(values, is_upper) => {
+                18u8.hash(state);
                 values.hash(state);
                 is_upper.hash(state);
             }

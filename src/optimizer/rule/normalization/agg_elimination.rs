@@ -396,9 +396,9 @@ mod tests {
     use crate::planner::{Childrens, LogicalPlan};
     use crate::types::index::{IndexInfo, IndexLookup, IndexMeta, IndexType};
     use crate::types::value::DataValue;
+    use crate::types::ColumnId;
     use crate::types::LogicalType;
     use std::ops::Bound;
-    use ulid::Ulid;
     fn make_sort_field(arena: &mut crate::planner::PlanArena, name: &str) -> SortField {
         make_sort_field_with_position(arena, name, 0)
     }
@@ -459,7 +459,7 @@ mod tests {
         let table_name: TableName = ::std::sync::Arc::from("t1");
         let meta = arena.alloc_index(IndexMeta {
             id: 1,
-            column_ids: (0..len).map(|_| Ulid::new()).collect(),
+            column_ids: (1..=len as ColumnId).collect(),
             table_name,
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,
@@ -485,7 +485,7 @@ mod tests {
     ) -> (LogicalPlan, SortOption) {
         let table_name: TableName = ::std::sync::Arc::from("t1");
         let c1 = arena.alloc_column(ColumnCatalog::new_dummy("c1".to_string()));
-        let c1_id = Ulid::new();
+        let c1_id = 1;
         let columns = vec![c1];
 
         let sort_fields = vec![SortField::new(

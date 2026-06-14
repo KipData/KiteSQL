@@ -16,8 +16,7 @@ fn main() {}
 
 #[cfg(test)]
 mod test {
-    use kite_sql::catalog::column::{ColumnCatalog, ColumnDesc, ColumnRelation};
-    use kite_sql::catalog::table::TableName;
+    use kite_sql::catalog::column::{ColumnCatalog, ColumnDesc};
     use kite_sql::db::{DataBaseBuilder, Database, ResultIter};
     use kite_sql::errors::DatabaseError;
     use kite_sql::expression::function::scala::ScalarFunctionImpl;
@@ -2944,35 +2943,20 @@ mod test {
         );
         assert!(numbers.next().is_none());
 
-        let table_name: TableName = "test_numbers".to_string().into();
         let mut table_arena = TableArena::default();
         let mut function_schema = Schema::new();
-        function.output_schema_into(&table_name, &mut table_arena, &mut function_schema);
+        function.output_schema_into(&mut table_arena, &mut function_schema);
         let c1_ref = function_schema[0];
         let c2_ref = function_schema[1];
-        let mut c1 = ColumnCatalog::new(
-            "c1".to_string(),
-            true,
-            ColumnDesc::new(LogicalType::Integer, None, false, None)?,
-        );
-        c1.summary_mut().relation = ColumnRelation::Table {
-            column_id: table_arena.column(c1_ref).id().unwrap(),
-            table_name: table_name.clone(),
-            is_temp: false,
-        };
-        let mut c2 = ColumnCatalog::new(
-            "c2".to_string(),
-            true,
-            ColumnDesc::new(LogicalType::Integer, None, false, None)?,
-        );
-        c2.summary_mut().relation = ColumnRelation::Table {
-            column_id: table_arena.column(c2_ref).id().unwrap(),
-            table_name: table_name.clone(),
-            is_temp: false,
-        };
+        let c1 = table_arena.column(c1_ref);
+        let c2 = table_arena.column(c2_ref);
 
-        assert_eq!(table_arena.column(c1_ref), &c1);
-        assert_eq!(table_arena.column(c2_ref), &c2);
+        assert_eq!(c1.name(), "c1");
+        assert_eq!(c1.datatype(), &LogicalType::Integer);
+        assert!(c1.nullable());
+        assert_eq!(c2.name(), "c2");
+        assert_eq!(c2.datatype(), &LogicalType::Integer);
+        assert!(c2.nullable());
 
         Ok(())
     }

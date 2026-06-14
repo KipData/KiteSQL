@@ -30,9 +30,9 @@ mod path_buf;
 mod phantom;
 mod ptr;
 mod slice;
+pub(crate) mod stable_hash;
 mod string;
 mod trim;
-mod ulid;
 mod vec;
 
 use crate::catalog::TableName;

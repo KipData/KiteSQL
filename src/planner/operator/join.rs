@@ -14,8 +14,8 @@
 
 use super::Operator;
 use crate::expression::ScalarExpression;
+use crate::iter_ext::Itertools;
 use crate::planner::{Childrens, LogicalPlan};
-use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::fmt::Formatter;

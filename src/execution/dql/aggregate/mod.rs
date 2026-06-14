@@ -27,8 +27,8 @@ use crate::execution::dql::aggregate::min_max::MinMaxAccumulator;
 use crate::execution::dql::aggregate::sum::{DistinctSumAccumulator, SumAccumulator};
 use crate::expression::agg::AggKind;
 use crate::expression::ScalarExpression;
+use crate::iter_ext::Itertools;
 use crate::types::value::DataValue;
-use itertools::Itertools;
 use std::borrow::Cow;
 
 /// Tips: Idea for sqlrs

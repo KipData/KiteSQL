@@ -12,7 +12,7 @@ jobs:
   # 1
   check:
     name: Rust project check
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
       - name: Install latest nightly
@@ -41,7 +41,7 @@ jobs:
   # 2
   fmt:
     name: Rust fmt
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
       - name: Install latest nightly
@@ -59,7 +59,7 @@ jobs:
   # 3
   e2e:
     name: Rust e2e sqllogictest
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
       - name: Install latest nightly
@@ -80,7 +80,7 @@ jobs:
   # 4
   wasm-tests:
     name: Wasm cargo tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
 
@@ -106,7 +106,7 @@ jobs:
   # 5
   wasm-examples:
     name: Wasm examples (nodejs)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
 
@@ -135,7 +135,7 @@ jobs:
   # 6
   native-examples:
     name: Native examples
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
 
@@ -150,7 +150,7 @@ jobs:
   # 7
   python-tests:
     name: Python bindings tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
 

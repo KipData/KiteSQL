@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ahash::RandomState;
-use itertools::Itertools;
 use std::collections::HashSet;
 
 use super::{Binder, QueryBindStep};
@@ -266,7 +264,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 group_raw_exprs.push(expr);
             }
         }
-        let mut group_raw_set: HashSet<&ScalarExpression, RandomState> =
+        let mut group_raw_set: HashSet<&ScalarExpression> =
             HashSet::from_iter(group_raw_exprs.iter().copied());
 
         for expr in select_items {
@@ -275,7 +273,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             }
             group_raw_set.remove(expr);
 
-            if !group_raw_exprs.iter().contains(&expr) {
+            if !group_raw_exprs.contains(&expr) {
                 return Err(DatabaseError::AggMiss(format!(
                     "`{expr}` must appear in the GROUP BY clause or be used in an aggregate function"
                 )));

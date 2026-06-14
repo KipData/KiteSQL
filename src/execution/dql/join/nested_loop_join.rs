@@ -16,17 +16,17 @@
 //! [`JoinType::RightOuter`], [`JoinType::Cross`], [`JoinType::Full`].
 
 use crate::errors::DatabaseError;
+use crate::execution::dql::join::RowBitmap;
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::expression::ScalarExpression;
+use crate::iter_ext::Itertools;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::tuple::{SplitTupleRef, Tuple};
 use crate::types::value::DataValue;
-use fixedbitset::FixedBitSet;
-use itertools::Itertools;
 
 /// Equivalent condition
 struct EqualCondition {
@@ -76,15 +76,15 @@ pub struct NestedLoopJoin {
 
 enum NestedLoopJoinState {
     PullLeft {
-        right_bitmap: Option<FixedBitSet>,
+        right_bitmap: Option<RowBitmap>,
     },
     ScanRight {
         active_left: ActiveLeftState,
-        right_bitmap: Option<FixedBitSet>,
+        right_bitmap: Option<RowBitmap>,
     },
     EmitRightUnmatched {
         right_input: ExecId,
-        right_bitmap: FixedBitSet,
+        right_bitmap: Option<RowBitmap>,
         right_emit_index: usize,
     },
     End,
@@ -178,7 +178,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
                         if matches!(self.ty, JoinType::Full) {
                             state = NestedLoopJoinState::EmitRightUnmatched {
                                 right_input: self.build_right_input(arena, plan_arena),
-                                right_bitmap: right_bitmap.unwrap_or_default(),
+                                right_bitmap,
                                 right_emit_index: 0,
                             };
                             continue;
@@ -288,7 +288,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
                                 bits.insert(idx);
                             }
                         } else {
-                            let mut bits = FixedBitSet::with_capacity(active_left.right_index);
+                            let mut bits = RowBitmap::with_capacity(active_left.right_index);
                             for idx in active_left.first_matches {
                                 bits.insert(idx);
                             }
@@ -338,7 +338,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
                         let idx = right_emit_index;
                         right_emit_index += 1;
 
-                        if !right_bitmap.contains(idx) {
+                        let is_unmatched = match right_bitmap.as_ref() {
+                            Some(bits) => !bits.contains(idx),
+                            None => true,
+                        };
+
+                        if is_unmatched {
                             let mut values = vec![DataValue::Null; self.eq_cond.left_len];
                             values.append(&mut right_tuple.values);
                             self.state = NestedLoopJoinState::EmitRightUnmatched {

@@ -15,10 +15,10 @@
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::{BinaryOperator, ScalarExpression};
+use crate::iter_ext::Itertools;
 use crate::planner::PlanArena;
 use crate::types::value::DataValue;
 use crate::types::ColumnId;
-use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::cmp::Ordering;
 use std::collections::Bound;

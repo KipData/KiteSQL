@@ -14,18 +14,17 @@
 
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::Range;
+use crate::serdes::stable_hash::{StableHasher, CM_SKETCH_HASH_KEYS};
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
 use kite_sql_serde_macros::ReferenceSerialization;
-use siphasher::sip::SipHasher13;
 use std::borrow::Borrow;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::marker::PhantomData;
 use std::{cmp, mem};
 
-pub(crate) type FastHasher = SipHasher13;
 pub(crate) const COUNT_MIN_SKETCH_STORAGE_PAGE_LEN: usize = 16 * 1024;
 
 #[derive(Debug, Clone, ReferenceSerialization)]
@@ -33,8 +32,8 @@ pub struct CountMinSketchMeta {
     width: usize,
     k_num: usize,
     page_len: usize,
-    hasher_0: FastHasher,
-    hasher_1: FastHasher,
+    hasher_0: StableHasher,
+    hasher_1: StableHasher,
 }
 
 impl CountMinSketchMeta {
@@ -77,7 +76,7 @@ pub struct CountMinSketchPage {
 pub struct CountMinSketch<K> {
     counters: Vec<Vec<usize>>,
     offsets: Vec<usize>,
-    hashers: [FastHasher; 2],
+    hashers: [StableHasher; 2],
     mask: usize,
     k_num: usize,
     phantom_k: PhantomData<K>,
@@ -219,7 +218,7 @@ impl<K: Hash> CountMinSketch<K> {
         let k_num = Self::optimal_k_num(probability);
         let counters = vec![vec![0; width]; k_num];
         let offsets = vec![0; k_num];
-        let hashers = [Self::sip_new(), Self::sip_new()];
+        let hashers = Self::new_hashers();
         CountMinSketch {
             counters,
             offsets,
@@ -290,7 +289,7 @@ impl<K: Hash> CountMinSketch<K> {
                 *counter = 0
             }
         }
-        self.hashers = [Self::sip_new(), Self::sip_new()];
+        self.hashers = Self::new_hashers();
     }
 
     fn optimal_width(capacity: usize, tolerance: f64) -> usize {
@@ -311,8 +310,12 @@ impl<K: Hash> CountMinSketch<K> {
         cmp::max(1, ((1.0 - probability).ln() / 0.5f64.ln()) as usize)
     }
 
-    fn sip_new() -> FastHasher {
-        FastHasher::new_with_keys(0, 1)
+    fn new_hashers() -> [StableHasher; 2] {
+        let [(key0, key1), (key2, key3)] = CM_SKETCH_HASH_KEYS;
+        [
+            StableHasher::new_with_keys(key0, key1),
+            StableHasher::new_with_keys(key2, key3),
+        ]
     }
 
     fn offset<Q: ?Sized + Hash>(&self, hashes: &mut [u64; 2], key: &Q, k_i: usize) -> usize
@@ -363,8 +366,8 @@ impl<K> ReferenceSerialization for CountMinSketch<K> {
     ) -> Result<Self, DatabaseError> {
         let counters = Vec::<Vec<usize>>::decode(reader, drive, reference_tables, arena)?;
         let offsets = Vec::<usize>::decode(reader, drive, reference_tables, arena)?;
-        let hasher_0 = FastHasher::decode(reader, drive, reference_tables, arena)?;
-        let hasher_1 = FastHasher::decode(reader, drive, reference_tables, arena)?;
+        let hasher_0 = StableHasher::decode(reader, drive, reference_tables, arena)?;
+        let hasher_1 = StableHasher::decode(reader, drive, reference_tables, arena)?;
         let mask = usize::decode(reader, drive, reference_tables, arena)?;
         let k_num = usize::decode(reader, drive, reference_tables, arena)?;
 

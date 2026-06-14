@@ -147,13 +147,12 @@ mod tests {
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::sync::Arc;
-    use ulid::Ulid;
 
     #[test]
     fn test_into_parts_and_from_parts() -> Result<(), DatabaseError> {
         let index = IndexMeta {
             id: 0,
-            column_ids: vec![Ulid::new()],
+            column_ids: vec![1],
             table_name: "t1".to_string().into(),
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,

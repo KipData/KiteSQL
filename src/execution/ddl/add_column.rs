@@ -17,12 +17,12 @@ use crate::errors::DatabaseError;
 use crate::execution::{
     DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
 };
+use crate::iter_ext::Itertools;
 use crate::planner::operator::alter_table::add_column::AddColumnOperator;
 use crate::storage::Transaction;
 use crate::types::index::{Index, IndexType};
 use crate::types::tuple_builder::TupleBuilder;
 use crate::types::value::DataValue;
-use itertools::Itertools;
 
 pub struct AddColumn {
     op: Option<AddColumnOperator>,

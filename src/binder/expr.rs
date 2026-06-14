@@ -16,7 +16,7 @@ use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression;
 use crate::expression::agg::AggKind;
-use itertools::Itertools;
+use crate::iter_ext::Itertools;
 
 use super::{Binder, BinderContext, QueryBindStep, SubQueryType};
 use crate::expression::function::scala::{ArcScalarFunctionImpl, ScalarFunction};
@@ -28,7 +28,7 @@ use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
 use crate::planner::{LogicalPlan, PlanArena};
 use crate::storage::Transaction;
 use crate::types::value::{DataValue, Utf8Type};
-use crate::types::{CharLengthUnits, ColumnId, LogicalType};
+use crate::types::{CharLengthUnits, LogicalType};
 
 macro_rules! try_default {
     ($table_name:expr, $column_name:expr) => {
@@ -110,7 +110,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
     ) -> (ScalarExpression, ScalarExpression) {
         let output_column = expr.output_column_ref(arena);
         let mut alias_column = arena.clone_column(output_column);
-        alias_column.set_ref_table(arena.temp_table(), ColumnId::new(), true);
+        alias_column.set_ref_table(arena.temp_table(), 0, true);
 
         let alias_column = arena.alloc_column(alias_column);
         let alias_ref = ScalarExpression::column_expr(alias_column, position);

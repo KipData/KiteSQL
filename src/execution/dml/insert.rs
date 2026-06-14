@@ -18,6 +18,7 @@ use crate::execution::{
     build_read, with_projection_tmp_value, ExecArena, ExecId, ExecNode, ExecutionContext,
     ExecutorNode, WriteExecutor,
 };
+use crate::iter_ext::Itertools;
 use crate::planner::operator::insert::InsertOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
@@ -26,7 +27,6 @@ use crate::types::tuple::{Schema, Tuple};
 use crate::types::tuple_builder::TupleBuilder;
 use crate::types::value::DataValue;
 use crate::types::ColumnId;
-use itertools::Itertools;
 use std::collections::HashMap;
 
 pub struct Insert {

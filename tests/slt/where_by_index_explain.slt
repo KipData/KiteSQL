@@ -127,7 +127,7 @@ Projection [#1, #2, #3] [Project => (Sort Option: Follow)] Filter (((#2 = 7) || 
 query T
 explain select * from t1 where c1 is null and c2 is null;
 ----
-Projection [#1, #2, #3] [Project => (Sort Option: Follow)] Filter (#2 is null && #3 is null), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [#1, #2, #3] [IndexScan By #2 => null => (Sort Option: OrderBy: (#3 Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [#1, #2, #3] [Project => (Sort Option: Follow)] Filter (#2 is null && #3 is null), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [#1, #2, #3] [IndexScan By #1 => null => (Sort Option: OrderBy: (#2 Asc Nulls Last) ignore_prefix_len: 0)]
 
 query T
 explain select * from t1 where c1 > 0 and c1 < 8;
@@ -165,13 +165,13 @@ Projection [#1, #2, #3] [Project => (Sort Option: Follow)] Filter ((#3 > 0) && (
 query T
 explain select c1 from t1 where c1 < 10;
 ----
-Projection [#2] [Project => (Sort Option: Follow)] Filter (#2 < 10), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [#2] [IndexScan By #3 => (-inf, (10)) Covered => (Sort Option: OrderBy: (#2 Asc Nulls Last, #3 Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [#2] [Project => (Sort Option: Follow)] Filter (#2 < 10), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [#2] [IndexScan By #1 => (-inf, 10) Covered => (Sort Option: OrderBy: (#2 Asc Nulls Last) ignore_prefix_len: 0)]
 
 # unique covered with primary key projection
 query T
 explain select c1, id from t1 where c1 < 10;
 ----
-Projection [#2, #1] [Project => (Sort Option: Follow)] Filter (#2 < 10), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [#1, #2] [IndexScan By #3 => (-inf, (10)) => (Sort Option: OrderBy: (#2 Asc Nulls Last, #3 Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [#2, #1] [Project => (Sort Option: Follow)] Filter (#2 < 10), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [#1, #2] [IndexScan By #1 => (-inf, 10) => (Sort Option: OrderBy: (#2 Asc Nulls Last) ignore_prefix_len: 0)]
 
 statement ok
 drop index t1.u_c1_index;

@@ -533,10 +533,7 @@ impl Histogram {
         match &ranges[*binary_i] {
             Range::Scope { min, max } => {
                 let bucket = &self.buckets[*bucket_i];
-                let mut bucket_count = bucket.count as usize;
-                if *bucket_i == 0 {
-                    bucket_count += self.meta.null_count;
-                }
+                let bucket_count = bucket.count as usize;
 
                 let mut temp_count = 0;
 
@@ -669,12 +666,11 @@ mod tests {
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::ops::Bound;
-    use ulid::Ulid;
 
     fn index_meta() -> IndexMeta {
         IndexMeta {
             id: 0,
-            column_ids: vec![Ulid::new()],
+            column_ids: vec![1],
             table_name: "t1".to_string().into(),
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,
