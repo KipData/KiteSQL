@@ -1,0 +1,86 @@
+{
+  "repo_notes": [
+    {
+      "content": "KiteSQL is a lightweight embedded OLTP-oriented relational database for Rust. The main crate is `kite_sql`; important entry points are `src/lib.rs`, `src/db.rs`, `README.md`, `docs/features.md`, and `docs/transaction-isolation.md`. Treat the project as both a SQL engine and a Rust-native API/ORM surface."
+    },
+    {
+      "content": "Document the core query path explicitly: SQL text or ORM builders enter through `Database` APIs in `src/db.rs`; parser support is under `src/parser`; binding and semantic analysis are under `src/binder`; logical/physical plan structures are under `src/planner`; optimizer rules and statistics are under `src/optimizer`; executors are under `src/execution`; storage transactions and KV encoding are under `src/storage`."
+    },
+    {
+      "content": "Storage is central to this repository. `src/storage/mod.rs` defines the `Storage`, `Transaction`, and checkpoint-related traits; `memory.rs`, `rocksdb.rs`, and `lmdb.rs` implement backends behind Cargo feature gates; `table_codec.rs` is correctness-sensitive because it defines table, index, and metadata key/value encoding."
+    },
+    {
+      "content": "The ORM is feature-gated by `orm`. Runtime ORM APIs live in `src/orm`, while derive macros live in the workspace crate `kite_sql_serde_macros`. The ORM frontend binds directly into core expressions and logical plans; it is not a SQL string generator."
+    },
+    {
+      "content": "Use the Makefile as the source of truth for development workflows. Important targets include `make test`, `make test-slt`, `make test-wasm`, `make test-python`, `make check`, and TPCC-related targets. SQL behavior coverage lives mainly in `tests/slt`, with the harness in `tests/sqllogictest`."
+    }
+  ],
+  "pages": [
+    {
+      "title": "Project Overview",
+      "purpose": "Explain KiteSQL's goals, workspace layout, Cargo features, supported frontends, and the high-level architecture of the embedded database.",
+      "parent": null
+    },
+    {
+      "title": "Public API and Database Lifecycle",
+      "purpose": "Document `src/lib.rs` and `src/db.rs`, including `DataBaseBuilder`, `Database`, transaction lifecycle, built-in functions, query execution entry points, and feature-gated builders.",
+      "parent": "Project Overview"
+    },
+    {
+      "title": "SQL Frontend: Parser and Binder",
+      "purpose": "Document how SQL statements are parsed and bound, covering `src/parser` and `src/binder`, statement preparation, semantic checks, catalog lookup, expression binding, and statement-specific binder modules.",
+      "parent": "Project Overview"
+    },
+    {
+      "title": "Logical Plans and Operators",
+      "purpose": "Document `src/planner`, `PlanArena`, `LogicalPlan`, operator modules, schema derivation, child plan structure, and how binder output becomes an executable plan.",
+      "parent": "Project Overview"
+    },
+    {
+      "title": "Optimizer and Statistics",
+      "purpose": "Document `src/optimizer`, heuristic batches, normalization and implementation rules, statistics metadata, histograms, sketches, and how physical options are selected.",
+      "parent": "Logical Plans and Operators"
+    },
+    {
+      "title": "Execution Engine",
+      "purpose": "Document the volcano-style execution engine in `src/execution`, including `Executor`, `ExecArena`, DDL apply handling, DQL nodes, DML nodes, joins, aggregation, subqueries, and explain output.",
+      "parent": "Project Overview"
+    },
+    {
+      "title": "Storage, Transactions, and Encoding",
+      "purpose": "Document `src/storage`, including storage traits, transaction isolation, in-memory/RocksDB/LMDB implementations, checkpoint capability, table and index encoding, caches, tuple iteration, and metadata persistence.",
+      "parent": "Project Overview"
+    },
+    {
+      "title": "Catalog, Types, Expressions, and Functions",
+      "purpose": "Document `src/catalog`, `src/types`, `src/expression`, and `src/function`, including table/view metadata, logical/data values, serialization, evaluators, scalar and table functions, and expression simplification.",
+      "parent": "Project Overview"
+    },
+    {
+      "title": "ORM and Derive Macros",
+      "purpose": "Document the feature-gated ORM in `src/orm` and the `kite_sql_serde_macros` crate, including `Model`, `Projection`, migrations, typed query/mutation builders, tuple mapping, and macro-generated metadata.",
+      "parent": "Project Overview"
+    },
+    {
+      "title": "Shell, WebAssembly, and Python Bindings",
+      "purpose": "Document user-facing integrations: `src/bin/shell.rs`, `src/wasm.rs`, `src/python.rs`, examples under `examples`, and the relevant Cargo features and build commands.",
+      "parent": "Project Overview"
+    },
+    {
+      "title": "Testing Strategy",
+      "purpose": "Document the Makefile-driven test workflow, unit/integration tests, SQL logic tests in `tests/slt`, the `tests/sqllogictest` harness, macro tests, WASM tests, and expected coverage practices from `AGENT.md`.",
+      "parent": "Project Overview"
+    },
+    {
+      "title": "TPC-C Benchmark",
+      "purpose": "Document the `tpcc` workspace crate, supported backends, dual validation mode, scripts, Makefile targets, and how benchmark output should be interpreted.",
+      "parent": "Project Overview"
+    },
+    {
+      "title": "Contribution and Maintenance Guide",
+      "purpose": "Summarize repository-specific engineering expectations from `AGENT.md`: simple code, low dependencies, Makefile-visible tests, correctness-first changes, and storage/encoding caution areas.",
+      "parent": "Project Overview"
+    }
+  ]
+}
