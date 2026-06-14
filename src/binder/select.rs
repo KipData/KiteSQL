@@ -285,6 +285,7 @@ where
     T: Transaction,
     A: AsRef<[(&'static str, DataValue)]>,
 {
+    #[cfg(feature = "orm")]
     pub(crate) fn typed<N>(self) -> BindPlanFrom<'s, 'a, 'b, 'arena, T, A, N> {
         BindPlanFrom {
             binder: self.binder,
@@ -294,6 +295,7 @@ where
         }
     }
 
+    #[cfg(feature = "orm")]
     pub(crate) fn filter_expr(
         mut self,
         predicate: ScalarExpression,
@@ -304,6 +306,7 @@ where
         Ok(self)
     }
 
+    #[cfg(feature = "orm")]
     pub(crate) fn join_plan(
         mut self,
         right_plan: LogicalPlan,
@@ -337,11 +340,13 @@ where
     T: Transaction,
     A: AsRef<[(&'static str, DataValue)]>,
 {
+    #[cfg(feature = "orm")]
     pub(crate) fn set_select_list(mut self, select_list: Vec<ScalarExpression>) -> Self {
         self.select_list = select_list;
         self
     }
 
+    #[cfg(feature = "orm")]
     pub(crate) fn group_by_expr(self, expr: ScalarExpression) -> Result<Self, DatabaseError> {
         let sorted = self
             .filter_expr(None)?
@@ -363,6 +368,7 @@ where
         })
     }
 
+    #[cfg(feature = "orm")]
     pub(crate) fn aggregate_without_group(self) -> Result<Self, DatabaseError> {
         let sorted = self
             .filter_expr(None)?
@@ -384,16 +390,19 @@ where
         })
     }
 
+    #[cfg(feature = "orm")]
     pub(crate) fn having_expr(mut self, expr: ScalarExpression) -> Result<Self, DatabaseError> {
         self.plan = self.binder.bind_having(self.plan, expr, self.arena)?;
         Ok(self)
     }
 
+    #[cfg(feature = "orm")]
     pub(crate) fn sort_field(mut self, field: SortField) -> Result<Self, DatabaseError> {
         self.plan = self.binder.bind_sort(self.plan, vec![field], self.arena)?;
         Ok(self)
     }
 
+    #[cfg(feature = "orm")]
     pub fn distinct(mut self) -> Result<Self, DatabaseError> {
         let distinct_outputs = self.select_list.clone();
         self.binder.bind_distinct_output_exprs(
@@ -405,6 +414,7 @@ where
         Ok(self)
     }
 
+    #[cfg(feature = "orm")]
     pub fn limit(mut self, limit: usize) -> Result<Self, DatabaseError> {
         self.plan = self
             .binder
@@ -412,6 +422,7 @@ where
         Ok(self)
     }
 
+    #[cfg(feature = "orm")]
     pub fn offset(mut self, offset: usize) -> Result<Self, DatabaseError> {
         self.plan = self
             .binder
@@ -419,6 +430,7 @@ where
         Ok(self)
     }
 
+    #[cfg(feature = "orm")]
     pub fn finish(self) -> Result<LogicalPlan, DatabaseError> {
         if self.select_list.iter().any(ScalarExpression::has_agg_call) {
             return self.aggregate_without_group()?.finish();

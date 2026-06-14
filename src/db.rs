@@ -81,6 +81,7 @@ pub(crate) trait BindSource {
             &mut PlanArena<'_>,
         ) -> Result<LogicalPlan, DatabaseError>;
 
+    #[cfg(feature = "orm")]
     fn explain<A, F>(self, params: A, build: F) -> Result<String, DatabaseError>
     where
         A: AsRef<[(&'static str, DataValue)]>,
@@ -890,6 +891,7 @@ impl<'a, S: Storage> BindSource for &'a Database<S> {
         Ok(DatabaseIter { transaction, inner })
     }
 
+    #[cfg(feature = "orm")]
     fn explain<A, F>(self, params: A, build: F) -> Result<String, DatabaseError>
     where
         A: AsRef<[(&'static str, DataValue)]>,
@@ -1103,6 +1105,7 @@ impl<'a, 'txn, S: Storage> BindSource for &'a mut DBTransaction<'txn, S> {
         ))
     }
 
+    #[cfg(feature = "orm")]
     fn explain<A, F>(self, params: A, build: F) -> Result<String, DatabaseError>
     where
         A: AsRef<[(&'static str, DataValue)]>,
