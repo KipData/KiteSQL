@@ -17,26 +17,14 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
-      - name: Install latest nightly
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-          components: rustfmt, clippy
-
       - name: Install Protoc
         uses: arduino/setup-protoc@v2
-
-      # `cargo check` command here will use installed `nightly`
-      # as it is set as an "override" for current directory
 
       - name: Run cargo check
         run: make cargo-check
 
-
       - name: Run cargo build
         run: make build
-
 
       - name: Run cargo test
         run: make test
@@ -46,16 +34,6 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
-      - name: Install latest nightly
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-          components: rustfmt, clippy
-
-      # `cargo check` command here will use installed `nightly`
-      # as it is set as an "override" for current directory
-
       - name: Run cargo fmt
         run: make fmt
   # 3
@@ -64,18 +42,8 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
-      - name: Install latest nightly
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-          components: rustfmt, clippy
-
       - name: Install Protoc
         uses: arduino/setup-protoc@v2
-
-      # `cargo check` command here will use installed `nightly`
-      # as it is set as an "override" for current directory
 
       - name: Run sqllogictest suite
         run: make test-slt
@@ -85,13 +53,6 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
-
-      - name: Install stable with wasm target
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          target: wasm32-unknown-unknown
-          override: true
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -111,13 +72,6 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
-
-      - name: Install stable with wasm target
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          target: wasm32-unknown-unknown
-          override: true
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -141,12 +95,6 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
-      - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-
       - name: Run native examples
         run: make native-examples
   # 7
@@ -155,12 +103,6 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v2
-
-      - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
 
       - name: Setup Python
         uses: actions/setup-python@v5
