@@ -50,20 +50,21 @@ impl Accumulator for AvgAccumulator {
         Ok(())
     }
 
-    fn evaluate(&self) -> Result<DataValue, DatabaseError> {
-        let Some(acc) = &self.inner else {
+    fn evaluate(self: Box<Self>) -> Result<DataValue, DatabaseError> {
+        let Self { inner, count } = *self;
+        let Some(acc) = inner else {
             return Ok(DataValue::Null);
         };
-        let mut value = acc.evaluate()?;
+        let mut value = acc.into_result();
         let value_ty = value.logical_type();
 
-        if self.count == 0 {
+        if count == 0 {
             return Ok(DataValue::Null);
         }
         let quantity = if value_ty.is_signed_numeric() {
-            DataValue::Int64(self.count as i64)
+            DataValue::Int64(count as i64)
         } else {
-            DataValue::UInt32(self.count as u32)
+            DataValue::UInt32(count as u32)
         };
         let quantity_ty = quantity.logical_type();
 

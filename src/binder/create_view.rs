@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::binder::{lower_case_name, lower_ident, Binder};
+use crate::binder::Binder;
 use crate::catalog::view::View;
 use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
 use crate::errors::DatabaseError;
@@ -22,76 +22,86 @@ use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
-use itertools::Itertools;
-use sqlparser::ast::{ObjectName, Query, ViewColumnDef};
 use ulid::Ulid;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_create_view(
         &mut self,
-        or_replace: &bool,
-        name: &ObjectName,
-        columns: &[ViewColumnDef],
-        query: &Query,
+        view_name: TableName,
+        or_replace: bool,
+        mut plan: LogicalPlan,
+        column_names: Vec<String>,
+        output_aliases: Vec<Option<String>>,
+        arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         fn projection_exprs(
             view_name: &TableName,
             mapping_schema: &[ColumnRef],
-            column_names: impl Iterator<Item = String>,
+            arena: &mut crate::planner::PlanArena,
+            mut column_name: impl FnMut(usize, ColumnRef, &crate::planner::PlanArena) -> String,
         ) -> Vec<ScalarExpression> {
-            column_names
-                .enumerate()
-                .map(|(i, column_name)| {
-                    let mapping_column = &mapping_schema[i];
-                    let mut column = ColumnCatalog::new(
-                        column_name,
-                        mapping_column.nullable(),
-                        mapping_column.desc().clone(),
-                    );
-                    column.set_ref_table(view_name.clone(), Ulid::new(), true);
+            let mapping_schema_len = mapping_schema.len();
+            let mut exprs = Vec::with_capacity(mapping_schema_len);
+            for (i, mapping_column) in mapping_schema.iter().copied().enumerate() {
+                let output_name = column_name(i, mapping_column, arena);
+                let (nullable, desc) = {
+                    let mapping_column_catalog = arena.column(mapping_column);
+                    (
+                        mapping_column_catalog.nullable(),
+                        mapping_column_catalog.desc().clone(),
+                    )
+                };
+                let mut column = ColumnCatalog::new(output_name, nullable, desc);
+                column.set_ref_table(view_name.clone(), Ulid::new(), true);
+                let output_column = arena.alloc_column(column);
 
-                    ScalarExpression::Alias {
-                        expr: Box::new(ScalarExpression::column_expr(mapping_column.clone(), i)),
-                        alias: AliasType::Expr(Box::new(ScalarExpression::column_expr(
-                            ColumnRef::from(column),
-                            i,
-                        ))),
-                    }
-                })
-                .collect_vec()
+                exprs.push(ScalarExpression::Alias {
+                    expr: Box::new(ScalarExpression::column_expr(mapping_column, i)),
+                    alias: AliasType::Expr(Box::new(ScalarExpression::column_expr(
+                        output_column,
+                        i,
+                    ))),
+                });
+            }
+            exprs
         }
 
-        let view_name: TableName = lower_case_name(name)?.into();
-        let mut plan = self.bind_query(query)?;
+        let mapping_schema = plan.output_schema(arena);
 
-        let mapping_schema = plan.output_schema();
+        if !column_names.is_empty() && column_names.len() > mapping_schema.len() {
+            return Err(DatabaseError::UnsupportedStmt(format!(
+                "view column count {} exceeds query output count {}",
+                column_names.len(),
+                mapping_schema.len()
+            )));
+        }
 
-        let exprs: Vec<ScalarExpression> = if columns.is_empty() {
-            projection_exprs(
-                &view_name,
-                mapping_schema,
-                mapping_schema
-                    .iter()
-                    .map(|column| column.name().to_string()),
-            )
+        let exprs: Vec<ScalarExpression> = if column_names.is_empty() {
+            projection_exprs(&view_name, mapping_schema, arena, |i, column, arena| {
+                output_aliases
+                    .get(i)
+                    .and_then(Clone::clone)
+                    .unwrap_or_else(|| arena.column(column).name().to_string())
+            })
         } else {
             projection_exprs(
                 &view_name,
-                mapping_schema,
-                columns
-                    .iter()
-                    .map(|column| lower_ident(&column.name).into_owned()),
+                &mapping_schema[..column_names.len()],
+                arena,
+                |i, _, _| column_names[i].clone(),
             )
         };
-        plan = self.bind_project(plan, exprs)?;
+        plan = self.bind_project(plan, exprs, arena)?;
+        let schema = plan.output_schema(arena).clone();
 
         Ok(LogicalPlan::new(
             Operator::CreateView(CreateViewOperator {
                 view: View {
                     name: view_name,
                     plan: Box::new(plan),
+                    schema,
                 },
-                or_replace: *or_replace,
+                or_replace,
             }),
             Childrens::None,
         ))

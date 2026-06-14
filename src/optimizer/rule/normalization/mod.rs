@@ -130,12 +130,12 @@ impl NormalizationRuleRootTag {
             | Operator::DropView(_)
             | Operator::DropIndex(_)
             | Operator::Truncate(_)
-            | Operator::CopyFromFile(_)
-            | Operator::CopyToFile(_)
             | Operator::FunctionScan(_)
             | Operator::Update(_)
             | Operator::Union(_)
             | Operator::SetMembership(_) => None,
+            #[cfg(feature = "copy")]
+            Operator::CopyFromFile(_) | Operator::CopyToFile(_) => None,
         }
     }
 }
@@ -182,31 +182,42 @@ impl NormalizationRuleImpl {
 }
 
 impl NormalizationRule for NormalizationRuleImpl {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        arena: &mut crate::planner::PlanArena,
+    ) -> Result<bool, DatabaseError> {
         match self {
-            NormalizationRuleImpl::ColumnPruning => ColumnPruning.apply(plan),
-            NormalizationRuleImpl::CollapseProject => CollapseProject.apply(plan),
-            NormalizationRuleImpl::CollapseGroupByAgg => CollapseGroupByAgg.apply(plan),
-            NormalizationRuleImpl::CombineFilter => CombineFilter.apply(plan),
-            NormalizationRuleImpl::LimitProjectTranspose => LimitProjectTranspose.apply(plan),
-            NormalizationRuleImpl::PushLimitThroughJoin => PushLimitThroughJoin.apply(plan),
-            NormalizationRuleImpl::PushLimitIntoTableScan => PushLimitIntoScan.apply(plan),
-            NormalizationRuleImpl::PushPredicateThroughJoin => PushPredicateThroughJoin.apply(plan),
-            NormalizationRuleImpl::PushJoinPredicateIntoScan => {
-                PushJoinPredicateIntoScan.apply(plan)
+            NormalizationRuleImpl::ColumnPruning => ColumnPruning.apply(plan, arena),
+            NormalizationRuleImpl::CollapseProject => CollapseProject.apply(plan, arena),
+            NormalizationRuleImpl::CollapseGroupByAgg => CollapseGroupByAgg.apply(plan, arena),
+            NormalizationRuleImpl::CombineFilter => CombineFilter.apply(plan, arena),
+            NormalizationRuleImpl::LimitProjectTranspose => {
+                LimitProjectTranspose.apply(plan, arena)
             }
-            NormalizationRuleImpl::SimplifyFilter => SimplifyFilter.apply(plan),
-            NormalizationRuleImpl::PushPredicateIntoScan => PushPredicateIntoScan.apply(plan),
-            NormalizationRuleImpl::ConstantCalculation => ConstantCalculation.apply(plan),
-            NormalizationRuleImpl::EvaluatorBind => EvaluatorBind.apply(plan),
-            NormalizationRuleImpl::MinMaxToTopK => MinMaxToTopK.apply(plan),
-            NormalizationRuleImpl::TopK => TopK.apply(plan),
-            NormalizationRuleImpl::ParameterizeMarkApply => ParameterizeMarkApply.apply(plan),
+            NormalizationRuleImpl::PushLimitThroughJoin => PushLimitThroughJoin.apply(plan, arena),
+            NormalizationRuleImpl::PushLimitIntoTableScan => PushLimitIntoScan.apply(plan, arena),
+            NormalizationRuleImpl::PushPredicateThroughJoin => {
+                PushPredicateThroughJoin.apply(plan, arena)
+            }
+            NormalizationRuleImpl::PushJoinPredicateIntoScan => {
+                PushJoinPredicateIntoScan.apply(plan, arena)
+            }
+            NormalizationRuleImpl::SimplifyFilter => SimplifyFilter.apply(plan, arena),
+            NormalizationRuleImpl::PushPredicateIntoScan => {
+                PushPredicateIntoScan.apply(plan, arena)
+            }
+            NormalizationRuleImpl::ConstantCalculation => ConstantCalculation.apply(plan, arena),
+            NormalizationRuleImpl::EvaluatorBind => EvaluatorBind.apply(plan, arena),
+            NormalizationRuleImpl::MinMaxToTopK => MinMaxToTopK.apply(plan, arena),
+            NormalizationRuleImpl::TopK => TopK.apply(plan, arena),
+            NormalizationRuleImpl::ParameterizeMarkApply => {
+                ParameterizeMarkApply.apply(plan, arena)
+            }
         }
     }
 }
 
-/// Return true when left is subset of right
 pub(crate) fn strip_alias(expr: &ScalarExpression) -> &ScalarExpression {
     match expr {
         ScalarExpression::Alias {
@@ -219,29 +230,6 @@ pub(crate) fn strip_alias(expr: &ScalarExpression) -> &ScalarExpression {
         } => strip_alias(alias_expr),
         _ => expr,
     }
-}
-
-fn strip_all_alias(expr: &ScalarExpression) -> &ScalarExpression {
-    match expr {
-        ScalarExpression::Alias { expr, .. } => strip_all_alias(expr),
-        _ => expr,
-    }
-}
-
-pub fn is_subset_exprs(left: &[ScalarExpression], right: &[ScalarExpression]) -> bool {
-    left.iter().all(|lhs| {
-        let lhs_stripped = strip_alias(lhs);
-        right.iter().any(|rhs| {
-            let rhs_stripped = strip_alias(rhs);
-            if lhs_stripped.eq_ignore_colref_pos(rhs_stripped) {
-                return true;
-            }
-            if matches!(lhs_stripped, ScalarExpression::ColumnRef { .. }) {
-                return lhs_stripped.eq_ignore_colref_pos(strip_all_alias(rhs));
-            }
-            false
-        })
-    })
 }
 
 pub(crate) fn remap_position(position: &mut usize, removed_positions: &[usize]) {

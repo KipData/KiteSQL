@@ -36,7 +36,7 @@ drop index t.index_2
 statement error
 drop index t.pk_index
 
-statement error
+statement ok
 drop index t.index_3
 
 statement ok

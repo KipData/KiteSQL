@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor};
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::expression::function::table::TableFunction;
 use crate::planner::operator::function_scan::FunctionScanOperator;
 use crate::storage::Transaction;
@@ -34,41 +34,29 @@ impl From<FunctionScanOperator> for FunctionScan {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for FunctionScan {
-    fn into_executor(
-        self,
-        arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
-    ) -> ExecId {
-        arena.push(ExecNode::FunctionScan(self))
-    }
-}
-
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for FunctionScan {
-    type Input = FunctionScanOperator;
+    type Input = Self;
 
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
+        _: ExecutionContext<'_>,
+        _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::FunctionScan(FunctionScan::from(input)))
-    }
-
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
-        FunctionScan::next_tuple(self, arena)
+        let executor = input;
+        arena.push(ExecNode::FunctionScan(executor))
     }
 }
 
-impl FunctionScan {
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for FunctionScan {
+    fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        _: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if self.iter.is_none() {
-            let TableFunction { args, inner } = &self.table_function;
-            self.iter = Some(inner.eval(args)?);
+            let TableFunction { args, catalog } = &self.table_function;
+            self.iter = Some(catalog.inner.eval(args)?);
         }
 
         let tuple = self.iter.as_mut().and_then(Iterator::next).transpose()?;

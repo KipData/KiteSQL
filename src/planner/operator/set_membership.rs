@@ -14,7 +14,7 @@
 
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
-use crate::types::tuple::SchemaRef;
+use crate::types::tuple::Schema;
 use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
@@ -27,7 +27,7 @@ pub enum SetMembershipKind {
 }
 
 impl SetMembershipKind {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Except => "Except",
             Self::Intersect => "Intersect",
@@ -38,16 +38,16 @@ impl SetMembershipKind {
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct SetMembershipOperator {
     pub kind: SetMembershipKind,
-    pub left_schema_ref: SchemaRef,
+    pub left_schema_ref: Schema,
     // mainly use `left_schema` as output and `right_schema` for `column pruning`
-    pub _right_schema_ref: SchemaRef,
+    pub _right_schema_ref: Schema,
 }
 
 impl SetMembershipOperator {
     pub fn build(
         kind: SetMembershipKind,
-        left_schema_ref: SchemaRef,
-        right_schema_ref: SchemaRef,
+        left_schema_ref: Schema,
+        right_schema_ref: Schema,
         left_plan: LogicalPlan,
         right_plan: LogicalPlan,
     ) -> LogicalPlan {
@@ -67,11 +67,7 @@ impl SetMembershipOperator {
 
 impl fmt::Display for SetMembershipOperator {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let schema = self
-            .left_schema_ref
-            .iter()
-            .map(|column| column.name().to_string())
-            .join(", ");
+        let schema = self.left_schema_ref.iter().join(", ");
 
         write!(f, "{}: [{schema}]", self.kind.name())?;
 

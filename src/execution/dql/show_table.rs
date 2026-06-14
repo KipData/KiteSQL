@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::ExecArena;
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::storage::{TableIter, Transaction};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
@@ -22,10 +22,30 @@ pub struct ShowTables<'a, T: Transaction + 'a> {
     pub(crate) metas: Option<TableIter<'a, T>>,
 }
 
-impl<'a, T: Transaction + 'a> ShowTables<'a, T> {
-    pub(crate) fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ShowTables<'a, T> {
+    type Input = Self;
+
+    fn into_executor(
+        input: Self::Input,
+        arena: &mut ExecArena<'a, T>,
+        _: &mut crate::planner::PlanArena<'a>,
+        _: ExecutionContext<'_>,
+        _: &T,
+    ) -> ExecId {
+        arena.push(ExecNode::ShowTables(input))
+    }
+}
+
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowTables<'a, T> {
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
         if self.metas.is_none() {
-            self.metas = Some(arena.transaction().tables()?);
+            let mut state = arena.local_state(plan_arena);
+            let (transaction, table_codec) = state.transaction_codec();
+            self.metas = Some(transaction.tables(table_codec)?);
         }
 
         let Some(table) = self

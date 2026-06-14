@@ -47,7 +47,7 @@ mod app {
         pub c2: String,
     }
 
-    fn run_with_database<S: Storage>(database: Database<S>) -> Result<(), DatabaseError> {
+    fn run_with_database<S: Storage>(mut database: Database<S>) -> Result<(), DatabaseError> {
         database.create_table_if_not_exists::<MyStruct>()?;
         database.insert(&MyStruct {
             c1: 0,
@@ -63,22 +63,25 @@ mod app {
         })?;
 
         database
-            .from::<MyStruct>()
-            .eq(MyStruct::c1(), 1)
-            .update()
-            .set(MyStruct::c2(), "ONE")
-            .execute()?;
-        database.from::<MyStruct>().eq(MyStruct::c1(), 2).delete()?;
+            .bind(|ctx| {
+                ctx.mutate::<MyStruct>()?
+                    .filter(|e| e.column(MyStruct::c1())?.eq(1))?
+                    .update(|u| u.set_value(MyStruct::c2(), "ONE"))
+            })?
+            .done()?;
+        database
+            .bind(|ctx| {
+                ctx.mutate::<MyStruct>()?
+                    .filter(|e| e.column(MyStruct::c1())?.eq(2))?
+                    .delete()
+            })?
+            .done()?;
 
         for row in database.fetch::<MyStruct>()? {
             println!("{:?}", row?);
         }
 
-        let mut agg = database.run("select count(*) from my_struct")?;
-        if let Some(count_row) = agg.next() {
-            println!("row count = {:?}", count_row?);
-        }
-        agg.done()?;
+        println!("row count = {}", database.fetch::<MyStruct>()?.count());
 
         database.drop_table::<MyStruct>()?;
 
@@ -87,23 +90,39 @@ mod app {
 
     pub fn run() -> Result<(), DatabaseError> {
         reset_example_dir()?;
-        let backend = env::var("KITESQL_BACKEND").unwrap_or_else(|_| "rocksdb".to_string());
+        let backend = env::var("KITESQL_BACKEND").unwrap_or_else(|_| {
+            #[cfg(feature = "rocksdb")]
+            {
+                "rocksdb".to_string()
+            }
+            #[cfg(all(not(feature = "rocksdb"), feature = "lmdb"))]
+            {
+                "lmdb".to_string()
+            }
+            #[cfg(all(not(feature = "rocksdb"), not(feature = "lmdb")))]
+            {
+                "memory".to_string()
+            }
+        });
 
         match backend.to_ascii_lowercase().as_str() {
+            "memory" => {
+                run_with_database(DataBaseBuilder::path(EXAMPLE_DB_PATH).build_in_memory()?)
+            }
             #[cfg(feature = "rocksdb")]
             "rocksdb" => run_with_database(DataBaseBuilder::path(EXAMPLE_DB_PATH).build_rocksdb()?),
             #[cfg(feature = "lmdb")]
             "lmdb" => run_with_database(DataBaseBuilder::path(EXAMPLE_DB_PATH).build_lmdb()?),
             other => Err(DatabaseError::InvalidValue(format!(
                 "unsupported example backend '{other}', expected {}",
-                {
-                    let mut expected = Vec::new();
+                [
+                    "memory",
                     #[cfg(feature = "rocksdb")]
-                    expected.push("rocksdb");
+                    "rocksdb",
                     #[cfg(feature = "lmdb")]
-                    expected.push("lmdb");
-                    expected.join(" or ")
-                }
+                    "lmdb",
+                ]
+                .join(" or ")
             ))),
         }
     }

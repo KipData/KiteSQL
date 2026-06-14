@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
+use crate::execution::{
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
+};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::LogicalPlan;
@@ -29,16 +31,17 @@ pub struct StreamDistinctExecutor {
     scratch: Tuple,
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor {
     type Input = (AggregateOperator, LogicalPlan);
 
     fn into_executor(
         (op, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+        cache: ExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
-        let input = build_read(arena, input, cache, transaction);
+        let input = build_read(arena, plan_arena, input, cache, transaction);
         arena.push(ExecNode::StreamDistinct(StreamDistinctExecutor {
             groupby_exprs: op.groupby_exprs,
             input,
@@ -46,10 +49,16 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor {
             scratch: Tuple::default(),
         }))
     }
+}
 
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor {
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
         loop {
-            if !arena.next_tuple(self.input)? {
+            if !arena.next_tuple(self.input, plan_arena)? {
                 arena.finish();
                 return Ok(());
             }
@@ -75,7 +84,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
+    use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
     use crate::execution::dql::aggregate::stream_distinct::StreamDistinctExecutor;
     use crate::execution::{execute_input, try_collect};
@@ -87,30 +96,27 @@ mod tests {
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
     use crate::planner::{Childrens, LogicalPlan};
-    use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
+    use crate::storage::rocksdb::RocksStorage;
     use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
-    use crate::utils::lru::SharedLruCache;
     use itertools::Itertools;
-    use std::hash::RandomState;
-    use std::sync::Arc;
     use tempfile::TempDir;
 
     #[allow(clippy::type_complexity)]
     fn build_test_storage() -> Result<
         (
-            Arc<TableCache>,
-            Arc<ViewCache>,
-            Arc<StatisticsMetaCache>,
+            TableCache,
+            ViewCache,
+            StatisticsMetaCache,
             TempDir,
             RocksStorage,
         ),
         DatabaseError,
     > {
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
 
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
@@ -118,7 +124,10 @@ mod tests {
         Ok((table_cache, view_cache, meta_cache, temp_dir, storage))
     }
 
-    fn optimize_exprs(plan: LogicalPlan) -> Result<LogicalPlan, DatabaseError> {
+    fn optimize_exprs(
+        plan: LogicalPlan,
+        arena: &mut crate::planner::PlanArena,
+    ) -> Result<LogicalPlan, DatabaseError> {
         HepOptimizerPipeline::builder()
             .before_batch(
                 "Expression Remapper".to_string(),
@@ -127,17 +136,16 @@ mod tests {
             )
             .build()
             .instantiate(plan)
-            .find_best::<RocksTransaction>(None)
+            .find_best(None, arena)
     }
 
     #[test]
     fn stream_distinct_single_column_sorted() -> Result<(), DatabaseError> {
         let desc = ColumnDesc::new(LogicalType::Integer, None, false, None)?;
-        let schema_ref = Arc::new(vec![ColumnRef::from(ColumnCatalog::new(
-            "c1".to_string(),
-            true,
-            desc,
-        ))]);
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let schema_ref =
+            vec![plan_arena.alloc_column(ColumnCatalog::new("c1".to_string(), true, desc))];
 
         let input = LogicalPlan::new(
             Operator::Values(ValuesOperator {
@@ -153,22 +161,23 @@ mod tests {
             Childrens::None,
         );
         let agg = AggregateOperator {
-            groupby_exprs: vec![ScalarExpression::column_expr(schema_ref[0].clone(), 0)],
+            groupby_exprs: vec![ScalarExpression::column_expr(schema_ref[0], 0)],
             agg_calls: vec![],
             is_distinct: true,
         };
         let plan = LogicalPlan::new(Operator::Aggregate(agg), Childrens::Only(Box::new(input)));
-        let plan = optimize_exprs(plan)?;
+        let plan = optimize_exprs(plan, &mut plan_arena)?;
         let Operator::Aggregate(agg) = plan.operator else {
             unreachable!()
         };
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
-        let mut transaction = storage.transaction()?;
+        let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, StreamDistinctExecutor>(
             (agg, plan.childrens.pop_only()),
-            (&table_cache, &view_cache, &meta_cache),
-            &mut transaction,
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            plan_arena,
+            &transaction,
         ))?;
 
         let actual = tuples
@@ -184,10 +193,12 @@ mod tests {
     #[test]
     fn stream_distinct_multi_column_sorted() -> Result<(), DatabaseError> {
         let desc = ColumnDesc::new(LogicalType::Integer, None, false, None)?;
-        let schema_ref = Arc::new(vec![
-            ColumnRef::from(ColumnCatalog::new("c1".to_string(), true, desc.clone())),
-            ColumnRef::from(ColumnCatalog::new("c2".to_string(), true, desc)),
-        ]);
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let schema_ref = vec![
+            plan_arena.alloc_column(ColumnCatalog::new("c1".to_string(), true, desc.clone())),
+            plan_arena.alloc_column(ColumnCatalog::new("c2".to_string(), true, desc)),
+        ];
 
         let input = LogicalPlan::new(
             Operator::Values(ValuesOperator {
@@ -204,24 +215,25 @@ mod tests {
         );
         let agg = AggregateOperator {
             groupby_exprs: vec![
-                ScalarExpression::column_expr(schema_ref[0].clone(), 0),
-                ScalarExpression::column_expr(schema_ref[1].clone(), 1),
+                ScalarExpression::column_expr(schema_ref[0], 0),
+                ScalarExpression::column_expr(schema_ref[1], 1),
             ],
             agg_calls: vec![],
             is_distinct: true,
         };
         let plan = LogicalPlan::new(Operator::Aggregate(agg), Childrens::Only(Box::new(input)));
-        let plan = optimize_exprs(plan)?;
+        let plan = optimize_exprs(plan, &mut plan_arena)?;
         let Operator::Aggregate(agg) = plan.operator else {
             unreachable!()
         };
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
-        let mut transaction = storage.transaction()?;
+        let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, StreamDistinctExecutor>(
             (agg, plan.childrens.pop_only()),
-            (&table_cache, &view_cache, &meta_cache),
-            &mut transaction,
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            plan_arena,
+            &transaction,
         ))?;
 
         let actual = tuples.into_iter().map(|tuple| tuple.values).collect_vec();

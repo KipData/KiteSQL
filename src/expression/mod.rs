@@ -19,18 +19,22 @@ use crate::expression::function::scala::ScalarFunction;
 use crate::expression::function::table::TableFunction;
 use crate::expression::visitor::{walk_expr, Visitor};
 use crate::expression::visitor_mut::VisitorMut;
+use crate::planner::operator::sort::SortField;
+use crate::planner::{MetaArena, PlanArena};
 use crate::types::evaluator::{
-    binary_create, cast_create, unary_create, BinaryEvaluatorBox, CastEvaluatorBox,
-    UnaryEvaluatorBox,
+    binary_create, cast_create, unary_create, BinaryEvaluatorRef, CastEvaluatorRef,
+    UnaryEvaluatorRef,
 };
 use crate::types::value::DataValue;
 use crate::types::{CharLengthUnits, LogicalType};
 use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
-use sqlparser::ast::{BinaryOperator as SqlBinaryOperator, UnaryOperator as SqlUnaryOperator};
+#[cfg(feature = "decimal")]
+use rust_decimal::Decimal;
 use std::borrow::Cow;
 use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
+use std::sync::Arc;
 use std::{fmt, mem};
 
 pub mod agg;
@@ -41,21 +45,11 @@ pub mod simplify;
 pub mod visitor;
 pub mod visitor_mut;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrimWhereField {
     Both,
     Leading,
     Trailing,
-}
-
-impl From<sqlparser::ast::TrimWhereField> for TrimWhereField {
-    fn from(value: sqlparser::ast::TrimWhereField) -> Self {
-        match value {
-            sqlparser::ast::TrimWhereField::Both => Self::Both,
-            sqlparser::ast::TrimWhereField::Leading => Self::Leading,
-            sqlparser::ast::TrimWhereField::Trailing => Self::Trailing,
-        }
-    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
@@ -82,7 +76,7 @@ pub enum ScalarExpression {
     TypeCast {
         expr: Box<ScalarExpression>,
         ty: LogicalType,
-        evaluator: Option<CastEvaluatorBox>,
+        evaluator: Option<CastEvaluatorRef>,
     },
     IsNull {
         negated: bool,
@@ -91,14 +85,14 @@ pub enum ScalarExpression {
     Unary {
         op: UnaryOperator,
         expr: Box<ScalarExpression>,
-        evaluator: Option<UnaryEvaluatorBox>,
+        evaluator: Option<UnaryEvaluatorRef>,
         ty: LogicalType,
     },
     Binary {
         op: BinaryOperator,
         left_expr: Box<ScalarExpression>,
         right_expr: Box<ScalarExpression>,
-        evaluator: Option<BinaryEvaluatorBox>,
+        evaluator: Option<BinaryEvaluatorRef>,
         ty: LogicalType,
     },
     AggCall {
@@ -165,17 +159,133 @@ pub enum ScalarExpression {
     },
 }
 
-pub struct BindEvaluator;
+impl From<DataValue> for ScalarExpression {
+    fn from(value: DataValue) -> Self {
+        ScalarExpression::Constant(value)
+    }
+}
 
-impl VisitorMut<'_> for BindEvaluator {
+macro_rules! impl_scalar_expression_from_data_value {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl From<$ty> for ScalarExpression {
+                fn from(value: $ty) -> Self {
+                    ScalarExpression::Constant(DataValue::from(value))
+                }
+            }
+        )+
+    };
+}
+
+impl_scalar_expression_from_data_value!(
+    bool,
+    i8,
+    i16,
+    i32,
+    i64,
+    u8,
+    u16,
+    u32,
+    u64,
+    f32,
+    f64,
+    String,
+    Option<bool>,
+    Option<i8>,
+    Option<i16>,
+    Option<i32>,
+    Option<i64>,
+    Option<u8>,
+    Option<u16>,
+    Option<u32>,
+    Option<u64>,
+    Option<f32>,
+    Option<f64>,
+    Option<String>,
+);
+#[cfg(feature = "decimal")]
+impl_scalar_expression_from_data_value!(Decimal, Option<Decimal>);
+
+impl From<&str> for ScalarExpression {
+    fn from(value: &str) -> Self {
+        ScalarExpression::Constant(DataValue::from(value.to_string()))
+    }
+}
+
+impl From<Option<&str>> for ScalarExpression {
+    fn from(value: Option<&str>) -> Self {
+        ScalarExpression::Constant(value.map(str::to_string).into())
+    }
+}
+
+impl From<Arc<str>> for ScalarExpression {
+    fn from(value: Arc<str>) -> Self {
+        ScalarExpression::Constant(DataValue::from(value.to_string()))
+    }
+}
+
+impl From<Option<Arc<str>>> for ScalarExpression {
+    fn from(value: Option<Arc<str>>) -> Self {
+        ScalarExpression::Constant(value.map(|value| value.to_string()).into())
+    }
+}
+
+#[cfg(feature = "time")]
+mod chrono_scalar_expression {
+    use super::ScalarExpression;
+    use crate::types::value::DataValue;
+    use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+
+    impl From<NaiveDate> for ScalarExpression {
+        fn from(value: NaiveDate) -> Self {
+            ScalarExpression::Constant(DataValue::from(&value))
+        }
+    }
+
+    impl From<Option<NaiveDate>> for ScalarExpression {
+        fn from(value: Option<NaiveDate>) -> Self {
+            ScalarExpression::Constant(DataValue::from(value.as_ref()))
+        }
+    }
+
+    impl From<NaiveDateTime> for ScalarExpression {
+        fn from(value: NaiveDateTime) -> Self {
+            ScalarExpression::Constant(DataValue::from(&value))
+        }
+    }
+
+    impl From<Option<NaiveDateTime>> for ScalarExpression {
+        fn from(value: Option<NaiveDateTime>) -> Self {
+            ScalarExpression::Constant(DataValue::from(value.as_ref()))
+        }
+    }
+
+    impl From<NaiveTime> for ScalarExpression {
+        fn from(value: NaiveTime) -> Self {
+            ScalarExpression::Constant(DataValue::from(&value))
+        }
+    }
+
+    impl From<Option<NaiveTime>> for ScalarExpression {
+        fn from(value: Option<NaiveTime>) -> Self {
+            ScalarExpression::Constant(DataValue::from(value.as_ref()))
+        }
+    }
+}
+
+pub struct BindEvaluator<'a, 'p> {
+    pub(crate) arena: &'a PlanArena<'p>,
+}
+
+impl VisitorMut<'_> for BindEvaluator<'_, '_> {
     fn visit_type_cast(
         &mut self,
         expr: &'_ mut ScalarExpression,
         ty: &'_ mut LogicalType,
-        evaluator: &'_ mut Option<CastEvaluatorBox>,
+        evaluator: &'_ mut Option<CastEvaluatorRef>,
     ) -> Result<(), DatabaseError> {
         self.visit(expr)?;
-        let from = expr.return_type();
+        let from = expr.return_type(self.arena);
         *evaluator = if from.as_ref() == ty {
             None
         } else {
@@ -189,12 +299,12 @@ impl VisitorMut<'_> for BindEvaluator {
         &mut self,
         op: &'_ mut UnaryOperator,
         expr: &'_ mut ScalarExpression,
-        evaluator: &'_ mut Option<UnaryEvaluatorBox>,
+        evaluator: &'_ mut Option<UnaryEvaluatorRef>,
         _ty: &'_ mut LogicalType,
     ) -> Result<(), DatabaseError> {
         self.visit(expr)?;
 
-        let ty = expr.return_type();
+        let ty = expr.return_type(self.arena);
         if ty.is_unsigned_numeric() {
             let target_ty = match ty.as_ref() {
                 LogicalType::UTinyint => LogicalType::Tinyint,
@@ -206,9 +316,10 @@ impl VisitorMut<'_> for BindEvaluator {
             *expr = ScalarExpression::type_cast(
                 mem::replace(expr, ScalarExpression::Empty),
                 Cow::Owned(target_ty),
+                self.arena,
             )?;
         }
-        *evaluator = Some(unary_create(expr.return_type(), *op)?);
+        *evaluator = Some(unary_create(expr.return_type(self.arena), *op)?);
 
         Ok(())
     }
@@ -218,20 +329,21 @@ impl VisitorMut<'_> for BindEvaluator {
         op: &'_ mut BinaryOperator,
         left_expr: &'_ mut ScalarExpression,
         right_expr: &'_ mut ScalarExpression,
-        evaluator: &'_ mut Option<BinaryEvaluatorBox>,
+        evaluator: &'_ mut Option<BinaryEvaluatorRef>,
         _ty: &'_ mut LogicalType,
     ) -> Result<(), DatabaseError> {
         self.visit(left_expr)?;
         self.visit(right_expr)?;
 
-        let left_ty = left_expr.return_type().into_owned();
-        let right_ty = right_expr.return_type().into_owned();
+        let left_ty = left_expr.return_type(self.arena).into_owned();
+        let right_ty = right_expr.return_type(self.arena).into_owned();
         let ty = LogicalType::max_logical_type(&left_ty, &right_ty)?;
         let fn_cast =
             |expr: &mut ScalarExpression, ty: &LogicalType| -> Result<(), DatabaseError> {
                 *expr = ScalarExpression::type_cast(
                     mem::replace(expr, ScalarExpression::Empty),
                     Cow::Borrowed(ty),
+                    self.arena,
                 )?;
                 Ok(())
             };
@@ -274,6 +386,22 @@ impl Visitor<'_> for HasCountStar {
 }
 
 impl ScalarExpression {
+    pub fn asc(self) -> SortField {
+        SortField::from(self).asc()
+    }
+
+    pub fn desc(self) -> SortField {
+        SortField::from(self).desc()
+    }
+
+    pub fn nulls_first(self) -> SortField {
+        SortField::from(self).nulls_first()
+    }
+
+    pub fn nulls_last(self) -> SortField {
+        SortField::from(self).nulls_last()
+    }
+
     pub fn column_expr(column: ColumnRef, position: usize) -> ScalarExpression {
         ScalarExpression::ColumnRef { column, position }
     }
@@ -281,8 +409,9 @@ impl ScalarExpression {
     pub fn type_cast(
         expr: ScalarExpression,
         ty: Cow<'_, LogicalType>,
+        arena: &PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
-        let from = expr.return_type();
+        let from = expr.return_type(arena);
         if from.as_ref() == ty.as_ref() {
             return Ok(expr);
         }
@@ -295,7 +424,7 @@ impl ScalarExpression {
         })
     }
 
-    pub(crate) fn eq_ignore_colref_pos(&self, other: &ScalarExpression) -> bool {
+    pub(crate) fn eq_ignore_colref_pos(&self, other: &ScalarExpression, arena: &PlanArena) -> bool {
         match (self.unpack_alias_ref(), other.unpack_alias_ref()) {
             (
                 ScalarExpression::ColumnRef {
@@ -304,7 +433,7 @@ impl ScalarExpression {
                 ScalarExpression::ColumnRef {
                     column: rhs_column, ..
                 },
-            ) => lhs_column.same_column(rhs_column),
+            ) => arena.same_column(*lhs_column, *rhs_column),
             (lhs, rhs) => lhs == rhs,
         }
     }
@@ -337,10 +466,12 @@ impl ScalarExpression {
         }
     }
 
-    pub fn return_type(&self) -> Cow<'_, LogicalType> {
+    pub fn return_type<'a>(&'a self, arena: &'a PlanArena<'_>) -> Cow<'a, LogicalType> {
         match self {
             ScalarExpression::Constant(v) => Cow::Owned(v.logical_type()),
-            ScalarExpression::ColumnRef { column, .. } => Cow::Borrowed(column.datatype()),
+            ScalarExpression::ColumnRef { column, .. } => {
+                Cow::Borrowed(arena.column(*column).datatype())
+            }
             ScalarExpression::Binary {
                 ty: return_type, ..
             }
@@ -378,12 +509,12 @@ impl ScalarExpression {
             ScalarExpression::Trim { .. } => {
                 Cow::Owned(LogicalType::Varchar(None, CharLengthUnits::Characters))
             }
-            ScalarExpression::Alias { expr, .. } => expr.return_type(),
+            ScalarExpression::Alias { expr, .. } => expr.return_type(arena),
             ScalarExpression::Empty | ScalarExpression::TableFunction(_) => unreachable!(),
             ScalarExpression::Tuple(exprs) => {
                 let types = exprs
                     .iter()
-                    .map(|expr| expr.return_type().into_owned())
+                    .map(|expr| expr.return_type(arena).into_owned())
                     .collect_vec();
 
                 Cow::Owned(LogicalType::Tuple(types))
@@ -394,16 +525,22 @@ impl ScalarExpression {
         }
     }
 
-    pub fn visit_referenced_columns(
+    pub fn visit_referenced_columns<A: MetaArena>(
         &self,
-        only_column_ref: bool,
-        f: &mut impl FnMut(&ColumnRef) -> bool,
+        arena: &mut A,
+        f: &mut impl FnMut(&mut A, &ColumnRef) -> bool,
     ) -> bool {
-        struct ColumnRefVisitor<'a, F> {
+        struct ColumnRefVisitor<'a, A, F> {
             f: &'a mut F,
             keep_going: bool,
+            arena: &'a mut A,
         }
-        impl<F: FnMut(&ColumnRef) -> bool> Visitor<'_> for ColumnRefVisitor<'_, F> {
+
+        impl<A, F> Visitor<'_> for ColumnRefVisitor<'_, A, F>
+        where
+            A: MetaArena,
+            F: FnMut(&mut A, &ColumnRef) -> bool,
+        {
             fn visit(&mut self, expr: &ScalarExpression) -> Result<(), DatabaseError> {
                 if self.keep_going {
                     walk_expr(self, expr)?;
@@ -412,85 +549,106 @@ impl ScalarExpression {
             }
 
             fn visit_column_ref(&mut self, col: &ColumnRef) -> Result<(), DatabaseError> {
-                self.keep_going = (self.f)(col);
-                Ok(())
-            }
-        }
-        struct OutputColumnVisitor<'a, F> {
-            f: &'a mut F,
-            keep_going: bool,
-        }
-        impl<F: FnMut(&ColumnRef) -> bool> Visitor<'_> for OutputColumnVisitor<'_, F> {
-            fn visit(&mut self, expr: &ScalarExpression) -> Result<(), DatabaseError> {
-                if !self.keep_going {
-                    return Ok(());
-                }
-
-                let output = expr.output_column();
-                self.keep_going = (self.f)(&output);
-                if self.keep_going {
-                    walk_expr(self, expr)?;
-                }
+                self.keep_going = (self.f)(self.arena, col);
                 Ok(())
             }
         }
 
-        if only_column_ref {
-            let mut visitor = ColumnRefVisitor {
-                f,
-                keep_going: true,
-            };
-            visitor.visit(self).unwrap();
-            visitor.keep_going
-        } else {
-            let mut visitor = OutputColumnVisitor {
-                f,
-                keep_going: true,
-            };
-            visitor.visit(self).unwrap();
-            visitor.keep_going
-        }
+        let mut visitor = ColumnRefVisitor {
+            f,
+            keep_going: true,
+            arena,
+        };
+        visitor.visit(self).unwrap();
+        visitor.keep_going
     }
 
     pub fn any_referenced_column(
         &self,
-        only_column_ref: bool,
-        mut predicate: impl FnMut(&ColumnRef) -> bool,
+        arena: &PlanArena,
+        mut predicate: impl FnMut(&PlanArena, &ColumnRef) -> bool,
     ) -> bool {
-        let mut found = false;
-        self.visit_referenced_columns(only_column_ref, &mut |column| {
-            found = predicate(column);
-            !found
-        });
-        found
+        struct ColumnRefVisitor<'a, 'p, F> {
+            f: &'a mut F,
+            any: bool,
+            arena: &'a PlanArena<'p>,
+        }
+
+        impl<F: FnMut(&PlanArena, &ColumnRef) -> bool> Visitor<'_> for ColumnRefVisitor<'_, '_, F> {
+            fn visit(&mut self, expr: &ScalarExpression) -> Result<(), DatabaseError> {
+                if !self.any {
+                    walk_expr(self, expr)?;
+                }
+                Ok(())
+            }
+
+            fn visit_column_ref(&mut self, col: &ColumnRef) -> Result<(), DatabaseError> {
+                self.any = (self.f)(self.arena, col);
+                Ok(())
+            }
+        }
+
+        let mut visitor = ColumnRefVisitor {
+            f: &mut predicate,
+            any: false,
+            arena,
+        };
+        visitor.visit(self).unwrap();
+        visitor.any
     }
 
     pub fn all_referenced_columns(
         &self,
-        only_column_ref: bool,
-        mut predicate: impl FnMut(&ColumnRef) -> bool,
+        arena: &PlanArena,
+        mut predicate: impl FnMut(&PlanArena, &ColumnRef) -> bool,
     ) -> bool {
-        let mut all = true;
-        self.visit_referenced_columns(only_column_ref, &mut |column| {
-            all = predicate(column);
-            all
-        });
-        all
+        struct ColumnRefVisitor<'a, 'p, F> {
+            f: &'a mut F,
+            all: bool,
+            arena: &'a PlanArena<'p>,
+        }
+
+        impl<F: FnMut(&PlanArena, &ColumnRef) -> bool> Visitor<'_> for ColumnRefVisitor<'_, '_, F> {
+            fn visit(&mut self, expr: &ScalarExpression) -> Result<(), DatabaseError> {
+                if self.all {
+                    walk_expr(self, expr)?;
+                }
+                Ok(())
+            }
+
+            fn visit_column_ref(&mut self, col: &ColumnRef) -> Result<(), DatabaseError> {
+                self.all = (self.f)(self.arena, col);
+                Ok(())
+            }
+        }
+
+        let mut visitor = ColumnRefVisitor {
+            f: &mut predicate,
+            all: true,
+            arena,
+        };
+        visitor.visit(self).unwrap();
+        visitor.all
     }
 
-    pub fn has_table_ref_column(&self) -> bool {
-        struct TableRefChecker {
+    pub fn has_table_ref_column(&self, arena: &PlanArena) -> bool {
+        struct TableRefChecker<'arena, 'table> {
             found: bool,
+            arena: &'arena PlanArena<'table>,
         }
-        impl Visitor<'_> for TableRefChecker {
+        impl Visitor<'_> for TableRefChecker<'_, '_> {
             fn visit_column_ref(&mut self, col: &ColumnRef) -> Result<(), DatabaseError> {
+                let col = self.arena.column(*col);
                 if col.table_name().is_some() && col.id().is_some() {
                     self.found = true;
                 }
                 Ok(())
             }
         }
-        let mut checker = TableRefChecker { found: false };
+        let mut checker = TableRefChecker {
+            found: false,
+            arena,
+        };
         checker.visit(self).unwrap();
         checker.found
     }
@@ -525,25 +683,31 @@ impl ScalarExpression {
         checker.has_agg
     }
 
-    pub fn output_name(&self) -> String {
+    fn output_name_by<N: fmt::Display>(&self, fn_display: &impl Fn(ColumnRef) -> N) -> String {
         match self {
             ScalarExpression::Constant(value) => format!("{value}"),
-            ScalarExpression::ColumnRef { column, .. } => column.full_name(),
+            ScalarExpression::ColumnRef { column, .. } => format!("{}", fn_display(*column)),
             ScalarExpression::Alias { alias, expr } => match alias {
                 AliasType::Name(alias) => alias.to_string(),
                 AliasType::Expr(alias_expr) => {
-                    format!("({}) as ({})", expr, alias_expr.output_name())
+                    format!(
+                        "({}) as ({})",
+                        expr.output_name_by(fn_display),
+                        alias_expr.output_name_by(fn_display)
+                    )
                 }
             },
             ScalarExpression::TypeCast { expr, ty, .. } => {
-                format!("cast ({} as {})", expr.output_name(), ty)
+                format!("cast ({} as {})", expr.output_name_by(fn_display), ty)
             }
             ScalarExpression::IsNull { expr, negated } => {
                 let suffix = if *negated { "is not null" } else { "is null" };
 
-                format!("{} {}", expr.output_name(), suffix)
+                format!("{} {}", expr.output_name_by(fn_display), suffix)
             }
-            ScalarExpression::Unary { expr, op, .. } => format!("{}{}", op, expr.output_name()),
+            ScalarExpression::Unary { expr, op, .. } => {
+                format!("{}{}", op, expr.output_name_by(fn_display))
+            }
             ScalarExpression::Binary {
                 left_expr,
                 right_expr,
@@ -551,9 +715,9 @@ impl ScalarExpression {
                 ..
             } => format!(
                 "({} {} {})",
-                left_expr.output_name(),
+                left_expr.output_name_by(fn_display),
                 op,
-                right_expr.output_name(),
+                right_expr.output_name_by(fn_display),
             ),
             ScalarExpression::AggCall {
                 args,
@@ -561,7 +725,10 @@ impl ScalarExpression {
                 distinct,
                 ..
             } => {
-                let args_str = args.iter().map(|expr| expr.output_name()).join(", ");
+                let args_str = args
+                    .iter()
+                    .map(|expr| expr.output_name_by(fn_display))
+                    .join(", ");
                 let op = |allow_distinct, distinct| {
                     if allow_distinct && distinct {
                         "distinct "
@@ -581,9 +748,17 @@ impl ScalarExpression {
                 negated,
                 expr,
             } => {
-                let args_string = args.iter().map(|arg| arg.output_name()).join(", ");
+                let args_string = args
+                    .iter()
+                    .map(|arg| arg.output_name_by(fn_display))
+                    .join(", ");
                 let op_string = if *negated { "not in" } else { "in" };
-                format!("{} {} ({})", expr.output_name(), op_string, args_string)
+                format!(
+                    "{} {} ({})",
+                    expr.output_name_by(fn_display),
+                    op_string,
+                    args_string
+                )
             }
             ScalarExpression::Between {
                 expr,
@@ -594,10 +769,10 @@ impl ScalarExpression {
                 let op_string = if *negated { "not between" } else { "between" };
                 format!(
                     "{} {} [{}, {}]",
-                    expr.output_name(),
+                    expr.output_name_by(fn_display),
                     op_string,
-                    left_expr.output_name(),
-                    right_expr.output_name()
+                    left_expr.output_name_by(fn_display),
+                    right_expr.output_name_by(fn_display)
                 )
             }
             ScalarExpression::SubString {
@@ -608,13 +783,13 @@ impl ScalarExpression {
                 let op = |tag: &str, num_expr: &Option<Box<ScalarExpression>>| {
                     num_expr
                         .as_ref()
-                        .map(|expr| format!(", {}: {}", tag, expr.output_name()))
+                        .map(|expr| format!(", {}: {}", tag, expr.output_name_by(fn_display)))
                         .unwrap_or_default()
                 };
 
                 format!(
                     "substring({}{}{})",
-                    expr.output_name(),
+                    expr.output_name_by(fn_display),
                     op("from", from_expr),
                     op("for", for_expr),
                 )
@@ -622,8 +797,8 @@ impl ScalarExpression {
             ScalarExpression::Position { expr, in_expr } => {
                 format!(
                     "position({} in {})",
-                    expr.output_name(),
-                    in_expr.output_name()
+                    expr.output_name_by(fn_display),
+                    in_expr.output_name_by(fn_display)
                 )
             }
             ScalarExpression::Trim {
@@ -634,8 +809,8 @@ impl ScalarExpression {
                 let trim_what_str = {
                     trim_what_expr
                         .as_ref()
-                        .map(|expr| expr.output_name())
-                        .unwrap_or(" ".to_string())
+                        .map(|expr| expr.output_name_by(fn_display))
+                        .unwrap_or_else(|| " ".to_string())
                 };
                 let trim_where_str = match trim_where {
                     Some(TrimWhereField::Both) => format!("both '{trim_what_str}' from"),
@@ -649,20 +824,33 @@ impl ScalarExpression {
                         }
                     }
                 };
-                format!("trim({} {})", trim_where_str, expr.output_name())
+                format!(
+                    "trim({} {})",
+                    trim_where_str,
+                    expr.output_name_by(fn_display)
+                )
             }
             ScalarExpression::Empty => unreachable!(),
             ScalarExpression::Tuple(args) => {
-                let args_str = args.iter().map(|expr| expr.output_name()).join(", ");
+                let args_str = args
+                    .iter()
+                    .map(|expr| expr.output_name_by(fn_display))
+                    .join(", ");
                 format!("({args_str})")
             }
             ScalarExpression::ScalaFunction(ScalarFunction { args, inner }) => {
-                let args_str = args.iter().map(|expr| expr.output_name()).join(", ");
+                let args_str = args
+                    .iter()
+                    .map(|expr| expr.output_name_by(fn_display))
+                    .join(", ");
                 format!("{}({})", inner.summary().name, args_str)
             }
-            ScalarExpression::TableFunction(TableFunction { args, inner }) => {
-                let args_str = args.iter().map(|expr| expr.output_name()).join(", ");
-                format!("{}({})", inner.summary().name, args_str)
+            ScalarExpression::TableFunction(TableFunction { args, catalog }) => {
+                let args_str = args
+                    .iter()
+                    .map(|expr| expr.output_name_by(fn_display))
+                    .join(", ");
+                format!("{}({})", catalog.inner.summary().name, args_str)
             }
             ScalarExpression::If {
                 condition,
@@ -670,24 +858,40 @@ impl ScalarExpression {
                 right_expr,
                 ..
             } => {
-                format!("if {condition} ({left_expr}, {right_expr})")
+                format!(
+                    "if {} ({}, {})",
+                    condition.output_name_by(fn_display),
+                    left_expr.output_name_by(fn_display),
+                    right_expr.output_name_by(fn_display)
+                )
             }
             ScalarExpression::IfNull {
                 left_expr,
                 right_expr,
                 ..
             } => {
-                format!("ifnull({left_expr}, {right_expr})")
+                format!(
+                    "ifnull({}, {})",
+                    left_expr.output_name_by(fn_display),
+                    right_expr.output_name_by(fn_display)
+                )
             }
             ScalarExpression::NullIf {
                 left_expr,
                 right_expr,
                 ..
             } => {
-                format!("ifnull({left_expr}, {right_expr})")
+                format!(
+                    "ifnull({}, {})",
+                    left_expr.output_name_by(fn_display),
+                    right_expr.output_name_by(fn_display)
+                )
             }
             ScalarExpression::Coalesce { exprs, .. } => {
-                let exprs_str = exprs.iter().map(|expr| expr.output_name()).join(", ");
+                let exprs_str = exprs
+                    .iter()
+                    .map(|expr| expr.output_name_by(fn_display))
+                    .join(", ");
                 format!("coalesce({exprs_str})")
             }
             ScalarExpression::CaseWhen {
@@ -698,12 +902,18 @@ impl ScalarExpression {
             } => {
                 let op = |tag: &str, expr: &Option<Box<ScalarExpression>>| {
                     expr.as_ref()
-                        .map(|expr| format!("{}{} ", tag, expr.output_name()))
+                        .map(|expr| format!("{}{} ", tag, expr.output_name_by(fn_display)))
                         .unwrap_or_default()
                 };
                 let expr_pairs_str = expr_pairs
                     .iter()
-                    .map(|(when_expr, then_expr)| format!("when {when_expr} then {then_expr}"))
+                    .map(|(when_expr, then_expr)| {
+                        format!(
+                            "when {} then {}",
+                            when_expr.output_name_by(fn_display),
+                            then_expr.output_name_by(fn_display)
+                        )
+                    })
                     .join(" ");
 
                 format!(
@@ -716,19 +926,28 @@ impl ScalarExpression {
         }
     }
 
-    pub fn output_column(&self) -> ColumnRef {
+    pub fn output_name(&self, arena: &PlanArena) -> String {
+        self.output_name_by(&|column| arena.column(column).full_name())
+    }
+
+    pub fn output_column_ref(&self, arena: &mut PlanArena) -> ColumnRef {
         match self {
-            ScalarExpression::ColumnRef { column, .. } => column.clone(),
+            ScalarExpression::ColumnRef { column, .. } => *column,
             ScalarExpression::Alias {
                 alias: AliasType::Expr(expr),
                 ..
-            } => expr.output_column(),
-            _ => ColumnRef::from(ColumnCatalog::new(
-                self.output_name(),
-                true,
-                // SAFETY: default expr must not be [`ScalarExpression::ColumnRef`]
-                ColumnDesc::new(self.return_type().into_owned(), None, false, None).unwrap(),
-            )),
+            } => expr.output_column_ref(arena),
+            _ => {
+                let output_name = self.output_name(arena);
+                let return_type = self.return_type(arena).into_owned();
+                let column = ColumnCatalog::new(
+                    output_name,
+                    true,
+                    // SAFETY: default expr must not be [`ScalarExpression::ColumnRef`]
+                    ColumnDesc::new(return_type, None, false, None).unwrap(),
+                );
+                arena.alloc_column(column)
+            }
         }
     }
 }
@@ -738,19 +957,6 @@ pub enum UnaryOperator {
     Plus,
     Minus,
     Not,
-}
-
-impl TryFrom<SqlUnaryOperator> for UnaryOperator {
-    type Error = DatabaseError;
-
-    fn try_from(value: SqlUnaryOperator) -> Result<Self, Self::Error> {
-        match value {
-            SqlUnaryOperator::Plus => Ok(UnaryOperator::Plus),
-            SqlUnaryOperator::Minus => Ok(UnaryOperator::Minus),
-            SqlUnaryOperator::Not => Ok(UnaryOperator::Not),
-            op => Err(DatabaseError::UnsupportedStmt(format!("{op}"))),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ReferenceSerialization)]
@@ -779,7 +985,7 @@ pub enum BinaryOperator {
 
 impl fmt::Display for ScalarExpression {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "{}", self.output_name())
+        write!(f, "{}", self.output_name_by(&|column| column))
     }
 }
 
@@ -830,34 +1036,9 @@ impl fmt::Display for UnaryOperator {
     }
 }
 
-impl TryFrom<SqlBinaryOperator> for BinaryOperator {
-    type Error = DatabaseError;
-
-    fn try_from(value: SqlBinaryOperator) -> Result<Self, Self::Error> {
-        match value {
-            SqlBinaryOperator::Plus => Ok(BinaryOperator::Plus),
-            SqlBinaryOperator::Minus => Ok(BinaryOperator::Minus),
-            SqlBinaryOperator::Multiply => Ok(BinaryOperator::Multiply),
-            SqlBinaryOperator::Divide => Ok(BinaryOperator::Divide),
-            SqlBinaryOperator::Modulo => Ok(BinaryOperator::Modulo),
-            SqlBinaryOperator::StringConcat => Ok(BinaryOperator::StringConcat),
-            SqlBinaryOperator::Gt => Ok(BinaryOperator::Gt),
-            SqlBinaryOperator::Lt => Ok(BinaryOperator::Lt),
-            SqlBinaryOperator::GtEq => Ok(BinaryOperator::GtEq),
-            SqlBinaryOperator::LtEq => Ok(BinaryOperator::LtEq),
-            SqlBinaryOperator::Spaceship => Ok(BinaryOperator::Spaceship),
-            SqlBinaryOperator::Eq => Ok(BinaryOperator::Eq),
-            SqlBinaryOperator::NotEq => Ok(BinaryOperator::NotEq),
-            SqlBinaryOperator::And => Ok(BinaryOperator::And),
-            SqlBinaryOperator::Or => Ok(BinaryOperator::Or),
-            op => Err(DatabaseError::UnsupportedStmt(format!("{op}"))),
-        }
-    }
-}
-
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation, ColumnSummary};
+    use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::db::test::build_table;
     use crate::db::{ScalaFunctions, TableFunctions};
     use crate::errors::DatabaseError;
@@ -866,30 +1047,31 @@ mod test {
         ArcScalarFunctionImpl, ScalarFunction, ScalarFunctionImpl,
     };
     use crate::expression::function::table::{
-        ArcTableFunctionImpl, TableFunction, TableFunctionImpl,
+        ArcTableFunctionImpl, TableFunction, TableFunctionCatalog, TableFunctionImpl,
     };
     use crate::expression::TrimWhereField;
     use crate::expression::{AliasType, BinaryOperator, ScalarExpression, UnaryOperator};
     use crate::function::current_date::CurrentDate;
     use crate::function::numbers::Numbers;
+    use crate::planner::{PlanArena, TableArenaCell};
     use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
-    use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
+    use crate::storage::rocksdb::RocksStorage;
+    use crate::storage::rocksdb::RocksTransaction;
     use crate::storage::{Storage, Transaction};
     use crate::types::evaluator::{binary_create, cast_create, unary_create};
     use crate::types::value::{DataValue, Utf8Type};
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
-    use crate::utils::lru::SharedLruCache;
     use std::borrow::Cow;
-    use std::hash::RandomState;
     use std::io::{Cursor, Seek, SeekFrom};
-    use std::sync::Arc;
     use tempfile::TempDir;
 
     #[test]
     fn test_eq_ignore_colref_pos() -> Result<(), DatabaseError> {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
         let left = ScalarExpression::column_expr(
-            ColumnRef::from(ColumnCatalog::new(
+            arena.alloc_column(ColumnCatalog::new(
                 "c1".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::Integer, None, false, None)?,
@@ -897,7 +1079,7 @@ mod test {
             0,
         );
         let right = ScalarExpression::column_expr(
-            ColumnRef::from(ColumnCatalog::new(
+            arena.alloc_column(ColumnCatalog::new(
                 "c1".to_string(),
                 true,
                 ColumnDesc::new(LogicalType::Bigint, None, false, None)?,
@@ -905,7 +1087,7 @@ mod test {
             2,
         );
         let different = ScalarExpression::column_expr(
-            ColumnRef::from(ColumnCatalog::new(
+            arena.alloc_column(ColumnCatalog::new(
                 "c2".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::Integer, None, false, None)?,
@@ -913,8 +1095,8 @@ mod test {
             0,
         );
 
-        assert!(left.eq_ignore_colref_pos(&right));
-        assert!(!left.eq_ignore_colref_pos(&different));
+        assert!(left.eq_ignore_colref_pos(&right, &arena));
+        assert!(!left.eq_ignore_colref_pos(&different, &arena));
         Ok(())
     }
 
@@ -925,13 +1107,15 @@ mod test {
             expr: ScalarExpression,
             drive: Option<&ReferenceDecodeContext<'_, RocksTransaction>>,
             reference_tables: &mut ReferenceTables,
+            arena: &mut PlanArena,
         ) -> Result<(), DatabaseError> {
-            expr.encode(cursor, false, reference_tables)?;
+            expr.encode(cursor, false, reference_tables, arena)?;
 
             cursor.seek(SeekFrom::Start(0))?;
-            assert_eq!(
-                ScalarExpression::decode(cursor, drive, reference_tables)?,
-                expr
+            let decoded = ScalarExpression::decode(cursor, drive, reference_tables, arena)?;
+            assert!(
+                decoded.eq_ignore_colref_pos(&expr, arena),
+                "decoded expression does not match: decoded={decoded:?}, expected={expr:?}",
             );
             cursor.seek(SeekFrom::Start(0))?;
 
@@ -941,22 +1125,37 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let mut table_cache = crate::storage::TableCache::default();
+        let table_arena = TableArenaCell::default();
         let mut scala_functions = ScalaFunctions::default();
         let current_date = CurrentDate::new();
         scala_functions.insert(current_date.summary().clone(), current_date);
         let mut table_functions = TableFunctions::default();
         let numbers = Numbers::new();
-        table_functions.insert(numbers.summary().clone(), numbers);
-        build_table(&table_cache, &mut transaction)?;
+        let mut schema = Vec::new();
+        numbers.output_schema_into(
+            &numbers.summary().name,
+            table_arena.borrow_mut(),
+            &mut schema,
+        );
+        table_functions.insert(
+            numbers.summary().clone(),
+            TableFunctionCatalog {
+                schema,
+                inner: ArcTableFunctionImpl(numbers),
+            },
+        );
+        let mut plan_arena = PlanArena::new(&table_arena);
+        build_table(&mut table_cache, &mut transaction, &mut plan_arena)?;
+        let mut plan_arena = PlanArena::new(&table_arena);
 
         let mut cursor = Cursor::new(Vec::new());
         let mut reference_tables = ReferenceTables::new();
-        let c3_column_id = {
+        let c3_column = {
             let table = transaction
                 .table(&table_cache, "t1".to_string().into())?
                 .unwrap();
-            *table.get_column_id_by_name("c3").unwrap()
+            table.get_column_by_name("c3").unwrap()
         };
         let context = ReferenceDecodeContext::with_functions(
             Some((&transaction, &table_cache)),
@@ -969,12 +1168,14 @@ mod test {
             ScalarExpression::Constant(DataValue::Null),
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
             ScalarExpression::Constant(DataValue::Int32(42)),
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -985,44 +1186,28 @@ mod test {
             }),
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
-            ScalarExpression::column_expr(
-                ColumnRef::from(ColumnCatalog::direct_new(
-                    ColumnSummary {
-                        name: "c3".to_string(),
-                        relation: ColumnRelation::Table {
-                            column_id: c3_column_id,
-                            table_name: "t1".to_string().into(),
-                            is_temp: false,
-                        },
-                    },
-                    false,
-                    ColumnDesc::new(LogicalType::Integer, None, false, None)?,
-                    false,
-                )),
-                0,
-            ),
+            ScalarExpression::column_expr(c3_column, 0),
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
             ScalarExpression::column_expr(
-                ColumnRef::from(ColumnCatalog::direct_new(
-                    ColumnSummary {
-                        name: "c4".to_string(),
-                        relation: ColumnRelation::None,
-                    },
+                plan_arena.alloc_column(ColumnCatalog::new(
+                    "c4".to_string(),
                     false,
                     ColumnDesc::new(LogicalType::Boolean, None, false, None)?,
-                    false,
                 )),
                 1,
             ),
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1032,6 +1217,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1041,6 +1227,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1054,6 +1241,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1063,6 +1251,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1077,6 +1266,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1088,6 +1278,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1102,6 +1293,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1114,6 +1306,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1125,6 +1318,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1135,6 +1329,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1146,6 +1341,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1156,6 +1352,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1166,6 +1363,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1176,6 +1374,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1185,6 +1384,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1195,6 +1395,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1205,6 +1406,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1215,18 +1417,21 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
             ScalarExpression::Empty,
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
             ScalarExpression::Tuple(vec![ScalarExpression::Empty]),
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1236,15 +1441,20 @@ mod test {
             }),
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
             ScalarExpression::TableFunction(TableFunction {
                 args: vec![ScalarExpression::Empty],
-                inner: ArcTableFunctionImpl(Numbers::new()),
+                catalog: TableFunctionCatalog {
+                    schema: Vec::new(),
+                    inner: ArcTableFunctionImpl(Numbers::new()),
+                },
             }),
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1256,6 +1466,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1266,6 +1477,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1276,6 +1488,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1285,6 +1498,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1296,6 +1510,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1307,6 +1522,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
@@ -1318,6 +1534,7 @@ mod test {
             },
             Some(&context),
             &mut reference_tables,
+            &mut plan_arena,
         )?;
 
         Ok(())

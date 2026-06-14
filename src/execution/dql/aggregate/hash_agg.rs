@@ -14,7 +14,9 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::{create_accumulators, Accumulator};
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
+use crate::execution::{
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
+};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::LogicalPlan;
@@ -33,7 +35,7 @@ pub struct HashAggExecutor {
     output: Option<HashAggOutput>,
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashAggExecutor {
     type Input = (AggregateOperator, LogicalPlan);
 
     fn into_executor(
@@ -46,10 +48,11 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
             input,
         ): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+        cache: ExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
-        let input = build_read(arena, input, cache, transaction);
+        let input = build_read(arena, plan_arena, input, cache, transaction);
         arena.push(ExecNode::HashAgg(HashAggExecutor {
             agg_calls,
             groupby_exprs,
@@ -57,13 +60,19 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
             output: None,
         }))
     }
+}
 
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
         if self.output.is_none() {
             let mut group_hash_accs: HashMap<Vec<DataValue>, Vec<Box<dyn Accumulator>>> =
                 HashMap::new();
 
-            while arena.next_tuple(self.input)? {
+            while arena.next_tuple(self.input, plan_arena)? {
                 let tuple = arena.result_tuple();
                 let group_keys = self
                     .groupby_exprs
@@ -105,7 +114,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
         output.values.clear();
         output.values.reserve(accs.len() + group_keys.len());
 
-        for acc in accs.iter() {
+        for acc in accs {
             output.values.push(acc.evaluate()?);
         }
         output.values.extend(group_keys);
@@ -116,7 +125,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
+    use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
     use crate::execution::dql::aggregate::hash_agg::HashAggExecutor;
     use crate::execution::dql::test::build_integers;
@@ -130,35 +139,34 @@ mod test {
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
     use crate::planner::{Childrens, LogicalPlan};
-    use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
+    use crate::storage::rocksdb::RocksStorage;
     use crate::storage::Storage;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
-    use crate::utils::lru::SharedLruCache;
     use itertools::Itertools;
-    use std::hash::RandomState;
-    use std::sync::Arc;
     use tempfile::TempDir;
 
     #[test]
     fn test_hash_agg() -> Result<(), DatabaseError> {
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
 
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path()).unwrap();
-        let mut transaction = storage.transaction()?;
+        let transaction = storage.transaction()?;
         let desc = ColumnDesc::new(LogicalType::Integer, None, false, None)?;
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
 
-        let t1_schema = Arc::new(vec![
-            ColumnRef::from(ColumnCatalog::new("c1".to_string(), true, desc.clone())),
-            ColumnRef::from(ColumnCatalog::new("c2".to_string(), true, desc.clone())),
-            ColumnRef::from(ColumnCatalog::new("c3".to_string(), true, desc.clone())),
-        ]);
+        let t1_schema = vec![
+            plan_arena.alloc_column(ColumnCatalog::new("c1".to_string(), true, desc.clone())),
+            plan_arena.alloc_column(ColumnCatalog::new("c2".to_string(), true, desc.clone())),
+            plan_arena.alloc_column(ColumnCatalog::new("c3".to_string(), true, desc.clone())),
+        ];
 
-        let input = LogicalPlan {
-            operator: Operator::Values(ValuesOperator {
+        let input = LogicalPlan::new(
+            Operator::Values(ValuesOperator {
                 rows: vec![
                     vec![
                         DataValue::Int32(0),
@@ -183,17 +191,15 @@ mod test {
                 ],
                 schema_ref: t1_schema.clone(),
             }),
-            childrens: Box::new(Childrens::None),
-            physical_option: None,
-            _output_schema_ref: None,
-        };
+            Childrens::None,
+        );
         let plan = LogicalPlan::new(
             Operator::Aggregate(AggregateOperator {
-                groupby_exprs: vec![ScalarExpression::column_expr(t1_schema[0].clone(), 0)],
+                groupby_exprs: vec![ScalarExpression::column_expr(t1_schema[0], 0)],
                 agg_calls: vec![ScalarExpression::AggCall {
                     distinct: false,
                     kind: AggKind::Sum,
-                    args: vec![ScalarExpression::column_expr(t1_schema[1].clone(), 1)],
+                    args: vec![ScalarExpression::column_expr(t1_schema[1], 1)],
                     ty: LogicalType::Integer,
                 }],
                 is_distinct: false,
@@ -210,15 +216,16 @@ mod test {
             .build();
         let plan = pipeline
             .instantiate(plan)
-            .find_best::<RocksTransaction>(None)?;
+            .find_best(None, &mut plan_arena)?;
 
         let Operator::Aggregate(op) = plan.operator else {
             unreachable!()
         };
         let tuples = try_collect(execute_input::<_, HashAggExecutor>(
             (op, plan.childrens.pop_only()),
-            (&table_cache, &view_cache, &meta_cache),
-            &mut transaction,
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            plan_arena,
+            &transaction,
         ))?;
 
         assert_eq!(tuples.len(), 2);

@@ -14,29 +14,17 @@
 
 use crate::catalog::ColumnCatalog;
 use crate::catalog::ColumnDesc;
-use crate::catalog::TableCatalog;
+use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::expression::function::table::TableFunctionImpl;
 use crate::expression::function::FunctionSummary;
 use crate::expression::ScalarExpression;
-use crate::types::tuple::SchemaRef;
+use crate::planner::TableArena;
+use crate::types::tuple::Schema;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use std::sync::Arc;
-use std::sync::LazyLock;
-
-static NUMBERS: LazyLock<TableCatalog> = LazyLock::new(|| {
-    TableCatalog::new(
-        "numbers".to_string().into(),
-        vec![ColumnCatalog::new(
-            "number".to_string(),
-            true,
-            ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
-        )],
-    )
-    .unwrap()
-});
 
 #[derive(Debug)]
 pub(crate) struct Numbers {
@@ -75,15 +63,23 @@ impl TableFunctionImpl for Numbers {
         )
     }
 
-    fn output_schema(&self) -> &SchemaRef {
-        NUMBERS.schema_ref()
-    }
-
     fn summary(&self) -> &FunctionSummary {
         &self.summary
     }
 
-    fn table(&self) -> &TableCatalog {
-        &NUMBERS
+    fn output_schema_into(
+        &self,
+        table_name: &TableName,
+        table_arena: &mut TableArena,
+        schema: &mut Schema,
+    ) {
+        schema.push(table_arena.alloc_table_column(
+            table_name.clone(),
+            ColumnCatalog::new(
+                "number".to_string(),
+                true,
+                ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
+            ),
+        ));
     }
 }

@@ -17,7 +17,6 @@ use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
 use crate::optimizer::core::rule::{BestPhysicalOption, ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
-use crate::storage::Transaction;
 use crate::types::index::{IndexLookup, IndexType};
 use std::sync::LazyLock;
 
@@ -35,19 +34,25 @@ impl MatchPattern for SeqScanImplementation {
     }
 }
 
-impl<T: Transaction> ImplementationRule<T> for SeqScanImplementation {
+impl ImplementationRule for SeqScanImplementation {
     fn update_best_option(
         &self,
         op: &Operator,
-        loader: &StatisticMetaLoader<T>,
+        arena: &crate::planner::PlanArena,
+        loader: &StatisticMetaLoader<'_>,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
         if let Operator::TableScan(scan_op) = op {
             let cost = scan_op
                 .index_infos
                 .iter()
-                .find(|index_info| matches!(index_info.meta.ty, IndexType::PrimaryKey { .. }))
-                .map(|index_info| loader.load(&scan_op.table_name, index_info.meta.id))
+                .find(|index_info| {
+                    matches!(
+                        arena.index(index_info.meta).ty,
+                        IndexType::PrimaryKey { .. }
+                    )
+                })
+                .map(|index_info| loader.load(&scan_op.table_name, arena.index(index_info.meta).id))
                 .transpose()?
                 .flatten()
                 .map(|statistics_meta| statistics_meta.histogram().values_len());
@@ -72,11 +77,12 @@ impl MatchPattern for IndexScanImplementation {
     }
 }
 
-impl<T: Transaction> ImplementationRule<T> for IndexScanImplementation {
+impl ImplementationRule for IndexScanImplementation {
     fn update_best_option(
         &self,
         op: &Operator,
-        loader: &StatisticMetaLoader<'_, T>,
+        arena: &crate::planner::PlanArena,
+        loader: &StatisticMetaLoader<'_>,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
         if let Operator::TableScan(scan_op) = op {
@@ -86,11 +92,12 @@ impl<T: Transaction> ImplementationRule<T> for IndexScanImplementation {
                 };
                 let mut cost = None;
 
+                let index_meta = arena.index(index_info.meta);
                 if let Some(mut row_count) =
-                    loader.collect_count(&scan_op.table_name, index_info.meta.id, range)?
+                    loader.collect_count(&scan_op.table_name, index_meta.id, range)?
                 {
                     if index_info.covered_deserializers.is_none()
-                        && !matches!(index_info.meta.ty, IndexType::PrimaryKey { .. })
+                        && !matches!(index_meta.ty, IndexType::PrimaryKey { .. })
                     {
                         // need to return table query(non-covering index)
                         row_count *= 2;

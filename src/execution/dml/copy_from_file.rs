@@ -13,12 +13,12 @@
 // limitations under the License.
 
 use crate::binder::copy::FileFormat;
-use crate::catalog::PrimaryKeyIndices;
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
+use crate::execution::{
+    ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
+};
 use crate::planner::operator::copy_from_file::CopyFromFileOperator;
 use crate::storage::Transaction;
-use crate::types::tuple::Tuple;
 use crate::types::tuple_builder::TupleBuilder;
 use itertools::Itertools;
 use std::fs::File;
@@ -35,35 +35,45 @@ impl From<CopyFromFileOperator> for CopyFromFile {
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CopyFromFile {
+    type Input = Self;
+
     fn into_executor(
-        self,
+        input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
+        _: ExecutionContext<'_>,
+        _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::CopyFromFile(self))
+        let executor = input;
+        arena.push(ExecNode::CopyFromFile(executor))
     }
 }
 
-impl CopyFromFile {
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyFromFile {
+    fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(op) = self.op.take() else {
             arena.finish();
             return Ok(());
         };
-        let serializers = op
+        let column_types = op
             .schema_ref
             .iter()
-            .map(|column| column.datatype().serializable())
+            .map(|column| plan_arena.column(*column).datatype().clone())
             .collect_vec();
-        let table = arena
-            .transaction_mut()
-            .table(arena.table_cache(), op.table.clone())?
+        let serializers = column_types
+            .iter()
+            .map(|ty| ty.serializable())
+            .collect_vec();
+        let table_cache = arena.context().table_cache();
+        let transaction = arena.transaction();
+        let table = transaction
+            .table(table_cache, op.table.clone())?
             .ok_or(DatabaseError::TableNotFound)?;
-        let primary_keys_indices = table.primary_keys_indices().clone();
+        let table_name = table.name().to_string();
 
         let file = File::open(op.source.path)?;
         let mut buf_reader = BufReader::new(file);
@@ -82,7 +92,7 @@ impl CopyFromFile {
         };
 
         let column_count = op.schema_ref.len();
-        let tuple_builder = TupleBuilder::new(&op.schema_ref, Some(&primary_keys_indices));
+        let tuple_builder = TupleBuilder::new(column_types, Some(table.primary_key_indices()));
         let mut size = 0_usize;
 
         for record in reader.records() {
@@ -95,57 +105,14 @@ impl CopyFromFile {
             }
 
             let chunk = tuple_builder.build_with_row(record.iter())?;
-            arena
-                .transaction_mut()
-                .append_tuple(table.name(), chunk, &serializers, false)?;
+            let mut state = arena.local_state(plan_arena);
+            let (transaction, table_codec) = state.transaction_codec_mut();
+            transaction.append_tuple(table_codec, &table_name, chunk, &serializers, false)?;
             size += 1;
         }
 
         TupleBuilder::build_result_into(arena.result_tuple_mut(), size.to_string());
         arena.resume();
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    fn read_file_blocking(
-        mut self,
-        tx: std::sync::mpsc::Sender<Tuple>,
-        pk_indices: PrimaryKeyIndices,
-    ) -> Result<(), DatabaseError> {
-        let Some(op) = self.op.take() else {
-            return Ok(());
-        };
-        let file = File::open(op.source.path)?;
-        let mut buf_reader = BufReader::new(file);
-        let mut reader = match op.source.format {
-            FileFormat::Csv {
-                delimiter,
-                quote,
-                escape,
-                header,
-            } => csv::ReaderBuilder::new()
-                .delimiter(delimiter as u8)
-                .quote(quote as u8)
-                .escape(escape.map(|c| c as u8))
-                .has_headers(header)
-                .from_reader(&mut buf_reader),
-        };
-
-        let column_count = op.schema_ref.len();
-        let tuple_builder = TupleBuilder::new(&op.schema_ref, Some(&pk_indices));
-
-        for record in reader.records() {
-            let record = record?;
-
-            if !(record.len() == column_count
-                || record.len() == column_count + 1 && record.get(column_count) == Some(""))
-            {
-                return Err(DatabaseError::MisMatch("columns", "values"));
-            }
-
-            tx.send(tuple_builder.build_with_row(record.iter())?)
-                .map_err(|_| DatabaseError::ChannelClose)?;
-        }
         Ok(())
     }
 }
@@ -154,14 +121,13 @@ impl CopyFromFile {
 mod tests {
     use super::*;
     use crate::binder::copy::ExtSource;
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation, ColumnSummary};
-    use crate::db::DataBaseBuilder;
+    use crate::catalog::{ColumnCatalog, ColumnDesc};
+    use crate::db::{CatalogKind, DataBaseBuilder};
     use crate::errors::DatabaseError;
     use crate::storage::Storage;
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
     use std::io::Write;
-    use std::sync::Arc;
     use tempfile::TempDir;
     use ulid::Ulid;
 
@@ -172,51 +138,34 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().expect("failed to create temp file");
         write!(file, "{csv}").expect("failed to write file");
 
+        let tmp_dir = TempDir::new()?;
+        let mut db = DataBaseBuilder::path(tmp_dir.path()).build_rocksdb()?;
+        db.ddl("create table test_copy (a int primary key, b float, c varchar(10))")?;
+        db.load(CatalogKind::Table("test_copy".to_string().into()))?;
+
+        fn test_column(
+            name: &str,
+            ty: LogicalType,
+            primary_key: Option<usize>,
+        ) -> Result<ColumnCatalog, DatabaseError> {
+            let mut column = ColumnCatalog::new(
+                name.to_string(),
+                false,
+                ColumnDesc::new(ty, primary_key, false, None)?,
+            );
+            column.set_ref_table("t1".to_string().into(), Ulid::new(), false);
+            Ok(column)
+        }
+
+        let mut plan_arena = crate::planner::PlanArena::new(db.state.table_arena());
         let columns = vec![
-            ColumnRef::from(ColumnCatalog::direct_new(
-                ColumnSummary {
-                    name: "a".to_string(),
-                    relation: ColumnRelation::Table {
-                        column_id: Ulid::new(),
-                        table_name: "t1".to_string().into(),
-                        is_temp: false,
-                    },
-                },
-                false,
-                ColumnDesc::new(LogicalType::Integer, Some(0), false, None)?,
-                false,
-            )),
-            ColumnRef::from(ColumnCatalog::direct_new(
-                ColumnSummary {
-                    name: "b".to_string(),
-                    relation: ColumnRelation::Table {
-                        column_id: Ulid::new(),
-                        table_name: "t1".to_string().into(),
-                        is_temp: false,
-                    },
-                },
-                false,
-                ColumnDesc::new(LogicalType::Float, None, false, None)?,
-                false,
-            )),
-            ColumnRef::from(ColumnCatalog::direct_new(
-                ColumnSummary {
-                    name: "c".to_string(),
-                    relation: ColumnRelation::Table {
-                        column_id: Ulid::new(),
-                        table_name: "t1".to_string().into(),
-                        is_temp: false,
-                    },
-                },
-                false,
-                ColumnDesc::new(
-                    LogicalType::Varchar(Some(10), CharLengthUnits::Characters),
-                    None,
-                    false,
-                    None,
-                )?,
-                false,
-            )),
+            plan_arena.alloc_column(test_column("a", LogicalType::Integer, Some(0))?),
+            plan_arena.alloc_column(test_column("b", LogicalType::Float, None)?),
+            plan_arena.alloc_column(test_column(
+                "c",
+                LogicalType::Varchar(Some(10), CharLengthUnits::Characters),
+                None,
+            )?),
         ];
 
         let op = CopyFromFileOperator {
@@ -230,24 +179,19 @@ mod tests {
                     header: false,
                 },
             },
-            schema_ref: Arc::new(columns),
+            schema_ref: columns,
         };
 
-        let tmp_dir = TempDir::new()?;
-        let db = DataBaseBuilder::path(tmp_dir.path()).build_rocksdb()?;
-        db.run("create table test_copy (a int primary key, b float, c varchar(10))")?
-            .done()?;
-
-        let storage = db.storage;
-        let mut transaction = storage.transaction()?;
+        let transaction = db.storage.transaction()?;
         let mut executor = crate::execution::execute_mut(
             CopyFromFile::from(op),
-            (
+            crate::execution::test_utils::empty_context(
                 db.state.table_cache(),
                 db.state.view_cache(),
                 db.state.meta_cache(),
             ),
-            &mut transaction,
+            plan_arena,
+            &transaction,
         );
 
         let result = executor.next().expect("copy from file should yield once")?;

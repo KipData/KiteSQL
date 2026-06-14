@@ -6,8 +6,8 @@ impl<S: Storage> Database<S> {
     ///
     /// This runs `ANALYZE TABLE` for the backing table so the optimizer can use
     /// up-to-date statistics.
-    pub fn analyze<M: Model>(&self) -> Result<(), DatabaseError> {
-        orm_analyze::<_, M>(self)
+    pub fn analyze_model<M: Model>(&mut self) -> Result<(), DatabaseError> {
+        self.analyze(M::table_name())
     }
 
     /// Inserts a model into its backing table.

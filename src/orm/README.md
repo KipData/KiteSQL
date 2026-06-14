@@ -1,31 +1,19 @@
 # ORM
 
-KiteSQL provides a built-in ORM behind `features = ["orm"]`.
-
-The ORM is centered around `#[derive(Model)]`. It generates:
-
-- tuple-to-struct mapping
-- cached model statements
-- cached DDL statements
-- migration metadata
-- typed field accessors for query building
-
-## Enabling the feature
+KiteSQL's ORM is available with `features = ["orm"]`. This also enables the
+derive macros used by `#[derive(Model)]`; `#[derive(Projection)]` is optional
+for DTO-style projections.
 
 ```toml
 kite_sql = { version = "*", features = ["orm"] }
 ```
 
-If you also want to derive the model macro, enable `macros` as well:
+## Model
 
-```toml
-kite_sql = { version = "*", features = ["orm", "macros"] }
-```
+`#[derive(Model)]` defines the table mapping, cached model operations, typed
+field accessors, and migration metadata.
 
-## Quick start
-
-```rust
-use kite_sql::db::DataBaseBuilder;
+```rust,ignore
 use kite_sql::Model;
 
 #[derive(Default, Debug, PartialEq, Model)]
@@ -39,210 +27,170 @@ struct User {
     #[model(default = "18", index)]
     age: Option<i32>,
 }
+```
 
-let database = DataBaseBuilder::path(".").build_in_memory()?;
+Common field attributes are `primary_key`, `unique`, `index`, `rename`,
+`default`, `varchar`, `char`, `decimal_precision`, `decimal_scale`, and `skip`.
+
+## Queries
+
+The recommended query entrypoint is `bind`. The closure receives an
+`OrmContext`, drives the binder directly, and returns a `LogicalPlan`. Query
+chains end with `.finish()`; mutation chains end with `update`, `delete`, or
+another operation that already returns a plan.
+
+```rust,ignore
+use kite_sql::db::{DataBaseBuilder, ResultIter};
+use kite_sql::orm::OrmQueryResultExt;
+
+let mut database = DataBaseBuilder::path(".").build_in_memory()?;
 database.create_table::<User>()?;
-
 database.insert(&User {
     id: 1,
     name: "Alice".to_string(),
     age: Some(18),
 })?;
 
-let user = database.get::<User>(&1)?.unwrap();
-assert_eq!(user.name, "Alice");
-
 let adults = database
-    .from::<User>()
-    .gte(User::age(), 18)
-    .asc(User::name())
-    .fetch()?;
+    .bind(|ctx| {
+        ctx.from::<User>()?
+            .filter(|e| {
+                let adult = e.column(User::age())?.gte(18)?;
+                let named_a = e.column(User::name())?.like("A%")?;
+                adult.and(named_a)
+            })?
+            .finish()
+    })?
+    .orm::<User>()
+    .collect::<Result<Vec<_>, _>>()?;
 
-for user in adults {
-    println!("{:?}", user?);
-}
+assert_eq!(adults[0].name, "Alice");
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-## Model derive
+Inside expression closures, `e.column(User::id())?` resolves through the core
+binder and returns a bound expression. Expression methods such as `eq`, `gte`,
+`like`, `and`, `or`, `is_null`, and `in_list` compose directly into core
+`ScalarExpression` values; constants can be passed directly.
 
-`#[derive(Model)]` is the intended entry point for ORM models.
+Prefer the compact helpers when the query shape is simple:
 
-Struct attributes:
+```rust,ignore
+let rows = database
+    .bind(|ctx| {
+        ctx.from::<User>()?
+            .filter(|e| e.column(User::age())?.gte(18))?
+            .order_by(User::age().desc())?
+            .project_scalars((User::id(), User::name()))?
+            .finish()
+    })?
+    .project_tuple::<(i32, String)>()
+    .collect::<Result<Vec<_>, _>>()?;
+# let _ = rows;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
-- `#[model(table = "users")]`: sets the backing table name
-- `#[model(index(name = "idx", columns = "a, b"))]`: declares a secondary index at the model level
+Use `project_scalar(...)` for one field, `project_scalars((...))` for simple
+tuples, and `project_value/project_tuple` when the projection is an expression
+or needs aliases. Use `order_by` for field ordering and already-bound sort
+fields, or `order_by_expr` for computed sort expressions. Call `.asc()`,
+`.desc()`, `.nulls_first()`, or `.nulls_last()` when the default
+ascending/nulls-last order is not enough.
 
-Field attributes:
+Joins and set operations use the same binder-backed style:
 
-- `#[model(primary_key)]`
-- `#[model(unique)]`
-- `#[model(index)]`
-- `#[model(rename = "column_name")]`
-- `#[model(default = "18")]`
-- `#[model(varchar = 64)]`
-- `#[model(char = 2)]`
-- `#[model(decimal_precision = 10, decimal_scale = 2)]`
-- `#[model(skip)]`
+```rust,ignore
+let joined = database
+    .bind(|ctx| {
+        ctx.from::<User>()?
+            .inner_join::<Order>(|e| {
+                e.column(User::id())?.eq(e.column(Order::user_id())?)
+            })?
+            .project_scalars((User::name(), Order::amount()))?
+            .order_by(Order::id())?
+            .finish()
+    })?;
 
-The derive macro generates the `Model` implementation, tuple decoding, cached
-read/insert/DDL statements, migration metadata, and typed field getters such as
-`User::id()` and `User::name()`.
+let ids = database.bind(|ctx| {
+    ctx.union(
+        true,
+        |ctx| ctx.from::<User>()?.project_scalar(User::id())?.finish(),
+        |ctx| ctx.from::<Order>()?.project_scalar(Order::user_id())?.finish(),
+    )
+})?;
+# let _ = (joined, ids);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
-## Query Builder
+## Writes
 
-`Database::from::<M>()` and `DBTransaction::from::<M>()` start a typed query
-from one ORM model table.
+For model rows, use the direct helpers:
 
-The usual flow is:
+```rust,ignore
+database.insert(&user)?;
+database.insert_many(users)?;
+let user = database.get::<User>(&1)?;
+let all = database.fetch::<User>()?;
+# let _ = (user, all);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
-- start with `from::<M>()`
-- add filters, joins, grouping, ordering, and limits
-- keep full-model output, or switch into `project::<P>()`,
-  `project_value(...)`, or `project_tuple(...)`
-- once the output shape is fixed, compose set queries with `union(...)`,
-  `except(...)`, `intersect(...)`, and optional `.all()`
+For query-shaped writes, start with `ctx.mutate::<M>()` and finish with
+`update` or `delete`.
 
-If you need an explicit relation alias, call `.alias("name")` on a source or
-pending join, and re-qualify fields with `Field::qualify("name")` where
-needed. For ordinary multi-table queries, `inner_join::<N>().on(...)`,
-`left_join::<N>().on(...)`, `right_join::<N>().on(...)`,
-`full_join::<N>().on(...)`, `cross_join::<N>()`, and `using(...)` cover most
-cases.
+```rust,ignore
+database
+    .bind(|ctx| {
+        ctx.mutate::<User>()?
+            .filter(|e| e.column(User::id())?.eq(1))?
+            .update(|u| {
+                u.set_value(User::name(), "Bob")?;
+                u.set_value(User::age(), None::<i32>)
+            })
+    })?
+    .done()?;
 
-Most expression building starts from generated fields such as `User::id()` and
-`User::name()`. Field values support arithmetic, comparison, null checks,
-pattern matching, range checks, casts, aliases, and subquery predicates. For
-computed expressions, use `QueryValue` helpers such as `func`, `count`,
-`count_all`, `sum`, `avg`, `min`, `max`, `case_when`, and `case_value`.
+database
+    .bind(|ctx| {
+        ctx.mutate::<User>()?
+            .filter(|e| e.column(User::id())?.eq(2))?
+            .delete()
+    })?
+    .done()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
-Boolean composition lives on `QueryExpr` through `and`, `or`, `not`, `exists`,
-and `not_exists`.
+`insert_select` and `overwrite_select` accept the same closure style for the
+source plan:
 
-### Projections
+```rust,ignore
+database
+    .bind(|ctx| {
+        ctx.insert_select::<UserSnapshot, _, _>(["id", "user_name"], |ctx| {
+            ctx.from::<User>()?
+                .project_scalars((User::id(), User::name()))?
+                .finish()
+        })
+    })?
+    .done()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
-Use full-model fetches when the query still matches `M`, or switch to one of
-the projection modes:
+## Schema And Maintenance
 
-- `project::<P>()`: decode rows into a DTO-style struct
-- `project_value(...)`: decode one expression per row into a scalar type
-- `project_tuple(...)`: decode multiple expressions positionally into a tuple
-
-For `project::<P>()`, `P` is typically a `#[derive(Projection)]` type whose
-field names match the output names. Use `#[projection(rename = "...")]` to map
-DTO fields to differently named source columns, and `#[projection(from = "...")]`
-for join projections that need an explicit source relation.
-
-If the output is expression-based, prefer `project_value(...)` or
-`project_tuple(...)` and assign explicit names with `.alias(...)`.
-
-### Set queries
-
-Set operations are available after the output shape is fixed:
-
-- model rows: `from::<User>().union(...)`
-- single values: `project_value(...).union(...)`
-- tuples: `project_tuple(...).except(...)`
-- intersections: `project_value(...).intersect(...)`
-- struct projections: `project::<P>().union(...)`
-
-Call `.all()` after `union(...)`, `except(...)`, or `intersect(...)` when you want multiset
-semantics instead of the default distinct result.
-
-After a set query is formed, you can still apply result-level methods such as
-`asc(...)`, `desc(...)`, `nulls_first()`, `nulls_last()`, `limit(...)`,
-`offset(...)`, `fetch()`, `get()`, `exists()`, `count()`, and `explain()`.
-
-Tips: `nulls_first()` and `nulls_last()` only affect the most recently added
-sort key from `asc(...)` or `desc(...)`.
-
-For richer combinations such as join projections, grouping, scalar subqueries,
-and set queries, prefer the rustdoc on `FromBuilder`, `SetQueryBuilder`,
-`Field`, `QueryValue`, and `QueryExpr`.
-
-## Change Operations
-
-The ORM supports both schema changes and data changes.
-
-### Schema changes
-
-On `Database`:
+Common schema helpers are:
 
 - `create_table::<M>()`
 - `create_table_if_not_exists::<M>()`
 - `migrate::<M>()`
-- `drop_index::<M>(index_name)`
-- `drop_index_if_exists::<M>(index_name)`
 - `drop_table::<M>()`
 - `drop_table_if_exists::<M>()`
 - `truncate::<M>()`
-- `create_view(name, query_builder)`
-- `create_or_replace_view(name, query_builder)`
-- `drop_view(name)`
-- `drop_view_if_exists(name)`
+- `create_view(...)` / `create_or_replace_view(...)`
+- `drop_view(...)` / `drop_view_if_exists(...)`
 
-`DBTransaction` does not currently expose the ORM DDL convenience methods.
+Introspection helpers include `show_tables()`, `show_views()`, `describe::<M>()`,
+and `analyze::<M>()`.
 
-Typical schema maintenance uses the same model types and query builders:
-create tables from `Model`, truncate by model, and create or replace views from
-ORM queries.
-
-### Data changes
-
-For common model-oriented writes:
-
-- `insert::<M>(&model)`
-- `insert_many::<M>(models)`
-
-For query-driven writes, reuse the same filtered `from::<M>()` entrypoint and
-finish with:
-
-- `insert::<Target>()`
-- `insert_into::<Target>(...)`
-- `overwrite::<Target>()`
-- `overwrite_into::<Target>(...)`
-- `update().set(...).execute()`
-- `delete()`
-
-Here `overwrite*` follows the engine's `INSERT OVERWRITE` semantics, meaning
-conflicting target rows are replaced rather than the whole table being cleared.
-
-For model-oriented writes, use `insert` and `insert_many`. For query-driven
-writes, compose from `from::<M>()` and finish with `insert`, `overwrite`,
-`update`, or `delete`.
-
-Query-driven writes are intentionally shaped like read queries first, so the
-same filters, joins, and projections can flow into the final write operation.
-
-## Introspection / Maintenance
-
-The ORM also exposes light-weight introspection and maintenance helpers.
-
-On `Database`:
-
-- `show_tables()`
-- `show_views()`
-- `describe::<M>()`
-- `from::<M>()...explain()`
-- `analyze::<M>()`
-
-On `DBTransaction`:
-
-- `show_tables()`
-- `show_views()`
-- `describe::<M>()`
-
-These helpers are intended for light-weight inspection around ORM-managed
-tables, without dropping down to raw SQL for common metadata queries.
-
-## Further reading
-
-Detailed method-by-method examples live in the rustdoc for:
-
-- `Field<M, T>`
-- `QueryValue`
-- `QueryExpr`
-- `FromBuilder<Q, M>`
-- `SetQueryBuilder<Q, M>`
-- `Projection`
-- `Model`
+The ORM frontend does not build SQL AST nodes. SQL parsing is the SQL frontend;
+ORM queries bind directly into `ScalarExpression` and `LogicalPlan`.

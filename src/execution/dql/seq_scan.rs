@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor};
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::storage::{Iter, Transaction, TupleIter};
 
@@ -32,35 +32,26 @@ impl<'a, T: Transaction + 'a> From<TableScanOperator> for SeqScan<'a, T> {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SeqScan<'a, T> {
-    fn into_executor(
-        self,
-        arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
-    ) -> ExecId {
-        arena.push(ExecNode::SeqScan(self))
-    }
-}
-
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SeqScan<'a, T> {
-    type Input = TableScanOperator;
+    type Input = Self;
 
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
+        _: ExecutionContext<'_>,
+        _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::SeqScan(SeqScan::from(input)))
-    }
-
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
-        SeqScan::next_tuple(self, arena)
+        let executor = input;
+        arena.push(ExecNode::SeqScan(executor))
     }
 }
 
-impl<'a, T: Transaction + 'a> SeqScan<'a, T> {
-    pub(crate) fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SeqScan<'a, T> {
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
         if self.iter.is_none() {
             let Some(TableScanOperator {
                 table_name,
@@ -73,8 +64,11 @@ impl<'a, T: Transaction + 'a> SeqScan<'a, T> {
                 arena.finish();
                 return Ok(());
             };
-            self.iter = Some(arena.transaction_mut().read(
-                arena.table_cache(),
+            let state = arena.local_state(plan_arena);
+            self.iter = Some(state.transaction().read(
+                state.table_codec,
+                state.plan_arena,
+                state.context.table_cache,
                 table_name,
                 limit,
                 columns,
@@ -82,11 +76,12 @@ impl<'a, T: Transaction + 'a> SeqScan<'a, T> {
             )?);
         }
 
+        let state = arena.local_state(plan_arena);
         if self
             .iter
             .as_mut()
             .expect("seq scan iterator initialized")
-            .next_tuple_into(arena.result_tuple_mut())?
+            .next_tuple_into(state.table_codec, &mut state.result.tuple)?
         {
             arena.resume();
         } else {

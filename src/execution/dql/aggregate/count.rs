@@ -37,7 +37,7 @@ impl Accumulator for CountAccumulator {
         Ok(())
     }
 
-    fn evaluate(&self) -> Result<DataValue, DatabaseError> {
+    fn evaluate(self: Box<Self>) -> Result<DataValue, DatabaseError> {
         Ok(DataValue::Int32(self.result))
     }
 }
@@ -63,7 +63,7 @@ impl Accumulator for DistinctCountAccumulator {
         Ok(())
     }
 
-    fn evaluate(&self) -> Result<DataValue, DatabaseError> {
+    fn evaluate(self: Box<Self>) -> Result<DataValue, DatabaseError> {
         Ok(DataValue::Int32(self.distinct_values.len() as i32))
     }
 }

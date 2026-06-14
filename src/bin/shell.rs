@@ -174,14 +174,37 @@ Transaction commands:
     where
         I: BorrowResultIter,
     {
-        let mut table = Table::new();
-        let schema = iter.schema().clone();
+        let (table, schema_len, row_count) = create_table(&mut iter)?;
+        iter.done()?;
 
-        if !schema.is_empty() {
-            let header = schema
-                .iter()
-                .map(|column| Cell::new(column.full_name()))
-                .collect::<Vec<_>>();
+        if schema_len == 0 {
+            println!("OK");
+        } else if row_count == 0 {
+            println!("{table}");
+            println!("0 rows");
+        } else {
+            println!("{table}");
+            println!("{row_count} row{}", if row_count == 1 { "" } else { "s" });
+        }
+
+        Ok(())
+    }
+
+    fn create_table<I>(iter: &mut I) -> Result<(Table, usize, usize), DatabaseError>
+    where
+        I: BorrowResultIter,
+    {
+        let mut table = Table::new();
+        let (header, schema_len) = iter.schema(|schema| {
+            (
+                schema
+                    .iter()
+                    .map(|column| Cell::new(column.full_name()))
+                    .collect::<Vec<_>>(),
+                schema.len(),
+            )
+        });
+        if !header.is_empty() {
             table.set_header(header);
         }
 
@@ -195,19 +218,8 @@ Transaction commands:
                 .collect::<Vec<_>>();
             table.add_row(row);
         }
-        iter.done()?;
 
-        if schema.is_empty() {
-            println!("OK");
-        } else if row_count == 0 {
-            println!("{table}");
-            println!("0 rows");
-        } else {
-            println!("{table}");
-            println!("{row_count} row{}", if row_count == 1 { "" } else { "s" });
-        }
-
-        Ok(())
+        Ok((table, schema_len, row_count))
     }
 
     fn run_sql<'a>(

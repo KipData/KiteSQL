@@ -38,14 +38,11 @@
 #[macro_export]
 macro_rules! from_tuple {
     ($struct_name:ident, ($($field_name:ident : $field_type:ty => $closure:expr),+)) => {
-        impl From<(&::kite_sql::types::tuple::SchemaRef, ::kite_sql::types::tuple::Tuple)> for $struct_name {
-            fn from((schema, mut tuple): (&::kite_sql::types::tuple::SchemaRef, ::kite_sql::types::tuple::Tuple)) -> Self {
-                fn try_get<T: 'static>(tuple: &mut ::kite_sql::types::tuple::Tuple, schema: &::kite_sql::types::tuple::SchemaRef, field_name: &str) -> Option<::kite_sql::types::value::DataValue> {
+        impl<'__kite_schema, '__kite_arena> From<(&::kite_sql::types::tuple::SchemaView<'__kite_schema, '__kite_arena>, ::kite_sql::types::tuple::Tuple)> for $struct_name {
+            fn from((schema, mut tuple): (&::kite_sql::types::tuple::SchemaView<'__kite_schema, '__kite_arena>, ::kite_sql::types::tuple::Tuple)) -> Self {
+                fn try_get<T: 'static>(tuple: &mut ::kite_sql::types::tuple::Tuple, schema: &::kite_sql::types::tuple::SchemaView<'_, '_>, field_name: &str) -> Option<::kite_sql::types::value::DataValue> {
                     let ty = ::kite_sql::types::LogicalType::type_trans::<T>()?;
-                    let (idx, _) = schema
-                        .iter()
-                        .enumerate()
-                        .find(|(_, col)| col.name() == field_name)?;
+                    let idx = schema.position(field_name)?;
 
                     std::mem::replace(&mut tuple.values[idx], ::kite_sql::types::value::DataValue::Null).cast(&ty).ok()
                 }
@@ -72,10 +69,8 @@ macro_rules! from_tuple {
 ///     DataValue::binary_op(&v1, &v2, &BinaryOperator::Plus)
 /// });
 ///
-/// let kite_sql = DataBaseBuilder::path("./example")
-///     .register_scala_function(TestFunction::new())
-///     .build()
-///     ?;
+/// let mut kite_sql = DataBaseBuilder::path("./example").build()?;
+/// kite_sql.load(CatalogKind::ScalarFunction(TestFunction::new()))?;
 /// ```
 #[macro_export]
 macro_rules! scala_function {
@@ -145,24 +140,12 @@ macro_rules! scala_function {
 ///             ])))) as Box<dyn Iterator<Item = Result<Tuple, DatabaseError>>>)
 ///     }));
 ///
-///     let kite_sql = DataBaseBuilder::path("./example")
-///         .register_table_function(MyTableFunction::new())
-///         .build()
-///     ?;
+///     let mut kite_sql = DataBaseBuilder::path("./example").build()?;
+///     kite_sql.load(CatalogKind::TableFunction(MyTableFunction::new()))?;
 /// ```
 #[macro_export]
 macro_rules! table_function {
     ($struct_name:ident::$function_name:ident($($arg_ty:expr),*) -> [$($output_name:ident: $output_ty:expr),*] => $closure:expr) => {
-        static $function_name: ::std::sync::LazyLock<::kite_sql::catalog::table::TableCatalog> = ::std::sync::LazyLock::new(|| {
-            let mut columns = Vec::new();
-
-            $({
-                columns.push(::kite_sql::catalog::column::ColumnCatalog::new(stringify!($output_name).to_lowercase(), true, ::kite_sql::catalog::column::ColumnDesc::new($output_ty, None, false, None).unwrap()));
-            })*
-
-            ::kite_sql::catalog::table::TableCatalog::new(stringify!($function_name).to_lowercase().into(), columns).unwrap()
-        });
-
         #[derive(Debug)]
         pub(crate) struct $struct_name {
             summary: ::kite_sql::expression::function::FunctionSummary,
@@ -201,16 +184,22 @@ macro_rules! table_function {
                 }, )*)
             }
 
-            fn output_schema(&self) -> &::kite_sql::types::tuple::SchemaRef {
-                $function_name.schema_ref()
-            }
-
             fn summary(&self) -> &::kite_sql::expression::function::FunctionSummary {
                 &self.summary
             }
 
-            fn table(&self) -> &::kite_sql::catalog::table::TableCatalog {
-                &$function_name
+            fn output_schema_into(
+                &self,
+                table_name: &::kite_sql::catalog::table::TableName,
+                table_arena: &mut ::kite_sql::planner::TableArena,
+                schema: &mut ::kite_sql::types::tuple::Schema,
+            ) {
+                $({
+                    schema.push(table_arena.alloc_table_column(
+                        table_name.clone(),
+                        ::kite_sql::catalog::column::ColumnCatalog::new(stringify!($output_name).to_lowercase(), true, ::kite_sql::catalog::column::ColumnDesc::new($output_ty, None, false, None).unwrap()),
+                    ));
+                })*
             }
         }
     };

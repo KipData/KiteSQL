@@ -23,7 +23,6 @@ crate::define_integer_cast_evaluators!(Int64, Int64, i64, LogicalType::Bigint);
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
-    use crate::types::evaluator::CastEvaluator;
     use crate::types::value::Utf8Type;
     use crate::types::CharLengthUnits;
     use ordered_float::OrderedFloat;
@@ -34,56 +33,51 @@ mod test {
         let value = DataValue::Int64(1);
 
         assert_eq!(
-            Int64ToBooleanCastEvaluator.eval_cast(&value).unwrap(),
+            int64_to_boolean_cast_eval(&value).unwrap(),
             DataValue::Boolean(true)
         );
         assert_eq!(
-            Int64ToTinyintCastEvaluator.eval_cast(&value).unwrap(),
+            int64_to_tinyint_cast_eval(&value).unwrap(),
             DataValue::Int8(1)
         );
         assert_eq!(
-            Int64ToUTinyintCastEvaluator.eval_cast(&value).unwrap(),
+            int64_to_utinyint_cast_eval(&value).unwrap(),
             DataValue::UInt8(1)
         );
         assert_eq!(
-            Int64ToSmallintCastEvaluator.eval_cast(&value).unwrap(),
+            int64_to_smallint_cast_eval(&value).unwrap(),
             DataValue::Int16(1)
         );
         assert_eq!(
-            Int64ToUSmallintCastEvaluator.eval_cast(&value).unwrap(),
+            int64_to_usmallint_cast_eval(&value).unwrap(),
             DataValue::UInt16(1)
         );
         assert_eq!(
-            Int64ToIntegerCastEvaluator.eval_cast(&value).unwrap(),
+            int64_to_integer_cast_eval(&value).unwrap(),
             DataValue::Int32(1)
         );
         assert_eq!(
-            Int64ToUIntegerCastEvaluator.eval_cast(&value).unwrap(),
+            int64_to_uinteger_cast_eval(&value).unwrap(),
             DataValue::UInt32(1)
         );
         assert_eq!(
-            Int64ToBigintCastEvaluator.eval_cast(&value).unwrap(),
+            int64_to_bigint_cast_eval(&value).unwrap(),
             DataValue::Int64(1)
         );
         assert_eq!(
-            Int64ToUBigintCastEvaluator.eval_cast(&value).unwrap(),
+            int64_to_ubigint_cast_eval(&value).unwrap(),
             DataValue::UInt64(1)
         );
         assert_eq!(
-            Int64ToFloatCastEvaluator.eval_cast(&value).unwrap(),
+            int64_to_float_cast_eval(&value).unwrap(),
             DataValue::Float32(OrderedFloat(1.0))
         );
         assert_eq!(
-            Int64ToDoubleCastEvaluator.eval_cast(&value).unwrap(),
+            int64_to_double_cast_eval(&value).unwrap(),
             DataValue::Float64(OrderedFloat(1.0))
         );
         assert_eq!(
-            Int64ToCharCastEvaluator {
-                len: 1,
-                unit: CharLengthUnits::Characters,
-            }
-            .eval_cast(&value)
-            .unwrap(),
+            int64_to_char_cast_eval(1, CharLengthUnits::Characters, &value).unwrap(),
             DataValue::Utf8 {
                 value: "1".to_string(),
                 ty: Utf8Type::Fixed(1),
@@ -91,12 +85,7 @@ mod test {
             }
         );
         assert_eq!(
-            Int64ToVarcharCastEvaluator {
-                len: Some(1),
-                unit: CharLengthUnits::Characters,
-            }
-            .eval_cast(&value)
-            .unwrap(),
+            int64_to_varchar_cast_eval(Some(1), CharLengthUnits::Characters, &value).unwrap(),
             DataValue::Utf8 {
                 value: "1".to_string(),
                 ty: Utf8Type::Variable(Some(1)),
@@ -104,9 +93,7 @@ mod test {
             }
         );
         assert_eq!(
-            Int64ToDecimalCastEvaluator { scale: Some(2) }
-                .eval_cast(&value)
-                .unwrap(),
+            int64_to_decimal_cast_eval(Some(2), &value).unwrap(),
             DataValue::Decimal(Decimal::new(100, 2))
         );
     }

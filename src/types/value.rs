@@ -15,36 +15,56 @@
 use super::LogicalType;
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::{BumpBytes, BOUND_MAX_TAG, NOTNULL_TAG, NULL_TAG};
-use crate::types::evaluator::cast_create;
+use crate::types::evaluator::cast::{cast_create, to_char, to_varchar};
 use crate::types::CharLengthUnits;
 use byteorder::ReadBytesExt;
-use chrono::format::{DelayedFormat, StrftimeItems};
-use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
+#[cfg(feature = "time")]
+use chrono::{
+    format::{DelayedFormat, StrftimeItems},
+    DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc,
+};
 use itertools::Itertools;
 use ordered_float::OrderedFloat;
+#[cfg(feature = "decimal")]
 use rust_decimal::Decimal;
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::fmt::Formatter;
 use std::hash::Hash;
-use std::io::{Read, Write};
-use std::sync::LazyLock;
-use std::{cmp, fmt, mem};
+use std::io::Read;
+#[cfg(feature = "decimal")]
+use std::mem;
+use std::{cmp, fmt};
 
-static UNIX_DATETIME: LazyLock<NaiveDateTime> =
-    LazyLock::new(|| DateTime::from_timestamp(0, 0).unwrap().naive_utc());
+#[cfg(feature = "time")]
+mod chrono_value {
+    use chrono::{DateTime, NaiveDateTime, NaiveTime};
+    use std::sync::LazyLock;
 
-static UNIX_TIME: LazyLock<NaiveTime> = LazyLock::new(|| NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+    pub(super) static UNIX_DATETIME: LazyLock<NaiveDateTime> =
+        LazyLock::new(|| DateTime::from_timestamp(0, 0).unwrap().naive_utc());
+    pub(super) static UNIX_TIME: LazyLock<NaiveTime> =
+        LazyLock::new(|| NaiveTime::from_hms_opt(0, 0, 0).unwrap());
 
-pub const DATE_FMT: &str = "%Y-%m-%d";
-pub const DATE_TIME_FMT: &str = "%Y-%m-%d %H:%M:%S";
-pub const TIME_STAMP_FMT_WITHOUT_ZONE: &str = "%Y-%m-%d %H:%M:%S%.f";
-pub const TIME_STAMP_FMT_WITH_ZONE: &str = "%Y-%m-%d %H:%M:%S%.f%z";
-pub const TIME_STAMP_FMT_WITHOUT_PRECISION: &str = "%Y-%m-%d %H:%M:%S%z";
-pub const TIME_FMT: &str = "%H:%M:%S";
-pub const TIME_FMT_WITHOUT_ZONE: &str = "%H:%M:%S%.f";
-pub const TIME_FMT_WITH_ZONE: &str = "%H:%M:%S%.f%z";
-pub const TIME_FMT_WITHOUT_PRECISION: &str = "%H:%M:%S%z";
+    pub const DATE_FMT: &str = "%Y-%m-%d";
+    pub const DATE_TIME_FMT: &str = "%Y-%m-%d %H:%M:%S";
+    pub const TIME_STAMP_FMT_WITHOUT_ZONE: &str = "%Y-%m-%d %H:%M:%S%.f";
+    pub const TIME_STAMP_FMT_WITH_ZONE: &str = "%Y-%m-%d %H:%M:%S%.f%z";
+    pub const TIME_STAMP_FMT_WITHOUT_PRECISION: &str = "%Y-%m-%d %H:%M:%S%z";
+    pub const TIME_FMT: &str = "%H:%M:%S";
+    pub const TIME_FMT_WITHOUT_ZONE: &str = "%H:%M:%S%.f";
+    pub const TIME_FMT_WITH_ZONE: &str = "%H:%M:%S%.f%z";
+    pub const TIME_FMT_WITHOUT_PRECISION: &str = "%H:%M:%S%z";
+}
+
+#[cfg(feature = "time")]
+pub use chrono_value::{
+    DATE_FMT, DATE_TIME_FMT, TIME_FMT, TIME_FMT_WITHOUT_PRECISION, TIME_FMT_WITHOUT_ZONE,
+    TIME_FMT_WITH_ZONE, TIME_STAMP_FMT_WITHOUT_PRECISION, TIME_STAMP_FMT_WITHOUT_ZONE,
+    TIME_STAMP_FMT_WITH_ZONE,
+};
+#[cfg(feature = "time")]
+use chrono_value::{UNIX_DATETIME, UNIX_TIME};
 
 pub const ONE_SEC_TO_NANO: u32 = 1_000_000_000;
 pub const ONE_DAY_TO_SEC: u32 = 86_400;
@@ -52,7 +72,7 @@ pub const ONE_DAY_TO_SEC: u32 = 86_400;
 const ENCODE_GROUP_SIZE: usize = 8;
 const ENCODE_MARKER: u8 = 0xFF;
 
-pub trait MemComparableBuffer: Write {
+pub trait MemComparableBuffer {
     fn push_byte(&mut self, byte: u8);
     fn extend_bytes(&mut self, bytes: &[u8]);
     fn reserve_bytes(&mut self, size: usize);
@@ -96,13 +116,13 @@ impl MemComparableBuffer for Vec<u8> {
     }
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone)]
 pub enum Utf8Type {
     Variable(Option<u32>),
     Fixed(u32),
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone)]
 pub enum DataValue {
     Null,
     Boolean(bool),
@@ -127,6 +147,7 @@ pub enum DataValue {
     Date64(i64),
     Time32(u32, u64),
     Time64(i64, u64, bool),
+    #[cfg(feature = "decimal")]
     Decimal(Decimal),
     /// (values, is_upper)
     Tuple(Vec<DataValue>, bool),
@@ -227,9 +248,19 @@ generate_get_option!(DataValue,
     u8 : UInt8(Option<u8>),
     u16 : UInt16(Option<u16>),
     u32 : UInt32(Option<u32>),
-    u64 : UInt64(Option<u64>),
-    decimal : Decimal(Option<Decimal>)
+    u64 : UInt64(Option<u64>)
 );
+
+#[cfg(feature = "decimal")]
+impl DataValue {
+    pub fn decimal(&self) -> Option<Decimal> {
+        if let DataValue::Decimal(val) = self {
+            Some(*val)
+        } else {
+            None
+        }
+    }
+}
 
 impl PartialEq for DataValue {
     fn eq(&self, other: &Self) -> bool {
@@ -274,7 +305,9 @@ impl PartialEq for DataValue {
             (Time32(..), _) => false,
             (Time64(v1, ..), Time64(v2, ..)) => v1.eq(v2),
             (Time64(..), _) => false,
+            #[cfg(feature = "decimal")]
             (Decimal(v1), Decimal(v2)) => v1.eq(v2),
+            #[cfg(feature = "decimal")]
             (Decimal(_), _) => false,
             (Tuple(values_1, is_upper_1), Tuple(values_2, is_upper_2)) => {
                 values_1.eq(values_2) && is_upper_1.eq(is_upper_2)
@@ -322,7 +355,9 @@ impl PartialOrd for DataValue {
             (Time32(..), _) => None,
             (Time64(v1, ..), Time64(v2, ..)) => v1.partial_cmp(v2),
             (Time64(..), _) => None,
+            #[cfg(feature = "decimal")]
             (Decimal(v1), Decimal(v2)) => v1.partial_cmp(v2),
+            #[cfg(feature = "decimal")]
             (Decimal(_), _) => None,
             (Tuple(..), _) => None,
         }
@@ -331,7 +366,7 @@ impl PartialOrd for DataValue {
 
 macro_rules! encode_u {
     ($writer:ident, $u:expr) => {
-        $writer.write_all(&$u.to_be_bytes())?
+        $writer.extend_bytes(&$u.to_be_bytes())
     };
 }
 
@@ -366,6 +401,7 @@ impl Hash for DataValue {
             Date64(v) => v.hash(state),
             Time32(v, ..) => v.hash(state),
             Time64(v, ..) => v.hash(state),
+            #[cfg(feature = "decimal")]
             Decimal(v) => v.hash(state),
             Tuple(values, is_upper) => {
                 values.hash(state);
@@ -375,6 +411,35 @@ impl Hash for DataValue {
     }
 }
 impl DataValue {
+    pub(crate) fn serialized_len_hint(&self) -> usize {
+        match self {
+            DataValue::Null => 0,
+            DataValue::Boolean(_) | DataValue::Int8(_) | DataValue::UInt8(_) => 1,
+            DataValue::Int16(_) | DataValue::UInt16(_) => 2,
+            DataValue::Int32(_)
+            | DataValue::UInt32(_)
+            | DataValue::Float32(_)
+            | DataValue::Date32(_)
+            | DataValue::Time32(_, _) => 4,
+            DataValue::Int64(_)
+            | DataValue::UInt64(_)
+            | DataValue::Float64(_)
+            | DataValue::Date64(_)
+            | DataValue::Time64(_, _, _) => 8,
+            DataValue::Utf8 { value, ty, unit } => match (ty, unit) {
+                (Utf8Type::Variable(_), _) => std::mem::size_of::<u32>() + value.len(),
+                (Utf8Type::Fixed(len), CharLengthUnits::Characters) => {
+                    let spaces_len = (*len as usize).saturating_sub(value.chars().count());
+                    std::mem::size_of::<u32>() + value.len() + spaces_len
+                }
+                (Utf8Type::Fixed(len), CharLengthUnits::Octets) => *len as usize,
+            },
+            #[cfg(feature = "decimal")]
+            DataValue::Decimal(_) => 16,
+            DataValue::Tuple(values, _) => values.iter().map(DataValue::serialized_len_hint).sum(),
+        }
+    }
+
     pub fn float(&self) -> Option<f32> {
         if let DataValue::Float32(val) = self {
             Some(val.0)
@@ -404,30 +469,6 @@ impl DataValue {
             ty: Utf8Type::Fixed(string.len() as u32),
             value: string,
             unit: CharLengthUnits::Characters,
-        }
-    }
-
-    pub fn date(&self) -> Option<NaiveDate> {
-        if let DataValue::Date32(val) = self {
-            NaiveDate::from_num_days_from_ce_opt(*val)
-        } else {
-            None
-        }
-    }
-
-    pub fn datetime(&self) -> Option<NaiveDateTime> {
-        if let DataValue::Date64(val) = self {
-            DateTime::from_timestamp(*val, 0).map(|dt| dt.naive_utc())
-        } else {
-            None
-        }
-    }
-
-    pub fn time(&self) -> Option<NaiveTime> {
-        if let DataValue::Time32(val, ..) = self {
-            NaiveTime::from_num_seconds_from_midnight_opt(*val, 0)
-        } else {
-            None
         }
     }
 
@@ -475,6 +516,7 @@ impl DataValue {
                     unit: CharLengthUnits::Octets,
                 },
             ) => Self::check_string_len(val, *len as usize, CharLengthUnits::Octets),
+            #[cfg(feature = "decimal")]
             (LogicalType::Decimal(full_len, scale_len), DataValue::Decimal(val)) => {
                 if let Some(len) = full_len {
                     let mantissa = val.mantissa().abs();
@@ -527,22 +569,6 @@ impl DataValue {
         (b, scaled_a * (1000000000 / 10_u32.pow(precision as u32)))
     }
 
-    pub(crate) fn format_date(value: i32) -> Option<String> {
-        Self::date_format(value).map(|fmt| format!("{fmt}"))
-    }
-
-    pub(crate) fn format_datetime(value: i64) -> Option<String> {
-        Self::date_time_format(value).map(|fmt| format!("{fmt}"))
-    }
-
-    pub(crate) fn format_time(value: u32, precision: u64) -> Option<String> {
-        Self::time_format(value, precision).map(|fmt| format!("{fmt}"))
-    }
-
-    pub(crate) fn format_timestamp(value: i64, precision: u64) -> Option<String> {
-        Self::time_stamp_format(value, precision, false).map(|fmt| format!("{fmt}"))
-    }
-
     #[inline]
     pub fn is_null(&self) -> bool {
         matches!(self, DataValue::Null)
@@ -573,26 +599,66 @@ impl DataValue {
                 ty: Utf8Type::Variable(*len),
                 unit: *unit,
             },
-            LogicalType::Date => DataValue::Date32(UNIX_DATETIME.num_days_from_ce()),
-            LogicalType::DateTime => DataValue::Date64(UNIX_DATETIME.and_utc().timestamp()),
+            LogicalType::Date => {
+                #[cfg(feature = "time")]
+                {
+                    DataValue::Date32(UNIX_DATETIME.num_days_from_ce())
+                }
+                #[cfg(not(feature = "time"))]
+                {
+                    DataValue::Date32(0)
+                }
+            }
+            LogicalType::DateTime => {
+                #[cfg(feature = "time")]
+                {
+                    DataValue::Date64(UNIX_DATETIME.and_utc().timestamp())
+                }
+                #[cfg(not(feature = "time"))]
+                {
+                    DataValue::Date64(0)
+                }
+            }
             LogicalType::Time(precision) => match precision {
+                #[cfg(feature = "time")]
                 Some(i) => DataValue::Time32(UNIX_TIME.num_seconds_from_midnight(), *i),
+                #[cfg(feature = "time")]
                 None => DataValue::Time32(UNIX_TIME.num_seconds_from_midnight(), 0),
+                #[cfg(not(feature = "time"))]
+                Some(i) => DataValue::Time32(0, *i),
+                #[cfg(not(feature = "time"))]
+                None => DataValue::Time32(0, 0),
             },
-            LogicalType::TimeStamp(precision, zone) => match precision {
-                Some(3) => DataValue::Time64(UNIX_DATETIME.and_utc().timestamp_millis(), 3, *zone),
-                Some(6) => DataValue::Time64(UNIX_DATETIME.and_utc().timestamp_micros(), 6, *zone),
-                Some(9) => {
-                    if let Some(value) = UNIX_DATETIME.and_utc().timestamp_nanos_opt() {
-                        DataValue::Time64(value, 9, *zone)
-                    } else {
-                        unreachable!()
+            LogicalType::TimeStamp(precision, zone) => {
+                #[cfg(feature = "time")]
+                {
+                    match precision {
+                        Some(3) => {
+                            DataValue::Time64(UNIX_DATETIME.and_utc().timestamp_millis(), 3, *zone)
+                        }
+                        Some(6) => {
+                            DataValue::Time64(UNIX_DATETIME.and_utc().timestamp_micros(), 6, *zone)
+                        }
+                        Some(9) => {
+                            if let Some(value) = UNIX_DATETIME.and_utc().timestamp_nanos_opt() {
+                                DataValue::Time64(value, 9, *zone)
+                            } else {
+                                unreachable!()
+                            }
+                        }
+                        None => DataValue::Time64(UNIX_DATETIME.and_utc().timestamp(), 0, *zone),
+                        _ => unreachable!(),
                     }
                 }
-                None => DataValue::Time64(UNIX_DATETIME.and_utc().timestamp(), 0, *zone),
-                _ => unreachable!(),
-            },
+                #[cfg(not(feature = "time"))]
+                {
+                    DataValue::Time64(0, precision.unwrap_or_default(), *zone)
+                }
+            }
+            #[cfg(feature = "decimal")]
             LogicalType::Decimal(_, _) => DataValue::Decimal(Decimal::new(0, 0)),
+            #[cfg(not(feature = "decimal"))]
+            LogicalType::Decimal(_, _) => unreachable!("DECIMAL requires the `decimal` feature"),
             LogicalType::Tuple(types) => {
                 let values = types.iter().map(DataValue::init).collect_vec();
 
@@ -630,6 +696,7 @@ impl DataValue {
             DataValue::Date64(_) => LogicalType::DateTime,
             DataValue::Time32(..) => LogicalType::Time(None),
             DataValue::Time64(..) => LogicalType::TimeStamp(None, false),
+            #[cfg(feature = "decimal")]
             DataValue::Decimal(_) => LogicalType::Decimal(None, None),
             DataValue::Tuple(values, ..) => {
                 let types = values.iter().map(|v| v.logical_type()).collect_vec();
@@ -745,15 +812,16 @@ impl DataValue {
             DataValue::Null => (),
             DataValue::Int8(v) => encode_u!(b, *v as u8 ^ 0x80_u8),
             DataValue::Int16(v) => encode_u!(b, *v as u16 ^ 0x8000_u16),
-            DataValue::Int32(v) | DataValue::Date32(v) => {
-                encode_u!(b, *v as u32 ^ 0x80000000_u32)
-            }
-            DataValue::Int64(v) | DataValue::Date64(v) | DataValue::Time64(v, ..) => {
+            DataValue::Int32(v) => encode_u!(b, *v as u32 ^ 0x80000000_u32),
+            DataValue::Date32(v) => encode_u!(b, *v as u32 ^ 0x80000000_u32),
+            DataValue::Int64(v) => encode_u!(b, *v as u64 ^ 0x8000000000000000_u64),
+            DataValue::Date64(v) | DataValue::Time64(v, ..) => {
                 encode_u!(b, *v as u64 ^ 0x8000000000000000_u64)
             }
             DataValue::UInt8(v) => encode_u!(b, v),
             DataValue::UInt16(v) => encode_u!(b, v),
-            DataValue::UInt32(v) | DataValue::Time32(v, ..) => encode_u!(b, v),
+            DataValue::UInt32(v) => encode_u!(b, v),
+            DataValue::Time32(v, ..) => encode_u!(b, v),
             DataValue::UInt64(v) => encode_u!(b, v),
             DataValue::Utf8 { value: v, .. } => Self::encode_string(b, v.as_bytes()),
             DataValue::Boolean(v) => b.push_byte(if *v { b'1' } else { b'0' }),
@@ -779,6 +847,7 @@ impl DataValue {
 
                 encode_u!(b, u);
             }
+            #[cfg(feature = "decimal")]
             DataValue::Decimal(v) => Self::serialize_decimal(*v, b)?,
             DataValue::Tuple(values, is_upper) => {
                 let last = values.len() - 1;
@@ -830,13 +899,33 @@ impl DataValue {
                 let u = decode_u!(reader, u16);
                 Ok(DataValue::Int16((u ^ 0x8000) as i16))
             }
-            LogicalType::Integer | LogicalType::Date | LogicalType::Time(_) => {
+            LogicalType::Integer => {
                 let u = decode_u!(reader, u32);
                 Ok(DataValue::Int32((u ^ 0x8000_0000) as i32))
             }
-            LogicalType::Bigint | LogicalType::DateTime | LogicalType::TimeStamp(..) => {
+            LogicalType::Date => {
+                let u = decode_u!(reader, u32);
+                Ok(DataValue::Date32((u ^ 0x8000_0000) as i32))
+            }
+            LogicalType::Time(precision) => {
+                let u = decode_u!(reader, u32);
+                Ok(DataValue::Time32(u, precision.unwrap_or_default()))
+            }
+            LogicalType::Bigint => {
                 let u = decode_u!(reader, u64);
                 Ok(DataValue::Int64((u ^ 0x8000_0000_0000_0000) as i64))
+            }
+            LogicalType::DateTime => {
+                let u = decode_u!(reader, u64);
+                Ok(DataValue::Date64((u ^ 0x8000_0000_0000_0000) as i64))
+            }
+            LogicalType::TimeStamp(precision, zone) => {
+                let u = decode_u!(reader, u64);
+                Ok(DataValue::Time64(
+                    (u ^ 0x8000_0000_0000_0000) as i64,
+                    precision.unwrap_or_default(),
+                    *zone,
+                ))
             }
             LogicalType::UTinyint => Ok(DataValue::UInt8(decode_u!(reader, u8))),
             LogicalType::USmallint => Ok(DataValue::UInt16(decode_u!(reader, u16))),
@@ -880,7 +969,12 @@ impl DataValue {
                 ty: Utf8Type::Fixed(*len),
                 unit: *unit,
             }),
+            #[cfg(feature = "decimal")]
             LogicalType::Decimal(..) => Ok(DataValue::Decimal(Self::deserialize_decimal(reader)?)),
+            #[cfg(not(feature = "decimal"))]
+            LogicalType::Decimal(..) => Err(DatabaseError::UnsupportedStmt(
+                "DECIMAL requires the `decimal` feature".to_string(),
+            )),
             LogicalType::Tuple(tys) => {
                 let mut collector = TupleCollector::new(tuple_mapping, tys.len());
 
@@ -894,6 +988,7 @@ impl DataValue {
     }
 
     // https://github.com/risingwavelabs/memcomparable/blob/main/src/ser.rs#L468
+    #[cfg(feature = "decimal")]
     pub fn serialize_decimal<B: MemComparableBuffer>(
         decimal: Decimal,
         bytes: &mut B,
@@ -939,6 +1034,7 @@ impl DataValue {
         Ok(())
     }
 
+    #[cfg(feature = "decimal")]
     fn decimal_e_m(decimal: Decimal) -> (i8, Vec<u8>) {
         if decimal.is_zero() {
             return (0, vec![]);
@@ -1015,6 +1111,7 @@ impl DataValue {
         (e100 as i8, byte_array)
     }
 
+    #[cfg(feature = "decimal")]
     pub fn deserialize_decimal<R: Read>(mut reader: R) -> Result<Decimal, DatabaseError> {
         // decode exponent
         let flag = reader.read_u8()?;
@@ -1090,9 +1187,20 @@ impl DataValue {
         if &from == to {
             return Ok(self);
         }
-        let evaluator = cast_create(Cow::Owned(from), Cow::Borrowed(to))?;
 
-        evaluator.eval_cast(&self)
+        match (self, to) {
+            (DataValue::Null, _) => Ok(DataValue::Null),
+            (DataValue::Utf8 { value, .. }, LogicalType::Char(len, unit)) => {
+                to_char(value, *len, *unit)
+            }
+            (DataValue::Utf8 { value, .. }, LogicalType::Varchar(len, unit)) => {
+                to_varchar(value, *len, *unit)
+            }
+            (value, _) => {
+                let evaluator = cast_create(Cow::Owned(from), Cow::Borrowed(to))?;
+                evaluator.eval(&value)
+            }
+        }
     }
 
     #[inline]
@@ -1123,15 +1231,7 @@ impl DataValue {
         Some(0)
     }
 
-    #[inline]
-    pub(crate) fn values_to_tuple(mut values: Vec<DataValue>) -> Option<DataValue> {
-        if values.len() > 1 {
-            Some(DataValue::Tuple(values, false))
-        } else {
-            values.pop()
-        }
-    }
-
+    #[cfg(feature = "decimal")]
     pub(crate) fn decimal_round_i(option: &Option<u8>, decimal: &mut Decimal) {
         if let Some(scale) = option {
             let new_decimal = decimal.trunc_with_scale(*scale as u32);
@@ -1139,6 +1239,7 @@ impl DataValue {
         }
     }
 
+    #[cfg(feature = "decimal")]
     pub(crate) fn decimal_round_f(option: &Option<u8>, decimal: &mut Decimal) {
         if let Some(scale) = option {
             let new_decimal = decimal.round_dp_with_strategy(
@@ -1147,6 +1248,54 @@ impl DataValue {
             );
             let _ = mem::replace(decimal, new_decimal);
         }
+    }
+
+    #[cfg(feature = "decimal")]
+    fn decimal_format(v: &Decimal) -> String {
+        v.to_string()
+    }
+}
+
+#[cfg(feature = "time")]
+impl DataValue {
+    pub fn date(&self) -> Option<NaiveDate> {
+        if let DataValue::Date32(val) = self {
+            NaiveDate::from_num_days_from_ce_opt(*val)
+        } else {
+            None
+        }
+    }
+
+    pub fn datetime(&self) -> Option<NaiveDateTime> {
+        if let DataValue::Date64(val) = self {
+            DateTime::from_timestamp(*val, 0).map(|dt| dt.naive_utc())
+        } else {
+            None
+        }
+    }
+
+    pub fn time(&self) -> Option<NaiveTime> {
+        if let DataValue::Time32(val, ..) = self {
+            NaiveTime::from_num_seconds_from_midnight_opt(*val, 0)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn format_date(value: i32) -> Option<String> {
+        Self::date_format(value).map(|fmt| format!("{fmt}"))
+    }
+
+    pub(crate) fn format_datetime(value: i64) -> Option<String> {
+        Self::date_time_format(value).map(|fmt| format!("{fmt}"))
+    }
+
+    pub(crate) fn format_time(value: u32, precision: u64) -> Option<String> {
+        Self::time_format(value, precision).map(|fmt| format!("{fmt}"))
+    }
+
+    pub(crate) fn format_timestamp(value: i64, precision: u64) -> Option<String> {
+        Self::time_stamp_format(value, precision, false).map(|fmt| format!("{fmt}"))
     }
 
     fn date_format<'a>(v: i32) -> Option<DelayedFormat<StrftimeItems<'a>>> {
@@ -1170,10 +1319,6 @@ impl DataValue {
     ) -> Option<DelayedFormat<StrftimeItems<'a>>> {
         Self::from_timestamp_precision(v, precision)
             .map(|date_time| date_time.format(TIME_STAMP_FMT_WITHOUT_ZONE))
-    }
-
-    fn decimal_format(v: &Decimal) -> String {
-        v.to_string()
     }
 
     pub fn timestamp_precision(v: DateTime<Utc>, precision: u64) -> i64 {
@@ -1230,6 +1375,7 @@ impl_scalar!(u8, UInt8);
 impl_scalar!(u16, UInt16);
 impl_scalar!(u32, UInt32);
 impl_scalar!(u64, UInt64);
+#[cfg(feature = "decimal")]
 impl_scalar!(Decimal, Decimal);
 
 impl From<f32> for DataValue {
@@ -1288,12 +1434,14 @@ impl From<Option<String>> for DataValue {
     }
 }
 
+#[cfg(feature = "time")]
 impl From<&NaiveDate> for DataValue {
     fn from(value: &NaiveDate) -> Self {
         DataValue::Date32(value.num_days_from_ce())
     }
 }
 
+#[cfg(feature = "time")]
 impl From<Option<&NaiveDate>> for DataValue {
     fn from(value: Option<&NaiveDate>) -> Self {
         if let Some(value) = value {
@@ -1304,12 +1452,14 @@ impl From<Option<&NaiveDate>> for DataValue {
     }
 }
 
+#[cfg(feature = "time")]
 impl From<&NaiveDateTime> for DataValue {
     fn from(value: &NaiveDateTime) -> Self {
         DataValue::Date64(value.and_utc().timestamp())
     }
 }
 
+#[cfg(feature = "time")]
 impl From<Option<&NaiveDateTime>> for DataValue {
     fn from(value: Option<&NaiveDateTime>) -> Self {
         if let Some(value) = value {
@@ -1320,6 +1470,7 @@ impl From<Option<&NaiveDateTime>> for DataValue {
     }
 }
 
+#[cfg(feature = "time")]
 impl From<&NaiveTime> for DataValue {
     fn from(value: &NaiveTime) -> Self {
         DataValue::Time32(
@@ -1329,6 +1480,7 @@ impl From<&NaiveTime> for DataValue {
     }
 }
 
+#[cfg(feature = "time")]
 impl From<Option<&NaiveTime>> for DataValue {
     fn from(value: Option<&NaiveTime>) -> Self {
         if let Some(value) = value {
@@ -1339,34 +1491,6 @@ impl From<Option<&NaiveTime>> for DataValue {
         } else {
             DataValue::Null
         }
-    }
-}
-
-impl TryFrom<&sqlparser::ast::Value> for DataValue {
-    type Error = DatabaseError;
-
-    fn try_from(value: &sqlparser::ast::Value) -> Result<Self, Self::Error> {
-        Ok(match value {
-            sqlparser::ast::Value::Number(n, _) => {
-                // use i32 to handle most cases
-                if let Ok(v) = n.parse::<i32>() {
-                    v.into()
-                } else if let Ok(v) = n.parse::<i64>() {
-                    v.into()
-                } else if let Ok(v) = n.parse::<f64>() {
-                    v.into()
-                } else if let Ok(v) = n.parse::<f32>() {
-                    v.into()
-                } else {
-                    return Err(DatabaseError::InvalidValue(n.to_string()));
-                }
-            }
-            sqlparser::ast::Value::SingleQuotedString(s)
-            | sqlparser::ast::Value::DoubleQuotedString(s) => s.clone().into(),
-            sqlparser::ast::Value::Boolean(b) => (*b).into(),
-            sqlparser::ast::Value::Null => Self::Null,
-            v => return Err(DatabaseError::UnsupportedStmt(format!("{v:?}"))),
-        })
     }
 }
 
@@ -1399,16 +1523,41 @@ impl fmt::Display for DataValue {
             DataValue::UInt64(e) => write!(f, "{e}")?,
             DataValue::Utf8 { value: e, .. } => write!(f, "{e}")?,
             DataValue::Null => write!(f, "null")?,
-            DataValue::Date32(e) => write!(f, "{}", DataValue::date_format(*e).unwrap())?,
-            DataValue::Date64(e) => write!(f, "{}", DataValue::date_time_format(*e).unwrap())?,
-            DataValue::Time32(e, precision) => {
-                write!(f, "{}", DataValue::time_format(*e, *precision).unwrap())?
+            DataValue::Date32(e) => {
+                #[cfg(feature = "time")]
+                write!(f, "{}", DataValue::date_format(*e).unwrap())?;
+                #[cfg(not(feature = "time"))]
+                write!(f, "{e}")?;
             }
-            DataValue::Time64(e, precision, zone) => write!(
-                f,
-                "{}",
-                DataValue::time_stamp_format(*e, *precision, *zone).unwrap()
-            )?,
+            DataValue::Date64(e) => {
+                #[cfg(feature = "time")]
+                write!(f, "{}", DataValue::date_time_format(*e).unwrap())?;
+                #[cfg(not(feature = "time"))]
+                write!(f, "{e}")?;
+            }
+            DataValue::Time32(e, precision) => {
+                #[cfg(feature = "time")]
+                write!(f, "{}", DataValue::time_format(*e, *precision).unwrap())?;
+                #[cfg(not(feature = "time"))]
+                {
+                    let _ = precision;
+                    write!(f, "{e}")?;
+                }
+            }
+            DataValue::Time64(e, precision, zone) => {
+                #[cfg(feature = "time")]
+                write!(
+                    f,
+                    "{}",
+                    DataValue::time_stamp_format(*e, *precision, *zone).unwrap()
+                )?;
+                #[cfg(not(feature = "time"))]
+                {
+                    let _ = (precision, zone);
+                    write!(f, "{e}")?;
+                }
+            }
+            #[cfg(feature = "decimal")]
             DataValue::Decimal(e) => write!(f, "{}", DataValue::decimal_format(e))?,
             DataValue::Tuple(values, ..) => {
                 write!(f, "(")?;
@@ -1447,6 +1596,7 @@ impl fmt::Debug for DataValue {
             DataValue::Date64(_) => write!(f, "Date64({self})"),
             DataValue::Time32(..) => write!(f, "Time32({self})"),
             DataValue::Time64(..) => write!(f, "Time64({self})"),
+            #[cfg(feature = "decimal")]
             DataValue::Decimal(_) => write!(f, "Decimal({self})"),
             DataValue::Tuple(..) => {
                 write!(f, "Tuple({self}")?;

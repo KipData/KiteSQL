@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::kitesql_rocksdb::KiteSqlTxnResult;
+use super::kitesql_rocksdb::{execute_kitesql_batch, KiteSqlTxnResult};
 use super::{
     BackendControl, BackendTransaction, DbParam, PreparedStatement, SimpleExecutor, StatementSpec,
 };
@@ -79,9 +79,8 @@ impl BackendControl for KiteSqlLmdbBackend {
 }
 
 impl SimpleExecutor for KiteSqlLmdbBackend {
-    fn execute_batch(&self, sql: &str) -> Result<(), TpccError> {
-        self.database.run(sql)?.done()?;
-        Ok(())
+    fn execute_batch(&mut self, sql: &str) -> Result<(), TpccError> {
+        execute_kitesql_batch(&mut self.database, sql)
     }
 }
 

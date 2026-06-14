@@ -30,7 +30,7 @@ impl fmt::Display for UpdateOperator {
         let values = self
             .value_exprs
             .iter()
-            .map(|(column, expr)| format!("{} -> {}", column.full_name(), expr))
+            .map(|(column, expr)| format!("{column} -> {expr}"))
             .join(", ");
         write!(f, "Update {} set {}", self.table_name, values)?;
 

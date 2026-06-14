@@ -110,10 +110,10 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                 let ty = process_type(&field_opts.ty);
 
                 encode_fields.push(quote! {
-                    #field_name.encode(writer, is_direct, reference_tables)?;
+                    #field_name.encode(writer, is_direct, reference_tables, arena)?;
                 });
                 decode_fields.push(quote! {
-                    let #field_name = #ty::decode(reader, drive, reference_tables)?;
+                    let #field_name = #ty::decode(reader, drive, reference_tables, arena)?;
                 });
                 init_fields.push(quote! {
                     #field_name,
@@ -127,11 +127,12 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 
             quote! {
                 impl crate::serdes::ReferenceSerialization for #struct_name {
-                    fn encode<W: std::io::Write>(
+                    fn encode<W: std::io::Write, A: crate::planner::MetaArena>(
                         &self,
                         writer: &mut W,
                         is_direct: bool,
                         reference_tables: &mut crate::serdes::ReferenceTables,
+                        arena: &A,
                     ) -> Result<(), crate::errors::DatabaseError> {
                         let #init_stream = self;
 
@@ -140,10 +141,11 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                         Ok(())
                     }
 
-                    fn decode<T: crate::storage::Transaction, R: std::io::Read>(
+                    fn decode<T: crate::storage::Transaction, R: std::io::Read, A: crate::planner::MetaArena>(
                         reader: &mut R,
                         drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
                         reference_tables: &crate::serdes::ReferenceTables,
+                        arena: &mut A,
                     ) -> Result<Self, crate::errors::DatabaseError> {
                         #(#decode_fields)*
 
@@ -173,10 +175,10 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                     let ty = process_type(&field_opts.ty);
 
                     encode_fields.push(quote! {
-                        #field_name.encode(writer, is_direct, reference_tables)?;
+                        #field_name.encode(writer, is_direct, reference_tables, arena)?;
                     });
                     decode_fields.push(quote! {
-                        let #field_name = #ty::decode(reader, drive, reference_tables)?;
+                        let #field_name = #ty::decode(reader, drive, reference_tables, arena)?;
                     });
                     init_fields.push(quote! {
                         #field_name,
@@ -206,11 +208,12 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 
             quote! {
                 impl crate::serdes::ReferenceSerialization for #struct_name {
-                    fn encode<W: std::io::Write>(
+                    fn encode<W: std::io::Write, A: crate::planner::MetaArena>(
                         &self,
                         writer: &mut W,
                         is_direct: bool,
                         reference_tables: &mut crate::serdes::ReferenceTables,
+                        arena: &A,
                     ) -> Result<(), crate::errors::DatabaseError> {
                         match self {
                             #(#variant_encode_fields)*
@@ -219,10 +222,11 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                         Ok(())
                     }
 
-                    fn decode<T: crate::storage::Transaction, R: std::io::Read>(
+                    fn decode<T: crate::storage::Transaction, R: std::io::Read, A: crate::planner::MetaArena>(
                         reader: &mut R,
                         drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
                         reference_tables: &crate::serdes::ReferenceTables,
+                        arena: &mut A,
                     ) -> Result<Self, crate::errors::DatabaseError> {
                         let mut type_bytes = [0u8; 1];
                         std::io::Read::read_exact(reader, &mut type_bytes)?;

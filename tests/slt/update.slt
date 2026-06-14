@@ -56,4 +56,12 @@ select * from t
 4 4 9 5
 
 statement ok
+update t set (v2, v3) = (v1 + 10, v3 + 20) where id = 2
+
+query IIII
+select * from t where id = 2
+----
+2 2 12 23
+
+statement ok
 drop table t

@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
@@ -39,48 +39,48 @@ impl From<(LogicalPlan, LogicalPlan)> for Union {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Union {
-    fn into_executor(
-        mut self,
-        arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
-    ) -> ExecId {
-        self.left_input = build_read(arena, self.left_plan.take(), cache, transaction);
-        self.right_input = build_read(arena, self.right_plan.take(), cache, transaction);
-        arena.push(ExecNode::Union(self))
-    }
-}
-
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Union {
-    type Input = (LogicalPlan, LogicalPlan);
+    type Input = Self;
 
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+        cache: ExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
-        <Self as ReadExecutor<'a, T>>::into_executor(Self::from(input), arena, cache, transaction)
-    }
-
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
-        Union::next_tuple(self, arena)
+        let mut executor = input;
+        executor.left_input = build_read(
+            arena,
+            plan_arena,
+            executor.left_plan.take(),
+            cache,
+            transaction,
+        );
+        executor.right_input = build_read(
+            arena,
+            plan_arena,
+            executor.right_plan.take(),
+            cache,
+            transaction,
+        );
+        arena.push(ExecNode::Union(executor))
     }
 }
 
-impl Union {
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Union {
+    fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if self.reading_left {
-            if arena.next_tuple(self.left_input)? {
+            if arena.next_tuple(self.left_input, plan_arena)? {
                 arena.resume();
                 return Ok(());
             }
             self.reading_left = false;
         }
-        if arena.next_tuple(self.right_input)? {
+        if arena.next_tuple(self.right_input, plan_arena)? {
             arena.resume();
         } else {
             arena.finish();

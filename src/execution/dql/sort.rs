@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
+use crate::execution::{
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
+};
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::LogicalPlan;
 use crate::storage::table_codec::BumpBytes;
@@ -281,16 +283,17 @@ pub struct Sort {
     input: ExecId,
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Sort {
     type Input = (SortOperator, LogicalPlan);
 
     fn into_executor(
         (SortOperator { sort_fields, limit }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+        cache: ExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
-        let input = build_read(arena, input, cache, transaction);
+        let input = build_read(arena, plan_arena, input, cache, transaction);
         arena.push(ExecNode::Sort(Sort {
             output: None,
             arena: Box::<Bump>::default(),
@@ -299,12 +302,18 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort {
             input,
         }))
     }
+}
 
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort {
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
         if self.output.is_none() {
             let mut tuples = NullableVec::new(&self.arena);
 
-            while arena.next_tuple(self.input)? {
+            while arena.next_tuple(self.input, plan_arena)? {
                 let offset = tuples.len();
                 tuples.put((offset, arena.result_tuple().clone()));
             }
@@ -337,7 +346,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
+    use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
     use crate::execution::dql::sort::{radix_sort, NullableVec, SortBy};
     use crate::expression::ScalarExpression;
@@ -346,7 +355,6 @@ mod test {
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use bumpalo::Bump;
-    use std::sync::Arc;
 
     #[test]
     fn test_radix_sort() {
@@ -371,25 +379,28 @@ mod test {
 
     #[test]
     fn test_single_value_desc_and_null_first() -> Result<(), DatabaseError> {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let sort_column = plan_arena.alloc_column(ColumnCatalog::new(
+            String::new(),
+            false,
+            ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
+        ));
         let fn_sort_fields = |asc: bool, nulls_first: bool| {
             vec![SortField {
                 expr: ScalarExpression::ColumnRef {
-                    column: ColumnRef::from(ColumnCatalog::new(
-                        String::new(),
-                        false,
-                        ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
-                    )),
+                    column: sort_column,
                     position: 0,
                 },
                 asc,
                 nulls_first,
             }]
         };
-        let _schema = Arc::new(vec![ColumnRef::from(ColumnCatalog::new(
+        let _schema = [plan_arena.alloc_column(ColumnCatalog::new(
             "c1".to_string(),
             true,
             ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
-        ))]);
+        ))];
 
         let arena = Bump::new();
         let fn_tuples = || {
@@ -518,49 +529,51 @@ mod test {
 
     #[test]
     fn test_mixed_value_desc_and_null_first() -> Result<(), DatabaseError> {
-        let fn_sort_fields = |asc_1: bool,
-                              nulls_first_1: bool,
-                              asc_2: bool,
-                              nulls_first_2: bool| {
-            vec![
-                SortField {
-                    expr: ScalarExpression::ColumnRef {
-                        column: ColumnRef::from(ColumnCatalog::new(
-                            String::new(),
-                            false,
-                            ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
-                        )),
-                        position: 0,
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let sort_column_1 = plan_arena.alloc_column(ColumnCatalog::new(
+            String::new(),
+            false,
+            ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
+        ));
+        let sort_column_2 = plan_arena.alloc_column(ColumnCatalog::new(
+            String::new(),
+            false,
+            ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
+        ));
+        let fn_sort_fields =
+            |asc_1: bool, nulls_first_1: bool, asc_2: bool, nulls_first_2: bool| {
+                vec![
+                    SortField {
+                        expr: ScalarExpression::ColumnRef {
+                            column: sort_column_1,
+                            position: 0,
+                        },
+                        asc: asc_1,
+                        nulls_first: nulls_first_1,
                     },
-                    asc: asc_1,
-                    nulls_first: nulls_first_1,
-                },
-                SortField {
-                    expr: ScalarExpression::ColumnRef {
-                        column: ColumnRef::from(ColumnCatalog::new(
-                            String::new(),
-                            false,
-                            ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
-                        )),
-                        position: 1,
+                    SortField {
+                        expr: ScalarExpression::ColumnRef {
+                            column: sort_column_2,
+                            position: 1,
+                        },
+                        asc: asc_2,
+                        nulls_first: nulls_first_2,
                     },
-                    asc: asc_2,
-                    nulls_first: nulls_first_2,
-                },
-            ]
-        };
-        let _schema = Arc::new(vec![
-            ColumnRef::from(ColumnCatalog::new(
+                ]
+            };
+        let _schema = [
+            plan_arena.alloc_column(ColumnCatalog::new(
                 "c1".to_string(),
                 true,
                 ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
             )),
-            ColumnRef::from(ColumnCatalog::new(
+            plan_arena.alloc_column(ColumnCatalog::new(
                 "c2".to_string(),
                 true,
                 ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
             )),
-        ]);
+        ];
         let arena = Bump::new();
 
         let fn_tuples = || {

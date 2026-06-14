@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
+use crate::execution::{
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
+};
 use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
@@ -25,32 +27,39 @@ pub struct ScalarSubquery {
     returned: bool,
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarSubquery {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ScalarSubquery {
     type Input = (ScalarSubqueryOperator, LogicalPlan);
 
     fn into_executor(
         (_, mut input): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+        cache: ExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
-        let value_count = input.output_schema().len();
-        let input = build_read(arena, input, cache, transaction);
+        let value_count = input.output_schema(plan_arena).len();
+        let input = build_read(arena, plan_arena, input, cache, transaction);
         arena.push(ExecNode::ScalarSubquery(Self {
             input,
             value_count,
             returned: false,
         }))
     }
+}
 
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarSubquery {
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
         if self.returned {
             arena.finish();
             return Ok(());
         }
         self.returned = true;
 
-        let has_first = arena.next_tuple(self.input)?;
+        let has_first = arena.next_tuple(self.input, plan_arena)?;
         if !has_first {
             let output = arena.result_tuple_mut();
             output.pk = None;
@@ -62,7 +71,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarSubquery {
             return Ok(());
         }
 
-        if arena.next_tuple(self.input)? {
+        if arena.next_tuple(self.input, plan_arena)? {
             return Err(DatabaseError::InvalidValue(
                 "scalar subquery returned more than one row".to_string(),
             ));

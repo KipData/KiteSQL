@@ -9,12 +9,11 @@ pprof = ["dep:pprof"]
 [dependencies]
 clap            = { version = "4", features = ["derive"] }
 chrono          = { version = "0.4" }
-kite_sql        = { path = "..", package = "kite_sql", features = ["rocksdb", "lmdb"] }
+kite_sql        = { path = "..", package = "kite_sql", features = ["rocksdb", "lmdb", "decimal"] }
 indicatif       = { version = "0.17" }
 ordered-float   = { version = "4" }
 rand            = { version = "0.8" }
 rust_decimal    = { version = "1" }
-thiserror       = { version = "1" }
 sqlite          = { version = "0.34" }
 
 [target.'cfg(unix)'.dependencies]

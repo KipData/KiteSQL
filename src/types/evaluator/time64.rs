@@ -14,84 +14,54 @@
 
 use crate::errors::DatabaseError;
 use crate::types::evaluator::cast::{cast_fail, to_char, to_varchar};
-use crate::types::evaluator::BinaryEvaluator;
 use crate::types::evaluator::DataValue;
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
 use chrono::{Datelike, Timelike};
 use std::hint;
 
-#[derive(Debug)]
-pub struct Time64GtBinaryEvaluator;
-#[derive(Debug)]
-pub struct Time64GtEqBinaryEvaluator;
-#[derive(Debug)]
-pub struct Time64LtBinaryEvaluator;
-#[derive(Debug)]
-pub struct Time64LtEqBinaryEvaluator;
-#[derive(Debug)]
-pub struct Time64EqBinaryEvaluator;
-#[derive(Debug)]
-pub struct Time64NotEqBinaryEvaluator;
-impl BinaryEvaluator for Time64GtBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Time64(v1, p1, _), DataValue::Time64(v2, p2, _)) => {
-                if let (Some(v1), Some(v2)) = (
-                    DataValue::from_timestamp_precision(*v1, *p1),
-                    DataValue::from_timestamp_precision(*v2, *p2),
-                ) {
-                    let p = if p2 > p1 { *p2 } else { *p1 };
-                    DataValue::Boolean(
-                        DataValue::timestamp_precision(v1, p)
-                            > DataValue::timestamp_precision(v2, p),
-                    )
-                } else {
-                    DataValue::Null
+macro_rules! time64_binary {
+    ($name:ident, $op:tt) => {
+        pub fn $name(left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+            Ok(match (left, right) {
+                (DataValue::Time64(v1, p1, _), DataValue::Time64(v2, p2, _)) => {
+                    if let (Some(v1), Some(v2)) = (
+                        DataValue::from_timestamp_precision(*v1, *p1),
+                        DataValue::from_timestamp_precision(*v2, *p2),
+                    ) {
+                        let p = if p2 > p1 { *p2 } else { *p1 };
+                        DataValue::Boolean(
+                            DataValue::timestamp_precision(v1, p)
+                                $op DataValue::timestamp_precision(v2, p),
+                        )
+                    } else {
+                        DataValue::Null
+                    }
                 }
-            }
-            (DataValue::Time64(..), DataValue::Null)
-            | (DataValue::Null, DataValue::Time64(..))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for Time64GtEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Time64(v1, p1, _), DataValue::Time64(v2, p2, _)) => {
-                if let (Some(v1), Some(v2)) = (
-                    DataValue::from_timestamp_precision(*v1, *p1),
-                    DataValue::from_timestamp_precision(*v2, *p2),
-                ) {
-                    let p = if p2 > p1 { *p2 } else { *p1 };
-                    DataValue::Boolean(
-                        DataValue::timestamp_precision(v1, p)
-                            >= DataValue::timestamp_precision(v2, p),
-                    )
-                } else {
-                    DataValue::Null
-                }
-            }
-            (DataValue::Time64(..), DataValue::Null)
-            | (DataValue::Null, DataValue::Time64(..))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
+                (DataValue::Time64(..), DataValue::Null)
+                | (DataValue::Null, DataValue::Time64(..))
+                | (DataValue::Null, DataValue::Null) => DataValue::Null,
+                _ => unsafe { hint::unreachable_unchecked() },
+            })
+        }
+    };
 }
 
+time64_binary!(time64_gt_binary_eval, >);
+time64_binary!(time64_gt_eq_binary_eval, >=);
+
 crate::define_cast_evaluator!(
-    Time64ToCharCastEvaluator {
+    time64_to_char_cast_eval {
         len: u32,
-        unit: CharLengthUnits,
-        to: LogicalType
+        unit: CharLengthUnits
     },
-    DataValue::Time64(value, precision, _) => |this| {
+    DataValue::Time64(value, precision, zone) => |this| {
         to_char(
             DataValue::format_timestamp(*value, *precision).ok_or_else(|| {
-                cast_fail(LogicalType::TimeStamp(Some(*precision), false), this.to.clone())
+                cast_fail(
+                    LogicalType::TimeStamp(Some(*precision), *zone),
+                    LogicalType::Char(this.len, this.unit),
+                )
             })?,
             this.len,
             this.unit,
@@ -99,15 +69,17 @@ crate::define_cast_evaluator!(
     }
 );
 crate::define_cast_evaluator!(
-    Time64ToVarcharCastEvaluator {
+    time64_to_varchar_cast_eval {
         len: Option<u32>,
-        unit: CharLengthUnits,
-        to: LogicalType
+        unit: CharLengthUnits
     },
-    DataValue::Time64(value, precision, _) => |this| {
+    DataValue::Time64(value, precision, zone) => |this| {
         to_varchar(
             DataValue::format_timestamp(*value, *precision).ok_or_else(|| {
-                cast_fail(LogicalType::TimeStamp(Some(*precision), false), this.to.clone())
+                cast_fail(
+                    LogicalType::TimeStamp(Some(*precision), *zone),
+                    LogicalType::Varchar(this.len, this.unit),
+                )
             })?,
             this.len,
             this.unit,
@@ -115,13 +87,15 @@ crate::define_cast_evaluator!(
     }
 );
 crate::define_cast_evaluator!(
-    Time64ToDateCastEvaluator {
-        from: LogicalType,
-        to: LogicalType
-    },
-    DataValue::Time64(value, precision, _) => |this| {
+    time64_to_date_cast_eval,
+    DataValue::Time64(value, precision, zone) => {
         let value = DataValue::from_timestamp_precision(*value, *precision)
-            .ok_or_else(|| cast_fail(this.from.clone(), this.to.clone()))?
+            .ok_or_else(|| {
+                cast_fail(
+                    LogicalType::TimeStamp(Some(*precision), *zone),
+                    LogicalType::Date,
+                )
+            })?
             .naive_utc()
             .date()
             .num_days_from_ce();
@@ -130,25 +104,25 @@ crate::define_cast_evaluator!(
     }
 );
 crate::define_cast_evaluator!(
-    Time64ToDatetimeCastEvaluator {
-        from: LogicalType,
-        to: LogicalType
-    },
-    DataValue::Time64(value, precision, _) => |this| {
+    time64_to_datetime_cast_eval,
+    DataValue::Time64(value, precision, zone) => {
         let value = DataValue::from_timestamp_precision(*value, *precision)
-            .ok_or_else(|| cast_fail(this.from.clone(), this.to.clone()))?
+            .ok_or_else(|| {
+                cast_fail(
+                    LogicalType::TimeStamp(Some(*precision), *zone),
+                    LogicalType::DateTime,
+                )
+            })?
             .timestamp();
 
         Ok(DataValue::Date64(value))
     }
 );
 crate::define_cast_evaluator!(
-    Time64ToTimeCastEvaluator {
-        precision: Option<u64>,
-        from: LogicalType,
-        to: LogicalType
+    time64_to_time_cast_eval {
+        precision: Option<u64>
     },
-    DataValue::Time64(value, precision, _) => |this| {
+    DataValue::Time64(value, precision, zone) => |this| {
         let target_precision = this.precision.unwrap_or(0);
         let (value, nano) = DataValue::from_timestamp_precision(*value, *precision)
             .map(|date_time| {
@@ -157,7 +131,12 @@ crate::define_cast_evaluator!(
                     date_time.time().nanosecond(),
                 )
             })
-            .ok_or_else(|| cast_fail(this.from.clone(), this.to.clone()))?;
+            .ok_or_else(|| {
+                cast_fail(
+                    LogicalType::TimeStamp(Some(*precision), *zone),
+                    LogicalType::Time(this.precision),
+                )
+            })?;
 
         Ok(DataValue::Time32(
             DataValue::pack(value, nano, target_precision),
@@ -166,7 +145,7 @@ crate::define_cast_evaluator!(
     }
 );
 crate::define_cast_evaluator!(
-    Time64ToTimestampCastEvaluator {
+    time64_to_timestamp_cast_eval {
         precision: Option<u64>,
         zone: bool
     },
@@ -174,119 +153,25 @@ crate::define_cast_evaluator!(
         Ok(DataValue::Time64(*value, this.precision.unwrap_or(0), this.zone))
     }
 );
-impl BinaryEvaluator for Time64LtBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Time64(v1, p1, _), DataValue::Time64(v2, p2, _)) => {
-                if let (Some(v1), Some(v2)) = (
-                    DataValue::from_timestamp_precision(*v1, *p1),
-                    DataValue::from_timestamp_precision(*v2, *p2),
-                ) {
-                    let p = if p2 > p1 { *p2 } else { *p1 };
-                    DataValue::Boolean(
-                        DataValue::timestamp_precision(v1, p)
-                            < DataValue::timestamp_precision(v2, p),
-                    )
-                } else {
-                    DataValue::Null
-                }
-            }
-            (DataValue::Time64(..), DataValue::Null)
-            | (DataValue::Null, DataValue::Time64(..))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for Time64LtEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Time64(v1, p1, _), DataValue::Time64(v2, p2, _)) => {
-                if let (Some(v1), Some(v2)) = (
-                    DataValue::from_timestamp_precision(*v1, *p1),
-                    DataValue::from_timestamp_precision(*v2, *p2),
-                ) {
-                    let p = if p2 > p1 { *p2 } else { *p1 };
-                    DataValue::Boolean(
-                        DataValue::timestamp_precision(v1, p)
-                            <= DataValue::timestamp_precision(v2, p),
-                    )
-                } else {
-                    DataValue::Null
-                }
-            }
-            (DataValue::Time64(..), DataValue::Null)
-            | (DataValue::Null, DataValue::Time64(..))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for Time64EqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Time64(v1, p1, _), DataValue::Time64(v2, p2, _)) => {
-                if let (Some(v1), Some(v2)) = (
-                    DataValue::from_timestamp_precision(*v1, *p1),
-                    DataValue::from_timestamp_precision(*v2, *p2),
-                ) {
-                    let p = if p2 > p1 { *p2 } else { *p1 };
-                    DataValue::Boolean(
-                        DataValue::timestamp_precision(v1, p)
-                            == DataValue::timestamp_precision(v2, p),
-                    )
-                } else {
-                    DataValue::Null
-                }
-            }
-            (DataValue::Time64(..), DataValue::Null)
-            | (DataValue::Null, DataValue::Time64(..))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for Time64NotEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Time64(v1, p1, _), DataValue::Time64(v2, p2, _)) => {
-                if let (Some(v1), Some(v2)) = (
-                    DataValue::from_timestamp_precision(*v1, *p1),
-                    DataValue::from_timestamp_precision(*v2, *p2),
-                ) {
-                    let p = if p2 > p1 { *p2 } else { *p1 };
-                    DataValue::Boolean(
-                        DataValue::timestamp_precision(v1, p)
-                            != DataValue::timestamp_precision(v2, p),
-                    )
-                } else {
-                    DataValue::Null
-                }
-            }
-            (DataValue::Time64(..), DataValue::Null)
-            | (DataValue::Null, DataValue::Time64(..))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
+time64_binary!(time64_lt_binary_eval, <);
+time64_binary!(time64_lt_eq_binary_eval, <=);
+time64_binary!(time64_eq_binary_eval, ==);
+time64_binary!(time64_not_eq_binary_eval, !=);
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
-    use crate::types::evaluator::{BinaryEvaluator, CastEvaluator};
     use crate::types::value::Utf8Type;
     use crate::types::CharLengthUnits;
 
     #[test]
     fn test_time64_binary_evaluators() {
         assert_eq!(
-            Time64EqBinaryEvaluator
-                .binary_eval(
-                    &DataValue::Time64(1_738_734_177_256, 3, false),
-                    &DataValue::Time64(1_738_734_177_256_000, 6, false),
-                )
-                .unwrap(),
+            time64_eq_binary_eval(
+                &DataValue::Time64(1_738_734_177_256, 3, false),
+                &DataValue::Time64(1_738_734_177_256_000, 6, false),
+            )
+            .unwrap(),
             DataValue::Boolean(true)
         );
     }
@@ -301,13 +186,7 @@ mod test {
             .timestamp_millis();
         let value = DataValue::Time64(timestamp, 3, false);
         assert_eq!(
-            Time64ToCharCastEvaluator {
-                len: 23,
-                unit: CharLengthUnits::Characters,
-                to: LogicalType::Char(23, CharLengthUnits::Characters),
-            }
-            .eval_cast(&value)
-            .unwrap(),
+            time64_to_char_cast_eval(23, CharLengthUnits::Characters, &value).unwrap(),
             DataValue::Utf8 {
                 value: "2024-01-02 03:04:05.123".to_string(),
                 ty: Utf8Type::Fixed(23),
@@ -315,13 +194,7 @@ mod test {
             }
         );
         assert_eq!(
-            Time64ToVarcharCastEvaluator {
-                len: Some(23),
-                unit: CharLengthUnits::Characters,
-                to: LogicalType::Varchar(Some(23), CharLengthUnits::Characters),
-            }
-            .eval_cast(&value)
-            .unwrap(),
+            time64_to_varchar_cast_eval(Some(23), CharLengthUnits::Characters, &value).unwrap(),
             DataValue::Utf8 {
                 value: "2024-01-02 03:04:05.123".to_string(),
                 ty: Utf8Type::Variable(Some(23)),
@@ -329,12 +202,7 @@ mod test {
             }
         );
         assert_eq!(
-            Time64ToDateCastEvaluator {
-                from: LogicalType::TimeStamp(Some(3), false),
-                to: LogicalType::Date,
-            }
-            .eval_cast(&value)
-            .unwrap(),
+            time64_to_date_cast_eval(&value).unwrap(),
             DataValue::Date32(
                 chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
                     .unwrap()
@@ -342,12 +210,7 @@ mod test {
             )
         );
         assert_eq!(
-            Time64ToDatetimeCastEvaluator {
-                from: LogicalType::TimeStamp(Some(3), false),
-                to: LogicalType::DateTime,
-            }
-            .eval_cast(&value)
-            .unwrap(),
+            time64_to_datetime_cast_eval(&value).unwrap(),
             DataValue::Date64(
                 chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
                     .unwrap()
@@ -358,22 +221,11 @@ mod test {
             )
         );
         assert_eq!(
-            Time64ToTimeCastEvaluator {
-                precision: Some(3),
-                from: LogicalType::TimeStamp(Some(3), false),
-                to: LogicalType::Time(Some(3)),
-            }
-            .eval_cast(&value)
-            .unwrap(),
+            time64_to_time_cast_eval(Some(3), &value).unwrap(),
             DataValue::Time32(DataValue::pack(3 * 3600 + 4 * 60 + 5, 123_000_000, 3), 3)
         );
         assert_eq!(
-            Time64ToTimestampCastEvaluator {
-                precision: Some(3),
-                zone: true,
-            }
-            .eval_cast(&value)
-            .unwrap(),
+            time64_to_timestamp_cast_eval(Some(3), true, &value).unwrap(),
             DataValue::Time64(timestamp, 3, true)
         );
     }

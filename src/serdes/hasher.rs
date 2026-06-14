@@ -12,7 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::implement_serialization_by_bincode;
+use crate::errors::DatabaseError;
 use crate::optimizer::core::cm_sketch::FastHasher;
+use crate::serdes::{ReferenceSerialization, ReferenceTables};
+use crate::storage::Transaction;
 
-implement_serialization_by_bincode!(FastHasher);
+impl ReferenceSerialization for FastHasher {
+    fn encode<W: std::io::Write, A: crate::planner::MetaArena>(
+        &self,
+        writer: &mut W,
+        is_direct: bool,
+        reference_tables: &mut ReferenceTables,
+        arena: &A,
+    ) -> Result<(), DatabaseError> {
+        let (key0, key1) = self.keys();
+        key0.encode(writer, is_direct, reference_tables, arena)?;
+        key1.encode(writer, is_direct, reference_tables, arena)
+    }
+
+    fn decode<T: Transaction, R: std::io::Read, A: crate::planner::MetaArena>(
+        reader: &mut R,
+        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
+        reference_tables: &ReferenceTables,
+        arena: &mut A,
+    ) -> Result<Self, DatabaseError> {
+        let key0 = u64::decode(reader, drive, reference_tables, arena)?;
+        let key1 = u64::decode(reader, drive, reference_tables, arena)?;
+
+        Ok(FastHasher::new_with_keys(key0, key1))
+    }
+}

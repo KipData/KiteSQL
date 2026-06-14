@@ -12,86 +12,39 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{attach_span_if_absent, is_valid_identifier, Binder};
-use crate::binder::{lower_case_name, lower_ident};
-use crate::catalog::{ColumnCatalog, ColumnDesc, TableName};
+use super::{is_valid_identifier, Binder};
+use crate::catalog::{ColumnCatalog, TableName};
 use crate::errors::DatabaseError;
-use crate::expression::ScalarExpression;
 use crate::planner::operator::create_table::CreateTableOperator;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
-use crate::types::LogicalType;
-use itertools::Itertools;
-use sqlparser::ast::{ColumnDef, ColumnOption, Expr, IndexColumn, ObjectName, TableConstraint};
-use std::borrow::Cow;
 use std::collections::HashSet;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     // TODO: TableConstraint
     pub(crate) fn bind_create_table(
         &mut self,
-        name: &ObjectName,
-        columns: &[ColumnDef],
-        constraints: &[TableConstraint],
+        table_name: TableName,
+        columns: Vec<ColumnCatalog>,
         if_not_exists: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name: TableName = lower_case_name(name)?.into();
-
-        if !is_valid_identifier(&table_name) {
-            return Err(attach_span_if_absent(
-                DatabaseError::invalid_table("illegal table naming".to_string()),
-                name,
-            ));
-        }
-        {
-            // check duplicated column names
-            let mut set = HashSet::new();
-            for col in columns.iter() {
-                let col_name = &col.name.value;
-                if !set.insert(col_name) {
-                    return Err(DatabaseError::DuplicateColumn(col_name.clone()));
-                }
-                if !is_valid_identifier(col_name) {
-                    return Err(attach_span_if_absent(
-                        DatabaseError::invalid_column("illegal column naming".to_string()),
-                        col,
-                    ));
-                }
+        let mut names = HashSet::new();
+        for column in &columns {
+            if !names.insert(column.name()) {
+                return Err(DatabaseError::DuplicateColumn(column.name().to_string()));
             }
-        }
-        let mut columns: Vec<ColumnCatalog> = columns
-            .iter()
-            .enumerate()
-            .map(|(i, col)| self.bind_column(col, Some(i)))
-            .try_collect()?;
-        for constraint in constraints {
-            match constraint {
-                TableConstraint::PrimaryKey(primary) => {
-                    Self::bind_constraint(&mut columns, &primary.columns, |i, desc| {
-                        desc.set_primary(Some(i))
-                    })?;
-                }
-                TableConstraint::Unique(unique) => {
-                    Self::bind_constraint(&mut columns, &unique.columns, |_, desc| {
-                        desc.set_unique()
-                    })?;
-                }
-                constraint => {
-                    return Err(DatabaseError::UnsupportedStmt(format!(
-                        "`CreateTable` does not currently support this constraint: {constraint:?}"
-                    )))?
-                }
+            if !is_valid_identifier(column.name()) {
+                return Err(DatabaseError::invalid_column(
+                    "illegal column naming".to_string(),
+                ));
             }
         }
 
         if columns.iter().filter(|col| col.desc().is_primary()).count() == 0 {
-            return Err(attach_span_if_absent(
-                DatabaseError::invalid_table(
-                    "the primary key field must exist and have at least one".to_string(),
-                ),
-                name,
+            return Err(DatabaseError::invalid_table(
+                "the primary key field must exist and have at least one".to_string(),
             ));
         }
 
@@ -104,79 +57,6 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             Childrens::None,
         ))
     }
-
-    fn bind_constraint<F: Fn(usize, &mut ColumnDesc)>(
-        table_columns: &mut [ColumnCatalog],
-        exprs: &[IndexColumn],
-        fn_constraint: F,
-    ) -> Result<(), DatabaseError> {
-        for (i, index_column) in exprs.iter().enumerate() {
-            let Expr::Identifier(ident) = &index_column.column.expr else {
-                return Err(DatabaseError::UnsupportedStmt(
-                    "only identifier columns are supported in `PRIMARY KEY/UNIQUE`".to_string(),
-                ));
-            };
-            let column_name = lower_ident(ident);
-
-            if let Some(column) = table_columns
-                .iter_mut()
-                .find(|column| column.name() == column_name.as_ref())
-            {
-                fn_constraint(i, column.desc_mut())
-            }
-        }
-        Ok(())
-    }
-
-    pub fn bind_column(
-        &mut self,
-        column_def: &ColumnDef,
-        column_index: Option<usize>,
-    ) -> Result<ColumnCatalog, DatabaseError> {
-        let column_name = lower_ident(&column_def.name).into_owned();
-        let mut column_desc = ColumnDesc::new(
-            LogicalType::try_from(column_def.data_type.clone())?,
-            None,
-            false,
-            None,
-        )?;
-        let mut nullable = true;
-
-        for option_def in &column_def.options {
-            match &option_def.option {
-                ColumnOption::Null => nullable = true,
-                ColumnOption::NotNull => nullable = false,
-                ColumnOption::PrimaryKey(_) => {
-                    column_desc.set_primary(column_index);
-                    nullable = false;
-                    // Skip other options when using primary key
-                    break;
-                }
-                ColumnOption::Unique(_) => column_desc.set_unique(),
-                ColumnOption::Default(expr) => {
-                    let mut expr = self.bind_expr(expr)?;
-
-                    if expr.any_referenced_column(true, |_| true) {
-                        return Err(DatabaseError::UnsupportedStmt(
-                            "column is not allowed to exist in `default`".to_string(),
-                        ));
-                    }
-                    expr = ScalarExpression::type_cast(
-                        expr,
-                        Cow::Borrowed(&column_desc.column_datatype),
-                    )?;
-                    column_desc.default = Some(expr);
-                }
-                option => {
-                    return Err(DatabaseError::UnsupportedStmt(format!(
-                        "`Column` does not currently support this option: {option:?}"
-                    )))
-                }
-            }
-        }
-
-        Ok(ColumnCatalog::new(column_name, nullable, column_desc))
-    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -188,10 +68,6 @@ mod tests {
     use crate::storage::Storage;
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
-    use crate::utils::lru::SharedLruCache;
-    use std::hash::RandomState;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::Arc;
     use tempfile::TempDir;
 
     #[test]
@@ -199,8 +75,8 @@ mod tests {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let transaction = storage.transaction()?;
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let table_cache = crate::storage::TableCache::default();
+        let view_cache = crate::storage::ViewCache::default();
         let scala_functions = Default::default();
         let table_functions = Default::default();
 
@@ -212,13 +88,15 @@ mod tests {
                 &transaction,
                 &scala_functions,
                 &table_functions,
-                Arc::new(AtomicUsize::new(0)),
             ),
             &[],
             None,
         );
         let stmt = crate::parser::parse_sql(sql).unwrap();
-        let plan1 = binder.bind(&stmt[0]).unwrap();
+        let stmt = stmt.into_iter().next().unwrap();
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let plan1 = binder.bind(&stmt, &mut plan_arena).unwrap();
 
         match plan1.operator {
             Operator::CreateTable(op) => {

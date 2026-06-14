@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor};
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 
@@ -30,37 +30,25 @@ impl Default for Dummy {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Dummy {
-    fn into_executor(
-        self,
-        arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
-    ) -> ExecId {
-        arena.push(ExecNode::Dummy(self))
-    }
-}
-
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Dummy {
     type Input = Self;
 
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
+        _: ExecutionContext<'_>,
+        _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::Dummy(input))
-    }
-
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
-        Dummy::next_tuple(self, arena)
+        let executor = input;
+        arena.push(ExecNode::Dummy(executor))
     }
 }
 
-impl Dummy {
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Dummy {
+    fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        _: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(row) = self.row.take() else {
             arena.finish();

@@ -16,7 +16,10 @@ use super::{
     BackendControl, BackendTransaction, DbParam, PreparedStatement, SimpleExecutor, StatementSpec,
 };
 use crate::TpccError;
-use kite_sql::db::{prepare, DBTransaction, DataBaseBuilder, Database, TransactionIter};
+use kite_sql::binder::{command_type, CommandType};
+use kite_sql::db::{
+    prepare, prepare_all, DBTransaction, DataBaseBuilder, Database, Statement, TransactionIter,
+};
 use kite_sql::storage::rocksdb::{OptimisticRocksStorage, RocksStorage};
 use kite_sql::storage::{Storage, Transaction};
 use kite_sql::types::tuple::Tuple;
@@ -101,10 +104,57 @@ impl<S: Storage> BackendControl for KiteSqlRocksBackend<S> {
 }
 
 impl<S: Storage> SimpleExecutor for KiteSqlRocksBackend<S> {
-    fn execute_batch(&self, sql: &str) -> Result<(), TpccError> {
-        self.database.run(sql)?.done()?;
-        Ok(())
+    fn execute_batch(&mut self, sql: &str) -> Result<(), TpccError> {
+        execute_kitesql_batch(&mut self.database, sql)
     }
+}
+
+pub(crate) fn execute_kitesql_batch<S: Storage>(
+    database: &mut Database<S>,
+    sql: &str,
+) -> Result<(), TpccError> {
+    let statements = prepare_all(sql)?;
+    let all_ddl = statements.iter().try_fold(true, |all_ddl, statement| {
+        Ok::<_, kite_sql::errors::DatabaseError>(
+            all_ddl && matches!(command_type(statement)?, CommandType::DDL),
+        )
+    })?;
+    if all_ddl {
+        database.ddl(sql)?;
+        return Ok(());
+    }
+
+    if statements
+        .iter()
+        .all(|statement| matches!(statement, Statement::Analyze(_)))
+    {
+        for statement in statements {
+            let Statement::Analyze(analyze) = statement else {
+                unreachable!("checked above")
+            };
+            let table_name = analyze.table_name.ok_or_else(|| {
+                kite_sql::errors::DatabaseError::UnsupportedStmt(
+                    "ANALYZE requires table name".to_string(),
+                )
+            })?;
+            let table_name = table_name.to_string();
+            let start = std::time::Instant::now();
+            println!("[KiteSQL Analyze: {table_name}] started");
+            database.analyze(&table_name)?;
+            println!(
+                "[KiteSQL Analyze: {table_name}] completed in {:.2}s",
+                start.elapsed().as_secs_f64()
+            );
+        }
+        return Ok(());
+    }
+
+    let mut transaction = database.new_transaction()?;
+    for statement in statements {
+        transaction.execute(statement, &[])?.done()?;
+    }
+    transaction.commit()?;
+    Ok(())
 }
 
 pub struct KiteSqlRocksTransaction<'a, S: Storage> {

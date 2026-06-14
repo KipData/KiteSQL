@@ -19,21 +19,23 @@ use std::io::{Read, Write};
 use ulid::Ulid;
 
 impl ReferenceSerialization for Ulid {
-    fn encode<W: Write>(
+    fn encode<W: Write, A: crate::planner::MetaArena>(
         &self,
         writer: &mut W,
         _: bool,
         _: &mut ReferenceTables,
+        _: &A,
     ) -> Result<(), DatabaseError> {
         writer.write_all(&self.to_bytes()[..])?;
 
         Ok(())
     }
 
-    fn decode<T: Transaction, R: Read>(
+    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
         reader: &mut R,
         _: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         _: &ReferenceTables,
+        _: &mut A,
     ) -> Result<Self, DatabaseError> {
         let mut buf = [0u8; 16];
         reader.read_exact(&mut buf)?;

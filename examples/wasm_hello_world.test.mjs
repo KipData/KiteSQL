@@ -8,8 +8,8 @@ const { WasmDatabase } = require("../pkg/kite_sql.js");
 async function main() {
   const db = new WasmDatabase();
 
-  await db.execute("drop table if exists my_struct");
-  await db.execute("create table my_struct (c1 int primary key, c2 int)");
+  await db.ddl("drop table if exists my_struct");
+  await db.ddl("create table my_struct (c1 int primary key, c2 int)");
   await db.execute("insert into my_struct values(0, 0), (1, 1)");
 
   const iter = db.run("select * from my_struct");
@@ -48,7 +48,7 @@ async function main() {
     [1, 11],
   ]);
 
-  await db.execute("drop table my_struct");
+  await db.ddl("drop table my_struct");
   console.log("wasm hello_world test passed");
 }
 

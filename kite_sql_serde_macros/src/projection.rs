@@ -33,7 +33,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         ));
     };
 
-    let mut projected_values = Vec::new();
+    let mut projection_exprs = Vec::new();
     let mut assignments = Vec::new();
 
     for field in data_struct.fields {
@@ -62,13 +62,16 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             .predicates
             .push(parse_quote!(#field_ty : ::kite_sql::orm::FromDataValue));
 
-        projected_values.push(if rename.is_some() {
+        projection_exprs.push(if rename.is_some() {
             quote! {
-                ::kite_sql::orm::projection_value(#source_name_lit, #relation_expr, #field_name_lit)
+                {
+                    let expr = scope.column_ref(#relation_expr, #source_name_lit)?;
+                    scope.alias(expr, #field_name_lit)
+                }
             }
         } else {
             quote! {
-                ::kite_sql::orm::projection_column(#source_name_lit, #relation_expr)
+                scope.column_ref(#relation_expr, #source_name_lit)?
             }
         });
         assignments.push(quote! {
@@ -78,21 +81,34 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         });
     }
 
+    let mut from_generics = generics.clone();
+    from_generics.params.insert(0, parse_quote!('__kite_arena));
+    from_generics.params.insert(0, parse_quote!('__kite_schema));
+    let (from_impl_generics, _, from_where_clause) = from_generics.split_for_impl();
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     Ok(quote! {
         impl #impl_generics ::kite_sql::orm::Projection for #struct_name #ty_generics
         #where_clause
         {
-            fn projected_values<M: ::kite_sql::orm::Model>(relation: &str) -> ::std::vec::Vec<::kite_sql::orm::ProjectedValue> {
-                vec![#(#projected_values),*]
+            fn bind_projection<'ctx, 'bind, 'parent, 'arena, T, A>(
+                scope: &mut ::kite_sql::orm::ExprBindScope<'ctx, 'bind, 'parent, 'arena, T, A>,
+                relation: &str,
+            ) -> ::std::result::Result<::std::vec::Vec<::kite_sql::expression::ScalarExpression>, ::kite_sql::errors::DatabaseError>
+            where
+                T: ::kite_sql::storage::Transaction,
+                A: AsRef<[(&'static str, ::kite_sql::types::value::DataValue)]>,
+            {
+                Ok(::std::vec![
+                    #(::kite_sql::orm::IntoOrmScalarExpression::into_orm_scalar(#projection_exprs)),*
+                ])
             }
         }
 
-        impl #impl_generics From<(&::kite_sql::types::tuple::SchemaRef, ::kite_sql::types::tuple::Tuple)> for #struct_name #ty_generics
-        #where_clause
+        impl #from_impl_generics From<(&::kite_sql::types::tuple::SchemaView<'__kite_schema, '__kite_arena>, ::kite_sql::types::tuple::Tuple)> for #struct_name #ty_generics
+        #from_where_clause
         {
-            fn from((schema, mut tuple): (&::kite_sql::types::tuple::SchemaRef, ::kite_sql::types::tuple::Tuple)) -> Self {
+            fn from((schema, mut tuple): (&::kite_sql::types::tuple::SchemaView<'__kite_schema, '__kite_arena>, ::kite_sql::types::tuple::Tuple)) -> Self {
                 let mut struct_instance = <Self as ::std::default::Default>::default();
                 #(#assignments)*
                 struct_instance

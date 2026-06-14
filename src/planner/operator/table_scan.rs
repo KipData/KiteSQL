@@ -17,7 +17,7 @@ use crate::catalog::{ColumnRef, TableCatalog, TableName};
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::sort::SortField;
-use crate::planner::{Childrens, LogicalPlan};
+use crate::planner::{Childrens, LogicalPlan, PlanArena};
 use crate::storage::Bounds;
 use crate::types::index::IndexInfo;
 use itertools::Itertools;
@@ -43,26 +43,28 @@ impl TableScanOperator {
         table_name: TableName,
         table_catalog: &TableCatalog,
         with_pk: bool,
+        arena: &PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         // Fill all Columns in TableCatalog by default
-        let columns = table_catalog.columns().cloned().collect();
+        let columns = table_catalog.columns().copied().collect_vec();
         let mut index_infos = Vec::with_capacity(table_catalog.indexes.len());
 
-        for index_meta in table_catalog.indexes.iter() {
+        for index_ref in table_catalog.indexes.iter().copied() {
+            let index_meta = arena.index(index_ref);
             let mut sort_fields = Vec::with_capacity(index_meta.column_ids.len());
             for col_id in &index_meta.column_ids {
-                let column = table_catalog.get_column_by_id(col_id).ok_or_else(|| {
+                let column_ref = table_catalog.get_column_by_id(col_id).ok_or_else(|| {
                     DatabaseError::column_not_found(format!("index column id: {col_id} not found"))
                 })?;
                 sort_fields.push(SortField {
-                    expr: ScalarExpression::column_expr(column.clone(), sort_fields.len()),
+                    expr: ScalarExpression::column_expr(column_ref, sort_fields.len()),
                     asc: true,
                     nulls_first: false,
                 })
             }
 
             index_infos.push(IndexInfo {
-                meta: index_meta.clone(),
+                meta: index_ref,
                 sort_option: SortOption::OrderBy {
                     fields: sort_fields,
                     ignore_prefix_len: 0,
@@ -90,11 +92,7 @@ impl TableScanOperator {
 
 impl fmt::Display for TableScanOperator {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let projection_columns = self
-            .columns
-            .iter()
-            .map(|column| column.name().to_string())
-            .join(", ");
+        let projection_columns = self.columns.iter().join(", ");
         let (offset, limit) = self.limit;
 
         write!(

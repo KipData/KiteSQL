@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::storage::table_codec::{Bytes, TableCodec};
+use crate::storage::table_codec::Bytes;
 use crate::storage::{
     EmptyStorageMetrics, InnerIter, Storage, Transaction, TransactionIsolationLevel,
 };
@@ -47,7 +47,6 @@ impl Storage for MemoryStorage {
         self.validate_transaction_isolation(isolation)?;
         Ok(MemoryTransaction {
             inner: self.inner.clone(),
-            table_codec: Default::default(),
         })
     }
 
@@ -58,7 +57,6 @@ impl Storage for MemoryStorage {
 
 pub struct MemoryTransaction {
     inner: Rc<RefCell<BTreeMap<Vec<u8>, Vec<u8>>>>,
-    table_codec: TableCodec,
 }
 
 pub struct MemoryIter {
@@ -97,11 +95,6 @@ impl Transaction for MemoryTransaction {
         = MemoryIter
     where
         Self: 'a;
-
-    fn table_codec(&self) -> *const TableCodec {
-        &self.table_codec
-    }
-
     fn get_borrowed<'a>(
         &'a self,
         key: &[u8],
@@ -160,49 +153,52 @@ impl Transaction for MemoryTransaction {
 #[cfg(all(test, target_arch = "wasm32"))]
 mod wasm_tests {
     use super::*;
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
-    use crate::db::DataBaseBuilder;
+    use crate::catalog::{ColumnCatalog, ColumnDesc, TableName};
+    use crate::db::{CatalogKind, DataBaseBuilder};
     use crate::expression::range_detacher::Range;
+    use crate::planner::{PlanArena, TableArenaCell};
+    use crate::storage::table_codec::TableCodec;
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
-    use crate::utils::lru::SharedLruCache;
-    use itertools::Itertools;
     use std::collections::Bound;
-    use std::hash::RandomState;
-    use std::sync::Arc;
     use wasm_bindgen_test::*;
 
     #[wasm_bindgen_test]
     fn memory_storage_roundtrip() -> Result<(), DatabaseError> {
         let storage = MemoryStorage::new();
         let mut transaction = storage.transaction()?;
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let columns = Arc::new(vec![
-            ColumnRef::from(ColumnCatalog::new(
+        let mut table_cache = crate::storage::TableCache::default();
+        let mut table_codec = TableCodec::default();
+        let table_arena = TableArenaCell::default();
+        let mut plan_arena = PlanArena::new(&table_arena);
+        let source_columns = vec![
+            ColumnCatalog::new(
                 "c1".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
+            ),
+            ColumnCatalog::new(
                 "c2".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::Boolean, None, false, None).unwrap(),
-            )),
-        ]);
-
-        let source_columns = columns
-            .iter()
-            .map(|col_ref| ColumnCatalog::clone(col_ref))
-            .collect_vec();
-        transaction.create_table(
-            &table_cache,
+            ),
+        ];
+        if let Some(table) = transaction.create_table(
+            &mut table_codec,
+            &mut plan_arena,
             "test".to_string().into(),
             source_columns,
             false,
-        )?;
+        )? {
+            let table = table.transplant_to_table_arena(&plan_arena)?;
+            table_cache.insert(table.name().clone(), table);
+        }
+        let plan_arena = PlanArena::new(&table_arena);
+        let table_name: TableName = "test".to_string().into();
 
         transaction.append_tuple(
+            &mut table_codec,
             "test",
             Tuple::new(
                 Some(DataValue::Int32(1)),
@@ -215,6 +211,7 @@ mod wasm_tests {
             false,
         )?;
         transaction.append_tuple(
+            &mut table_codec,
             "test",
             Tuple::new(
                 Some(DataValue::Int32(2)),
@@ -227,9 +224,18 @@ mod wasm_tests {
             false,
         )?;
 
-        let read_columns = vec![columns[0].clone()];
+        let read_column = table_cache
+            .get(&table_name)
+            .unwrap()
+            .columns()
+            .next()
+            .copied()
+            .unwrap();
+        let read_columns = vec![read_column];
 
         let mut iter = transaction.read(
+            &mut table_codec,
+            &plan_arena,
             &table_cache,
             "test".to_string().into(),
             (Some(1), Some(1)),
@@ -248,10 +254,9 @@ mod wasm_tests {
 
     #[wasm_bindgen_test]
     fn memory_storage_read_by_index() -> Result<(), DatabaseError> {
-        let kite_sql = DataBaseBuilder::path("./memory").build_in_memory()?;
-        kite_sql
-            .run("create table t1 (a int primary key, b int)")?
-            .done()?;
+        let mut kite_sql = DataBaseBuilder::path("./memory").build_in_memory()?;
+        kite_sql.ddl("create table t1 (a int primary key, b int)")?;
+        kite_sql.load(CatalogKind::Table("t1".to_string().into()))?;
         kite_sql
             .run("insert into t1 (a, b) values (0, 0), (1, 1), (2, 2), (3, 4)")?
             .done()?;
@@ -263,8 +268,10 @@ mod wasm_tests {
             .unwrap()
             .clone();
         let pk_index = table.indexes().next().unwrap().clone();
+        let plan_arena = PlanArena::new(kite_sql.state.table_arena());
         let mut iter = transaction.read_by_index(
             kite_sql.state.table_cache(),
+            &plan_arena,
             table_name,
             (Some(0), None),
             table.columns().cloned().collect(),
@@ -292,48 +299,51 @@ mod wasm_tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod native_tests {
     use super::*;
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
-    use crate::db::DataBaseBuilder;
+    use crate::catalog::{ColumnCatalog, ColumnDesc, TableName};
+    use crate::db::{CatalogKind, DataBaseBuilder};
     use crate::expression::range_detacher::Range;
+    use crate::planner::{PlanArena, TableArenaCell};
+    use crate::storage::table_codec::TableCodec;
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
-    use crate::utils::lru::SharedLruCache;
-    use itertools::Itertools;
     use std::collections::Bound;
-    use std::hash::RandomState;
-    use std::sync::Arc;
 
     #[test]
     fn memory_storage_roundtrip() -> Result<(), DatabaseError> {
         let storage = MemoryStorage::new();
         let mut transaction = storage.transaction()?;
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let columns = Arc::new(vec![
-            ColumnRef::from(ColumnCatalog::new(
+        let mut table_cache = crate::storage::TableCache::default();
+        let mut table_codec = TableCodec::default();
+        let table_arena = TableArenaCell::default();
+        let mut plan_arena = PlanArena::new(&table_arena);
+        let source_columns = vec![
+            ColumnCatalog::new(
                 "c1".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
+            ),
+            ColumnCatalog::new(
                 "c2".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::Boolean, None, false, None).unwrap(),
-            )),
-        ]);
-
-        let source_columns = columns
-            .iter()
-            .map(|col_ref| ColumnCatalog::clone(col_ref))
-            .collect_vec();
-        transaction.create_table(
-            &table_cache,
+            ),
+        ];
+        if let Some(table) = transaction.create_table(
+            &mut table_codec,
+            &mut plan_arena,
             "test".to_string().into(),
             source_columns,
             false,
-        )?;
+        )? {
+            let table = table.transplant_to_table_arena(&plan_arena)?;
+            table_cache.insert(table.name().clone(), table);
+        }
+        let plan_arena = PlanArena::new(&table_arena);
+        let table_name: TableName = "test".to_string().into();
 
         transaction.append_tuple(
+            &mut table_codec,
             "test",
             Tuple::new(
                 Some(DataValue::Int32(1)),
@@ -346,6 +356,7 @@ mod native_tests {
             false,
         )?;
         transaction.append_tuple(
+            &mut table_codec,
             "test",
             Tuple::new(
                 Some(DataValue::Int32(2)),
@@ -358,9 +369,18 @@ mod native_tests {
             false,
         )?;
 
-        let read_columns = vec![columns[0].clone()];
+        let read_column = table_cache
+            .get(&table_name)
+            .unwrap()
+            .columns()
+            .next()
+            .copied()
+            .unwrap();
+        let read_columns = vec![read_column];
 
         let mut iter = transaction.read(
+            &mut table_codec,
+            &plan_arena,
             &table_cache,
             "test".to_string().into(),
             (Some(1), Some(1)),
@@ -379,10 +399,9 @@ mod native_tests {
 
     #[test]
     fn memory_storage_read_by_index() -> Result<(), DatabaseError> {
-        let kite_sql = DataBaseBuilder::path("./memory").build_in_memory()?;
-        kite_sql
-            .run("create table t1 (a int primary key, b int)")?
-            .done()?;
+        let mut kite_sql = DataBaseBuilder::path("./memory").build_in_memory()?;
+        kite_sql.ddl("create table t1 (a int primary key, b int)")?;
+        kite_sql.load(CatalogKind::Table("t1".to_string().into()))?;
         kite_sql
             .run("insert into t1 (a, b) values (0, 0), (1, 1), (2, 2), (3, 4)")?
             .done()?;
@@ -393,9 +412,11 @@ mod native_tests {
             .table(kite_sql.state.table_cache(), table_name.clone())?
             .unwrap()
             .clone();
-        let pk_index = table.indexes().next().unwrap().clone();
+        let pk_index = *table.indexes().next().unwrap();
+        let plan_arena = PlanArena::new(kite_sql.state.table_arena());
         let mut iter = transaction.read_by_index(
             kite_sql.state.table_cache(),
+            &plan_arena,
             table_name,
             (Some(0), None),
             table.columns().cloned().collect(),

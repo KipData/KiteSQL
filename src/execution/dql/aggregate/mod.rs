@@ -39,7 +39,7 @@ pub trait Accumulator {
     fn update_value(&mut self, value: &DataValue) -> Result<(), DatabaseError>;
 
     /// returns its value based on its current state.
-    fn evaluate(&self) -> Result<DataValue, DatabaseError>;
+    fn evaluate(self: Box<Self>) -> Result<DataValue, DatabaseError>;
 }
 
 fn create_accumulator(expr: &ScalarExpression) -> Result<Box<dyn Accumulator>, DatabaseError> {

@@ -19,11 +19,12 @@ use crate::storage::Transaction;
 use std::io::{Read, Write};
 
 impl ReferenceSerialization for TrimWhereField {
-    fn encode<W: Write>(
+    fn encode<W: Write, A: crate::planner::MetaArena>(
         &self,
         writer: &mut W,
         _: bool,
         _: &mut ReferenceTables,
+        _: &A,
     ) -> Result<(), DatabaseError> {
         let type_id = match self {
             TrimWhereField::Both => 0,
@@ -35,10 +36,11 @@ impl ReferenceSerialization for TrimWhereField {
         Ok(())
     }
 
-    fn decode<T: Transaction, R: Read>(
+    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
         reader: &mut R,
         _: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         _: &ReferenceTables,
+        _: &mut A,
     ) -> Result<Self, DatabaseError> {
         let mut one_byte = [0u8; 1];
         reader.read_exact(&mut one_byte)?;

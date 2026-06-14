@@ -12,9 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+macro_rules! with_query_bind_step {
+    ($binder:expr, $step:expr, $body:block) => {{
+        let current_step = $binder.context.step_now();
+        $binder.context.step($step);
+        let result = (|| -> Result<_, DatabaseError> { Ok($body) })();
+        $binder.context.step(current_step);
+        result
+    }};
+}
+
+pub(crate) use with_query_bind_step;
+
 pub mod aggregate;
 mod alter_table;
 mod analyze;
+#[cfg(feature = "copy")]
 pub mod copy;
 mod create_index;
 mod create_table;
@@ -28,32 +41,32 @@ mod drop_view;
 mod explain;
 pub mod expr;
 mod insert;
+#[cfg(feature = "parser")]
+mod parser;
 mod select;
 mod show_table;
 mod show_view;
 mod truncate;
 mod update;
 
-use sqlparser::ast::{
-    DescribeAlias, FromTable, Ident, ObjectName, ObjectNamePart, ObjectType, SetExpr, Spanned,
-    Statement, TableObject,
-};
-use sqlparser::tokenizer::Span;
-use std::borrow::Cow;
+#[cfg(feature = "parser")]
+pub use parser::{command_type, prepare, prepare_all, CommandType, Statement};
+#[cfg(feature = "orm")]
+pub use select::{BindPlanFrom, BindPlanSelectList};
+#[cfg(feature = "orm")]
+pub(crate) use select::{JoinConstraintInput, TableAliasInput};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 
 use crate::catalog::view::View;
 use crate::catalog::{ColumnRef, TableCatalog, TableName};
 use crate::db::{ScalaFunctions, TableFunctions};
-use crate::errors::{DatabaseError, SqlErrorSpan};
+use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::JoinType;
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
-use crate::planner::{LogicalPlan, SchemaOutput};
+use crate::planner::{LogicalPlan, PlanArena};
 use crate::storage::{TableCache, Transaction, ViewCache};
-use crate::types::tuple::SchemaRef;
+use crate::types::tuple::Schema;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 
@@ -62,76 +75,11 @@ pub enum InputRefType {
     GroupBy,
 }
 
-pub enum CommandType {
-    DQL,
-    DML,
-    DDL,
-}
-
-fn annotate_bind_error(stmt: &Statement, err: DatabaseError) -> DatabaseError {
-    attach_span_if_absent(err, stmt)
-}
-
-pub(crate) fn attach_span_from_sqlparser_span_if_absent(
-    err: DatabaseError,
-    span: Span,
-) -> DatabaseError {
-    if err.sql_error_span().is_some() {
-        return err;
-    }
-
-    match sqlparser_span_to_sql_error_span(span) {
-        Some(span) => err.with_span(span),
-        None => err,
-    }
-}
-
-pub(crate) fn attach_span_if_absent<T: Spanned + ?Sized>(
-    err: DatabaseError,
-    node: &T,
-) -> DatabaseError {
-    attach_span_from_sqlparser_span_if_absent(err, node.span())
-}
-
-pub(crate) fn sqlparser_span_to_sql_error_span(span: Span) -> Option<SqlErrorSpan> {
-    if span == Span::empty() {
-        return None;
-    }
-
-    let start = span.start.column as usize;
-    let mut end = span.end.column as usize;
-    if end <= start {
-        end = start.saturating_add(1);
-    }
-
-    Some(SqlErrorSpan {
-        start,
-        end,
-        line: span.start.line as usize,
-        highlight: None,
-    })
-}
-
-pub fn command_type(stmt: &Statement) -> Result<CommandType, DatabaseError> {
-    match stmt {
-        Statement::CreateTable(_)
-        | Statement::CreateIndex(_)
-        | Statement::CreateView(_)
-        | Statement::AlterTable(_)
-        | Statement::Drop { .. } => Ok(CommandType::DDL),
-        Statement::Query(_)
-        | Statement::Explain { .. }
-        | Statement::ExplainTable { .. }
-        | Statement::ShowTables { .. }
-        | Statement::ShowViews { .. } => Ok(CommandType::DQL),
-        Statement::Analyze(_)
-        | Statement::Truncate(_)
-        | Statement::Update(_)
-        | Statement::Delete(_)
-        | Statement::Insert(_)
-        | Statement::Copy { .. } => Ok(CommandType::DML),
-        stmt => Err(DatabaseError::UnsupportedStmt(stmt.to_string())),
-    }
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum SetOperatorKind {
+    Union,
+    Except,
+    Intersect,
 }
 
 // Tips: only query now!
@@ -173,7 +121,7 @@ pub enum SubQueryType {
 pub enum Source<'a> {
     Table(&'a TableCatalog),
     View(&'a View),
-    Schema(SchemaRef),
+    Schema(Schema),
 }
 
 #[derive(Debug, Clone)]
@@ -233,21 +181,24 @@ impl UsingColumn {
     }
 
     fn left_expr(&self) -> ScalarExpression {
-        ScalarExpression::column_expr(self.left_column.clone(), self.left_position)
+        ScalarExpression::column_expr(self.left_column, self.left_position)
     }
 
     fn right_expr(&self) -> ScalarExpression {
-        ScalarExpression::column_expr(self.right_column.clone(), self.right_position)
+        ScalarExpression::column_expr(self.right_column, self.right_position)
     }
 
-    pub(crate) fn visible_expr(&self) -> Result<ScalarExpression, DatabaseError> {
+    pub(crate) fn visible_expr(
+        &self,
+        arena: &PlanArena,
+    ) -> Result<ScalarExpression, DatabaseError> {
         match self.join_type {
             JoinType::RightOuter => Ok(self.right_expr()),
             JoinType::Full => {
                 let left_expr = self.left_expr();
                 let right_expr = self.right_expr();
-                let left_ty = left_expr.return_type();
-                let right_ty = right_expr.return_type();
+                let left_ty = left_expr.return_type(arena);
+                let right_ty = right_expr.return_type(arena);
                 let ty = LogicalType::max_logical_type(&left_ty, &right_ty)?.into_owned();
 
                 Ok(ScalarExpression::Coalesce {
@@ -259,17 +210,16 @@ impl UsingColumn {
         }
     }
 
-    pub(crate) fn hides_column(&self, column: &ColumnRef) -> bool {
+    pub(crate) fn hides_column(&self, column: &ColumnRef, arena: &PlanArena) -> bool {
         let hidden_column = if self.join_type.is_right() {
             &self.left_column
         } else {
             &self.right_column
         };
-        hidden_column.same_column(column)
+        arena.same_column(*hidden_column, *column)
     }
 }
 
-#[derive(Clone)]
 pub struct BinderContext<'a, T: Transaction> {
     pub(crate) scala_functions: &'a ScalaFunctions,
     pub(crate) table_functions: &'a TableFunctions,
@@ -292,37 +242,38 @@ pub struct BinderContext<'a, T: Transaction> {
     sub_queries: HashMap<QueryBindStep, Vec<SubQueryType>>,
     has_outer_refs: bool,
 
-    temp_table_id: Arc<AtomicUsize>,
     pub(crate) allow_default: bool,
 }
 
 impl Source<'_> {
-    pub(crate) fn column(
-        &self,
-        name: &str,
-        schema_buf: &mut Option<SchemaOutput>,
-    ) -> Option<ColumnRef> {
+    pub(crate) fn column(&self, name: &str, arena: &PlanArena) -> Option<ColumnRef> {
         match self {
             Source::Table(table) => table.get_column_by_name(name),
-            Source::View(view) => schema_buf
-                .get_or_insert_with(|| view.plan.output_schema_direct())
-                .columns()
-                .find(|column| column.name() == name),
-            Source::Schema(schema_ref) => schema_ref.iter().find(|column| column.name() == name),
+            Source::View(view) => view
+                .schema
+                .iter()
+                .find(|column| arena.column(**column).name() == name)
+                .copied(),
+            Source::Schema(schema_ref) => schema_ref
+                .iter()
+                .find(|column| arena.column(**column).name() == name)
+                .copied(),
         }
-        .cloned()
     }
 
-    pub(crate) fn schema_ref(&self, schema_buf: &mut Option<SchemaOutput>) -> SchemaRef {
+    pub(crate) fn schema(&self) -> &[ColumnRef] {
         match self {
-            Source::Table(table) => table.schema_ref().clone(),
-            Source::View(view) => {
-                match schema_buf.get_or_insert_with(|| view.plan.output_schema_direct()) {
-                    SchemaOutput::Schema(schema) => Arc::new(schema.clone()),
-                    SchemaOutput::SchemaRef(schema_ref) => schema_ref.clone(),
-                }
-            }
-            Source::Schema(schema_ref) => schema_ref.clone(),
+            Source::Table(table) => table.columns().as_slice(),
+            Source::View(view) => &view.schema,
+            Source::Schema(schema_ref) => schema_ref,
+        }
+    }
+
+    pub(crate) fn schema_len(&self) -> usize {
+        match self {
+            Source::Table(table) => table.columns_len(),
+            Source::View(view) => view.schema.len(),
+            Source::Schema(schema_ref) => schema_ref.len(),
         }
     }
 }
@@ -334,7 +285,6 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
         transaction: &'a T,
         scala_functions: &'a ScalaFunctions,
         table_functions: &'a TableFunctions,
-        temp_table_id: Arc<AtomicUsize>,
     ) -> Self {
         BinderContext {
             scala_functions,
@@ -351,17 +301,46 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
             bind_step: QueryBindStep::From,
             sub_queries: Default::default(),
             has_outer_refs: false,
-            temp_table_id,
             allow_default: false,
         }
     }
 
-    pub fn temp_table(&mut self) -> TableName {
-        format!(
-            "_temp_table_{}_",
-            self.temp_table_id.fetch_add(1, Ordering::SeqCst)
+    /// Creates a child context that starts with the current binding scope.
+    ///
+    /// This is used for nested query bodies that should be able to resolve the
+    /// same local sources and aliases while keeping their mutations isolated.
+    pub(crate) fn fork(&self) -> Self {
+        BinderContext {
+            scala_functions: self.scala_functions,
+            table_functions: self.table_functions,
+            table_cache: self.table_cache,
+            view_cache: self.view_cache,
+            transaction: self.transaction,
+            bind_table: self.bind_table.clone(),
+            expr_aliases: self.expr_aliases.clone(),
+            table_aliases: self.table_aliases.clone(),
+            group_by_exprs: self.group_by_exprs.clone(),
+            agg_calls: self.agg_calls.clone(),
+            using: self.using.clone(),
+            bind_step: self.bind_step,
+            sub_queries: Default::default(),
+            has_outer_refs: false,
+            allow_default: self.allow_default,
+        }
+    }
+
+    /// Creates a child context with shared catalogs but without local bindings.
+    ///
+    /// This is used while binding an independent input, such as the right side
+    /// of a join, before merging its newly bound sources into the parent scope.
+    pub(crate) fn fork_empty(&self) -> Self {
+        BinderContext::new(
+            self.table_cache,
+            self.view_cache,
+            self.transaction,
+            self.scala_functions,
+            self.table_functions,
         )
-        .into()
     }
 
     pub fn step(&mut self, bind_step: QueryBindStep) {
@@ -550,9 +529,9 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
         }
         let using_column = UsingColumn::new(
             join_type,
-            left_column.clone(),
+            *left_column,
             left_position,
-            right_column.clone(),
+            *right_column,
             right_position,
         );
         self.using.insert(name, using_column);
@@ -577,23 +556,21 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
     }
 }
 
-pub struct Binder<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> {
-    context: BinderContext<'a, T>,
-    table_schema_buf: HashMap<TableName, Option<SchemaOutput>>,
-    args: &'a A,
+pub struct Binder<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> {
+    pub(crate) context: BinderContext<'a, T>,
+    pub(crate) args: &'a A,
     with_pk: Option<TableName>,
-    pub(crate) parent: Option<&'b Binder<'a, 'b, T, A>>,
+    pub(crate) parent: Option<&'parent BinderContext<'a, T>>,
 }
 
-impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, 'b, T, A> {
+impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, 'parent, T, A> {
     pub fn new(
         context: BinderContext<'a, T>,
         args: &'a A,
-        parent: Option<&'b Binder<'a, 'b, T, A>>,
+        parent: Option<&'parent BinderContext<'a, T>>,
     ) -> Self {
         Binder {
             context,
-            table_schema_buf: Default::default(),
             args,
             with_pk: None,
             parent,
@@ -604,6 +581,10 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
         self.with_pk = Some(table_name);
     }
 
+    pub fn clear_with_pk(&mut self) {
+        self.with_pk = None;
+    }
+
     pub fn is_scan_with_pk(&self, table_name: &TableName) -> bool {
         if let Some(with_pk_table) = self.with_pk.as_ref() {
             return with_pk_table == table_name;
@@ -611,162 +592,7 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
         false
     }
 
-    fn bind_inner(&mut self, stmt: &Statement) -> Result<LogicalPlan, DatabaseError> {
-        let plan = match stmt {
-            Statement::Query(query) => self.bind_query(query)?,
-            Statement::AlterTable(alter) => {
-                if alter.operations.len() != 1 {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "only a single ALTER TABLE operation is supported".to_string(),
-                    ));
-                }
-                self.bind_alter_table(&alter.name, &alter.operations[0])?
-            }
-            Statement::CreateTable(create) => self.bind_create_table(
-                &create.name,
-                &create.columns,
-                &create.constraints,
-                create.if_not_exists,
-            )?,
-            Statement::Drop {
-                object_type,
-                names,
-                if_exists,
-                ..
-            } => {
-                if names.len() > 1 {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "only Drop a single `Table` or `View` is allowed".to_string(),
-                    ));
-                }
-                match object_type {
-                    ObjectType::Table => self.bind_drop_table(&names[0], if_exists)?,
-                    ObjectType::View => self.bind_drop_view(&names[0], if_exists)?,
-                    ObjectType::Index => self.bind_drop_index(&names[0], if_exists)?,
-                    _ => {
-                        return Err(DatabaseError::UnsupportedStmt(
-                            "only `Table` and `View` are allowed to be Dropped".to_string(),
-                        ))
-                    }
-                }
-            }
-            Statement::Insert(insert) => {
-                let table_name = match &insert.table {
-                    TableObject::TableName(table_name) => table_name,
-                    TableObject::TableFunction(_) => {
-                        return Err(DatabaseError::UnsupportedStmt(
-                            "insert into table function is not supported".to_string(),
-                        ))
-                    }
-                };
-                let source = insert.source.as_ref().ok_or_else(|| {
-                    DatabaseError::UnsupportedStmt(
-                        "insert without source is not supported".to_string(),
-                    )
-                })?;
-                match source.body.as_ref() {
-                    SetExpr::Values(values) => self.bind_insert(
-                        table_name,
-                        &insert.columns,
-                        &values.rows,
-                        insert.overwrite,
-                        false,
-                    )?,
-                    _ => self.bind_insert_query(
-                        table_name,
-                        &insert.columns,
-                        source,
-                        insert.overwrite,
-                    )?,
-                }
-            }
-            Statement::Update(update) => {
-                let table = &update.table;
-                self.bind_update(table, &update.selection, &update.assignments)?
-            }
-            Statement::Delete(delete) => {
-                let from = match &delete.from {
-                    FromTable::WithFromKeyword(from) | FromTable::WithoutKeyword(from) => from,
-                };
-                let table = &from[0];
-
-                self.bind_delete(table, &delete.selection)?
-            }
-            Statement::Analyze(analyze) => {
-                let table_name = analyze.table_name.as_ref().ok_or_else(|| {
-                    DatabaseError::UnsupportedStmt(
-                        "ANALYZE without table is not supported".to_string(),
-                    )
-                })?;
-                self.bind_analyze(table_name)?
-            }
-            Statement::Truncate(truncate) => {
-                if truncate.table_names.len() != 1 {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "only truncate a single table is supported".to_string(),
-                    ));
-                }
-                self.bind_truncate(&truncate.table_names[0].name)?
-            }
-            Statement::ShowTables { .. } => self.bind_show_tables()?,
-            Statement::ShowViews { .. } => self.bind_show_views()?,
-            Statement::Copy {
-                source,
-                to,
-                target,
-                options,
-                ..
-            } => self.bind_copy(source.clone(), *to, target.clone(), options)?,
-            Statement::Explain { statement, .. } => {
-                let plan = self.bind_inner(statement)?;
-
-                self.bind_explain(plan)?
-            }
-            Statement::ExplainTable {
-                describe_alias: DescribeAlias::Describe | DescribeAlias::Desc,
-                table_name,
-                ..
-            } => self.bind_describe(table_name)?,
-            Statement::CreateIndex(create) => self.bind_create_index(
-                &create.table_name,
-                create.name.as_ref(),
-                &create.columns,
-                create.if_not_exists,
-                create.unique,
-            )?,
-            Statement::CreateView(create) => self.bind_create_view(
-                &create.or_replace,
-                &create.name,
-                &create.columns,
-                &create.query,
-            )?,
-            _ => return Err(DatabaseError::UnsupportedStmt(stmt.to_string())),
-        };
-        Ok(plan)
-    }
-
-    pub fn bind(&mut self, stmt: &Statement) -> Result<LogicalPlan, DatabaseError> {
-        self.bind_inner(stmt)
-            .map_err(|err| annotate_bind_error(stmt, err))
-    }
-
-    pub fn bind_set_expr(&mut self, set_expr: &SetExpr) -> Result<LogicalPlan, DatabaseError> {
-        match set_expr {
-            SetExpr::Select(select) => self.bind_select(select, None),
-            SetExpr::Query(query) => self.bind_query(query),
-            SetExpr::SetOperation {
-                op,
-                set_quantifier,
-                left,
-                right,
-            } => self.bind_set_operation(op, set_quantifier, left, right),
-            expr => Err(DatabaseError::UnsupportedStmt(format!(
-                "set expression: {expr:?}"
-            ))),
-        }
-    }
-
-    fn extend(&mut self, context: BinderContext<'a, T>) {
+    pub(crate) fn extend(&mut self, context: BinderContext<'a, T>) {
         for bound_source in context.bind_table {
             self.context.add_bound_source(
                 bound_source.table_name,
@@ -784,33 +610,6 @@ impl<'a, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '
     }
 }
 
-fn lower_ident(ident: &Ident) -> Cow<'_, str> {
-    let value = &ident.value;
-
-    if value.chars().any(char::is_uppercase) {
-        Cow::Owned(value.to_lowercase())
-    } else {
-        Cow::Borrowed(value)
-    }
-}
-
-fn lower_name_part(part: &ObjectNamePart) -> Result<Cow<'_, str>, DatabaseError> {
-    part.as_ident()
-        .map(lower_ident)
-        .ok_or_else(|| attach_span_if_absent(DatabaseError::invalid_table(part.to_string()), part))
-}
-
-/// Convert an object name into lower case
-fn lower_case_name(name: &ObjectName) -> Result<Cow<'_, str>, DatabaseError> {
-    if name.0.len() == 1 {
-        return lower_name_part(&name.0[0]);
-    }
-    Err(attach_span_if_absent(
-        DatabaseError::invalid_table(name.to_string()),
-        name,
-    ))
-}
-
 pub(crate) fn is_valid_identifier(s: &str) -> bool {
     s.chars().all(|c| c.is_alphanumeric() || c == '_')
         && !s.chars().next().unwrap_or_default().is_numeric()
@@ -822,27 +621,33 @@ pub mod test {
     use crate::binder::{is_valid_identifier, Binder, BinderContext};
     use crate::catalog::{ColumnCatalog, ColumnDesc, TableCatalog};
     use crate::errors::DatabaseError;
-    use crate::planner::LogicalPlan;
+    use crate::planner::{LogicalPlan, PlanArena, TableArenaCell};
     use crate::storage::rocksdb::RocksStorage;
-    use crate::storage::{Storage, TableCache, Transaction, ViewCache};
+    use crate::storage::{table_codec::TableCodec, Storage, TableCache, Transaction, ViewCache};
     use crate::types::ColumnId;
     use crate::types::LogicalType::Integer;
-    use crate::utils::lru::SharedLruCache;
-    use std::hash::RandomState;
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::Arc;
     use tempfile::TempDir;
 
     pub(crate) struct TableState<S: Storage> {
         pub(crate) table: TableCatalog,
-        pub(crate) table_cache: Arc<TableCache>,
-        pub(crate) view_cache: Arc<ViewCache>,
+        pub(crate) table_cache: TableCache,
+        pub(crate) view_cache: ViewCache,
+        pub(crate) table_arena: TableArenaCell,
         pub(crate) storage: S,
     }
 
     impl<S: Storage> TableState<S> {
         pub(crate) fn plan<T: AsRef<str>>(&self, sql: T) -> Result<LogicalPlan, DatabaseError> {
+            let mut plan_arena = PlanArena::new(&self.table_arena);
+            self.plan_with_arena(sql, &mut plan_arena)
+        }
+
+        pub(crate) fn plan_with_arena<T: AsRef<str>>(
+            &self,
+            sql: T,
+            plan_arena: &mut PlanArena,
+        ) -> Result<LogicalPlan, DatabaseError> {
             let scala_functions = Default::default();
             let table_functions = Default::default();
             let transaction = self.storage.transaction()?;
@@ -853,14 +658,14 @@ pub mod test {
                     &transaction,
                     &scala_functions,
                     &table_functions,
-                    Arc::new(AtomicUsize::new(0)),
                 ),
                 &[],
                 None,
             );
             let stmt = crate::parser::parse_sql(sql)?;
+            let stmt = stmt.into_iter().next().unwrap();
 
-            binder.bind(&stmt[0])
+            binder.bind(&stmt, plan_arena)
         }
 
         pub(crate) fn column_id_by_name(&self, name: &str) -> &ColumnId {
@@ -870,9 +675,10 @@ pub mod test {
 
     pub(crate) fn build_t1_table() -> Result<TableState<RocksStorage>, DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let storage = build_test_catalog(&table_cache, temp_dir.path())?;
+        let mut table_cache = crate::storage::TableCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_arena = TableArenaCell::default();
+        let storage = build_test_catalog(&mut table_cache, temp_dir.path(), &table_arena)?;
         let table = {
             let transaction = storage.transaction()?;
             transaction
@@ -885,19 +691,24 @@ pub mod test {
             table,
             table_cache,
             view_cache,
+            table_arena,
             storage,
         })
     }
 
     pub(crate) fn build_test_catalog(
-        table_cache: &TableCache,
+        table_cache: &mut TableCache,
         path: impl Into<PathBuf> + Send,
+        table_arena: &TableArenaCell,
     ) -> Result<RocksStorage, DatabaseError> {
         let storage = RocksStorage::new(path)?;
         let mut transaction = storage.transaction()?;
+        let mut table_codec = TableCodec::default();
 
-        let _ = transaction.create_table(
-            table_cache,
+        let mut plan_arena = PlanArena::new(table_arena);
+        if let Some(table) = transaction.create_table(
+            &mut table_codec,
+            &mut plan_arena,
             "t1".to_string().into(),
             vec![
                 ColumnCatalog::new(
@@ -912,10 +723,15 @@ pub mod test {
                 ),
             ],
             false,
-        )?;
+        )? {
+            let table = table.transplant_to_table_arena(&plan_arena)?;
+            table_cache.insert(table.name().clone(), table);
+        }
 
-        let _ = transaction.create_table(
-            table_cache,
+        let mut plan_arena = PlanArena::new(table_arena);
+        if let Some(table) = transaction.create_table(
+            &mut table_codec,
+            &mut plan_arena,
             "t2".to_string().into(),
             vec![
                 ColumnCatalog::new(
@@ -930,8 +746,10 @@ pub mod test {
                 ),
             ],
             false,
-        )?;
-
+        )? {
+            let table = table.transplant_to_table_arena(&plan_arena)?;
+            table_cache.insert(table.name().clone(), table);
+        }
         transaction.commit()?;
 
         Ok(storage)

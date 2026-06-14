@@ -21,7 +21,7 @@ use crate::storage::lmdb::LmdbStorage;
 use crate::storage::memory::MemoryStorage;
 #[cfg(feature = "rocksdb")]
 use crate::storage::rocksdb::RocksStorage;
-use crate::types::tuple::{SchemaRef, Tuple};
+use crate::types::tuple::{SchemaView, Tuple};
 use crate::types::value::DataValue;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -82,7 +82,7 @@ fn tuple_to_python_row(py: Python<'_>, tuple: &Tuple) -> PyResult<PyObject> {
     Ok(row.into_any().unbind())
 }
 
-fn schema_to_python(py: Python<'_>, schema: &SchemaRef) -> PyResult<Vec<PyObject>> {
+fn schema_to_python(py: Python<'_>, schema: &SchemaView<'_, '_>) -> PyResult<Vec<PyObject>> {
     schema
         .iter()
         .map(|col| {
@@ -131,6 +131,26 @@ impl PythonDatabaseInner {
             }
         }
     }
+
+    fn ddl(&mut self, sql: &str) -> Result<(), DatabaseError> {
+        match self {
+            #[cfg(feature = "lmdb")]
+            PythonDatabaseInner::Lmdb(db) => db.ddl(sql),
+            PythonDatabaseInner::Memory(db) => db.ddl(sql),
+            #[cfg(feature = "rocksdb")]
+            PythonDatabaseInner::Rocks(db) => db.ddl(sql),
+        }
+    }
+
+    fn analyze(&mut self, table_name: &str) -> Result<(), DatabaseError> {
+        match self {
+            #[cfg(feature = "lmdb")]
+            PythonDatabaseInner::Lmdb(db) => db.analyze(table_name),
+            PythonDatabaseInner::Memory(db) => db.analyze(table_name),
+            #[cfg(feature = "rocksdb")]
+            PythonDatabaseInner::Rocks(db) => db.analyze(table_name),
+        }
+    }
 }
 
 enum PythonResultIterInner {
@@ -152,13 +172,13 @@ impl PythonResultIterInner {
         }
     }
 
-    fn schema(&self) -> &SchemaRef {
+    fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
         match self {
             #[cfg(feature = "lmdb")]
-            PythonResultIterInner::Lmdb(iter) => iter.schema(),
-            PythonResultIterInner::Memory(iter) => iter.schema(),
+            PythonResultIterInner::Lmdb(iter) => iter.schema(f),
+            PythonResultIterInner::Memory(iter) => iter.schema(f),
             #[cfg(feature = "rocksdb")]
-            PythonResultIterInner::Rocks(iter) => iter.schema(),
+            PythonResultIterInner::Rocks(iter) => iter.schema(f),
         }
     }
 
@@ -198,11 +218,12 @@ impl PythonDatabase {
                     .map_err(to_py_err)?,
             ),
             other => {
-                let mut expected = Vec::new();
-                #[cfg(feature = "rocksdb")]
-                expected.push("rocksdb");
-                #[cfg(feature = "lmdb")]
-                expected.push("lmdb");
+                let expected = [
+                    #[cfg(feature = "rocksdb")]
+                    "rocksdb",
+                    #[cfg(feature = "lmdb")]
+                    "lmdb",
+                ];
                 return Err(PyValueError::new_err(format!(
                     "unsupported backend '{other}', expected {}",
                     expected.join(" or ")
@@ -234,6 +255,14 @@ impl PythonDatabase {
         iter.done().map_err(to_py_err)?;
 
         Ok(())
+    }
+
+    pub fn ddl(&mut self, sql: &str) -> PyResult<()> {
+        self.inner.ddl(sql).map_err(to_py_err)
+    }
+
+    pub fn analyze(&mut self, table_name: &str) -> PyResult<()> {
+        self.inner.analyze(table_name).map_err(to_py_err)
     }
 }
 
@@ -269,7 +298,7 @@ impl PythonResultIter {
 
     pub fn schema(&self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
         let iter = self.inner_ref()?;
-        schema_to_python(py, iter.schema())
+        iter.schema(|schema| schema_to_python(py, schema))
     }
 
     pub fn rows(&mut self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
@@ -377,8 +406,8 @@ mod tests {
                 c_str!(
                     r#"
 db = kite_sql.Database.in_memory() if backend == "memory" else kite_sql.Database(db_path, backend)
-db.execute("drop table if exists my_struct")
-db.execute("create table my_struct (c1 int primary key, c2 int)")
+db.ddl("drop table if exists my_struct")
+db.ddl("create table my_struct (c1 int primary key, c2 int)")
 db.execute("insert into my_struct values(0, 0), (1, 1)")
 
 iter_obj = db.run("select * from my_struct")
@@ -405,7 +434,7 @@ while row is not None:
 stream.finish()
 assert streamed == [[0, 0], [1, 11]]
 
-db.execute("drop table my_struct")
+db.ddl("drop table my_struct")
 "#
                 ),
             )?;
@@ -423,8 +452,8 @@ db.execute("drop table my_struct")
                 c_str!(
                     r#"
 db = kite_sql.Database.in_memory() if backend == "memory" else kite_sql.Database(db_path, backend)
-db.execute("drop table if exists t1")
-db.execute("create table t1(id int primary key, c1 int, c2 int)")
+db.ddl("drop table if exists t1")
+db.ddl("create table t1(id int primary key, c1 int, c2 int)")
 
 for i in range(2000):
     id_v = i * 3
@@ -432,10 +461,10 @@ for i in range(2000):
     c2_v = id_v + 2
     db.execute(f"insert into t1 values({id_v}, {c1_v}, {c2_v})")
 
-db.execute("create unique index u_c1_index on t1 (c1)")
-db.execute("create index c2_index on t1 (c2)")
-db.execute("create index p_index on t1 (c1, c2)")
-db.execute("analyze table t1")
+db.ddl("create unique index u_c1_index on t1 (c1)")
+db.ddl("create index c2_index on t1 (c2)")
+db.ddl("create index p_index on t1 (c1, c2)")
+db.analyze("t1")
 
 def row_vals(row):
     ints = row["values"]
@@ -473,7 +502,43 @@ db.execute("delete from t1 where c1 = 7")
 after_delete = db.run("select * from t1 where c2 = 123456").rows()
 assert len(after_delete) == 0
 
-db.execute("drop table t1")
+db.ddl("drop table t1")
+"#
+                ),
+            )?;
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_python_mutations_use_explicit_api() -> PyResult<()> {
+        Python::with_gil(|py| {
+            let module = register_module(py)?;
+            run_script_on_all_backends(
+                py,
+                &module,
+                c_str!(
+                    r#"
+db = kite_sql.Database.in_memory() if backend == "memory" else kite_sql.Database(db_path, backend)
+
+try:
+    db.execute("create table explicit_api(id int primary key)")
+    raise AssertionError("expected execute to reject DDL")
+except RuntimeError as exc:
+    assert "Database::ddl" in str(exc)
+
+db.ddl("create table explicit_api(id int primary key)")
+for i in range(200):
+    db.execute(f"insert into explicit_api values ({i})")
+
+try:
+    db.execute("analyze table explicit_api")
+    raise AssertionError("expected execute to reject ANALYZE")
+except RuntimeError as exc:
+    assert "Database::analyze" in str(exc)
+
+db.analyze("explicit_api")
+db.ddl("drop table explicit_api")
 "#
                 ),
             )?;

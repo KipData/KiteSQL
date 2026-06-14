@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
+use crate::execution::{
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
+};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::filter::FilterOperator;
 use crate::planner::LogicalPlan;
@@ -23,22 +25,29 @@ pub struct Filter {
     input: ExecId,
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Filter {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Filter {
     type Input = (FilterOperator, LogicalPlan);
 
     fn into_executor(
         (FilterOperator { predicate, .. }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+        cache: ExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
-        let input = build_read(arena, input, cache, transaction);
+        let input = build_read(arena, plan_arena, input, cache, transaction);
         arena.push(ExecNode::Filter(Filter { predicate, input }))
     }
+}
 
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Filter {
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
         loop {
-            if !arena.next_tuple(self.input)? {
+            if !arena.next_tuple(self.input, plan_arena)? {
                 arena.finish();
                 return Ok(());
             };

@@ -35,19 +35,24 @@ use std::collections::Bound;
 const REWRITE_BATCH_SIZE: usize = 1024;
 
 #[allow(clippy::too_many_arguments)]
-fn read_tuple_batch<T: Transaction>(
+fn read_tuple_batch<T, D, I>(
     transaction: &T,
+    table_codec: &mut TableCodec,
     table_name: &TableName,
     pk_ty: &LogicalType,
-    old_deserializers: &[TupleValueSerializableImpl],
     old_values_len: usize,
+    old_deserializers: &mut D,
     start_after: Option<&TupleId>,
     batch: &mut Vec<Tuple>,
     batch_size: usize,
-) -> Result<usize, DatabaseError> {
-    let table_codec = unsafe { &*transaction.table_codec() };
+) -> Result<usize, DatabaseError>
+where
+    T: Transaction,
+    D: FnMut() -> I,
+    I: IntoIterator<Item = TupleValueSerializableImpl>,
+{
     let lower = if let Some(last_pk) = start_after {
-        table_codec.with_tuple_key_unchecked(table_name.as_ref(), last_pk, |key| {
+        table_codec.with_tuple_unchecked(table_name.as_ref(), last_pk, None, |key, _| {
             Ok::<_, DatabaseError>(Bound::Excluded(key.to_vec()))
         })?
     } else {
@@ -81,7 +86,7 @@ fn read_tuple_batch<T: Transaction>(
             };
             TableCodec::decode_tuple_into(
                 tuple,
-                old_deserializers,
+                old_deserializers(),
                 Some(tuple_id),
                 value,
                 old_values_len,
@@ -93,16 +98,19 @@ fn read_tuple_batch<T: Transaction>(
     })
 }
 
-pub(crate) fn visit_table_in_batches<T, F>(
+pub(crate) fn visit_table_in_batches<T, D, I, F>(
     transaction: &T,
+    table_codec: &mut TableCodec,
     table_name: &TableName,
     pk_ty: &LogicalType,
-    old_deserializers: &[TupleValueSerializableImpl],
     old_values_len: usize,
+    mut old_deserializers: D,
     mut visit: F,
 ) -> Result<(), DatabaseError>
 where
     T: Transaction,
+    D: FnMut() -> I,
+    I: IntoIterator<Item = TupleValueSerializableImpl>,
     F: FnMut(&Tuple) -> Result<(), DatabaseError>,
 {
     let mut last_pk = None;
@@ -111,10 +119,11 @@ where
     loop {
         let batch_len = read_tuple_batch(
             transaction,
+            table_codec,
             table_name,
             pk_ty,
-            old_deserializers,
             old_values_len,
+            &mut old_deserializers,
             last_pk.as_ref(),
             &mut batch,
             REWRITE_BATCH_SIZE,
@@ -137,20 +146,25 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn rewrite_table_in_batches<T, F, G>(
+pub(crate) fn rewrite_table_in_batches<T, D, I, S, J, F, G>(
     transaction: &mut T,
+    table_codec: &mut TableCodec,
     table_name: &TableName,
     pk_ty: &LogicalType,
-    old_deserializers: &[TupleValueSerializableImpl],
     old_values_len: usize,
-    new_serializers: &[TupleValueSerializableImpl],
+    mut old_deserializers: D,
+    mut new_serializers: S,
     mut rewrite: F,
     mut after_write: G,
 ) -> Result<(), DatabaseError>
 where
     T: Transaction,
+    D: FnMut() -> I,
+    I: IntoIterator<Item = TupleValueSerializableImpl>,
+    S: FnMut() -> J,
+    J: IntoIterator<Item = TupleValueSerializableImpl>,
     F: FnMut(&mut Tuple) -> Result<(), DatabaseError>,
-    G: FnMut(&mut T, &Tuple) -> Result<(), DatabaseError>,
+    G: FnMut(&mut T, &mut TableCodec, &Tuple) -> Result<(), DatabaseError>,
 {
     let mut last_pk = None;
     let mut batch = Vec::with_capacity(REWRITE_BATCH_SIZE);
@@ -158,10 +172,11 @@ where
     loop {
         let batch_len = read_tuple_batch(
             transaction,
+            table_codec,
             table_name,
             pk_ty,
-            old_deserializers,
             old_values_len,
+            &mut old_deserializers,
             last_pk.as_ref(),
             &mut batch,
             REWRITE_BATCH_SIZE,
@@ -173,8 +188,14 @@ where
 
         for tuple in batch.iter_mut().take(batch_len) {
             rewrite(tuple)?;
-            transaction.append_tuple(table_name.as_ref(), tuple.clone(), new_serializers, true)?;
-            after_write(transaction, tuple)?;
+            transaction.append_tuple(
+                table_codec,
+                table_name.as_ref(),
+                tuple.clone(),
+                new_serializers(),
+                true,
+            )?;
+            after_write(transaction, table_codec, tuple)?;
         }
 
         if batch_len < REWRITE_BATCH_SIZE {

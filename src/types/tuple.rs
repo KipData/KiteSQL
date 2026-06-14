@@ -12,23 +12,68 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::ColumnRef;
-use crate::db::ResultIter;
+use crate::catalog::{ColumnCatalog, ColumnRef};
 use crate::errors::DatabaseError;
-use crate::storage::table_codec::BumpBytes;
+use crate::planner::PlanArena;
 use crate::types::serialize::{TupleValueSerializable, TupleValueSerializableImpl};
 use crate::types::value::DataValue;
-use bumpalo::Bump;
-use comfy_table::{Cell, Table};
 use itertools::Itertools;
+use std::borrow::Borrow;
 use std::io::Cursor;
-use std::sync::Arc;
 
 const BITS_MAX_INDEX: usize = 8;
 
 pub type TupleId = DataValue;
 pub type Schema = Vec<ColumnRef>;
-pub type SchemaRef = Arc<Schema>;
+
+pub struct SchemaView<'a, 'p> {
+    schema: &'a Schema,
+    arena: &'a PlanArena<'p>,
+}
+
+pub struct SchemaColumnIter<'a, 'p, 's> {
+    columns: std::slice::Iter<'s, ColumnRef>,
+    arena: &'a PlanArena<'p>,
+}
+
+impl<'a> Iterator for SchemaColumnIter<'a, '_, '_> {
+    type Item = &'a ColumnCatalog;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.columns.next().map(|column| self.arena.column(*column))
+    }
+}
+
+impl<'a, 'p> SchemaView<'a, 'p> {
+    pub fn new(schema: &'a Schema, arena: &'a PlanArena<'p>) -> Self {
+        Self { schema, arena }
+    }
+
+    pub fn iter(&self) -> SchemaColumnIter<'a, 'p, '_> {
+        SchemaColumnIter {
+            columns: self.schema.iter(),
+            arena: self.arena,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.schema.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.schema.is_empty()
+    }
+
+    pub fn get(&self, index: usize) -> Option<&'a ColumnCatalog> {
+        self.schema
+            .get(index)
+            .map(|column| self.arena.column(*column))
+    }
+
+    pub fn position(&self, name: &str) -> Option<usize> {
+        self.iter().position(|column| column.name() == name)
+    }
+}
 
 pub trait TupleLike {
     fn value_at(&self, index: usize) -> &DataValue;
@@ -149,62 +194,73 @@ impl Tuple {
     }
 
     #[inline]
-    pub fn deserialize_from_into(
+    pub fn deserialize_from_into<I, S>(
         &mut self,
-        deserializers: &[TupleValueSerializableImpl],
+        deserializers: I,
         bytes: &[u8],
         total_len: usize,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<(), DatabaseError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Borrow<TupleValueSerializableImpl>,
+    {
         fn is_null(bits: u8, i: usize) -> bool {
             bits & (1 << (7 - i)) > 0
         }
 
         let bits_len = (total_len + BITS_MAX_INDEX) / BITS_MAX_INDEX;
         self.values.clear();
-        self.values.reserve(deserializers.len());
+        self.values.reserve(total_len);
 
         let mut cursor = Cursor::new(&bytes[bits_len..]);
 
-        for (i, deserializer) in deserializers.iter().enumerate() {
+        for (i, deserializer) in deserializers.into_iter().enumerate() {
             if is_null(bytes[i / BITS_MAX_INDEX], i % BITS_MAX_INDEX) {
                 self.values.push(DataValue::Null);
                 continue;
             }
-            deserializer.filling_value(&mut cursor, &mut self.values)?;
+            deserializer
+                .borrow()
+                .filling_value(&mut cursor, &mut self.values)?;
         }
         Ok(())
     }
 
     /// e.g.: bits(u8)..|data_0(len for utf8_1)|utf8_0|data_1|
     /// Tips: all len is u32
-    pub fn serialize_to<'a>(
+    pub fn serialize_to<I, S>(
         &self,
-        serializers: &[TupleValueSerializableImpl],
-        arena: &'a Bump,
-    ) -> Result<BumpBytes<'a>, DatabaseError> {
-        debug_assert_eq!(self.values.len(), serializers.len());
-
+        serializers: I,
+        bytes: &mut Vec<u8>,
+    ) -> Result<(), DatabaseError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Borrow<TupleValueSerializableImpl>,
+    {
         fn flip_bit(bits: u8, i: usize) -> u8 {
             bits | (1 << (7 - i))
         }
 
         let values_len = self.values.len();
         let bits_len = (values_len + BITS_MAX_INDEX) / BITS_MAX_INDEX;
-        let mut bytes = BumpBytes::new_in(arena);
+        let values_bytes_len = self
+            .values
+            .iter()
+            .map(DataValue::serialized_len_hint)
+            .sum::<usize>();
+        bytes.clear();
+        bytes.reserve(bits_len + values_bytes_len);
         bytes.resize(bits_len, 0u8);
-        let null_bytes: *mut BumpBytes = &mut bytes;
 
-        debug_assert_eq!(self.values.len(), serializers.len());
-        for (i, (value, serializer)) in self.values.iter().zip(serializers.iter()).enumerate() {
+        for (i, (value, serializer)) in self.values.iter().zip(serializers).enumerate() {
             if value.is_null() {
-                let null_bytes = unsafe { &mut *null_bytes };
-                null_bytes[i / BITS_MAX_INDEX] =
-                    flip_bit(null_bytes[i / BITS_MAX_INDEX], i % BITS_MAX_INDEX);
+                bytes[i / BITS_MAX_INDEX] = flip_bit(bytes[i / BITS_MAX_INDEX], i % BITS_MAX_INDEX);
             } else {
-                serializer.to_raw(value, &mut bytes)?;
+                serializer.borrow().to_raw(value, bytes)?;
             }
         }
-        Ok(bytes)
+
+        Ok(())
     }
 
     pub fn primary_projection(pk_indices: &[usize], values: &[DataValue]) -> TupleId {
@@ -219,40 +275,13 @@ impl Tuple {
     }
 }
 
-pub fn create_table<I: ResultIter>(iter: I) -> Result<Table, DatabaseError> {
-    let mut table = Table::new();
-    let mut header = Vec::new();
-    let schema = iter.schema().clone();
-
-    for col in schema.iter() {
-        header.push(Cell::new(col.full_name()));
-    }
-    table.set_header(header);
-
-    for tuple in iter {
-        let tuple = tuple?;
-        debug_assert_eq!(schema.len(), tuple.values.len());
-
-        let cells = tuple
-            .values
-            .iter()
-            .map(|value| Cell::new(format!("{value}")))
-            .collect_vec();
-
-        table.add_row(cells);
-    }
-
-    Ok(table)
-}
-
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
+    use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::types::tuple::Tuple;
     use crate::types::value::{DataValue, Utf8Type};
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
-    use bumpalo::Bump;
     use itertools::Itertools;
     use ordered_float::OrderedFloat;
     use rust_decimal::Decimal;
@@ -261,17 +290,17 @@ mod tests {
     #[test]
     fn test_tuple_serialize_to_and_deserialize_from() {
         let columns = Arc::new(vec![
-            ColumnRef::from(ColumnCatalog::new(
+            ColumnCatalog::new(
                 "c1".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
+            ),
+            ColumnCatalog::new(
                 "c2".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::UInteger, None, false, None).unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
+            ),
+            ColumnCatalog::new(
                 "c3".to_string(),
                 false,
                 ColumnDesc::new(
@@ -281,58 +310,58 @@ mod tests {
                     None,
                 )
                 .unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
+            ),
+            ColumnCatalog::new(
                 "c4".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::Smallint, None, false, None).unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
+            ),
+            ColumnCatalog::new(
                 "c5".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::USmallint, None, false, None).unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
+            ),
+            ColumnCatalog::new(
                 "c6".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::Float, None, false, None).unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
+            ),
+            ColumnCatalog::new(
                 "c7".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::Double, None, false, None).unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
+            ),
+            ColumnCatalog::new(
                 "c8".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::Tinyint, None, false, None).unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
+            ),
+            ColumnCatalog::new(
                 "c9".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::UTinyint, None, false, None).unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
+            ),
+            ColumnCatalog::new(
                 "c10".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::Boolean, None, false, None).unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
+            ),
+            ColumnCatalog::new(
                 "c11".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::DateTime, None, false, None).unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
+            ),
+            ColumnCatalog::new(
                 "c12".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::Date, None, false, None).unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
+            ),
+            ColumnCatalog::new(
                 "c13".to_string(),
                 false,
                 ColumnDesc::new(LogicalType::Decimal(None, None), None, false, None).unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
+            ),
+            ColumnCatalog::new(
                 "c14".to_string(),
                 false,
                 ColumnDesc::new(
@@ -342,8 +371,8 @@ mod tests {
                     None,
                 )
                 .unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
+            ),
+            ColumnCatalog::new(
                 "c15".to_string(),
                 false,
                 ColumnDesc::new(
@@ -353,8 +382,8 @@ mod tests {
                     None,
                 )
                 .unwrap(),
-            )),
-            ColumnRef::from(ColumnCatalog::new(
+            ),
+            ColumnCatalog::new(
                 "c16".to_string(),
                 false,
                 ColumnDesc::new(
@@ -364,7 +393,18 @@ mod tests {
                     None,
                 )
                 .unwrap(),
-            )),
+            ),
+            ColumnCatalog::new(
+                "c17".to_string(),
+                false,
+                ColumnDesc::new(
+                    LogicalType::Char(3, CharLengthUnits::Characters),
+                    None,
+                    false,
+                    None,
+                )
+                .unwrap(),
+            ),
         ]);
 
         let tuples = [
@@ -403,12 +443,18 @@ mod tests {
                         ty: Utf8Type::Fixed(10),
                         unit: CharLengthUnits::Octets,
                     },
+                    DataValue::Utf8 {
+                        value: "你".to_string(),
+                        ty: Utf8Type::Fixed(3),
+                        unit: CharLengthUnits::Characters,
+                    },
                 ],
             ),
             Tuple::new(
                 Some(DataValue::Int32(1)),
                 vec![
                     DataValue::Int32(1),
+                    DataValue::Null,
                     DataValue::Null,
                     DataValue::Null,
                     DataValue::Null,
@@ -431,19 +477,15 @@ mod tests {
             .iter()
             .map(|column| column.datatype().serializable())
             .collect_vec();
-        let columns = Arc::new(columns);
-        let arena = Bump::new();
+        let mut bytes = Vec::new();
         {
             let mut tuple_0 = Tuple {
                 pk: tuples[0].pk.clone(),
                 values: Vec::with_capacity(serializers.len()),
             };
+            tuples[0].serialize_to(&serializers, &mut bytes).unwrap();
             tuple_0
-                .deserialize_from_into(
-                    &serializers,
-                    &tuples[0].serialize_to(&serializers, &arena).unwrap(),
-                    columns.len(),
-                )
+                .deserialize_from_into(&serializers, &bytes, columns.len())
                 .unwrap();
 
             assert_eq!(tuples[0], tuple_0);
@@ -453,12 +495,9 @@ mod tests {
                 pk: tuples[1].pk.clone(),
                 values: Vec::with_capacity(serializers.len()),
             };
+            tuples[1].serialize_to(&serializers, &mut bytes).unwrap();
             tuple_1
-                .deserialize_from_into(
-                    &serializers,
-                    &tuples[1].serialize_to(&serializers, &arena).unwrap(),
-                    columns.len(),
-                )
+                .deserialize_from_into(&serializers, &bytes, columns.len())
                 .unwrap();
 
             assert_eq!(tuples[1], tuple_1);
@@ -475,12 +514,9 @@ mod tests {
                 pk: tuples[0].pk.clone(),
                 values: Vec::with_capacity(2),
             };
+            tuples[0].serialize_to(&serializers, &mut bytes).unwrap();
             tuple_2
-                .deserialize_from_into(
-                    &projection_serializers,
-                    &tuples[0].serialize_to(&serializers, &arena).unwrap(),
-                    columns.len(),
-                )
+                .deserialize_from_into(&projection_serializers, &bytes, columns.len())
                 .unwrap();
 
             assert_eq!(
@@ -511,12 +547,11 @@ mod tests {
                 pk: multi_pk_tuple.pk.clone(),
                 values: Vec::with_capacity(serializers.len()),
             };
+            multi_pk_tuple
+                .serialize_to(&serializers, &mut bytes)
+                .unwrap();
             tuple_3
-                .deserialize_from_into(
-                    &multiple_pk_serializers,
-                    &multi_pk_tuple.serialize_to(&serializers, &arena).unwrap(),
-                    columns.len(),
-                )
+                .deserialize_from_into(&multiple_pk_serializers, &bytes, columns.len())
                 .unwrap();
 
             assert_eq!(

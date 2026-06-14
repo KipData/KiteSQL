@@ -14,58 +14,87 @@
 
 use crate::errors::DatabaseError;
 use crate::expression::UnaryOperator;
-use crate::types::evaluator::boolean::BooleanNotUnaryEvaluator;
+use crate::types::evaluator::boolean::boolean_not_unary_eval;
 use crate::types::evaluator::float32::*;
 use crate::types::evaluator::float64::*;
 use crate::types::evaluator::int16::*;
 use crate::types::evaluator::int32::*;
 use crate::types::evaluator::int64::*;
 use crate::types::evaluator::int8::*;
-use crate::types::evaluator::UnaryEvaluatorBox;
+use crate::types::evaluator::UnaryEvaluatorRef;
 use crate::types::LogicalType;
-use paste::paste;
 use std::borrow::Cow;
-use std::sync::Arc;
 
-macro_rules! box_unary {
-    ($ty:expr, $op:expr, $evaluator:expr) => {
-        Ok(UnaryEvaluatorBox::new(
-            Arc::new($evaluator),
-            $ty.clone(),
-            $op,
-        ))
-    };
-}
+const UNARY_INT8_PLUS: u16 = 0;
+const UNARY_INT8_MINUS: u16 = 1;
+const UNARY_INT16_PLUS: u16 = 2;
+const UNARY_INT16_MINUS: u16 = 3;
+const UNARY_INT32_PLUS: u16 = 4;
+const UNARY_INT32_MINUS: u16 = 5;
+const UNARY_INT64_PLUS: u16 = 6;
+const UNARY_INT64_MINUS: u16 = 7;
+const UNARY_BOOLEAN_NOT: u16 = 8;
+const UNARY_FLOAT32_PLUS: u16 = 9;
+const UNARY_FLOAT32_MINUS: u16 = 10;
+const UNARY_FLOAT64_PLUS: u16 = 11;
+const UNARY_FLOAT64_MINUS: u16 = 12;
 
-macro_rules! numeric_unary_evaluator {
-    ($value_type:ident, $op:expr, $ty:expr) => {
-        paste! {
-            match $op {
-                UnaryOperator::Plus => box_unary!($ty, $op, [<$value_type PlusUnaryEvaluator>]),
-                UnaryOperator::Minus => box_unary!($ty, $op, [<$value_type MinusUnaryEvaluator>]),
-                _ => Err(DatabaseError::UnsupportedUnaryOperator($ty.clone(), $op)),
-            }
-        }
+// Evaluator positions are serialized ABI. Do not reorder or reuse existing
+// positions; only append new positions at the end of the current layout.
+
+fn numeric_unary_ref(
+    plus: u16,
+    minus: u16,
+    ty: &LogicalType,
+    op: UnaryOperator,
+) -> Result<UnaryEvaluatorRef, DatabaseError> {
+    let pos = match op {
+        UnaryOperator::Plus => plus,
+        UnaryOperator::Minus => minus,
+        _ => return Err(DatabaseError::UnsupportedUnaryOperator(ty.clone(), op)),
     };
+    Ok(UnaryEvaluatorRef::new(pos))
 }
 
 pub fn unary_create(
     ty: Cow<'_, LogicalType>,
     op: UnaryOperator,
-) -> Result<UnaryEvaluatorBox, DatabaseError> {
+) -> Result<UnaryEvaluatorRef, DatabaseError> {
     let ty = ty.as_ref();
     match ty {
-        LogicalType::Tinyint => numeric_unary_evaluator!(Int8, op, ty),
-        LogicalType::Smallint => numeric_unary_evaluator!(Int16, op, ty),
-        LogicalType::Integer => numeric_unary_evaluator!(Int32, op, ty),
-        LogicalType::Bigint => numeric_unary_evaluator!(Int64, op, ty),
+        LogicalType::Tinyint => numeric_unary_ref(UNARY_INT8_PLUS, UNARY_INT8_MINUS, ty, op),
+        LogicalType::Smallint => numeric_unary_ref(UNARY_INT16_PLUS, UNARY_INT16_MINUS, ty, op),
+        LogicalType::Integer => numeric_unary_ref(UNARY_INT32_PLUS, UNARY_INT32_MINUS, ty, op),
+        LogicalType::Bigint => numeric_unary_ref(UNARY_INT64_PLUS, UNARY_INT64_MINUS, ty, op),
         LogicalType::Boolean => match op {
-            UnaryOperator::Not => box_unary!(ty, op, BooleanNotUnaryEvaluator),
+            UnaryOperator::Not => Ok(UnaryEvaluatorRef::new(UNARY_BOOLEAN_NOT)),
             _ => Err(DatabaseError::UnsupportedUnaryOperator(ty.clone(), op)),
         },
-        LogicalType::Float => numeric_unary_evaluator!(Float32, op, ty),
-        LogicalType::Double => numeric_unary_evaluator!(Float64, op, ty),
+        LogicalType::Float => numeric_unary_ref(UNARY_FLOAT32_PLUS, UNARY_FLOAT32_MINUS, ty, op),
+        LogicalType::Double => numeric_unary_ref(UNARY_FLOAT64_PLUS, UNARY_FLOAT64_MINUS, ty, op),
         _ => Err(DatabaseError::UnsupportedUnaryOperator(ty.clone(), op)),
+    }
+}
+
+pub(crate) fn eval_unary(
+    pos: u16,
+    value: &crate::types::value::DataValue,
+) -> crate::types::value::DataValue {
+    match pos {
+        UNARY_INT8_PLUS => int8_plus_unary_eval(value),
+        UNARY_INT8_MINUS => int8_minus_unary_eval(value),
+        UNARY_INT16_PLUS => int16_plus_unary_eval(value),
+        UNARY_INT16_MINUS => int16_minus_unary_eval(value),
+        UNARY_INT32_PLUS => int32_plus_unary_eval(value),
+        UNARY_INT32_MINUS => int32_minus_unary_eval(value),
+        UNARY_INT64_PLUS => int64_plus_unary_eval(value),
+        UNARY_INT64_MINUS => int64_minus_unary_eval(value),
+        UNARY_BOOLEAN_NOT => boolean_not_unary_eval(value),
+        UNARY_FLOAT32_PLUS => float32_plus_unary_eval(value),
+        UNARY_FLOAT32_MINUS => float32_minus_unary_eval(value),
+        UNARY_FLOAT64_PLUS => float64_plus_unary_eval(value),
+        UNARY_FLOAT64_MINUS => float64_minus_unary_eval(value),
+        _ => unreachable!("unknown unary evaluator position {pos}"),
     }
 }
 
@@ -73,20 +102,18 @@ pub fn unary_create(
 macro_rules! numeric_unary_evaluator_definition {
     ($value_type:ident, $compute_type:path) => {
         paste::paste! {
-            #[derive(Debug)]
-            pub struct [<$value_type PlusUnaryEvaluator>];
-            #[derive(Debug)]
-            pub struct [<$value_type MinusUnaryEvaluator>];            impl $crate::types::evaluator::UnaryEvaluator for [<$value_type PlusUnaryEvaluator>] {
-                fn unary_eval(&self, value: &$crate::types::value::DataValue) -> $crate::types::value::DataValue {
-                    value.clone()
-                }
-            }            impl $crate::types::evaluator::UnaryEvaluator for [<$value_type MinusUnaryEvaluator>] {
-                fn unary_eval(&self, value: &$crate::types::value::DataValue) -> $crate::types::value::DataValue {
-                    match value {
-                        $compute_type(value) => $compute_type(-value),
-                        $crate::types::value::DataValue::Null => $crate::types::value::DataValue::Null,
-                        _ => unsafe { std::hint::unreachable_unchecked() },
-                    }
+            pub fn [<$value_type:snake _plus_unary_eval>](
+                value: &$crate::types::value::DataValue,
+            ) -> $crate::types::value::DataValue {
+                value.clone()
+            }
+            pub fn [<$value_type:snake _minus_unary_eval>](
+                value: &$crate::types::value::DataValue,
+            ) -> $crate::types::value::DataValue {
+                match value {
+                    $compute_type(value) => $compute_type(-value),
+                    $crate::types::value::DataValue::Null => $crate::types::value::DataValue::Null,
+                    _ => unsafe { std::hint::unreachable_unchecked() },
                 }
             }
         }
@@ -95,20 +122,38 @@ macro_rules! numeric_unary_evaluator_definition {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
-    use super::unary_create;
+    use super::*;
     use crate::errors::DatabaseError;
     use crate::expression::UnaryOperator;
     use crate::serdes::{ReferenceSerialization, ReferenceTables};
     use crate::storage::rocksdb::RocksTransaction;
-    use crate::types::evaluator::UnaryEvaluatorBox;
+    use crate::types::evaluator::UnaryEvaluatorRef;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use ordered_float::OrderedFloat;
     use std::borrow::Cow;
     use std::io::{Cursor, Seek, SeekFrom};
 
-    fn create(ty: LogicalType, op: UnaryOperator) -> Result<UnaryEvaluatorBox, DatabaseError> {
+    fn create(ty: LogicalType, op: UnaryOperator) -> Result<UnaryEvaluatorRef, DatabaseError> {
         unary_create(Cow::Owned(ty), op)
+    }
+
+    #[test]
+    fn test_unary_evaluator_positions_are_stable() -> Result<(), DatabaseError> {
+        assert_eq!(
+            create(LogicalType::Integer, UnaryOperator::Minus)?.pos,
+            UNARY_INT32_MINUS
+        );
+        assert_eq!(
+            create(LogicalType::Boolean, UnaryOperator::Not)?.pos,
+            UNARY_BOOLEAN_NOT
+        );
+        assert_eq!(
+            create(LogicalType::Double, UnaryOperator::Plus)?.pos,
+            UNARY_FLOAT64_PLUS
+        );
+
+        Ok(())
     }
 
     #[test]
@@ -150,7 +195,7 @@ mod test {
     }
 
     #[test]
-    fn test_boolean_unary_evaluator() -> Result<(), DatabaseError> {
+    fn test_boolean_unary_eval() -> Result<(), DatabaseError> {
         let evaluator = create(LogicalType::Boolean, UnaryOperator::Not)?;
         assert_eq!(
             evaluator.unary_eval(&DataValue::Boolean(true)),
@@ -174,12 +219,18 @@ mod test {
         let evaluator = create(LogicalType::Boolean, UnaryOperator::Not)?;
         let mut cursor = Cursor::new(Vec::new());
         let mut reference_tables = ReferenceTables::new();
+        let mut arena = crate::planner::TableArena::default();
 
-        evaluator.encode(&mut cursor, false, &mut reference_tables)?;
+        evaluator.encode(&mut cursor, false, &mut reference_tables, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
 
         assert_eq!(
-            UnaryEvaluatorBox::decode::<RocksTransaction, _>(&mut cursor, None, &reference_tables)?,
+            UnaryEvaluatorRef::decode::<RocksTransaction, _, _>(
+                &mut cursor,
+                None,
+                &reference_tables,
+                &mut arena
+            )?,
             evaluator
         );
 

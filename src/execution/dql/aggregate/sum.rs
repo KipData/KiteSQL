@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::Accumulator;
 use crate::expression::BinaryOperator;
-use crate::types::evaluator::{binary_create, BinaryEvaluatorBox};
+use crate::types::evaluator::{binary_create, BinaryEvaluatorRef};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use ahash::RandomState;
@@ -24,7 +24,7 @@ use std::collections::HashSet;
 
 pub struct SumAccumulator {
     result: DataValue,
-    evaluator: BinaryEvaluatorBox,
+    evaluator: BinaryEvaluatorRef,
 }
 
 impl SumAccumulator {
@@ -35,6 +35,10 @@ impl SumAccumulator {
             result: DataValue::Null,
             evaluator: binary_create(ty, BinaryOperator::Plus)?,
         })
+    }
+
+    pub(super) fn into_result(self) -> DataValue {
+        self.result
     }
 }
 
@@ -51,8 +55,8 @@ impl Accumulator for SumAccumulator {
         Ok(())
     }
 
-    fn evaluate(&self) -> Result<DataValue, DatabaseError> {
-        Ok(self.result.clone())
+    fn evaluate(self: Box<Self>) -> Result<DataValue, DatabaseError> {
+        Ok(self.into_result())
     }
 }
 
@@ -80,7 +84,7 @@ impl Accumulator for DistinctSumAccumulator {
         Ok(())
     }
 
-    fn evaluate(&self) -> Result<DataValue, DatabaseError> {
-        self.inner.evaluate()
+    fn evaluate(self: Box<Self>) -> Result<DataValue, DatabaseError> {
+        Ok(self.inner.into_result())
     }
 }

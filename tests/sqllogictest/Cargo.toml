@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 clap            = { version = "4" }
-"kite_sql"      = { path = "../.." }
+"kite_sql"      = { path = "../..", features = ["copy", "decimal", "orm"] }
 glob            = { version = "0.3" }
 sqllogictest    = { version = "0.14" }
 tempfile        = { version = "3.10" }

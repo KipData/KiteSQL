@@ -17,20 +17,19 @@ use crate::errors::DatabaseError;
 use crate::expression::range_detacher::Range;
 use crate::optimizer::core::cm_sketch::CountMinSketch;
 use crate::optimizer::core::histogram::{Bucket, Histogram, HistogramMeta};
-use crate::storage::{StatisticsMetaCache, Transaction};
+use crate::storage::StatisticsMetaCache;
 use crate::types::index::IndexId;
 use crate::types::value::DataValue;
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::slice;
 
-pub struct StatisticMetaLoader<'a, T: Transaction> {
+pub struct StatisticMetaLoader<'a> {
     cache: &'a StatisticsMetaCache,
-    tx: &'a T,
 }
 
-impl<'a, T: Transaction> StatisticMetaLoader<'a, T> {
-    pub fn new(tx: &'a T, cache: &'a StatisticsMetaCache) -> StatisticMetaLoader<'a, T> {
-        StatisticMetaLoader { cache, tx }
+impl<'a> StatisticMetaLoader<'a> {
+    pub fn new(cache: &'a StatisticsMetaCache) -> StatisticMetaLoader<'a> {
+        StatisticMetaLoader { cache }
     }
 
     pub fn load(
@@ -39,19 +38,7 @@ impl<'a, T: Transaction> StatisticMetaLoader<'a, T> {
         index_id: IndexId,
     ) -> Result<Option<&StatisticsMeta>, DatabaseError> {
         let key = (table_name.clone(), index_id);
-        match self.cache.get(&key) {
-            Some(Some(entry)) => return Ok(Some(entry)),
-            Some(None) => return Ok(None),
-            _ => {}
-        }
-
-        let Some(statistics_meta) = self.tx.statistics_meta(table_name.as_ref(), index_id)? else {
-            self.cache.put(key, None);
-            return Ok(None);
-        };
-        self.cache.put(key.clone(), Some(statistics_meta));
-
-        Ok(self.cache.get(&key).and_then(|entry| entry.as_ref()))
+        Ok(self.cache.get(&key))
     }
 
     pub fn collect_count(

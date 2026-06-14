@@ -13,61 +13,55 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
+use crate::execution::{
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
+};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::project::ProjectOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
-use crate::types::tuple::Tuple;
-use crate::types::value::DataValue;
 
 pub struct Projection {
     exprs: Vec<ScalarExpression>,
     input: ExecId,
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Projection {
     type Input = (ProjectOperator, LogicalPlan);
 
     fn into_executor(
         (ProjectOperator { exprs }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+        cache: ExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
-        let input = build_read(arena, input, cache, transaction);
+        let input = build_read(arena, plan_arena, input, cache, transaction);
         arena.push(ExecNode::Projection(Projection { exprs, input }))
     }
+}
 
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
-        if !arena.next_tuple(self.input)? {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection {
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
+        if !arena.next_tuple(self.input, plan_arena)? {
             arena.finish();
             return Ok(());
         }
 
-        arena.with_projection_tmp(|tuple, projection_tmp| {
-            projection_tmp.clear();
+        arena.with_projection_tmp(|arena, projection_tmp| {
+            let tuple = arena.result_tuple();
             projection_tmp.reserve(self.exprs.len());
             for expr in self.exprs.iter() {
                 projection_tmp.push(expr.eval(Some(tuple))?);
             }
+            std::mem::swap(&mut arena.result_tuple_mut().values, projection_tmp);
             Ok::<_, DatabaseError>(())
         })?;
         arena.resume();
         Ok(())
-    }
-}
-
-impl Projection {
-    pub fn projection(
-        tuple: &Tuple,
-        exprs: &[ScalarExpression],
-    ) -> Result<Vec<DataValue>, DatabaseError> {
-        let mut values = Vec::with_capacity(exprs.len());
-
-        for expr in exprs.iter() {
-            values.push(expr.eval(Some(tuple))?);
-        }
-        Ok(values)
     }
 }

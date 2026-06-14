@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::TableName;
-use crate::planner::LogicalPlan;
+use crate::catalog::{ColumnRef, TableName};
+use crate::planner::{LogicalPlan, MetaArena};
+use crate::types::tuple::Schema;
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::fmt::Formatter;
@@ -22,11 +23,25 @@ use std::fmt::Formatter;
 pub struct View {
     pub name: TableName,
     pub plan: Box<LogicalPlan>,
+    pub schema: Schema,
+}
+
+impl View {
+    pub(crate) fn visit_column_refs<A, F>(&self, arena: &mut A, f: &mut F)
+    where
+        A: MetaArena,
+        F: FnMut(&ColumnRef) + ?Sized,
+    {
+        for column in &self.schema {
+            f(column);
+        }
+        self.plan.visit_column_refs(arena, f);
+    }
 }
 
 impl fmt::Display for View {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "View {}: {}", self.name, self.plan.explain(0))?;
+        write!(f, "View {}", self.name)?;
 
         Ok(())
     }

@@ -19,7 +19,7 @@ use crate::expression::function::scala::ScalarFunction;
 use crate::expression::function::table::TableFunction;
 use crate::expression::TrimWhereField;
 use crate::expression::{AliasType, BinaryOperator, ScalarExpression, UnaryOperator};
-use crate::types::evaluator::{BinaryEvaluatorBox, CastEvaluatorBox, UnaryEvaluatorBox};
+use crate::types::evaluator::{BinaryEvaluatorRef, CastEvaluatorRef, UnaryEvaluatorRef};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 
@@ -51,7 +51,7 @@ pub trait Visitor<'a>: Sized {
         &mut self,
         expr: &'a ScalarExpression,
         _ty: &'a LogicalType,
-        _evaluator: Option<&'a CastEvaluatorBox>,
+        _evaluator: Option<&'a CastEvaluatorRef>,
     ) -> Result<(), DatabaseError> {
         self.visit(expr)
     }
@@ -68,7 +68,7 @@ pub trait Visitor<'a>: Sized {
         &mut self,
         _op: &'a UnaryOperator,
         expr: &'a ScalarExpression,
-        _evaluator: Option<&'a UnaryEvaluatorBox>,
+        _evaluator: Option<&'a UnaryEvaluatorRef>,
         _ty: &'a LogicalType,
     ) -> Result<(), DatabaseError> {
         self.visit(expr)
@@ -79,7 +79,7 @@ pub trait Visitor<'a>: Sized {
         _op: &'a BinaryOperator,
         left_expr: &'a ScalarExpression,
         right_expr: &'a ScalarExpression,
-        _evaluator: Option<&'a BinaryEvaluatorBox>,
+        _evaluator: Option<&'a BinaryEvaluatorRef>,
         _ty: &'a LogicalType,
     ) -> Result<(), DatabaseError> {
         self.visit(left_expr)?;

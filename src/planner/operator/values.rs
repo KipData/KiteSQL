@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::types::tuple::SchemaRef;
+use crate::types::tuple::Schema;
 use crate::types::value::DataValue;
 use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
@@ -22,7 +22,7 @@ use std::fmt::Formatter;
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct ValuesOperator {
     pub rows: Vec<Vec<DataValue>>,
-    pub schema_ref: SchemaRef,
+    pub schema_ref: Schema,
 }
 
 impl fmt::Display for ValuesOperator {

@@ -49,7 +49,7 @@ create table t2(id int primary key, v1 int)
 statement ok
 insert into t2 values (1,1)
 
-statement error
+statement ok
 alter table t2 add column v2 int default 0 unique
 
 query IIII rowsort
@@ -69,11 +69,11 @@ create table t3(id int primary key, v int)
 statement ok
 insert into t3 values (1, 10), (2, 20)
 
-query TTTTI
+query TTTTTTT
 describe t3
 ----
-id Integer 4 false PRIMARY null
-v Integer 4 true EMPTY null
+id Integer 4 false PRIMARY null #1
+v Integer 4 true EMPTY null #2
 
 statement ok
 insert into t3 values (3, 10)
@@ -104,11 +104,11 @@ select * from t3
 3 10
 4 10
 
-query TTTTI
+query TTTTTTT
 describe t3
 ----
-id Integer 4 false PRIMARY null
-v Integer 4 true EMPTY null
+id Integer 4 false PRIMARY null #1
+v Integer 4 true EMPTY null #2
 
 statement error
 alter table t3 modify column v int first

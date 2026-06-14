@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::hash::full_join::FullJoinState;
 use crate::execution::dql::join::hash::inner_join::InnerJoinState;
@@ -21,10 +20,9 @@ use crate::execution::dql::join::hash::right_join::RightJoinState;
 use crate::execution::dql::join::hash::{
     JoinProbeState, JoinProbeStateImpl, LeftDropState, ProbeState,
 };
-use crate::execution::dql::join::joins_nullable;
 use crate::execution::dql::sort::BumpVec;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
@@ -70,7 +68,7 @@ enum HashJoinState {
 
 impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for HashJoin {
     fn from(
-        (JoinOperator { on, join_type }, mut left_input, mut right_input): (
+        (JoinOperator { on, join_type }, left_input, right_input): (
             JoinOperator,
             LogicalPlan,
             LogicalPlan,
@@ -93,41 +91,20 @@ impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for HashJoin {
             None
         };
 
-        let (left_force_nullable, right_force_nullable) = joins_nullable(&join_type);
-
-        let mut full_schema_ref = Vec::clone(left_input.output_schema());
-        let left_schema_len = full_schema_ref.len();
-
-        force_nullable(&mut full_schema_ref, left_force_nullable);
-        full_schema_ref.extend_from_slice(right_input.output_schema());
-        force_nullable(
-            &mut full_schema_ref[left_schema_len..],
-            right_force_nullable,
-        );
-        let right_schema_len = full_schema_ref.len() - left_schema_len;
-
         HashJoin {
             state: HashJoinState::Build,
             ty: join_type,
             on_left_keys,
             on_right_keys,
             filter: filter_expr,
-            left_schema_len,
-            right_schema_len,
+            left_schema_len: 0,
+            right_schema_len: 0,
             left_input_plan: left_input,
             right_input_plan: right_input,
             left_input: 0,
             right_input: 0,
             bump: Box::<Bump>::default(),
             init_error,
-        }
-    }
-}
-
-fn force_nullable(schema: &mut [ColumnRef], force_nullable: bool) {
-    for column in schema.iter_mut() {
-        if let Some(new_column) = column.nullable_for_join(force_nullable) {
-            *column = new_column;
         }
     }
 }
@@ -165,6 +142,7 @@ impl HashJoin {
     fn initialize_build<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if !matches!(self.state, HashJoinState::Build) {
             return Ok(());
@@ -178,7 +156,7 @@ impl HashJoin {
         let mut build_buf = BumpVec::with_capacity_in(self.on_left_keys.len(), &self.bump);
         let mut build_count = 0usize;
 
-        while arena.next_tuple(self.left_input)? {
+        while arena.next_tuple(self.left_input, plan_arena)? {
             let tuple = arena.result_tuple().clone();
             Self::eval_keys(&self.on_left_keys, &tuple, &mut build_buf)?;
 
@@ -246,45 +224,49 @@ pub(crate) struct BuildState {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
-    fn into_executor(
-        mut self,
-        arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
-    ) -> ExecId {
-        self.left_input = build_read(arena, self.left_input_plan.take(), cache, transaction);
-        self.right_input = build_read(arena, self.right_input_plan.take(), cache, transaction);
-        arena.push(ExecNode::HashJoin(self))
-    }
-}
-
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashJoin {
-    type Input = (JoinOperator, LogicalPlan, LogicalPlan);
+    type Input = Self;
 
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+        cache: ExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
-        <Self as ReadExecutor<'a, T>>::into_executor(Self::from(input), arena, cache, transaction)
-    }
-
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
-        HashJoin::next_tuple(self, arena)
+        let mut executor = input;
+        let left_schema_len = executor.left_input_plan.output_schema(plan_arena).len();
+        let right_schema_len = executor.right_input_plan.output_schema(plan_arena).len();
+        executor.left_schema_len = left_schema_len;
+        executor.right_schema_len = right_schema_len;
+        executor.left_input = build_read(
+            arena,
+            plan_arena,
+            executor.left_input_plan.take(),
+            cache,
+            transaction,
+        );
+        executor.right_input = build_read(
+            arena,
+            plan_arena,
+            executor.right_input_plan.take(),
+            cache,
+            transaction,
+        );
+        arena.push(ExecNode::HashJoin(executor))
     }
 }
 
-impl HashJoin {
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashJoin {
+    fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if let Some(err) = self.init_error.take() {
             return Err(err);
         }
 
-        self.initialize_build(arena)?;
+        self.initialize_build(arena, plan_arena)?;
         let mut state = std::mem::replace(&mut self.state, HashJoinState::End);
 
         loop {
@@ -298,7 +280,7 @@ impl HashJoin {
                 } => {
                     let probe_finished = loop {
                         if probe_state.is_none() {
-                            if !arena.next_tuple(self.right_input)? {
+                            if !arena.next_tuple(self.right_input, plan_arena)? {
                                 break true;
                             }
                             let tuple = arena.result_tuple().clone();
@@ -381,7 +363,7 @@ impl HashJoin {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
+    use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
     use crate::execution::dql::join::hash_join::HashJoin;
     use crate::execution::dql::test::build_integers;
@@ -394,16 +376,16 @@ mod test {
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
     use crate::planner::{Childrens, LogicalPlan};
-    use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
+    use crate::storage::rocksdb::RocksStorage;
     use crate::storage::Storage;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
-    use crate::utils::lru::SharedLruCache;
-    use std::hash::RandomState;
-    use std::sync::Arc;
     use tempfile::TempDir;
 
-    fn optimize_exprs(plan: LogicalPlan) -> Result<LogicalPlan, DatabaseError> {
+    fn optimize_exprs(
+        plan: LogicalPlan,
+        arena: &mut crate::planner::PlanArena,
+    ) -> Result<LogicalPlan, DatabaseError> {
         HepOptimizerPipeline::builder()
             .before_batch(
                 "Expression Remapper".to_string(),
@@ -412,10 +394,12 @@ mod test {
             )
             .build()
             .instantiate(plan)
-            .find_best::<RocksTransaction>(None)
+            .find_best(None, arena)
     }
 
-    fn build_join_values() -> (
+    fn build_join_values(
+        arena: &mut crate::planner::PlanArena,
+    ) -> (
         Vec<(ScalarExpression, ScalarExpression)>,
         LogicalPlan,
         LogicalPlan,
@@ -423,24 +407,24 @@ mod test {
         let desc = ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap();
 
         let t1_columns = vec![
-            ColumnRef::from(ColumnCatalog::new("c1".to_string(), true, desc.clone())),
-            ColumnRef::from(ColumnCatalog::new("c2".to_string(), true, desc.clone())),
-            ColumnRef::from(ColumnCatalog::new("c3".to_string(), true, desc.clone())),
+            arena.alloc_column(ColumnCatalog::new("c1".to_string(), true, desc.clone())),
+            arena.alloc_column(ColumnCatalog::new("c2".to_string(), true, desc.clone())),
+            arena.alloc_column(ColumnCatalog::new("c3".to_string(), true, desc.clone())),
         ];
 
         let t2_columns = vec![
-            ColumnRef::from(ColumnCatalog::new("c4".to_string(), true, desc.clone())),
-            ColumnRef::from(ColumnCatalog::new("c5".to_string(), true, desc.clone())),
-            ColumnRef::from(ColumnCatalog::new("c6".to_string(), true, desc.clone())),
+            arena.alloc_column(ColumnCatalog::new("c4".to_string(), true, desc.clone())),
+            arena.alloc_column(ColumnCatalog::new("c5".to_string(), true, desc.clone())),
+            arena.alloc_column(ColumnCatalog::new("c6".to_string(), true, desc.clone())),
         ];
 
         let on_keys = vec![(
-            ScalarExpression::column_expr(t1_columns[0].clone(), 0),
-            ScalarExpression::column_expr(t2_columns[0].clone(), 0),
+            ScalarExpression::column_expr(t1_columns[0], 0),
+            ScalarExpression::column_expr(t2_columns[0], 0),
         )];
 
-        let values_t1 = LogicalPlan {
-            operator: Operator::Values(ValuesOperator {
+        let values_t1 = LogicalPlan::new(
+            Operator::Values(ValuesOperator {
                 rows: vec![
                     vec![
                         DataValue::Int32(0),
@@ -458,15 +442,13 @@ mod test {
                         DataValue::Int32(7),
                     ],
                 ],
-                schema_ref: Arc::new(t1_columns),
+                schema_ref: t1_columns,
             }),
-            childrens: Box::new(Childrens::None),
-            physical_option: None,
-            _output_schema_ref: None,
-        };
+            Childrens::None,
+        );
 
-        let values_t2 = LogicalPlan {
-            operator: Operator::Values(ValuesOperator {
+        let values_t2 = LogicalPlan::new(
+            Operator::Values(ValuesOperator {
                 rows: vec![
                     vec![
                         DataValue::Int32(0),
@@ -489,12 +471,10 @@ mod test {
                         DataValue::Int32(1),
                     ],
                 ],
-                schema_ref: Arc::new(t2_columns),
+                schema_ref: t2_columns,
             }),
-            childrens: Box::new(Childrens::None),
-            physical_option: None,
-            _output_schema_ref: None,
-        };
+            Childrens::None,
+        );
 
         (on_keys, values_t1, values_t2)
     }
@@ -503,11 +483,13 @@ mod test {
     fn test_inner_join() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let (keys, left, right) = build_join_values();
+        let transaction = storage.transaction()?;
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let (keys, left, right) = build_join_values(&mut plan_arena);
 
         let plan = LogicalPlan::new(
             Operator::Join(JoinOperator {
@@ -522,7 +504,7 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = optimize_exprs(plan)?;
+        let plan = optimize_exprs(plan, &mut plan_arena)?;
 
         let Operator::Join(op) = plan.operator else {
             unreachable!()
@@ -530,8 +512,9 @@ mod test {
         let (left, right) = plan.childrens.pop_twins();
         let executor = crate::execution::execute(
             HashJoin::from((op, left, right)),
-            (&table_cache, &view_cache, &meta_cache),
-            &mut transaction,
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            plan_arena,
+            &transaction,
         );
         let tuples = try_collect(executor)?;
 
@@ -557,11 +540,13 @@ mod test {
     fn test_left_join() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let (keys, left, right) = build_join_values();
+        let transaction = storage.transaction()?;
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let (keys, left, right) = build_join_values(&mut plan_arena);
 
         let plan = LogicalPlan::new(
             Operator::Join(JoinOperator {
@@ -576,7 +561,7 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = optimize_exprs(plan)?;
+        let plan = optimize_exprs(plan, &mut plan_arena)?;
 
         let Operator::Join(op) = plan.operator else {
             unreachable!()
@@ -586,8 +571,9 @@ mod test {
             let executor = HashJoin::from((op.clone(), left.clone(), right.clone()));
             let tuples = try_collect(crate::execution::execute(
                 executor,
-                (&table_cache, &view_cache, &meta_cache),
-                &mut transaction,
+                crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+                plan_arena,
+                &transaction,
             ))?;
 
             assert_eq!(tuples.len(), 4);
@@ -617,11 +603,13 @@ mod test {
     fn test_right_join() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let (keys, left, right) = build_join_values();
+        let transaction = storage.transaction()?;
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let (keys, left, right) = build_join_values(&mut plan_arena);
 
         let plan = LogicalPlan::new(
             Operator::Join(JoinOperator {
@@ -636,7 +624,7 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = optimize_exprs(plan)?;
+        let plan = optimize_exprs(plan, &mut plan_arena)?;
 
         let Operator::Join(op) = plan.operator else {
             unreachable!()
@@ -644,8 +632,9 @@ mod test {
         let (left, right) = plan.childrens.pop_twins();
         let executor = crate::execution::execute(
             HashJoin::from((op, left, right)),
-            (&table_cache, &view_cache, &meta_cache),
-            &mut transaction,
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            plan_arena,
+            &transaction,
         );
         let tuples = try_collect(executor)?;
 
@@ -675,55 +664,50 @@ mod test {
     fn test_right_join_filter_only_left_columns() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let transaction = storage.transaction()?;
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
 
         let desc = ColumnDesc::new(LogicalType::Integer, None, false, None)?;
         let left_columns = vec![
-            ColumnRef::from(ColumnCatalog::new("k".to_string(), true, desc.clone())),
-            ColumnRef::from(ColumnCatalog::new("v".to_string(), true, desc.clone())),
+            plan_arena.alloc_column(ColumnCatalog::new("k".to_string(), true, desc.clone())),
+            plan_arena.alloc_column(ColumnCatalog::new("v".to_string(), true, desc.clone())),
         ];
-        let right_columns = vec![ColumnRef::from(ColumnCatalog::new(
-            "rk".to_string(),
-            true,
-            desc.clone(),
-        ))];
+        let right_columns =
+            vec![plan_arena.alloc_column(ColumnCatalog::new("rk".to_string(), true, desc.clone()))];
 
         let on_keys = vec![(
-            ScalarExpression::column_expr(left_columns[0].clone(), 0),
-            ScalarExpression::column_expr(right_columns[0].clone(), 0),
+            ScalarExpression::column_expr(left_columns[0], 0),
+            ScalarExpression::column_expr(right_columns[0], 0),
         )];
         let filter_expr = ScalarExpression::Binary {
             op: BinaryOperator::Gt,
-            left_expr: Box::new(ScalarExpression::column_expr(left_columns[1].clone(), 1)),
+            left_expr: Box::new(ScalarExpression::column_expr(left_columns[1], 1)),
             right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(1))),
             evaluator: None,
             ty: LogicalType::Boolean,
         };
 
-        let left = LogicalPlan {
-            operator: Operator::Values(ValuesOperator {
+        let left = LogicalPlan::new(
+            Operator::Values(ValuesOperator {
                 rows: vec![
                     vec![DataValue::Int32(2), DataValue::Int32(0)],
                     vec![DataValue::Int32(2), DataValue::Int32(5)],
                 ],
-                schema_ref: Arc::new(left_columns),
+                schema_ref: left_columns,
             }),
-            childrens: Box::new(Childrens::None),
-            physical_option: None,
-            _output_schema_ref: None,
-        };
-        let right = LogicalPlan {
-            operator: Operator::Values(ValuesOperator {
+            Childrens::None,
+        );
+        let right = LogicalPlan::new(
+            Operator::Values(ValuesOperator {
                 rows: vec![vec![DataValue::Int32(2)]],
-                schema_ref: Arc::new(right_columns),
+                schema_ref: right_columns,
             }),
-            childrens: Box::new(Childrens::None),
-            physical_option: None,
-            _output_schema_ref: None,
-        };
+            Childrens::None,
+        );
 
         let plan = LogicalPlan::new(
             Operator::Join(JoinOperator {
@@ -739,7 +723,7 @@ mod test {
             },
         );
 
-        let plan = optimize_exprs(plan)?;
+        let plan = optimize_exprs(plan, &mut plan_arena)?;
 
         let Operator::Join(op) = plan.operator else {
             unreachable!()
@@ -747,8 +731,9 @@ mod test {
         let (left, right) = plan.childrens.pop_twins();
         let executor = crate::execution::execute(
             HashJoin::from((op, left, right)),
-            (&table_cache, &view_cache, &meta_cache),
-            &mut transaction,
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            plan_arena,
+            &transaction,
         );
         let tuples = try_collect(executor)?;
 
@@ -769,11 +754,13 @@ mod test {
     fn test_full_join() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let (keys, left, right) = build_join_values();
+        let transaction = storage.transaction()?;
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let (keys, left, right) = build_join_values(&mut plan_arena);
 
         let plan = LogicalPlan::new(
             Operator::Join(JoinOperator {
@@ -788,7 +775,7 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = optimize_exprs(plan)?;
+        let plan = optimize_exprs(plan, &mut plan_arena)?;
 
         let Operator::Join(op) = plan.operator else {
             unreachable!()
@@ -796,8 +783,9 @@ mod test {
         let (left, right) = plan.childrens.pop_twins();
         let executor = crate::execution::execute(
             HashJoin::from((op, left, right)),
-            (&table_cache, &view_cache, &meta_cache),
-            &mut transaction,
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            plan_arena,
+            &transaction,
         );
         let tuples = try_collect(executor)?;
 

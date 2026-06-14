@@ -14,7 +14,7 @@
 
 use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor};
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::planner::operator::describe::DescribeOperator;
 use crate::storage::Transaction;
 use crate::types::value::{DataValue, Utf8Type};
@@ -56,76 +56,75 @@ impl From<DescribeOperator> for Describe {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Describe {
-    fn into_executor(
-        self,
-        arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
-    ) -> ExecId {
-        arena.push(ExecNode::Describe(self))
-    }
-}
-
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Describe {
-    type Input = DescribeOperator;
+    type Input = Self;
 
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
+        _: ExecutionContext<'_>,
+        _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::Describe(Describe::from(input)))
-    }
-
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
-        Describe::next_tuple(self, arena)
+        let executor = input;
+        arena.push(ExecNode::Describe(executor))
     }
 }
 
-impl Describe {
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Describe {
+    fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if self.columns.is_none() {
             let table = arena
-                .transaction_mut()
+                .transaction()
                 .table(arena.table_cache(), self.table_name.clone())?
                 .ok_or(DatabaseError::TableNotFound)?;
-            self.columns = Some(table.columns().cloned().collect());
+            self.columns = Some(table.columns().copied().collect());
         }
 
-        let Some(column) = self
+        let Some(column_ref) = self
             .columns
             .as_ref()
             .and_then(|columns| columns.get(self.cursor))
-            .cloned()
+            .copied()
         else {
             arena.finish();
             return Ok(());
         };
 
         self.cursor += 1;
+        let column = plan_arena.column(column_ref);
+        let default = describe_default(column, plan_arena);
+        let mapping = column_ref.to_string();
 
         let output = arena.result_tuple_mut();
         output.pk = None;
         output.values.clear();
-        fill_describe_row(&mut output.values, &column);
+        fill_describe_row(&mut output.values, column, default, mapping);
 
         arena.resume();
         Ok(())
     }
 }
 
-fn fill_describe_row(values: &mut Vec<DataValue>, column: &ColumnCatalog) {
-    let datatype = column.datatype();
-    let default = column
+fn describe_default(column: &ColumnCatalog, arena: &crate::planner::PlanArena) -> String {
+    column
         .desc()
         .default
         .as_ref()
-        .map(|expr| format!("{expr}"))
-        .unwrap_or_else(|| "null".to_string());
+        .map(|expr| expr.output_name(arena))
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn fill_describe_row(
+    values: &mut Vec<DataValue>,
+    column: &ColumnCatalog,
+    default: String,
+    mapping: String,
+) {
+    let datatype = column.datatype();
 
     values.push(DataValue::Utf8 {
         value: column.name().to_string(),
@@ -153,6 +152,11 @@ fn fill_describe_row(values: &mut Vec<DataValue>, column: &ColumnCatalog) {
     values.push(key_value(column));
     values.push(DataValue::Utf8 {
         value: default,
+        ty: Utf8Type::Variable(None),
+        unit: CharLengthUnits::Characters,
+    });
+    values.push(DataValue::Utf8 {
+        value: mapping,
         ty: Utf8Type::Variable(None),
         unit: CharLengthUnits::Characters,
     });

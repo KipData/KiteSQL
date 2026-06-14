@@ -21,28 +21,32 @@ impl<V> ReferenceSerialization for Vec<V>
 where
     V: ReferenceSerialization,
 {
-    fn encode<W: Write>(
+    fn encode<W: Write, A: crate::planner::MetaArena>(
         &self,
         writer: &mut W,
         is_direct: bool,
         reference_tables: &mut ReferenceTables,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.len().encode(writer, is_direct, reference_tables)?;
+        self.len()
+            .encode(writer, is_direct, reference_tables, arena)?;
         for value in self.iter() {
-            value.encode(writer, is_direct, reference_tables)?
+            value.encode(writer, is_direct, reference_tables, arena)?
         }
         Ok(())
     }
 
-    fn decode<T: Transaction, R: Read>(
+    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
         reader: &mut R,
         drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
+        arena: &mut A,
     ) -> Result<Self, DatabaseError> {
-        let len = <usize as ReferenceSerialization>::decode(reader, drive, reference_tables)?;
+        let len =
+            <usize as ReferenceSerialization>::decode(reader, drive, reference_tables, arena)?;
         let mut vec = Vec::with_capacity(len);
         for _ in 0..len {
-            vec.push(V::decode(reader, drive, reference_tables)?);
+            vec.push(V::decode(reader, drive, reference_tables, arena)?);
         }
         Ok(vec)
     }

@@ -13,7 +13,7 @@ select value1 from alter_users order by id
 11
 22
 
-statement error
+statement ok
 alter table alter_users alter column value1 type int
 
 statement error
@@ -22,12 +22,12 @@ alter table alter_users alter column id type bigint
 statement ok
 alter table alter_users alter column v2 type bigint
 
-query TTTTI
+query TTTTTTT
 describe alter_users
 ----
-id Integer 4 false PRIMARY null
-value1 Integer 4 true UNIQUE null
-v2 Bigint 8 true EMPTY null
+id Integer 4 false PRIMARY null #1
+value1 Integer 4 true UNIQUE null #4
+v2 Bigint 8 true EMPTY null #2
 
 query I
 select v2 from alter_users order by id
@@ -38,12 +38,12 @@ select v2 from alter_users order by id
 statement ok
 alter table alter_users change column v2 value2 bigint
 
-query TTTTI
+query TTTTTTT
 describe alter_users
 ----
-id Integer 4 false PRIMARY null
-value1 Integer 4 true UNIQUE null
-value2 Bigint 8 true EMPTY null
+id Integer 4 false PRIMARY null #1
+value1 Integer 4 true UNIQUE null #4
+value2 Bigint 8 true EMPTY null #3
 
 statement ok
 alter table alter_users alter column value2 set default 999
@@ -76,12 +76,12 @@ update alter_users set value2 = 404 where id = 4
 statement ok
 alter table alter_users alter column value2 set not null
 
-query TTTTI
+query TTTTTTT
 describe alter_users
 ----
-id Integer 4 false PRIMARY null
-value1 Integer 4 true UNIQUE null
-value2 Bigint 8 false EMPTY null
+id Integer 4 false PRIMARY null #1
+value1 Integer 4 true UNIQUE null #4
+value2 Bigint 8 false EMPTY null #2
 
 statement error
 insert into alter_users (id, value1) values (5, 55)
@@ -100,12 +100,12 @@ null
 statement ok
 alter table alter_users modify column value2 int
 
-query TTTTI
+query TTTTTTT
 describe alter_users
 ----
-id Integer 4 false PRIMARY null
-value1 Integer 4 true UNIQUE null
-value2 Integer 4 true EMPTY null
+id Integer 4 false PRIMARY null #1
+value1 Integer 4 true UNIQUE null #4
+value2 Integer 4 true EMPTY null #2
 
 query I
 select value2 from alter_users where value2 is not null order by id
@@ -121,12 +121,12 @@ update alter_users set value2 = 606 where id = 6
 statement ok
 alter table alter_users change column value2 value2 int not null
 
-query TTTTI
+query TTTTTTT
 describe alter_users
 ----
-id Integer 4 false PRIMARY null
-value1 Integer 4 true UNIQUE null
-value2 Integer 4 false EMPTY null
+id Integer 4 false PRIMARY null #1
+value1 Integer 4 true UNIQUE null #4
+value2 Integer 4 false EMPTY null #3
 
 statement error
 insert into alter_users (id, value1) values (7, 77)
@@ -142,12 +142,12 @@ select value2 from alter_users where id = 7
 ----
 707
 
-query TTTTI
+query TTTTTTT
 describe alter_users
 ----
-id Integer 4 false PRIMARY null
-value1 Integer 4 true UNIQUE null
-value2 Integer 4 false EMPTY 707
+id Integer 4 false PRIMARY null #1
+value1 Integer 4 true UNIQUE null #4
+value2 Integer 4 false EMPTY 707 #2
 
 statement ok
 alter table alter_users modify column value2 int null
@@ -160,22 +160,22 @@ select value2 from alter_users where id = 8
 ----
 707
 
-query TTTTI
+query TTTTTTT
 describe alter_users
 ----
-id Integer 4 false PRIMARY null
-value1 Integer 4 true UNIQUE null
-value2 Integer 4 true EMPTY 707
+id Integer 4 false PRIMARY null #1
+value1 Integer 4 true UNIQUE null #4
+value2 Integer 4 true EMPTY 707 #3
 
 statement ok
 alter table alter_users modify column value2 int not null
 
-query TTTTI
+query TTTTTTT
 describe alter_users
 ----
-id Integer 4 false PRIMARY null
-value1 Integer 4 true UNIQUE null
-value2 Integer 4 false EMPTY 707
+id Integer 4 false PRIMARY null #1
+value1 Integer 4 true UNIQUE null #4
+value2 Integer 4 false EMPTY 707 #2
 
 statement ok
 alter table alter_users modify column value2 int default 808
@@ -188,12 +188,12 @@ select value2 from alter_users where id = 9
 ----
 808
 
-query TTTTI
+query TTTTTTT
 describe alter_users
 ----
-id Integer 4 false PRIMARY null
-value1 Integer 4 true UNIQUE null
-value2 Integer 4 false EMPTY 808
+id Integer 4 false PRIMARY null #1
+value1 Integer 4 true UNIQUE null #4
+value2 Integer 4 false EMPTY 808 #3
 
 statement ok
 drop table alter_users

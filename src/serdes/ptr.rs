@@ -25,19 +25,22 @@ macro_rules! implement_ptr_serialization {
         where
             V: ReferenceSerialization,
         {
-            fn encode<W: Write>(
+            fn encode<W: Write, A: $crate::planner::MetaArena>(
                 &self,
                 writer: &mut W,
                 is_direct: bool,
                 reference_tables: &mut ReferenceTables,
+                arena: &A,
             ) -> Result<(), DatabaseError> {
-                self.as_ref().encode(writer, is_direct, reference_tables)
+                self.as_ref()
+                    .encode(writer, is_direct, reference_tables, arena)
             }
 
-            fn decode<T: Transaction, R: Read>(
+            fn decode<T: Transaction, R: Read, A: $crate::planner::MetaArena>(
                 reader: &mut R,
-                drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
+                drive: Option<&$crate::serdes::ReferenceDecodeContext<'_, T>>,
                 reference_tables: &ReferenceTables,
+                arena: &mut A,
             ) -> Result<Self, DatabaseError>
             where
                 Self: Sized,
@@ -46,6 +49,7 @@ macro_rules! implement_ptr_serialization {
                     reader,
                     drive,
                     reference_tables,
+                    arena,
                 )?))
             }
         }

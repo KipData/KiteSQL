@@ -13,34 +13,32 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::serdes::{ReferenceSerialization, ReferenceTables};
+use crate::planner::MetaArena;
+use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
 use crate::storage::Transaction;
+use crate::types::index::{IndexMeta, IndexMetaRef};
 use std::io::{Read, Write};
 
-impl ReferenceSerialization for char {
-    fn encode<W: Write, A: crate::planner::MetaArena>(
+impl ReferenceSerialization for IndexMetaRef {
+    fn encode<W: Write, A: MetaArena>(
         &self,
         writer: &mut W,
-        _: bool,
-        _: &mut ReferenceTables,
-        _: &A,
+        is_direct: bool,
+        reference_tables: &mut ReferenceTables,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        let mut buf = [0u8; 2];
-        self.encode_utf8(&mut buf);
-
-        Ok(writer.write_all(&buf)?)
+        arena
+            .index(*self)
+            .encode(writer, is_direct, reference_tables, arena)
     }
 
-    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
+    fn decode<T: Transaction, R: Read, A: MetaArena>(
         reader: &mut R,
-        _: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
-        _: &ReferenceTables,
-        _: &mut A,
+        drive: Option<&ReferenceDecodeContext<'_, T>>,
+        reference_tables: &ReferenceTables,
+        arena: &mut A,
     ) -> Result<Self, DatabaseError> {
-        let mut buf = [0u8; 2];
-        reader.read_exact(&mut buf)?;
-
-        // SAFETY
-        Ok(std::str::from_utf8(&buf)?.chars().next().unwrap())
+        let index = IndexMeta::decode(reader, drive, reference_tables, arena)?;
+        Ok(arena.alloc_index(index))
     }
 }

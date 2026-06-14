@@ -16,6 +16,7 @@ use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::{walk_mut_expr, VisitorMut};
 use crate::expression::{BinaryOperator, ScalarExpression, UnaryOperator};
+use crate::planner::PlanArena;
 use crate::types::evaluator::{binary_create, unary_create};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
@@ -44,9 +45,17 @@ struct ReplaceUnary {
     ty: LogicalType,
 }
 
-pub struct ConstantCalculator;
+pub struct ConstantCalculator<'a, 'p> {
+    arena: &'a PlanArena<'p>,
+}
 
-impl VisitorMut<'_> for ConstantCalculator {
+impl<'a, 'p> ConstantCalculator<'a, 'p> {
+    pub fn new(arena: &'a PlanArena<'p>) -> Self {
+        Self { arena }
+    }
+}
+
+impl VisitorMut<'_> for ConstantCalculator<'_, '_> {
     fn visit(&mut self, expr: &'_ mut ScalarExpression) -> Result<(), DatabaseError> {
         match expr {
             ScalarExpression::Unary {
@@ -72,8 +81,8 @@ impl VisitorMut<'_> for ConstantCalculator {
                 right_expr,
                 ..
             } => {
-                let left_ty = left_expr.return_type();
-                let right_ty = right_expr.return_type();
+                let left_ty = left_expr.return_type(self.arena);
+                let right_ty = right_expr.return_type(self.arena);
                 let ty = LogicalType::max_logical_type(&left_ty, &right_ty)?.into_owned();
                 self.visit(left_expr)?;
                 self.visit(right_expr)?;
@@ -534,13 +543,6 @@ impl Simplify {
             }),
         );
     }
-
-    fn _is_belong(table_name: &str, col: &ColumnRef) -> bool {
-        matches!(
-            col.table_name().map(|name| table_name == name.as_ref()),
-            Some(true)
-        )
-    }
 }
 
 impl ScalarExpression {
@@ -598,7 +600,7 @@ impl ScalarExpression {
 
     pub(crate) fn unpack_bound_col(&self, is_deep: bool) -> Option<(ColumnRef, usize)> {
         match self {
-            ScalarExpression::ColumnRef { column, position } => Some((column.clone(), *position)),
+            ScalarExpression::ColumnRef { column, position } => Some((*column, *position)),
             ScalarExpression::Alias { expr, .. } => expr.unpack_bound_col(is_deep),
             ScalarExpression::Unary { expr, .. } => expr.unpack_bound_col(is_deep),
             ScalarExpression::Binary {

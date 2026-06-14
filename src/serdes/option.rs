@@ -21,31 +21,33 @@ impl<V> ReferenceSerialization for Option<V>
 where
     V: ReferenceSerialization,
 {
-    fn encode<W: Write>(
+    fn encode<W: Write, A: crate::planner::MetaArena>(
         &self,
         writer: &mut W,
         is_direct: bool,
         reference_tables: &mut ReferenceTables,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
         match self {
-            None => 0u8.encode(writer, is_direct, reference_tables)?,
+            None => 0u8.encode(writer, is_direct, reference_tables, arena)?,
             Some(v) => {
-                1u8.encode(writer, is_direct, reference_tables)?;
-                v.encode(writer, is_direct, reference_tables)?;
+                1u8.encode(writer, is_direct, reference_tables, arena)?;
+                v.encode(writer, is_direct, reference_tables, arena)?;
             }
         }
 
         Ok(())
     }
 
-    fn decode<T: Transaction, R: Read>(
+    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
         reader: &mut R,
         drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
+        arena: &mut A,
     ) -> Result<Self, DatabaseError> {
-        match u8::decode(reader, drive, reference_tables)? {
+        match u8::decode(reader, drive, reference_tables, arena)? {
             0 => Ok(None),
-            1 => Ok(Some(V::decode(reader, drive, reference_tables)?)),
+            1 => Ok(Some(V::decode(reader, drive, reference_tables, arena)?)),
             _ => unreachable!(),
         }
     }

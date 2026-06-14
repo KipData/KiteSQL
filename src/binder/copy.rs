@@ -17,15 +17,12 @@ use std::str::FromStr;
 
 use super::*;
 use crate::catalog::TableName;
-use crate::errors::DatabaseError;
 use crate::planner::operator::copy_from_file::CopyFromFileOperator;
 use crate::planner::operator::copy_to_file::CopyToFileOperator;
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::Operator;
 use crate::planner::Childrens;
 use kite_sql_serde_macros::ReferenceSerialization;
-use serde::{Deserialize, Serialize};
-use sqlparser::ast::{CopyOption, CopySource, CopyTarget};
 
 #[derive(Debug, PartialEq, PartialOrd, Ord, Hash, Eq, Clone, ReferenceSerialization)]
 pub struct ExtSource {
@@ -34,18 +31,7 @@ pub struct ExtSource {
 }
 
 /// File format.
-#[derive(
-    Debug,
-    PartialEq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Eq,
-    Clone,
-    Serialize,
-    Deserialize,
-    ReferenceSerialization,
-)]
+#[derive(Debug, PartialEq, PartialOrd, Ord, Hash, Eq, Clone, ReferenceSerialization)]
 pub enum FileFormat {
     Csv {
         /// Delimiter to parse.
@@ -79,55 +65,34 @@ impl FromStr for ExtSource {
 }
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
-    pub(super) fn bind_copy(
+    pub(super) fn bind_copy_to_file(
         &mut self,
-        source: CopySource,
-        to: bool,
-        target: CopyTarget,
-        options: &[CopyOption],
+        target: ExtSource,
+        input: LogicalPlan,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let ext_source = copy_ext_source(target, options)?;
+        Ok(LogicalPlan::new(
+            Operator::CopyToFile(CopyToFileOperator { target }),
+            Childrens::Only(Box::new(input)),
+        ))
+    }
 
-        let (table_name, ..) = match source {
-            CopySource::Table {
-                table_name,
-                columns,
-            } => (table_name, columns),
-            CopySource::Query(query) => {
-                if !to {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "'COPY FROM query'".to_string(),
-                    ));
-                }
-                let mut input_plan = self.bind_query(&query)?;
-                let schema_ref = input_plan.output_schema().clone();
-                return Ok(LogicalPlan::new(
-                    Operator::CopyToFile(CopyToFileOperator {
-                        target: ext_source,
-                        schema_ref,
-                    }),
-                    Childrens::Only(Box::new(input_plan)),
-                ));
-            }
-        };
-        let table_name: TableName = lower_case_name(&table_name)?.into();
-
-        if let Some(table) = self.context.table(table_name.clone())? {
-            let schema_ref = table.schema_ref().clone();
-
+    pub(super) fn bind_copy_table(
+        &mut self,
+        table_name: TableName,
+        to: bool,
+        ext_source: ExtSource,
+        arena: &crate::planner::PlanArena,
+    ) -> Result<LogicalPlan, DatabaseError> {
+        if let Some(table) = self.context.table(table_name.clone())?.cloned() {
             if to {
-                // COPY <source_table> TO <dest_file>
                 Ok(LogicalPlan::new(
-                    Operator::CopyToFile(CopyToFileOperator {
-                        target: ext_source,
-                        schema_ref,
-                    }),
+                    Operator::CopyToFile(CopyToFileOperator { target: ext_source }),
                     Childrens::Only(Box::new(TableScanOperator::build(
-                        table_name, table, false,
+                        table_name, &table, false, arena,
                     )?)),
                 ))
             } else {
-                // COPY <dest_table> FROM <source_file>
+                let schema_ref = table.columns().copied().collect();
                 Ok(LogicalPlan::new(
                     Operator::CopyFromFile(CopyFromFileOperator {
                         source: ext_source,
@@ -139,48 +104,6 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             }
         } else {
             Err(DatabaseError::TableNotFound)
-        }
-    }
-}
-
-fn copy_ext_source(target: CopyTarget, options: &[CopyOption]) -> Result<ExtSource, DatabaseError> {
-    Ok(ExtSource {
-        path: match target {
-            CopyTarget::File { filename } => filename.into(),
-            t => {
-                return Err(DatabaseError::UnsupportedStmt(format!(
-                    "copy target: {t:?}"
-                )))
-            }
-        },
-        format: FileFormat::from_options(options),
-    })
-}
-
-impl FileFormat {
-    /// Create from copy options.
-    pub fn from_options(options: &[CopyOption]) -> Self {
-        let mut delimiter = ',';
-        let mut quote = '"';
-        let mut escape = None;
-        let mut header = false;
-        for opt in options {
-            match opt {
-                CopyOption::Format(fmt) => {
-                    debug_assert_eq!(fmt.value.to_lowercase(), "csv", "only support CSV format")
-                }
-                CopyOption::Delimiter(c) => delimiter = *c,
-                CopyOption::Header(b) => header = *b,
-                CopyOption::Quote(c) => quote = *c,
-                CopyOption::Escape(c) => escape = Some(*c),
-                o => panic!("unsupported copy option: {o:?}"),
-            }
-        }
-        FileFormat::Csv {
-            delimiter,
-            quote,
-            escape,
-            header,
         }
     }
 }

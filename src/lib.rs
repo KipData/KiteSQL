@@ -50,13 +50,14 @@
 //! [`Database::new_transaction`](db::Database::new_transaction) method.
 //!
 //! support UDF (User-Defined Function) so that users can customize internal calculation functions
-//! with the [`DataBaseBuilder::register_function`](db::DataBaseBuilder::register_scala_function)
+//! with [`Database::load`](db::Database::load) and [`CatalogKind`](db::CatalogKind)
 //!
 //! # Examples
 //!
 //! ```ignore
-//! use kite_sql::db::{DataBaseBuilder, ResultIter};
+//! use kite_sql::db::DataBaseBuilder;
 //! use kite_sql::errors::DatabaseError;
+//! use kite_sql::orm::OrmQueryResultExt;
 //! use kite_sql::Model;
 //!
 //! #[derive(Default, Debug, PartialEq, Model)]
@@ -82,7 +83,15 @@
 //!         c2: "one".to_string(),
 //!     })?;
 //!
-//!     for row in database.fetch::<MyStruct>()? {
+//!     let rows = database
+//!         .bind(|ctx| {
+//!             ctx.from::<MyStruct>()?
+//!                 .filter(|e| e.column(MyStruct::c1())?.gte(1))?
+//!                 .project_scalars((MyStruct::c1(), MyStruct::c2()))
+//!         })?
+//!         .project_tuple::<(i32, String)>();
+//!
+//!     for row in rows {
 //!         println!("{:?}", row?);
 //!     }
 //!     database.drop_table::<MyStruct>()?;
@@ -106,6 +115,7 @@ pub mod macros;
 mod optimizer;
 #[cfg(feature = "orm")]
 pub mod orm;
+#[cfg(feature = "parser")]
 pub mod parser;
 pub mod planner;
 #[cfg(all(not(target_arch = "wasm32"), feature = "python"))]
@@ -113,7 +123,6 @@ pub mod python;
 pub mod serdes;
 pub mod storage;
 pub mod types;
-pub(crate) mod utils;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
 

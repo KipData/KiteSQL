@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
+use crate::execution::{
+    DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
+};
 use crate::planner::operator::drop_index::DropIndexOperator;
 use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
@@ -29,20 +31,25 @@ impl From<DropIndexOperator> for DropIndex {
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropIndex {
+    type Input = Self;
+
     fn into_executor(
-        self,
+        input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
+        _: ExecutionContext<'_>,
+        _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::DropIndex(self))
+        let executor = input;
+        arena.push(ExecNode::DropIndex(executor))
     }
 }
 
-impl DropIndex {
-    pub(crate) fn next_tuple<'a, T: Transaction>(
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropIndex {
+    fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(DropIndexOperator {
             table_name,
@@ -54,13 +61,23 @@ impl DropIndex {
             return Ok(());
         };
 
-        arena.transaction_mut().drop_index(
-            arena.table_cache(),
-            arena.meta_cache(),
-            table_name,
-            &index_name,
-            if_exists,
-        )?;
+        let dropped = {
+            let (transaction, table_codec) = arena.transaction_codec_mut();
+            transaction.drop_index(
+                table_codec,
+                plan_arena,
+                table_name.clone(),
+                &index_name,
+                if_exists,
+            )?
+        };
+        if let Some((table, index_id)) = dropped {
+            arena.push_ddl_apply(DDLApply::upsert_table(table, false));
+            arena.push_ddl_apply(DDLApply::RemoveStatisticsMeta {
+                table_name: table_name.clone(),
+                index_id,
+            });
+        }
 
         TupleBuilder::build_result_into(arena.result_tuple_mut(), index_name.to_string());
         arena.resume();

@@ -14,7 +14,9 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::create_accumulators;
-use crate::execution::{build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode};
+use crate::execution::{
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
+};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::LogicalPlan;
@@ -25,24 +27,31 @@ pub struct SimpleAggExecutor {
     returned: bool,
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SimpleAggExecutor {
     type Input = (AggregateOperator, LogicalPlan);
 
     fn into_executor(
         (AggregateOperator { agg_calls, .. }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+        cache: ExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
-        let input = build_read(arena, input, cache, transaction);
+        let input = build_read(arena, plan_arena, input, cache, transaction);
         arena.push(ExecNode::SimpleAgg(SimpleAggExecutor {
             agg_calls,
             input,
             returned: false,
         }))
     }
+}
 
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor {
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
         if self.returned {
             arena.finish();
             return Ok(());
@@ -50,7 +59,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor {
 
         let mut accs = create_accumulators(&self.agg_calls)?;
 
-        while arena.next_tuple(self.input)? {
+        while arena.next_tuple(self.input, plan_arena)? {
             let tuple = arena.result_tuple();
             for (acc, expr) in accs.iter_mut().zip(self.agg_calls.iter()) {
                 let ScalarExpression::AggCall { args, .. } = expr else {

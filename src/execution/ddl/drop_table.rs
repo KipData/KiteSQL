@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
+use crate::execution::{
+    DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
+};
 use crate::planner::operator::drop_table::DropTableOperator;
 use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
@@ -29,20 +31,25 @@ impl From<DropTableOperator> for DropTable {
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropTable {
+    type Input = Self;
+
     fn into_executor(
-        self,
+        input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
+        _: ExecutionContext<'_>,
+        _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::DropTable(self))
+        let executor = input;
+        arena.push(ExecNode::DropTable(executor))
     }
 }
 
-impl DropTable {
-    pub(crate) fn next_tuple<'a, T: Transaction>(
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropTable {
+    fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        _: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(DropTableOperator {
             table_name,
@@ -53,9 +60,12 @@ impl DropTable {
             return Ok(());
         };
 
-        arena
-            .transaction_mut()
-            .drop_table(arena.table_cache(), table_name.clone(), if_exists)?;
+        let (transaction, table_codec) = arena.transaction_codec_mut();
+        if transaction.drop_table(table_codec, table_name.clone(), if_exists)? {
+            arena.push_ddl_apply(DDLApply::DropTable {
+                name: table_name.clone(),
+            });
+        }
 
         TupleBuilder::build_result_into(arena.result_tuple_mut(), format!("{table_name}"));
         arena.resume();

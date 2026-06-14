@@ -92,7 +92,7 @@ impl BackendControl for SqliteBackend {
 }
 
 impl SimpleExecutor for SqliteBackend {
-    fn execute_batch(&self, sql: &str) -> Result<(), TpccError> {
+    fn execute_batch(&mut self, sql: &str) -> Result<(), TpccError> {
         if let Some(stmt) = normalize_sqlite_sql(sql) {
             self.connection.execute(&stmt)?;
         }

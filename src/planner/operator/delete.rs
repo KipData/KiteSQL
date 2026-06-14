@@ -20,6 +20,7 @@ use std::fmt::Formatter;
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct DeleteOperator {
     pub table_name: TableName,
+    // FIXME
     // for column pruning
     pub primary_keys: Vec<ColumnRef>,
 }

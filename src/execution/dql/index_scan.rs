@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor};
+use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::expression::range_detacher::Range;
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::storage::{IndexIter, IndexRanges, Iter, Transaction};
@@ -59,52 +59,26 @@ impl<'a, T: Transaction + 'a>
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for IndexScan<'a, T> {
-    fn into_executor(
-        self,
-        arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
-    ) -> ExecId {
-        arena.push(ExecNode::IndexScan(self))
-    }
-}
-
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for IndexScan<'a, T> {
-    type Input = (
-        TableScanOperator,
-        IndexMetaRef,
-        IndexLookup,
-        Option<Vec<TupleValueSerializableImpl>>,
-        Option<Vec<usize>>,
-    );
+    type Input = Self;
 
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
+        _: ExecutionContext<'_>,
+        _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::IndexScan(IndexScan::from(input)))
-    }
-
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
-        IndexScan::next_tuple(self, arena)
+        let executor = input;
+        arena.push(ExecNode::IndexScan(executor))
     }
 }
 
-impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
-    fn ranges_from_lookup(lookup: IndexLookup, arena: &mut ExecArena<'a, T>) -> IndexRanges {
-        match lookup {
-            IndexLookup::Static(Range::SortedRanges(ranges)) => ranges.into(),
-            IndexLookup::Static(range) => range.into(),
-            IndexLookup::Probe => match arena.pop_runtime_probe() {
-                RuntimeIndexProbe::Eq(value) => Range::Eq(value).into(),
-                RuntimeIndexProbe::Scope { min, max } => Range::Scope { min, max }.into(),
-            },
-        }
-    }
-
-    pub(crate) fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for IndexScan<'a, T> {
+    fn next_tuple(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> Result<(), DatabaseError> {
         if self.iter.is_none() {
             let Some(TableScanOperator {
                 table_name,
@@ -121,12 +95,14 @@ impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
                 self.lookup.take().expect("index scan lookup initialized"),
                 arena,
             );
-            self.iter = Some(arena.transaction().read_by_index(
-                arena.table_cache(),
+            let state = arena.local_state(plan_arena);
+            self.iter = Some(state.transaction().read_by_index(
+                state.context.table_cache,
+                state.plan_arena,
                 table_name,
                 limit,
                 columns,
-                self.index_by.clone(),
+                self.index_by,
                 ranges,
                 with_pk,
                 self.covered_deserializers.take(),
@@ -134,16 +110,30 @@ impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
             )?);
         }
 
+        let state = arena.local_state(plan_arena);
         if self
             .iter
             .as_mut()
             .expect("index scan iterator initialized")
-            .next_tuple_into(arena.result_tuple_mut())?
+            .next_tuple_into(state.table_codec, &mut state.result.tuple)?
         {
             arena.resume();
         } else {
             arena.finish();
         }
         Ok(())
+    }
+}
+
+impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
+    fn ranges_from_lookup(lookup: IndexLookup, arena: &mut ExecArena<'a, T>) -> IndexRanges {
+        match lookup {
+            IndexLookup::Static(Range::SortedRanges(ranges)) => ranges.into(),
+            IndexLookup::Static(range) => range.into(),
+            IndexLookup::Probe => match arena.pop_runtime_probe() {
+                RuntimeIndexProbe::Eq(value) => Range::Eq(value).into(),
+                RuntimeIndexProbe::Scope { min, max } => Range::Scope { min, max }.into(),
+            },
+        }
     }
 }

@@ -14,7 +14,9 @@
 
 use super::{rewrite_table_in_batches, visit_table_in_batches};
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionCaches, WriteExecutor};
+use crate::execution::{
+    DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
+};
 use crate::planner::operator::alter_table::change_column::{ChangeColumnOperator, NotNullChange};
 use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
@@ -31,20 +33,25 @@ impl From<ChangeColumnOperator> for ChangeColumn {
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for ChangeColumn {
+    type Input = Self;
+
     fn into_executor(
-        self,
+        input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _: ExecutionCaches<'a>,
-        _: *mut T,
+        _plan_arena: &mut crate::planner::PlanArena<'a>,
+        _: ExecutionContext<'_>,
+        _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::ChangeColumn(self))
+        let executor = input;
+        arena.push(ExecNode::ChangeColumn(executor))
     }
 }
 
-impl ChangeColumn {
-    pub(crate) fn next_tuple<'a, T: Transaction>(
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ChangeColumn {
+    fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let table_cache = arena.table_cache();
         let Some(ChangeColumnOperator {
@@ -60,63 +67,76 @@ impl ChangeColumn {
             return Ok(());
         };
 
-        let table_catalog = arena
-            .transaction_mut()
-            .table(table_cache, table_name.clone())?
-            .cloned()
-            .ok_or(DatabaseError::TableNotFound)?;
-        let schema = table_catalog.schema_ref().clone();
-        let (column_index, old_column) = schema
-            .iter()
-            .enumerate()
-            .find(|(_, column)| column.name() == old_column_name)
-            .map(|(index, column)| (index, column.clone()))
-            .ok_or_else(|| DatabaseError::column_not_found(old_column_name.clone()))?;
-        let needs_data_rewrite = old_column.datatype() != &data_type;
+        let (old_schema, pk_ty, column_index, old_column_type, old_column_id, affected_index_name) = {
+            let table_catalog = arena
+                .transaction()
+                .table(table_cache, table_name.clone())?
+                .ok_or(DatabaseError::TableNotFound)?;
+            let (column_index, old_column) = table_catalog
+                .columns()
+                .enumerate()
+                .find_map(|(index, column)| {
+                    let column = plan_arena.column(*column);
+                    (column.name() == old_column_name).then_some((index, column))
+                })
+                .ok_or_else(|| DatabaseError::column_not_found(old_column_name.clone()))?;
+            let old_column_id = old_column.id();
+            let affected_index_name = old_column_id.and_then(|column_id| {
+                table_catalog
+                    .indexes()
+                    .map(|index_meta| plan_arena.index(*index_meta))
+                    .find(|index_meta| index_meta.column_ids.contains(&column_id))
+                    .map(|index_meta| index_meta.name.clone())
+            });
+            (
+                table_catalog.columns().copied().collect_vec(),
+                table_catalog.primary_keys_type().clone(),
+                column_index,
+                old_column.datatype().clone(),
+                old_column_id,
+                affected_index_name,
+            )
+        };
+        let needs_data_rewrite = old_column_type != data_type;
         let needs_not_null_validation = matches!(not_null_change, NotNullChange::Set);
 
         if needs_data_rewrite {
-            let Some(column_id) = old_column.id() else {
+            let Some(_) = old_column_id else {
                 return Err(DatabaseError::column_not_found(old_column_name.clone()));
             };
-            let affected_index = table_catalog
-                .indexes()
-                .find(|index_meta| index_meta.column_ids.contains(&column_id));
-            if let Some(index_meta) = affected_index {
+            if let Some(index_name) = affected_index_name {
                 return Err(DatabaseError::UnsupportedStmt(format!(
-                    "cannot alter type of indexed column `{}`; drop index `{}` first",
-                    old_column_name, index_meta.name
+                    "cannot alter type of indexed column `{old_column_name}`; drop index `{index_name}` first"
                 )));
             }
         }
 
-        let old_deserializers = schema
-            .iter()
-            .map(|column| column.datatype().serializable())
-            .collect_vec();
-        let pk_ty = table_catalog.primary_keys_type().clone();
-
         if needs_data_rewrite {
-            let serializers = schema
-                .iter()
-                .enumerate()
-                .map(|(index, column)| {
-                    if index == column_index {
-                        data_type.serializable()
-                    } else {
-                        column.datatype().serializable()
-                    }
-                })
-                .collect_vec();
             let target_column_name = new_column_name.clone();
             let target_data_type = data_type.clone();
+            let mut state = arena.local_state(plan_arena);
+            let plan_arena = state.plan_arena;
+            let (transaction, table_codec) = state.transaction_codec_mut();
             rewrite_table_in_batches(
-                arena.transaction_mut(),
+                transaction,
+                table_codec,
                 &table_name,
                 &pk_ty,
-                &old_deserializers,
-                schema.len(),
-                &serializers,
+                old_schema.len(),
+                || {
+                    old_schema
+                        .iter()
+                        .map(|column| plan_arena.column(*column).datatype().serializable())
+                },
+                || {
+                    old_schema.iter().enumerate().map(|(index, column)| {
+                        if index == column_index {
+                            data_type.serializable()
+                        } else {
+                            plan_arena.column(*column).datatype().serializable()
+                        }
+                    })
+                },
                 |tuple| {
                     tuple.values[column_index] =
                         tuple.values[column_index].clone().cast(&target_data_type)?;
@@ -125,16 +145,24 @@ impl ChangeColumn {
                     }
                     Ok(())
                 },
-                |_, _| Ok(()),
+                |_, _, _| Ok(()),
             )?;
         } else if needs_not_null_validation {
             let target_column_name = new_column_name.clone();
+            let mut state = arena.local_state(plan_arena);
+            let plan_arena = state.plan_arena;
+            let (transaction, table_codec) = state.transaction_codec_mut();
             visit_table_in_batches(
-                arena.transaction(),
+                transaction,
+                table_codec,
                 &table_name,
                 &pk_ty,
-                &old_deserializers,
-                schema.len(),
+                old_schema.len(),
+                || {
+                    old_schema
+                        .iter()
+                        .map(|column| plan_arena.column(*column).datatype().serializable())
+                },
                 |tuple| {
                     if tuple.values[column_index].is_null() {
                         return Err(DatabaseError::not_null_column(target_column_name.clone()));
@@ -144,15 +172,21 @@ impl ChangeColumn {
             )?;
         }
 
-        arena.transaction_mut().change_column(
-            table_cache,
-            &table_name,
-            &old_column_name,
-            &new_column_name,
-            &data_type,
-            &default_change,
-            &not_null_change,
-        )?;
+        let apply = {
+            let (transaction, table_codec) = arena.transaction_codec_mut();
+            let table = transaction.change_column(
+                table_codec,
+                plan_arena,
+                &table_name,
+                &old_column_name,
+                &new_column_name,
+                &data_type,
+                &default_change,
+                &not_null_change,
+            )?;
+            DDLApply::upsert_table(table, true)
+        };
+        arena.push_ddl_apply(apply);
 
         TupleBuilder::build_result_into(arena.result_tuple_mut(), format!("{table_name}"));
         arena.resume();

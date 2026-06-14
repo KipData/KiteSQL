@@ -25,7 +25,11 @@ use crate::planner::LogicalPlan;
 pub struct MinMaxToTopK;
 
 impl NormalizationRule for MinMaxToTopK {
-    fn apply(&self, plan: &mut LogicalPlan) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        _: &mut crate::planner::PlanArena,
+    ) -> Result<bool, DatabaseError> {
         let Operator::Aggregate(op) = &plan.operator else {
             return Ok(false);
         };
@@ -83,7 +87,7 @@ mod tests {
     use crate::errors::DatabaseError;
     use crate::optimizer::core::rule::NormalizationRule;
     use crate::planner::operator::Operator;
-    use crate::planner::Childrens;
+    use crate::planner::{Childrens, PlanArena};
 
     fn find_aggregate(plan: &crate::planner::LogicalPlan) -> &crate::planner::LogicalPlan {
         if matches!(plan.operator, Operator::Aggregate(_)) {
@@ -110,10 +114,11 @@ mod tests {
     #[test]
     fn test_min_to_topk() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let mut plan = table_state.plan("select min(c1) from t1")?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let mut plan = table_state.plan_with_arena("select min(c1) from t1", &mut arena)?;
 
         let agg_plan = find_aggregate_mut(&mut plan);
-        assert!(MinMaxToTopK.apply(agg_plan)?);
+        assert!(MinMaxToTopK.apply(agg_plan, &mut arena)?);
 
         let agg_plan = find_aggregate(&plan);
         let Operator::Aggregate(op) = &agg_plan.operator else {
@@ -147,10 +152,11 @@ mod tests {
     #[test]
     fn test_max_to_topk() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
-        let mut plan = table_state.plan("select max(c2) from t1")?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let mut plan = table_state.plan_with_arena("select max(c2) from t1", &mut arena)?;
 
         let agg_plan = find_aggregate_mut(&mut plan);
-        assert!(MinMaxToTopK.apply(agg_plan)?);
+        assert!(MinMaxToTopK.apply(agg_plan, &mut arena)?);
 
         let agg_plan = find_aggregate(&plan);
         let child = match agg_plan.childrens.as_ref() {

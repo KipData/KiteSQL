@@ -14,117 +14,94 @@
 
 use crate::errors::DatabaseError;
 use crate::types::evaluator::cast::{cast_fail, to_char, to_varchar};
-use crate::types::evaluator::BinaryEvaluator;
 use crate::types::evaluator::DataValue;
 use crate::types::value::{ONE_DAY_TO_SEC, ONE_SEC_TO_NANO};
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
 use std::hint;
+pub fn time_plus_binary_eval(
+    left: &DataValue,
+    right: &DataValue,
+) -> Result<DataValue, DatabaseError> {
+    Ok(match (left, right) {
+        (DataValue::Time32(v1, p1), DataValue::Time32(v2, p2)) => {
+            let (mut v1, n1) = DataValue::unpack(*v1, *p1);
+            let (v2, n2) = DataValue::unpack(*v2, *p2);
+            let mut n = n1 + n2;
+            while n > ONE_SEC_TO_NANO {
+                v1 += 1;
+                n -= ONE_SEC_TO_NANO;
+            }
+            let p = if p2 > p1 { *p2 } else { *p1 };
+            if v1 + v2 > ONE_DAY_TO_SEC {
+                return Ok(DataValue::Null);
+            }
+            DataValue::Time32(DataValue::pack(v1 + v2, n, p), p)
+        }
+        (DataValue::Time32(..), DataValue::Null)
+        | (DataValue::Null, DataValue::Time32(..))
+        | (DataValue::Null, DataValue::Null) => DataValue::Null,
+        _ => unsafe { hint::unreachable_unchecked() },
+    })
+}
+pub fn time_minus_binary_eval(
+    left: &DataValue,
+    right: &DataValue,
+) -> Result<DataValue, DatabaseError> {
+    Ok(match (left, right) {
+        (DataValue::Time32(v1, p1), DataValue::Time32(v2, p2, ..)) => {
+            let (mut v1, mut n1) = DataValue::unpack(*v1, *p1);
+            let (v2, n2) = DataValue::unpack(*v2, *p2);
+            while n1 < n2 {
+                v1 -= 1;
+                n1 += ONE_SEC_TO_NANO;
+            }
+            if v1 < v2 {
+                return Ok(DataValue::Null);
+            }
+            let p = if p2 > p1 { *p2 } else { *p1 };
+            DataValue::Time32(DataValue::pack(v1 - v2, n1 - n2, p), p)
+        }
+        (DataValue::Time32(..), DataValue::Null)
+        | (DataValue::Null, DataValue::Time32(..))
+        | (DataValue::Null, DataValue::Null) => DataValue::Null,
+        _ => unsafe { hint::unreachable_unchecked() },
+    })
+}
 
-#[derive(Debug)]
-pub struct TimePlusBinaryEvaluator;
-#[derive(Debug)]
-pub struct TimeMinusBinaryEvaluator;
-#[derive(Debug)]
-pub struct TimeGtBinaryEvaluator;
-#[derive(Debug)]
-pub struct TimeGtEqBinaryEvaluator;
-#[derive(Debug)]
-pub struct TimeLtBinaryEvaluator;
-#[derive(Debug)]
-pub struct TimeLtEqBinaryEvaluator;
-#[derive(Debug)]
-pub struct TimeEqBinaryEvaluator;
-#[derive(Debug)]
-pub struct TimeNotEqBinaryEvaluator;
-impl BinaryEvaluator for TimePlusBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Time32(v1, p1), DataValue::Time32(v2, p2)) => {
-                let (mut v1, n1) = DataValue::unpack(*v1, *p1);
-                let (v2, n2) = DataValue::unpack(*v2, *p2);
-                let mut n = n1 + n2;
-                while n > ONE_SEC_TO_NANO {
-                    v1 += 1;
-                    n -= ONE_SEC_TO_NANO;
+macro_rules! time32_order_binary {
+    ($name:ident, $is_order:ident) => {
+        pub fn $name(left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+            Ok(match (left, right) {
+                (DataValue::Time32(v1, p1), DataValue::Time32(v2, p2, ..)) => {
+                    let (v1, n1) = DataValue::unpack(*v1, *p1);
+                    let (v2, n2) = DataValue::unpack(*v2, *p2);
+                    DataValue::Boolean(v1.cmp(&v2).then_with(|| n1.cmp(&n2)).$is_order())
                 }
-                let p = if p2 > p1 { *p2 } else { *p1 };
-                if v1 + v2 > ONE_DAY_TO_SEC {
-                    return Ok(DataValue::Null);
-                }
-                DataValue::Time32(DataValue::pack(v1 + v2, n, p), p)
-            }
-            (DataValue::Time32(..), DataValue::Null)
-            | (DataValue::Null, DataValue::Time32(..))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
+                (DataValue::Time32(..), DataValue::Null)
+                | (DataValue::Null, DataValue::Time32(..))
+                | (DataValue::Null, DataValue::Null) => DataValue::Null,
+                _ => unsafe { hint::unreachable_unchecked() },
+            })
+        }
+    };
 }
-impl BinaryEvaluator for TimeMinusBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Time32(v1, p1), DataValue::Time32(v2, p2, ..)) => {
-                let (mut v1, mut n1) = DataValue::unpack(*v1, *p1);
-                let (v2, n2) = DataValue::unpack(*v2, *p2);
-                while n1 < n2 {
-                    v1 -= 1;
-                    n1 += ONE_SEC_TO_NANO;
-                }
-                if v1 < v2 {
-                    return Ok(DataValue::Null);
-                }
-                let p = if p2 > p1 { *p2 } else { *p1 };
-                DataValue::Time32(DataValue::pack(v1 - v2, n1 - n2, p), p)
-            }
-            (DataValue::Time32(..), DataValue::Null)
-            | (DataValue::Null, DataValue::Time32(..))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for TimeGtBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Time32(v1, p1), DataValue::Time32(v2, p2, ..)) => {
-                let (v1, n1) = DataValue::unpack(*v1, *p1);
-                let (v2, n2) = DataValue::unpack(*v2, *p2);
-                DataValue::Boolean(v1.cmp(&v2).then_with(|| n1.cmp(&n2)).is_gt())
-            }
-            (DataValue::Time32(..), DataValue::Null)
-            | (DataValue::Null, DataValue::Time32(..))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for TimeGtEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Time32(v1, p1), DataValue::Time32(v2, p2, ..)) => {
-                let (v1, n1) = DataValue::unpack(*v1, *p1);
-                let (v2, n2) = DataValue::unpack(*v2, *p2);
-                DataValue::Boolean(!v1.cmp(&v2).then_with(|| n1.cmp(&n2)).is_lt())
-            }
-            (DataValue::Time32(..), DataValue::Null)
-            | (DataValue::Null, DataValue::Time32(..))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
+
+time32_order_binary!(time_gt_binary_eval, is_gt);
+time32_order_binary!(time_gt_eq_binary_eval, is_ge);
 
 crate::define_cast_evaluator!(
-    Time32ToCharCastEvaluator {
+    time32_to_char_cast_eval {
         len: u32,
-        unit: CharLengthUnits,
-        to: LogicalType
+        unit: CharLengthUnits
     },
     DataValue::Time32(value, precision) => |this| {
         to_char(
             DataValue::format_time(*value, *precision).ok_or_else(|| {
-                cast_fail(LogicalType::Time(Some(*precision)), this.to.clone())
+                cast_fail(
+                    LogicalType::Time(Some(*precision)),
+                    LogicalType::Char(this.len, this.unit),
+                )
             })?,
             this.len,
             this.unit,
@@ -132,15 +109,17 @@ crate::define_cast_evaluator!(
     }
 );
 crate::define_cast_evaluator!(
-    Time32ToVarcharCastEvaluator {
+    time32_to_varchar_cast_eval {
         len: Option<u32>,
-        unit: CharLengthUnits,
-        to: LogicalType
+        unit: CharLengthUnits
     },
     DataValue::Time32(value, precision) => |this| {
         to_varchar(
             DataValue::format_time(*value, *precision).ok_or_else(|| {
-                cast_fail(LogicalType::Time(Some(*precision)), this.to.clone())
+                cast_fail(
+                    LogicalType::Time(Some(*precision)),
+                    LogicalType::Varchar(this.len, this.unit),
+                )
             })?,
             this.len,
             this.unit,
@@ -148,98 +127,47 @@ crate::define_cast_evaluator!(
     }
 );
 crate::define_cast_evaluator!(
-    Time32ToTimeCastEvaluator {
+    time32_to_time_cast_eval {
         precision: Option<u64>
     },
     DataValue::Time32(value, _precision) => |this| {
         Ok(DataValue::Time32(*value, this.precision.unwrap_or(0)))
     }
 );
-impl BinaryEvaluator for TimeLtBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Time32(v1, p1), DataValue::Time32(v2, p2, ..)) => {
-                let (v1, n1) = DataValue::unpack(*v1, *p1);
-                let (v2, n2) = DataValue::unpack(*v2, *p2);
-                DataValue::Boolean(v1.cmp(&v2).then_with(|| n1.cmp(&n2)).is_lt())
-            }
-            (DataValue::Time32(..), DataValue::Null)
-            | (DataValue::Null, DataValue::Time32(..))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for TimeLtEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Time32(v1, p1), DataValue::Time32(v2, p2, ..)) => {
-                let (v1, n1) = DataValue::unpack(*v1, *p1);
-                let (v2, n2) = DataValue::unpack(*v2, *p2);
-                DataValue::Boolean(!v1.cmp(&v2).then_with(|| n1.cmp(&n2)).is_gt())
-            }
-            (DataValue::Time32(..), DataValue::Null)
-            | (DataValue::Null, DataValue::Time32(..))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for TimeEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Time32(v1, p1), DataValue::Time32(v2, p2, ..)) => {
-                let (v1, n1) = DataValue::unpack(*v1, *p1);
-                let (v2, n2) = DataValue::unpack(*v2, *p2);
-                DataValue::Boolean(v1.cmp(&v2).then_with(|| n1.cmp(&n2)).is_eq())
-            }
-            (DataValue::Time32(..), DataValue::Null)
-            | (DataValue::Null, DataValue::Time32(..))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for TimeNotEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Time32(v1, p1), DataValue::Time32(v2, p2, ..)) => {
-                let (v1, n1) = DataValue::unpack(*v1, *p1);
-                let (v2, n2) = DataValue::unpack(*v2, *p2);
-                DataValue::Boolean(!v1.cmp(&v2).then_with(|| n1.cmp(&n2)).is_eq())
-            }
-            (DataValue::Time32(..), DataValue::Null)
-            | (DataValue::Null, DataValue::Time32(..))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
+time32_order_binary!(time_lt_binary_eval, is_lt);
+time32_order_binary!(time_lt_eq_binary_eval, is_le);
+time32_order_binary!(time_eq_binary_eval, is_eq);
+pub fn time_not_eq_binary_eval(
+    left: &DataValue,
+    right: &DataValue,
+) -> Result<DataValue, DatabaseError> {
+    Ok(match time_eq_binary_eval(left, right)? {
+        DataValue::Boolean(value) => DataValue::Boolean(!value),
+        value => value,
+    })
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
-    use crate::types::evaluator::{BinaryEvaluator, CastEvaluator};
     use crate::types::value::Utf8Type;
 
     #[test]
     fn test_time32_binary_evaluators() {
         assert_eq!(
-            TimePlusBinaryEvaluator
-                .binary_eval(
-                    &DataValue::Time32(4_190_119_896, 3),
-                    &DataValue::Time32(2_621_204_256, 4),
-                )
-                .unwrap(),
+            time_plus_binary_eval(
+                &DataValue::Time32(4_190_119_896, 3),
+                &DataValue::Time32(2_621_204_256, 4),
+            )
+            .unwrap(),
             DataValue::Time32(2_618_593_017, 4)
         );
         assert_eq!(
-            TimeGtBinaryEvaluator
-                .binary_eval(
-                    &DataValue::Time32(2_621_204_256, 4),
-                    &DataValue::Time32(4_190_119_896, 3),
-                )
-                .unwrap(),
+            time_gt_binary_eval(
+                &DataValue::Time32(2_621_204_256, 4),
+                &DataValue::Time32(4_190_119_896, 3),
+            )
+            .unwrap(),
             DataValue::Boolean(true)
         );
     }
@@ -248,13 +176,7 @@ mod test {
     fn test_time32_cast_evaluators() {
         let value = DataValue::Time32(DataValue::pack(3 * 3600 + 4 * 60 + 5, 123_000_000, 3), 3);
         assert_eq!(
-            Time32ToCharCastEvaluator {
-                len: 12,
-                unit: CharLengthUnits::Characters,
-                to: LogicalType::Char(12, CharLengthUnits::Characters),
-            }
-            .eval_cast(&value)
-            .unwrap(),
+            time32_to_char_cast_eval(12, CharLengthUnits::Characters, &value).unwrap(),
             DataValue::Utf8 {
                 value: "03:04:05.123".to_string(),
                 ty: Utf8Type::Fixed(12),
@@ -262,24 +184,13 @@ mod test {
             }
         );
         assert_eq!(
-            Time32ToVarcharCastEvaluator {
-                len: Some(12),
-                unit: CharLengthUnits::Characters,
-                to: LogicalType::Varchar(Some(12), CharLengthUnits::Characters),
-            }
-            .eval_cast(&value)
-            .unwrap(),
+            time32_to_varchar_cast_eval(Some(12), CharLengthUnits::Characters, &value).unwrap(),
             DataValue::Utf8 {
                 value: "03:04:05.123".to_string(),
                 ty: Utf8Type::Variable(Some(12)),
                 unit: CharLengthUnits::Characters,
             }
         );
-        assert_eq!(
-            Time32ToTimeCastEvaluator { precision: Some(3) }
-                .eval_cast(&value)
-                .unwrap(),
-            value
-        );
+        assert_eq!(time32_to_time_cast_eval(Some(3), &value).unwrap(), value);
     }
 }

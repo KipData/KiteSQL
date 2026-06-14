@@ -14,59 +14,36 @@
 
 use crate::errors::DatabaseError;
 use crate::types::evaluator::cast::{to_char, to_varchar};
-use crate::types::evaluator::BinaryEvaluator;
 use crate::types::evaluator::DataValue;
 use crate::types::CharLengthUnits;
 use ordered_float::OrderedFloat;
 use rust_decimal::prelude::ToPrimitive;
 use std::hint;
 
-#[derive(Debug)]
-pub struct DecimalPlusBinaryEvaluator;
-#[derive(Debug)]
-pub struct DecimalMinusBinaryEvaluator;
-#[derive(Debug)]
-pub struct DecimalMultiplyBinaryEvaluator;
-#[derive(Debug)]
-pub struct DecimalDivideBinaryEvaluator;
-#[derive(Debug)]
-pub struct DecimalGtBinaryEvaluator;
-#[derive(Debug)]
-pub struct DecimalGtEqBinaryEvaluator;
-#[derive(Debug)]
-pub struct DecimalLtBinaryEvaluator;
-#[derive(Debug)]
-pub struct DecimalLtEqBinaryEvaluator;
-#[derive(Debug)]
-pub struct DecimalEqBinaryEvaluator;
-#[derive(Debug)]
-pub struct DecimalNotEqBinaryEvaluator;
-#[derive(Debug)]
-pub struct DecimalModBinaryEvaluator;
-impl BinaryEvaluator for DecimalPlusBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Decimal(v1), DataValue::Decimal(v2)) => DataValue::Decimal(v1 + v2),
-            (DataValue::Decimal(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Decimal(_))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for DecimalMinusBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Decimal(v1), DataValue::Decimal(v2)) => DataValue::Decimal(v1 - v2),
-            (DataValue::Decimal(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Decimal(_))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
+macro_rules! decimal_binary {
+    ($name:ident, $body:expr) => {
+        pub fn $name(left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
+            Ok(match (left, right) {
+                (DataValue::Decimal(v1), DataValue::Decimal(v2)) => $body(v1, v2),
+                (DataValue::Decimal(_), DataValue::Null)
+                | (DataValue::Null, DataValue::Decimal(_))
+                | (DataValue::Null, DataValue::Null) => DataValue::Null,
+                _ => unsafe { hint::unreachable_unchecked() },
+            })
+        }
+    };
 }
 
-crate::define_cast_evaluator!(DecimalToFloatCastEvaluator, DataValue::Decimal(value) => {
+decimal_binary!(
+    decimal_plus_binary_eval,
+    |v1: &rust_decimal::Decimal, v2: &rust_decimal::Decimal| DataValue::Decimal(v1 + v2)
+);
+decimal_binary!(
+    decimal_minus_binary_eval,
+    |v1: &rust_decimal::Decimal, v2: &rust_decimal::Decimal| DataValue::Decimal(v1 - v2)
+);
+
+crate::define_cast_evaluator!(decimal_to_float_cast_eval, DataValue::Decimal(value) => {
     Ok(DataValue::Float32(OrderedFloat(value.to_f32().ok_or_else(|| {
         crate::types::evaluator::cast::cast_fail(
             crate::types::LogicalType::Decimal(None, None),
@@ -74,7 +51,7 @@ crate::define_cast_evaluator!(DecimalToFloatCastEvaluator, DataValue::Decimal(va
         )
     })?)))
 });
-crate::define_cast_evaluator!(DecimalToDoubleCastEvaluator, DataValue::Decimal(value) => {
+crate::define_cast_evaluator!(decimal_to_double_cast_eval, DataValue::Decimal(value) => {
     Ok(DataValue::Float64(OrderedFloat(value.to_f64().ok_or_else(|| {
         crate::types::evaluator::cast::cast_fail(
             crate::types::LogicalType::Decimal(None, None),
@@ -82,151 +59,87 @@ crate::define_cast_evaluator!(DecimalToDoubleCastEvaluator, DataValue::Decimal(v
         )
     })?)))
 });
-crate::define_cast_evaluator!(DecimalToDecimalCastEvaluator, DataValue::Decimal(value) => {
+crate::define_cast_evaluator!(decimal_to_decimal_cast_eval, DataValue::Decimal(value) => {
     Ok(DataValue::Decimal(*value))
 });
 crate::define_cast_evaluator!(
-    DecimalToCharCastEvaluator {
+    decimal_to_char_cast_eval {
         len: u32,
         unit: CharLengthUnits
     },
     DataValue::Decimal(value) => |this| to_char(value.to_string(), this.len, this.unit)
 );
 crate::define_cast_evaluator!(
-    DecimalToVarcharCastEvaluator {
+    decimal_to_varchar_cast_eval {
         len: Option<u32>,
         unit: CharLengthUnits
     },
     DataValue::Decimal(value) => |this| to_varchar(value.to_string(), this.len, this.unit)
 );
-crate::define_cast_evaluator!(DecimalToTinyintCastEvaluator, DataValue::Decimal(value) => {
+crate::define_cast_evaluator!(decimal_to_tinyint_cast_eval, DataValue::Decimal(value) => {
     Ok(DataValue::Int8(crate::decimal_to_int_cast!(*value, i8)))
 });
-crate::define_cast_evaluator!(DecimalToSmallintCastEvaluator, DataValue::Decimal(value) => {
+crate::define_cast_evaluator!(decimal_to_smallint_cast_eval, DataValue::Decimal(value) => {
     Ok(DataValue::Int16(crate::decimal_to_int_cast!(*value, i16)))
 });
-crate::define_cast_evaluator!(DecimalToIntegerCastEvaluator, DataValue::Decimal(value) => {
+crate::define_cast_evaluator!(decimal_to_integer_cast_eval, DataValue::Decimal(value) => {
     Ok(DataValue::Int32(crate::decimal_to_int_cast!(*value, i32)))
 });
-crate::define_cast_evaluator!(DecimalToBigintCastEvaluator, DataValue::Decimal(value) => {
+crate::define_cast_evaluator!(decimal_to_bigint_cast_eval, DataValue::Decimal(value) => {
     Ok(DataValue::Int64(crate::decimal_to_int_cast!(*value, i64)))
 });
-crate::define_cast_evaluator!(DecimalToUTinyintCastEvaluator, DataValue::Decimal(value) => {
+crate::define_cast_evaluator!(decimal_to_utinyint_cast_eval, DataValue::Decimal(value) => {
     Ok(DataValue::UInt8(crate::decimal_to_int_cast!(*value, u8)))
 });
-crate::define_cast_evaluator!(DecimalToUSmallintCastEvaluator, DataValue::Decimal(value) => {
+crate::define_cast_evaluator!(decimal_to_usmallint_cast_eval, DataValue::Decimal(value) => {
     Ok(DataValue::UInt16(crate::decimal_to_int_cast!(*value, u16)))
 });
-crate::define_cast_evaluator!(DecimalToUIntegerCastEvaluator, DataValue::Decimal(value) => {
+crate::define_cast_evaluator!(decimal_to_uinteger_cast_eval, DataValue::Decimal(value) => {
     Ok(DataValue::UInt32(crate::decimal_to_int_cast!(*value, u32)))
 });
-crate::define_cast_evaluator!(DecimalToUBigintCastEvaluator, DataValue::Decimal(value) => {
+crate::define_cast_evaluator!(decimal_to_ubigint_cast_eval, DataValue::Decimal(value) => {
     Ok(DataValue::UInt64(crate::decimal_to_int_cast!(*value, u64)))
 });
-impl BinaryEvaluator for DecimalMultiplyBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Decimal(v1), DataValue::Decimal(v2)) => DataValue::Decimal(v1 * v2),
-            (DataValue::Decimal(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Decimal(_))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for DecimalDivideBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Decimal(v1), DataValue::Decimal(v2)) => DataValue::Decimal(v1 / v2),
-            (DataValue::Decimal(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Decimal(_))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for DecimalGtBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Decimal(v1), DataValue::Decimal(v2)) => DataValue::Boolean(v1 > v2),
-            (DataValue::Decimal(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Decimal(_))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for DecimalGtEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Decimal(v1), DataValue::Decimal(v2)) => DataValue::Boolean(v1 >= v2),
-            (DataValue::Decimal(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Decimal(_))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for DecimalLtBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Decimal(v1), DataValue::Decimal(v2)) => DataValue::Boolean(v1 < v2),
-            (DataValue::Decimal(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Decimal(_))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for DecimalLtEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Decimal(v1), DataValue::Decimal(v2)) => DataValue::Boolean(v1 <= v2),
-            (DataValue::Decimal(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Decimal(_))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for DecimalEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Decimal(v1), DataValue::Decimal(v2)) => DataValue::Boolean(v1 == v2),
-            (DataValue::Decimal(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Decimal(_))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for DecimalNotEqBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Decimal(v1), DataValue::Decimal(v2)) => DataValue::Boolean(v1 != v2),
-            (DataValue::Decimal(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Decimal(_))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
-impl BinaryEvaluator for DecimalModBinaryEvaluator {
-    fn binary_eval(&self, left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
-        Ok(match (left, right) {
-            (DataValue::Decimal(v1), DataValue::Decimal(v2)) => DataValue::Decimal(v1 % v2),
-            (DataValue::Decimal(_), DataValue::Null)
-            | (DataValue::Null, DataValue::Decimal(_))
-            | (DataValue::Null, DataValue::Null) => DataValue::Null,
-            _ => unsafe { hint::unreachable_unchecked() },
-        })
-    }
-}
+decimal_binary!(
+    decimal_multiply_binary_eval,
+    |v1: &rust_decimal::Decimal, v2: &rust_decimal::Decimal| DataValue::Decimal(v1 * v2)
+);
+decimal_binary!(
+    decimal_divide_binary_eval,
+    |v1: &rust_decimal::Decimal, v2: &rust_decimal::Decimal| DataValue::Decimal(v1 / v2)
+);
+decimal_binary!(
+    decimal_gt_binary_eval,
+    |v1: &rust_decimal::Decimal, v2: &rust_decimal::Decimal| DataValue::Boolean(v1 > v2)
+);
+decimal_binary!(
+    decimal_gt_eq_binary_eval,
+    |v1: &rust_decimal::Decimal, v2: &rust_decimal::Decimal| DataValue::Boolean(v1 >= v2)
+);
+decimal_binary!(
+    decimal_lt_binary_eval,
+    |v1: &rust_decimal::Decimal, v2: &rust_decimal::Decimal| DataValue::Boolean(v1 < v2)
+);
+decimal_binary!(
+    decimal_lt_eq_binary_eval,
+    |v1: &rust_decimal::Decimal, v2: &rust_decimal::Decimal| DataValue::Boolean(v1 <= v2)
+);
+decimal_binary!(
+    decimal_eq_binary_eval,
+    |v1: &rust_decimal::Decimal, v2: &rust_decimal::Decimal| DataValue::Boolean(v1 == v2)
+);
+decimal_binary!(
+    decimal_not_eq_binary_eval,
+    |v1: &rust_decimal::Decimal, v2: &rust_decimal::Decimal| DataValue::Boolean(v1 != v2)
+);
+decimal_binary!(
+    decimal_mod_binary_eval,
+    |v1: &rust_decimal::Decimal, v2: &rust_decimal::Decimal| DataValue::Decimal(v1 % v2)
+);
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
-    use crate::types::evaluator::CastEvaluator;
     use crate::types::value::Utf8Type;
     use crate::types::CharLengthUnits;
     use rust_decimal::Decimal;
@@ -236,24 +149,19 @@ mod test {
         let value = DataValue::Decimal(Decimal::new(125, 1));
 
         assert_eq!(
-            DecimalToFloatCastEvaluator.eval_cast(&value).unwrap(),
+            decimal_to_float_cast_eval(&value).unwrap(),
             DataValue::Float32(OrderedFloat(12.5))
         );
         assert_eq!(
-            DecimalToDoubleCastEvaluator.eval_cast(&value).unwrap(),
+            decimal_to_double_cast_eval(&value).unwrap(),
             DataValue::Float64(OrderedFloat(12.5))
         );
         assert_eq!(
-            DecimalToDecimalCastEvaluator.eval_cast(&value).unwrap(),
+            decimal_to_decimal_cast_eval(&value).unwrap(),
             DataValue::Decimal(Decimal::new(125, 1))
         );
         assert_eq!(
-            DecimalToCharCastEvaluator {
-                len: 4,
-                unit: CharLengthUnits::Characters,
-            }
-            .eval_cast(&value)
-            .unwrap(),
+            decimal_to_char_cast_eval(4, CharLengthUnits::Characters, &value).unwrap(),
             DataValue::Utf8 {
                 value: "12.5".to_string(),
                 ty: Utf8Type::Fixed(4),
@@ -261,12 +169,7 @@ mod test {
             }
         );
         assert_eq!(
-            DecimalToVarcharCastEvaluator {
-                len: Some(4),
-                unit: CharLengthUnits::Characters,
-            }
-            .eval_cast(&value)
-            .unwrap(),
+            decimal_to_varchar_cast_eval(Some(4), CharLengthUnits::Characters, &value).unwrap(),
             DataValue::Utf8 {
                 value: "12.5".to_string(),
                 ty: Utf8Type::Variable(Some(4)),
@@ -274,35 +177,35 @@ mod test {
             }
         );
         assert_eq!(
-            DecimalToTinyintCastEvaluator.eval_cast(&value).unwrap(),
+            decimal_to_tinyint_cast_eval(&value).unwrap(),
             DataValue::Int8(12)
         );
         assert_eq!(
-            DecimalToSmallintCastEvaluator.eval_cast(&value).unwrap(),
+            decimal_to_smallint_cast_eval(&value).unwrap(),
             DataValue::Int16(12)
         );
         assert_eq!(
-            DecimalToIntegerCastEvaluator.eval_cast(&value).unwrap(),
+            decimal_to_integer_cast_eval(&value).unwrap(),
             DataValue::Int32(12)
         );
         assert_eq!(
-            DecimalToBigintCastEvaluator.eval_cast(&value).unwrap(),
+            decimal_to_bigint_cast_eval(&value).unwrap(),
             DataValue::Int64(12)
         );
         assert_eq!(
-            DecimalToUTinyintCastEvaluator.eval_cast(&value).unwrap(),
+            decimal_to_utinyint_cast_eval(&value).unwrap(),
             DataValue::UInt8(12)
         );
         assert_eq!(
-            DecimalToUSmallintCastEvaluator.eval_cast(&value).unwrap(),
+            decimal_to_usmallint_cast_eval(&value).unwrap(),
             DataValue::UInt16(12)
         );
         assert_eq!(
-            DecimalToUIntegerCastEvaluator.eval_cast(&value).unwrap(),
+            decimal_to_uinteger_cast_eval(&value).unwrap(),
             DataValue::UInt32(12)
         );
         assert_eq!(
-            DecimalToUBigintCastEvaluator.eval_cast(&value).unwrap(),
+            decimal_to_ubigint_cast_eval(&value).unwrap(),
             DataValue::UInt64(12)
         );
     }

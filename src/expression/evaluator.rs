@@ -58,7 +58,7 @@ impl ScalarExpression {
             } => {
                 let value = expr.eval(tuple)?;
                 if let Some(evaluator) = evaluator {
-                    evaluator.eval_cast(&value)
+                    evaluator.eval(&value)
                 } else {
                     Ok(value)
                 }

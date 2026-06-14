@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::binder::{lower_case_name, Binder, Source};
+use crate::binder::{Binder, Source};
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::planner::operator::analyze::AnalyzeOperator;
@@ -21,12 +21,13 @@ use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
-use sqlparser::ast::ObjectName;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
-    pub(crate) fn bind_analyze(&mut self, name: &ObjectName) -> Result<LogicalPlan, DatabaseError> {
-        let table_name: TableName = lower_case_name(name)?.into();
-
+    pub(crate) fn bind_analyze(
+        &mut self,
+        table_name: TableName,
+        arena: &crate::planner::PlanArena,
+    ) -> Result<LogicalPlan, DatabaseError> {
         let table = self
             .context
             .source_and_bind(table_name.clone(), None, None, true)?
@@ -40,7 +41,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             .ok_or(DatabaseError::TableNotFound)?;
         let index_metas = table.indexes.clone();
 
-        let scan_op = TableScanOperator::build(table_name.clone(), table, false)?;
+        let scan_op = TableScanOperator::build(table_name.clone(), table, false, arena)?;
         Ok(LogicalPlan::new(
             Operator::Analyze(AnalyzeOperator {
                 table_name,

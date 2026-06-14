@@ -17,13 +17,13 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionCaches, ExecutorNode, ReadExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
-use crate::types::tuple::{Schema, SplitTupleRef, Tuple};
+use crate::types::tuple::{SplitTupleRef, Tuple};
 use crate::types::value::DataValue;
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
@@ -37,26 +37,6 @@ struct EqualCondition {
 }
 
 impl EqualCondition {
-    /// Constructs a new `EqualCondition`
-    /// If the `on_left_keys` and `on_right_keys` are empty, it means no equivalent condition
-    /// Note: `on_left_keys` and `on_right_keys` are either all empty or none of them.
-    fn new(
-        on_left_keys: Vec<ScalarExpression>,
-        on_right_keys: Vec<ScalarExpression>,
-        left_schema: &Schema,
-        right_schema: &Schema,
-    ) -> EqualCondition {
-        if !on_left_keys.is_empty() && on_left_keys.len() != on_right_keys.len() {
-            unreachable!("Unexpected join on condition.")
-        }
-        EqualCondition {
-            on_left_keys,
-            on_right_keys,
-            left_len: left_schema.len(),
-            right_len: right_schema.len(),
-        }
-    }
-
     /// Compare left tuple and right tuple on equivalent condition
     /// `left_tuple` must be from the [`NestedLoopJoin::left_input`]
     /// `right_tuple` must be from the [`NestedLoopJoin::right_input`]
@@ -132,16 +112,18 @@ impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for NestedLoopJoin {
         };
 
         let (mut left_input, mut right_input) = (left_input, right_input);
-        let mut left_schema = left_input.output_schema().clone();
-        let mut right_schema = right_input.output_schema().clone();
 
         if matches!(join_type, JoinType::RightOuter) {
             std::mem::swap(&mut left_input, &mut right_input);
             std::mem::swap(&mut on_left_keys, &mut on_right_keys);
-            std::mem::swap(&mut left_schema, &mut right_schema);
         }
 
-        let eq_cond = EqualCondition::new(on_left_keys, on_right_keys, &left_schema, &right_schema);
+        let eq_cond = EqualCondition {
+            on_left_keys,
+            on_right_keys,
+            left_len: 0,
+            right_len: 0,
+        };
 
         NestedLoopJoin {
             left_input_plan: left_input,
@@ -156,64 +138,46 @@ impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for NestedLoopJoin {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
-    fn into_executor(
-        mut self,
-        arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
-    ) -> ExecId {
-        self.left_input = build_read(arena, self.left_input_plan.take(), cache, transaction);
-        arena.push(ExecNode::NestedLoopJoin(self))
-    }
-}
-
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
-    type Input = (JoinOperator, LogicalPlan, LogicalPlan);
+    type Input = Self;
 
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        cache: ExecutionCaches<'a>,
-        transaction: *mut T,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+        cache: ExecutionContext<'_>,
+        transaction: &T,
     ) -> ExecId {
-        <Self as ReadExecutor<'a, T>>::into_executor(Self::from(input), arena, cache, transaction)
-    }
-
-    fn next_tuple(&mut self, arena: &mut ExecArena<'a, T>) -> Result<(), DatabaseError> {
-        NestedLoopJoin::next_tuple(self, arena)
+        let mut executor = input;
+        let left_len = executor.left_input_plan.output_schema(plan_arena).len();
+        let right_len = executor.right_input_plan.output_schema(plan_arena).len();
+        executor.eq_cond.left_len = left_len;
+        executor.eq_cond.right_len = right_len;
+        executor.left_input = build_read(
+            arena,
+            plan_arena,
+            executor.left_input_plan.take(),
+            cache,
+            transaction,
+        );
+        arena.push(ExecNode::NestedLoopJoin(executor))
     }
 }
 
-impl NestedLoopJoin {
-    fn build_right_input<'a, T: Transaction + 'a>(
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
+    fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-    ) -> ExecId {
-        let cache = (
-            arena.table_cache(),
-            arena.view_cache(),
-            arena.meta_cache(),
-            arena.scala_functions(),
-            arena.table_functions(),
-        );
-        let transaction = arena.transaction_mut() as *mut T;
-        // Fixme: Executor reset
-        build_read(arena, self.right_input_plan.clone(), cache, transaction)
-    }
-
-    pub(crate) fn next_tuple<'a, T: Transaction + 'a>(
-        &mut self,
-        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let mut state = std::mem::replace(&mut self.state, NestedLoopJoinState::End);
 
         loop {
             match state {
                 NestedLoopJoinState::PullLeft { right_bitmap } => {
-                    if !arena.next_tuple(self.left_input)? {
+                    if !arena.next_tuple(self.left_input, plan_arena)? {
                         if matches!(self.ty, JoinType::Full) {
                             state = NestedLoopJoinState::EmitRightUnmatched {
-                                right_input: self.build_right_input(arena),
+                                right_input: self.build_right_input(arena, plan_arena),
                                 right_bitmap: right_bitmap.unwrap_or_default(),
                                 right_emit_index: 0,
                             };
@@ -228,7 +192,7 @@ impl NestedLoopJoin {
                     state = NestedLoopJoinState::ScanRight {
                         active_left: ActiveLeftState {
                             left_tuple,
-                            right_input: self.build_right_input(arena),
+                            right_input: self.build_right_input(arena, plan_arena),
                             right_index: 0,
                             has_matched: false,
                             first_matches: Vec::new(),
@@ -240,7 +204,7 @@ impl NestedLoopJoin {
                     mut active_left,
                     mut right_bitmap,
                 } => {
-                    while arena.next_tuple(active_left.right_input)? {
+                    while arena.next_tuple(active_left.right_input, plan_arena)? {
                         let right_tuple = arena.result_tuple().clone();
                         let idx = active_left.right_index;
                         active_left.right_index += 1;
@@ -369,7 +333,7 @@ impl NestedLoopJoin {
                     right_bitmap,
                     mut right_emit_index,
                 } => {
-                    while arena.next_tuple(right_input)? {
+                    while arena.next_tuple(right_input, plan_arena)? {
                         let mut right_tuple = arena.result_tuple().clone();
                         let idx = right_emit_index;
                         right_emit_index += 1;
@@ -398,6 +362,25 @@ impl NestedLoopJoin {
                 }
             }
         }
+    }
+}
+
+impl NestedLoopJoin {
+    fn build_right_input<'a, T: Transaction + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
+    ) -> ExecId {
+        let cache = arena.context();
+        let transaction = arena.transaction();
+        // Fixme: Executor reset
+        build_read(
+            arena,
+            plan_arena,
+            self.right_input_plan.clone(),
+            cache,
+            transaction,
+        )
     }
 
     /// Emit a tuple according to the join type.
@@ -449,8 +432,8 @@ impl NestedLoopJoin {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
-    use crate::db::DataBaseBuilder;
+    use crate::catalog::{ColumnCatalog, ColumnDesc};
+    use crate::db::{CatalogKind, DataBaseBuilder};
     use crate::execution::dql::test::build_integers;
     use crate::execution::try_collect;
     use crate::expression::BinaryOperator;
@@ -460,18 +443,18 @@ mod test {
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
     use crate::planner::Childrens;
-    use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
+    use crate::storage::rocksdb::RocksStorage;
     use crate::storage::Storage;
     use crate::types::evaluator::binary_create;
     use crate::types::LogicalType;
-    use crate::utils::lru::SharedLruCache;
     use std::borrow::Cow;
     use std::collections::HashSet;
-    use std::hash::RandomState;
-    use std::sync::Arc;
     use tempfile::TempDir;
 
-    fn optimize_exprs(plan: LogicalPlan) -> Result<LogicalPlan, DatabaseError> {
+    fn optimize_exprs(
+        plan: LogicalPlan,
+        arena: &mut crate::planner::PlanArena,
+    ) -> Result<LogicalPlan, DatabaseError> {
         HepOptimizerPipeline::builder()
             .before_batch(
                 "Expression Remapper".to_string(),
@@ -480,7 +463,7 @@ mod test {
             )
             .build()
             .instantiate(plan)
-            .find_best::<RocksTransaction>(None)
+            .find_best(None, arena)
     }
 
     fn tuple_to_strings(tuple: &Tuple) -> Vec<Option<String>> {
@@ -496,6 +479,7 @@ mod test {
     }
 
     fn build_join_values(
+        arena: &mut crate::planner::PlanArena,
         eq: bool,
     ) -> (
         Vec<(ScalarExpression, ScalarExpression)>,
@@ -506,28 +490,28 @@ mod test {
         let desc = ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap();
 
         let t1_columns = vec![
-            ColumnRef::from(ColumnCatalog::new("c1".to_string(), true, desc.clone())),
-            ColumnRef::from(ColumnCatalog::new("c2".to_string(), true, desc.clone())),
-            ColumnRef::from(ColumnCatalog::new("c3".to_string(), true, desc.clone())),
+            arena.alloc_column(ColumnCatalog::new("c1".to_string(), true, desc.clone())),
+            arena.alloc_column(ColumnCatalog::new("c2".to_string(), true, desc.clone())),
+            arena.alloc_column(ColumnCatalog::new("c3".to_string(), true, desc.clone())),
         ];
 
         let t2_columns = vec![
-            ColumnRef::from(ColumnCatalog::new("c4".to_string(), true, desc.clone())),
-            ColumnRef::from(ColumnCatalog::new("c5".to_string(), true, desc.clone())),
-            ColumnRef::from(ColumnCatalog::new("c6".to_string(), true, desc.clone())),
+            arena.alloc_column(ColumnCatalog::new("c4".to_string(), true, desc.clone())),
+            arena.alloc_column(ColumnCatalog::new("c5".to_string(), true, desc.clone())),
+            arena.alloc_column(ColumnCatalog::new("c6".to_string(), true, desc.clone())),
         ];
 
         let on_keys = if eq {
             vec![(
-                ScalarExpression::column_expr(t1_columns[1].clone(), 1),
-                ScalarExpression::column_expr(t2_columns[1].clone(), 1),
+                ScalarExpression::column_expr(t1_columns[1], 1),
+                ScalarExpression::column_expr(t2_columns[1], 1),
             )]
         } else {
             vec![]
         };
 
-        let values_t1 = LogicalPlan {
-            operator: Operator::Values(ValuesOperator {
+        let values_t1 = LogicalPlan::new(
+            Operator::Values(ValuesOperator {
                 rows: vec![
                     vec![
                         DataValue::Int32(0),
@@ -550,15 +534,13 @@ mod test {
                         DataValue::Int32(7),
                     ],
                 ],
-                schema_ref: Arc::new(t1_columns),
+                schema_ref: t1_columns,
             }),
-            childrens: Box::new(Childrens::None),
-            physical_option: None,
-            _output_schema_ref: None,
-        };
+            Childrens::None,
+        );
 
-        let values_t2 = LogicalPlan {
-            operator: Operator::Values(ValuesOperator {
+        let values_t2 = LogicalPlan::new(
+            Operator::Values(ValuesOperator {
                 rows: vec![
                     vec![
                         DataValue::Int32(0),
@@ -581,21 +563,19 @@ mod test {
                         DataValue::Int32(1),
                     ],
                 ],
-                schema_ref: Arc::new(t2_columns),
+                schema_ref: t2_columns,
             }),
-            childrens: Box::new(Childrens::None),
-            physical_option: None,
-            _output_schema_ref: None,
-        };
+            Childrens::None,
+        );
 
         let filter = ScalarExpression::Binary {
             op: crate::expression::BinaryOperator::Gt,
             left_expr: Box::new(ScalarExpression::column_expr(
-                ColumnRef::from(ColumnCatalog::new("c1".to_owned(), true, desc.clone())),
+                arena.alloc_column(ColumnCatalog::new("c1".to_owned(), true, desc.clone())),
                 0,
             )),
             right_expr: Box::new(ScalarExpression::column_expr(
-                ColumnRef::from(ColumnCatalog::new("c4".to_owned(), true, desc.clone())),
+                arena.alloc_column(ColumnCatalog::new("c4".to_owned(), true, desc.clone())),
                 3,
             )),
             evaluator: Some(
@@ -632,11 +612,13 @@ mod test {
     fn test_nested_inner_join() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let (keys, left, right, filter) = build_join_values(true);
+        let transaction = storage.transaction()?;
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let (keys, left, right, filter) = build_join_values(&mut plan_arena, true);
         let plan = LogicalPlan::new(
             Operator::Join(JoinOperator {
                 on: JoinCondition::On {
@@ -650,15 +632,16 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = optimize_exprs(plan)?;
+        let plan = optimize_exprs(plan, &mut plan_arena)?;
         let Operator::Join(op) = plan.operator else {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
         let executor = crate::execution::execute(
             NestedLoopJoin::from((op, left, right)),
-            (&table_cache, &view_cache, &meta_cache),
-            &mut transaction,
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            plan_arena,
+            &transaction,
         );
         let tuples = try_collect(executor)?;
 
@@ -681,11 +664,13 @@ mod test {
     fn test_nested_left_out_join() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let (keys, left, right, filter) = build_join_values(true);
+        let transaction = storage.transaction()?;
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let (keys, left, right, filter) = build_join_values(&mut plan_arena, true);
         let plan = LogicalPlan::new(
             Operator::Join(JoinOperator {
                 on: JoinCondition::On {
@@ -699,15 +684,16 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = optimize_exprs(plan)?;
+        let plan = optimize_exprs(plan, &mut plan_arena)?;
         let Operator::Join(op) = plan.operator else {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
         let executor = crate::execution::execute(
             NestedLoopJoin::from((op, left, right)),
-            (&table_cache, &view_cache, &meta_cache),
-            &mut transaction,
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            plan_arena,
+            &transaction,
         );
         let tuples = try_collect(executor)?;
 
@@ -759,11 +745,13 @@ mod test {
     fn test_nested_cross_join_with_on() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let (keys, left, right, filter) = build_join_values(true);
+        let transaction = storage.transaction()?;
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let (keys, left, right, filter) = build_join_values(&mut plan_arena, true);
         let plan = LogicalPlan::new(
             Operator::Join(JoinOperator {
                 on: JoinCondition::On {
@@ -777,15 +765,16 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = optimize_exprs(plan)?;
+        let plan = optimize_exprs(plan, &mut plan_arena)?;
         let Operator::Join(op) = plan.operator else {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
         let executor = crate::execution::execute(
             NestedLoopJoin::from((op, left, right)),
-            (&table_cache, &view_cache, &meta_cache),
-            &mut transaction,
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            plan_arena,
+            &transaction,
         );
         let tuples = try_collect(executor)?;
 
@@ -808,11 +797,13 @@ mod test {
     fn test_nested_cross_join_without_filter() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let (keys, left, right, _) = build_join_values(true);
+        let transaction = storage.transaction()?;
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let (keys, left, right, _) = build_join_values(&mut plan_arena, true);
         let plan = LogicalPlan::new(
             Operator::Join(JoinOperator {
                 on: JoinCondition::On {
@@ -826,15 +817,16 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = optimize_exprs(plan)?;
+        let plan = optimize_exprs(plan, &mut plan_arena)?;
         let Operator::Join(op) = plan.operator else {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
         let executor = crate::execution::execute(
             NestedLoopJoin::from((op, left, right)),
-            (&table_cache, &view_cache, &meta_cache),
-            &mut transaction,
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            plan_arena,
+            &transaction,
         );
         let tuples = try_collect(executor)?;
 
@@ -872,11 +864,13 @@ mod test {
     fn test_nested_cross_join_without_on() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let (keys, left, right, _) = build_join_values(false);
+        let transaction = storage.transaction()?;
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let (keys, left, right, _) = build_join_values(&mut plan_arena, false);
         let plan = LogicalPlan::new(
             Operator::Join(JoinOperator {
                 on: JoinCondition::On {
@@ -890,15 +884,16 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = optimize_exprs(plan)?;
+        let plan = optimize_exprs(plan, &mut plan_arena)?;
         let Operator::Join(op) = plan.operator else {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
         let executor = crate::execution::execute(
             NestedLoopJoin::from((op, left, right)),
-            (&table_cache, &view_cache, &meta_cache),
-            &mut transaction,
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            plan_arena,
+            &transaction,
         );
         let tuples = try_collect(executor)?;
 
@@ -911,11 +906,13 @@ mod test {
     fn test_nested_right_out_join() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let (keys, left, right, filter) = build_join_values(true);
+        let transaction = storage.transaction()?;
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let (keys, left, right, filter) = build_join_values(&mut plan_arena, true);
         let plan = LogicalPlan::new(
             Operator::Join(JoinOperator {
                 on: JoinCondition::On {
@@ -929,15 +926,16 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = optimize_exprs(plan)?;
+        let plan = optimize_exprs(plan, &mut plan_arena)?;
         let Operator::Join(op) = plan.operator else {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
         let executor = crate::execution::execute(
             NestedLoopJoin::from((op, left, right)),
-            (&table_cache, &view_cache, &meta_cache),
-            &mut transaction,
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            plan_arena,
+            &transaction,
         );
         let tuples = try_collect(executor)?;
 
@@ -984,11 +982,13 @@ mod test {
     fn test_nested_full_join() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let (keys, left, right, filter) = build_join_values(true);
+        let transaction = storage.transaction()?;
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let (keys, left, right, filter) = build_join_values(&mut plan_arena, true);
         let plan = LogicalPlan::new(
             Operator::Join(JoinOperator {
                 on: JoinCondition::On {
@@ -1002,15 +1002,16 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = optimize_exprs(plan)?;
+        let plan = optimize_exprs(plan, &mut plan_arena)?;
         let Operator::Join(op) = plan.operator else {
             unreachable!()
         };
         let (left, right) = plan.childrens.pop_twins();
         let executor = crate::execution::execute(
             NestedLoopJoin::from((op, left, right)),
-            (&table_cache, &view_cache, &meta_cache),
-            &mut transaction,
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            plan_arena,
+            &transaction,
         );
         let tuples = try_collect(executor)?;
 
@@ -1086,55 +1087,50 @@ mod test {
     fn test_nested_right_join_filter_only_left_columns() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        let mut transaction = storage.transaction()?;
-        let meta_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let view_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
-        let table_cache = Arc::new(SharedLruCache::new(4, 1, RandomState::new())?);
+        let transaction = storage.transaction()?;
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
 
         let desc = ColumnDesc::new(LogicalType::Integer, None, false, None)?;
         let left_columns = vec![
-            ColumnRef::from(ColumnCatalog::new("k".to_string(), true, desc.clone())),
-            ColumnRef::from(ColumnCatalog::new("v".to_string(), true, desc.clone())),
+            plan_arena.alloc_column(ColumnCatalog::new("k".to_string(), true, desc.clone())),
+            plan_arena.alloc_column(ColumnCatalog::new("v".to_string(), true, desc.clone())),
         ];
-        let right_columns = vec![ColumnRef::from(ColumnCatalog::new(
-            "rk".to_string(),
-            true,
-            desc.clone(),
-        ))];
+        let right_columns =
+            vec![plan_arena.alloc_column(ColumnCatalog::new("rk".to_string(), true, desc.clone()))];
 
         let on_keys = vec![(
-            ScalarExpression::column_expr(left_columns[0].clone(), 0),
-            ScalarExpression::column_expr(right_columns[0].clone(), 0),
+            ScalarExpression::column_expr(left_columns[0], 0),
+            ScalarExpression::column_expr(right_columns[0], 0),
         )];
         let filter_expr = ScalarExpression::Binary {
             op: crate::expression::BinaryOperator::Gt,
-            left_expr: Box::new(ScalarExpression::column_expr(left_columns[1].clone(), 1)),
+            left_expr: Box::new(ScalarExpression::column_expr(left_columns[1], 1)),
             right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(1))),
             evaluator: None,
             ty: LogicalType::Boolean,
         };
 
-        let left = LogicalPlan {
-            operator: Operator::Values(ValuesOperator {
+        let left = LogicalPlan::new(
+            Operator::Values(ValuesOperator {
                 rows: vec![
                     vec![DataValue::Int32(2), DataValue::Int32(0)],
                     vec![DataValue::Int32(2), DataValue::Int32(5)],
                 ],
-                schema_ref: Arc::new(left_columns),
+                schema_ref: left_columns,
             }),
-            childrens: Box::new(Childrens::None),
-            physical_option: None,
-            _output_schema_ref: None,
-        };
-        let right = LogicalPlan {
-            operator: Operator::Values(ValuesOperator {
+            Childrens::None,
+        );
+        let right = LogicalPlan::new(
+            Operator::Values(ValuesOperator {
                 rows: vec![vec![DataValue::Int32(2)]],
-                schema_ref: Arc::new(right_columns),
+                schema_ref: right_columns,
             }),
-            childrens: Box::new(Childrens::None),
-            physical_option: None,
-            _output_schema_ref: None,
-        };
+            Childrens::None,
+        );
 
         let plan = LogicalPlan::new(
             Operator::Join(JoinOperator {
@@ -1149,7 +1145,7 @@ mod test {
                 right: Box::new(right),
             },
         );
-        let plan = optimize_exprs(plan)?;
+        let plan = optimize_exprs(plan, &mut plan_arena)?;
 
         let Operator::Join(op) = plan.operator else {
             unreachable!()
@@ -1157,8 +1153,9 @@ mod test {
         let (left, right) = plan.childrens.pop_twins();
         let executor = crate::execution::execute(
             NestedLoopJoin::from((op, left, right)),
-            (&table_cache, &view_cache, &meta_cache),
-            &mut transaction,
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            plan_arena,
+            &transaction,
         );
         let tuples = try_collect(executor)?;
 
@@ -1178,7 +1175,7 @@ mod test {
     #[test]
     fn test_right_join_using_binds_visible_column_to_right_side() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let db = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+        let mut db = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
 
         let setup_sql = [
             "DROP TABLE IF EXISTS str1",
@@ -1190,7 +1187,16 @@ mod test {
         ];
 
         for sql in setup_sql {
-            db.run(sql)?.done()?;
+            if sql.starts_with("DROP ") || sql.starts_with("CREATE ") {
+                db.ddl(sql)?;
+                if sql.starts_with("CREATE TABLE str1") {
+                    db.load(CatalogKind::Table("str1".to_string().into()))?;
+                } else if sql.starts_with("CREATE TABLE str2") {
+                    db.load(CatalogKind::Table("str2".to_string().into()))?;
+                }
+            } else {
+                db.run(sql)?.done()?;
+            }
         }
 
         let mut iter = db.run(

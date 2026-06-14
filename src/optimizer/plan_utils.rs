@@ -40,27 +40,12 @@ pub fn only_child_mut(plan: &mut LogicalPlan) -> Option<&mut LogicalPlan> {
     }
 }
 
-pub fn left_child(plan: &LogicalPlan) -> Option<&LogicalPlan> {
-    match plan.childrens.as_ref() {
-        Childrens::Only(child) => Some(child.as_ref()),
-        Childrens::Twins { left, .. } => Some(left.as_ref()),
-        Childrens::None => None,
-    }
-}
-
 #[allow(dead_code)]
 pub fn left_child_mut(plan: &mut LogicalPlan) -> Option<&mut LogicalPlan> {
     match plan.childrens.as_mut() {
         Childrens::Only(child) => Some(child.as_mut()),
         Childrens::Twins { left, .. } => Some(left.as_mut()),
         Childrens::None => None,
-    }
-}
-
-pub fn right_child(plan: &LogicalPlan) -> Option<&LogicalPlan> {
-    match plan.childrens.as_ref() {
-        Childrens::Twins { right, .. } => Some(right.as_ref()),
-        _ => None,
     }
 }
 

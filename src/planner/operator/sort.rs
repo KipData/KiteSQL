@@ -33,6 +33,32 @@ impl SortField {
             nulls_first,
         }
     }
+
+    pub fn asc(mut self) -> Self {
+        self.asc = true;
+        self
+    }
+
+    pub fn desc(mut self) -> Self {
+        self.asc = false;
+        self
+    }
+
+    pub fn nulls_first(mut self) -> Self {
+        self.nulls_first = true;
+        self
+    }
+
+    pub fn nulls_last(mut self) -> Self {
+        self.nulls_first = false;
+        self
+    }
+}
+
+impl From<ScalarExpression> for SortField {
+    fn from(expr: ScalarExpression) -> Self {
+        SortField::new(expr, true, false)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]

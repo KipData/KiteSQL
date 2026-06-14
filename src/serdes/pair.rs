@@ -22,26 +22,28 @@ where
     A: ReferenceSerialization,
     B: ReferenceSerialization,
 {
-    fn encode<W: Write>(
+    fn encode<W: Write, AR: crate::planner::MetaArena>(
         &self,
         writer: &mut W,
         is_direct: bool,
         reference_tables: &mut ReferenceTables,
+        arena: &AR,
     ) -> Result<(), DatabaseError> {
         let (v1, v2) = self;
-        v1.encode(writer, is_direct, reference_tables)?;
-        v2.encode(writer, is_direct, reference_tables)?;
+        v1.encode(writer, is_direct, reference_tables, arena)?;
+        v2.encode(writer, is_direct, reference_tables, arena)?;
 
         Ok(())
     }
 
-    fn decode<T: Transaction, R: Read>(
+    fn decode<T: Transaction, R: Read, AR: crate::planner::MetaArena>(
         reader: &mut R,
         drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
+        arena: &mut AR,
     ) -> Result<Self, DatabaseError> {
-        let v1 = A::decode(reader, drive, reference_tables)?;
-        let v2 = B::decode(reader, drive, reference_tables)?;
+        let v1 = A::decode(reader, drive, reference_tables, arena)?;
+        let v2 = B::decode(reader, drive, reference_tables, arena)?;
 
         Ok((v1, v2))
     }
