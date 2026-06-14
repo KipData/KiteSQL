@@ -17,11 +17,11 @@ use crate::errors::DatabaseError;
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
+use crate::iter_ext::Itertools;
 use crate::planner::operator::copy_to_file::CopyToFileOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
-use itertools::Itertools;
 
 pub struct CopyToFile {
     op: CopyToFileOperator,
@@ -119,7 +119,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyToFile {
         let message = if self.column_names.is_empty() {
             format!("{}", self.op)
         } else {
-            format!("{} [{}]", self.op, self.column_names.iter().format(", "))
+            format!("{} [{}]", self.op, self.column_names.iter().join(", "))
         };
         TupleBuilder::build_result_into(arena.result_tuple_mut(), message);
         arena.resume();

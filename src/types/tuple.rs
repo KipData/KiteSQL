@@ -14,10 +14,10 @@
 
 use crate::catalog::{ColumnCatalog, ColumnRef};
 use crate::errors::DatabaseError;
+use crate::iter_ext::Itertools;
 use crate::planner::PlanArena;
 use crate::types::serialize::{TupleValueSerializable, TupleValueSerializableImpl};
 use crate::types::value::DataValue;
-use itertools::Itertools;
 use std::borrow::Borrow;
 use std::io::Cursor;
 
@@ -278,11 +278,11 @@ impl Tuple {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
+    use crate::iter_ext::Itertools;
     use crate::types::tuple::Tuple;
     use crate::types::value::{DataValue, Utf8Type};
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
-    use itertools::Itertools;
     use ordered_float::OrderedFloat;
     use rust_decimal::Decimal;
     use std::sync::Arc;

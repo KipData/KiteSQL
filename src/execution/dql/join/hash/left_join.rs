@@ -17,15 +17,15 @@ use crate::execution::dql::join::hash::{
     filter, JoinProbeState, LeftDropState, LeftDropTuples, ProbeState,
 };
 use crate::execution::dql::join::hash_join::BuildState;
+use crate::execution::dql::join::RowBitmap;
 use crate::expression::ScalarExpression;
 use crate::types::tuple::{SplitTupleRef, Tuple};
 use crate::types::value::DataValue;
-use fixedbitset::FixedBitSet;
 
 pub(crate) struct LeftJoinState {
     pub(crate) left_schema_len: usize,
     pub(crate) right_schema_len: usize,
-    pub(crate) bits: FixedBitSet,
+    pub(crate) bits: RowBitmap,
 }
 
 impl JoinProbeState for LeftJoinState {
@@ -54,7 +54,7 @@ impl JoinProbeState for LeftJoinState {
                     SplitTupleRef::from_slices(values, &probe_state.probe_tuple.values);
                 if !filter(&full_values, filter_expr)? {
                     probe_state.has_filtered = true;
-                    self.bits.set(*i, true);
+                    self.bits.insert(*i);
                     continue;
                 }
             }

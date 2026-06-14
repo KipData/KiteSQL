@@ -163,16 +163,7 @@ impl TableArena {
             .unwrap_or_else(|| panic!("unknown dummy column: {name}"))
     }
 
-    pub fn alloc_table_column(
-        &mut self,
-        table_name: TableName,
-        mut column: ColumnCatalog,
-    ) -> ColumnRef {
-        column.set_ref_table(table_name, ulid::Ulid::new(), false);
-        self.alloc_column(column)
-    }
-
-    pub(crate) fn alloc_column(&mut self, column: ColumnCatalog) -> ColumnRef {
+    pub fn alloc_column(&mut self, column: ColumnCatalog) -> ColumnRef {
         <Self as MetaArena>::alloc_column(self, column)
     }
 
@@ -548,7 +539,7 @@ mod tests {
 
     fn table_column(name: &str, is_temp: bool) -> ColumnCatalog {
         let mut column = column(name);
-        column.set_ref_table("t".to_string().into(), ulid::Ulid::new(), is_temp);
+        column.set_ref_table("t".to_string().into(), if is_temp { 0 } else { 1 }, is_temp);
         column
     }
 

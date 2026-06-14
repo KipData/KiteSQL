@@ -51,8 +51,7 @@ use crate::storage::{
 };
 use crate::types::tuple::{Schema, SchemaView, Tuple};
 use crate::types::value::DataValue;
-use ahash::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::mem;
 use std::path::Path;
@@ -213,7 +212,7 @@ impl DataBaseBuilder {
     }
 
     /// Builds a database for the current target platform.
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
     pub fn build(self) -> Result<Database<MemoryStorage>, DatabaseError> {
         let storage = MemoryStorage::new();
 
@@ -448,7 +447,7 @@ impl<S: Storage> State<S> {
     ) -> Result<(), DatabaseError> {
         let summary = function.summary().clone();
         let mut schema = Schema::new();
-        function.output_schema_into(&summary.name, self.table_arena.borrow_mut(), &mut schema);
+        function.output_schema_into(self.table_arena.borrow_mut(), &mut schema);
         self.table_functions.insert(
             summary,
             TableFunctionCatalog {

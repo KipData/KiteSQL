@@ -14,8 +14,8 @@
 
 use crate::binder::copy::ExtSource;
 use crate::catalog::TableName;
+use crate::iter_ext::Itertools;
 use crate::types::tuple::Schema;
-use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::fmt::Formatter;

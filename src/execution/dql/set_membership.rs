@@ -20,7 +20,7 @@ use crate::planner::operator::set_membership::SetMembershipKind;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
-use ahash::{HashMap, HashMapExt};
+use std::collections::HashMap;
 
 pub struct SetMembership {
     kind: SetMembershipKind,

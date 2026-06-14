@@ -30,11 +30,11 @@ build:
 
 ## Build the WebAssembly package (artifact goes to ./pkg).
 wasm-build:
-	$(WASM_PACK) build --release --target nodejs
+	$(WASM_PACK) build --release --target nodejs -- --features wasm
 
 ## Execute wasm-bindgen tests under Node.js (wasm32 target).
 test-wasm:
-	$(WASM_PACK) test --node -- --package kite_sql --lib
+	$(WASM_PACK) test --node -- --features wasm --package kite_sql --lib
 
 ## Run the sqllogictest harness against the configured .slt suite.
 test-slt:

@@ -15,7 +15,6 @@
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::Accumulator;
 use crate::types::value::DataValue;
-use ahash::RandomState;
 use std::collections::HashSet;
 
 pub struct CountAccumulator {
@@ -43,7 +42,7 @@ impl Accumulator for CountAccumulator {
 }
 
 pub struct DistinctCountAccumulator {
-    distinct_values: HashSet<DataValue, RandomState>,
+    distinct_values: HashSet<DataValue>,
 }
 
 impl DistinctCountAccumulator {

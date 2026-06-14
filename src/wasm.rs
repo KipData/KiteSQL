@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![cfg(target_arch = "wasm32")]
+#![cfg(all(target_arch = "wasm32", feature = "wasm"))]
 
 use crate::db::{DataBaseBuilder, Database, DatabaseIter};
 use crate::storage::memory::MemoryStorage;

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::expression::function::FunctionSummary;
 use crate::expression::ScalarExpression;
@@ -68,12 +67,7 @@ pub trait TableFunctionImpl: Debug + Send + Sync {
 
     fn summary(&self) -> &FunctionSummary;
 
-    fn output_schema_into(
-        &self,
-        table_name: &TableName,
-        table_arena: &mut TableArena,
-        schema: &mut Schema,
-    );
+    fn output_schema_into(&self, table_arena: &mut TableArena, schema: &mut Schema);
 }
 
 impl TableFunction {

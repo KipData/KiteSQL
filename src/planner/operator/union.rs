@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::iter_ext::Itertools;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::types::tuple::Schema;
-use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::fmt::Formatter;

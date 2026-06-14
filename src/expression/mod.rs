@@ -19,6 +19,7 @@ use crate::expression::function::scala::ScalarFunction;
 use crate::expression::function::table::TableFunction;
 use crate::expression::visitor::{walk_expr, Visitor};
 use crate::expression::visitor_mut::VisitorMut;
+use crate::iter_ext::Itertools;
 use crate::planner::operator::sort::SortField;
 use crate::planner::{MetaArena, PlanArena};
 use crate::types::evaluator::{
@@ -27,7 +28,6 @@ use crate::types::evaluator::{
 };
 use crate::types::value::DataValue;
 use crate::types::{CharLengthUnits, LogicalType};
-use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
 #[cfg(feature = "decimal")]
 use rust_decimal::Decimal;
@@ -1133,11 +1133,7 @@ mod test {
         let mut table_functions = TableFunctions::default();
         let numbers = Numbers::new();
         let mut schema = Vec::new();
-        numbers.output_schema_into(
-            &numbers.summary().name,
-            table_arena.borrow_mut(),
-            &mut schema,
-        );
+        numbers.output_schema_into(table_arena.borrow_mut(), &mut schema);
         table_functions.insert(
             numbers.summary().clone(),
             TableFunctionCatalog {

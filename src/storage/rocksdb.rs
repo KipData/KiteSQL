@@ -763,6 +763,7 @@ mod test {
     use crate::db::{CatalogKind, DataBaseBuilder};
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
+    use crate::iter_ext::Itertools;
     use crate::planner::{PlanArena, TableArenaCell};
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::table_codec::TableCodec;
@@ -774,7 +775,6 @@ mod test {
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
-    use itertools::Itertools;
     use std::collections::Bound;
     use tempfile::TempDir;
 

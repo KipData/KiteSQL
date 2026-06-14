@@ -15,16 +15,15 @@
 use crate::catalog::{ColumnCatalog, ColumnRef, ColumnRelation};
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
+use crate::iter_ext::Itertools;
 use crate::planner::{MetaArena, PlanArena};
 use crate::types::index::{IndexMeta, IndexMetaRef, IndexType};
 use crate::types::tuple::Schema;
 use crate::types::{ColumnId, LogicalType};
-use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::{slice, vec};
-use ulid::Generator;
 
 pub type TableName = Arc<str>;
 
@@ -146,17 +145,16 @@ impl TableCatalog {
     pub(crate) fn add_column(
         &mut self,
         mut col: ColumnCatalog,
-        generator: &mut Generator,
         arena: &mut impl MetaArena,
     ) -> Result<ColumnId, DatabaseError> {
         if self.column_idxs.contains_key(col.name()) {
             return Err(DatabaseError::DuplicateColumn(col.name().to_string()));
         }
         let max_existing_id = self.columns.keys().max().copied();
-        let mut col_id = generator.generate().unwrap();
-        while max_existing_id.is_some_and(|max_id| col_id <= max_id) {
-            col_id = generator.generate().unwrap();
-        }
+        let col_id = max_existing_id
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(DatabaseError::OverFlow)?;
 
         col.summary_mut().relation = ColumnRelation::Table {
             column_id: col_id,
@@ -241,11 +239,8 @@ impl TableCatalog {
             primary_key_indices: Default::default(),
             primary_key_type: LogicalType::SqlNull,
         };
-        let mut generator = Generator::new();
         for col_catalog in columns.into_iter() {
-            let _ = table_catalog
-                .add_column(col_catalog, &mut generator, arena)
-                .unwrap();
+            let _ = table_catalog.add_column(col_catalog, arena).unwrap();
         }
         let (primary_keys, primary_key_indices) =
             Self::build_primary_keys(&table_catalog.column_refs, arena);
@@ -374,7 +369,6 @@ mod tests {
     use crate::catalog::ColumnDesc;
     use crate::planner::TableArenaCell;
     use crate::types::LogicalType;
-    use ulid::Generator;
 
     fn build_table_catalog(
         name: &str,
@@ -455,7 +449,6 @@ mod tests {
                 .filter_map(|column| table_arena.borrow().column(*column).id())
                 .max()
                 .unwrap();
-            let mut generator = Generator::new();
             let new_id = table_catalog
                 .add_column(
                     ColumnCatalog::new(
@@ -463,7 +456,6 @@ mod tests {
                         true,
                         ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
                     ),
-                    &mut generator,
                     table_arena.borrow_mut(),
                 )
                 .unwrap();

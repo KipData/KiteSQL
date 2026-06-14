@@ -37,6 +37,11 @@ lmdb    = ["dep:lmdb", "dep:lmdb-sys"]
 pprof   = ["pprof/criterion", "pprof/flamegraph"]
 python  = ["parser", "dep:pyo3"]
 shell   = ["parser", "dep:comfy-table", "dep:rustyline"]
+wasm    = [
+    "dep:js-sys",
+    "dep:wasm-bindgen",
+    "parser",
+]
 
 [[bench]]
 name    = "query_bench"
@@ -45,17 +50,10 @@ harness = false
 required-features = ["pprof"]
 
 [dependencies]
-ahash                 = { version = "0.8" }
 bumpalo               = { version = "3", default-features = false, features = ["collections"] }
-byteorder             = { version = "1" }
-fixedbitset           = { version = "0.4" }
-itertools             = { version = "0.12" }
 ordered-float         = { version = "4" }
 paste                 = { version = "1" }
-recursive             = { version = "0.1" }
 kite_sql_serde_macros = { version = "0.2.1", path = "kite_sql_serde_macros" }
-siphasher             = { version = "1" }
-ulid                  = { version = "1" }
 
 # Optional dependencies for features
 comfy-table           = { version = "7", default-features = false, optional = true }
@@ -84,16 +82,8 @@ rocksdb = { version = "0.23", optional = true, default-features = false, feature
 rustyline = { version = "14", default-features = false, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen        = { version = "0.2.106" }
-web-sys             = { version = "0.3.83", features = [
-    "Storage",
-    "Window",
-] }
-base64              = { version = "0.21" }
-getrandom           = { version = "0.2", features = ["js"] }
-getrandom_03        = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
-js-sys              = { version = "0.3.83" }
-once_cell           = { version = "1" }
+wasm-bindgen        = { version = "0.2.106", optional = true }
+js-sys              = { version = "0.3.83", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3.56"

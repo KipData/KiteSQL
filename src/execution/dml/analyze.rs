@@ -19,6 +19,7 @@ use crate::execution::{
     ExecutorNode, WriteExecutor,
 };
 use crate::expression::ScalarExpression;
+use crate::iter_ext::Itertools;
 use crate::optimizer::core::histogram::HistogramBuilder;
 use crate::optimizer::core::statistics_meta::StatisticsMeta;
 use crate::planner::operator::analyze::AnalyzeOperator;
@@ -27,7 +28,6 @@ use crate::storage::{table_codec::TableCodec, Transaction};
 use crate::types::index::IndexId;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
-use itertools::Itertools;
 use std::fmt::{self, Formatter};
 
 const DEFAULT_NUM_OF_BUCKETS: usize = 100;

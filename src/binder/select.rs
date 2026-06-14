@@ -33,6 +33,7 @@ use crate::errors::DatabaseError;
 use crate::execution::dql::join::joins_nullable;
 use crate::expression::visitor_mut::{walk_mut_expr, PositionShift, VisitorMut};
 use crate::expression::{AliasType, BinaryOperator};
+use crate::iter_ext::Itertools;
 use crate::planner::operator::function_scan::FunctionScanOperator;
 use crate::planner::operator::insert::InsertOperator;
 use crate::planner::operator::join::JoinCondition;
@@ -43,7 +44,6 @@ use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::tuple::Schema;
 use crate::types::{ColumnId, LogicalType};
-use itertools::Itertools;
 
 struct RightSidePositionGlobalizer<'a, 'p> {
     right_schema: &'a Schema,

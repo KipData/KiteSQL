@@ -20,6 +20,7 @@ use crate::optimizer::core::cm_sketch::{CountMinSketchMeta, CountMinSketchPage};
 use crate::optimizer::core::histogram::Bucket;
 use crate::optimizer::core::statistics_meta::StatisticsMetaRoot;
 use crate::planner::{MetaArena, TableArena};
+use crate::serdes::stable_hash::{StableHasher, TABLE_NAME_HASH_KEYS};
 use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
 use crate::storage::{TableCache, Transaction};
 use crate::types::index::{Index, IndexId, IndexMeta, IndexType, INDEX_ID_LEN};
@@ -27,7 +28,6 @@ use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::{Tuple, TupleId};
 use crate::types::value::{DataValue, TupleMappingRef};
 use crate::types::LogicalType;
-use siphasher::sip::SipHasher;
 use std::borrow::Borrow;
 use std::hash::{Hash, Hasher};
 use std::io::{Cursor, Read, Seek, SeekFrom};
@@ -132,7 +132,8 @@ impl TableCodec {
     }
 
     fn hash_bytes(table_name: &str) -> [u8; 8] {
-        let mut hasher = SipHasher::new();
+        let (key0, key1) = TABLE_NAME_HASH_KEYS;
+        let mut hasher = StableHasher::new_with_keys(key0, key1);
         table_name.hash(&mut hasher);
         hasher.finish().to_le_bytes()
     }
@@ -427,7 +428,7 @@ impl TableCodec {
             self.with_table_hash_buffers(table_name.as_ref(), |lower, table_hash, value, refs| {
                 Self::write_key_prefix(lower, CodecType::Column, table_hash);
                 lower.push(BOUND_MIN_TAG);
-                lower.extend_from_slice(&column_id.to_bytes());
+                lower.extend_from_slice(&column_id.to_be_bytes());
 
                 if encode_value {
                     let _ = refs.push_or_replace(table_name);
@@ -1002,6 +1003,7 @@ mod tests {
     use crate::catalog::view::View;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRelation, TableCatalog, TableMeta};
     use crate::errors::DatabaseError;
+    use crate::iter_ext::Itertools;
     use crate::optimizer::core::histogram::HistogramBuilder;
     use crate::optimizer::core::statistics_meta::StatisticsMeta;
     use crate::planner::{PlanArena, TableArenaCell};
@@ -1012,14 +1014,13 @@ mod tests {
     use crate::types::index::{Index, IndexMeta, IndexType};
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
+    use crate::types::ColumnId;
     use crate::types::LogicalType;
-    use itertools::Itertools;
     use rust_decimal::Decimal;
     use std::collections::BTreeSet;
     use std::io::Cursor;
     use std::ops::Bound;
     use std::sync::Arc;
-    use ulid::Ulid;
 
     fn build_table_codec(table_arena: &TableArenaCell) -> TableCatalog {
         let columns = vec![
@@ -1094,7 +1095,7 @@ mod tests {
         let mut table_codec = TableCodec::default();
         let index_meta = IndexMeta {
             id: 0,
-            column_ids: vec![Ulid::new()],
+            column_ids: vec![1],
             table_name: "t1".to_string().into(),
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,
@@ -1171,7 +1172,7 @@ mod tests {
         let mut table_codec = TableCodec::default();
         let index_meta = IndexMeta {
             id: 0,
-            column_ids: vec![Ulid::new()],
+            column_ids: vec![1],
             table_name: "t1".to_string().into(),
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,
@@ -1207,7 +1208,7 @@ mod tests {
             ColumnDesc::new(LogicalType::Boolean, None, false, None).unwrap(),
         );
         col.summary_mut().relation = ColumnRelation::Table {
-            column_id: Ulid::new(),
+            column_id: 1,
             table_name: "t1".to_string().into(),
             is_temp: false,
         };
@@ -1376,7 +1377,7 @@ mod tests {
             );
 
             col.summary_mut().relation = ColumnRelation::Table {
-                column_id: Ulid::from(col_id as u128),
+                column_id: col_id as ColumnId,
                 table_name: table_name.to_string().into(),
                 is_temp: false,
             };
@@ -1674,8 +1675,8 @@ mod tests {
             .collect_vec();
 
         assert_eq!(vec[0], &op("T0"));
-        assert_eq!(vec[1], &op("T1"));
-        assert_eq!(vec[2], &op("T2"));
+        assert_eq!(vec[1], &op("T2"));
+        assert_eq!(vec[2], &op("T1"));
     }
 
     #[test]
@@ -1711,8 +1712,8 @@ mod tests {
             ))
             .collect_vec();
 
+        assert_eq!(vec[0], &op("V2"));
+        assert_eq!(vec[1], &op("V1"));
         assert_eq!(vec[2], &op("V0"));
-        assert_eq!(vec[0], &op("V1"));
-        assert_eq!(vec[1], &op("V2"));
     }
 }

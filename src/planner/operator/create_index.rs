@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use crate::catalog::{ColumnRef, TableName};
+use crate::iter_ext::Itertools;
 use crate::types::index::IndexType;
-use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::fmt::Formatter;

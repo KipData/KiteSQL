@@ -669,12 +669,11 @@ mod tests {
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::ops::Bound;
-    use ulid::Ulid;
 
     fn index_meta() -> IndexMeta {
         IndexMeta {
             id: 0,
-            column_ids: vec![Ulid::new()],
+            column_ids: vec![1],
             table_name: "t1".to_string().into(),
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,
@@ -969,7 +968,7 @@ mod tests {
             &sketch,
         )?;
 
-        assert_eq!(count_7, 13);
+        assert_eq!(count_7, 14);
 
         let count_8 = histogram.collect_count(
             &[Range::Scope {
@@ -999,7 +998,7 @@ mod tests {
             &sketch,
         )?;
 
-        assert_eq!(count_10, 2);
+        assert_eq!(count_10, 3);
 
         let count_11 = histogram.collect_count(
             &[Range::Scope {

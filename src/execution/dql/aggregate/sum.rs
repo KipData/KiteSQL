@@ -18,7 +18,6 @@ use crate::expression::BinaryOperator;
 use crate::types::evaluator::{binary_create, BinaryEvaluatorRef};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
-use ahash::RandomState;
 use std::borrow::Cow;
 use std::collections::HashSet;
 
@@ -61,7 +60,7 @@ impl Accumulator for SumAccumulator {
 }
 
 pub struct DistinctSumAccumulator {
-    distinct_values: HashSet<DataValue, RandomState>,
+    distinct_values: HashSet<DataValue>,
     inner: SumAccumulator,
 }
 

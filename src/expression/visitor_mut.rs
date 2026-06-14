@@ -288,7 +288,6 @@ pub trait VisitorMut<'a>: Sized {
     }
 }
 
-#[recursive::recursive]
 pub fn walk_mut_expr<'a, V: VisitorMut<'a>>(
     visitor: &mut V,
     expr: &'a mut ScalarExpression,

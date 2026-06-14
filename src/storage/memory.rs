@@ -150,7 +150,7 @@ impl Transaction for MemoryTransaction {
     }
 }
 
-#[cfg(all(test, target_arch = "wasm32"))]
+#[cfg(all(test, target_arch = "wasm32", feature = "wasm"))]
 mod wasm_tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc, TableName};

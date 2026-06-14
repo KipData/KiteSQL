@@ -14,7 +14,6 @@
 
 use crate::catalog::ColumnCatalog;
 use crate::catalog::ColumnDesc;
-use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::expression::function::table::TableFunctionImpl;
 use crate::expression::function::FunctionSummary;
@@ -67,19 +66,11 @@ impl TableFunctionImpl for Numbers {
         &self.summary
     }
 
-    fn output_schema_into(
-        &self,
-        table_name: &TableName,
-        table_arena: &mut TableArena,
-        schema: &mut Schema,
-    ) {
-        schema.push(table_arena.alloc_table_column(
-            table_name.clone(),
-            ColumnCatalog::new(
-                "number".to_string(),
-                true,
-                ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
-            ),
-        ));
+    fn output_schema_into(&self, table_arena: &mut TableArena, schema: &mut Schema) {
+        schema.push(table_arena.alloc_column(ColumnCatalog::new(
+            "number".to_string(),
+            true,
+            ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
+        )));
     }
 }

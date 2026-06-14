@@ -17,10 +17,10 @@ use crate::errors::DatabaseError;
 use crate::execution::{
     ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
 };
+use crate::iter_ext::Itertools;
 use crate::planner::operator::copy_from_file::CopyFromFileOperator;
 use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
-use itertools::Itertools;
 use std::fs::File;
 use std::io::BufReader;
 
@@ -129,7 +129,6 @@ mod tests {
     use crate::types::LogicalType;
     use std::io::Write;
     use tempfile::TempDir;
-    use ulid::Ulid;
 
     #[test]
     fn read_csv() -> Result<(), DatabaseError> {
@@ -153,7 +152,7 @@ mod tests {
                 false,
                 ColumnDesc::new(ty, primary_key, false, None)?,
             );
-            column.set_ref_table("t1".to_string().into(), Ulid::new(), false);
+            column.set_ref_table("t1".to_string().into(), 1, false);
             Ok(column)
         }
 

@@ -18,13 +18,13 @@ use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::expression::ScalarExpression;
+use crate::iter_ext::Itertools;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
-use ahash::{HashMap, HashMapExt};
-use itertools::Itertools;
 use std::collections::hash_map::{Entry, IntoIter as HashMapIntoIter};
+use std::collections::HashMap;
 
 type HashAggOutput = HashMapIntoIter<Vec<DataValue>, Vec<Box<dyn Accumulator>>>;
 
@@ -85,7 +85,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
                     Entry::Vacant(entry) => entry.insert(create_accumulators(&self.agg_calls)?),
                 };
 
-                for (acc, expr) in entry.iter_mut().zip_eq(self.agg_calls.iter()) {
+                for (acc, expr) in entry.iter_mut().zip(self.agg_calls.iter()) {
                     let ScalarExpression::AggCall { args, .. } = expr else {
                         unreachable!()
                     };
@@ -132,6 +132,7 @@ mod test {
     use crate::execution::{execute_input, try_collect};
     use crate::expression::agg::AggKind;
     use crate::expression::ScalarExpression;
+    use crate::iter_ext::Itertools;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
     use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
@@ -143,7 +144,6 @@ mod test {
     use crate::storage::Storage;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
-    use itertools::Itertools;
     use tempfile::TempDir;
 
     #[test]

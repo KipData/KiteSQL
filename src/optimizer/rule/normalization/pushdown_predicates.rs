@@ -16,6 +16,7 @@ use crate::errors::DatabaseError;
 use crate::expression::range_detacher::{Range, RangeDetacher};
 use crate::expression::visitor_mut::{PositionShift, VisitorMut};
 use crate::expression::{BinaryOperator, ScalarExpression};
+use crate::iter_ext::Itertools;
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{replace_with_only_child, wrap_child_with};
 use crate::planner::operator::filter::FilterOperator;
@@ -25,7 +26,6 @@ use crate::planner::{Childrens, LogicalPlan};
 use crate::types::index::{IndexInfo, IndexLookup, IndexMetaRef, IndexType};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
-use itertools::Itertools;
 use std::ops::Bound;
 use std::{mem, slice};
 
@@ -517,7 +517,6 @@ mod tests {
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::collections::Bound;
-    use ulid::Ulid;
 
     fn apply_pipeline(
         plan: LogicalPlan,
@@ -574,9 +573,9 @@ mod tests {
         let table_name: TableName = ::std::sync::Arc::from("mock_table");
         let table_arena = crate::planner::TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
-        let c1_id = Ulid::new();
-        let c2_id = Ulid::new();
-        let c3_id = Ulid::new();
+        let c1_id = 1;
+        let c2_id = 2;
+        let c3_id = 3;
 
         let mut c1 = ColumnCatalog::new(
             "c1".to_string(),

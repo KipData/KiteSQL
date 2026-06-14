@@ -29,9 +29,8 @@ use std::cmp;
 
 use crate::errors::DatabaseError;
 use kite_sql_serde_macros::ReferenceSerialization;
-use ulid::Ulid;
 
-pub type ColumnId = Ulid;
+pub type ColumnId = u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CharLengthUnits {

@@ -110,6 +110,7 @@ pub mod errors;
 pub mod execution;
 pub mod expression;
 mod function;
+pub(crate) mod iter_ext;
 #[cfg(feature = "macros")]
 pub mod macros;
 mod optimizer;
@@ -123,7 +124,7 @@ pub mod python;
 pub mod serdes;
 pub mod storage;
 pub mod types;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 pub mod wasm;
 
 #[cfg(feature = "orm")]

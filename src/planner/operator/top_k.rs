@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use super::Operator;
+use crate::iter_ext::Itertools;
 use crate::planner::operator::sort::SortField;
 use crate::planner::{Childrens, LogicalPlan};
-use itertools::Itertools;
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::fmt::Formatter;

@@ -19,13 +19,13 @@ use crate::execution::{
     ExecutorNode, WriteExecutor,
 };
 use crate::expression::ScalarExpression;
+use crate::iter_ext::Itertools;
 use crate::planner::operator::update::UpdateOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::index::Index;
 use crate::types::tuple::{Schema, Tuple};
 use crate::types::tuple_builder::TupleBuilder;
-use itertools::Itertools;
 use std::collections::HashMap;
 
 pub struct Update {

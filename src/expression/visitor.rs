@@ -265,7 +265,6 @@ pub trait Visitor<'a>: Sized {
     }
 }
 
-#[recursive::recursive]
 pub fn walk_expr<'a, V: Visitor<'a>>(
     visitor: &mut V,
     expr: &'a ScalarExpression,

@@ -22,7 +22,6 @@ use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
-use ulid::Ulid;
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_create_view(
@@ -52,7 +51,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                     )
                 };
                 let mut column = ColumnCatalog::new(output_name, nullable, desc);
-                column.set_ref_table(view_name.clone(), Ulid::new(), true);
+                column.set_ref_table(view_name.clone(), 0, true);
                 let output_column = arena.alloc_column(column);
 
                 exprs.push(ScalarExpression::Alias {
