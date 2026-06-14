@@ -533,7 +533,10 @@ impl Histogram {
         match &ranges[*binary_i] {
             Range::Scope { min, max } => {
                 let bucket = &self.buckets[*bucket_i];
-                let bucket_count = bucket.count as usize;
+                let mut bucket_count = bucket.count as usize;
+                if *bucket_i == 0 {
+                    bucket_count += self.meta.null_count;
+                }
 
                 let mut temp_count = 0;
 
@@ -965,7 +968,7 @@ mod tests {
             &sketch,
         )?;
 
-        assert_eq!(count_7, 13);
+        assert_eq!(count_7, 14);
 
         let count_8 = histogram.collect_count(
             &[Range::Scope {
@@ -995,7 +998,7 @@ mod tests {
             &sketch,
         )?;
 
-        assert_eq!(count_10, 2);
+        assert_eq!(count_10, 3);
 
         let count_11 = histogram.collect_count(
             &[Range::Scope {
