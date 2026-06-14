@@ -53,7 +53,7 @@ itertools             = { version = "0.12" }
 ordered-float         = { version = "4" }
 paste                 = { version = "1" }
 recursive             = { version = "0.1" }
-kite_sql_serde_macros = { version = "0.2.0", path = "kite_sql_serde_macros" }
+kite_sql_serde_macros = { version = "0.2.1", path = "kite_sql_serde_macros" }
 siphasher             = { version = "1" }
 ulid                  = { version = "1" }
 
