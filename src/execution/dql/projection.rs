@@ -20,8 +20,6 @@ use crate::expression::ScalarExpression;
 use crate::planner::operator::project::ProjectOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
-use crate::types::tuple::Tuple;
-use crate::types::value::DataValue;
 
 pub struct Projection {
     exprs: Vec<ScalarExpression>,
@@ -54,29 +52,16 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection {
             return Ok(());
         }
 
-        arena.with_projection_tmp(|tuple, projection_tmp| {
-            projection_tmp.clear();
+        arena.with_projection_tmp(|arena, projection_tmp| {
+            let tuple = arena.result_tuple();
             projection_tmp.reserve(self.exprs.len());
             for expr in self.exprs.iter() {
                 projection_tmp.push(expr.eval(Some(tuple))?);
             }
+            std::mem::swap(&mut arena.result_tuple_mut().values, projection_tmp);
             Ok::<_, DatabaseError>(())
         })?;
         arena.resume();
         Ok(())
-    }
-}
-
-impl Projection {
-    pub fn projection(
-        tuple: &Tuple,
-        exprs: &[ScalarExpression],
-    ) -> Result<Vec<DataValue>, DatabaseError> {
-        let mut values = Vec::with_capacity(exprs.len());
-
-        for expr in exprs.iter() {
-            values.push(expr.eval(Some(tuple))?);
-        }
-        Ok(values)
     }
 }

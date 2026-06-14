@@ -14,9 +14,9 @@
 
 use crate::catalog::{ColumnRef, TableName};
 use crate::errors::DatabaseError;
-use crate::execution::dql::projection::Projection;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
+    build_read, with_projection_tmp_value, ExecArena, ExecId, ExecNode, ExecutionContext,
+    ExecutorNode, WriteExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::update::UpdateOperator;
@@ -25,7 +25,6 @@ use crate::storage::Transaction;
 use crate::types::index::Index;
 use crate::types::tuple::{Schema, Tuple};
 use crate::types::tuple_builder::TupleBuilder;
-use crate::types::value::DataValue;
 use itertools::Itertools;
 use std::collections::HashMap;
 
@@ -122,14 +121,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update {
                 };
                 for (index_meta, exprs) in table_snapshot.index_metas.iter() {
                     let index_meta = plan_arena.index(*index_meta);
-                    let values = Projection::projection(&tuple, exprs)?;
-                    let Some(value) = DataValue::values_to_tuple(values) else {
-                        continue;
-                    };
-                    let index = Index::new(index_meta.id, &value, index_meta.ty);
-                    let mut state = arena.local_state(plan_arena);
-                    let (transaction, table_codec) = state.transaction_codec_mut();
-                    transaction.del_index(table_codec, &self.table_name, &index, &old_pk)?;
+                    with_projection_tmp_value(arena, Some(&tuple), exprs, |arena, value| {
+                        let mut state = arena.local_state(plan_arena);
+                        let (transaction, table_codec) = state.transaction_codec_mut();
+                        let index = Index::new(index_meta.id, value, index_meta.ty);
+                        transaction.del_index(table_codec, &self.table_name, &index, &old_pk)
+                    })?;
                 }
                 for (i, column) in self.input_schema.iter().enumerate() {
                     if let Some(expr) = exprs_map.get(&plan_arena.column(*column).id()) {
@@ -152,14 +149,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update {
                 }
                 for (index_meta, exprs) in table_snapshot.index_metas.iter() {
                     let index_meta = plan_arena.index(*index_meta);
-                    let values = Projection::projection(&tuple, exprs)?;
-                    let Some(value) = DataValue::values_to_tuple(values) else {
-                        continue;
-                    };
-                    let index = Index::new(index_meta.id, &value, index_meta.ty);
-                    let mut state = arena.local_state(plan_arena);
-                    let (transaction, table_codec) = state.transaction_codec_mut();
-                    transaction.add_index(table_codec, &self.table_name, index, new_pk)?;
+                    with_projection_tmp_value(arena, Some(&tuple), exprs, |arena, value| {
+                        let mut state = arena.local_state(plan_arena);
+                        let (transaction, table_codec) = state.transaction_codec_mut();
+                        let index = Index::new(index_meta.id, value, index_meta.ty);
+                        transaction.add_index(table_codec, &self.table_name, index, new_pk)
+                    })?;
                 }
 
                 let mut state = arena.local_state(plan_arena);

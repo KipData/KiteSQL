@@ -63,13 +63,14 @@ use crate::execution::dql::sort::Sort;
 use crate::execution::dql::top_k::TopK;
 use crate::execution::dql::union::Union;
 use crate::execution::dql::values::Values;
+use crate::expression::ScalarExpression;
 use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
 use crate::planner::{LogicalPlan, PlanArena};
 use crate::storage::table_codec::TableCodec;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::types::index::RuntimeIndexProbe;
-use crate::types::tuple::Tuple;
+use crate::types::tuple::{Tuple, TupleLike};
 use crate::types::value::DataValue;
 
 #[derive(Clone, Copy)]
@@ -408,6 +409,36 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
     }
 }
 
+pub(crate) fn with_projection_tmp_value<'a, T: Transaction + 'a>(
+    arena: &mut ExecArena<'a, T>,
+    tuple: Option<&dyn TupleLike>,
+    exprs: &[ScalarExpression],
+    f: impl FnOnce(&mut ExecArena<'a, T>, &DataValue) -> Result<(), DatabaseError>,
+) -> Result<(), DatabaseError> {
+    arena.with_projection_tmp(|arena, projection_tmp| {
+        {
+            let tuple = tuple.unwrap_or_else(|| arena.result_tuple() as &dyn TupleLike);
+            projection_tmp.reserve(exprs.len());
+            for expr in exprs.iter() {
+                projection_tmp.push(expr.eval(Some(tuple))?);
+            }
+        }
+
+        if projection_tmp.len() > 1 {
+            let value = DataValue::Tuple(std::mem::take(projection_tmp), false);
+            let ret = f(arena, &value);
+            let DataValue::Tuple(values, _) = value else {
+                unreachable!()
+            };
+            *projection_tmp = values;
+            ret?;
+        } else if let Some(value) = projection_tmp.first() {
+            f(arena, value)?;
+        }
+        Ok(())
+    })
+}
+
 impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
     pub(crate) fn init_context(&mut self, context: ExecutionContext<'a>, transaction: &'a T) {
         if let Some(current) = &self.context {
@@ -498,18 +529,16 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
     }
 
     #[inline]
-    pub(crate) fn with_projection_tmp<R, E>(
+    pub(crate) fn with_projection_tmp<R>(
         &mut self,
-        f: impl FnOnce(&Tuple, &mut Vec<DataValue>) -> Result<R, E>,
-    ) -> Result<R, E> {
-        let ExecArena {
-            result,
-            projection_tmp,
-            ..
-        } = self;
-        let ret = f(&result.tuple, projection_tmp)?;
-        std::mem::swap(&mut result.tuple.values, projection_tmp);
-        Ok(ret)
+        f: impl FnOnce(&mut Self, &mut Vec<DataValue>) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        let mut projection_tmp = std::mem::take(&mut self.projection_tmp);
+        projection_tmp.clear();
+        let ret = f(self, &mut projection_tmp);
+        projection_tmp.clear();
+        self.projection_tmp = projection_tmp;
+        ret
     }
 
     #[inline]

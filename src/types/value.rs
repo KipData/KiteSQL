@@ -411,6 +411,35 @@ impl Hash for DataValue {
     }
 }
 impl DataValue {
+    pub(crate) fn serialized_len_hint(&self) -> usize {
+        match self {
+            DataValue::Null => 0,
+            DataValue::Boolean(_) | DataValue::Int8(_) | DataValue::UInt8(_) => 1,
+            DataValue::Int16(_) | DataValue::UInt16(_) => 2,
+            DataValue::Int32(_)
+            | DataValue::UInt32(_)
+            | DataValue::Float32(_)
+            | DataValue::Date32(_)
+            | DataValue::Time32(_, _) => 4,
+            DataValue::Int64(_)
+            | DataValue::UInt64(_)
+            | DataValue::Float64(_)
+            | DataValue::Date64(_)
+            | DataValue::Time64(_, _, _) => 8,
+            DataValue::Utf8 { value, ty, unit } => match (ty, unit) {
+                (Utf8Type::Variable(_), _) => std::mem::size_of::<u32>() + value.len(),
+                (Utf8Type::Fixed(len), CharLengthUnits::Characters) => {
+                    let spaces_len = (*len as usize).saturating_sub(value.chars().count());
+                    std::mem::size_of::<u32>() + value.len() + spaces_len
+                }
+                (Utf8Type::Fixed(len), CharLengthUnits::Octets) => *len as usize,
+            },
+            #[cfg(feature = "decimal")]
+            DataValue::Decimal(_) => 16,
+            DataValue::Tuple(values, _) => values.iter().map(DataValue::serialized_len_hint).sum(),
+        }
+    }
+
     pub fn float(&self) -> Option<f32> {
         if let DataValue::Float32(val) = self {
             Some(val.0)
@@ -1200,15 +1229,6 @@ impl DataValue {
             return Some(min_len);
         }
         Some(0)
-    }
-
-    #[inline]
-    pub(crate) fn values_to_tuple(mut values: Vec<DataValue>) -> Option<DataValue> {
-        if values.len() > 1 {
-            Some(DataValue::Tuple(values, false))
-        } else {
-            values.pop()
-        }
     }
 
     #[cfg(feature = "decimal")]

@@ -13,10 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::dql::projection::Projection;
 use crate::execution::{
-    build_read, DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode,
-    WriteExecutor,
+    build_read, with_projection_tmp_value, DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext,
+    ExecutorNode, WriteExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::create_index::CreateIndexOperator;
@@ -25,7 +24,6 @@ use crate::storage::Transaction;
 use crate::types::index::Index;
 use crate::types::tuple::Schema;
 use crate::types::tuple_builder::TupleBuilder;
-use crate::types::value::DataValue;
 use crate::types::ColumnId;
 
 pub struct CreateIndex {
@@ -136,22 +134,15 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateIndex {
         };
 
         while arena.next_tuple(self.input, plan_arena)? {
-            let (value, tuple_pk) = {
-                let tuple = arena.result_tuple();
-                let Some(value) =
-                    DataValue::values_to_tuple(Projection::projection(tuple, &column_exprs)?)
-                else {
-                    continue;
-                };
-                let Some(tuple_pk) = tuple.pk.clone() else {
-                    continue;
-                };
-                (value, tuple_pk)
+            let Some(tuple_pk) = arena.result_tuple().pk.clone() else {
+                continue;
             };
-            let index = Index::new(index_id, &value, ty);
-            let mut state = arena.local_state(plan_arena);
-            let (transaction, table_codec) = state.transaction_codec_mut();
-            transaction.add_index(table_codec, table_name.as_ref(), index, &tuple_pk)?;
+            with_projection_tmp_value(arena, None, &column_exprs, |arena, value| {
+                let mut state = arena.local_state(plan_arena);
+                let (transaction, table_codec) = state.transaction_codec_mut();
+                let index = Index::new(index_id, value, ty);
+                transaction.add_index(table_codec, table_name.as_ref(), index, &tuple_pk)
+            })?;
         }
 
         TupleBuilder::build_result_into(arena.result_tuple_mut(), "1".to_string());

@@ -14,9 +14,9 @@
 
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
-use crate::execution::dql::projection::Projection;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
+    build_read, with_projection_tmp_value, ExecArena, ExecId, ExecNode, ExecutionContext,
+    ExecutorNode, WriteExecutor,
 };
 use crate::planner::operator::insert::InsertOperator;
 use crate::planner::LogicalPlan;
@@ -166,15 +166,13 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert {
 
                 for (index_meta, exprs) in table_snapshot.index_metas.iter() {
                     let index_meta = plan_arena.index(*index_meta);
-                    let values = Projection::projection(&tuple, exprs)?;
-                    let Some(value) = DataValue::values_to_tuple(values) else {
-                        continue;
-                    };
                     let tuple_id = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
-                    let index = Index::new(index_meta.id, &value, index_meta.ty);
-                    let mut state = arena.local_state(plan_arena);
-                    let (transaction, table_codec) = state.transaction_codec_mut();
-                    transaction.add_index(table_codec, &self.table_name, index, tuple_id)?;
+                    with_projection_tmp_value(arena, Some(&tuple), exprs, |arena, value| {
+                        let mut state = arena.local_state(plan_arena);
+                        let (transaction, table_codec) = state.transaction_codec_mut();
+                        let index = Index::new(index_meta.id, value, index_meta.ty);
+                        transaction.add_index(table_codec, &self.table_name, index, tuple_id)
+                    })?;
                 }
                 let mut state = arena.local_state(plan_arena);
                 let (transaction, table_codec) = state.transaction_codec_mut();

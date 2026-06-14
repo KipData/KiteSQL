@@ -243,7 +243,13 @@ impl Tuple {
 
         let values_len = self.values.len();
         let bits_len = (values_len + BITS_MAX_INDEX) / BITS_MAX_INDEX;
+        let values_bytes_len = self
+            .values
+            .iter()
+            .map(DataValue::serialized_len_hint)
+            .sum::<usize>();
         bytes.clear();
+        bytes.reserve(bits_len + values_bytes_len);
         bytes.resize(bits_len, 0u8);
 
         for (i, (value, serializer)) in self.values.iter().zip(serializers).enumerate() {

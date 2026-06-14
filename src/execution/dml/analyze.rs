@@ -14,10 +14,9 @@
 
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
-use crate::execution::dql::projection::Projection;
 use crate::execution::{
-    build_read, DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode,
-    WriteExecutor,
+    build_read, with_projection_tmp_value, DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext,
+    ExecutorNode, WriteExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::optimizer::core::histogram::HistogramBuilder;
@@ -114,15 +113,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Analyze {
         };
 
         while arena.next_tuple(input, plan_arena)? {
-            let tuple = arena.result_tuple();
             for State { exprs, builder, .. } in builders.iter_mut() {
-                let values = Projection::projection(tuple, exprs)?;
-
-                if values.len() == 1 {
-                    builder.append(&values[0])?;
-                } else {
-                    builder.append(&DataValue::Tuple(values, false))?;
-                }
+                with_projection_tmp_value(arena, None, exprs, |_, value| builder.append(value))?;
             }
         }
         let mut state = arena.local_state(plan_arena);
