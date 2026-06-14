@@ -326,6 +326,52 @@ impl PartialEq for DataValue {
     }
 }
 
+fn tuple_partial_cmp(
+    (left, left_is_upper): (&[DataValue], bool),
+    (right, right_is_upper): (&[DataValue], bool),
+) -> Option<Ordering> {
+    let mut left_iter = left.iter();
+    let mut right_iter = right.iter();
+
+    loop {
+        match (left_iter.next(), right_iter.next()) {
+            (Some(left), Some(right)) => {
+                let ordering = tuple_element_partial_cmp(left, right)?;
+                if ordering != Ordering::Equal {
+                    return Some(ordering);
+                }
+            }
+            (Some(_), None) => {
+                return Some(if right_is_upper {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                });
+            }
+            (None, Some(_)) => {
+                return Some(if left_is_upper {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                });
+            }
+            (None, None) => return Some(Ordering::Equal),
+        }
+    }
+}
+
+fn tuple_element_partial_cmp(left: &DataValue, right: &DataValue) -> Option<Ordering> {
+    match (left, right) {
+        (DataValue::Null, DataValue::Null) => Some(Ordering::Equal),
+        (DataValue::Null, _) => Some(Ordering::Greater),
+        (_, DataValue::Null) => Some(Ordering::Less),
+        (DataValue::Tuple(left, left_is_upper), DataValue::Tuple(right, right_is_upper)) => {
+            tuple_partial_cmp((left, *left_is_upper), (right, *right_is_upper))
+        }
+        _ => left.partial_cmp(right),
+    }
+}
+
 impl PartialOrd for DataValue {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         use DataValue::*;
@@ -368,6 +414,9 @@ impl PartialOrd for DataValue {
             (Decimal(v1), Decimal(v2)) => v1.partial_cmp(v2),
             #[cfg(feature = "decimal")]
             (Decimal(_), _) => None,
+            (Tuple(v1, is_upper1), Tuple(v2, is_upper2)) => {
+                tuple_partial_cmp((v1, *is_upper1), (v2, *is_upper2))
+            }
             (Tuple(..), _) => None,
         }
     }
@@ -1680,7 +1729,23 @@ mod test {
     use bumpalo::Bump;
     use ordered_float::OrderedFloat;
     use rust_decimal::Decimal;
+    use std::cmp::Ordering;
     use std::io::Cursor;
+
+    #[test]
+    fn test_tuple_partial_cmp() {
+        let tuple_1 = DataValue::Tuple(vec![DataValue::Int32(1), DataValue::Int32(2)], false);
+        let tuple_2 = DataValue::Tuple(vec![DataValue::Int32(1), DataValue::Int32(3)], false);
+        let tuple_with_null = DataValue::Tuple(vec![DataValue::Int32(1), DataValue::Null], false);
+        let lower_prefix = DataValue::Tuple(vec![DataValue::Int32(1)], false);
+        let upper_prefix = DataValue::Tuple(vec![DataValue::Int32(1)], true);
+
+        assert_eq!(tuple_1.partial_cmp(&tuple_2), Some(Ordering::Less));
+        assert_eq!(tuple_2.partial_cmp(&tuple_with_null), Some(Ordering::Less));
+        assert_eq!(lower_prefix.partial_cmp(&tuple_1), Some(Ordering::Less));
+        assert_eq!(upper_prefix.partial_cmp(&tuple_1), Some(Ordering::Greater));
+        assert_eq!(DataValue::Null.partial_cmp(&DataValue::Int32(1)), None);
+    }
 
     #[test]
     fn test_mem_comparable_null() -> Result<(), DatabaseError> {

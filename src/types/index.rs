@@ -75,8 +75,27 @@ pub struct IndexInfo {
     pub(crate) lookup: Option<IndexLookup>,
     pub(crate) covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
     pub(crate) cover_mapping: Option<Vec<usize>>,
-    pub(crate) sort_elimination_hint: Option<usize>,
-    pub(crate) stream_distinct_hint: Option<usize>,
+    pub(crate) sort_elimination_hint: Option<IndexOrderHint>,
+    pub(crate) stream_distinct_hint: Option<IndexOrderHint>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, ReferenceSerialization)]
+pub struct IndexOrderHint {
+    cover_num: usize,
+}
+
+impl IndexOrderHint {
+    pub(crate) fn new(cover_num: usize) -> Self {
+        Self { cover_num }
+    }
+
+    pub(crate) fn cover_num(self) -> usize {
+        self.cover_num
+    }
+
+    pub(crate) fn merge_cover_num(&mut self, cover_num: usize) {
+        self.cover_num = self.cover_num.max(cover_num);
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]

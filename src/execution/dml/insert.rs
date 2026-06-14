@@ -170,7 +170,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert {
                     with_projection_tmp_value(arena, Some(&tuple), exprs, |arena, value| {
                         let mut state = arena.local_state(plan_arena);
                         let (transaction, table_codec) = state.transaction_codec_mut();
-                        let index = Index::new(index_meta.id, value, index_meta.ty);
+                        let index = Index::new(index_meta.id, &value, index_meta.ty);
                         transaction.add_index(table_codec, &self.table_name, index, tuple_id)
                     })?;
                 }

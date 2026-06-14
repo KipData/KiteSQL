@@ -20,10 +20,10 @@ use crate::storage::Transaction;
 use crate::types::value::DataValue;
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::borrow::Borrow;
+use std::cmp;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::marker::PhantomData;
-use std::{cmp, mem};
 
 pub(crate) const COUNT_MIN_SKETCH_STORAGE_PAGE_LEN: usize = 16 * 1024;
 
@@ -146,7 +146,6 @@ impl<K> CountMinSketch<K> {
                 "count-min sketch width must be a power of two".to_string(),
             ));
         }
-
         let mut counters = vec![Vec::with_capacity(width); k_num];
         let mut expected_page_idx = vec![0usize; k_num];
 
@@ -213,20 +212,34 @@ impl CountMinSketch<DataValue> {
 }
 
 impl<K: Hash> CountMinSketch<K> {
-    pub fn new(capacity: usize, probability: f64, tolerance: f64) -> Self {
-        let width = Self::optimal_width(capacity, tolerance);
+    pub fn with_relative_error(
+        probability: f64,
+        relative_error: f64,
+    ) -> Result<Self, DatabaseError> {
+        if !(0.0..1.0).contains(&probability) {
+            return Err(DatabaseError::InvalidValue(format!(
+                "count-min sketch probability must be between 0 and 1, got {probability}"
+            )));
+        }
+        if relative_error <= 0.0 || relative_error.is_nan() {
+            return Err(DatabaseError::InvalidValue(format!(
+                "count-min sketch relative error must be greater than zero, got {relative_error}"
+            )));
+        }
+
+        let width = Self::optimal_relative_width(relative_error)?;
         let k_num = Self::optimal_k_num(probability);
         let counters = vec![vec![0; width]; k_num];
         let offsets = vec![0; k_num];
         let hashers = Self::new_hashers();
-        CountMinSketch {
+        Ok(CountMinSketch {
             counters,
             offsets,
             hashers,
             mask: Self::mask(width),
             k_num,
             phantom_k: PhantomData,
-        }
+        })
     }
 
     pub fn add<Q: ?Sized + Hash>(&mut self, key: &Q, value: usize)
@@ -272,17 +285,6 @@ impl<K: Hash> CountMinSketch<K> {
     }
 
     #[allow(dead_code)]
-    pub fn estimate_memory(
-        capacity: usize,
-        probability: f64,
-        tolerance: f64,
-    ) -> Result<usize, &'static str> {
-        let width = Self::optimal_width(capacity, tolerance);
-        let k_num = Self::optimal_k_num(probability);
-        Ok(width * mem::size_of::<u64>() * k_num)
-    }
-
-    #[allow(dead_code)]
     pub fn clear(&mut self) {
         for k_i in 0..self.k_num {
             for counter in &mut self.counters[k_i] {
@@ -292,12 +294,21 @@ impl<K: Hash> CountMinSketch<K> {
         self.hashers = Self::new_hashers();
     }
 
-    fn optimal_width(capacity: usize, tolerance: f64) -> usize {
-        let e = tolerance / (capacity as f64);
-        let width = (2.0 / e).round() as usize;
-        cmp::max(2, width)
+    fn optimal_relative_width(relative_error: f64) -> Result<usize, DatabaseError> {
+        let width = (2.0 / relative_error).ceil();
+        if !width.is_finite() || width > usize::MAX as f64 {
+            return Err(DatabaseError::InvalidValue(format!(
+                "count-min sketch relative error is too small: {relative_error}"
+            )));
+        }
+
+        cmp::max(2, width as usize)
             .checked_next_power_of_two()
-            .expect("Width would be way too large")
+            .ok_or_else(|| {
+                DatabaseError::InvalidValue(format!(
+                    "count-min sketch width overflow for relative error: {relative_error}"
+                ))
+            })
     }
 
     fn mask(width: usize) -> usize {
@@ -307,7 +318,7 @@ impl<K: Hash> CountMinSketch<K> {
     }
 
     fn optimal_k_num(probability: f64) -> usize {
-        cmp::max(1, ((1.0 - probability).ln() / 0.5f64.ln()) as usize)
+        cmp::max(1, ((1.0 - probability).ln() / 0.5f64.ln()).ceil() as usize)
     }
 
     fn new_hashers() -> [StableHasher; 2] {
@@ -391,7 +402,7 @@ mod tests {
 
     #[test]
     fn test_increment() {
-        let mut cms = CountMinSketch::<&str>::new(100, 0.95, 10.0);
+        let mut cms = CountMinSketch::<&str>::with_relative_error(0.95, 0.01).unwrap();
         for _ in 0..300 {
             cms.increment("key");
         }
@@ -400,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_increment_multi() {
-        let mut cms = CountMinSketch::<u64>::new(100, 0.99, 2.0);
+        let mut cms = CountMinSketch::<u64>::with_relative_error(0.99, 0.001).unwrap();
         for i in 0..1_000_000 {
             cms.increment(&(i % 100));
         }
@@ -411,7 +422,7 @@ mod tests {
 
     #[test]
     fn test_collect_count() {
-        let mut cms = CountMinSketch::<DataValue>::new(100, 0.95, 10.0);
+        let mut cms = CountMinSketch::<DataValue>::with_relative_error(0.95, 0.01).unwrap();
         for _ in 0..300 {
             cms.increment(&DataValue::Int32(300));
         }
@@ -429,7 +440,7 @@ mod tests {
 
     #[test]
     fn test_storage_parts_roundtrip() {
-        let mut cms = CountMinSketch::<DataValue>::new(128, 0.95, 10.0);
+        let mut cms = CountMinSketch::<DataValue>::with_relative_error(0.95, 0.01).unwrap();
         for i in 0..256 {
             cms.increment(&DataValue::Int32(i % 17));
         }

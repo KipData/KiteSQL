@@ -13,34 +13,31 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::dql::sort::{radix_sort, BumpVec, NullableVec};
 use crate::expression::range_detacher::Range;
 use crate::expression::BinaryOperator;
 use crate::optimizer::core::cm_sketch::CountMinSketch;
-use crate::storage::table_codec::BumpBytes;
+use crate::optimizer::core::kll_sketch::KllSketchBuilder;
 use crate::types::evaluator::{binary_create, BinaryEvaluatorRef};
 use crate::types::index::{IndexId, IndexMeta};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
-use bumpalo::Bump;
 use kite_sql_serde_macros::ReferenceSerialization;
 use ordered_float::OrderedFloat;
 use std::borrow::Cow;
+use std::cmp;
 use std::collections::Bound;
+use std::mem;
 use std::sync::OnceLock;
-use std::{cmp, mem};
+
+const ANALYZE_STATISTICS_CONFIDENCE: f64 = 0.95;
+pub(crate) const ANALYZE_STATISTICS_RELATIVE_ERROR: f64 = 0.001;
 
 pub struct HistogramBuilder {
-    arena: Bump,
     index_id: IndexId,
-    capacity: Option<usize>,
-    is_init: bool,
-
     null_count: usize,
-    values: Option<NullableVec<'static, (usize, DataValue)>>,
-    sort_keys: Option<NullableVec<'static, (usize, BumpBytes<'static>)>>,
-
-    value_index: usize,
+    values_len: usize,
+    quantile: KllSketchBuilder,
+    sketch: CountMinSketch<DataValue>,
 }
 
 #[derive(Debug)]
@@ -97,156 +94,96 @@ pub struct Bucket {
 }
 
 impl HistogramBuilder {
-    #[allow(clippy::missing_transmute_annotations)]
-    pub(crate) fn init(&mut self) {
-        if self.is_init {
-            return;
-        }
-        let (values, sort_keys) = self
-            .capacity
-            .map(|capacity| {
-                (
-                    NullableVec::<(usize, DataValue)>::with_capacity(capacity, &self.arena),
-                    BumpVec::<(usize, BumpBytes<'static>)>::with_capacity_in(capacity, &self.arena),
-                )
-            })
-            .unwrap_or_else(|| (NullableVec::new(&self.arena), BumpVec::new_in(&self.arena)));
-
-        self.values = Some(unsafe { mem::transmute::<_, _>(values) });
-        self.sort_keys = Some(unsafe { mem::transmute::<_, _>(sort_keys) });
-        self.is_init = true;
-    }
-
-    pub fn new(index_meta: &IndexMeta, capacity: Option<usize>) -> Self {
-        Self {
-            arena: Default::default(),
+    pub fn new(index_meta: &IndexMeta, relative_error: f64) -> Result<Self, DatabaseError> {
+        Ok(Self {
             index_id: index_meta.id,
-            capacity,
-            is_init: false,
             null_count: 0,
-            values: None,
-            sort_keys: None,
-            value_index: 0,
-        }
+            values_len: 0,
+            quantile: KllSketchBuilder::with_relative_error(relative_error)?,
+            sketch: CountMinSketch::with_relative_error(
+                ANALYZE_STATISTICS_CONFIDENCE,
+                relative_error,
+            )?,
+        })
     }
 
-    #[allow(clippy::missing_transmute_annotations)]
-    pub fn append(&mut self, value: &DataValue) -> Result<(), DatabaseError> {
-        self.init();
+    pub fn append(&mut self, value: DataValue) -> Result<(), DatabaseError> {
         if value.is_null() {
             self.null_count += 1;
         } else {
-            let mut bytes = BumpBytes::new_in(&self.arena);
-
-            value.memcomparable_encode(&mut bytes)?;
-            self.values
-                .as_mut()
-                .unwrap()
-                .put((self.value_index, value.clone()));
-            self.sort_keys
-                .as_mut()
-                .unwrap()
-                .put((self.value_index, unsafe { mem::transmute::<_, _>(bytes) }))
+            self.sketch.increment(&value);
+            self.quantile.insert(value)?;
+            self.values_len += 1;
         }
-
-        self.value_index += 1;
 
         Ok(())
     }
 
     pub fn build(
-        mut self,
+        self,
         number_of_buckets: usize,
     ) -> Result<(Histogram, CountMinSketch<DataValue>), DatabaseError> {
-        self.init();
-        let values_len = self.values.as_ref().unwrap().len();
+        if number_of_buckets == 0 {
+            return Err(DatabaseError::InvalidValue(
+                "histogram bucket count must be greater than zero".to_string(),
+            ));
+        }
+
+        let values_len = self.values_len;
         if number_of_buckets > values_len {
             return Err(DatabaseError::TooManyBuckets(number_of_buckets, values_len));
         }
 
-        let mut sketch = CountMinSketch::new(values_len, 0.95, 1.0);
         let HistogramBuilder {
-            arena,
             index_id,
             null_count,
-            values,
-            sort_keys,
+            quantile,
+            mut sketch,
             ..
         } = self;
-        let mut values = values.unwrap();
-        let mut sort_keys = sort_keys.unwrap();
         let mut buckets = Vec::with_capacity(number_of_buckets);
-        let bucket_len = if values_len.is_multiple_of(number_of_buckets) {
-            values_len / number_of_buckets
-        } else {
-            (values_len + number_of_buckets) / number_of_buckets
-        };
-        radix_sort(&mut sort_keys, &arena);
+        let quantile = quantile.build()?;
+        let correlation = quantile.correlation();
+        let ranks = (0..number_of_buckets).flat_map(|i| {
+            [
+                i * values_len / number_of_buckets,
+                ((i + 1) * values_len / number_of_buckets) - 1,
+            ]
+        });
+        let mut values = quantile.values_at_ranks(ranks);
 
         for i in 0..number_of_buckets {
-            let mut bucket = Bucket::empty();
-            let j = (i + 1) * bucket_len;
-
-            bucket.upper = values
-                .get(sort_keys.get(cmp::min(j, values_len) - 1).0)
-                .1
-                .clone();
-            buckets.push(bucket);
-        }
-        let mut corr_xy_sum = 0.0;
-        let mut number_of_distinct_value = 0;
-        let mut last_value: Option<DataValue> = None;
-
-        for (i, (index, _)) in sort_keys.into_iter().enumerate() {
-            let (ordinal, value) = values.take(index);
-            sketch.increment(&value);
-
-            if let None | Some(true) = last_value.as_ref().map(|last_value| last_value != &value) {
-                last_value = Some(value.clone());
-                number_of_distinct_value += 1;
-            }
-
-            let bucket = &mut buckets[i / bucket_len];
-
-            if bucket.lower.is_null() {
-                bucket.lower = value;
-            }
-            bucket.count += 1;
-
-            corr_xy_sum += i as f64 * ordinal as f64;
+            let lower_rank = i * values_len / number_of_buckets;
+            let upper_rank = ((i + 1) * values_len / number_of_buckets) - 1;
+            let lower = values.next().flatten().ok_or_else(|| {
+                DatabaseError::InvalidValue("KLL sketch failed to produce bucket lower".to_string())
+            })?;
+            let upper = values.next().flatten().ok_or_else(|| {
+                DatabaseError::InvalidValue("KLL sketch failed to produce bucket upper".to_string())
+            })?;
+            buckets.push(Bucket {
+                lower,
+                upper,
+                count: (upper_rank - lower_rank + 1) as u64,
+            });
         }
         sketch.add(&DataValue::Null, self.null_count);
-
-        drop(values);
-        drop(arena);
 
         Ok((
             Histogram {
                 meta: HistogramMeta {
                     index_id,
-                    number_of_distinct_value,
+                    number_of_distinct_value: values_len,
                     null_count,
                     values_len,
                     buckets_len: buckets.len(),
-                    correlation: Self::calc_correlation(corr_xy_sum, values_len),
+                    correlation,
                 },
                 buckets,
                 comparator: OnceLock::new(),
             },
             sketch,
         ))
-    }
-
-    // https://github.com/pingcap/tidb/blob/6957170f1147e96958e63db48148445a7670328e/pkg/statistics/builder.go#L210
-    fn calc_correlation(corr_xy_sum: f64, values_len: usize) -> f64 {
-        if values_len == 1 {
-            return 1.0;
-        }
-        let item_count = values_len as f64;
-        let corr_x_sum = (item_count - 1.0) * item_count / 2.0;
-        let corr_x2_sum = (item_count - 1.0) * item_count * (2.0 * item_count - 1.0) / 6.0;
-        (item_count * corr_xy_sum - corr_x_sum * corr_x_sum)
-            / (item_count * corr_x2_sum - corr_x_sum * corr_x_sum)
     }
 }
 
@@ -534,7 +471,7 @@ impl Histogram {
             Range::Scope { min, max } => {
                 let bucket = &self.buckets[*bucket_i];
                 let mut bucket_count = bucket.count as usize;
-                if *bucket_i == 0 {
+                if *bucket_i == 0 && scope_lower_includes_null(min) {
                     bucket_count += self.meta.null_count;
                 }
 
@@ -561,14 +498,14 @@ impl Histogram {
                         }
                         Bound::Excluded(val) => (
                             calc_fraction(&bucket.lower, &bucket.upper, val)?,
-                            Some(sketch.estimate(val)),
+                            endpoint_count(val, bucket, sketch),
                         ),
                         Bound::Unbounded => unreachable!(),
                     };
                     let ratio = *distinct_1.max(OrderedFloat(temp_ratio).min(OrderedFloat(1.0)));
                     temp_count += (bucket_count as f64 * ratio).ceil() as usize;
                     if let Some(count) = option {
-                        temp_count = temp_count.saturating_sub(count);
+                        temp_count = subtract_endpoint_count(temp_count, count);
                     }
                     *bucket_i += 1;
                 } else if is_under(comparator, &bucket.upper, max, false)? {
@@ -578,14 +515,14 @@ impl Histogram {
                         }
                         Bound::Excluded(val) => (
                             calc_fraction(&bucket.lower, &bucket.upper, val)?,
-                            Some(sketch.estimate(val)),
+                            endpoint_count(val, bucket, sketch),
                         ),
                         Bound::Unbounded => unreachable!(),
                     };
                     let ratio = *distinct_1.max(OrderedFloat(temp_ratio).min(OrderedFloat(1.0)));
                     temp_count += (bucket_count as f64 * (1.0 - ratio)).ceil() as usize;
                     if let Some(count) = option {
-                        temp_count = temp_count.saturating_sub(count);
+                        temp_count = subtract_endpoint_count(temp_count, count);
                     }
                     *bucket_i += 1;
                 } else {
@@ -595,7 +532,7 @@ impl Histogram {
                         }
                         Bound::Excluded(val) => (
                             calc_fraction(&bucket.lower, &bucket.upper, val)?,
-                            Some(sketch.estimate(val)),
+                            endpoint_count(val, bucket, sketch),
                         ),
                         Bound::Unbounded => unreachable!(),
                     };
@@ -605,7 +542,7 @@ impl Histogram {
                         }
                         Bound::Excluded(val) => (
                             calc_fraction(&bucket.lower, &bucket.upper, val)?,
-                            Some(sketch.estimate(val)),
+                            endpoint_count(val, bucket, sketch),
                         ),
                         Bound::Unbounded => unreachable!(),
                     };
@@ -613,17 +550,21 @@ impl Histogram {
                         .max(OrderedFloat(temp_ratio_max - temp_ratio_min).min(OrderedFloat(1.0)));
                     temp_count += (bucket_count as f64 * ratio).ceil() as usize;
                     if let Some(count) = option_max {
-                        temp_count = temp_count.saturating_sub(count);
+                        temp_count = subtract_endpoint_count(temp_count, count);
                     }
                     if let Some(count) = option_min {
-                        temp_count = temp_count.saturating_sub(count);
+                        temp_count = subtract_endpoint_count(temp_count, count);
                     }
                     *binary_i += 1;
                 }
                 *count += cmp::max(temp_count, 0);
             }
             Range::Eq(value) => {
-                *count += sketch.estimate(value);
+                *count += if value.is_null() {
+                    self.meta.null_count
+                } else {
+                    sketch.estimate(value)
+                };
                 *binary_i += 1
             }
             Range::Dummy => return Ok(true),
@@ -631,6 +572,44 @@ impl Histogram {
         }
 
         Ok(false)
+    }
+}
+
+fn subtract_endpoint_count(count: usize, endpoint_count: usize) -> usize {
+    if endpoint_count < count {
+        count.saturating_sub(endpoint_count)
+    } else if endpoint_count == count && count > 1 {
+        count - 1
+    } else {
+        count
+    }
+}
+
+fn endpoint_count(
+    value: &DataValue,
+    bucket: &Bucket,
+    sketch: &CountMinSketch<DataValue>,
+) -> Option<usize> {
+    let bucket_key_type = bucket.lower.logical_type();
+    debug_assert_eq!(bucket_key_type, bucket.upper.logical_type());
+
+    if value.logical_type() == bucket_key_type {
+        match value {
+            DataValue::Tuple(values, true) => {
+                Some(sketch.estimate(&DataValue::Tuple(values.clone(), false)))
+            }
+            _ => Some(sketch.estimate(value)),
+        }
+    } else {
+        None
+    }
+}
+
+fn scope_lower_includes_null(min: &Bound<DataValue>) -> bool {
+    match min {
+        Bound::Unbounded => true,
+        Bound::Included(value) => value.is_null(),
+        Bound::Excluded(_) => false,
     }
 }
 
@@ -648,23 +627,14 @@ impl HistogramMeta {
     }
 }
 
-impl Bucket {
-    fn empty() -> Self {
-        let empty_value = DataValue::Null;
-
-        Bucket {
-            lower: empty_value.clone(),
-            upper: empty_value,
-            count: 0,
-        }
-    }
-}
-
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
-    use crate::optimizer::core::histogram::{Bucket, HistogramBuilder};
+    use crate::optimizer::core::cm_sketch::CountMinSketch;
+    use crate::optimizer::core::histogram::{
+        Bucket, HistogramBuilder, ANALYZE_STATISTICS_RELATIVE_ERROR,
+    };
     use crate::types::index::{IndexMeta, IndexType};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -684,28 +654,28 @@ mod tests {
 
     #[test]
     fn test_sort_tuples_on_histogram() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), Some(15));
+        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
 
-        builder.append(&DataValue::Int32(0))?;
-        builder.append(&DataValue::Int32(1))?;
-        builder.append(&DataValue::Int32(2))?;
-        builder.append(&DataValue::Int32(3))?;
-        builder.append(&DataValue::Int32(4))?;
+        builder.append(DataValue::Int32(0))?;
+        builder.append(DataValue::Int32(1))?;
+        builder.append(DataValue::Int32(2))?;
+        builder.append(DataValue::Int32(3))?;
+        builder.append(DataValue::Int32(4))?;
 
-        builder.append(&DataValue::Int32(5))?;
-        builder.append(&DataValue::Int32(6))?;
-        builder.append(&DataValue::Int32(7))?;
-        builder.append(&DataValue::Int32(8))?;
-        builder.append(&DataValue::Int32(9))?;
+        builder.append(DataValue::Int32(5))?;
+        builder.append(DataValue::Int32(6))?;
+        builder.append(DataValue::Int32(7))?;
+        builder.append(DataValue::Int32(8))?;
+        builder.append(DataValue::Int32(9))?;
 
-        builder.append(&DataValue::Int32(10))?;
-        builder.append(&DataValue::Int32(11))?;
-        builder.append(&DataValue::Int32(12))?;
-        builder.append(&DataValue::Int32(13))?;
-        builder.append(&DataValue::Int32(14))?;
+        builder.append(DataValue::Int32(10))?;
+        builder.append(DataValue::Int32(11))?;
+        builder.append(DataValue::Int32(12))?;
+        builder.append(DataValue::Int32(13))?;
+        builder.append(DataValue::Int32(14))?;
 
-        builder.append(&DataValue::Null)?;
-        builder.append(&DataValue::Null)?;
+        builder.append(DataValue::Null)?;
+        builder.append(DataValue::Null)?;
 
         // assert!(matches!(builder.build(10), Err(DataBaseError::TooManyBuckets)));
 
@@ -750,28 +720,28 @@ mod tests {
 
     #[test]
     fn test_rev_sort_tuples_on_histogram() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), Some(15));
+        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
 
-        builder.append(&DataValue::Int32(14))?;
-        builder.append(&DataValue::Int32(13))?;
-        builder.append(&DataValue::Int32(12))?;
-        builder.append(&DataValue::Int32(11))?;
-        builder.append(&DataValue::Int32(10))?;
+        builder.append(DataValue::Int32(14))?;
+        builder.append(DataValue::Int32(13))?;
+        builder.append(DataValue::Int32(12))?;
+        builder.append(DataValue::Int32(11))?;
+        builder.append(DataValue::Int32(10))?;
 
-        builder.append(&DataValue::Int32(9))?;
-        builder.append(&DataValue::Int32(8))?;
-        builder.append(&DataValue::Int32(7))?;
-        builder.append(&DataValue::Int32(6))?;
-        builder.append(&DataValue::Int32(5))?;
+        builder.append(DataValue::Int32(9))?;
+        builder.append(DataValue::Int32(8))?;
+        builder.append(DataValue::Int32(7))?;
+        builder.append(DataValue::Int32(6))?;
+        builder.append(DataValue::Int32(5))?;
 
-        builder.append(&DataValue::Int32(4))?;
-        builder.append(&DataValue::Int32(3))?;
-        builder.append(&DataValue::Int32(2))?;
-        builder.append(&DataValue::Int32(1))?;
-        builder.append(&DataValue::Int32(0))?;
+        builder.append(DataValue::Int32(4))?;
+        builder.append(DataValue::Int32(3))?;
+        builder.append(DataValue::Int32(2))?;
+        builder.append(DataValue::Int32(1))?;
+        builder.append(DataValue::Int32(0))?;
 
-        builder.append(&DataValue::Null)?;
-        builder.append(&DataValue::Null)?;
+        builder.append(DataValue::Null)?;
+        builder.append(DataValue::Null)?;
 
         let (histogram, _) = builder.build(5)?;
 
@@ -814,28 +784,28 @@ mod tests {
 
     #[test]
     fn test_non_average_on_histogram() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), Some(15));
+        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
 
-        builder.append(&DataValue::Int32(14))?;
-        builder.append(&DataValue::Int32(13))?;
-        builder.append(&DataValue::Int32(12))?;
-        builder.append(&DataValue::Int32(11))?;
-        builder.append(&DataValue::Int32(10))?;
+        builder.append(DataValue::Int32(14))?;
+        builder.append(DataValue::Int32(13))?;
+        builder.append(DataValue::Int32(12))?;
+        builder.append(DataValue::Int32(11))?;
+        builder.append(DataValue::Int32(10))?;
 
-        builder.append(&DataValue::Int32(4))?;
-        builder.append(&DataValue::Int32(3))?;
-        builder.append(&DataValue::Int32(2))?;
-        builder.append(&DataValue::Int32(1))?;
-        builder.append(&DataValue::Int32(0))?;
+        builder.append(DataValue::Int32(4))?;
+        builder.append(DataValue::Int32(3))?;
+        builder.append(DataValue::Int32(2))?;
+        builder.append(DataValue::Int32(1))?;
+        builder.append(DataValue::Int32(0))?;
 
-        builder.append(&DataValue::Int32(9))?;
-        builder.append(&DataValue::Int32(8))?;
-        builder.append(&DataValue::Int32(7))?;
-        builder.append(&DataValue::Int32(6))?;
-        builder.append(&DataValue::Int32(5))?;
+        builder.append(DataValue::Int32(9))?;
+        builder.append(DataValue::Int32(8))?;
+        builder.append(DataValue::Int32(7))?;
+        builder.append(DataValue::Int32(6))?;
+        builder.append(DataValue::Int32(5))?;
 
-        builder.append(&DataValue::Null)?;
-        builder.append(&DataValue::Null)?;
+        builder.append(DataValue::Null)?;
+        builder.append(DataValue::Null)?;
 
         let (histogram, _) = builder.build(4)?;
 
@@ -847,23 +817,23 @@ mod tests {
             vec![
                 Bucket {
                     lower: DataValue::Int32(0),
-                    upper: DataValue::Int32(3),
-                    count: 4,
-                },
-                Bucket {
-                    lower: DataValue::Int32(4),
-                    upper: DataValue::Int32(7),
-                    count: 4,
-                },
-                Bucket {
-                    lower: DataValue::Int32(8),
-                    upper: DataValue::Int32(11),
-                    count: 4,
-                },
-                Bucket {
-                    lower: DataValue::Int32(12),
-                    upper: DataValue::Int32(14),
+                    upper: DataValue::Int32(2),
                     count: 3,
+                },
+                Bucket {
+                    lower: DataValue::Int32(3),
+                    upper: DataValue::Int32(6),
+                    count: 4,
+                },
+                Bucket {
+                    lower: DataValue::Int32(7),
+                    upper: DataValue::Int32(10),
+                    count: 4,
+                },
+                Bucket {
+                    lower: DataValue::Int32(11),
+                    upper: DataValue::Int32(14),
+                    count: 4,
                 },
             ]
         );
@@ -873,27 +843,27 @@ mod tests {
 
     #[test]
     fn test_collect_count() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), Some(15));
+        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
 
-        builder.append(&DataValue::Int32(14))?;
-        builder.append(&DataValue::Int32(13))?;
-        builder.append(&DataValue::Int32(12))?;
-        builder.append(&DataValue::Int32(11))?;
-        builder.append(&DataValue::Int32(10))?;
+        builder.append(DataValue::Int32(14))?;
+        builder.append(DataValue::Int32(13))?;
+        builder.append(DataValue::Int32(12))?;
+        builder.append(DataValue::Int32(11))?;
+        builder.append(DataValue::Int32(10))?;
 
-        builder.append(&DataValue::Int32(4))?;
-        builder.append(&DataValue::Int32(3))?;
-        builder.append(&DataValue::Int32(2))?;
-        builder.append(&DataValue::Int32(1))?;
-        builder.append(&DataValue::Int32(0))?;
+        builder.append(DataValue::Int32(4))?;
+        builder.append(DataValue::Int32(3))?;
+        builder.append(DataValue::Int32(2))?;
+        builder.append(DataValue::Int32(1))?;
+        builder.append(DataValue::Int32(0))?;
 
-        builder.append(&DataValue::Int32(9))?;
-        builder.append(&DataValue::Int32(8))?;
-        builder.append(&DataValue::Int32(7))?;
-        builder.append(&DataValue::Int32(6))?;
-        builder.append(&DataValue::Int32(5))?;
+        builder.append(DataValue::Int32(9))?;
+        builder.append(DataValue::Int32(8))?;
+        builder.append(DataValue::Int32(7))?;
+        builder.append(DataValue::Int32(6))?;
+        builder.append(DataValue::Int32(5))?;
 
-        builder.append(&DataValue::Null)?;
+        builder.append(DataValue::Null)?;
 
         let (histogram, sketch) = builder.build(4)?;
 
@@ -958,7 +928,7 @@ mod tests {
             &sketch,
         )?;
 
-        assert_eq!(count_6, 13);
+        assert_eq!(count_6, 12);
 
         let count_7 = histogram.collect_count(
             &[Range::Scope {
@@ -968,7 +938,7 @@ mod tests {
             &sketch,
         )?;
 
-        assert_eq!(count_7, 14);
+        assert_eq!(count_7, 13);
 
         let count_8 = histogram.collect_count(
             &[Range::Scope {
@@ -998,7 +968,7 @@ mod tests {
             &sketch,
         )?;
 
-        assert_eq!(count_10, 3);
+        assert_eq!(count_10, 2);
 
         let count_11 = histogram.collect_count(
             &[Range::Scope {
@@ -1009,6 +979,60 @@ mod tests {
         )?;
 
         assert_eq!(count_11, 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_collect_count_ignores_tuple_prefix_endpoint_count() -> Result<(), DatabaseError> {
+        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+
+        for value in 0..15 {
+            builder.append(DataValue::Tuple(
+                vec![DataValue::Int32(value), DataValue::Int32(value)],
+                false,
+            ))?;
+        }
+
+        let (histogram, mut sketch) = builder.build(5)?;
+        let ranges = [Range::Scope {
+            min: Bound::Excluded(DataValue::Tuple(vec![DataValue::Int32(0)], false)),
+            max: Bound::Excluded(DataValue::Tuple(vec![DataValue::Int32(8)], true)),
+        }];
+        let clean_count = histogram.collect_count(&ranges, &sketch)?;
+
+        sketch.increment(&DataValue::Tuple(vec![DataValue::Int32(0)], false));
+        sketch.increment(&DataValue::Tuple(vec![DataValue::Int32(8)], true));
+
+        assert_eq!(histogram.collect_count(&ranges, &sketch)?, clean_count);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_endpoint_count_uses_only_full_histogram_keys() -> Result<(), DatabaseError> {
+        let bucket = Bucket {
+            lower: DataValue::Tuple(vec![DataValue::Int32(0), DataValue::Int32(0)], false),
+            upper: DataValue::Tuple(vec![DataValue::Int32(10), DataValue::Int32(10)], false),
+            count: 11,
+        };
+        let mut sketch = CountMinSketch::with_relative_error(
+            super::ANALYZE_STATISTICS_CONFIDENCE,
+            ANALYZE_STATISTICS_RELATIVE_ERROR,
+        )?;
+
+        let real_key = DataValue::Tuple(vec![DataValue::Int32(8), DataValue::Int32(8)], false);
+        let upper_bound = DataValue::Tuple(vec![DataValue::Int32(8), DataValue::Int32(8)], true);
+        let prefix_bound = DataValue::Tuple(vec![DataValue::Int32(8)], true);
+
+        sketch.increment(&real_key);
+        sketch.increment(&prefix_bound);
+
+        assert_eq!(
+            super::endpoint_count(&upper_bound, &bucket, &sketch),
+            Some(1)
+        );
+        assert_eq!(super::endpoint_count(&prefix_bound, &bucket, &sketch), None);
 
         Ok(())
     }

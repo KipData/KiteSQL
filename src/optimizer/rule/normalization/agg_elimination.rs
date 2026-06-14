@@ -21,6 +21,7 @@ use crate::planner::operator::sort::SortField;
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
 use crate::planner::{Childrens, LogicalPlan};
+use crate::types::index::IndexOrderHint;
 
 pub struct EliminateRedundantSort;
 
@@ -152,18 +153,18 @@ pub(crate) fn apply_scan_order_hint(
             let covered = hint_len(required);
             match hint {
                 OrderHintKind::SortElimination => {
-                    index_info.sort_elimination_hint = Some(
-                        index_info
-                            .sort_elimination_hint
-                            .map_or(covered, |old| old.max(covered)),
-                    );
+                    if let Some(hint) = &mut index_info.sort_elimination_hint {
+                        hint.merge_cover_num(covered);
+                    } else {
+                        index_info.sort_elimination_hint = Some(IndexOrderHint::new(covered));
+                    }
                 }
                 OrderHintKind::StreamDistinct => {
-                    index_info.stream_distinct_hint = Some(
-                        index_info
-                            .stream_distinct_hint
-                            .map_or(covered, |old| old.max(covered)),
-                    );
+                    if let Some(hint) = &mut index_info.stream_distinct_hint {
+                        hint.merge_cover_num(covered);
+                    } else {
+                        index_info.stream_distinct_hint = Some(IndexOrderHint::new(covered));
+                    }
                 }
             }
         }
@@ -695,7 +696,12 @@ mod tests {
         };
 
         assert_eq!(scan_op.index_infos.len(), 1);
-        assert_eq!(scan_op.index_infos[0].stream_distinct_hint, Some(1));
+        assert_eq!(
+            scan_op.index_infos[0]
+                .stream_distinct_hint
+                .map(|hint| hint.cover_num()),
+            Some(1)
+        );
         Ok(())
     }
 

@@ -66,11 +66,6 @@ impl<'a, T> NullableVec<'a, T> {
     }
 
     #[inline]
-    pub(crate) fn get(&self, offset: usize) -> &T {
-        unsafe { self.0[offset].assume_init_ref() }
-    }
-
-    #[inline]
     pub(crate) fn len(&self) -> usize {
         self.0.len()
     }
