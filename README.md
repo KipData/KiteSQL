@@ -201,10 +201,10 @@ Recent 720-second local comparison on the machine above:
 
 | Backend | TpmC | New-Order p90 | Payment p90 | Order-Status p90 | Delivery p90 | Stock-Level p90 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| KiteSQL LMDB | 61723 | 0.001s | 0.001s | 0.001s | 0.002s | 0.001s |
-| KiteSQL RocksDB | 30446 | 0.001s | 0.001s | 0.001s | 0.016s | 0.002s |
-| SQLite balanced | 42989 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
-| SQLite practical | 42276 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
+| KiteSQL LMDB | 73638 | 0.001s | 0.001s | 0.001s | 0.002s | 0.001s |
+| KiteSQL RocksDB | 39051 | 0.001s | 0.001s | 0.002s | 0.009s | 0.001s |
+| SQLite balanced | 39835 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
+| SQLite practical | 37911 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
 
 The detailed raw outputs are recorded in [tpcc/README.md](tpcc/README.md).
 #### 👉[check more](tpcc/README.md)
