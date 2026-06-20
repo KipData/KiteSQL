@@ -52,7 +52,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowTables<'a, T> {
             .metas
             .as_mut()
             .expect("show tables iterator initialized")
-            .try_next()?
+            .try_next(plan_arena)?
         else {
             arena.finish();
             return Ok(());

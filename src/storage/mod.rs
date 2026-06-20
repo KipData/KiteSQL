@@ -331,9 +331,13 @@ pub trait Transaction: Sized {
         let index_meta = table.add_index_meta(index_name, column_ids, ty, plan_arena)?;
         let index_meta = plan_arena.index(index_meta);
         let index_id = index_meta.id;
-        table_codec.with_index_meta(table_name, index_id, Some(index_meta), |key, value| {
-            self.set(key, value)
-        })?;
+        table_codec.with_index_meta(
+            table_name,
+            index_id,
+            Some(index_meta),
+            plan_arena,
+            |key, value| self.set(key, value),
+        )?;
 
         Ok((table, index_id))
     }
@@ -431,7 +435,7 @@ pub trait Transaction: Sized {
         })?;
 
         for column in table.columns().map(|column| arena.column(*column)) {
-            table_codec.with_column(column, true, |key, value| self.set(key, value))?;
+            table_codec.with_column(column, true, arena, |key, value| self.set(key, value))?;
         }
         for index_meta in table.indexes() {
             let index_meta = arena.index(*index_meta);
@@ -439,6 +443,7 @@ pub trait Transaction: Sized {
                 table_name.as_ref(),
                 index_meta.id,
                 Some(index_meta),
+                arena,
                 |key, value| self.set(key, value),
             )?;
         }
@@ -576,13 +581,17 @@ pub trait Transaction: Sized {
                 plan_arena,
             )?;
             let meta = plan_arena.index(meta_ref);
-            table_codec.with_index_meta(table_name, meta.id, Some(meta), |key, value| {
-                self.set(key, value)
-            })?;
+            table_codec.with_index_meta(
+                table_name,
+                meta.id,
+                Some(meta),
+                plan_arena,
+                |key, value| self.set(key, value),
+            )?;
         }
 
         let column = plan_arena.column(table.get_column_by_id(&col_id).unwrap());
-        table_codec.with_column(column, true, |key, value| self.set(key, value))?;
+        table_codec.with_column(column, true, plan_arena, |key, value| self.set(key, value))?;
 
         Ok((table, col_id))
     }
@@ -600,7 +609,7 @@ pub trait Transaction: Sized {
         let column_id = {
             let column = plan_arena.column(table_catalog.get_column_by_name(column_name).unwrap());
             let column_id = column.id().unwrap();
-            table_codec.with_column(column, false, |key, _| self.remove(key))?;
+            table_codec.with_column(column, false, plan_arena, |key, _| self.remove(key))?;
             column_id
         };
 
@@ -609,8 +618,13 @@ pub trait Transaction: Sized {
             if !index_meta.column_ids.contains(&column_id) {
                 continue;
             }
-            table_codec
-                .with_index_meta(table_name, index_meta.id, None, |key, _| self.remove(key))?;
+            table_codec.with_index_meta(
+                table_name,
+                index_meta.id,
+                None,
+                plan_arena,
+                |key, _| self.remove(key),
+            )?;
 
             table_codec.with_index_bound(table_name, index_meta.id, |min, max| {
                 self.remove_range(Bound::Included(min), Bound::Included(max))
@@ -656,7 +670,9 @@ pub trait Transaction: Sized {
         }
 
         let exists =
-            table_codec.with_root_table(table_name.as_ref(), None, |key, _| self.exists(key))?;
+            table_codec.with_root_table(table_name.as_ref(), None, plan_arena, |key, _| {
+                self.exists(key)
+            })?;
         if exists {
             if if_not_exists {
                 return Ok(None);
@@ -666,15 +682,18 @@ pub trait Transaction: Sized {
         self.check_name_hash(table_codec, &table_name)?;
         self.create_index_meta_from_column(table_codec, plan_arena, &mut table_catalog)?;
         let table_meta = TableMeta::empty(table_name.clone());
-        table_codec.with_root_table(table_name.as_ref(), Some(&table_meta), |key, value| {
-            self.set(key, value)
-        })?;
+        table_codec.with_root_table(
+            table_name.as_ref(),
+            Some(&table_meta),
+            plan_arena,
+            |key, value| self.set(key, value),
+        )?;
 
         for column in table_catalog
             .columns()
             .map(|column| plan_arena.column(*column))
         {
-            table_codec.with_column(column, true, |key, value| self.set(key, value))?;
+            table_codec.with_column(column, true, plan_arena, |key, value| self.set(key, value))?;
         }
 
         Ok(Some(table_catalog))
@@ -750,9 +769,13 @@ pub trait Transaction: Sized {
         }
 
         let index_id = index_meta.id;
-        table_codec.with_index_meta(table_name.as_ref(), index_id, None, |key, _| {
-            self.remove(key)
-        })?;
+        table_codec.with_index_meta(
+            table_name.as_ref(),
+            index_id,
+            None,
+            plan_arena,
+            |key, _| self.remove(key),
+        )?;
 
         table_codec.with_index_bound(table_name.as_ref(), index_id, |min, max| {
             self.remove_range(Bound::Included(min), Bound::Included(max))
@@ -769,11 +792,14 @@ pub trait Transaction: Sized {
     fn drop_table(
         &mut self,
         table_codec: &mut TableCodec,
+        plan_arena: &mut PlanArena,
         table_name: TableName,
         if_exists: bool,
     ) -> Result<bool, DatabaseError> {
         let exists =
-            table_codec.with_root_table(table_name.as_ref(), None, |key, _| self.exists(key))?;
+            table_codec.with_root_table(table_name.as_ref(), None, plan_arena, |key, _| {
+                self.exists(key)
+            })?;
         if !exists {
             if if_exists {
                 return Ok(false);
@@ -792,7 +818,9 @@ pub trait Transaction: Sized {
             self.remove_range(Bound::Included(min), Bound::Included(max))
         })?;
 
-        table_codec.with_root_table(table_name.as_ref(), None, |key, _| self.remove(key))?;
+        table_codec.with_root_table(table_name.as_ref(), None, plan_arena, |key, _| {
+            self.remove(key)
+        })?;
 
         Ok(true)
     }
@@ -885,7 +913,7 @@ pub trait Transaction: Sized {
         arena: &mut impl MetaArena,
         table_name: TableName,
     ) -> Result<Option<TableCatalog>, DatabaseError> {
-        self.table_collect(table_codec, &table_name)?
+        self.table_collect(table_codec, &table_name, arena)?
             .map(|(columns, indexes)| {
                 TableCatalog::reload(table_name, columns.into_iter(), indexes.into_iter(), arena)
             })
@@ -908,13 +936,15 @@ pub trait Transaction: Sized {
         table_codec: &mut TableCodec,
         table_name: &TableName,
         statistics_meta: StatisticsMeta,
+        arena: &impl MetaArena,
     ) -> Result<(), DatabaseError> {
         let index_id = statistics_meta.index_id();
-        let (root, buckets, cm_sketch) = statistics_meta.into_parts();
+        let (root, buckets, cm_sketch, top_n) = statistics_meta.into_parts();
         table_codec.with_statistics_meta(
             table_name.as_ref(),
             index_id,
             Some(&root),
+            arena,
             |key, value| self.set(key, value),
         )?;
         let (sketch_meta, sketch_pages) =
@@ -923,6 +953,7 @@ pub trait Transaction: Sized {
             table_name.as_ref(),
             index_id,
             Some(&sketch_meta),
+            arena,
             |key, value| self.set(key, value),
         )?;
         for sketch_page in sketch_pages {
@@ -931,6 +962,7 @@ pub trait Transaction: Sized {
                 index_id,
                 &sketch_page,
                 true,
+                arena,
                 |key, value| self.set(key, value),
             )?;
         }
@@ -941,9 +973,17 @@ pub trait Transaction: Sized {
                 index_id,
                 ordinal as u32,
                 Some(bucket),
+                arena,
                 |key, value| self.set(key, value),
             )?;
         }
+        table_codec.with_statistics_top_n(
+            table_name.as_ref(),
+            index_id,
+            Some(&top_n),
+            arena,
+            |key, value| self.set(key, value),
+        )?;
 
         Ok(())
     }
@@ -953,6 +993,7 @@ pub trait Transaction: Sized {
         table_codec: &mut TableCodec,
         table_name: &str,
         index_id: IndexId,
+        arena: &mut impl MetaArena,
     ) -> Result<Option<StatisticsMeta>, DatabaseError> {
         table_codec.with_statistics_index_bound(table_name, index_id, |min, max| {
             let mut iter = self.range(Bound::Included(min), Bound::Included(max))?;
@@ -960,22 +1001,28 @@ pub trait Transaction: Sized {
             let mut buckets = Vec::new();
             let mut sketch_meta = None;
             let mut sketch_pages = Vec::<CountMinSketchPage>::new();
+            let mut top_n = None;
 
             while let Some((key, value)) = iter.try_next()? {
                 match TableCodec::decode_statistics_codec_type(key)? {
                     StatisticsCodecType::Root => {
-                        root = Some(TableCodec::decode_statistics_meta::<Self>(value)?);
+                        root = Some(TableCodec::decode_statistics_meta::<Self>(value, arena)?);
                     }
                     StatisticsCodecType::SketchMeta => {
-                        sketch_meta =
-                            Some(TableCodec::decode_statistics_sketch_meta::<Self>(value)?);
+                        sketch_meta = Some(TableCodec::decode_statistics_sketch_meta::<Self>(
+                            value, arena,
+                        )?);
                     }
                     StatisticsCodecType::SketchPage => {
-                        sketch_pages
-                            .push(TableCodec::decode_statistics_sketch_page::<Self>(value)?);
+                        sketch_pages.push(TableCodec::decode_statistics_sketch_page::<Self>(
+                            value, arena,
+                        )?);
                     }
                     StatisticsCodecType::Bucket => {
-                        buckets.push(TableCodec::decode_statistics_bucket::<Self>(value)?);
+                        buckets.push(TableCodec::decode_statistics_bucket::<Self>(value, arena)?);
+                    }
+                    StatisticsCodecType::TopN => {
+                        top_n = Some(TableCodec::decode_statistics_top_n::<Self>(value, arena)?);
                     }
                 }
             }
@@ -983,9 +1030,13 @@ pub trait Transaction: Sized {
             match (root, sketch_meta) {
                 (Some(root), Some(sketch_meta)) => {
                     let sketch = CountMinSketch::from_storage_parts(sketch_meta, sketch_pages)?;
-                    StatisticsMeta::from_parts(root, buckets, sketch).map(Some)
+                    StatisticsMeta::from_parts(root, buckets, sketch, top_n).map(Some)
                 }
-                (None, None) if buckets.is_empty() && sketch_pages.is_empty() => Ok(None),
+                (None, None)
+                    if buckets.is_empty() && sketch_pages.is_empty() && top_n.is_none() =>
+                {
+                    Ok(None)
+                }
                 _ => Err(DatabaseError::InvalidValue(
                     "statistics meta is incomplete".to_string(),
                 )),
@@ -1011,6 +1062,7 @@ pub trait Transaction: Sized {
         &self,
         table_codec: &mut TableCodec,
         table_name: &TableName,
+        arena: &mut impl MetaArena,
     ) -> Result<Option<(Vec<ColumnCatalog>, Vec<IndexMeta>)>, DatabaseError> {
         table_codec.with_table_bound(table_name, |table_min, table_max| {
             let mut column_iter =
@@ -1028,9 +1080,10 @@ pub trait Transaction: Sized {
                     columns.push(TableCodec::decode_column::<Self, _>(
                         &mut cursor,
                         &reference_tables,
+                        arena,
                     )?);
                 } else {
-                    index_metas.push(TableCodec::decode_index_meta::<Self>(value)?);
+                    index_metas.push(TableCodec::decode_index_meta::<Self>(value, arena)?);
                 }
             }
 
@@ -1064,9 +1117,13 @@ pub trait Transaction: Sized {
             let index_name = format!("uk_{}_index", col.name());
             let meta_ref = table.add_index_meta(index_name, vec![col_id], index_ty, arena)?;
             let meta = arena.index(meta_ref);
-            table_codec.with_index_meta(&table_name, meta.id, Some(meta), |key, value| {
-                self.set(key, value)
-            })?;
+            table_codec.with_index_meta(
+                &table_name,
+                meta.id,
+                Some(meta),
+                arena,
+                |key, value| self.set(key, value),
+            )?;
         }
         let primary_keys = table
             .primary_keys()
@@ -1079,7 +1136,7 @@ pub trait Transaction: Sized {
         let meta_ref =
             table.add_index_meta("pk_index".to_string(), primary_keys, pk_index_ty, arena)?;
         let meta = arena.index(meta_ref);
-        table_codec.with_index_meta(&table_name, meta.id, Some(meta), |key, value| {
+        table_codec.with_index_meta(&table_name, meta.id, Some(meta), arena, |key, value| {
             self.set(key, value)
         })?;
 
@@ -2005,12 +2062,15 @@ pub struct TableIter<'a, T: Transaction + 'a> {
 }
 
 impl<T: Transaction> TableIter<'_, T> {
-    pub fn try_next(&mut self) -> Result<Option<TableMeta>, DatabaseError> {
+    pub fn try_next(
+        &mut self,
+        arena: &mut impl MetaArena,
+    ) -> Result<Option<TableMeta>, DatabaseError> {
         let Some((_, value)) = self.iter.try_next()? else {
             return Ok(None);
         };
 
-        Ok(Some(TableCodec::decode_root_table::<T>(value)?))
+        Ok(Some(TableCodec::decode_root_table::<T>(value, arena)?))
     }
 }
 

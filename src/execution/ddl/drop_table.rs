@@ -49,7 +49,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropTable {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        _: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         let Some(DropTableOperator {
             table_name,
@@ -61,7 +61,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropTable {
         };
 
         let (transaction, table_codec) = arena.transaction_codec_mut();
-        if transaction.drop_table(table_codec, table_name.clone(), if_exists)? {
+        if transaction.drop_table(table_codec, plan_arena, table_name.clone(), if_exists)? {
             arena.push_ddl_apply(DDLApply::DropTable {
                 name: table_name.clone(),
             });

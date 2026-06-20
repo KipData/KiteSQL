@@ -22,6 +22,7 @@ pub(crate) const CM_SKETCH_HASH_KEYS: [(u64, u64); 2] = [
     (0x94d0_49bb_1331_11eb, 0xd6e8_feb8_6659_fd93),
     (0xa076_1d64_78bd_642f, 0xe703_7ed1_a0b4_28db),
 ];
+pub(crate) const HLL_HASH_KEYS: (u64, u64) = (0xd1b5_4a32_d192_ed03, 0xabc9_83a9_351f_3c2d);
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StableHasher {

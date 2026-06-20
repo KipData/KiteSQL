@@ -14,7 +14,9 @@
 
 pub(crate) mod cm_sketch;
 pub(crate) mod histogram;
+pub(crate) mod hll;
 pub(crate) mod kll_sketch;
 pub(crate) mod pattern;
 pub(crate) mod rule;
 pub(crate) mod statistics_meta;
+pub(crate) mod top_n;

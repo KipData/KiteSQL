@@ -791,11 +791,14 @@ impl<S: Storage> Database<S> {
                     )?
                     .ok_or(DatabaseError::TableNotFound)?;
                 for index in table.indexes() {
-                    let index = self.state.table_arena.borrow().index(*index);
-                    if let Some(meta) =
-                        transaction.statistics_meta(&mut table_codec, name.as_ref(), index.id)?
-                    {
-                        self.state.meta_cache.insert((name.clone(), index.id), meta);
+                    let index_id = self.state.table_arena.borrow().index(*index).id;
+                    if let Some(meta) = transaction.statistics_meta(
+                        &mut table_codec,
+                        name.as_ref(),
+                        index_id,
+                        self.state.table_arena.borrow_mut(),
+                    )? {
+                        self.state.meta_cache.insert((name.clone(), index_id), meta);
                     }
                 }
                 self.state.table_cache.insert(name, table);

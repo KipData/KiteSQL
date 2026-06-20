@@ -125,6 +125,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Analyze {
             ddl_apply,
             transaction,
             table_codec,
+            plan_arena,
         )?;
 
         let output = arena.result_tuple_mut();
@@ -149,6 +150,7 @@ impl Analyze {
         applies: &mut Vec<DDLApply>,
         transaction: &mut U,
         table_codec: &mut TableCodec,
+        plan_arena: &crate::planner::PlanArena<'_>,
     ) -> Result<Vec<DataValue>, DatabaseError> {
         let mut values = Vec::with_capacity(builders.len());
 
@@ -159,11 +161,11 @@ impl Analyze {
             ..
         } in builders
         {
-            let (histogram, sketch) =
+            let (histogram, sketch, top_n) =
                 builder.build(histogram_buckets.unwrap_or(DEFAULT_NUM_OF_BUCKETS))?;
-            let meta = StatisticsMeta::new(histogram, sketch);
+            let meta = StatisticsMeta::new(histogram, sketch, top_n);
 
-            transaction.save_statistics_meta(table_codec, table_name, meta.clone())?;
+            transaction.save_statistics_meta(table_codec, table_name, meta.clone(), plan_arena)?;
             applies.push(DDLApply::UpsertStatisticsMeta {
                 table_name: table_name.clone(),
                 index_id,
@@ -377,6 +379,7 @@ mod test {
             + statistics_meta
                 .sketch()
                 .storage_page_count(COUNT_MIN_SKETCH_STORAGE_PAGE_LEN)
+            + 1
             + statistics_meta.histogram().buckets_len();
         assert_eq!(keys, expected_keys);
 
