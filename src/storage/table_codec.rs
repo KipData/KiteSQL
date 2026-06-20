@@ -19,7 +19,8 @@ use crate::errors::DatabaseError;
 use crate::optimizer::core::cm_sketch::{CountMinSketchMeta, CountMinSketchPage};
 use crate::optimizer::core::histogram::Bucket;
 use crate::optimizer::core::statistics_meta::StatisticsMetaRoot;
-use crate::planner::{MetaArena, TableArena};
+use crate::optimizer::core::top_n::ColumnTopN;
+use crate::planner::MetaArena;
 use crate::serdes::stable_hash::{StableHasher, TABLE_NAME_HASH_KEYS};
 use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
 use crate::storage::{TableCache, Transaction};
@@ -47,6 +48,7 @@ const STATISTICS_BUCKET_ORD_LEN: usize = 4;
 static ROOT_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"Root".to_vec());
 static VIEW_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"View".to_vec());
 static HASH_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"Hash".to_vec());
+static EMPTY_REFERENCE_TABLES: LazyLock<ReferenceTables> = LazyLock::new(ReferenceTables::new);
 
 pub type Bytes = Vec<u8>;
 pub type BumpBytes<'bump> = bumpalo::collections::Vec<'bump, u8>;
@@ -92,6 +94,7 @@ pub(crate) enum StatisticsCodecType {
     SketchMeta,
     SketchPage,
     Bucket,
+    TopN,
 }
 
 impl StatisticsCodecType {
@@ -101,6 +104,7 @@ impl StatisticsCodecType {
             StatisticsCodecType::SketchMeta => b'1',
             StatisticsCodecType::SketchPage => b'2',
             StatisticsCodecType::Bucket => b'3',
+            StatisticsCodecType::TopN => b'4',
         }
     }
 
@@ -110,6 +114,7 @@ impl StatisticsCodecType {
             b'1' => Ok(StatisticsCodecType::SketchMeta),
             b'2' => Ok(StatisticsCodecType::SketchPage),
             b'3' => Ok(StatisticsCodecType::Bucket),
+            b'4' => Ok(StatisticsCodecType::TopN),
             _ => Err(DatabaseError::InvalidValue(format!(
                 "invalid statistics codec tag: {tag}"
             ))),
@@ -302,6 +307,7 @@ impl TableCodec {
         table_name: &str,
         index_id: IndexId,
         index_meta: Option<&IndexMeta>,
+        arena: &impl MetaArena,
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
@@ -311,7 +317,7 @@ impl TableCodec {
             lower.extend_from_slice(&index_id.to_le_bytes());
 
             if let Some(index_meta) = index_meta {
-                Self::encode_index_meta_value_into(index_meta, refs, value)?;
+                Self::encode_index_meta_value_into(index_meta, refs, value, arena)?;
             }
 
             f(lower.as_slice(), value.as_slice())
@@ -416,6 +422,7 @@ impl TableCodec {
         &mut self,
         col: &ColumnCatalog,
         encode_value: bool,
+        arena: &impl MetaArena,
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         if let ColumnRelation::Table {
@@ -432,7 +439,7 @@ impl TableCodec {
 
                 if encode_value {
                     let _ = refs.push_or_replace(table_name);
-                    Self::encode_column_value_into(col, refs, value)?;
+                    Self::encode_column_value_into(col, refs, value, arena)?;
                 }
 
                 f(lower.as_slice(), value.as_slice())
@@ -525,6 +532,7 @@ impl TableCodec {
         table_name: &str,
         index_id: IndexId,
         statistics_meta: Option<&StatisticsMetaRoot>,
+        arena: &impl MetaArena,
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
@@ -535,7 +543,7 @@ impl TableCodec {
             lower.push(StatisticsCodecType::Root.tag());
 
             if let Some(statistics_meta) = statistics_meta {
-                Self::encode_statistics_meta_value_into(statistics_meta, refs, value)?;
+                Self::encode_statistics_meta_value_into(statistics_meta, refs, value, arena)?;
             }
 
             f(lower.as_slice(), value.as_slice())
@@ -548,6 +556,7 @@ impl TableCodec {
         table_name: &str,
         index_id: IndexId,
         sketch_meta: Option<&CountMinSketchMeta>,
+        arena: &impl MetaArena,
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
@@ -558,7 +567,7 @@ impl TableCodec {
             lower.push(StatisticsCodecType::SketchMeta.tag());
 
             if let Some(sketch_meta) = sketch_meta {
-                Self::encode_statistics_sketch_meta_value_into(sketch_meta, refs, value)?;
+                Self::encode_statistics_sketch_meta_value_into(sketch_meta, refs, value, arena)?;
             }
 
             f(lower.as_slice(), value.as_slice())
@@ -572,6 +581,7 @@ impl TableCodec {
         index_id: IndexId,
         sketch_page: &CountMinSketchPage,
         encode_value: bool,
+        arena: &impl MetaArena,
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
@@ -586,7 +596,7 @@ impl TableCodec {
             lower.extend_from_slice(&(sketch_page.page_idx() as u32).to_be_bytes());
 
             if encode_value {
-                Self::encode_statistics_sketch_page_value_into(sketch_page, refs, value)?;
+                Self::encode_statistics_sketch_page_value_into(sketch_page, refs, value, arena)?;
             }
 
             f(lower.as_slice(), value.as_slice())
@@ -600,6 +610,7 @@ impl TableCodec {
         index_id: IndexId,
         ordinal: u32,
         bucket: Option<&Bucket>,
+        arena: &impl MetaArena,
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
@@ -612,7 +623,31 @@ impl TableCodec {
             lower.extend_from_slice(&ordinal.to_be_bytes());
 
             if let Some(bucket) = bucket {
-                Self::encode_statistics_bucket_value_into(bucket, refs, value)?;
+                Self::encode_statistics_bucket_value_into(bucket, refs, value, arena)?;
+            }
+
+            f(lower.as_slice(), value.as_slice())
+        })
+    }
+
+    /// Key: `{TableName}{STATISTICS_TAG}{BOUND_MIN_TAG}{INDEX_ID}{TOP_N_TAG}`.
+    pub fn with_statistics_top_n<R>(
+        &mut self,
+        table_name: &str,
+        index_id: IndexId,
+        top_n: Option<&ColumnTopN>,
+        arena: &impl MetaArena,
+        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError> {
+        self.clear_buffers();
+        self.with_table_hash_buffers(table_name, |lower, table_hash, value, refs| {
+            Self::write_key_prefix(lower, CodecType::Statistics, table_hash);
+            lower.push(BOUND_MIN_TAG);
+            lower.extend_from_slice(&index_id.to_le_bytes());
+            lower.push(StatisticsCodecType::TopN.tag());
+
+            if let Some(top_n) = top_n {
+                Self::encode_statistics_top_n_value_into(top_n, refs, value, arena)?;
             }
 
             f(lower.as_slice(), value.as_slice())
@@ -666,6 +701,7 @@ impl TableCodec {
         &mut self,
         table_name: &str,
         meta: Option<&TableMeta>,
+        arena: &impl MetaArena,
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
@@ -673,7 +709,7 @@ impl TableCodec {
             Self::write_key_prefix(lower, CodecType::Root, table_hash);
 
             if let Some(meta) = meta {
-                Self::encode_root_table_value_into(meta, refs, value)?;
+                Self::encode_root_table_value_into(meta, refs, value, arena)?;
             }
 
             f(lower.as_slice(), value.as_slice())
@@ -730,26 +766,20 @@ impl TableCodec {
         index_meta: &IndexMeta,
         reference_tables: &mut ReferenceTables,
         value: &mut Bytes,
+        arena: &impl MetaArena,
     ) -> Result<(), DatabaseError> {
-        index_meta.encode(value, true, reference_tables, &TableArena::default())
+        index_meta.encode(value, true, reference_tables, arena)
     }
 
-    pub fn encode_index_meta_value(
-        &mut self,
-        index_meta: &IndexMeta,
-    ) -> Result<Bytes, DatabaseError> {
-        self.clear_buffers();
-        let (_, value, reference_tables) = self.slots_mut();
-        Self::encode_index_meta_value_into(index_meta, reference_tables, value)?;
-        Ok(value.clone())
-    }
-
-    pub fn decode_index_meta<T: Transaction>(bytes: &[u8]) -> Result<IndexMeta, DatabaseError> {
+    pub fn decode_index_meta<T: Transaction>(
+        bytes: &[u8],
+        arena: &mut impl MetaArena,
+    ) -> Result<IndexMeta, DatabaseError> {
         IndexMeta::decode::<T, _, _>(
             &mut Cursor::new(bytes),
             None,
-            &ReferenceTables::new(),
-            &mut TableArena::default(),
+            &EMPTY_REFERENCE_TABLES,
+            arena,
         )
     }
 
@@ -771,51 +801,38 @@ impl TableCodec {
         col: &ColumnCatalog,
         reference_tables: &mut ReferenceTables,
         value: &mut Bytes,
+        arena: &impl MetaArena,
     ) -> Result<(), DatabaseError> {
-        col.encode(value, true, reference_tables, &TableArena::default())
-    }
-
-    pub fn encode_column_value(&mut self, col: &ColumnCatalog) -> Result<Bytes, DatabaseError> {
-        self.clear_buffers();
-        let (_, value, reference_tables) = self.slots_mut();
-        Self::encode_column_value_into(col, reference_tables, value)?;
-        Ok(value.clone())
+        col.encode(value, true, reference_tables, arena)
     }
 
     pub fn decode_column<T: Transaction, R: Read>(
         reader: &mut R,
         reference_tables: &ReferenceTables,
+        arena: &mut impl MetaArena,
     ) -> Result<ColumnCatalog, DatabaseError> {
         // `TableCache` is not theoretically used in `table_collect` because `ColumnCatalog` should not depend on other Column
-        ColumnCatalog::decode::<T, R, _>(reader, None, reference_tables, &mut TableArena::default())
+        ColumnCatalog::decode::<T, R, _>(reader, None, reference_tables, arena)
     }
 
     fn encode_statistics_meta_value_into(
         statistics_meta: &StatisticsMetaRoot,
         reference_tables: &mut ReferenceTables,
         value: &mut Bytes,
+        arena: &impl MetaArena,
     ) -> Result<(), DatabaseError> {
-        statistics_meta.encode(value, true, reference_tables, &TableArena::default())
-    }
-
-    pub fn encode_statistics_meta_value(
-        &mut self,
-        statistics_meta: &StatisticsMetaRoot,
-    ) -> Result<Bytes, DatabaseError> {
-        self.clear_buffers();
-        let (_, value, reference_tables) = self.slots_mut();
-        Self::encode_statistics_meta_value_into(statistics_meta, reference_tables, value)?;
-        Ok(value.clone())
+        statistics_meta.encode(value, true, reference_tables, arena)
     }
 
     pub fn decode_statistics_meta<T: Transaction>(
         bytes: &[u8],
+        arena: &mut impl MetaArena,
     ) -> Result<StatisticsMetaRoot, DatabaseError> {
         StatisticsMetaRoot::decode::<T, _, _>(
             &mut Cursor::new(bytes),
             None,
-            &ReferenceTables::new(),
-            &mut TableArena::default(),
+            &EMPTY_REFERENCE_TABLES,
+            arena,
         )
     }
 
@@ -823,28 +840,20 @@ impl TableCodec {
         sketch_meta: &CountMinSketchMeta,
         reference_tables: &mut ReferenceTables,
         value: &mut Bytes,
+        arena: &impl MetaArena,
     ) -> Result<(), DatabaseError> {
-        sketch_meta.encode(value, true, reference_tables, &TableArena::default())
-    }
-
-    pub fn encode_statistics_sketch_meta_value(
-        &mut self,
-        sketch_meta: &CountMinSketchMeta,
-    ) -> Result<Bytes, DatabaseError> {
-        self.clear_buffers();
-        let (_, value, reference_tables) = self.slots_mut();
-        Self::encode_statistics_sketch_meta_value_into(sketch_meta, reference_tables, value)?;
-        Ok(value.clone())
+        sketch_meta.encode(value, true, reference_tables, arena)
     }
 
     pub fn decode_statistics_sketch_meta<T: Transaction>(
         bytes: &[u8],
+        arena: &mut impl MetaArena,
     ) -> Result<CountMinSketchMeta, DatabaseError> {
         CountMinSketchMeta::decode::<T, _, _>(
             &mut Cursor::new(bytes),
             None,
-            &ReferenceTables::new(),
-            &mut TableArena::default(),
+            &EMPTY_REFERENCE_TABLES,
+            arena,
         )
     }
 
@@ -852,28 +861,20 @@ impl TableCodec {
         sketch_page: &CountMinSketchPage,
         reference_tables: &mut ReferenceTables,
         value: &mut Bytes,
+        arena: &impl MetaArena,
     ) -> Result<(), DatabaseError> {
-        sketch_page.encode(value, true, reference_tables, &TableArena::default())
-    }
-
-    pub fn encode_statistics_sketch_page_value(
-        &mut self,
-        sketch_page: &CountMinSketchPage,
-    ) -> Result<Bytes, DatabaseError> {
-        self.clear_buffers();
-        let (_, value, reference_tables) = self.slots_mut();
-        Self::encode_statistics_sketch_page_value_into(sketch_page, reference_tables, value)?;
-        Ok(value.clone())
+        sketch_page.encode(value, true, reference_tables, arena)
     }
 
     pub fn decode_statistics_sketch_page<T: Transaction>(
         bytes: &[u8],
+        arena: &mut impl MetaArena,
     ) -> Result<CountMinSketchPage, DatabaseError> {
         CountMinSketchPage::decode::<T, _, _>(
             &mut Cursor::new(bytes),
             None,
-            &ReferenceTables::new(),
-            &mut TableArena::default(),
+            &EMPTY_REFERENCE_TABLES,
+            arena,
         )
     }
 
@@ -881,18 +882,9 @@ impl TableCodec {
         bucket: &Bucket,
         reference_tables: &mut ReferenceTables,
         value: &mut Bytes,
+        arena: &impl MetaArena,
     ) -> Result<(), DatabaseError> {
-        bucket.encode(value, true, reference_tables, &TableArena::default())
-    }
-
-    pub fn encode_statistics_bucket_value(
-        &mut self,
-        bucket: &Bucket,
-    ) -> Result<Bytes, DatabaseError> {
-        self.clear_buffers();
-        let (_, value, reference_tables) = self.slots_mut();
-        Self::encode_statistics_bucket_value_into(bucket, reference_tables, value)?;
-        Ok(value.clone())
+        bucket.encode(value, true, reference_tables, arena)
     }
 
     pub(crate) fn decode_statistics_codec_type(
@@ -908,12 +900,36 @@ impl TableCodec {
         StatisticsCodecType::from_tag(tag)
     }
 
-    pub fn decode_statistics_bucket<T: Transaction>(bytes: &[u8]) -> Result<Bucket, DatabaseError> {
+    pub fn decode_statistics_bucket<T: Transaction>(
+        bytes: &[u8],
+        arena: &mut impl MetaArena,
+    ) -> Result<Bucket, DatabaseError> {
         Bucket::decode::<T, _, _>(
             &mut Cursor::new(bytes),
             None,
-            &ReferenceTables::new(),
-            &mut TableArena::default(),
+            &EMPTY_REFERENCE_TABLES,
+            arena,
+        )
+    }
+
+    fn encode_statistics_top_n_value_into(
+        top_n: &ColumnTopN,
+        reference_tables: &mut ReferenceTables,
+        value: &mut Bytes,
+        arena: &impl MetaArena,
+    ) -> Result<(), DatabaseError> {
+        top_n.encode(value, true, reference_tables, arena)
+    }
+
+    pub fn decode_statistics_top_n<T: Transaction>(
+        bytes: &[u8],
+        arena: &mut impl MetaArena,
+    ) -> Result<ColumnTopN, DatabaseError> {
+        ColumnTopN::decode::<T, _, _>(
+            &mut Cursor::new(bytes),
+            None,
+            &EMPTY_REFERENCE_TABLES,
+            arena,
         )
     }
 
@@ -974,26 +990,18 @@ impl TableCodec {
         meta: &TableMeta,
         reference_tables: &mut ReferenceTables,
         value: &mut Bytes,
+        arena: &impl MetaArena,
     ) -> Result<(), DatabaseError> {
-        meta.encode(value, true, reference_tables, &TableArena::default())
+        meta.encode(value, true, reference_tables, arena)
     }
 
-    pub fn encode_root_table_value(&mut self, meta: &TableMeta) -> Result<Bytes, DatabaseError> {
-        self.clear_buffers();
-        let (_, value, reference_tables) = self.slots_mut();
-        Self::encode_root_table_value_into(meta, reference_tables, value)?;
-        Ok(value.clone())
-    }
-
-    pub fn decode_root_table<T: Transaction>(bytes: &[u8]) -> Result<TableMeta, DatabaseError> {
+    pub fn decode_root_table<T: Transaction>(
+        bytes: &[u8],
+        arena: &mut impl MetaArena,
+    ) -> Result<TableMeta, DatabaseError> {
         let mut bytes = Cursor::new(bytes);
 
-        TableMeta::decode::<T, _, _>(
-            &mut bytes,
-            None,
-            &ReferenceTables::new(),
-            &mut TableArena::default(),
-        )
+        TableMeta::decode::<T, _, _>(&mut bytes, None, &EMPTY_REFERENCE_TABLES, arena)
     }
 }
 
@@ -1079,13 +1087,21 @@ mod tests {
         let mut table_codec = TableCodec::default();
         let table_arena = TableArenaCell::default();
         let table_catalog = build_table_codec(&table_arena);
+        let meta = TableMeta {
+            table_name: table_catalog.name.clone(),
+        };
         let bytes = table_codec
-            .encode_root_table_value(&TableMeta {
-                table_name: table_catalog.name.clone(),
-            })
+            .with_root_table(
+                table_catalog.name.as_ref(),
+                Some(&meta),
+                table_arena.borrow(),
+                |_, value| Ok::<_, DatabaseError>(value.to_vec()),
+            )
             .unwrap();
 
-        let table_meta = TableCodec::decode_root_table::<RocksTransaction>(&bytes).unwrap();
+        let table_meta =
+            TableCodec::decode_root_table::<RocksTransaction>(&bytes, table_arena.borrow_mut())
+                .unwrap();
 
         assert_eq!(table_meta.table_name.as_ref(), table_catalog.name.as_ref());
     }
@@ -1093,6 +1109,8 @@ mod tests {
     #[test]
     fn test_table_codec_statistics_meta() -> Result<(), DatabaseError> {
         let mut table_codec = TableCodec::default();
+        let table_arena = TableArenaCell::default();
+        let mut plan_arena = PlanArena::new(&table_arena);
         let index_meta = IndexMeta {
             id: 0,
             column_ids: vec![1],
@@ -1107,11 +1125,16 @@ mod tests {
         for value in 0..4 {
             builder.append(DataValue::Int32(value))?;
         }
-        let (histogram, sketch) = builder.build(2)?;
-        let (root, buckets, _) = StatisticsMeta::new(histogram, sketch.clone()).into_parts();
+        let (histogram, sketch, top_n) = builder.build(2)?;
+        let (root, buckets, _, top_n) =
+            StatisticsMeta::new(histogram, sketch.clone(), top_n).into_parts();
 
-        let root_bytes = table_codec.encode_statistics_meta_value(&root)?;
-        let decoded_root = TableCodec::decode_statistics_meta::<RocksTransaction>(&root_bytes)?;
+        let root_bytes =
+            table_codec.with_statistics_meta("t1", 0, Some(&root), &plan_arena, |_, value| {
+                Ok::<_, DatabaseError>(value.to_vec())
+            })?;
+        let decoded_root =
+            TableCodec::decode_statistics_meta::<RocksTransaction>(&root_bytes, &mut plan_arena)?;
         assert_eq!(decoded_root.index_id(), root.index_id());
         assert_eq!(
             decoded_root.histogram_meta().values_len(),
@@ -1123,25 +1146,43 @@ mod tests {
         );
 
         let (sketch_meta, mut sketch_pages) = sketch.clone().into_storage_parts(1);
-        let sketch_meta_bytes = table_codec.encode_statistics_sketch_meta_value(&sketch_meta)?;
-        let decoded_sketch_meta =
-            TableCodec::decode_statistics_sketch_meta::<RocksTransaction>(&sketch_meta_bytes)?;
+        let sketch_meta_bytes = table_codec.with_statistics_sketch_meta(
+            "t1",
+            0,
+            Some(&sketch_meta),
+            &plan_arena,
+            |_, value| Ok::<_, DatabaseError>(value.to_vec()),
+        )?;
+        let decoded_sketch_meta = TableCodec::decode_statistics_sketch_meta::<RocksTransaction>(
+            &sketch_meta_bytes,
+            &mut plan_arena,
+        )?;
         assert_eq!(decoded_sketch_meta.width(), sketch_meta.width());
         assert_eq!(decoded_sketch_meta.k_num(), sketch_meta.k_num());
 
         let first_sketch_page = sketch_pages.next().unwrap();
-        let sketch_page_bytes =
-            table_codec.encode_statistics_sketch_page_value(&first_sketch_page)?;
-        let decoded_sketch_page =
-            TableCodec::decode_statistics_sketch_page::<RocksTransaction>(&sketch_page_bytes)?;
+        let sketch_page_bytes = table_codec.with_statistics_sketch_page(
+            "t1",
+            0,
+            &first_sketch_page,
+            true,
+            &plan_arena,
+            |_, value| Ok::<_, DatabaseError>(value.to_vec()),
+        )?;
+        let decoded_sketch_page = TableCodec::decode_statistics_sketch_page::<RocksTransaction>(
+            &sketch_page_bytes,
+            &mut plan_arena,
+        )?;
         assert_eq!(decoded_sketch_page.counters(), first_sketch_page.counters());
 
-        let bucket0_key = table_codec.with_statistics_bucket("t1", 0, 0, None, |key, _| {
-            Ok::<_, DatabaseError>(key.to_vec())
-        })?;
-        let bucket1_key = table_codec.with_statistics_bucket("t1", 0, 1, None, |key, _| {
-            Ok::<_, DatabaseError>(key.to_vec())
-        })?;
+        let bucket0_key =
+            table_codec.with_statistics_bucket("t1", 0, 0, None, &plan_arena, |key, _| {
+                Ok::<_, DatabaseError>(key.to_vec())
+            })?;
+        let bucket1_key =
+            table_codec.with_statistics_bucket("t1", 0, 1, None, &plan_arena, |key, _| {
+                Ok::<_, DatabaseError>(key.to_vec())
+            })?;
         assert!(bucket0_key < bucket1_key);
 
         let (bucket0_min, bucket0_max) =
@@ -1151,9 +1192,18 @@ mod tests {
         assert!(bucket0_key.as_slice() >= bucket0_min.as_slice());
         assert!(bucket1_key.as_slice() <= bucket0_max.as_slice());
 
-        let bucket_bytes = table_codec.encode_statistics_bucket_value(&buckets[0])?;
-        let decoded_bucket =
-            TableCodec::decode_statistics_bucket::<RocksTransaction>(&bucket_bytes)?;
+        let bucket_bytes = table_codec.with_statistics_bucket(
+            "t1",
+            0,
+            0,
+            Some(&buckets[0]),
+            &plan_arena,
+            |_, value| Ok::<_, DatabaseError>(value.to_vec()),
+        )?;
+        let decoded_bucket = TableCodec::decode_statistics_bucket::<RocksTransaction>(
+            &bucket_bytes,
+            &mut plan_arena,
+        )?;
         assert_eq!(decoded_bucket, buckets[0]);
         assert_eq!(
             TableCodec::decode_statistics_bucket_ordinal(&bucket0_key)?,
@@ -1164,12 +1214,29 @@ mod tests {
             1
         );
 
+        let top_n_key =
+            table_codec.with_statistics_top_n("t1", 0, None, &plan_arena, |key, _| {
+                Ok::<_, DatabaseError>(key.to_vec())
+            })?;
+        assert!(top_n_key.as_slice() >= bucket0_min.as_slice());
+        assert!(top_n_key.as_slice() <= bucket0_max.as_slice());
+
+        let top_n_bytes =
+            table_codec.with_statistics_top_n("t1", 0, Some(&top_n), &plan_arena, |_, value| {
+                Ok::<_, DatabaseError>(value.to_vec())
+            })?;
+        let decoded_top_n =
+            TableCodec::decode_statistics_top_n::<RocksTransaction>(&top_n_bytes, &mut plan_arena)?;
+        assert_eq!(decoded_top_n, top_n);
+
         Ok(())
     }
 
     #[test]
     fn test_table_codec_index_meta() -> Result<(), DatabaseError> {
         let mut table_codec = TableCodec::default();
+        let table_arena = TableArenaCell::default();
+        let mut plan_arena = PlanArena::new(&table_arena);
         let index_meta = IndexMeta {
             id: 0,
             column_ids: vec![1],
@@ -1179,10 +1246,13 @@ mod tests {
             name: "index_1".to_string(),
             ty: IndexType::PrimaryKey { is_multiple: false },
         };
-        let bytes = table_codec.encode_index_meta_value(&index_meta)?;
+        let bytes =
+            table_codec.with_index_meta("t1", 0, Some(&index_meta), &plan_arena, |_, value| {
+                Ok::<_, DatabaseError>(value.to_vec())
+            })?;
 
         assert_eq!(
-            TableCodec::decode_index_meta::<RocksTransaction>(&bytes)?,
+            TableCodec::decode_index_meta::<RocksTransaction>(&bytes, &mut plan_arena)?,
             index_meta
         );
 
@@ -1218,10 +1288,19 @@ mod tests {
         reference_tables.push_or_replace(&"t1".to_string().into());
 
         let mut table_codec = TableCodec::default();
-        let bytes = table_codec.encode_column_value(&col).unwrap();
+        let table_arena = TableArenaCell::default();
+        let mut plan_arena = PlanArena::new(&table_arena);
+        let bytes = table_codec
+            .with_column(&col, true, &plan_arena, |_, value| {
+                Ok::<_, DatabaseError>(value.to_vec())
+            })
+            .unwrap();
         let mut cursor = Cursor::new(bytes);
-        let decode_col =
-            TableCodec::decode_column::<RocksTransaction, _>(&mut cursor, &reference_tables)?;
+        let decode_col = TableCodec::decode_column::<RocksTransaction, _>(
+            &mut cursor,
+            &reference_tables,
+            &mut plan_arena,
+        )?;
 
         assert_eq!(decode_col, expected_col);
 
@@ -1382,8 +1461,12 @@ mod tests {
                 is_temp: false,
             };
 
+            let table_arena = TableArenaCell::default();
+            let plan_arena = PlanArena::new(&table_arena);
             table_codec
-                .with_column(&col, false, |key, _| Ok::<_, DatabaseError>(key.to_vec()))
+                .with_column(&col, false, &plan_arena, |key, _| {
+                    Ok::<_, DatabaseError>(key.to_vec())
+                })
                 .unwrap()
         };
 
@@ -1436,8 +1519,10 @@ mod tests {
                 ty: IndexType::PrimaryKey { is_multiple: false },
             };
 
+            let table_arena = TableArenaCell::default();
+            let plan_arena = PlanArena::new(&table_arena);
             table_codec
-                .with_index_meta(table_name, index_meta.id, None, |key, _| {
+                .with_index_meta(table_name, index_meta.id, None, &plan_arena, |key, _| {
                     Ok::<_, DatabaseError>(key.to_vec())
                 })
                 .unwrap()
@@ -1647,8 +1732,10 @@ mod tests {
         let mut set: BTreeSet<Bytes> = BTreeSet::new();
         let op = |table_name: &str| {
             let mut table_codec = TableCodec::default();
+            let table_arena = TableArenaCell::default();
+            let plan_arena = PlanArena::new(&table_arena);
             table_codec
-                .with_root_table(table_name, None, |key, _| {
+                .with_root_table(table_name, None, &plan_arena, |key, _| {
                     Ok::<_, DatabaseError>(key.to_vec())
                 })
                 .unwrap()

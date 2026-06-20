@@ -83,6 +83,11 @@ pub struct CountMinSketch<K> {
 }
 
 impl<K> CountMinSketch<K> {
+    pub fn error_bound(&self, total_count: usize) -> usize {
+        let width = self.mask + 1;
+        total_count.saturating_mul(2).div_ceil(width)
+    }
+
     pub fn storage_page_count(&self, page_len: usize) -> usize {
         self.counters
             .iter()
@@ -418,6 +423,15 @@ mod tests {
         for key in 0..100 {
             assert!(cms.estimate(&key) >= 9_000);
         }
+    }
+
+    #[test]
+    fn test_error_bound() {
+        let cms = CountMinSketch::<u64>::with_relative_error(0.95, 0.01).unwrap();
+
+        assert_eq!(cms.error_bound(0), 0);
+        assert_eq!(cms.error_bound(1), 1);
+        assert_eq!(cms.error_bound(10_000), 79);
     }
 
     #[test]

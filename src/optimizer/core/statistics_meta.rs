@@ -17,6 +17,7 @@ use crate::errors::DatabaseError;
 use crate::expression::range_detacher::Range;
 use crate::optimizer::core::cm_sketch::CountMinSketch;
 use crate::optimizer::core::histogram::{Bucket, Histogram, HistogramMeta};
+use crate::optimizer::core::top_n::ColumnTopN;
 use crate::storage::StatisticsMetaCache;
 use crate::types::index::IndexId;
 use crate::types::value::DataValue;
@@ -58,7 +59,7 @@ impl<'a> StatisticMetaLoader<'a> {
 
         entry
             .histogram()
-            .collect_count(ranges, entry.sketch())
+            .collect_count(ranges, entry.sketch(), entry.top_n())
             .map(Some)
     }
 }
@@ -95,14 +96,16 @@ pub struct StatisticsMeta {
     index_id: IndexId,
     histogram: Histogram,
     sketch: CountMinSketch<DataValue>,
+    top_n: ColumnTopN,
 }
 
 impl StatisticsMeta {
-    pub fn new(histogram: Histogram, sketch: CountMinSketch<DataValue>) -> Self {
+    pub fn new(histogram: Histogram, sketch: CountMinSketch<DataValue>, top_n: ColumnTopN) -> Self {
         StatisticsMeta {
             index_id: histogram.index_id(),
             histogram,
             sketch,
+            top_n,
         }
     }
 
@@ -110,18 +113,27 @@ impl StatisticsMeta {
         root: StatisticsMetaRoot,
         buckets: Vec<Bucket>,
         sketch: CountMinSketch<DataValue>,
+        top_n: Option<ColumnTopN>,
     ) -> Result<Self, DatabaseError> {
         let histogram = Histogram::from_parts(root.into_histogram_meta(), buckets)?;
 
-        Ok(Self::new(histogram, sketch))
+        Ok(Self::new(histogram, sketch, top_n.unwrap_or_default()))
     }
 
-    pub fn into_parts(self) -> (StatisticsMetaRoot, Vec<Bucket>, CountMinSketch<DataValue>) {
+    pub fn into_parts(
+        self,
+    ) -> (
+        StatisticsMetaRoot,
+        Vec<Bucket>,
+        CountMinSketch<DataValue>,
+        ColumnTopN,
+    ) {
         let (histogram_meta, buckets) = self.histogram.into_parts();
         (
             StatisticsMetaRoot::new(histogram_meta),
             buckets,
             self.sketch,
+            self.top_n,
         )
     }
 
@@ -135,6 +147,10 @@ impl StatisticsMeta {
 
     pub fn sketch(&self) -> &CountMinSketch<DataValue> {
         &self.sketch
+    }
+
+    pub fn top_n(&self) -> &ColumnTopN {
+        &self.top_n
     }
 }
 
@@ -179,16 +195,21 @@ mod tests {
         builder.append(DataValue::Null)?;
         builder.append(DataValue::Null)?;
 
-        let (histogram, sketch) = builder.build(4)?;
+        let (histogram, sketch, top_n) = builder.build(4)?;
         let expected_estimate = sketch.estimate(&DataValue::Int32(7));
-        let meta = StatisticsMeta::new(histogram.clone(), sketch);
-        let (root, buckets, sketch) = meta.into_parts();
-        let statistics_meta = StatisticsMeta::from_parts(root, buckets, sketch)?;
+        let expected_top_n_count = top_n.get(&DataValue::Int32(7));
+        let meta = StatisticsMeta::new(histogram.clone(), sketch, top_n);
+        let (root, buckets, sketch, top_n) = meta.into_parts();
+        let statistics_meta = StatisticsMeta::from_parts(root, buckets, sketch, Some(top_n))?;
 
         assert_eq!(histogram, statistics_meta.histogram);
         assert_eq!(
             expected_estimate,
             statistics_meta.sketch().estimate(&DataValue::Int32(7))
+        );
+        assert_eq!(
+            expected_top_n_count,
+            statistics_meta.top_n().get(&DataValue::Int32(7))
         );
 
         Ok(())
