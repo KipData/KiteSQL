@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::backend::{BackendTransaction, PreparedStatement};
+use crate::backend::BackendTransaction;
 use crate::load::DIST_PER_WARE;
 use crate::{TpccArgs, TpccError, TpccTest, TpccTransaction};
 use chrono::Utc;
@@ -38,10 +38,10 @@ pub(crate) struct DeliveryTest;
 impl TpccTransaction for Delivery {
     type Args = DeliveryArgs;
 
-    fn run(
-        tx: &mut dyn BackendTransaction,
+    fn run<T: BackendTransaction>(
+        tx: &mut T,
         args: &Self::Args,
-        statements: &[PreparedStatement],
+        statements: &mut [T::PreparedStatement],
     ) -> Result<(), TpccError> {
         let now = Utc::now().naive_utc();
 
@@ -49,7 +49,7 @@ impl TpccTransaction for Delivery {
             // "SELECT COALESCE(MIN(no_o_id),0) FROM new_orders WHERE no_d_id = ? AND no_w_id = ?"
             let mut no_o_id = 0;
             tx.with_query_one(
-                &statements[0],
+                &mut statements[0],
                 &[
                     ("$1", DataValue::Int8(d_id as i8)),
                     ("$2", DataValue::Int16(args.w_id as i16)),
@@ -65,7 +65,7 @@ impl TpccTransaction for Delivery {
             }
             // "DELETE FROM new_orders WHERE no_o_id = ? AND no_d_id = ? AND no_w_id = ?"
             tx.execute_drain(
-                &statements[1],
+                &mut statements[1],
                 &[
                     ("$1", DataValue::Int32(no_o_id)),
                     ("$2", DataValue::Int8(d_id as i8)),
@@ -75,7 +75,7 @@ impl TpccTransaction for Delivery {
             // "SELECT o_c_id FROM orders WHERE o_id = ? AND o_d_id = ? AND o_w_id = ?"
             let mut c_id = 0;
             tx.with_query_one(
-                &statements[2],
+                &mut statements[2],
                 &[
                     ("$1", DataValue::Int32(no_o_id)),
                     ("$2", DataValue::Int8(d_id as i8)),
@@ -88,7 +88,7 @@ impl TpccTransaction for Delivery {
             )?;
             // "UPDATE orders SET o_carrier_id = ? WHERE o_id = ? AND o_d_id = ? AND o_w_id = ?"
             tx.execute_drain(
-                &statements[3],
+                &mut statements[3],
                 &[
                     ("$1", DataValue::Int8(args.o_carrier_id as i8)),
                     ("$2", DataValue::Int32(no_o_id)),
@@ -98,7 +98,7 @@ impl TpccTransaction for Delivery {
             )?;
             // "UPDATE order_line SET ol_delivery_d = ? WHERE ol_o_id = ? AND ol_d_id = ? AND ol_w_id = ?"
             tx.execute_drain(
-                &statements[4],
+                &mut statements[4],
                 &[
                     ("$1", DataValue::from(&now)),
                     ("$2", DataValue::Int32(no_o_id)),
@@ -109,7 +109,7 @@ impl TpccTransaction for Delivery {
             // "SELECT SUM(ol_amount) FROM order_line WHERE ol_o_id = ? AND ol_d_id = ? AND ol_w_id = ?"
             let mut ol_total = Default::default();
             tx.with_query_one(
-                &statements[5],
+                &mut statements[5],
                 &[
                     ("$1", DataValue::Int32(no_o_id)),
                     ("$2", DataValue::Int8(d_id as i8)),
@@ -122,7 +122,7 @@ impl TpccTransaction for Delivery {
             )?;
             // "UPDATE customer SET c_balance = c_balance + ? , c_delivery_cnt = c_delivery_cnt + 1 WHERE c_id = ? AND c_d_id = ? AND c_w_id = ?"
             tx.execute_drain(
-                &statements[6],
+                &mut statements[6],
                 &[
                     ("$1", DataValue::Decimal(ol_total)),
                     ("$2", DataValue::Int32(c_id)),
@@ -137,17 +137,13 @@ impl TpccTransaction for Delivery {
 }
 
 impl TpccTest for DeliveryTest {
-    fn name(&self) -> &'static str {
-        "Delivery"
-    }
-
-    fn do_transaction(
+    fn do_transaction<T: BackendTransaction>(
         &self,
         rng: &mut ThreadRng,
-        tx: &mut dyn BackendTransaction,
+        tx: &mut T,
         num_ware: usize,
         _: &TpccArgs,
-        statements: &[PreparedStatement],
+        statements: &mut [T::PreparedStatement],
     ) -> Result<(), TpccError> {
         let w_id = rng.gen_range(0..num_ware) + 1;
         let o_carrier_id = rng.gen_range(1..10);

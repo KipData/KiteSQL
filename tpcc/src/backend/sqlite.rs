@@ -23,7 +23,7 @@ use kite_sql::types::tuple::Tuple;
 use kite_sql::types::value::{DataValue, Utf8Type};
 use kite_sql::types::CharLengthUnits;
 use rust_decimal::Decimal;
-use sqlite::{Connection, CursorWithOwnership, Row, Statement as SqliteStatement, Value};
+use sqlite::{Connection, State, Statement as SqliteStatement, Value};
 
 pub struct SqliteBackend {
     connection: Connection,
@@ -51,17 +51,21 @@ impl SqliteBackend {
     fn prepare_spec_groups(
         &self,
         specs: &[Vec<StatementSpec>],
-    ) -> Result<Vec<Vec<PreparedStatement>>, TpccError> {
-        Ok(specs
-            .iter()
-            .map(|group| {
-                group
-                    .iter()
-                    .cloned()
-                    .map(|spec| PreparedStatement::Sqlite { spec })
-                    .collect()
-            })
-            .collect())
+    ) -> Result<Vec<Vec<SqlitePreparedStatement<'_>>>, TpccError> {
+        let mut groups = Vec::with_capacity(specs.len());
+
+        for group in specs {
+            let mut prepared = Vec::with_capacity(group.len());
+            for spec in group {
+                let statement = self.connection.prepare(spec.sql)?;
+                prepared.push(SqlitePreparedStatement {
+                    statement,
+                    spec: spec.clone(),
+                });
+            }
+            groups.push(prepared);
+        }
+        Ok(groups)
     }
 
     fn start_transaction(&self) -> Result<SqliteTransaction<'_>, TpccError> {
@@ -74,6 +78,11 @@ impl SqliteBackend {
 }
 
 impl BackendControl for SqliteBackend {
+    type PreparedStatement<'a>
+        = SqlitePreparedStatement<'a>
+    where
+        Self: 'a;
+
     type Transaction<'a>
         = SqliteTransaction<'a>
     where
@@ -82,7 +91,7 @@ impl BackendControl for SqliteBackend {
     fn prepare_statements(
         &self,
         specs: &[Vec<StatementSpec>],
-    ) -> Result<Vec<Vec<PreparedStatement>>, TpccError> {
+    ) -> Result<Vec<Vec<Self::PreparedStatement<'_>>>, TpccError> {
         self.prepare_spec_groups(specs)
     }
 
@@ -105,18 +114,26 @@ pub struct SqliteTransaction<'a> {
     finished: bool,
 }
 
+pub struct SqlitePreparedStatement<'a> {
+    statement: SqliteStatement<'a>,
+    spec: StatementSpec,
+}
+
+impl PreparedStatement for SqlitePreparedStatement<'_> {
+    fn spec(&self) -> &StatementSpec {
+        &self.spec
+    }
+}
+
 impl<'a> SqliteTransaction<'a> {
     pub(crate) fn execute_raw<'b>(
         &'b mut self,
-        statement: &PreparedStatement,
+        statement: &'b mut SqlitePreparedStatement<'a>,
         params: &[DbParam],
-    ) -> Result<SqliteResult<'b>, TpccError> {
-        let PreparedStatement::Sqlite { spec } = statement else {
-            return Err(TpccError::InvalidBackend);
-        };
-        let mut stmt = self.connection.prepare(spec.sql)?;
-        bind_params(&mut stmt, params)?;
-        SqliteResult::new(stmt.into_iter(), spec.result_types)
+    ) -> Result<SqliteResult<'b, 'a>, TpccError> {
+        statement.statement.reset()?;
+        bind_params(&mut statement.statement, params)?;
+        SqliteResult::new(&mut statement.statement, statement.spec.result_types)
     }
 }
 
@@ -129,9 +146,11 @@ impl Drop for SqliteTransaction<'_> {
 }
 
 impl<'a> BackendTransaction for SqliteTransaction<'a> {
+    type PreparedStatement = SqlitePreparedStatement<'a>;
+
     fn query_one(
         &mut self,
-        statement: &PreparedStatement,
+        statement: &mut Self::PreparedStatement,
         params: &[DbParam],
     ) -> Result<Tuple, TpccError> {
         match self.execute_raw(statement, params)?.next() {
@@ -142,7 +161,7 @@ impl<'a> BackendTransaction for SqliteTransaction<'a> {
 
     fn query_nth(
         &mut self,
-        statement: &PreparedStatement,
+        statement: &mut Self::PreparedStatement,
         params: &[DbParam],
         n: usize,
     ) -> Result<Tuple, TpccError> {
@@ -160,7 +179,7 @@ impl<'a> BackendTransaction for SqliteTransaction<'a> {
 
     fn execute_drain(
         &mut self,
-        statement: &PreparedStatement,
+        statement: &mut Self::PreparedStatement,
         params: &[DbParam],
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
@@ -288,58 +307,66 @@ fn normalize_sqlite_sql(sql: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-pub struct SqliteResult<'a> {
-    cursor: CursorWithOwnership<'a>,
+pub struct SqliteResult<'stmt, 'conn> {
+    statement: &'stmt mut SqliteStatement<'conn>,
     column_types: &'static [ColumnType],
 }
 
-impl<'a> SqliteResult<'a> {
+impl<'stmt, 'conn> SqliteResult<'stmt, 'conn> {
     fn new(
-        cursor: CursorWithOwnership<'a>,
+        statement: &'stmt mut SqliteStatement<'conn>,
         column_types: &'static [ColumnType],
     ) -> Result<Self, TpccError> {
         Ok(Self {
-            cursor,
+            statement,
             column_types,
         })
     }
 }
 
-impl Iterator for SqliteResult<'_> {
-    type Item = Result<Tuple, TpccError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let row = match self.cursor.next()? {
-            Ok(row) => row,
-            Err(err) => return Some(Err(TpccError::Sqlite(err))),
-        };
-
-        Some(convert_row(row, self.column_types))
+impl Drop for SqliteResult<'_, '_> {
+    fn drop(&mut self) {
+        let _ = self.statement.reset();
     }
 }
 
-fn convert_row(row: Row, types: &[ColumnType]) -> Result<Tuple, TpccError> {
+impl Iterator for SqliteResult<'_, '_> {
+    type Item = Result<Tuple, TpccError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.statement.next() {
+            Ok(State::Row) => Some(convert_statement_row(&self.statement, self.column_types)),
+            Ok(State::Done) => None,
+            Err(err) => return Some(Err(TpccError::Sqlite(err))),
+        }
+    }
+}
+
+fn convert_statement_row(
+    statement: &SqliteStatement<'_>,
+    types: &[ColumnType],
+) -> Result<Tuple, TpccError> {
     let mut values = Vec::with_capacity(types.len());
     for (idx, column_type) in types.iter().enumerate() {
         let value = match column_type {
-            ColumnType::Int8 => DataValue::Int8(row.try_read::<i64, _>(idx)? as i8),
-            ColumnType::Int16 => DataValue::Int16(row.try_read::<i64, _>(idx)? as i16),
-            ColumnType::Int32 => DataValue::Int32(row.try_read::<i64, _>(idx)? as i32),
-            ColumnType::Int64 => DataValue::Int64(row.try_read::<i64, _>(idx)?),
-            ColumnType::Decimal => DataValue::Decimal(read_decimal(&row, idx)?),
+            ColumnType::Int8 => DataValue::Int8(statement.read::<i64, _>(idx)? as i8),
+            ColumnType::Int16 => DataValue::Int16(statement.read::<i64, _>(idx)? as i16),
+            ColumnType::Int32 => DataValue::Int32(statement.read::<i64, _>(idx)? as i32),
+            ColumnType::Int64 => DataValue::Int64(statement.read::<i64, _>(idx)?),
+            ColumnType::Decimal => DataValue::Decimal(read_decimal(statement, idx)?),
             ColumnType::Utf8 => DataValue::Utf8 {
-                value: row.try_read::<&str, _>(idx)?.to_string(),
+                value: statement.read::<String, _>(idx)?,
                 ty: Utf8Type::Variable(None),
                 unit: CharLengthUnits::Characters,
             },
             ColumnType::DateTime => {
-                let text: &str = row.try_read(idx)?;
-                parse_datetime(text)?
+                let text: String = statement.read(idx)?;
+                parse_datetime(&text)?
             }
             ColumnType::NullableDateTime => {
-                let text: Option<&str> = row.try_read(idx)?;
+                let text: Option<String> = statement.read(idx)?;
                 match text {
-                    Some(value) => parse_datetime(value)?,
+                    Some(value) => parse_datetime(&value)?,
                     None => DataValue::Null,
                 }
             }
@@ -354,13 +381,13 @@ fn parse_datetime(text: &str) -> Result<DataValue, TpccError> {
     Ok(DataValue::from(&dt))
 }
 
-fn read_decimal(row: &Row, idx: usize) -> Result<Decimal, TpccError> {
-    if let Ok(text) = row.try_read::<&str, _>(idx) {
-        return Ok(Decimal::from_str_exact(text)?);
+fn read_decimal(statement: &SqliteStatement<'_>, idx: usize) -> Result<Decimal, TpccError> {
+    if let Ok(text) = statement.read::<String, _>(idx) {
+        return Ok(Decimal::from_str_exact(&text)?);
     }
-    if let Ok(value) = row.try_read::<f64, _>(idx) {
+    if let Ok(value) = statement.read::<f64, _>(idx) {
         return Ok(Decimal::from_str_exact(&value.to_string())?);
     }
-    let value: i64 = row.try_read(idx)?;
+    let value: i64 = statement.read(idx)?;
     Ok(Decimal::from_str_exact(&value.to_string())?)
 }

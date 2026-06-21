@@ -16,9 +16,7 @@ use crate::backend::dual::DualBackend;
 use crate::backend::kitesql_lmdb::KiteSqlLmdbBackend;
 use crate::backend::kitesql_rocksdb::{KiteSqlOptimisticRocksDbBackend, KiteSqlRocksDbBackend};
 use crate::backend::sqlite::{SqliteBackend, SqliteProfile};
-use crate::backend::{
-    BackendControl, BackendTransaction, ColumnType, PreparedStatement, StatementSpec,
-};
+use crate::backend::{BackendControl, BackendTransaction, ColumnType, StatementSpec};
 use crate::delivery::DeliveryTest;
 use crate::load::Load;
 use crate::new_ord::NewOrdTest;
@@ -74,23 +72,21 @@ pub(crate) const STOCK_LEVEL_DISTINCT_SQLITE: &str = "SELECT DISTINCT ol_i_id FR
 pub(crate) trait TpccTransaction {
     type Args;
 
-    fn run(
-        tx: &mut dyn BackendTransaction,
+    fn run<T: BackendTransaction>(
+        tx: &mut T,
         args: &Self::Args,
-        statements: &[PreparedStatement],
+        statements: &mut [T::PreparedStatement],
     ) -> Result<(), TpccError>;
 }
 
 pub(crate) trait TpccTest {
-    fn name(&self) -> &'static str;
-
-    fn do_transaction(
+    fn do_transaction<T: BackendTransaction>(
         &self,
         rng: &mut ThreadRng,
-        tx: &mut dyn BackendTransaction,
+        tx: &mut T,
         num_ware: usize,
         args: &TpccArgs,
-        statements: &[PreparedStatement],
+        statements: &mut [T::PreparedStatement],
     ) -> Result<(), TpccError>;
 }
 
@@ -193,19 +189,12 @@ fn run_tpcc<B: BackendControl>(
     Load::load_ord(rng, backend, args.num_ware)?;
 
     let statement_specs = statement_specs();
-    let test_statements = backend.prepare_statements(&statement_specs)?;
+    let mut test_statements = backend.prepare_statements(&statement_specs)?;
 
     let mut rt_hist = RtHist::new();
     let mut success = [0usize; 5];
     let mut late = [0usize; 5];
     let mut failure = [0usize; 5];
-    let tests: Vec<Box<dyn TpccTest>> = vec![
-        Box::new(NewOrdTest),
-        Box::new(PaymentTest),
-        Box::new(OrderStatTest),
-        Box::new(DeliveryTest),
-        Box::new(SlevTest),
-    ];
     let tpcc_args = TpccArgs { joins: args.joins };
 
     let duration = Duration::new(args.measure_time, 0);
@@ -228,8 +217,7 @@ fn run_tpcc<B: BackendControl>(
 
     while tpcc_start.elapsed() < duration {
         let i = seq_gen.get();
-        let tpcc_test = &tests[i];
-        let statement = &test_statements[i];
+        let statement = &mut test_statements[i];
 
         let mut is_succeed = false;
         let mut last_error = None;
@@ -238,7 +226,7 @@ fn run_tpcc<B: BackendControl>(
             let mut tx = backend.new_transaction()?;
 
             if let Err(err) =
-                tpcc_test.do_transaction(rng, &mut tx, args.num_ware, &tpcc_args, statement)
+                do_tpcc_transaction::<B>(i, rng, &mut tx, args.num_ware, &tpcc_args, statement)
             {
                 failure[i] += 1;
                 last_error = Some(err);
@@ -260,7 +248,7 @@ fn run_tpcc<B: BackendControl>(
             if let Some(err) = last_error {
                 eprintln!(
                     "[{}] Error after {} retries: {}",
-                    tpcc_test.name(),
+                    tpcc_test_name(i),
                     args.max_retry,
                     err
                 );
@@ -281,7 +269,7 @@ fn run_tpcc<B: BackendControl>(
             print_checkpoint(
                 round_count / CHECK_POINT_COUNT,
                 round_count,
-                tpcc_test.name(),
+                tpcc_test_name(i),
                 p90,
                 &success,
                 &late,
@@ -321,6 +309,28 @@ fn run_tpcc<B: BackendControl>(
     }
 
     Ok(())
+}
+
+fn tpcc_test_name(index: usize) -> &'static str {
+    TX_NAMES[index]
+}
+
+fn do_tpcc_transaction<'a, B: BackendControl>(
+    index: usize,
+    rng: &mut ThreadRng,
+    tx: &mut B::Transaction<'a>,
+    num_ware: usize,
+    args: &TpccArgs,
+    statements: &mut [B::PreparedStatement<'a>],
+) -> Result<(), TpccError> {
+    match index {
+        0 => NewOrdTest.do_transaction(rng, tx, num_ware, args, statements),
+        1 => PaymentTest.do_transaction(rng, tx, num_ware, args, statements),
+        2 => OrderStatTest.do_transaction(rng, tx, num_ware, args, statements),
+        3 => DeliveryTest.do_transaction(rng, tx, num_ware, args, statements),
+        4 => SlevTest.do_transaction(rng, tx, num_ware, args, statements),
+        _ => Err(TpccError::InvalidTransaction),
+    }
 }
 
 #[cfg(all(unix, feature = "pprof"))]
@@ -740,6 +750,7 @@ pub enum TpccError {
     EmptyTuples,
     MaxRetry,
     InvalidBackend,
+    InvalidTransaction,
     InvalidParameter,
     InvalidDateTime,
     BackendMismatch(String),
@@ -757,6 +768,7 @@ impl fmt::Display for TpccError {
             Self::EmptyTuples => f.write_str("tuples is empty"),
             Self::MaxRetry => f.write_str("maximum retries reached"),
             Self::InvalidBackend => f.write_str("invalid backend usage"),
+            Self::InvalidTransaction => f.write_str("invalid transaction index"),
             Self::InvalidParameter => f.write_str("invalid parameter name"),
             Self::InvalidDateTime => f.write_str("invalid datetime value"),
             Self::BackendMismatch(value) => write!(f, "backend mismatch: {value}"),

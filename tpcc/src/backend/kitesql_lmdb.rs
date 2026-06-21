@@ -14,7 +14,8 @@
 
 use super::kitesql_rocksdb::{execute_kitesql_batch, KiteSqlTxnResult};
 use super::{
-    BackendControl, BackendTransaction, DbParam, PreparedStatement, SimpleExecutor, StatementSpec,
+    BackendControl, BackendTransaction, DbParam, KiteSqlPreparedStatement, SimpleExecutor,
+    StatementSpec,
 };
 use crate::TpccError;
 use kite_sql::db::{prepare, DBTransaction, DataBaseBuilder, Database};
@@ -37,13 +38,13 @@ impl KiteSqlLmdbBackend {
     fn prepare_spec_groups(
         &self,
         specs: &[Vec<StatementSpec>],
-    ) -> Result<Vec<Vec<PreparedStatement>>, TpccError> {
+    ) -> Result<Vec<Vec<KiteSqlPreparedStatement>>, TpccError> {
         let mut groups = Vec::with_capacity(specs.len());
         for group in specs {
             let mut prepared = Vec::with_capacity(group.len());
             for spec in group {
                 let statement = prepare(spec.sql)?;
-                prepared.push(PreparedStatement::KiteSql {
+                prepared.push(KiteSqlPreparedStatement {
                     statement,
                     spec: spec.clone(),
                 });
@@ -61,6 +62,11 @@ impl KiteSqlLmdbBackend {
 }
 
 impl BackendControl for KiteSqlLmdbBackend {
+    type PreparedStatement<'a>
+        = KiteSqlPreparedStatement
+    where
+        Self: 'a;
+
     type Transaction<'a>
         = KiteSqlLmdbTransactionWrapper<'a>
     where
@@ -69,7 +75,7 @@ impl BackendControl for KiteSqlLmdbBackend {
     fn prepare_statements(
         &self,
         specs: &[Vec<StatementSpec>],
-    ) -> Result<Vec<Vec<PreparedStatement>>, TpccError> {
+    ) -> Result<Vec<Vec<Self::PreparedStatement<'_>>>, TpccError> {
         self.prepare_spec_groups(specs)
     }
 
@@ -91,22 +97,21 @@ pub struct KiteSqlLmdbTransactionWrapper<'a> {
 impl<'a> KiteSqlLmdbTransactionWrapper<'a> {
     pub(crate) fn execute_raw<'b>(
         &'b mut self,
-        statement: &PreparedStatement,
+        statement: &mut KiteSqlPreparedStatement,
         params: &[DbParam],
     ) -> Result<KiteSqlTxnResult<'b, KiteSqlLmdbTransaction<'a>>, TpccError> {
-        let PreparedStatement::KiteSql { statement, .. } = statement else {
-            return Err(TpccError::InvalidBackend);
-        };
         Ok(KiteSqlTxnResult::new(
-            self.inner.execute(statement, params)?,
+            self.inner.execute(&statement.statement, params)?,
         ))
     }
 }
 
 impl<'a> BackendTransaction for KiteSqlLmdbTransactionWrapper<'a> {
+    type PreparedStatement = KiteSqlPreparedStatement;
+
     fn query_one(
         &mut self,
-        statement: &PreparedStatement,
+        statement: &mut Self::PreparedStatement,
         params: &[DbParam],
     ) -> Result<Tuple, TpccError> {
         self.execute_raw(statement, params)?
@@ -117,7 +122,7 @@ impl<'a> BackendTransaction for KiteSqlLmdbTransactionWrapper<'a> {
 
     fn query_nth(
         &mut self,
-        statement: &PreparedStatement,
+        statement: &mut Self::PreparedStatement,
         params: &[DbParam],
         n: usize,
     ) -> Result<Tuple, TpccError> {
@@ -134,7 +139,7 @@ impl<'a> BackendTransaction for KiteSqlLmdbTransactionWrapper<'a> {
 
     fn execute_drain(
         &mut self,
-        statement: &PreparedStatement,
+        statement: &mut Self::PreparedStatement,
         params: &[DbParam],
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
@@ -144,7 +149,7 @@ impl<'a> BackendTransaction for KiteSqlLmdbTransactionWrapper<'a> {
 
     fn with_query_one(
         &mut self,
-        statement: &PreparedStatement,
+        statement: &mut Self::PreparedStatement,
         params: &[DbParam],
         visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
     ) -> Result<(), TpccError> {
@@ -155,7 +160,7 @@ impl<'a> BackendTransaction for KiteSqlLmdbTransactionWrapper<'a> {
 
     fn with_query_nth(
         &mut self,
-        statement: &PreparedStatement,
+        statement: &mut Self::PreparedStatement,
         params: &[DbParam],
         n: usize,
         visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,

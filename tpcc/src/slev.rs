@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::backend::{BackendTransaction, PreparedStatement};
+use crate::backend::BackendTransaction;
 use crate::load::DIST_PER_WARE;
 use crate::{TpccArgs, TpccError, TpccTest, TpccTransaction};
 use kite_sql::types::value::DataValue;
@@ -38,15 +38,15 @@ pub(crate) struct SlevTest;
 impl TpccTransaction for Slev {
     type Args = SlevArgs;
 
-    fn run(
-        tx: &mut dyn BackendTransaction,
+    fn run<T: BackendTransaction>(
+        tx: &mut T,
         args: &Self::Args,
-        statements: &[PreparedStatement],
+        statements: &mut [T::PreparedStatement],
     ) -> Result<(), TpccError> {
         // "SELECT d_next_o_id FROM district WHERE d_id = ? AND d_w_id = ?"
         let mut d_next_o_id = 0;
         tx.with_query_one(
-            &statements[0],
+            &mut statements[0],
             &[
                 ("$1", DataValue::Int8(args.d_id as i8)),
                 ("$2", DataValue::Int16(args.w_id as i16)),
@@ -59,7 +59,7 @@ impl TpccTransaction for Slev {
         // "SELECT DISTINCT ol_i_id FROM order_line WHERE ol_w_id = ? AND ol_d_id = ? AND ol_o_id < ? AND ol_o_id >= (? - 20)"
         let mut ol_i_id = 0;
         tx.with_query_one(
-            &statements[1],
+            &mut statements[1],
             &[
                 ("$1", DataValue::Int16(args.w_id as i16)),
                 ("$2", DataValue::Int8(args.d_id as i8)),
@@ -73,7 +73,7 @@ impl TpccTransaction for Slev {
         )?;
         // "SELECT count(*) FROM stock WHERE s_w_id = ? AND s_i_id = ? AND s_quantity < ?"
         tx.with_query_one(
-            &statements[2],
+            &mut statements[2],
             &[
                 ("$1", DataValue::Int16(args.w_id as i16)),
                 ("$2", DataValue::Int8(ol_i_id as i8)),
@@ -88,17 +88,13 @@ impl TpccTransaction for Slev {
 }
 
 impl TpccTest for SlevTest {
-    fn name(&self) -> &'static str {
-        "Stock-Level"
-    }
-
-    fn do_transaction(
+    fn do_transaction<T: BackendTransaction>(
         &self,
         rng: &mut ThreadRng,
-        tx: &mut dyn BackendTransaction,
+        tx: &mut T,
         num_ware: usize,
         _: &TpccArgs,
-        statements: &[PreparedStatement],
+        statements: &mut [T::PreparedStatement],
     ) -> Result<(), TpccError> {
         let w_id = rng.gen_range(0..num_ware) + 1;
         let d_id = rng.gen_range(1..DIST_PER_WARE);

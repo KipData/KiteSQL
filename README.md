@@ -204,8 +204,8 @@ Recent 720-second local comparison on the machine above:
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | KiteSQL LMDB | 73638 | 0.001s | 0.001s | 0.001s | 0.002s | 0.001s |
 | KiteSQL RocksDB | 39051 | 0.001s | 0.001s | 0.002s | 0.009s | 0.001s |
-| SQLite balanced | 39835 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
-| SQLite practical | 37911 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
+| SQLite balanced | 56788 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
+| SQLite practical | 44049 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
 
 The detailed raw outputs are recorded in [tpcc/README.md](tpcc/README.md).
 #### 👉[check more](tpcc/README.md)

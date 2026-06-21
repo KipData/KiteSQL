@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use super::kitesql_rocksdb::{KiteSqlRocksDbBackend, KiteSqlRocksDbTransaction, KiteSqlTxnResult};
-use super::sqlite::{SqliteBackend, SqliteResult, SqliteTransaction};
+use super::sqlite::{SqliteBackend, SqlitePreparedStatement, SqliteResult, SqliteTransaction};
 use super::{
-    BackendControl, BackendTransaction, DbParam, PreparedStatement, SimpleExecutor, StatementSpec,
+    BackendControl, BackendTransaction, DbParam, KiteSqlPreparedStatement, PreparedStatement,
+    SimpleExecutor, StatementSpec,
 };
 use crate::{TpccError, STOCK_LEVEL_DISTINCT_SQL, STOCK_LEVEL_DISTINCT_SQLITE};
 use kite_sql::types::tuple::Tuple;
@@ -28,6 +29,18 @@ pub struct DualBackend {
     sqlite: SqliteBackend,
 }
 
+pub struct DualPreparedStatement<'a> {
+    kitesql: KiteSqlPreparedStatement,
+    sqlite: SqlitePreparedStatement<'a>,
+    spec: StatementSpec,
+}
+
+impl PreparedStatement for DualPreparedStatement<'_> {
+    fn spec(&self) -> &StatementSpec {
+        &self.spec
+    }
+}
+
 impl DualBackend {
     pub fn new(path: &str, rocksdb_stats: bool) -> Result<Self, TpccError> {
         Ok(Self {
@@ -38,6 +51,11 @@ impl DualBackend {
 }
 
 impl BackendControl for DualBackend {
+    type PreparedStatement<'a>
+        = DualPreparedStatement<'a>
+    where
+        Self: 'a;
+
     type Transaction<'a>
         = DualTransaction<'a>
     where
@@ -46,8 +64,29 @@ impl BackendControl for DualBackend {
     fn prepare_statements(
         &self,
         specs: &[Vec<StatementSpec>],
-    ) -> Result<Vec<Vec<PreparedStatement>>, TpccError> {
-        self.kitesql.prepare_statements(specs)
+    ) -> Result<Vec<Vec<Self::PreparedStatement<'_>>>, TpccError> {
+        let sqlite_specs: Vec<Vec<StatementSpec>> = specs
+            .iter()
+            .map(|group| group.iter().map(sqlite_statement_spec).collect())
+            .collect();
+        let kitesql_groups = self.kitesql.prepare_statements(specs)?;
+        let sqlite_groups = self.sqlite.prepare_statements(&sqlite_specs)?;
+        let mut groups = Vec::with_capacity(kitesql_groups.len());
+
+        for (kitesql_group, sqlite_group) in kitesql_groups.into_iter().zip(sqlite_groups) {
+            let mut group = Vec::with_capacity(kitesql_group.len());
+            for (kitesql, sqlite) in kitesql_group.into_iter().zip(sqlite_group) {
+                let spec = kitesql.spec().clone();
+                group.push(DualPreparedStatement {
+                    kitesql,
+                    sqlite,
+                    spec,
+                });
+            }
+            groups.push(group);
+        }
+
+        Ok(groups)
     }
 
     fn new_transaction(&self) -> Result<Self::Transaction<'_>, TpccError> {
@@ -78,18 +117,17 @@ pub struct DualTransaction<'a> {
 }
 
 impl<'a> BackendTransaction for DualTransaction<'a> {
+    type PreparedStatement = DualPreparedStatement<'a>;
+
     fn query_one(
         &mut self,
-        statement: &PreparedStatement,
+        statement: &mut Self::PreparedStatement,
         params: &[DbParam],
     ) -> Result<Tuple, TpccError> {
-        let spec = statement.spec().clone();
-        let sqlite_stmt = PreparedStatement::Sqlite {
-            spec: sqlite_statement_spec(&spec),
-        };
+        let spec = statement.spec.clone();
 
-        let kitesql_iter = self.kitesql.execute_raw(statement, params)?;
-        let sqlite_iter = self.sqlite.execute_raw(&sqlite_stmt, params)?;
+        let kitesql_iter = self.kitesql.execute_raw(&mut statement.kitesql, params)?;
+        let sqlite_iter = self.sqlite.execute_raw(&mut statement.sqlite, params)?;
 
         if is_select_sql(&spec) {
             if spec.sql == STOCK_LEVEL_DISTINCT_SQL {
@@ -114,17 +152,14 @@ impl<'a> BackendTransaction for DualTransaction<'a> {
 
     fn query_nth(
         &mut self,
-        statement: &PreparedStatement,
+        statement: &mut Self::PreparedStatement,
         params: &[DbParam],
         n: usize,
     ) -> Result<Tuple, TpccError> {
-        let spec = statement.spec().clone();
-        let sqlite_stmt = PreparedStatement::Sqlite {
-            spec: sqlite_statement_spec(&spec),
-        };
+        let spec = statement.spec.clone();
 
-        let kitesql_iter = self.kitesql.execute_raw(statement, params)?;
-        let sqlite_iter = self.sqlite.execute_raw(&sqlite_stmt, params)?;
+        let kitesql_iter = self.kitesql.execute_raw(&mut statement.kitesql, params)?;
+        let sqlite_iter = self.sqlite.execute_raw(&mut statement.sqlite, params)?;
 
         if spec.sql == STOCK_LEVEL_DISTINCT_SQL {
             let kitesql_rows = collect_all_rows(kitesql_iter)?;
@@ -141,16 +176,13 @@ impl<'a> BackendTransaction for DualTransaction<'a> {
 
     fn execute_drain(
         &mut self,
-        statement: &PreparedStatement,
+        statement: &mut Self::PreparedStatement,
         params: &[DbParam],
     ) -> Result<(), TpccError> {
-        let spec = statement.spec().clone();
-        let sqlite_stmt = PreparedStatement::Sqlite {
-            spec: sqlite_statement_spec(&spec),
-        };
+        let spec = statement.spec.clone();
 
-        let kitesql_iter = self.kitesql.execute_raw(statement, params)?;
-        let sqlite_iter = self.sqlite.execute_raw(&sqlite_stmt, params)?;
+        let kitesql_iter = self.kitesql.execute_raw(&mut statement.kitesql, params)?;
+        let sqlite_iter = self.sqlite.execute_raw(&mut statement.sqlite, params)?;
 
         if is_select_sql(&spec) {
             if spec.sql == STOCK_LEVEL_DISTINCT_SQL {
@@ -182,7 +214,7 @@ fn normalize_sqlite_sql(sql: &str) -> Option<Cow<'_, str>> {
     }
 }
 
-fn drain_sqlite_iter(mut iter: SqliteResult<'_>) -> Result<(), TpccError> {
+fn drain_sqlite_iter(mut iter: SqliteResult<'_, '_>) -> Result<(), TpccError> {
     while let Some(row) = iter.next() {
         row?;
     }
@@ -211,7 +243,7 @@ where
 
 fn query_ordered_nth<T: kite_sql::storage::Transaction>(
     mut kitesql_iter: KiteSqlTxnResult<'_, T>,
-    mut sqlite_iter: SqliteResult<'_>,
+    mut sqlite_iter: SqliteResult<'_, '_>,
     sql: &'static str,
     n: usize,
 ) -> Result<Tuple, TpccError> {
@@ -261,7 +293,7 @@ fn query_ordered_nth<T: kite_sql::storage::Transaction>(
 
 fn drain_and_compare_ordered<T: kite_sql::storage::Transaction>(
     mut kitesql_iter: KiteSqlTxnResult<'_, T>,
-    mut sqlite_iter: SqliteResult<'_>,
+    mut sqlite_iter: SqliteResult<'_, '_>,
     sql: &'static str,
 ) -> Result<(), TpccError> {
     loop {
