@@ -66,7 +66,9 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         ));
     };
 
-    let mut assignments = Vec::new();
+    let mut field_initializers = Vec::new();
+    let mut field_index_declarations = Vec::new();
+    let mut field_index_resolvers = Vec::new();
     let mut params = Vec::new();
     let mut orm_fields = Vec::new();
     let mut orm_columns = Vec::new();
@@ -132,6 +134,13 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                     "decimal field cannot be skipped",
                 ));
             }
+            generics
+                .make_where_clause()
+                .predicates
+                .push(parse_quote!(#field_ty : ::core::default::Default));
+            field_initializers.push(quote! {
+                #field_name: ::core::default::Default::default()
+            });
             continue;
         }
 
@@ -163,6 +172,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         let is_unique = field.unique;
         let is_index = field.index;
         let column_index = orm_columns.len();
+        let field_index_ident = format_ident!("__kite_orm_{field_name}_index");
 
         persisted_columns.push((field_name_string, column_name.clone()));
         column_names.push(column_name.clone());
@@ -223,10 +233,21 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             quote! { None::<::kite_sql::types::value::DataValue> }
         };
 
-        assignments.push(quote! {
-            if let Some(value) = ::kite_sql::orm::try_get::<#field_ty>(&mut tuple, schema, #column_name_lit) {
-                struct_instance.#field_name = value;
+        field_index_declarations.push(quote! {
+            let mut #field_index_ident = None;
+        });
+        field_index_resolvers.push(quote! {
+            if #field_index_ident.is_none() && __kite_orm_column_name == #column_name_lit {
+                #field_index_ident = Some(__kite_orm_index);
+                __kite_orm_found_fields += 1;
             }
+        });
+        field_initializers.push(quote! {
+            #field_name: ::kite_sql::orm::take_value_at::<#field_ty>(
+                &mut tuple,
+                #field_index_ident,
+                #column_name_lit,
+            )?
         });
         params.push(quote! {
             (#placeholder_lit, ::kite_sql::orm::ToDataValue::to_data_value(&self.#field_name))
@@ -379,23 +400,31 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
     let primary_key_value = primary_key_value.expect("primary key checked above");
     let _primary_key_column = primary_key_column.expect("primary key checked above");
     let _primary_key_placeholder = primary_key_placeholder.expect("primary key checked above");
-    let mut from_generics = generics.clone();
-    from_generics.params.insert(0, parse_quote!('__kite_arena));
-    from_generics.params.insert(0, parse_quote!('__kite_schema));
-    let (from_impl_generics, _, from_where_clause) = from_generics.split_for_impl();
+    let field_count = field_index_declarations.len();
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     Ok(quote! {
-        impl #from_impl_generics ::core::convert::From<(&::kite_sql::types::tuple::SchemaView<'__kite_schema, '__kite_arena>, ::kite_sql::types::tuple::Tuple)>
+        impl #impl_generics ::kite_sql::orm::FromQueryRow
             for #struct_name #ty_generics
-            #from_where_clause
+            #where_clause
         {
-            fn from((schema, mut tuple): (&::kite_sql::types::tuple::SchemaView<'__kite_schema, '__kite_arena>, ::kite_sql::types::tuple::Tuple)) -> Self {
-                let mut struct_instance = <Self as ::core::default::Default>::default();
+            fn from_query_row(
+                schema: &::kite_sql::types::tuple::SchemaView<'_, '_>,
+                mut tuple: ::kite_sql::types::tuple::Tuple,
+            ) -> ::std::result::Result<Self, ::kite_sql::errors::DatabaseError> {
+                let mut __kite_orm_found_fields = 0usize;
+                #(#field_index_declarations)*
+                for (__kite_orm_index, __kite_orm_column) in schema.iter().enumerate() {
+                    let __kite_orm_column_name = __kite_orm_column.name();
+                    #(#field_index_resolvers)*
+                    if __kite_orm_found_fields == #field_count {
+                        break;
+                    }
+                }
 
-                #(#assignments)*
-
-                struct_instance
+                Ok(Self {
+                    #(#field_initializers),*
+                })
             }
         }
 

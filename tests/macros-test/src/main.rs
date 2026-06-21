@@ -73,6 +73,22 @@ mod test {
         Ok((temp_dir, database))
     }
 
+    #[test]
+    fn test_from_data_value_reports_conversion_error() {
+        let err = <i32 as kite_sql::orm::FromDataValue>::from_data_value(DataValue::Utf8 {
+            value: "not an integer".to_string(),
+            ty: Utf8Type::Variable(None),
+            unit: CharLengthUnits::Characters,
+        })
+        .expect_err("converting utf8 directly into i32 should fail");
+
+        assert!(matches!(
+            err,
+            DatabaseError::InvalidValue(message)
+                if message.contains("Varchar") && message.contains("i32")
+        ));
+    }
+
     fn create_model_table<M: kite_sql::orm::Model>(
         database: &mut Database<RocksStorage>,
     ) -> Result<(), DatabaseError> {
@@ -135,6 +151,14 @@ mod test {
         age: Option<i32>,
         #[model(skip)]
         cache: String,
+    }
+
+    #[derive(Debug, PartialEq, Model)]
+    #[model(table = "no_default_users")]
+    struct NoDefaultUser {
+        #[model(primary_key)]
+        id: i32,
+        name: String,
     }
 
     #[derive(Default, Debug, PartialEq, Model)]
@@ -201,6 +225,27 @@ mod test {
         #[projection(rename = "user_name")]
         display_name: String,
         age: Option<i32>,
+    }
+
+    #[derive(Debug, PartialEq, Projection)]
+    struct InvalidUserProjection {
+        #[projection(rename = "user_name")]
+        name: RejectDataValue,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct RejectDataValue;
+
+    impl kite_sql::orm::FromDataValue for RejectDataValue {
+        fn logical_type() -> Option<LogicalType> {
+            Some(LogicalType::Varchar(None, CharLengthUnits::Characters))
+        }
+
+        fn from_data_value(_: DataValue) -> Result<Self, DatabaseError> {
+            Err(DatabaseError::InvalidValue(
+                "rejecting value for test".to_string(),
+            ))
+        }
     }
 
     #[derive(Default, Debug, PartialEq, Projection)]
@@ -325,12 +370,34 @@ mod test {
         );
 
         let schema = SchemaView::new(&schema, &plan_arena);
-        let derived = DerivedStruct::from((&schema, tuple));
+        let derived =
+            <DerivedStruct as kite_sql::orm::FromQueryRow>::from_query_row(&schema, tuple).unwrap();
 
         assert_eq!(derived.c1, 9);
         assert_eq!(derived.name, "LOL");
         assert_eq!(derived.age, None);
         assert_eq!(derived.skipped, "");
+    }
+
+    #[test]
+    fn test_model_decode_does_not_require_default() -> Result<(), DatabaseError> {
+        let (_temp_dir, mut database) = build_test_database()?;
+
+        create_model_table::<NoDefaultUser>(&mut database)?;
+        database.insert(&NoDefaultUser {
+            id: 1,
+            name: "Alice".to_string(),
+        })?;
+
+        assert_eq!(
+            database.get::<NoDefaultUser>(&1)?,
+            Some(NoDefaultUser {
+                id: 1,
+                name: "Alice".to_string(),
+            })
+        );
+
+        Ok(())
     }
 
     #[test]
@@ -1055,6 +1122,21 @@ mod test {
                 age: Some(18),
             })
         );
+
+        let invalid_projection = database
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .filter(|e| e.column(User::id())?.eq(1))?
+                    .project::<InvalidUserProjection>()?
+                    .finish()
+            })?
+            .orm::<InvalidUserProjection>()
+            .next()
+            .transpose();
+        assert!(matches!(
+            invalid_projection,
+            Err(DatabaseError::InvalidValue(_))
+        ));
 
         let aliased_total_users = database.bind(|ctx| {
             ctx.from::<User>()?
