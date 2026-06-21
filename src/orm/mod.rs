@@ -2278,9 +2278,7 @@ where
 }
 
 #[doc(hidden)]
-pub trait Projection:
-    for<'view, 'schema, 'arena> From<(&'view SchemaView<'schema, 'arena>, Tuple)>
-{
+pub trait Projection: FromQueryRow {
     fn bind_projection<'ctx, 'bind, 'parent, 'arena, T, A>(
         scope: &mut ExprBindScope<'ctx, 'bind, 'parent, 'arena, T, A>,
         relation: &str,
@@ -2449,9 +2447,7 @@ fn describe_text_value(value: Option<DataValue>) -> String {
 /// In normal usage you should derive this trait with `#[derive(Model)]` rather
 /// than implementing it by hand. The derive macro generates tuple mapping and
 /// model metadata.
-pub trait Model:
-    Sized + for<'view, 'schema, 'arena> From<(&'view SchemaView<'schema, 'arena>, Tuple)>
-{
+pub trait Model: Sized + FromQueryRow {
     /// Rust type used as the model primary key.
     ///
     /// This associated type lets APIs such as
@@ -2512,8 +2508,8 @@ pub trait FromDataValue: Sized {
     /// Returns the logical SQL type used for conversion, when one is required.
     fn logical_type() -> Option<LogicalType>;
 
-    /// Attempts to convert a raw [`DataValue`] into `Self`.
-    fn from_data_value(value: DataValue) -> Option<Self>;
+    /// Converts a raw [`DataValue`] into `Self`.
+    fn from_data_value(value: DataValue) -> Result<Self, DatabaseError>;
 }
 
 /// Conversion trait from a projected result tuple into a Rust value.
@@ -2529,6 +2525,25 @@ pub trait FromDataValue: Sized {
 pub trait FromQueryTuple: Sized {
     /// Decodes one projected tuple into `Self`.
     fn from_query_tuple(tuple: Tuple) -> Result<Self, DatabaseError>;
+}
+
+/// Conversion trait from a query result row into a Rust value.
+///
+/// `#[derive(Model)]` and `#[derive(Projection)]` generate this automatically.
+/// Types that still implement the older `From<(&SchemaView, Tuple)>` mapping
+/// are also accepted through a compatibility implementation.
+pub trait FromQueryRow: Sized {
+    /// Decodes one result row into `Self`.
+    fn from_query_row(schema: &SchemaView<'_, '_>, tuple: Tuple) -> Result<Self, DatabaseError>;
+}
+
+impl<T> FromQueryRow for T
+where
+    T: for<'view, 'schema, 'arena> From<(&'view SchemaView<'schema, 'arena>, Tuple)>,
+{
+    fn from_query_row(schema: &SchemaView<'_, '_>, tuple: Tuple) -> Result<Self, DatabaseError> {
+        Ok(T::from((schema, tuple)))
+    }
 }
 
 /// Typed adapter over a [`ResultIter`] that yields projected values instead of raw tuples.
@@ -2698,17 +2713,24 @@ pub trait StringType {}
 pub trait DecimalType {}
 
 #[doc(hidden)]
-pub fn try_get<T: FromDataValue>(
+pub fn take_value_at<T: FromDataValue>(
     tuple: &mut Tuple,
-    schema: &SchemaView<'_, '_>,
+    index: Option<usize>,
     field_name: &str,
-) -> Option<T> {
-    let ty = T::logical_type()?;
-    let idx = schema.position(field_name)?;
-
-    let value = std::mem::replace(&mut tuple.values[idx], DataValue::Null)
-        .cast(&ty)
-        .ok()?;
+) -> Result<T, DatabaseError> {
+    let idx = index.ok_or_else(|| DatabaseError::ColumnNotFound {
+        name: field_name.to_string(),
+        span: None,
+    })?;
+    let value = tuple.values.get_mut(idx).ok_or(DatabaseError::MisMatch(
+        "the query result schema",
+        "the query result tuple",
+    ))?;
+    let value = std::mem::replace(value, DataValue::Null);
+    let value = match T::logical_type() {
+        Some(ty) => value.cast(&ty)?,
+        None => value,
+    };
 
     T::from_data_value(value)
 }
@@ -2720,8 +2742,10 @@ macro_rules! impl_from_data_value_by_method {
                 LogicalType::type_trans::<Self>()
             }
 
-            fn from_data_value(value: DataValue) -> Option<Self> {
-                value.$method()
+            fn from_data_value(value: DataValue) -> Result<Self, crate::errors::DatabaseError> {
+                value
+                    .$method()
+                    .ok_or_else(|| crate::orm::invalid_from_data_value::<Self>(&value))
             }
         }
     };
@@ -2828,11 +2852,11 @@ impl FromDataValue for String {
         LogicalType::type_trans::<Self>()
     }
 
-    fn from_data_value(value: DataValue) -> Option<Self> {
+    fn from_data_value(value: DataValue) -> Result<Self, DatabaseError> {
         if let DataValue::Utf8 { value, .. } = value {
-            Some(value)
+            Ok(value)
         } else {
-            None
+            Err(invalid_from_data_value::<Self>(&value))
         }
     }
 }
@@ -2842,11 +2866,11 @@ impl FromDataValue for Arc<str> {
         Some(LogicalType::Varchar(None, CharLengthUnits::Characters))
     }
 
-    fn from_data_value(value: DataValue) -> Option<Self> {
+    fn from_data_value(value: DataValue) -> Result<Self, DatabaseError> {
         if let DataValue::Utf8 { value, .. } = value {
-            Some(value.into())
+            Ok(value.into())
         } else {
-            None
+            Err(invalid_from_data_value::<Self>(&value))
         }
     }
 }
@@ -2874,9 +2898,9 @@ impl<T: FromDataValue> FromDataValue for Option<T> {
         T::logical_type()
     }
 
-    fn from_data_value(value: DataValue) -> Option<Self> {
+    fn from_data_value(value: DataValue) -> Result<Self, DatabaseError> {
         if matches!(value, DataValue::Null) {
-            Some(None)
+            Ok(None)
         } else {
             T::from_data_value(value).map(Some)
         }
@@ -2993,12 +3017,12 @@ where
 fn extract_optional_row<I, T>(mut iter: I) -> Result<Option<T>, DatabaseError>
 where
     I: ResultIter,
-    T: for<'view, 'schema, 'arena> From<(&'view SchemaView<'schema, 'arena>, Tuple)>,
+    T: FromQueryRow,
 {
     Ok(match iter.next() {
         Some(tuple) => {
             let tuple = tuple?;
-            Some(iter.schema(|schema| T::from((schema, tuple))))
+            Some(iter.schema(|schema| T::from_query_row(schema, tuple))?)
         }
         None => None,
     })
@@ -3010,12 +3034,15 @@ fn convert_projected_value<T: FromDataValue>(value: DataValue) -> Result<T, Data
         None => value,
     };
 
-    T::from_data_value(value).ok_or_else(|| {
-        DatabaseError::InvalidValue(format!(
-            "failed to convert projected value into {}",
-            std::any::type_name::<T>()
-        ))
-    })
+    T::from_data_value(value)
+}
+
+fn invalid_from_data_value<T>(value: &DataValue) -> DatabaseError {
+    DatabaseError::InvalidValue(format!(
+        "failed to convert {} value `{value}` into {}",
+        value.logical_type(),
+        std::any::type_name::<T>()
+    ))
 }
 
 fn extract_projected_data_value<T: FromDataValue>(

@@ -1,7 +1,7 @@
 use darling::ast::Data;
 use darling::{FromDeriveInput, FromField};
 use proc_macro2::{Span, TokenStream};
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::{parse_quote, DeriveInput, Error, Generics, Ident, LitStr, Type};
 
 #[derive(Debug, FromDeriveInput)]
@@ -34,7 +34,9 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
     };
 
     let mut projection_exprs = Vec::new();
-    let mut assignments = Vec::new();
+    let mut field_initializers = Vec::new();
+    let mut field_index_declarations = Vec::new();
+    let mut field_index_resolvers = Vec::new();
 
     for field in data_struct.fields {
         let ProjectionFieldOpts {
@@ -50,6 +52,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         let source_name = rename.clone().unwrap_or_else(|| field_name_string.clone());
         let source_name_lit = LitStr::new(&source_name, Span::call_site());
         let field_name_lit = LitStr::new(&field_name_string, Span::call_site());
+        let field_index_ident = format_ident!("__kite_projection_{field_name}_index");
         let relation_expr = if let Some(source_relation) = from {
             let relation_lit = LitStr::new(&source_relation, Span::call_site());
             quote!(#relation_lit)
@@ -74,17 +77,25 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                 scope.column_ref(#relation_expr, #source_name_lit)?
             }
         });
-        assignments.push(quote! {
-            if let Some(value) = ::kite_sql::orm::try_get::<#field_ty>(&mut tuple, schema, #field_name_lit) {
-                struct_instance.#field_name = value;
+        field_index_declarations.push(quote! {
+            let mut #field_index_ident = None;
+        });
+        field_index_resolvers.push(quote! {
+            if #field_index_ident.is_none() && __kite_orm_column_name == #field_name_lit {
+                #field_index_ident = Some(__kite_orm_index);
+                __kite_orm_found_fields += 1;
             }
+        });
+        field_initializers.push(quote! {
+            #field_name: ::kite_sql::orm::take_value_at::<#field_ty>(
+                &mut tuple,
+                #field_index_ident,
+                #field_name_lit,
+            )?
         });
     }
 
-    let mut from_generics = generics.clone();
-    from_generics.params.insert(0, parse_quote!('__kite_arena));
-    from_generics.params.insert(0, parse_quote!('__kite_schema));
-    let (from_impl_generics, _, from_where_clause) = from_generics.split_for_impl();
+    let field_count = field_index_declarations.len();
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     Ok(quote! {
@@ -105,13 +116,26 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             }
         }
 
-        impl #from_impl_generics From<(&::kite_sql::types::tuple::SchemaView<'__kite_schema, '__kite_arena>, ::kite_sql::types::tuple::Tuple)> for #struct_name #ty_generics
-        #from_where_clause
+        impl #impl_generics ::kite_sql::orm::FromQueryRow for #struct_name #ty_generics
+        #where_clause
         {
-            fn from((schema, mut tuple): (&::kite_sql::types::tuple::SchemaView<'__kite_schema, '__kite_arena>, ::kite_sql::types::tuple::Tuple)) -> Self {
-                let mut struct_instance = <Self as ::std::default::Default>::default();
-                #(#assignments)*
-                struct_instance
+            fn from_query_row(
+                schema: &::kite_sql::types::tuple::SchemaView<'_, '_>,
+                mut tuple: ::kite_sql::types::tuple::Tuple,
+            ) -> ::std::result::Result<Self, ::kite_sql::errors::DatabaseError> {
+                let mut __kite_orm_found_fields = 0usize;
+                #(#field_index_declarations)*
+                for (__kite_orm_index, __kite_orm_column) in schema.iter().enumerate() {
+                    let __kite_orm_column_name = __kite_orm_column.name();
+                    #(#field_index_resolvers)*
+                    if __kite_orm_found_fields == #field_count {
+                        break;
+                    }
+                }
+
+                Ok(Self {
+                    #(#field_initializers),*
+                })
             }
         }
     })
