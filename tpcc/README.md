@@ -31,12 +31,11 @@ Local 720-second comparison on the machine above:
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | KiteSQL LMDB | 73638 | 0.001s | 0.001s | 0.001s | 0.002s | 0.001s |
 | KiteSQL RocksDB | 39051 | 0.001s | 0.001s | 0.002s | 0.009s | 0.001s |
-| SQLite balanced | 39835 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
-| SQLite practical | 37911 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
+| SQLite balanced | 56788 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
+| SQLite practical | 44049 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
 
 - All rows are from fresh 720-second reruns with `--num-ware 1` and the default `--max-retry 5`.
 - SQLite rows use the `balanced` and `practical` profiles respectively.
-- Raw logs for this run were generated under `tpcc/results/2026-06-20_12-16-15/`.
 
 ### KiteSQL LMDB
 ```shell
@@ -189,11 +188,11 @@ Transaction Summary (elapsed 720.0s)
 +--------------+---------+------+---------+-------+
 | Transaction  | Success | Late | Failure | Total |
 +--------------+---------+------+---------+-------+
-| New-Order    |  478016 |    0 |    4738 | 482754 |
-| Payment      |  477993 |    0 |       0 | 477993 |
-| Order-Status |   47800 |    0 |       0 | 47800 |
-| Delivery     |   47799 |    0 |       0 | 47799 |
-| Stock-Level  |   47799 |    0 |       0 | 47799 |
+| New-Order    |  681461 |    0 |    6997 | 688458 |
+| Payment      |  681435 |    0 |       0 | 681435 |
+| Order-Status |   68143 |    0 |       0 | 68143 |
+| Delivery     |   68144 |    0 |       0 | 68144 |
+| Stock-Level  |   68144 |    0 |       0 | 68144 |
 +--------------+---------+------+---------+-------+
 <Constraint Check> (all must be [OK])
 [transaction percentage]
@@ -213,37 +212,34 @@ Transaction Summary (elapsed 720.0s)
 
 1.New-Order
 
-0.001, 472255
-0.002,   5697
-0.003,     64
+0.001, 681310
+0.002,    151
 
 2.Payment
 
-0.001, 477992
-0.002,      1
+0.001, 681435
 
 3.Order-Status
 
-0.001,  47800
+0.001,  68143
 
 4.Delivery
 
-0.001,  46716
-0.002,   1070
-0.003,     13
+0.001,  68121
+0.002,     23
 
 5.Stock-Level
 
-0.001,  47799
+0.001,  68144
 
 <90th Percentile RT (MaxRT)>
-   New-Order : 0.001  (0.003)
+   New-Order : 0.001  (0.001)
      Payment : 0.001  (0.001)
-Order-Status : 0.001  (0.001)
-    Delivery : 0.001  (0.003)
+Order-Status : 0.001  (0.000)
+    Delivery : 0.001  (0.001)
  Stock-Level : 0.001  (0.000)
 <TpmC>
-39835 Tpmc
+56788 Tpmc
 ```
 
 ### SQLite practical
@@ -252,11 +248,11 @@ Transaction Summary (elapsed 720.0s)
 +--------------+---------+------+---------+-------+
 | Transaction  | Success | Late | Failure | Total |
 +--------------+---------+------+---------+-------+
-| New-Order    |  454941 |    0 |    4578 | 459519 |
-| Payment      |  454917 |    0 |       0 | 454917 |
-| Order-Status |   45491 |    0 |       0 | 45491 |
-| Delivery     |   45492 |    0 |       0 | 45492 |
-| Stock-Level  |   45491 |    0 |       0 | 45491 |
+| New-Order    |  528594 |    0 |    5563 | 534157 |
+| Payment      |  528570 |    0 |       0 | 528570 |
+| Order-Status |   52857 |    0 |       0 | 52857 |
+| Delivery     |   52857 |    0 |       0 | 52857 |
+| Stock-Level  |   52857 |    0 |       0 | 52857 |
 +--------------+---------+------+---------+-------+
 <Constraint Check> (all must be [OK])
 [transaction percentage]
@@ -276,36 +272,37 @@ Transaction Summary (elapsed 720.0s)
 
 1.New-Order
 
-0.001, 452749
-0.002,   2175
-0.003,     17
+0.001, 528448
+0.002,    141
+0.003,      5
 
 2.Payment
 
-0.001, 454917
+0.001, 528567
+0.002,      3
 
 3.Order-Status
 
-0.001,  45491
+0.001,  52857
 
 4.Delivery
 
-0.001,  45045
-0.002,    442
-0.003,      5
+0.001,  52831
+0.002,     25
+0.003,      1
 
 5.Stock-Level
 
-0.001,  45491
+0.001,  52857
 
 <90th Percentile RT (MaxRT)>
-   New-Order : 0.001  (0.002)
-     Payment : 0.001  (0.001)
-Order-Status : 0.001  (0.001)
+   New-Order : 0.001  (0.003)
+     Payment : 0.001  (0.002)
+Order-Status : 0.001  (0.000)
     Delivery : 0.001  (0.003)
  Stock-Level : 0.001  (0.000)
 <TpmC>
-37911 Tpmc
+44049 Tpmc
 ```
 
 ## Refer to

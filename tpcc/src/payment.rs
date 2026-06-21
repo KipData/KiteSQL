@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::backend::{BackendTransaction, PreparedStatement};
+use crate::backend::BackendTransaction;
 use crate::load::{last_name, nu_rand, CUST_PER_DIST, DIST_PER_WARE};
 use crate::{other_ware, TpccArgs, TpccError, TpccTest, TpccTransaction, ALLOW_MULTI_WAREHOUSE_TX};
 use chrono::Utc;
@@ -65,15 +65,15 @@ impl TpccTransaction for Payment {
     type Args = PaymentArgs;
 
     #[allow(unused_variables)]
-    fn run(
-        tx: &mut dyn BackendTransaction,
+    fn run<T: BackendTransaction>(
+        tx: &mut T,
         args: &Self::Args,
-        statements: &[PreparedStatement],
+        statements: &mut [T::PreparedStatement],
     ) -> Result<(), TpccError> {
         let now = Utc::now();
         // "UPDATE warehouse SET w_ytd = w_ytd + ? WHERE w_id = ?"
         tx.execute_drain(
-            &statements[0],
+            &mut statements[0],
             &[
                 ("$1", DataValue::Decimal(args.h_amount)),
                 ("$2", DataValue::Int16(args.w_id as i16)),
@@ -87,7 +87,7 @@ impl TpccTransaction for Payment {
         let mut w_zip = String::new();
         let mut w_name = String::new();
         tx.with_query_one(
-            &statements[1],
+            &mut statements[1],
             &[("$1", DataValue::Int16(args.w_id as i16))],
             &mut |tuple| {
                 w_street_1 = tuple.values[0].utf8().unwrap().to_string();
@@ -102,7 +102,7 @@ impl TpccTransaction for Payment {
 
         // "UPDATE district SET d_ytd = d_ytd + ? WHERE d_w_id = ? AND d_id = ?"
         tx.execute_drain(
-            &statements[2],
+            &mut statements[2],
             &[
                 ("$1", DataValue::Decimal(args.h_amount)),
                 ("$2", DataValue::Int16(args.w_id as i16)),
@@ -118,7 +118,7 @@ impl TpccTransaction for Payment {
         let mut d_zip = String::new();
         let mut d_name = String::new();
         tx.with_query_one(
-            &statements[3],
+            &mut statements[3],
             &[
                 ("$1", DataValue::Int16(args.w_id as i16)),
                 ("$2", DataValue::Int8(args.d_id as i8)),
@@ -139,7 +139,7 @@ impl TpccTransaction for Payment {
             // "SELECT count(c_id) FROM customer WHERE c_w_id = ? AND c_d_id = ? AND c_last = ?"
             let mut name_cnt = 0;
             tx.with_query_one(
-                &statements[4],
+                &mut statements[4],
                 &[
                     ("$1", DataValue::Int16(args.c_w_id as i16)),
                     ("$2", DataValue::Int8(args.c_d_id as i8)),
@@ -160,7 +160,7 @@ impl TpccTransaction for Payment {
                 name_cnt += 1;
             }
             let target = name_cnt as usize / 2 - 1;
-            tx.with_query_nth(&statements[5], &params, target, &mut |tuple| {
+            tx.with_query_nth(&mut statements[5], &params, target, &mut |tuple| {
                 c_id = tuple.values[0].i32().unwrap();
                 Ok(())
             })?;
@@ -181,7 +181,7 @@ impl TpccTransaction for Payment {
         let mut c_balance = Decimal::default();
         let mut c_since = Default::default();
         tx.with_query_one(
-            &statements[6],
+            &mut statements[6],
             &[
                 ("$1", DataValue::Int16(args.c_w_id as i16)),
                 ("$2", DataValue::Int8(args.c_d_id as i8)),
@@ -212,7 +212,7 @@ impl TpccTransaction for Payment {
                 // "SELECT c_data FROM customer WHERE c_w_id = ? AND c_d_id = ? AND c_id = ?"
                 let mut c_data = String::new();
                 tx.with_query_one(
-                    &statements[7],
+                    &mut statements[7],
                     &[
                         ("$1", DataValue::Int16(args.c_w_id as i16)),
                         ("$2", DataValue::Int8(args.c_d_id as i8)),
@@ -229,7 +229,7 @@ impl TpccTransaction for Payment {
 
                 // "UPDATE customer SET c_balance = ?, c_data = ? WHERE c_w_id = ? AND c_d_id = ? AND c_id = ?"
                 tx.execute_drain(
-                    &statements[8],
+                    &mut statements[8],
                     &[
                         ("$1", DataValue::Decimal(c_balance)),
                         ("$2", DataValue::from(c_data)),
@@ -241,7 +241,7 @@ impl TpccTransaction for Payment {
             } else {
                 // "UPDATE customer SET c_balance = ? WHERE c_w_id = ? AND c_d_id = ? AND c_id = ?"
                 tx.execute_drain(
-                    &statements[9],
+                    &mut statements[9],
                     &[
                         ("$1", DataValue::Decimal(c_balance)),
                         ("$2", DataValue::Int16(args.c_w_id as i16)),
@@ -253,7 +253,7 @@ impl TpccTransaction for Payment {
         } else {
             // "UPDATE customer SET c_balance = ? WHERE c_w_id = ? AND c_d_id = ? AND c_id = ?"
             tx.execute_drain(
-                &statements[9],
+                &mut statements[9],
                 &[
                     ("$1", DataValue::Decimal(c_balance)),
                     ("$2", DataValue::Int16(args.c_w_id as i16)),
@@ -265,7 +265,7 @@ impl TpccTransaction for Payment {
         let h_data = format!("\\0{d_name}    \\0");
         // "INSERT INTO history(h_c_d_id, h_c_w_id, h_c_id, h_d_id, h_w_id, h_date, h_amount, h_data) VALUES(?, ?, ?, ?, ?, ?, ?, ?)"
         tx.execute_drain(
-            &statements[10],
+            &mut statements[10],
             &[
                 ("$1", DataValue::Int8(args.c_d_id as i8)),
                 ("$2", DataValue::Int16(args.c_w_id as i16)),
@@ -283,17 +283,13 @@ impl TpccTransaction for Payment {
 }
 
 impl TpccTest for PaymentTest {
-    fn name(&self) -> &'static str {
-        "Payment"
-    }
-
-    fn do_transaction(
+    fn do_transaction<T: BackendTransaction>(
         &self,
         rng: &mut ThreadRng,
-        tx: &mut dyn BackendTransaction,
+        tx: &mut T,
         num_ware: usize,
         _: &TpccArgs,
-        statements: &[PreparedStatement],
+        statements: &mut [T::PreparedStatement],
     ) -> Result<(), TpccError> {
         let w_id = rng.gen_range(0..num_ware) + 1;
         let d_id = rng.gen_range(1..DIST_PER_WARE);

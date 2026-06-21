@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use super::{
-    BackendControl, BackendTransaction, DbParam, PreparedStatement, SimpleExecutor, StatementSpec,
+    BackendControl, BackendTransaction, DbParam, KiteSqlPreparedStatement, SimpleExecutor,
+    StatementSpec,
 };
 use crate::TpccError;
 use kite_sql::binder::{command_type, CommandType};
@@ -56,13 +57,13 @@ impl<S: Storage> KiteSqlRocksBackend<S> {
     fn prepare_spec_groups(
         &self,
         specs: &[Vec<StatementSpec>],
-    ) -> Result<Vec<Vec<PreparedStatement>>, TpccError> {
+    ) -> Result<Vec<Vec<KiteSqlPreparedStatement>>, TpccError> {
         let mut groups = Vec::with_capacity(specs.len());
         for group in specs {
             let mut prepared = Vec::with_capacity(group.len());
             for spec in group {
                 let statement = prepare(spec.sql)?;
-                prepared.push(PreparedStatement::KiteSql {
+                prepared.push(KiteSqlPreparedStatement {
                     statement,
                     spec: spec.clone(),
                 });
@@ -80,6 +81,11 @@ impl<S: Storage> KiteSqlRocksBackend<S> {
 }
 
 impl<S: Storage> BackendControl for KiteSqlRocksBackend<S> {
+    type PreparedStatement<'a>
+        = KiteSqlPreparedStatement
+    where
+        Self: 'a;
+
     type Transaction<'a>
         = KiteSqlRocksTransaction<'a, S>
     where
@@ -88,7 +94,7 @@ impl<S: Storage> BackendControl for KiteSqlRocksBackend<S> {
     fn prepare_statements(
         &self,
         specs: &[Vec<StatementSpec>],
-    ) -> Result<Vec<Vec<PreparedStatement>>, TpccError> {
+    ) -> Result<Vec<Vec<Self::PreparedStatement<'_>>>, TpccError> {
         self.prepare_spec_groups(specs)
     }
 
@@ -164,22 +170,21 @@ pub struct KiteSqlRocksTransaction<'a, S: Storage> {
 impl<'a, S: Storage> KiteSqlRocksTransaction<'a, S> {
     pub(crate) fn execute_raw<'b>(
         &'b mut self,
-        statement: &PreparedStatement,
+        statement: &mut KiteSqlPreparedStatement,
         params: &[DbParam],
     ) -> Result<KiteSqlTxnResult<'b, S::TransactionType<'a>>, TpccError> {
-        let PreparedStatement::KiteSql { statement, .. } = statement else {
-            return Err(TpccError::InvalidBackend);
-        };
         Ok(KiteSqlTxnResult::new(
-            self.inner.execute(statement, params)?,
+            self.inner.execute(&statement.statement, params)?,
         ))
     }
 }
 
 impl<'a, S: Storage> BackendTransaction for KiteSqlRocksTransaction<'a, S> {
+    type PreparedStatement = KiteSqlPreparedStatement;
+
     fn query_one(
         &mut self,
-        statement: &PreparedStatement,
+        statement: &mut Self::PreparedStatement,
         params: &[DbParam],
     ) -> Result<Tuple, TpccError> {
         self.execute_raw(statement, params)?
@@ -190,7 +195,7 @@ impl<'a, S: Storage> BackendTransaction for KiteSqlRocksTransaction<'a, S> {
 
     fn query_nth(
         &mut self,
-        statement: &PreparedStatement,
+        statement: &mut Self::PreparedStatement,
         params: &[DbParam],
         n: usize,
     ) -> Result<Tuple, TpccError> {
@@ -207,7 +212,7 @@ impl<'a, S: Storage> BackendTransaction for KiteSqlRocksTransaction<'a, S> {
 
     fn execute_drain(
         &mut self,
-        statement: &PreparedStatement,
+        statement: &mut Self::PreparedStatement,
         params: &[DbParam],
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
@@ -217,7 +222,7 @@ impl<'a, S: Storage> BackendTransaction for KiteSqlRocksTransaction<'a, S> {
 
     fn with_query_one(
         &mut self,
-        statement: &PreparedStatement,
+        statement: &mut Self::PreparedStatement,
         params: &[DbParam],
         visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
     ) -> Result<(), TpccError> {
@@ -228,7 +233,7 @@ impl<'a, S: Storage> BackendTransaction for KiteSqlRocksTransaction<'a, S> {
 
     fn with_query_nth(
         &mut self,
-        statement: &PreparedStatement,
+        statement: &mut Self::PreparedStatement,
         params: &[DbParam],
         n: usize,
         visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,

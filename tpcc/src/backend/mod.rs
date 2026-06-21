@@ -29,14 +29,17 @@ pub trait SimpleExecutor {
 }
 
 pub trait BackendControl: SimpleExecutor {
-    type Transaction<'a>: BackendTransaction + 'a
+    type PreparedStatement<'a>: PreparedStatement + 'a
+    where
+        Self: 'a;
+    type Transaction<'a>: BackendTransaction<PreparedStatement = Self::PreparedStatement<'a>> + 'a
     where
         Self: 'a;
 
     fn prepare_statements(
         &self,
         specs: &[Vec<StatementSpec>],
-    ) -> Result<Vec<Vec<PreparedStatement>>, TpccError>;
+    ) -> Result<Vec<Vec<Self::PreparedStatement<'_>>>, TpccError>;
 
     fn new_transaction(&self) -> Result<Self::Transaction<'_>, TpccError>;
 
@@ -46,28 +49,30 @@ pub trait BackendControl: SimpleExecutor {
 }
 
 pub trait BackendTransaction {
+    type PreparedStatement: PreparedStatement;
+
     fn query_one(
         &mut self,
-        statement: &PreparedStatement,
+        statement: &mut Self::PreparedStatement,
         params: &[DbParam],
     ) -> Result<Tuple, TpccError>;
 
     fn query_nth(
         &mut self,
-        statement: &PreparedStatement,
+        statement: &mut Self::PreparedStatement,
         params: &[DbParam],
         n: usize,
     ) -> Result<Tuple, TpccError>;
 
     fn execute_drain(
         &mut self,
-        statement: &PreparedStatement,
+        statement: &mut Self::PreparedStatement,
         params: &[DbParam],
     ) -> Result<(), TpccError>;
 
     fn with_query_one(
         &mut self,
-        statement: &PreparedStatement,
+        statement: &mut Self::PreparedStatement,
         params: &[DbParam],
         visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
     ) -> Result<(), TpccError> {
@@ -77,7 +82,7 @@ pub trait BackendTransaction {
 
     fn with_query_nth(
         &mut self,
-        statement: &PreparedStatement,
+        statement: &mut Self::PreparedStatement,
         params: &[DbParam],
         n: usize,
         visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
@@ -108,21 +113,17 @@ pub struct StatementSpec {
 }
 
 #[derive(Clone)]
-pub enum PreparedStatement {
-    KiteSql {
-        statement: Statement,
-        spec: StatementSpec,
-    },
-    Sqlite {
-        spec: StatementSpec,
-    },
+pub struct KiteSqlPreparedStatement {
+    pub statement: Statement,
+    pub spec: StatementSpec,
 }
 
-impl PreparedStatement {
-    pub fn spec(&self) -> &StatementSpec {
-        match self {
-            PreparedStatement::KiteSql { spec, .. } => spec,
-            PreparedStatement::Sqlite { spec } => spec,
-        }
+pub trait PreparedStatement {
+    fn spec(&self) -> &StatementSpec;
+}
+
+impl PreparedStatement for KiteSqlPreparedStatement {
+    fn spec(&self) -> &StatementSpec {
+        &self.spec
     }
 }

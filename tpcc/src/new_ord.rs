@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::backend::{BackendTransaction, PreparedStatement};
+use crate::backend::BackendTransaction;
 use crate::load::{nu_rand, CUST_PER_DIST, DIST_PER_WARE, MAX_ITEMS, MAX_NUM_ITEMS};
 use crate::{other_ware, TpccArgs, TpccError, TpccTest, TpccTransaction, ALLOW_MULTI_WAREHOUSE_TX};
 use chrono::Utc;
@@ -67,10 +67,10 @@ pub(crate) struct NewOrdTest;
 impl TpccTransaction for NewOrd {
     type Args = NewOrdArgs;
 
-    fn run(
-        tx: &mut dyn BackendTransaction,
+    fn run<T: BackendTransaction>(
+        tx: &mut T,
         args: &Self::Args,
-        statements: &[PreparedStatement],
+        statements: &mut [T::PreparedStatement],
     ) -> Result<(), TpccError> {
         let mut price = vec![Decimal::default(); MAX_NUM_ITEMS];
         let mut iname = vec![String::new(); MAX_NUM_ITEMS];
@@ -86,7 +86,7 @@ impl TpccTransaction for NewOrd {
             let mut c_credit = String::new();
             let mut w_tax = Decimal::default();
             tx.with_query_one(
-                &statements[0],
+                &mut statements[0],
                 &[
                     ("$1", DataValue::Int16(args.w_id as i16)),
                     ("$2", DataValue::Int16(args.w_id as i16)),
@@ -109,7 +109,7 @@ impl TpccTransaction for NewOrd {
             let mut c_last = String::new();
             let mut c_credit = String::new();
             tx.with_query_one(
-                &statements[1],
+                &mut statements[1],
                 &[
                     ("$1", DataValue::Int16(args.w_id as i16)),
                     ("$2", DataValue::Int8(args.d_id as i8)),
@@ -125,7 +125,7 @@ impl TpccTransaction for NewOrd {
             // "SELECT w_tax FROM warehouse WHERE w_id = ?"
             let mut w_tax = Decimal::default();
             tx.with_query_one(
-                &statements[2],
+                &mut statements[2],
                 &[("$1", DataValue::Int16(args.w_id as i16))],
                 &mut |tuple| {
                     w_tax = tuple.values[0].decimal().unwrap();
@@ -139,7 +139,7 @@ impl TpccTransaction for NewOrd {
         let mut d_next_o_id = 0;
         let mut d_tax = Decimal::default();
         tx.with_query_one(
-            &statements[3],
+            &mut statements[3],
             &[
                 ("$1", DataValue::Int8(args.d_id as i8)),
                 ("$2", DataValue::Int16(args.w_id as i16)),
@@ -152,7 +152,7 @@ impl TpccTransaction for NewOrd {
         )?;
         // "UPDATE district SET d_next_o_id = ? + 1 WHERE d_id = ? AND d_w_id = ?"
         tx.execute_drain(
-            &statements[4],
+            &mut statements[4],
             &[
                 ("$1", DataValue::Int32(d_next_o_id)),
                 ("$2", DataValue::Int8(args.d_id as i8)),
@@ -162,7 +162,7 @@ impl TpccTransaction for NewOrd {
         let o_id = d_next_o_id;
         // "INSERT INTO orders (o_id, o_d_id, o_w_id, o_c_id, o_entry_d, o_ol_cnt, o_all_local) VALUES(?, ?, ?, ?, ?, ?, ?)"
         tx.execute_drain(
-            &statements[5],
+            &mut statements[5],
             &[
                 ("$1", DataValue::Int32(o_id)),
                 ("$2", DataValue::Int8(args.d_id as i8)),
@@ -175,7 +175,7 @@ impl TpccTransaction for NewOrd {
         )?;
         // "INSERT INTO new_orders (no_o_id, no_d_id, no_w_id) VALUES (?,?,?)"
         tx.execute_drain(
-            &statements[6],
+            &mut statements[6],
             &[
                 ("$1", DataValue::Int32(o_id)),
                 ("$2", DataValue::Int8(args.d_id as i8)),
@@ -214,7 +214,7 @@ impl TpccTransaction for NewOrd {
             let mut i_price = Decimal::default();
             let mut i_name = String::new();
             let mut i_data = String::new();
-            tx.with_query_one(&statements[7], &params, &mut |tuple| {
+            tx.with_query_one(&mut statements[7], &params, &mut |tuple| {
                 i_price = tuple.values[0].decimal().unwrap();
                 i_name = tuple.values[1].utf8().unwrap().to_string();
                 i_data = tuple.values[2].utf8().unwrap().to_string();
@@ -241,7 +241,7 @@ impl TpccTransaction for NewOrd {
             let mut s_dist_08 = String::new();
             let mut s_dist_09 = String::new();
             let mut s_dist_10 = String::new();
-            tx.with_query_one(&statements[8], &params, &mut |tuple| {
+            tx.with_query_one(&mut statements[8], &params, &mut |tuple| {
                 s_quantity = tuple.values[0].i16().unwrap();
                 s_data = tuple.values[1].utf8().unwrap().to_string();
                 s_dist_01 = tuple.values[2].utf8().unwrap().to_string();
@@ -280,7 +280,7 @@ impl TpccTransaction for NewOrd {
                 ("$2", DataValue::Int32(ol_i_id as i32)),
                 ("$3", DataValue::Int16(ol_supply_w_id as i16)),
             ];
-            tx.execute_drain(&statements[9], &params)?;
+            tx.execute_drain(&mut statements[9], &params)?;
 
             // Tips: Integers always have 7 digits, so divide by 10 here
             let mut ol_amount = Decimal::from(ol_quantity)
@@ -304,7 +304,7 @@ impl TpccTransaction for NewOrd {
                 ("$8", DataValue::Decimal(ol_amount.round_dp(2))),
                 ("$9", DataValue::from(ol_dist_info)),
             ];
-            tx.execute_drain(&statements[10], &params)?;
+            tx.execute_drain(&mut statements[10], &params)?;
         }
 
         Ok(())
@@ -312,17 +312,13 @@ impl TpccTransaction for NewOrd {
 }
 
 impl TpccTest for NewOrdTest {
-    fn name(&self) -> &'static str {
-        "New-Order"
-    }
-
-    fn do_transaction(
+    fn do_transaction<T: BackendTransaction>(
         &self,
         rng: &mut ThreadRng,
-        tx: &mut dyn BackendTransaction,
+        tx: &mut T,
         num_ware: usize,
         args: &TpccArgs,
-        statements: &[PreparedStatement],
+        statements: &mut [T::PreparedStatement],
     ) -> Result<(), TpccError> {
         let mut all_local = 1;
         let notfound = MAX_ITEMS + 1;

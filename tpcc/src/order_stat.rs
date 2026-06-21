@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::backend::{BackendTransaction, PreparedStatement};
+use crate::backend::BackendTransaction;
 use crate::load::{last_name, nu_rand, CUST_PER_DIST, DIST_PER_WARE};
 use crate::{TpccArgs, TpccError, TpccTest, TpccTransaction};
 use kite_sql::types::value::DataValue;
@@ -52,16 +52,16 @@ pub(crate) struct OrderStatTest;
 impl TpccTransaction for OrderStat {
     type Args = OrderStatArgs;
 
-    fn run(
-        tx: &mut dyn BackendTransaction,
+    fn run<T: BackendTransaction>(
+        tx: &mut T,
         args: &Self::Args,
-        statements: &[PreparedStatement],
+        statements: &mut [T::PreparedStatement],
     ) -> Result<(), TpccError> {
         let (_c_balance, _c_first, _c_middle, _c_last) = if args.by_name {
             // "SELECT count(c_id) FROM customer WHERE c_w_id = ? AND c_d_id = ? AND c_last = ?"
             let mut name_cnt = 0usize;
             tx.with_query_one(
-                &statements[0],
+                &mut statements[0],
                 &[
                     ("$1", DataValue::Int16(args.w_id as i16)),
                     ("$2", DataValue::Int8(args.d_id as i8)),
@@ -86,7 +86,7 @@ impl TpccTransaction for OrderStat {
             let mut c_first = String::new();
             let mut c_middle = String::new();
             let mut c_last = String::new();
-            tx.with_query_nth(&statements[1], &params, target, &mut |tuple| {
+            tx.with_query_nth(&mut statements[1], &params, target, &mut |tuple| {
                 c_balance = tuple.values[0].decimal().unwrap();
                 c_first = tuple.values[1].utf8().unwrap().to_string();
                 c_middle = tuple.values[2].utf8().unwrap().to_string();
@@ -101,7 +101,7 @@ impl TpccTransaction for OrderStat {
             let mut c_middle = String::new();
             let mut c_last = String::new();
             tx.with_query_one(
-                &statements[2],
+                &mut statements[2],
                 &[
                     ("$1", DataValue::Int16(args.w_id as i16)),
                     ("$2", DataValue::Int8(args.d_id as i8)),
@@ -127,7 +127,7 @@ impl TpccTransaction for OrderStat {
             ("$6", DataValue::Int32(args.c_id as i32)),
         ];
         let mut o_id = 0;
-        tx.with_query_one(&statements[3], &params, &mut |tuple| {
+        tx.with_query_one(&mut statements[3], &params, &mut |tuple| {
             o_id = tuple.values[0].i32().unwrap();
             Ok(())
         })?;
@@ -137,7 +137,7 @@ impl TpccTransaction for OrderStat {
             ("$2", DataValue::Int8(args.d_id as i8)),
             ("$3", DataValue::Int32(o_id)),
         ];
-        tx.with_query_one(&statements[4], &params, &mut |_| Ok(()))?;
+        tx.with_query_one(&mut statements[4], &params, &mut |_| Ok(()))?;
         // let ol_i_id = tuple.values[0].i32();
         // let ol_supply_w_id = tuple.values[1].i16();
         // let ol_quantity = tuple.values[2].i8();
@@ -149,17 +149,13 @@ impl TpccTransaction for OrderStat {
 }
 
 impl TpccTest for OrderStatTest {
-    fn name(&self) -> &'static str {
-        "Order-Status"
-    }
-
-    fn do_transaction(
+    fn do_transaction<T: BackendTransaction>(
         &self,
         rng: &mut ThreadRng,
-        tx: &mut dyn BackendTransaction,
+        tx: &mut T,
         num_ware: usize,
         _: &TpccArgs,
-        statements: &[PreparedStatement],
+        statements: &mut [T::PreparedStatement],
     ) -> Result<(), TpccError> {
         let w_id = rng.gen_range(0..num_ware) + 1;
         let d_id = rng.gen_range(1..DIST_PER_WARE);
