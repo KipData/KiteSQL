@@ -190,7 +190,7 @@ mod tests {
             &transaction,
         );
 
-        let tuple = executor.next().expect("executor should yield once")?;
+        let tuple = executor.next_tuple()?.expect("executor should yield once");
 
         let mut rdr = csv::Reader::from_path(file_path)?;
         let headers = rdr.headers()?.clone();

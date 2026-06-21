@@ -38,8 +38,11 @@
 #[macro_export]
 macro_rules! from_tuple {
     ($struct_name:ident, ($($field_name:ident : $field_type:ty => $closure:expr),+)) => {
-        impl<'__kite_schema, '__kite_arena> From<(&::kite_sql::types::tuple::SchemaView<'__kite_schema, '__kite_arena>, ::kite_sql::types::tuple::Tuple)> for $struct_name {
-            fn from((schema, mut tuple): (&::kite_sql::types::tuple::SchemaView<'__kite_schema, '__kite_arena>, ::kite_sql::types::tuple::Tuple)) -> Self {
+        impl ::kite_sql::orm::FromQueryRow for $struct_name {
+            fn from_query_row(
+                schema: &::kite_sql::types::tuple::SchemaView<'_, '_>,
+                tuple: &mut ::kite_sql::types::tuple::Tuple,
+            ) -> ::std::result::Result<Self, ::kite_sql::errors::DatabaseError> {
                 fn try_get<T: 'static>(tuple: &mut ::kite_sql::types::tuple::Tuple, schema: &::kite_sql::types::tuple::SchemaView<'_, '_>, field_name: &str) -> Option<::kite_sql::types::value::DataValue> {
                     let ty = ::kite_sql::types::LogicalType::type_trans::<T>()?;
                     let idx = schema.position(field_name)?;
@@ -49,14 +52,14 @@ macro_rules! from_tuple {
 
                 let mut struct_instance = $struct_name::default();
                 $(
-                    if let Some(value) = try_get::<$field_type>(&mut tuple, schema, stringify!($field_name)) {
+                    if let Some(value) = try_get::<$field_type>(tuple, schema, stringify!($field_name)) {
                         $closure(
                             &mut struct_instance,
                             value
                         );
                     }
                 )+
-                struct_instance
+                Ok(struct_instance)
             }
         }
     };

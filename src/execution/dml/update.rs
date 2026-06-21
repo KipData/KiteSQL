@@ -26,7 +26,7 @@ use crate::storage::Transaction;
 use crate::types::index::Index;
 use crate::types::tuple::{Schema, Tuple};
 use crate::types::tuple_builder::TupleBuilder;
-use std::collections::HashMap;
+use std::{collections::HashMap, mem};
 
 pub struct Update {
     table_name: TableName,
@@ -113,15 +113,14 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update {
             let mut updated_count = 0;
 
             while arena.next_tuple(input, plan_arena)? {
-                let mut tuple = arena.result_tuple().clone();
                 let mut is_overwrite = true;
 
-                let Some(old_pk) = tuple.pk.clone() else {
+                let Some(old_pk) = arena.result_tuple().pk.clone() else {
                     continue;
                 };
                 for (index_meta, exprs) in table_snapshot.index_metas.iter() {
                     let index_meta = plan_arena.index(*index_meta);
-                    with_projection_tmp_value(arena, Some(&tuple), exprs, |arena, value| {
+                    with_projection_tmp_value(arena, None, exprs, |arena, value| {
                         let mut state = arena.local_state(plan_arena);
                         let (transaction, table_codec) = state.transaction_codec_mut();
                         let index = Index::new(index_meta.id, &value, index_meta.ty);
@@ -130,18 +129,18 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update {
                 }
                 for (i, column) in self.input_schema.iter().enumerate() {
                     if let Some(expr) = exprs_map.get(&plan_arena.column(*column).id()) {
-                        let value = expr.eval(Some(&tuple))?;
-                        tuple.values[i] = value;
+                        let value = expr.eval(Some(arena.result_tuple()))?;
+                        arena.result_tuple_mut().values[i] = value;
                     }
                 }
 
-                tuple.pk = Some(Tuple::primary_projection(
+                let new_pk = Tuple::primary_projection(
                     table_snapshot.primary_key_indices,
-                    &tuple.values,
-                ));
-                let new_pk = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
+                    &arena.result_tuple().values,
+                );
+                arena.result_tuple_mut().pk = Some(new_pk.clone());
 
-                if new_pk != &old_pk {
+                if new_pk != old_pk {
                     let mut state = arena.local_state(plan_arena);
                     let (transaction, table_codec) = state.transaction_codec_mut();
                     transaction.remove_tuple(table_codec, &self.table_name, &old_pk)?;
@@ -149,20 +148,21 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update {
                 }
                 for (index_meta, exprs) in table_snapshot.index_metas.iter() {
                     let index_meta = plan_arena.index(*index_meta);
-                    with_projection_tmp_value(arena, Some(&tuple), exprs, |arena, value| {
+                    with_projection_tmp_value(arena, None, exprs, |arena, value| {
                         let mut state = arena.local_state(plan_arena);
                         let (transaction, table_codec) = state.transaction_codec_mut();
                         let index = Index::new(index_meta.id, &value, index_meta.ty);
-                        transaction.add_index(table_codec, &self.table_name, index, new_pk)
+                        transaction.add_index(table_codec, &self.table_name, index, &new_pk)
                     })?;
                 }
 
+                let tuple = mem::take(arena.result_tuple_mut());
                 let mut state = arena.local_state(plan_arena);
                 let (transaction, table_codec) = state.transaction_codec_mut();
                 transaction.append_tuple(
                     table_codec,
                     &self.table_name,
-                    tuple,
+                    &tuple,
                     &serializers,
                     is_overwrite,
                 )?;

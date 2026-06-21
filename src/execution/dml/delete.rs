@@ -93,26 +93,27 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Delete {
         let mut deleted_count = 0;
 
         while arena.next_tuple(input, plan_arena)? {
-            let tuple = arena.result_tuple().clone();
-            if let Some(tuple_id) = &tuple.pk {
-                for (index_id, index_ty, exprs) in index_templates.iter() {
-                    with_projection_tmp_value(arena, Some(&tuple), exprs, |arena, value| {
-                        let mut state = arena.local_state(plan_arena);
-                        let (transaction, table_codec) = state.transaction_codec_mut();
-                        transaction.del_index(
-                            table_codec,
-                            &self.table_name,
-                            &Index::new(*index_id, &value, *index_ty),
-                            tuple_id,
-                        )
-                    })?;
-                }
+            let Some(tuple_id) = arena.result_tuple().pk.clone() else {
+                continue;
+            };
 
-                let mut state = arena.local_state(plan_arena);
-                let (transaction, table_codec) = state.transaction_codec_mut();
-                transaction.remove_tuple(table_codec, &self.table_name, tuple_id)?;
-                deleted_count += 1;
+            for (index_id, index_ty, exprs) in index_templates.iter() {
+                with_projection_tmp_value(arena, None, exprs, |arena, value| {
+                    let mut state = arena.local_state(plan_arena);
+                    let (transaction, table_codec) = state.transaction_codec_mut();
+                    transaction.del_index(
+                        table_codec,
+                        &self.table_name,
+                        &Index::new(*index_id, &value, *index_ty),
+                        &tuple_id,
+                    )
+                })?;
             }
+
+            let mut state = arena.local_state(plan_arena);
+            let (transaction, table_codec) = state.transaction_codec_mut();
+            transaction.remove_tuple(table_codec, &self.table_name, &tuple_id)?;
+            deleted_count += 1;
         }
 
         TupleBuilder::build_result_into(arena.result_tuple_mut(), deleted_count.to_string());

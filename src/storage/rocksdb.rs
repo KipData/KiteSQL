@@ -877,7 +877,7 @@ mod test {
         transaction.append_tuple(
             &mut table_codec,
             "test",
-            Tuple::new(
+            &Tuple::new(
                 Some(DataValue::Int32(1)),
                 vec![DataValue::Int32(1), DataValue::Boolean(true)],
             ),
@@ -890,7 +890,7 @@ mod test {
         transaction.append_tuple(
             &mut table_codec,
             "test",
-            Tuple::new(
+            &Tuple::new(
                 Some(DataValue::Int32(2)),
                 vec![DataValue::Int32(2), DataValue::Boolean(true)],
             ),

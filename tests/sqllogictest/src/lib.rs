@@ -72,14 +72,14 @@ fn collect_output(
     let types = vec![DefaultColumnType::Any; iter.schema(|schema| schema.len())];
     let mut rows = Vec::new();
 
-    while let Some(tuple) = iter.next_borrowed_tuple()? {
-        rows.push(
-            tuple
-                .values
-                .iter()
-                .map(|value| format!("{}", value))
-                .collect(),
-        );
+    while let Some(row) = iter.next_tuple(|_, tuple| {
+        tuple
+            .values
+            .iter()
+            .map(|value| format!("{}", value))
+            .collect()
+    })? {
+        rows.push(row);
     }
     iter.done()?;
     if rows.is_empty() {

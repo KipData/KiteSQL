@@ -15,6 +15,8 @@
 //! Defines the nested loop join executor, it supports [`JoinType::Inner`], [`JoinType::LeftOuter`],
 //! [`JoinType::RightOuter`], [`JoinType::Cross`], [`JoinType::Full`].
 
+use std::mem;
+
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::RowBitmap;
 use crate::execution::{
@@ -187,7 +189,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
                         arena.finish();
                         return Ok(());
                     }
-                    let left_tuple = arena.result_tuple().clone();
+                    let left_tuple = mem::take(arena.result_tuple_mut());
 
                     state = NestedLoopJoinState::ScanRight {
                         active_left: ActiveLeftState {
@@ -205,7 +207,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
                     mut right_bitmap,
                 } => {
                     while arena.next_tuple(active_left.right_input, plan_arena)? {
-                        let right_tuple = arena.result_tuple().clone();
+                        let right_tuple = mem::take(arena.result_tuple_mut());
                         let idx = active_left.right_index;
                         active_left.right_index += 1;
 
@@ -334,7 +336,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
                     mut right_emit_index,
                 } => {
                     while arena.next_tuple(right_input, plan_arena)? {
-                        let mut right_tuple = arena.result_tuple().clone();
+                        let mut right_tuple = mem::take(arena.result_tuple_mut());
                         let idx = right_emit_index;
                         right_emit_index += 1;
 
@@ -1211,9 +1213,8 @@ mod test {
         )?;
         let mut actual = Vec::new();
 
-        for row in iter.by_ref() {
-            let tuple = row?;
-            actual.push(tuple_to_strings(&tuple));
+        while let Some(row) = iter.next_tuple(|_, tuple| tuple_to_strings(tuple))? {
+            actual.push(row);
         }
         iter.done()?;
 

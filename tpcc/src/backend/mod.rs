@@ -51,19 +51,6 @@ pub trait BackendControl: SimpleExecutor {
 pub trait BackendTransaction {
     type PreparedStatement: PreparedStatement;
 
-    fn query_one(
-        &mut self,
-        statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
-    ) -> Result<Tuple, TpccError>;
-
-    fn query_nth(
-        &mut self,
-        statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
-        n: usize,
-    ) -> Result<Tuple, TpccError>;
-
     fn execute_drain(
         &mut self,
         statement: &mut Self::PreparedStatement,
@@ -75,10 +62,7 @@ pub trait BackendTransaction {
         statement: &mut Self::PreparedStatement,
         params: &[DbParam],
         visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
-    ) -> Result<(), TpccError> {
-        let tuple = self.query_one(statement, params)?;
-        visitor(&tuple)
-    }
+    ) -> Result<(), TpccError>;
 
     fn with_query_nth(
         &mut self,
@@ -86,10 +70,7 @@ pub trait BackendTransaction {
         params: &[DbParam],
         n: usize,
         visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
-    ) -> Result<(), TpccError> {
-        let tuple = self.query_nth(statement, params, n)?;
-        visitor(&tuple)
-    }
+    ) -> Result<(), TpccError>;
 
     fn commit(self) -> Result<(), TpccError>;
 }

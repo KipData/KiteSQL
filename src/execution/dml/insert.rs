@@ -131,18 +131,17 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert {
                 .iter()
                 .map(|column| plan_arena.column(*column).datatype().serializable())
                 .collect_vec();
+            let mut tuple = Tuple::new(None, Vec::with_capacity(table_snapshot.columns_len));
             let mut inserted_count = 0;
 
             while arena.next_tuple(input, plan_arena)? {
-                let values = arena.result_tuple().values.clone();
-
-                let mut tuple_map = HashMap::new();
-                for (i, value) in values.into_iter().enumerate() {
+                let mut tuple_map = HashMap::with_capacity(self.input_schema.len());
+                for (i, value) in arena.result_tuple_mut().values.drain(..).enumerate() {
                     let column = plan_arena.column(self.input_schema[i]);
                     tuple_map.insert(Self::column_key(column, self.is_mapping_by_name), value);
                 }
-                let mut values = Vec::with_capacity(table_snapshot.columns_len);
 
+                tuple.values.clear();
                 for column in table_snapshot.columns.iter() {
                     let column = plan_arena.column(*column);
                     let mut value = {
@@ -159,10 +158,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert {
                     if value.is_null() && !column.nullable() {
                         return Err(DatabaseError::not_null_column(column.name().to_string()));
                     }
-                    values.push(value)
+                    tuple.values.push(value)
                 }
-                let pk = Tuple::primary_projection(table_snapshot.primary_key_indices, &values);
-                let tuple = Tuple::new(Some(pk), values);
+                tuple.pk = Some(Tuple::primary_projection(
+                    table_snapshot.primary_key_indices,
+                    &tuple.values,
+                ));
 
                 for (index_meta, exprs) in table_snapshot.index_metas.iter() {
                     let index_meta = plan_arena.index(*index_meta);
@@ -179,7 +180,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert {
                 transaction.append_tuple(
                     table_codec,
                     &self.table_name,
-                    tuple,
+                    &tuple,
                     &serializers,
                     self.is_overwrite,
                 )?;

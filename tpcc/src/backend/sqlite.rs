@@ -148,35 +148,6 @@ impl Drop for SqliteTransaction<'_> {
 impl<'a> BackendTransaction for SqliteTransaction<'a> {
     type PreparedStatement = SqlitePreparedStatement<'a>;
 
-    fn query_one(
-        &mut self,
-        statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
-    ) -> Result<Tuple, TpccError> {
-        match self.execute_raw(statement, params)?.next() {
-            Some(row) => row,
-            None => Err(TpccError::EmptyTuples),
-        }
-    }
-
-    fn query_nth(
-        &mut self,
-        statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
-        n: usize,
-    ) -> Result<Tuple, TpccError> {
-        let mut iter = self.execute_raw(statement, params)?;
-        for _ in 0..n {
-            if iter.next().transpose()?.is_none() {
-                return Err(TpccError::EmptyTuples);
-            }
-        }
-        match iter.next() {
-            Some(row) => row,
-            None => Err(TpccError::EmptyTuples),
-        }
-    }
-
     fn execute_drain(
         &mut self,
         statement: &mut Self::PreparedStatement,
@@ -187,6 +158,34 @@ impl<'a> BackendTransaction for SqliteTransaction<'a> {
             row?;
         }
         Ok(())
+    }
+
+    fn with_query_one(
+        &mut self,
+        statement: &mut Self::PreparedStatement,
+        params: &[DbParam],
+        visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+    ) -> Result<(), TpccError> {
+        let mut iter = self.execute_raw(statement, params)?;
+        let tuple = iter.next().transpose()?.ok_or(TpccError::EmptyTuples)?;
+        visitor(&tuple)
+    }
+
+    fn with_query_nth(
+        &mut self,
+        statement: &mut Self::PreparedStatement,
+        params: &[DbParam],
+        n: usize,
+        visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+    ) -> Result<(), TpccError> {
+        let mut iter = self.execute_raw(statement, params)?;
+        for _ in 0..n {
+            if iter.next().transpose()?.is_none() {
+                return Err(TpccError::EmptyTuples);
+            }
+        }
+        let tuple = iter.next().transpose()?.ok_or(TpccError::EmptyTuples)?;
+        visitor(&tuple)
     }
 
     fn commit(mut self) -> Result<(), TpccError> {

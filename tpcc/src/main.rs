@@ -810,6 +810,7 @@ impl_from_tpcc_error!(std::io::Error, Io);
 #[test]
 fn explain_tpcc() -> Result<(), DatabaseError> {
     use kite_sql::db::{DataBaseBuilder, ResultIter};
+    use kite_sql::types::tuple::Tuple;
 
     fn create_table<I: ResultIter>(mut iter: I) -> Result<String, DatabaseError> {
         let mut output = iter.schema(|schema| {
@@ -822,8 +823,7 @@ fn explain_tpcc() -> Result<(), DatabaseError> {
         if !output.is_empty() {
             output.push('\n');
         }
-        for tuple in iter.by_ref() {
-            let tuple = tuple?;
+        while let Some(()) = iter.next_tuple(|_, tuple| {
             output.push_str(
                 &tuple
                     .values
@@ -833,71 +833,94 @@ fn explain_tpcc() -> Result<(), DatabaseError> {
                     .join("\t"),
             );
             output.push('\n');
-        }
+        })? {}
         iter.done()?;
         Ok(output)
+    }
+
+    fn with_next_tuple<I: ResultIter, R>(
+        mut iter: I,
+        f: impl FnOnce(&Tuple) -> R,
+    ) -> Result<R, DatabaseError> {
+        let value = iter
+            .next_tuple(|_, tuple| f(tuple))?
+            .expect("expected one tuple");
+        iter.done()?;
+        Ok(value)
     }
 
     let database = DataBaseBuilder::path(tpcc_db_path()).build_lmdb()?;
     let mut tx = database.new_transaction()?;
 
-    let customer_tuple = tx
-        .run("SELECT c_w_id, c_d_id, c_id, c_last, c_balance, c_data FROM customer limit 1")?
-        .next()
-        .unwrap()?;
-    let district_tuple = tx
-        .run("SELECT d_id, d_w_id, d_next_o_id FROM district limit 1")?
-        .next()
-        .unwrap()?;
-    let item_tuple = tx.run("SELECT i_id FROM item limit 1")?.next().unwrap()?;
-    let stock_tuple = tx
-        .run("SELECT s_i_id, s_w_id, s_quantity FROM stock limit 1")?
-        .next()
-        .unwrap()?;
-    let orders_tuple = tx
-        .run("SELECT o_w_id, o_d_id, o_c_id, o_id, o_carrier_id FROM orders limit 1")?
-        .next()
-        .unwrap()?;
-    let order_line_tuple = tx
-        .run("SELECT ol_w_id, ol_d_id, ol_o_id, ol_delivery_d FROM order_line limit 1")?
-        .next()
-        .unwrap()?;
-    let new_order_tuple = tx
-        .run("SELECT no_d_id, no_w_id, no_o_id FROM new_orders limit 1")?
-        .next()
-        .unwrap()?;
-
-    let c_w_id = customer_tuple.values[0].clone();
-    let c_d_id = customer_tuple.values[1].clone();
-    let c_id = customer_tuple.values[2].clone();
-    let c_last = customer_tuple.values[3].clone();
-    let c_balance = customer_tuple.values[4].clone();
-    let c_data = customer_tuple.values[5].clone();
-
-    let d_id = district_tuple.values[0].clone();
-    let d_w_id = district_tuple.values[1].clone();
-    let d_next_o_id = district_tuple.values[2].clone();
-
-    let i_id = item_tuple.values[0].clone();
-
-    let s_i_id = stock_tuple.values[0].clone();
-    let s_w_id = stock_tuple.values[1].clone();
-    let s_quantity = stock_tuple.values[2].clone();
-
-    let o_w_id = orders_tuple.values[0].clone();
-    let o_d_id = orders_tuple.values[1].clone();
-    let o_c_id = orders_tuple.values[2].clone();
-    let o_id = orders_tuple.values[3].clone();
-    let o_carrier_id = orders_tuple.values[4].clone();
-
-    let ol_w_id = order_line_tuple.values[0].clone();
-    let ol_d_id = order_line_tuple.values[1].clone();
-    let ol_o_id = order_line_tuple.values[2].clone();
-    let ol_delivery_d = order_line_tuple.values[3].clone();
-
-    let no_d_id = new_order_tuple.values[0].clone();
-    let no_w_id = new_order_tuple.values[1].clone();
-    let no_o_id = new_order_tuple.values[2].clone();
+    let (c_w_id, c_d_id, c_id, c_last, c_balance, c_data) = with_next_tuple(
+        tx.run("SELECT c_w_id, c_d_id, c_id, c_last, c_balance, c_data FROM customer limit 1")?,
+        |tuple| {
+            (
+                tuple.values[0].clone(),
+                tuple.values[1].clone(),
+                tuple.values[2].clone(),
+                tuple.values[3].clone(),
+                tuple.values[4].clone(),
+                tuple.values[5].clone(),
+            )
+        },
+    )?;
+    let (d_id, d_w_id, d_next_o_id) = with_next_tuple(
+        tx.run("SELECT d_id, d_w_id, d_next_o_id FROM district limit 1")?,
+        |tuple| {
+            (
+                tuple.values[0].clone(),
+                tuple.values[1].clone(),
+                tuple.values[2].clone(),
+            )
+        },
+    )?;
+    let i_id = with_next_tuple(tx.run("SELECT i_id FROM item limit 1")?, |tuple| {
+        tuple.values[0].clone()
+    })?;
+    let (s_i_id, s_w_id, s_quantity) = with_next_tuple(
+        tx.run("SELECT s_i_id, s_w_id, s_quantity FROM stock limit 1")?,
+        |tuple| {
+            (
+                tuple.values[0].clone(),
+                tuple.values[1].clone(),
+                tuple.values[2].clone(),
+            )
+        },
+    )?;
+    let (o_w_id, o_d_id, o_c_id, o_id, o_carrier_id) = with_next_tuple(
+        tx.run("SELECT o_w_id, o_d_id, o_c_id, o_id, o_carrier_id FROM orders limit 1")?,
+        |tuple| {
+            (
+                tuple.values[0].clone(),
+                tuple.values[1].clone(),
+                tuple.values[2].clone(),
+                tuple.values[3].clone(),
+                tuple.values[4].clone(),
+            )
+        },
+    )?;
+    let (ol_w_id, ol_d_id, ol_o_id, ol_delivery_d) = with_next_tuple(
+        tx.run("SELECT ol_w_id, ol_d_id, ol_o_id, ol_delivery_d FROM order_line limit 1")?,
+        |tuple| {
+            (
+                tuple.values[0].clone(),
+                tuple.values[1].clone(),
+                tuple.values[2].clone(),
+                tuple.values[3].clone(),
+            )
+        },
+    )?;
+    let (no_d_id, no_w_id, no_o_id) = with_next_tuple(
+        tx.run("SELECT no_d_id, no_w_id, no_o_id FROM new_orders limit 1")?,
+        |tuple| {
+            (
+                tuple.values[0].clone(),
+                tuple.values[1].clone(),
+                tuple.values[2].clone(),
+            )
+        },
+    )?;
     // ORDER
     {
         println!("========Explain on Order");

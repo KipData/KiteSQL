@@ -170,7 +170,7 @@ impl WasmDatabase {
 
     pub fn execute(&self, sql: &str) -> Result<(), JsValue> {
         let mut iter = self.inner.run(sql).map_err(to_js_err)?;
-        while iter.next_borrowed_tuple().map_err(to_js_err)?.is_some() {}
+        while iter.next_tuple(|_, _| ()).map_err(to_js_err)?.is_some() {}
         Ok(())
     }
 
@@ -192,8 +192,11 @@ impl WasmResultIter {
             .inner
             .as_mut()
             .ok_or_else(|| to_js_err("iterator already consumed"))?;
-        match iter.next_borrowed_tuple().map_err(to_js_err)? {
-            Some(tuple) => tuple_to_wasm_row(tuple),
+        match iter
+            .next_tuple(|_, tuple| tuple_to_wasm_row(tuple))
+            .map_err(to_js_err)?
+        {
+            Some(row) => row,
             None => Ok(JsValue::undefined()),
         }
     }
@@ -230,8 +233,11 @@ impl WasmResultIter {
             .take()
             .ok_or_else(|| to_js_err("iterator already consumed"))?;
         let rows = Array::new();
-        while let Some(tuple) = iter.next_borrowed_tuple().map_err(to_js_err)? {
-            rows.push(&tuple_to_wasm_row(tuple)?);
+        while let Some(row) = iter
+            .next_tuple(|_, tuple| tuple_to_wasm_row(tuple))
+            .map_err(to_js_err)?
+        {
+            rows.push(&row?);
         }
         iter.done().map_err(to_js_err)?;
         Ok(rows.into())

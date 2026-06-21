@@ -385,7 +385,7 @@ pub trait Transaction: Sized {
         &mut self,
         table_codec: &mut TableCodec,
         table_name: &str,
-        tuple: Tuple,
+        tuple: &Tuple,
         serializers: I,
         is_overwrite: bool,
     ) -> Result<(), DatabaseError>
@@ -400,7 +400,7 @@ pub trait Transaction: Sized {
         table_codec.with_tuple(
             table_name,
             tuple_id,
-            Some((&tuple, &mut write_value)),
+            Some((tuple, &mut write_value)),
             |key, value| {
                 if !is_overwrite && self.exists(key)? {
                     return Err(DatabaseError::DuplicatePrimaryKey);
@@ -2289,7 +2289,7 @@ mod test {
         let plan_arena = PlanArena::new(&table_arena);
 
         let tuples = build_tuples();
-        for tuple in tuples.iter().cloned() {
+        for tuple in tuples.iter() {
             transaction.append_tuple(
                 &mut table_codec,
                 "t1",
@@ -2592,7 +2592,7 @@ mod test {
         for (tuple_id, index) in indexes.iter().cloned() {
             transaction.add_index(&mut table_codec, "t1", index, &tuple_id)?;
         }
-        for tuple in tuples.iter().cloned() {
+        for tuple in tuples.iter() {
             transaction.append_tuple(
                 &mut table_codec,
                 "t1",
@@ -2715,13 +2715,7 @@ mod test {
                 Index::new(index_id, &initial_tuple.values[2], IndexType::Normal),
                 initial_tuple.pk.as_ref().unwrap(),
             )?;
-            setup_tx.append_tuple(
-                &mut table_codec,
-                "t1",
-                initial_tuple.clone(),
-                &serializers,
-                false,
-            )?;
+            setup_tx.append_tuple(&mut table_codec, "t1", &initial_tuple, &serializers, false)?;
             setup_tx.commit()?;
 
             index_id
@@ -2765,13 +2759,7 @@ mod test {
             Index::new(index_id, &updated_tuple.values[2], IndexType::Normal),
             updated_tuple.pk.as_ref().unwrap(),
         )?;
-        writer_tx.append_tuple(
-            &mut table_codec,
-            "t1",
-            updated_tuple.clone(),
-            &serializers,
-            true,
-        )?;
+        writer_tx.append_tuple(&mut table_codec, "t1", &updated_tuple, &serializers, true)?;
         writer_tx.commit()?;
 
         let after_update = table_codec.with_tuple("t1", &tuple_id, None, |key, _| {

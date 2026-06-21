@@ -109,41 +109,13 @@ impl<'a> KiteSqlLmdbTransactionWrapper<'a> {
 impl<'a> BackendTransaction for KiteSqlLmdbTransactionWrapper<'a> {
     type PreparedStatement = KiteSqlPreparedStatement;
 
-    fn query_one(
-        &mut self,
-        statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
-    ) -> Result<Tuple, TpccError> {
-        self.execute_raw(statement, params)?
-            .next_borrowed_tuple()?
-            .cloned()
-            .ok_or(TpccError::EmptyTuples)
-    }
-
-    fn query_nth(
-        &mut self,
-        statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
-        n: usize,
-    ) -> Result<Tuple, TpccError> {
-        let mut iter = self.execute_raw(statement, params)?;
-        for _ in 0..n {
-            if iter.next_borrowed_tuple()?.is_none() {
-                return Err(TpccError::EmptyTuples);
-            }
-        }
-        iter.next_borrowed_tuple()?
-            .cloned()
-            .ok_or(TpccError::EmptyTuples)
-    }
-
     fn execute_drain(
         &mut self,
         statement: &mut Self::PreparedStatement,
         params: &[DbParam],
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
-        while iter.next_borrowed_tuple()?.is_some() {}
+        while iter.skip_next_tuple()? {}
         Ok(())
     }
 
@@ -154,8 +126,8 @@ impl<'a> BackendTransaction for KiteSqlLmdbTransactionWrapper<'a> {
         visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
-        let tuple = iter.next_borrowed_tuple()?.ok_or(TpccError::EmptyTuples)?;
-        visitor(tuple)
+        iter.with_next_tuple(|tuple| visitor(tuple))?
+            .ok_or(TpccError::EmptyTuples)
     }
 
     fn with_query_nth(
@@ -167,12 +139,12 @@ impl<'a> BackendTransaction for KiteSqlLmdbTransactionWrapper<'a> {
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
         for _ in 0..n {
-            if iter.next_borrowed_tuple()?.is_none() {
+            if !iter.skip_next_tuple()? {
                 return Err(TpccError::EmptyTuples);
             }
         }
-        let tuple = iter.next_borrowed_tuple()?.ok_or(TpccError::EmptyTuples)?;
-        visitor(tuple)
+        iter.with_next_tuple(|tuple| visitor(tuple))?
+            .ok_or(TpccError::EmptyTuples)
     }
 
     fn commit(self) -> Result<(), TpccError> {

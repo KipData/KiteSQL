@@ -21,6 +21,7 @@ use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use std::collections::HashMap;
+use std::mem;
 
 pub struct SetMembership {
     kind: SetMembershipKind,
@@ -87,7 +88,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SetMembership {
             while arena.next_tuple(self.right_input, plan_arena)? {
                 *self
                     .right_counts
-                    .entry(arena.result_tuple().clone())
+                    .entry(mem::take(arena.result_tuple_mut()))
                     .or_insert(0) += 1;
             }
             self.built = true;

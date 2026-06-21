@@ -66,6 +66,33 @@ mod test {
         (Tuple::new(None, values), schema)
     }
 
+    fn tuple_owned(tuple: &Tuple) -> Tuple {
+        Tuple {
+            pk: tuple.pk.clone(),
+            values: tuple.values.clone(),
+        }
+    }
+
+    fn collect_result_tuples<I: ResultIter>(mut iter: I) -> Result<Vec<Tuple>, DatabaseError> {
+        let mut rows = Vec::new();
+        while let Some(row) = iter.next_tuple(|_, tuple| tuple_owned(tuple))? {
+            rows.push(row);
+        }
+        iter.done()?;
+        Ok(rows)
+    }
+
+    fn drain_result_iter<I: ResultIter>(mut iter: I) -> Result<(), DatabaseError> {
+        while iter.next_tuple(|_, _| ())?.is_some() {}
+        iter.done()
+    }
+
+    fn has_result_row<I: ResultIter>(mut iter: I) -> Result<bool, DatabaseError> {
+        let exists = iter.next_tuple(|_, _| ())?.is_some();
+        iter.done()?;
+        Ok(exists)
+    }
+
     fn build_test_database() -> Result<(TempDir, Database<RocksStorage>), DatabaseError> {
         let temp_dir = TempDir::new().expect("create temp dir for ORM test");
         let database = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
@@ -328,9 +355,10 @@ mod test {
     fn test_from_tuple() {
         let table_arena = TableArenaCell::default();
         let mut plan_arena = PlanArena::new(&table_arena);
-        let (tuple, schema) = build_tuple(&mut plan_arena);
+        let (mut tuple, schema) = build_tuple(&mut plan_arena);
         let schema = SchemaView::new(&schema, &plan_arena);
-        let my_struct = MyStruct::from((&schema, tuple));
+        let my_struct =
+            <MyStruct as kite_sql::orm::FromQueryRow>::from_query_row(&schema, &mut tuple).unwrap();
 
         println!("{:?}", my_struct);
 
@@ -356,7 +384,7 @@ mod test {
             true,
             ColumnDesc::new(LogicalType::Integer, None, true, None).unwrap(),
         )));
-        let tuple = Tuple::new(
+        let mut tuple = Tuple::new(
             None,
             vec![
                 DataValue::Int32(9),
@@ -371,7 +399,8 @@ mod test {
 
         let schema = SchemaView::new(&schema, &plan_arena);
         let derived =
-            <DerivedStruct as kite_sql::orm::FromQueryRow>::from_query_row(&schema, tuple).unwrap();
+            <DerivedStruct as kite_sql::orm::FromQueryRow>::from_query_row(&schema, &mut tuple)
+                .unwrap();
 
         assert_eq!(derived.c1, 9);
         assert_eq!(derived.name, "LOL");
@@ -448,9 +477,7 @@ mod test {
         }
         database.analyze_model::<Wallet>()?;
 
-        let mut iter = database.run("describe wallets")?;
-        let rows = iter.by_ref().collect::<Result<Vec<_>, _>>()?;
-        iter.done()?;
+        let rows = collect_result_tuples(database.run("describe wallets")?)?;
 
         let balance = rows
             .iter()
@@ -476,9 +503,7 @@ mod test {
 
         create_model_table::<CountryCode>(&mut database)?;
 
-        let mut iter = database.run("describe country_codes")?;
-        let rows = iter.by_ref().collect::<Result<Vec<_>, _>>()?;
-        iter.done()?;
+        let rows = collect_result_tuples(database.run("describe country_codes")?)?;
 
         let code = rows
             .iter()
@@ -517,9 +542,7 @@ mod test {
             Some(MigratingUserV3 { id: 1, age: 18 })
         );
 
-        let describe_rows = database
-            .run("describe migrating_users")?
-            .collect::<Result<Vec<_>, _>>()?;
+        let describe_rows = collect_result_tuples(database.run("describe migrating_users")?)?;
         let column_names = describe_rows
             .iter()
             .filter_map(|row| match row.values.first() {
@@ -727,25 +750,17 @@ mod test {
             .unwrap() as usize;
         assert_eq!(count, 2);
 
-        let exists = database
-            .bind(|ctx| {
-                ctx.from::<User>()?
-                    .filter(|e| e.column(User::id())?.eq(2))?
-                    .exists()
-            })?
-            .next()
-            .transpose()?
-            .is_some();
+        let exists = has_result_row(database.bind(|ctx| {
+            ctx.from::<User>()?
+                .filter(|e| e.column(User::id())?.eq(2))?
+                .exists()
+        })?)?;
         assert!(exists);
-        let missing = database
-            .bind(|ctx| {
-                ctx.from::<User>()?
-                    .filter(|e| e.column(User::id())?.eq(99))?
-                    .exists()
-            })?
-            .next()
-            .transpose()?
-            .is_some();
+        let missing = has_result_row(database.bind(|ctx| {
+            ctx.from::<User>()?
+                .filter(|e| e.column(User::id())?.eq(99))?
+                .exists()
+        })?)?;
         assert!(!missing);
 
         let two_users = database
@@ -2353,7 +2368,7 @@ mod test {
                     })?
                     .finish()
             })
-            .and_then(|iter| iter.collect::<Result<Vec<_>, _>>().map(|_| ()));
+            .and_then(drain_result_iter);
         assert!(join_subquery.is_err());
 
         let group_by_subquery = database
@@ -2367,7 +2382,7 @@ mod test {
                     })?
                     .finish()
             })
-            .and_then(|iter| iter.collect::<Result<Vec<_>, _>>().map(|_| ()));
+            .and_then(drain_result_iter);
         assert!(group_by_subquery.is_err());
 
         let having_subquery = database
@@ -2385,7 +2400,7 @@ mod test {
                     })?
                     .finish()
             })
-            .and_then(|iter| iter.collect::<Result<Vec<_>, _>>().map(|_| ()));
+            .and_then(drain_result_iter);
         assert!(having_subquery.is_err());
 
         let sort_subquery = database
@@ -2399,7 +2414,7 @@ mod test {
                     })?
                     .finish()
             })
-            .and_then(|iter| iter.collect::<Result<Vec<_>, _>>().map(|_| ()));
+            .and_then(drain_result_iter);
         assert!(sort_subquery.is_err());
 
         database.drop_table::<Order>()?;
@@ -2452,9 +2467,8 @@ mod test {
         }
         database.analyze_model::<User>()?;
 
-        let mut explain_iter = database.run("explain select age from users where age = 1050")?;
-        let explain_rows = explain_iter.by_ref().collect::<Result<Vec<_>, _>>()?;
-        explain_iter.done()?;
+        let explain_rows =
+            collect_result_tuples(database.run("explain select age from users where age = 1050")?)?;
         let explain_plan = explain_rows
             .iter()
             .filter_map(|row| match row.values.first() {

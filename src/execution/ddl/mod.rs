@@ -191,7 +191,7 @@ where
             transaction.append_tuple(
                 table_codec,
                 table_name.as_ref(),
-                tuple.clone(),
+                tuple,
                 new_serializers(),
                 true,
             )?;

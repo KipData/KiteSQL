@@ -15,7 +15,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use comfy_table::{Cell, Table};
-    use kite_sql::db::{BorrowResultIter, DBTransaction, DataBaseBuilder, Database};
+    use kite_sql::db::{DBTransaction, DataBaseBuilder, Database, ResultIter};
     use kite_sql::errors::DatabaseError;
     use kite_sql::storage::rocksdb::RocksStorage;
     use rustyline::config::Configurer;
@@ -172,7 +172,7 @@ Transaction commands:
 
     fn print_table<I>(mut iter: I) -> Result<(), DatabaseError>
     where
-        I: BorrowResultIter,
+        I: ResultIter,
     {
         let (table, schema_len, row_count) = create_table(&mut iter)?;
         iter.done()?;
@@ -192,7 +192,7 @@ Transaction commands:
 
     fn create_table<I>(iter: &mut I) -> Result<(Table, usize, usize), DatabaseError>
     where
-        I: BorrowResultIter,
+        I: ResultIter,
     {
         let mut table = Table::new();
         let (header, schema_len) = iter.schema(|schema| {
@@ -209,13 +209,14 @@ Transaction commands:
         }
 
         let mut row_count = 0usize;
-        while let Some(tuple) = iter.next_borrowed_tuple()? {
-            row_count += 1;
-            let row = tuple
+        while let Some(row) = iter.next_tuple(|_, tuple| {
+            tuple
                 .values
                 .iter()
                 .map(|value| Cell::new(format!("{value}")))
-                .collect::<Vec<_>>();
+                .collect::<Vec<_>>()
+        })? {
+            row_count += 1;
             table.add_row(row);
         }
 
