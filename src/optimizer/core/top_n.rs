@@ -70,14 +70,6 @@ impl ColumnTopN {
         self.add_with_options(top_n_size, value, count, 0);
     }
 
-    pub fn merge_with_size(&mut self, other: ColumnTopN, top_n_size: usize) {
-        for entry in other.values {
-            if self.should_insert(&entry.value, entry.count, entry.error) {
-                self.insert_new_with_options(top_n_size, entry);
-            }
-        }
-    }
-
     pub fn finish_with_size(mut self, top_n_size: usize) -> Self {
         self.prune_to_capacity(top_n_size);
         self
@@ -267,43 +259,6 @@ mod tests {
         let entry = top_n.get_entry(&DataValue::Int32(3)).unwrap();
         assert_eq!(entry.count(), 2);
         assert_eq!(entry.error(), 1);
-    }
-
-    #[test]
-    fn top_n_merge_accumulates_entries() {
-        let mut left = ColumnTopN::default();
-        left.add_with_size(2, DataValue::Int32(1), 3);
-        left.add_with_size(2, DataValue::Int32(2), 2);
-
-        let mut right = ColumnTopN::default();
-        right.add_with_size(2, DataValue::Int32(1), 4);
-        right.add_with_size(2, DataValue::Int32(3), 1);
-
-        left.merge_with_size(right, 2);
-
-        assert_eq!(left.get(&DataValue::Int32(1)), Some(7));
-        assert_eq!(left.len(), 2);
-    }
-
-    #[test]
-    fn top_n_merge_records_error_for_absent_entries() {
-        let mut left = ColumnTopN::default();
-        left.add_with_size(2, DataValue::Int32(1), 5);
-        left.add_with_size(2, DataValue::Int32(2), 3);
-
-        let mut right = ColumnTopN::default();
-        right.add_with_size(2, DataValue::Int32(3), 4);
-        right.add_with_size(2, DataValue::Int32(4), 1);
-
-        left.merge_with_size(right, 2);
-
-        assert_eq!(left.len(), 2);
-        let entry = left.get_entry(&DataValue::Int32(3)).unwrap();
-        assert_eq!(entry.count(), 7);
-        assert_eq!(entry.error(), 3);
-        let entry = left.get_entry(&DataValue::Int32(4)).unwrap();
-        assert_eq!(entry.count(), 6);
-        assert_eq!(entry.error(), 5);
     }
 
     #[test]
