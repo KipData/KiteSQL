@@ -162,13 +162,16 @@ enum PythonResultIterInner {
 }
 
 impl PythonResultIterInner {
-    fn next_tuple(&mut self) -> Result<Option<&Tuple>, DatabaseError> {
+    fn next_tuple<R>(
+        &mut self,
+        f: impl FnOnce(&mut Tuple) -> R,
+    ) -> Result<Option<R>, DatabaseError> {
         match self {
             #[cfg(feature = "lmdb")]
-            PythonResultIterInner::Lmdb(iter) => iter.next_borrowed_tuple(),
-            PythonResultIterInner::Memory(iter) => iter.next_borrowed_tuple(),
+            PythonResultIterInner::Lmdb(iter) => iter.next_tuple(|_, tuple| f(tuple)),
+            PythonResultIterInner::Memory(iter) => iter.next_tuple(|_, tuple| f(tuple)),
             #[cfg(feature = "rocksdb")]
-            PythonResultIterInner::Rocks(iter) => iter.next_borrowed_tuple(),
+            PythonResultIterInner::Rocks(iter) => iter.next_tuple(|_, tuple| f(tuple)),
         }
     }
 
@@ -251,7 +254,7 @@ impl PythonDatabase {
 
     pub fn execute(&self, sql: &str) -> PyResult<()> {
         let mut iter = self.inner.run(sql).map_err(to_py_err)?;
-        while iter.next_tuple().map_err(to_py_err)?.is_some() {}
+        while iter.next_tuple(|_| ()).map_err(to_py_err)?.is_some() {}
         iter.done().map_err(to_py_err)?;
 
         Ok(())
@@ -290,8 +293,11 @@ impl PythonResultIter {
     pub fn next(&mut self, py: Python<'_>) -> PyResult<Option<PyObject>> {
         let iter = self.inner_mut()?;
 
-        match iter.next_tuple().map_err(to_py_err)? {
-            Some(tuple) => tuple_to_python_row(py, tuple).map(Some),
+        match iter
+            .next_tuple(|tuple| tuple_to_python_row(py, tuple))
+            .map_err(to_py_err)?
+        {
+            Some(row) => row.map(Some),
             None => Ok(None),
         }
     }
@@ -308,8 +314,11 @@ impl PythonResultIter {
             .ok_or_else(|| PyValueError::new_err("iterator already consumed"))?;
 
         let mut rows = Vec::new();
-        while let Some(tuple) = iter.next_tuple().map_err(to_py_err)? {
-            rows.push(tuple_to_python_row(py, tuple)?);
+        while let Some(row) = iter
+            .next_tuple(|tuple| tuple_to_python_row(py, tuple))
+            .map_err(to_py_err)?
+        {
+            rows.push(row?);
         }
         iter.done().map_err(to_py_err)?;
 

@@ -371,7 +371,7 @@ mod tests {
             .unwrap();
 
         let mut iter = kite_sql.run("select b from t1 where a = 2").unwrap();
-        let tuple = iter.next().unwrap().unwrap();
+        let tuple = iter.next_tuple(|_, tuple| tuple.clone()).unwrap().unwrap();
         assert_eq!(tuple.values[0].to_string(), "20");
         iter.done().unwrap();
     }

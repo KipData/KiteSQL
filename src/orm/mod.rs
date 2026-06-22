@@ -6,8 +6,7 @@ use crate::binder::{
 };
 use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog, TableName};
 use crate::db::{
-    BindSource, BorrowResultIter, DBTransaction, Database, DatabaseIter, OrmIter, ResultIter,
-    TransactionIter,
+    BindSource, DBTransaction, Database, DatabaseIter, OrmIter, ResultIter, TransactionIter,
 };
 use crate::errors::DatabaseError;
 use crate::expression::{self, AliasType, ScalarExpression};
@@ -60,28 +59,26 @@ pub struct DescribeColumn {
     pub default: String,
 }
 
-impl From<(&SchemaView<'_, '_>, Tuple)> for DescribeColumn {
-    fn from((_, tuple): (&SchemaView<'_, '_>, Tuple)) -> Self {
-        let mut values = tuple.values.into_iter();
-
-        let field = describe_text_value(values.next());
-        let data_type = describe_text_value(values.next());
-        let len = describe_text_value(values.next());
+impl FromQueryRow for DescribeColumn {
+    fn from_query_row(_: &SchemaView<'_, '_>, tuple: &mut Tuple) -> Result<Self, DatabaseError> {
+        let field = describe_text_value(take_projected_value(tuple, 0));
+        let data_type = describe_text_value(take_projected_value(tuple, 1));
+        let len = describe_text_value(take_projected_value(tuple, 2));
         let nullable = matches!(
-            values.next(),
+            take_projected_value(tuple, 3),
             Some(DataValue::Utf8 { value, .. }) if value == "true"
         );
-        let key = describe_text_value(values.next());
-        let default = describe_text_value(values.next());
+        let key = describe_text_value(take_projected_value(tuple, 4));
+        let default = describe_text_value(take_projected_value(tuple, 5));
 
-        Self {
+        Ok(Self {
             field,
             data_type,
             len,
             nullable,
             key,
             default,
-        }
+        })
     }
 }
 
@@ -2524,26 +2521,18 @@ pub trait FromDataValue: Sized {
 /// ```
 pub trait FromQueryTuple: Sized {
     /// Decodes one projected tuple into `Self`.
-    fn from_query_tuple(tuple: Tuple) -> Result<Self, DatabaseError>;
+    fn from_query_tuple(tuple: &mut Tuple) -> Result<Self, DatabaseError>;
 }
 
 /// Conversion trait from a query result row into a Rust value.
 ///
 /// `#[derive(Model)]` and `#[derive(Projection)]` generate this automatically.
-/// Types that still implement the older `From<(&SchemaView, Tuple)>` mapping
-/// are also accepted through a compatibility implementation.
 pub trait FromQueryRow: Sized {
     /// Decodes one result row into `Self`.
-    fn from_query_row(schema: &SchemaView<'_, '_>, tuple: Tuple) -> Result<Self, DatabaseError>;
-}
-
-impl<T> FromQueryRow for T
-where
-    T: for<'view, 'schema, 'arena> From<(&'view SchemaView<'schema, 'arena>, Tuple)>,
-{
-    fn from_query_row(schema: &SchemaView<'_, '_>, tuple: Tuple) -> Result<Self, DatabaseError> {
-        Ok(T::from((schema, tuple)))
-    }
+    fn from_query_row(
+        schema: &SchemaView<'_, '_>,
+        tuple: &mut Tuple,
+    ) -> Result<Self, DatabaseError>;
 }
 
 /// Typed adapter over a [`ResultIter`] that yields projected values instead of raw tuples.
@@ -2649,8 +2638,9 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         self.inner
-            .next()
-            .map(|result| result.and_then(extract_value_from_tuple::<T>))
+            .next_tuple(|_, tuple| extract_value_from_tuple::<T>(tuple))
+            .transpose()
+            .map(|value| value.and_then(std::convert::identity))
     }
 }
 
@@ -2664,8 +2654,9 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         self.inner
-            .next()
-            .map(|result| result.and_then(extract_projected_tuple::<T>))
+            .next_tuple(|_, tuple| extract_projected_tuple::<T>(tuple))
+            .transpose()
+            .map(|tuple| tuple.and_then(std::convert::identity))
     }
 }
 
@@ -2937,23 +2928,25 @@ macro_rules! impl_from_query_tuple {
                 $($name: FromDataValue,)+
             {
                 #[allow(non_snake_case)]
-                fn from_query_tuple(tuple: Tuple) -> Result<Self, DatabaseError> {
+                fn from_query_tuple(tuple: &mut Tuple) -> Result<Self, DatabaseError> {
                     let expected_len = [$(stringify!($name)),+].len();
-                    let mut values = tuple.values.into_iter();
-
-                    $(
-                        let $name = extract_projected_data_value::<$name>(
-                            values.next(),
-                            expected_len,
-                        )?;
-                    )+
-
-                    if values.next().is_some() {
+                    if tuple.values.len() != expected_len {
                         return Err(DatabaseError::MisMatch(
                             "the expected tuple projection width",
                             "the query result",
                         ));
                     }
+                    let mut indexes = 0..expected_len;
+
+                    $(
+                        let $name = extract_projected_data_value::<$name>(
+                            take_projected_value(
+                                tuple,
+                                indexes.next().expect("checked projected tuple width"),
+                            ),
+                            expected_len,
+                        )?;
+                    )+
 
                     Ok(($($name,)+))
                 }
@@ -3019,13 +3012,12 @@ where
     I: ResultIter,
     T: FromQueryRow,
 {
-    Ok(match iter.next() {
-        Some(tuple) => {
-            let tuple = tuple?;
-            Some(iter.schema(|schema| T::from_query_row(schema, tuple))?)
-        }
-        None => None,
-    })
+    Ok(
+        match iter.next_tuple(|schema, tuple| T::from_query_row(schema, tuple))? {
+            Some(row) => Some(row?),
+            None => None,
+        },
+    )
 }
 
 fn convert_projected_value<T: FromDataValue>(value: DataValue) -> Result<T, DatabaseError> {
@@ -3045,6 +3037,13 @@ fn invalid_from_data_value<T>(value: &DataValue) -> DatabaseError {
     ))
 }
 
+fn take_projected_value(tuple: &mut Tuple, index: usize) -> Option<DataValue> {
+    tuple
+        .values
+        .get_mut(index)
+        .map(|value| std::mem::replace(value, DataValue::Null))
+}
+
 fn extract_projected_data_value<T: FromDataValue>(
     value: Option<DataValue>,
     _expected_len: usize,
@@ -3056,9 +3055,9 @@ fn extract_projected_data_value<T: FromDataValue>(
     convert_projected_value::<T>(value)
 }
 
-fn extract_value_from_tuple<T: FromDataValue>(mut tuple: Tuple) -> Result<T, DatabaseError> {
+fn extract_value_from_tuple<T: FromDataValue>(tuple: &mut Tuple) -> Result<T, DatabaseError> {
     let value = if tuple.values.len() == 1 {
-        tuple.values.swap_remove(0)
+        take_projected_value(tuple, 0).expect("checked one projected expression")
     } else {
         return Err(DatabaseError::MisMatch(
             "one projected expression",
@@ -3069,7 +3068,7 @@ fn extract_value_from_tuple<T: FromDataValue>(mut tuple: Tuple) -> Result<T, Dat
     convert_projected_value::<T>(value)
 }
 
-fn extract_projected_tuple<T: FromQueryTuple>(tuple: Tuple) -> Result<T, DatabaseError> {
+fn extract_projected_tuple<T: FromQueryTuple>(tuple: &mut Tuple) -> Result<T, DatabaseError> {
     T::from_query_tuple(tuple)
 }
 

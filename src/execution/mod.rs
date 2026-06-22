@@ -147,11 +147,11 @@ impl<'a, T: Transaction + 'a> Executor<'a, T> {
     pub(crate) fn next_tuple(
         &mut self,
         plan_arena: &mut PlanArena<'a>,
-    ) -> Result<Option<&Tuple>, DatabaseError> {
+    ) -> Result<Option<&mut Tuple>, DatabaseError> {
         if !self.arena.next_tuple(self.root, plan_arena)? {
             return Ok(None);
         }
-        Ok(Some(self.arena.result_tuple()))
+        Ok(Some(self.arena.result_tuple_mut()))
     }
 
     pub(crate) fn take_ddl_apply(&mut self) -> Vec<DDLApply> {
@@ -1043,21 +1043,9 @@ mod test_utils {
         plan_arena: PlanArena<'a>,
     }
 
-    impl<'a, T: Transaction + 'a> TestExecutor<'a, T> {
-        pub(crate) fn next_tuple(&mut self) -> Result<Option<&Tuple>, DatabaseError> {
+    impl<T: Transaction> TestExecutor<'_, T> {
+        pub(crate) fn next_tuple(&mut self) -> Result<Option<&mut Tuple>, DatabaseError> {
             self.executor.next_tuple(&mut self.plan_arena)
-        }
-    }
-
-    impl<T: Transaction> Iterator for TestExecutor<'_, T> {
-        type Item = Result<Tuple, DatabaseError>;
-
-        fn next(&mut self) -> Option<Self::Item> {
-            match self.next_tuple() {
-                Ok(Some(tuple)) => Some(Ok(tuple.clone())),
-                Ok(None) => None,
-                Err(err) => Some(Err(err)),
-            }
         }
     }
 

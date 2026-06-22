@@ -88,7 +88,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         });
         field_initializers.push(quote! {
             #field_name: ::kite_sql::orm::take_value_at::<#field_ty>(
-                &mut tuple,
+                tuple,
                 #field_index_ident,
                 #field_name_lit,
             )?
@@ -121,7 +121,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         {
             fn from_query_row(
                 schema: &::kite_sql::types::tuple::SchemaView<'_, '_>,
-                mut tuple: ::kite_sql::types::tuple::Tuple,
+                tuple: &mut ::kite_sql::types::tuple::Tuple,
             ) -> ::std::result::Result<Self, ::kite_sql::errors::DatabaseError> {
                 let mut __kite_orm_found_fields = 0usize;
                 #(#field_index_declarations)*

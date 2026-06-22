@@ -367,6 +367,23 @@ impl Histogram {
         }
     }
 
+    fn top_n_count_or_fallback(
+        &self,
+        value: &DataValue,
+        sketch: &CountMinSketch<DataValue>,
+        top_n: &ColumnTopN,
+    ) -> usize {
+        let Some(entry) = top_n.get_entry(value) else {
+            return self.equal_count(value, sketch);
+        };
+        if entry.error() == 0 || entry.error() < self.average_count() {
+            return entry.count();
+        }
+
+        let lower = entry.count().saturating_sub(entry.error());
+        self.equal_count(value, sketch).clamp(lower, entry.count())
+    }
+
     pub fn collect_count(
         &self,
         ranges: &[Range],
@@ -604,10 +621,8 @@ impl Histogram {
             Range::Eq(value) => {
                 *count += if value.is_null() {
                     self.meta.null_count
-                } else if let Some(count) = top_n.get(value) {
-                    count
                 } else {
-                    self.equal_count(value, sketch)
+                    self.top_n_count_or_fallback(value, sketch, top_n)
                 };
                 *binary_i += 1
             }
@@ -1125,6 +1140,36 @@ mod tests {
         assert_eq!(
             histogram.collect_count(&[Range::Eq(DataValue::Int32(7))], &sketch, &top_n)?,
             average_count
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_eq_count_falls_back_when_top_n_error_is_large() -> Result<(), DatabaseError> {
+        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+
+        for value in 0..10_000 {
+            builder.append(DataValue::Int32(value))?;
+        }
+
+        let (histogram, sketch, _) = builder.build(100)?;
+
+        let mut top_n = ColumnTopN::default();
+        top_n.add_with_size(1, DataValue::Int32(1), 10);
+        top_n.add_with_size(1, DataValue::Int32(7), 1);
+        let entry = top_n.get_entry(&DataValue::Int32(7)).unwrap();
+        assert_eq!(entry.count(), 11);
+        assert_eq!(entry.error(), 10);
+
+        let fallback = histogram.equal_count(&DataValue::Int32(7), &sketch);
+        let lower = entry.count().saturating_sub(entry.error());
+        let expected = fallback.clamp(lower, entry.count());
+        assert!(expected < entry.count());
+
+        assert_eq!(
+            histogram.collect_count(&[Range::Eq(DataValue::Int32(7))], &sketch, &top_n)?,
+            expected
         );
 
         Ok(())

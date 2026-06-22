@@ -119,61 +119,6 @@ pub struct DualTransaction<'a> {
 impl<'a> BackendTransaction for DualTransaction<'a> {
     type PreparedStatement = DualPreparedStatement<'a>;
 
-    fn query_one(
-        &mut self,
-        statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
-    ) -> Result<Tuple, TpccError> {
-        let spec = statement.spec.clone();
-
-        let kitesql_iter = self.kitesql.execute_raw(&mut statement.kitesql, params)?;
-        let sqlite_iter = self.sqlite.execute_raw(&mut statement.sqlite, params)?;
-
-        if is_select_sql(&spec) {
-            if spec.sql == STOCK_LEVEL_DISTINCT_SQL {
-                let kitesql_rows = collect_all_rows(kitesql_iter)?;
-                let sqlite_rows = collect_all_rows(sqlite_iter)?;
-                compare_unordered_rows(&kitesql_rows, &sqlite_rows, spec.sql)?;
-                return kitesql_rows
-                    .into_iter()
-                    .next()
-                    .ok_or(TpccError::EmptyTuples);
-            }
-            query_ordered_nth(kitesql_iter, sqlite_iter, spec.sql, 0)
-        } else {
-            drain_sqlite_iter(sqlite_iter)?;
-            let mut kitesql_iter = kitesql_iter;
-            match kitesql_iter.next() {
-                Some(row) => row,
-                None => Err(TpccError::EmptyTuples),
-            }
-        }
-    }
-
-    fn query_nth(
-        &mut self,
-        statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
-        n: usize,
-    ) -> Result<Tuple, TpccError> {
-        let spec = statement.spec.clone();
-
-        let kitesql_iter = self.kitesql.execute_raw(&mut statement.kitesql, params)?;
-        let sqlite_iter = self.sqlite.execute_raw(&mut statement.sqlite, params)?;
-
-        if spec.sql == STOCK_LEVEL_DISTINCT_SQL {
-            let kitesql_rows = collect_all_rows(kitesql_iter)?;
-            let sqlite_rows = collect_all_rows(sqlite_iter)?;
-            compare_unordered_rows(&kitesql_rows, &sqlite_rows, spec.sql)?;
-            return kitesql_rows
-                .into_iter()
-                .nth(n)
-                .ok_or(TpccError::EmptyTuples);
-        }
-
-        query_ordered_nth(kitesql_iter, sqlite_iter, spec.sql, n)
-    }
-
     fn execute_drain(
         &mut self,
         statement: &mut Self::PreparedStatement,
@@ -186,9 +131,9 @@ impl<'a> BackendTransaction for DualTransaction<'a> {
 
         if is_select_sql(&spec) {
             if spec.sql == STOCK_LEVEL_DISTINCT_SQL {
-                let kitesql_rows = collect_all_rows(kitesql_iter)?;
-                let sqlite_rows = collect_all_rows(sqlite_iter)?;
-                compare_unordered_rows(&kitesql_rows, &sqlite_rows, spec.sql)
+                let (kitesql_counts, kitesql_len) = collect_kitesql_value_counts(kitesql_iter)?;
+                let sqlite_rows = collect_sqlite_rows(sqlite_iter)?;
+                compare_unordered_rows(kitesql_counts, kitesql_len, &sqlite_rows, spec.sql)
             } else {
                 drain_and_compare_ordered(kitesql_iter, sqlite_iter, spec.sql)
             }
@@ -196,6 +141,43 @@ impl<'a> BackendTransaction for DualTransaction<'a> {
             drain_sqlite_iter(sqlite_iter)?;
             drain_kitesql_iter(kitesql_iter)
         }
+    }
+
+    fn with_query_one(
+        &mut self,
+        statement: &mut Self::PreparedStatement,
+        params: &[DbParam],
+        visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+    ) -> Result<(), TpccError> {
+        self.with_query_nth(statement, params, 0, visitor)
+    }
+
+    fn with_query_nth(
+        &mut self,
+        statement: &mut Self::PreparedStatement,
+        params: &[DbParam],
+        n: usize,
+        visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+    ) -> Result<(), TpccError> {
+        let spec = statement.spec.clone();
+
+        let kitesql_iter = self.kitesql.execute_raw(&mut statement.kitesql, params)?;
+        let sqlite_iter = self.sqlite.execute_raw(&mut statement.sqlite, params)?;
+
+        if spec.sql == STOCK_LEVEL_DISTINCT_SQL {
+            let (kitesql_counts, kitesql_len) = collect_kitesql_value_counts(kitesql_iter)?;
+            let sqlite_rows = collect_sqlite_rows(sqlite_iter)?;
+            compare_unordered_rows(kitesql_counts, kitesql_len, &sqlite_rows, spec.sql)?;
+            let tuple = sqlite_rows.get(n).ok_or(TpccError::EmptyTuples)?;
+            return visitor(tuple);
+        }
+
+        if !is_select_sql(&spec) {
+            drain_sqlite_iter(sqlite_iter)?;
+            return with_kitesql_nth(kitesql_iter, n, visitor);
+        }
+
+        with_ordered_nth(kitesql_iter, sqlite_iter, spec.sql, n, visitor)
     }
 
     fn commit(self) -> Result<(), TpccError> {
@@ -224,16 +206,11 @@ fn drain_sqlite_iter(mut iter: SqliteResult<'_, '_>) -> Result<(), TpccError> {
 fn drain_kitesql_iter<T: kite_sql::storage::Transaction>(
     mut iter: KiteSqlTxnResult<'_, T>,
 ) -> Result<(), TpccError> {
-    while let Some(row) = iter.next() {
-        row?;
-    }
+    while iter.skip_next_tuple()? {}
     Ok(())
 }
 
-fn collect_all_rows<I>(mut iter: I) -> Result<Vec<Tuple>, TpccError>
-where
-    I: Iterator<Item = Result<Tuple, TpccError>>,
-{
+fn collect_sqlite_rows(mut iter: SqliteResult<'_, '_>) -> Result<Vec<Tuple>, TpccError> {
     let mut rows = Vec::new();
     while let Some(row) = iter.next() {
         rows.push(row?);
@@ -241,42 +218,71 @@ where
     Ok(rows)
 }
 
-fn query_ordered_nth<T: kite_sql::storage::Transaction>(
+fn collect_kitesql_value_counts<T: kite_sql::storage::Transaction>(
+    mut iter: KiteSqlTxnResult<'_, T>,
+) -> Result<(HashMap<Vec<DataValue>, usize>, usize), TpccError> {
+    let mut counts = HashMap::new();
+    let mut len = 0;
+    while let Some(()) = iter.with_next_tuple(|tuple| {
+        *counts.entry(tuple.values.clone()).or_insert(0) += 1;
+        len += 1;
+        Ok(())
+    })? {}
+    Ok((counts, len))
+}
+
+fn with_kitesql_nth<T: kite_sql::storage::Transaction>(
+    mut iter: KiteSqlTxnResult<'_, T>,
+    n: usize,
+    visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+) -> Result<(), TpccError> {
+    for _ in 0..n {
+        if !iter.skip_next_tuple()? {
+            return Err(TpccError::EmptyTuples);
+        }
+    }
+    iter.with_next_tuple(|tuple| visitor(tuple))?
+        .ok_or(TpccError::EmptyTuples)
+}
+
+fn with_ordered_nth<T: kite_sql::storage::Transaction>(
     mut kitesql_iter: KiteSqlTxnResult<'_, T>,
     mut sqlite_iter: SqliteResult<'_, '_>,
     sql: &'static str,
     n: usize,
-) -> Result<Tuple, TpccError> {
-    let mut result = None;
+    visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+) -> Result<(), TpccError> {
+    let mut visited = false;
     let mut index = 0usize;
 
     loop {
-        match kitesql_iter.next() {
-            Some(kitesql_row) => {
-                let kitesql_tuple = kitesql_row?;
-                let sqlite_tuple = match sqlite_iter.next() {
-                    Some(row) => row?,
-                    None => {
-                        return Err(TpccError::BackendMismatch(format!(
-                            "SQLite returned fewer rows for SQL: {}",
-                            sql
-                        )))
-                    }
-                };
-                if kitesql_tuple.values != sqlite_tuple.values {
-                    println!("[Dual] mismatch SQL: {}", sql);
-                    println!("  KiteSQL row:   {:?}", kitesql_tuple.values);
-                    println!("  SQLite  row:   {:?}", sqlite_tuple.values);
+        match kitesql_iter.with_next_tuple(|kitesql_tuple| {
+            let sqlite_tuple = match sqlite_iter.next() {
+                Some(row) => row?,
+                None => {
                     return Err(TpccError::BackendMismatch(format!(
-                        "Result mismatch for SQL: {}",
+                        "SQLite returned fewer rows for SQL: {}",
                         sql
-                    )));
+                    )))
                 }
-                if index == n {
-                    result = Some(kitesql_tuple.clone());
-                }
-                index += 1;
+            };
+            if kitesql_tuple.values != sqlite_tuple.values {
+                println!("[Dual] mismatch SQL: {}", sql);
+                println!("  KiteSQL row:   {:?}", kitesql_tuple.values);
+                println!("  SQLite  row:   {:?}", sqlite_tuple.values);
+                return Err(TpccError::BackendMismatch(format!(
+                    "Result mismatch for SQL: {}",
+                    sql
+                )));
             }
+            if index == n {
+                visitor(&sqlite_tuple)?;
+                visited = true;
+            }
+            index += 1;
+            Ok(())
+        })? {
+            Some(()) => {}
             None => {
                 if let Some(extra) = sqlite_iter.next() {
                     extra?;
@@ -285,7 +291,11 @@ fn query_ordered_nth<T: kite_sql::storage::Transaction>(
                         sql
                     )));
                 }
-                return result.ok_or(TpccError::EmptyTuples);
+                return if visited {
+                    Ok(())
+                } else {
+                    Err(TpccError::EmptyTuples)
+                };
             }
         }
     }
@@ -297,28 +307,28 @@ fn drain_and_compare_ordered<T: kite_sql::storage::Transaction>(
     sql: &'static str,
 ) -> Result<(), TpccError> {
     loop {
-        match kitesql_iter.next() {
-            Some(kitesql_row) => {
-                let kitesql_tuple = kitesql_row?;
-                let sqlite_tuple = match sqlite_iter.next() {
-                    Some(row) => row?,
-                    None => {
-                        return Err(TpccError::BackendMismatch(format!(
-                            "SQLite returned fewer rows for SQL: {}",
-                            sql
-                        )))
-                    }
-                };
-                if kitesql_tuple.values != sqlite_tuple.values {
-                    println!("[Dual] mismatch SQL: {}", sql);
-                    println!("  KiteSQL row:   {:?}", kitesql_tuple.values);
-                    println!("  SQLite  row:   {:?}", sqlite_tuple.values);
+        match kitesql_iter.with_next_tuple(|kitesql_tuple| {
+            let sqlite_tuple = match sqlite_iter.next() {
+                Some(row) => row?,
+                None => {
                     return Err(TpccError::BackendMismatch(format!(
-                        "Result mismatch for SQL: {}",
+                        "SQLite returned fewer rows for SQL: {}",
                         sql
-                    )));
+                    )))
                 }
+            };
+            if kitesql_tuple.values != sqlite_tuple.values {
+                println!("[Dual] mismatch SQL: {}", sql);
+                println!("  KiteSQL row:   {:?}", kitesql_tuple.values);
+                println!("  SQLite  row:   {:?}", sqlite_tuple.values);
+                return Err(TpccError::BackendMismatch(format!(
+                    "Result mismatch for SQL: {}",
+                    sql
+                )));
             }
+            Ok(())
+        })? {
+            Some(()) => {}
             None => {
                 if let Some(extra) = sqlite_iter.next() {
                     extra?;
@@ -334,21 +344,18 @@ fn drain_and_compare_ordered<T: kite_sql::storage::Transaction>(
 }
 
 fn compare_unordered_rows(
-    kitesql_rows: &[Tuple],
+    mut counts: HashMap<Vec<DataValue>, usize>,
+    kitesql_len: usize,
     sqlite_rows: &[Tuple],
     sql: &'static str,
 ) -> Result<(), TpccError> {
-    if kitesql_rows.len() != sqlite_rows.len() {
+    if kitesql_len != sqlite_rows.len() {
         return Err(TpccError::BackendMismatch(format!(
             "SQLite returned different row count for SQL: {}",
             sql
         )));
     }
 
-    let mut counts: HashMap<Vec<DataValue>, usize> = HashMap::new();
-    for row in kitesql_rows {
-        *counts.entry(row.values.clone()).or_insert(0) += 1;
-    }
     for row in sqlite_rows {
         match counts.get_mut(&row.values) {
             Some(count) => {

@@ -926,23 +926,20 @@ where
     }
 }
 
-/// Borrowing interface for result iterators returned by database execution APIs.
-pub trait BorrowResultIter {
+/// Common interface for result iterators returned by database execution APIs.
+pub trait ResultIter {
     /// Borrows the output schema for the current result set.
     fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R;
 
-    /// Returns the next row as a borrowed tuple.
-    fn next_borrowed_tuple(&mut self) -> Result<Option<&Tuple>, DatabaseError>;
+    /// Advances to the next row and runs `f` while the executor row slot is borrowed.
+    fn next_tuple<R>(
+        &mut self,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut Tuple) -> R,
+    ) -> Result<Option<R>, DatabaseError>;
 
     /// Finishes consuming the iterator and flushes any remaining work.
     fn done(self) -> Result<(), DatabaseError>;
-}
 
-/// Common interface for owned-tuple result iterators.
-///
-/// This remains for compatibility with existing callers that expect
-/// `Iterator<Item = Result<Tuple, DatabaseError>>`.
-pub trait ResultIter: BorrowResultIter + Iterator<Item = Result<Tuple, DatabaseError>> {
     #[cfg(feature = "orm")]
     /// Converts this iterator into a typed ORM iterator.
     ///
@@ -957,8 +954,6 @@ pub trait ResultIter: BorrowResultIter + Iterator<Item = Result<Tuple, DatabaseE
         OrmIter::new(self)
     }
 }
-
-impl<I> ResultIter for I where I: BorrowResultIter + Iterator<Item = Result<Tuple, DatabaseError>> {}
 
 #[cfg(feature = "orm")]
 /// Typed adapter over a [`ResultIter`] that yields ORM models instead of raw tuples.
@@ -1000,11 +995,10 @@ where
     type Item = Result<T, DatabaseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let tuple = match self.inner.next()? {
-            Ok(tuple) => tuple,
-            Err(err) => return Some(Err(err)),
-        };
-        Some(self.inner.schema(|schema| T::from_query_row(schema, tuple)))
+        self.inner
+            .next_tuple(|schema, tuple| T::from_query_row(schema, tuple))
+            .transpose()
+            .map(|row| row.and_then(std::convert::identity))
     }
 }
 
@@ -1032,8 +1026,11 @@ impl<S: Storage> DatabaseIter<'_, S> {
     }
 
     #[inline]
-    pub fn next_borrowed_tuple(&mut self) -> Result<Option<&Tuple>, DatabaseError> {
-        unsafe { (*self.inner).next_borrowed_tuple() }
+    pub fn next_tuple<R>(
+        &mut self,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut Tuple) -> R,
+    ) -> Result<Option<R>, DatabaseError> {
+        unsafe { (*self.inner).next_tuple(f) }
     }
 
     #[inline]
@@ -1048,21 +1045,16 @@ impl<S: Storage> DatabaseIter<'_, S> {
     }
 }
 
-impl<S: Storage> Iterator for DatabaseIter<'_, S> {
-    type Item = Result<Tuple, DatabaseError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        unsafe { (*self.inner).next() }
-    }
-}
-
-impl<S: Storage> BorrowResultIter for DatabaseIter<'_, S> {
+impl<S: Storage> ResultIter for DatabaseIter<'_, S> {
     fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
         DatabaseIter::schema(self, f)
     }
 
-    fn next_borrowed_tuple(&mut self) -> Result<Option<&Tuple>, DatabaseError> {
-        DatabaseIter::next_borrowed_tuple(self)
+    fn next_tuple<R>(
+        &mut self,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut Tuple) -> R,
+    ) -> Result<Option<R>, DatabaseError> {
+        DatabaseIter::next_tuple(self, f)
     }
 
     fn done(self) -> Result<(), DatabaseError> {
@@ -1175,7 +1167,10 @@ impl<'a, T: Transaction + 'a> TransactionIter<'a, T> {
     }
 
     #[inline]
-    pub fn next_borrowed_tuple(&mut self) -> Result<Option<&Tuple>, DatabaseError> {
+    pub fn next_tuple<R>(
+        &mut self,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut Tuple) -> R,
+    ) -> Result<Option<R>, DatabaseError> {
         let Some(executor) = self.executor.as_mut() else {
             return Ok(None);
         };
@@ -1185,7 +1180,10 @@ impl<'a, T: Transaction + 'a> TransactionIter<'a, T> {
             .as_mut()
             .expect("result iterator plan arena is unavailable after statement completion");
         match unsafe { (*executor_ptr).next_tuple(plan_arena) } {
-            Ok(Some(tuple)) => Ok(Some(tuple)),
+            Ok(Some(tuple)) => {
+                let schema = SchemaView::new(&self.schema, plan_arena);
+                Ok(Some(f(&schema, tuple)))
+            }
             Ok(None) => {
                 self.finish_statement_scope()?;
                 Ok(None)
@@ -1199,12 +1197,12 @@ impl<'a, T: Transaction + 'a> TransactionIter<'a, T> {
 
     #[inline]
     pub fn done(mut self) -> Result<(), DatabaseError> {
-        while self.next_borrowed_tuple()?.is_some() {}
+        while self.next_tuple(|_, _| ())?.is_some() {}
         Ok(())
     }
 
     fn done_with_ddl_apply(mut self) -> Result<(PlanArena<'a>, Vec<DDLApply>), DatabaseError> {
-        while self.next_borrowed_tuple()?.is_some() {}
+        while self.next_tuple(|_, _| ())?.is_some() {}
         Ok((
             self.plan_arena
                 .take()
@@ -1220,39 +1218,16 @@ impl<T: Transaction> Drop for TransactionIter<'_, T> {
     }
 }
 
-impl<T: Transaction> Iterator for TransactionIter<'_, T> {
-    type Item = Result<Tuple, DatabaseError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let result = {
-            let executor = self.executor.as_mut()?;
-            let plan_arena = self
-                .plan_arena
-                .as_mut()
-                .expect("result iterator plan arena is unavailable after statement completion");
-            executor.next_tuple(plan_arena)
-        };
-        match result {
-            Ok(Some(tuple)) => Some(Ok(tuple.clone())),
-            Ok(None) => match self.finish_statement_scope() {
-                Ok(()) => None,
-                Err(err) => Some(Err(err)),
-            },
-            Err(err) => match self.finish_statement_scope() {
-                Ok(()) => Some(Err(err)),
-                Err(scope_err) => Some(Err(scope_err)),
-            },
-        }
-    }
-}
-
-impl<T: Transaction> BorrowResultIter for TransactionIter<'_, T> {
+impl<T: Transaction> ResultIter for TransactionIter<'_, T> {
     fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
         TransactionIter::schema(self, f)
     }
 
-    fn next_borrowed_tuple(&mut self) -> Result<Option<&Tuple>, DatabaseError> {
-        TransactionIter::next_borrowed_tuple(self)
+    fn next_tuple<R>(
+        &mut self,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut Tuple) -> R,
+    ) -> Result<Option<R>, DatabaseError> {
+        TransactionIter::next_tuple(self, f)
     }
 
     fn done(self) -> Result<(), DatabaseError> {
@@ -1266,7 +1241,7 @@ pub(crate) mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     #[cfg(feature = "unsafe_txdb_checkpoint")]
     use crate::db::CatalogKind;
-    use crate::db::{BorrowResultIter, DataBaseBuilder, DatabaseError};
+    use crate::db::{DataBaseBuilder, DatabaseError, ResultIter};
     use crate::expression::ScalarExpression;
     use crate::planner::operator::join::JoinCondition;
     use crate::planner::operator::Operator;
@@ -1338,15 +1313,30 @@ pub(crate) mod test {
         Ok(())
     }
 
+    fn tuple_owned(tuple: &Tuple) -> Tuple {
+        Tuple {
+            pk: tuple.pk.clone(),
+            values: tuple.values.clone(),
+        }
+    }
+
+    fn next_tuple_owned<I: ResultIter>(iter: &mut I) -> Result<Option<Tuple>, DatabaseError> {
+        iter.next_tuple(|_, tuple| tuple_owned(tuple))
+    }
+
+    fn next_values<I: ResultIter>(iter: &mut I) -> Result<Option<Vec<DataValue>>, DatabaseError> {
+        iter.next_tuple(|_, tuple| tuple.values.clone())
+    }
+
     fn read_single_i32<I>(mut iter: I) -> Result<i32, DatabaseError>
     where
-        I: BorrowResultIter + Iterator<Item = Result<Tuple, DatabaseError>>,
+        I: ResultIter,
     {
-        let value = match iter.next().transpose()?.map(|tuple| tuple.values) {
-            Some(values) => match values.as_slice() {
-                [DataValue::Int32(value)] => *value,
-                other => panic!("expected a single Int32 column, got {other:?}"),
-            },
+        let value = match iter.next_tuple(|_, tuple| match tuple.values.as_slice() {
+            [DataValue::Int32(value)] => *value,
+            other => panic!("expected a single Int32 column, got {other:?}"),
+        })? {
+            Some(value) => value,
             None => panic!("expected one result row"),
         };
         iter.done()?;
@@ -1359,11 +1349,11 @@ pub(crate) mod test {
         sql: &str,
     ) -> Result<i32, DatabaseError> {
         let mut iter = database.run(sql)?;
-        let value = match iter.next().transpose()?.map(|tuple| tuple.values) {
-            Some(values) => match values.as_slice() {
-                [DataValue::Int32(value)] => *value,
-                other => panic!("expected a single Int32 column, got {other:?}"),
-            },
+        let value = match iter.next_tuple(|_, tuple| match tuple.values.as_slice() {
+            [DataValue::Int32(value)] => *value,
+            other => panic!("expected a single Int32 column, got {other:?}"),
+        })? {
+            Some(value) => value,
             None => panic!("expected one result row for query: {sql}"),
         };
         iter.done()?;
@@ -1376,9 +1366,15 @@ pub(crate) mod test {
         let mut database = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
         database.ddl("create table t1(c1 int primary key, c2 boolean, c3 int)")?;
 
-        for result in database.run("select * from t1")? {
-            println!("{:#?}", result?);
-        }
+        let mut iter = database.run("select * from t1")?;
+        while iter
+            .next_tuple(|_, tuple| {
+                println!("{tuple:#?}");
+                ()
+            })?
+            .is_some()
+        {}
+        iter.done()?;
         Ok(())
     }
 
@@ -1396,13 +1392,13 @@ pub(crate) mod test {
             assert_eq!(column.datatype(), &LogicalType::Date);
         });
         assert_eq!(
-            iter.next().unwrap()?,
+            next_tuple_owned(&mut iter)?.unwrap(),
             Tuple::new(
                 None,
                 vec![DataValue::Date32(Local::now().num_days_from_ce())]
             )
         );
-        assert!(iter.next().is_none());
+        assert!(iter.next_tuple(|_, _| ())?.is_none());
 
         Ok(())
     }
@@ -1423,11 +1419,11 @@ pub(crate) mod test {
             assert_eq!(column.datatype(), &LogicalType::Integer);
         });
         assert_eq!(
-            iter.next().unwrap()?,
+            next_tuple_owned(&mut iter)?.unwrap(),
             Tuple::new(None, vec![DataValue::Int32(3)])
         );
         assert_eq!(
-            iter.next().unwrap()?,
+            next_tuple_owned(&mut iter)?.unwrap(),
             Tuple::new(None, vec![DataValue::Int32(4)])
         );
         Ok(())
@@ -1715,7 +1711,7 @@ pub(crate) mod test {
 
             let mut iter = kite_sql.execute(statement, &[("$1", DataValue::Int32(0))])?;
 
-            let row = iter.next().unwrap()?;
+            let row = next_tuple_owned(&mut iter)?.unwrap();
             let plan = row.values[0].utf8().unwrap();
             assert!(plan.contains("Projection"));
             assert!(plan.contains("Filter ("));
@@ -1737,7 +1733,7 @@ pub(crate) mod test {
                     ("$4", DataValue::Int32(0)),
                 ],
             )?;
-            let row = iter.next().unwrap()?;
+            let row = next_tuple_owned(&mut iter)?.unwrap();
             let plan = row.values[0].utf8().unwrap();
             assert!(plan.contains("Projection"));
             assert!(plan.contains("Aggregate"));
@@ -1757,7 +1753,7 @@ pub(crate) mod test {
                     ("$4", DataValue::Int32(0)),
                 ],
             )?;
-            let row = iter.next().unwrap()?;
+            let row = next_tuple_owned(&mut iter)?.unwrap();
             let plan = row.values[0].utf8().unwrap();
             assert!(plan.contains("Projection"));
             assert!(plan.contains("LeftOuter Join"));
@@ -1812,22 +1808,19 @@ pub(crate) mod test {
 
         let collect_plan = |sql: &str| -> Result<String, DatabaseError> {
             let mut iter = kite_sql.run(sql)?;
-            let rows = iter.by_ref().collect::<Result<Vec<_>, _>>()?;
+            let mut lines = Vec::new();
+            while let Some(row) = next_tuple_owned(&mut iter)? {
+                if let Some(DataValue::Utf8 { value, .. }) = row.values.first() {
+                    lines.push(value.clone());
+                }
+            }
             iter.done()?;
-            Ok(rows
-                .iter()
-                .filter_map(|row| match row.values.first() {
-                    Some(DataValue::Utf8 { value, .. }) => Some(value.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n"))
+            Ok(lines.join("\n"))
         };
         let collect_ids = |sql: &str| -> Result<Vec<i32>, DatabaseError> {
             let mut iter = kite_sql.run(sql)?;
             let mut ids = Vec::new();
-            for row in iter.by_ref() {
-                let row = row?;
+            while let Some(row) = next_tuple_owned(&mut iter)? {
                 ids.push(row.values[0].i32().unwrap());
             }
             iter.done()?;
@@ -1944,22 +1937,19 @@ pub(crate) mod test {
 
         let collect_plan = |sql: &str| -> Result<String, DatabaseError> {
             let mut iter = kite_sql.run(sql)?;
-            let rows = iter.by_ref().collect::<Result<Vec<_>, _>>()?;
+            let mut lines = Vec::new();
+            while let Some(row) = next_tuple_owned(&mut iter)? {
+                if let Some(DataValue::Utf8 { value, .. }) = row.values.first() {
+                    lines.push(value.clone());
+                }
+            }
             iter.done()?;
-            Ok(rows
-                .iter()
-                .filter_map(|row| match row.values.first() {
-                    Some(DataValue::Utf8 { value, .. }) => Some(value.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n"))
+            Ok(lines.join("\n"))
         };
         let collect_ids = |sql: &str| -> Result<Vec<i32>, DatabaseError> {
             let mut iter = kite_sql.run(sql)?;
             let mut ids = Vec::new();
-            for row in iter.by_ref() {
-                let row = row?;
+            while let Some(row) = next_tuple_owned(&mut iter)? {
                 ids.push(row.values[0].i32().unwrap());
             }
             iter.done()?;
@@ -2012,14 +2002,14 @@ pub(crate) mod test {
             "insert into t_multi values(0, 0); insert into t_multi values(1, 1); select * from t_multi order by a",
         )?;
         assert_eq!(
-            iter.next().unwrap()?.values,
+            next_values(&mut iter)?.unwrap(),
             vec![DataValue::Int32(0), DataValue::Int32(0)]
         );
         assert_eq!(
-            iter.next().unwrap()?.values,
+            next_values(&mut iter)?.unwrap(),
             vec![DataValue::Int32(1), DataValue::Int32(1)]
         );
-        assert!(iter.next().is_none());
+        assert!(iter.next_tuple(|_, _| ())?.is_none());
         iter.done()?;
 
         Ok(())
@@ -2125,16 +2115,16 @@ pub(crate) mod test {
         let mut iter_2 = tx_2.run("select * from t1")?;
 
         assert_eq!(
-            iter_1.next().unwrap()?.values,
+            next_values(&mut iter_1)?.unwrap(),
             vec![DataValue::Int32(0), DataValue::Int32(0)]
         );
         assert_eq!(
-            iter_1.next().unwrap()?.values,
+            next_values(&mut iter_1)?.unwrap(),
             vec![DataValue::Int32(1), DataValue::Int32(1)]
         );
 
         assert_eq!(
-            iter_2.next().unwrap()?.values,
+            next_values(&mut iter_2)?.unwrap(),
             vec![DataValue::Int32(3), DataValue::Int32(3)]
         );
         drop(iter_1);
@@ -2162,20 +2152,20 @@ pub(crate) mod test {
             "insert into t_multi_tx values(0, 0); insert into t_multi_tx values(1, 1); select * from t_multi_tx order by a",
         )?;
         assert_eq!(
-            iter.next().unwrap()?.values,
+            next_values(&mut iter)?.unwrap(),
             vec![DataValue::Int32(0), DataValue::Int32(0)]
         );
         assert_eq!(
-            iter.next().unwrap()?.values,
+            next_values(&mut iter)?.unwrap(),
             vec![DataValue::Int32(1), DataValue::Int32(1)]
         );
-        assert!(iter.next().is_none());
+        assert!(iter.next_tuple(|_, _| ())?.is_none());
         iter.done()?;
         tx.commit()?;
 
         let mut check_iter = kite_sql.run("select count(*) from t_multi_tx")?;
         assert_eq!(
-            check_iter.next().unwrap()?.values,
+            next_values(&mut check_iter)?.unwrap(),
             vec![DataValue::Int32(2)]
         );
         check_iter.done()?;
@@ -2194,7 +2184,8 @@ pub(crate) mod test {
         tx.run("insert into t_iter_drop values (0, 0), (1, 1)")?
             .done()?;
 
-        assert!(kite_sql.run("select * from t_iter_drop")?.next().is_none());
+        let mut iter = kite_sql.run("select * from t_iter_drop")?;
+        assert!(iter.next_tuple(|_, _| ())?.is_none());
 
         tx.commit()?;
 
@@ -2213,14 +2204,14 @@ pub(crate) mod test {
 
         let mut iter = kite_sql.run("select * from t_iter_guard order by a")?;
         assert_eq!(
-            iter.next().unwrap()?.values,
+            next_values(&mut iter)?.unwrap(),
             vec![DataValue::Int32(0), DataValue::Int32(0)]
         );
         assert_eq!(
-            iter.next().unwrap()?.values,
+            next_values(&mut iter)?.unwrap(),
             vec![DataValue::Int32(1), DataValue::Int32(1)]
         );
-        assert!(iter.next().is_none());
+        assert!(iter.next_tuple(|_, _| ())?.is_none());
         iter.done()?;
 
         kite_sql.ddl("drop table t_iter_guard")?;
@@ -2321,20 +2312,20 @@ pub(crate) mod test {
         let mut iter_2 = tx_2.run("select * from t1")?;
 
         assert_eq!(
-            iter_1.next().unwrap()?.values,
+            next_values(&mut iter_1)?.unwrap(),
             vec![DataValue::Int32(0), DataValue::Int32(0)]
         );
         assert_eq!(
-            iter_1.next().unwrap()?.values,
+            next_values(&mut iter_1)?.unwrap(),
             vec![DataValue::Int32(1), DataValue::Int32(1)]
         );
 
         assert_eq!(
-            iter_2.next().unwrap()?.values,
+            next_values(&mut iter_2)?.unwrap(),
             vec![DataValue::Int32(0), DataValue::Int32(0)]
         );
         assert_eq!(
-            iter_2.next().unwrap()?.values,
+            next_values(&mut iter_2)?.unwrap(),
             vec![DataValue::Int32(3), DataValue::Int32(3)]
         );
         drop(iter_1);

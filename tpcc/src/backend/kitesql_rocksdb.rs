@@ -182,41 +182,13 @@ impl<'a, S: Storage> KiteSqlRocksTransaction<'a, S> {
 impl<'a, S: Storage> BackendTransaction for KiteSqlRocksTransaction<'a, S> {
     type PreparedStatement = KiteSqlPreparedStatement;
 
-    fn query_one(
-        &mut self,
-        statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
-    ) -> Result<Tuple, TpccError> {
-        self.execute_raw(statement, params)?
-            .next_borrowed_tuple()?
-            .cloned()
-            .ok_or(TpccError::EmptyTuples)
-    }
-
-    fn query_nth(
-        &mut self,
-        statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
-        n: usize,
-    ) -> Result<Tuple, TpccError> {
-        let mut iter = self.execute_raw(statement, params)?;
-        for _ in 0..n {
-            if iter.next_borrowed_tuple()?.is_none() {
-                return Err(TpccError::EmptyTuples);
-            }
-        }
-        iter.next_borrowed_tuple()?
-            .cloned()
-            .ok_or(TpccError::EmptyTuples)
-    }
-
     fn execute_drain(
         &mut self,
         statement: &mut Self::PreparedStatement,
         params: &[DbParam],
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
-        while iter.next_borrowed_tuple()?.is_some() {}
+        while iter.skip_next_tuple()? {}
         Ok(())
     }
 
@@ -227,8 +199,8 @@ impl<'a, S: Storage> BackendTransaction for KiteSqlRocksTransaction<'a, S> {
         visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
-        let tuple = iter.next_borrowed_tuple()?.ok_or(TpccError::EmptyTuples)?;
-        visitor(tuple)
+        iter.with_next_tuple(|tuple| visitor(tuple))?
+            .ok_or(TpccError::EmptyTuples)
     }
 
     fn with_query_nth(
@@ -240,12 +212,12 @@ impl<'a, S: Storage> BackendTransaction for KiteSqlRocksTransaction<'a, S> {
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
         for _ in 0..n {
-            if iter.next_borrowed_tuple()?.is_none() {
+            if !iter.skip_next_tuple()? {
                 return Err(TpccError::EmptyTuples);
             }
         }
-        let tuple = iter.next_borrowed_tuple()?.ok_or(TpccError::EmptyTuples)?;
-        visitor(tuple)
+        iter.with_next_tuple(|tuple| visitor(tuple))?
+            .ok_or(TpccError::EmptyTuples)
     }
 
     fn commit(self) -> Result<(), TpccError> {
@@ -261,15 +233,25 @@ impl<'a, T: Transaction + 'a> KiteSqlTxnResult<'a, T> {
         Self(iter)
     }
 
-    pub(crate) fn next_borrowed_tuple(&mut self) -> Result<Option<&Tuple>, TpccError> {
-        self.0.next_borrowed_tuple().map_err(TpccError::from)
+    pub(crate) fn skip_next_tuple(&mut self) -> Result<bool, TpccError> {
+        Ok(self
+            .0
+            .next_tuple(|_, _| ())
+            .map_err(TpccError::from)?
+            .is_some())
     }
-}
 
-impl<T: Transaction> Iterator for KiteSqlTxnResult<'_, T> {
-    type Item = Result<Tuple, TpccError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0.next().map(|item| item.map_err(TpccError::from))
+    pub(crate) fn with_next_tuple<R>(
+        &mut self,
+        f: impl FnOnce(&Tuple) -> Result<R, TpccError>,
+    ) -> Result<Option<R>, TpccError> {
+        match self
+            .0
+            .next_tuple(|_, tuple| f(tuple))
+            .map_err(TpccError::from)?
+        {
+            Some(result) => result.map(Some),
+            None => Ok(None),
+        }
     }
 }

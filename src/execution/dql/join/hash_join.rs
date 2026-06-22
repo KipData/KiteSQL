@@ -33,7 +33,7 @@ use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use bumpalo::Bump;
 use std::collections::HashMap;
-use std::mem::transmute;
+use std::mem::{self, transmute};
 
 pub struct HashJoin {
     state: HashJoinState,
@@ -157,7 +157,7 @@ impl HashJoin {
         let mut build_count = 0usize;
 
         while arena.next_tuple(self.left_input, plan_arena)? {
-            let tuple = arena.result_tuple().clone();
+            let tuple = mem::take(arena.result_tuple_mut());
             Self::eval_keys(&self.on_left_keys, &tuple, &mut build_buf)?;
 
             match build_map.get_mut(&build_buf) {
@@ -283,7 +283,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashJoin {
                             if !arena.next_tuple(self.right_input, plan_arena)? {
                                 break true;
                             }
-                            let tuple = arena.result_tuple().clone();
+                            let tuple = mem::take(arena.result_tuple_mut());
                             Self::eval_keys(&self.on_right_keys, &tuple, &mut probe_buf)?;
                             probe_state = Some(ProbeState {
                                 is_keys_has_null: probe_buf.iter().any(DataValue::is_null),

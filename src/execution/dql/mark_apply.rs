@@ -22,7 +22,6 @@ use crate::storage::Transaction;
 use crate::types::index::RuntimeIndexProbe;
 use crate::types::tuple::{SplitTupleRef, Tuple};
 use crate::types::value::DataValue;
-use std::mem;
 
 #[derive(PartialEq, Eq)]
 enum QuantifiedPredicateOutcome {
@@ -36,7 +35,6 @@ pub struct MarkApply {
     op: MarkApplyOperator,
     right_input_plan: LogicalPlan,
     left_input: ExecId,
-    left_tuple: Tuple,
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for MarkApply {
@@ -54,7 +52,6 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for MarkApply {
             op,
             right_input_plan: right_input,
             left_input,
-            left_tuple: Tuple::default(),
         }))
     }
 }
@@ -70,12 +67,11 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply {
             return Ok(());
         }
 
-        self.left_tuple = mem::take(arena.result_tuple_mut());
-        let marker = self.mark_value(arena, plan_arena)?;
+        let mut left_tuple = arena.result_tuple().clone();
+        let marker = self.mark_value(arena, plan_arena, &left_tuple)?;
 
-        arena.produce_tuple(mem::take(&mut self.left_tuple));
-        arena.result_tuple_mut().values.push(marker);
-        arena.resume();
+        left_tuple.values.push(marker);
+        arena.produce_tuple(left_tuple);
         Ok(())
     }
 }
@@ -142,27 +138,31 @@ impl MarkApply {
         result
     }
 
-    fn parameterized_probe_value(&self) -> Result<Option<DataValue>, DatabaseError> {
+    fn parameterized_probe_value(
+        &self,
+        left_tuple: &Tuple,
+    ) -> Result<Option<DataValue>, DatabaseError> {
         self.op
             .parameterized_probe()
-            .map(|probe| probe.eval(Some(&self.left_tuple)))
+            .map(|probe| probe.eval(Some(left_tuple)))
             .transpose()
     }
 
     fn mark_value<'a, T: Transaction + 'a>(
-        &mut self,
+        &self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
+        left_tuple: &Tuple,
     ) -> Result<DataValue, DatabaseError> {
         match self.op.kind {
             MarkApplyKind::Exists => self.with_right_input(
                 arena,
                 plan_arena,
-                self.parameterized_probe_value()?,
+                self.parameterized_probe_value(left_tuple)?,
                 |arena, plan_arena, right_input| {
                     while arena.next_tuple(right_input, plan_arena)? {
                         let right_tuple = arena.result_tuple();
-                        if self.exists_predicate_matched(&self.left_tuple, right_tuple)? {
+                        if self.exists_predicate_matched(left_tuple, right_tuple)? {
                             return Ok(DataValue::Boolean(true));
                         }
                     }
@@ -171,7 +171,7 @@ impl MarkApply {
                 },
             ),
             MarkApplyKind::Quantified(MarkApplyQuantifier::Any) => {
-                if let Some(probe_value) = self.parameterized_probe_value()? {
+                if let Some(probe_value) = self.parameterized_probe_value(left_tuple)? {
                     if !probe_value.is_null() {
                         if self.with_right_input(
                             arena,
@@ -180,10 +180,8 @@ impl MarkApply {
                             |arena, plan_arena, right_input| {
                                 while arena.next_tuple(right_input, plan_arena)? {
                                     let right_tuple = arena.result_tuple();
-                                    if self.quantified_predicate_outcome(
-                                        &self.left_tuple,
-                                        right_tuple,
-                                    )? == QuantifiedPredicateOutcome::True
+                                    if self.quantified_predicate_outcome(left_tuple, right_tuple)?
+                                        == QuantifiedPredicateOutcome::True
                                     {
                                         return Ok(true);
                                     }
@@ -202,10 +200,8 @@ impl MarkApply {
                             |arena, plan_arena, right_input| {
                                 while arena.next_tuple(right_input, plan_arena)? {
                                     let right_tuple = arena.result_tuple();
-                                    if self.quantified_predicate_outcome(
-                                        &self.left_tuple,
-                                        right_tuple,
-                                    )? == QuantifiedPredicateOutcome::Null
+                                    if self.quantified_predicate_outcome(left_tuple, right_tuple)?
+                                        == QuantifiedPredicateOutcome::Null
                                     {
                                         return Ok(true);
                                     }
@@ -227,6 +223,7 @@ impl MarkApply {
                         plan_arena,
                         right_input,
                         MarkApplyQuantifier::Any,
+                        left_tuple,
                     )
                 })
             }
@@ -237,6 +234,7 @@ impl MarkApply {
                         plan_arena,
                         right_input,
                         MarkApplyQuantifier::All,
+                        left_tuple,
                     )
                 })
             }
@@ -249,12 +247,13 @@ impl MarkApply {
         plan_arena: &mut crate::planner::PlanArena<'a>,
         right_input: ExecId,
         quantifier: MarkApplyQuantifier,
+        left_tuple: &Tuple,
     ) -> Result<DataValue, DatabaseError> {
         let mut saw_null = false;
 
         while arena.next_tuple(right_input, plan_arena)? {
             let right_tuple = arena.result_tuple();
-            match self.quantified_predicate_outcome(&self.left_tuple, right_tuple)? {
+            match self.quantified_predicate_outcome(left_tuple, right_tuple)? {
                 QuantifiedPredicateOutcome::True => {
                     if matches!(quantifier, MarkApplyQuantifier::Any) {
                         return Ok(DataValue::Boolean(true));
@@ -581,15 +580,15 @@ mod tests {
             &transaction,
         );
 
-        let mut exec = MarkApply {
+        let exec = MarkApply {
             op,
             right_input_plan: right,
             left_input: 0,
-            left_tuple: Tuple::new(None, vec![DataValue::Int32(2), DataValue::Int32(1)]),
         };
+        let left_tuple = Tuple::new(None, vec![DataValue::Int32(2), DataValue::Int32(1)]);
 
         assert_eq!(
-            exec.mark_value(&mut arena, &mut plan_arena)?,
+            exec.mark_value(&mut arena, &mut plan_arena, &left_tuple)?,
             DataValue::Boolean(true)
         );
         assert_eq!(
@@ -629,15 +628,15 @@ mod tests {
             &transaction,
         );
 
-        let mut exec = MarkApply {
+        let exec = MarkApply {
             op,
             right_input_plan: right,
             left_input: 0,
-            left_tuple: Tuple::new(None, vec![DataValue::Int32(2)]),
         };
+        let left_tuple = Tuple::new(None, vec![DataValue::Int32(2)]);
 
         assert_eq!(
-            exec.mark_value(&mut arena, &mut plan_arena)?,
+            exec.mark_value(&mut arena, &mut plan_arena, &left_tuple)?,
             DataValue::Boolean(true)
         );
         assert_eq!(
@@ -677,15 +676,15 @@ mod tests {
             &transaction,
         );
 
-        let mut exec = MarkApply {
+        let exec = MarkApply {
             op,
             right_input_plan: right,
             left_input: 0,
-            left_tuple: Tuple::new(None, vec![DataValue::Null]),
         };
+        let left_tuple = Tuple::new(None, vec![DataValue::Null]);
 
         assert_eq!(
-            exec.mark_value(&mut arena, &mut plan_arena)?,
+            exec.mark_value(&mut arena, &mut plan_arena, &left_tuple)?,
             DataValue::Null
         );
         assert_eq!(

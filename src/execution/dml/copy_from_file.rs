@@ -107,7 +107,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyFromFile {
             let chunk = tuple_builder.build_with_row(record.iter())?;
             let mut state = arena.local_state(plan_arena);
             let (transaction, table_codec) = state.transaction_codec_mut();
-            transaction.append_tuple(table_codec, &table_name, chunk, &serializers, false)?;
+            transaction.append_tuple(table_codec, &table_name, &chunk, &serializers, false)?;
             size += 1;
         }
 
@@ -193,7 +193,9 @@ mod tests {
             &transaction,
         );
 
-        let result = executor.next().expect("copy from file should yield once")?;
+        let result = executor
+            .next_tuple()?
+            .expect("copy from file should yield once");
         assert_eq!(result.values[0].to_string(), "2");
 
         Ok(())

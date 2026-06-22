@@ -26,7 +26,7 @@ use crate::types::tuple::Tuple;
 use bumpalo::Bump;
 use std::cmp::Ordering;
 use std::collections::{btree_set::IntoIter as BTreeSetIntoIter, BTreeSet};
-use std::mem::transmute;
+use std::mem::{self, transmute};
 
 #[derive(Eq, PartialEq, Debug)]
 struct CmpItem<'a> {
@@ -143,7 +143,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for TopK {
                     &self.arena,
                     &self.sort_fields,
                     &mut set,
-                    arena.result_tuple().clone(),
+                    mem::take(arena.result_tuple_mut()),
                     keep_count,
                 )?;
             }

@@ -49,33 +49,40 @@ mod app {
             .run("insert into t1 values(0, 0), (1, 1)")?
             .done()?;
 
-        assert!(database.run("select * from t1")?.next().is_none());
+        let mut hidden_iter = database.run("select * from t1")?;
+        assert!(hidden_iter.next_tuple(|_, _| ())?.is_none());
+        hidden_iter.done()?;
 
         transaction.commit()?;
 
         let mut iter = database.run("select * from t1")?;
-        assert_eq!(
-            iter.next().unwrap()?,
-            Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)])
-        );
-        assert_eq!(
-            iter.next().unwrap()?,
-            Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(1)])
-        );
-        assert!(iter.next().is_none());
+        iter.next_tuple(|_, tuple| {
+            assert_eq!(
+                tuple,
+                &Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)])
+            );
+        })?
+        .unwrap();
+        iter.next_tuple(|_, tuple| {
+            assert_eq!(
+                tuple,
+                &Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(1)])
+            );
+        })?
+        .unwrap();
+        assert!(iter.next_tuple(|_, _| ())?.is_none());
         iter.done()?;
 
         let mut tx2 = database.new_transaction()?;
         tx2.run("update t1 set c2 = 99 where c1 = 0")?.done()?;
+        let mut c2_iter = database.run("select c2 from t1 where c1 = 0")?;
         assert_eq!(
-            database
-                .run("select c2 from t1 where c1 = 0")?
-                .next()
-                .unwrap()?
-                .values[0]
-                .i32(),
+            c2_iter
+                .next_tuple(|_, tuple| tuple.values[0].i32())?
+                .unwrap(),
             Some(0)
         );
+        c2_iter.done()?;
         drop(tx2);
 
         database.ddl("drop table t1")?;
