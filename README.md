@@ -198,16 +198,16 @@ Run `make tpcc-dual` to mirror every TPCC statement to an in-memory SQLite datab
 - KIOXIA-EXCERIA PLUS G3 SSD
 - Tips: TPC-C currently only supports single thread
 
-Recent 720-second local comparison on the machine above:
+Recent stable-run 720-second local comparison on the machine above:
 
 | Backend | TpmC | New-Order p90 | Payment p90 | Order-Status p90 | Delivery p90 | Stock-Level p90 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| KiteSQL LMDB | 73638 | 0.001s | 0.001s | 0.001s | 0.002s | 0.001s |
-| KiteSQL RocksDB | 39051 | 0.001s | 0.001s | 0.002s | 0.009s | 0.001s |
-| SQLite balanced | 56788 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
-| SQLite practical | 44049 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
+| KiteSQL LMDB | 71345 | 0.001s | 0.001s | 0.001s | 0.002s | 0.001s |
+| KiteSQL RocksDB | 40563 | 0.001s | 0.001s | 0.002s | 0.009s | 0.001s |
+| SQLite balanced | 67527 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
+| SQLite practical | 64774 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
 
-The detailed raw outputs are recorded in [tpcc/README.md](tpcc/README.md).
+These rows are from `./scripts/run_tpcc_stable.py --build` at `2026-06-23_00-50-48`; the detailed raw outputs are recorded in [tpcc/README.md](tpcc/README.md).
 #### 👉[check more](tpcc/README.md)
 
 ## Roadmap
