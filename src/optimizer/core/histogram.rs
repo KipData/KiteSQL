@@ -360,10 +360,18 @@ impl Histogram {
 
     fn equal_count(&self, value: &DataValue, sketch: &CountMinSketch<DataValue>) -> usize {
         let average_count = self.average_count();
-        if sketch.error_bound(self.meta.values_len) >= average_count {
-            average_count
+        if average_count == 0 {
+            return 0;
+        }
+
+        let estimated_count = sketch.estimate(value);
+        let error_bound = sketch.error_bound(self.meta.values_len);
+        if error_bound < average_count
+            || estimated_count.saturating_sub(error_bound) > average_count
+        {
+            estimated_count
         } else {
-            sketch.estimate(value)
+            average_count
         }
     }
 
@@ -1123,23 +1131,51 @@ mod tests {
     }
 
     #[test]
-    fn test_eq_count_falls_back_to_hll_when_cm_error_is_large() -> Result<(), DatabaseError> {
+    fn test_eq_count_falls_back_to_average_when_cm_error_is_large() -> Result<(), DatabaseError> {
         let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
 
         for value in 0..10_000 {
             builder.append(DataValue::Int32(value))?;
         }
 
-        let (histogram, mut sketch, _) = builder.build(100)?;
+        let (histogram, sketch, _) = builder.build(100)?;
         let top_n = ColumnTopN::default();
         let average_count = histogram.average_count();
-        assert!(sketch.error_bound(histogram.values_len()) >= average_count);
-
-        sketch.add(&DataValue::Int32(7), 1000);
+        let error_bound = sketch.error_bound(histogram.values_len());
+        let estimated_count = sketch.estimate(&DataValue::Int32(7));
+        assert!(error_bound >= average_count);
+        assert!(estimated_count.saturating_sub(error_bound) <= average_count);
 
         assert_eq!(
             histogram.collect_count(&[Range::Eq(DataValue::Int32(7))], &sketch, &top_n)?,
             average_count
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_eq_count_uses_cm_sketch_for_clear_heavy_hitter() -> Result<(), DatabaseError> {
+        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+
+        for _ in 0..1_000 {
+            builder.append(DataValue::Int32(7))?;
+        }
+        for value in 0..9_000 {
+            builder.append(DataValue::Int32(10_000 + value))?;
+        }
+
+        let (histogram, sketch, _) = builder.build(100)?;
+        let top_n = ColumnTopN::default();
+        let average_count = histogram.average_count();
+        let error_bound = sketch.error_bound(histogram.values_len());
+        let estimated_count = sketch.estimate(&DataValue::Int32(7));
+        assert!(error_bound >= average_count);
+        assert!(estimated_count.saturating_sub(error_bound) > average_count);
+
+        assert_eq!(
+            histogram.collect_count(&[Range::Eq(DataValue::Int32(7))], &sketch, &top_n)?,
+            estimated_count
         );
 
         Ok(())
