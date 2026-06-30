@@ -1261,7 +1261,7 @@ fn encode_bound<'a>(
             Ok(Bound::Included(buffer.as_slice()))
         }
         Bound::Excluded(val) => {
-            inner.bound_key(table_codec, params, val, is_upper, buffer)?;
+            inner.bound_key(table_codec, params, val, !is_upper, buffer)?;
             Ok(Bound::Excluded(buffer.as_slice()))
         }
         Bound::Unbounded => Ok(Bound::Unbounded),

@@ -627,11 +627,10 @@ mod tests {
     use crate::optimizer::rule::implementation::ImplementationRuleImpl;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::sort::SortField;
-    use crate::planner::operator::{PhysicalOption, PlanImpl, SortOption};
+    use crate::planner::operator::{Operator, PlanImpl, SortOption};
     use crate::storage::{Storage, Transaction};
-    use crate::types::index::{IndexInfo, IndexLookup, IndexMeta, IndexType};
+    use crate::types::index::IndexLookup;
     use crate::types::value::DataValue;
-    use crate::types::LogicalType;
     use std::ops::Bound;
     use tempfile::TempDir;
 
@@ -708,50 +707,31 @@ mod tests {
             &mut plan_arena,
         )?;
 
-        let expected_index_meta = plan_arena.alloc_index(IndexMeta {
-            id: 0,
-            column_ids: vec![plan_arena.column(c1_column).id().unwrap()],
-            table_name: "t1".to_string().into(),
-            pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Integer,
-            name: "pk_index".to_string(),
-            ty: IndexType::PrimaryKey { is_multiple: false },
-        });
-
+        let join_plan = best_plan.childrens.pop_only();
+        let left_scan = join_plan.childrens.pop_twins().0;
+        assert!(matches!(left_scan.operator, Operator::TableScan(_)));
+        let Some(physical_option) = left_scan.physical_option else {
+            unreachable!("left scan should select index scan");
+        };
+        let PlanImpl::IndexScan(index_info) = &physical_option.plan else {
+            unreachable!("left scan should select index scan");
+        };
         assert_eq!(
-            best_plan
-                .childrens
-                .pop_only()
-                .childrens
-                .pop_twins()
-                .0
-                .childrens
-                .pop_only()
-                .physical_option,
-            Some(PhysicalOption::new(
-                PlanImpl::IndexScan(Box::new(IndexInfo {
-                    meta: expected_index_meta,
-                    sort_option: SortOption::OrderBy {
-                        fields: sort_fields.clone(),
-                        ignore_prefix_len: 0,
-                    },
-                    lookup: Some(IndexLookup::Static(Range::SortedRanges(vec![
-                        Range::Eq(DataValue::Int32(2)),
-                        Range::Scope {
-                            min: Bound::Excluded(DataValue::Int32(40)),
-                            max: Bound::Unbounded,
-                        }
-                    ]))),
-                    covered_deserializers: None,
-                    cover_mapping: None,
-                    sort_elimination_hint: None,
-                    stream_distinct_hint: None,
-                })),
-                SortOption::OrderBy {
-                    fields: sort_fields,
-                    ignore_prefix_len: 0,
+            index_info.lookup,
+            Some(IndexLookup::Static(Range::SortedRanges(vec![
+                Range::Eq(DataValue::Int32(2)),
+                Range::Scope {
+                    min: Bound::Excluded(DataValue::Int32(40)),
+                    max: Bound::Unbounded,
                 }
-            ))
+            ])))
+        );
+        assert_eq!(
+            physical_option.sort_option(),
+            &SortOption::OrderBy {
+                fields: sort_fields,
+                ignore_prefix_len: 0,
+            }
         );
 
         Ok(())

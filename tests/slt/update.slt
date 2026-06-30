@@ -65,3 +65,39 @@ select * from t where id = 2
 
 statement ok
 drop table t
+
+statement ok
+create table t_update_idx(id int primary key, b int, c int)
+
+statement ok
+copy t_update_idx from 'tests/data/row_20000.csv' ( DELIMITER '|' )
+
+statement ok
+create index idx_t_update_idx_b on t_update_idx(b)
+
+statement ok
+analyze table t_update_idx
+
+query T
+explain select id, b, c from t_update_idx where b = 10
+----
+Projection [#1, #2, #3] [Project => (Sort Option: Follow)] TableScan t_update_idx -> [#1, #2, #3] [IndexScan By #2 => 10 => (Sort Option: OrderBy: (#2 Asc Nulls Last) ignore_prefix_len: 0)]
+
+statement ok
+update t_update_idx set c = 111 where id = 9
+
+query III
+select id, b, c from t_update_idx where b = 10
+----
+9 10 111
+
+statement ok
+update t_update_idx set id = 300000 where id = 9
+
+query III
+select id, b, c from t_update_idx where b = 10
+----
+300000 10 111
+
+statement ok
+drop table t_update_idx

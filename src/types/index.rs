@@ -73,6 +73,7 @@ pub struct IndexInfo {
     pub(crate) meta: IndexMetaRef,
     pub(crate) sort_option: SortOption,
     pub(crate) lookup: Option<IndexLookup>,
+    pub(crate) residual_predicate: Option<ScalarExpression>,
     pub(crate) covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
     pub(crate) cover_mapping: Option<Vec<usize>>,
     pub(crate) sort_elimination_hint: Option<IndexOrderHint>,
