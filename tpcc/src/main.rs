@@ -809,6 +809,7 @@ impl_from_tpcc_error!(std::io::Error, Io);
 #[ignore]
 #[test]
 fn explain_tpcc() -> Result<(), DatabaseError> {
+    use kite_sql::db::CatalogKind;
     use kite_sql::db::{DataBaseBuilder, ResultIter};
     use kite_sql::types::tuple::Tuple;
 
@@ -849,7 +850,20 @@ fn explain_tpcc() -> Result<(), DatabaseError> {
         Ok(value)
     }
 
-    let database = DataBaseBuilder::path(tpcc_db_path()).build_lmdb()?;
+    let mut database = DataBaseBuilder::path(tpcc_db_path()).build_lmdb()?;
+    for table_name in [
+        "item",
+        "warehouse",
+        "stock",
+        "district",
+        "customer",
+        "history",
+        "orders",
+        "new_orders",
+        "order_line",
+    ] {
+        database.load(CatalogKind::Table(table_name.to_string().into()))?;
+    }
     let mut tx = database.new_transaction()?;
 
     let (c_w_id, c_d_id, c_id, c_last, c_balance, c_data) = with_next_tuple(

@@ -3,15 +3,8 @@ Run `make tpcc` (or `cargo run -p tpcc --release`) to exercise the workload on K
 
 Run `make tpcc-dual` to execute the workload on KiteSQL while mirroring every statement to an in-memory SQLite database; the runner asserts that both engines return identical tuples, making it ideal for correctness validation. This target runs for 60 seconds (`--measure-time 60`). Use `cargo run -p tpcc --release -- --backend dual --measure-time <secs>` for a custom duration.
 
-## Performance Matrix Script
-Use `./scripts/run_tpcc_matrix.sh` to run the TPCC performance comparison in one shot.
-
-- The script measures `kitesql-lmdb`, `kitesql-rocksdb`, `sqlite-balanced`, and `sqlite-practical`.
-- Main variants follow TPCC's default duration unless `TPCC_MAIN_MEASURE_TIME` is overridden.
-- If a run fails with a duplicate-key style error, the script clears that backend's database and retries that variant once.
-- Outputs are written to `tpcc/results/<timestamp>/`, including `summary.md` and per-backend raw logs.
-
-For more stable local numbers on machines that thermal-throttle under sustained TPCC load, use the Python runner:
+## Stable Performance Runner
+Use the Python runner for local performance comparisons:
 
 ```shell
 ./scripts/run_tpcc_stable.py --build
@@ -33,7 +26,7 @@ Example shorter smoke run:
 Before a formal local run, clear old TPCC data and Linux page cache so each matrix starts from a comparable state:
 
 ```shell
-rm -rf target/tpcc-stable-run-data target/tpcc-run-data kite_sql_tpcc kite_sql_tpcc.sqlite
+rm -rf target/tpcc-stable-run-data kite_sql_tpcc kite_sql_tpcc.sqlite
 sync
 sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
 ```
@@ -42,11 +35,6 @@ The runner reads CPU temperatures from Linux `/sys/class/hwmon` and `/sys/class/
 
 Duplicate-key note:
 The benchmark stores `history.h_date` as `timestamp(6)`, so high-throughput `Payment` transactions do not collide on second-level timestamp buckets. A duplicate-primary-key failure during TPCC should be treated as a run failure and investigated or rerun from a clean database.
-
-Example:
-```shell
-TPCC_DUPLICATE_RETRY=1 ./scripts/run_tpcc_matrix.sh
-```
 
 - i9-13900HX
 - 32.0 GB

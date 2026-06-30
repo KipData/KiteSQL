@@ -19,7 +19,7 @@
 <p align="center">
     <a href="https://github.com/KipData/KiteSQL/actions/workflows/ci.yml"><img src="https://github.com/KipData/KiteSQL/actions/workflows/ci.yml/badge.svg" alt="CI"></img></a>
     <a href="https://deepwiki.com/KipData/KiteSQL"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></img></a>
-    <a href="https://discord.gg/89cxtD2g"><img src="https://img.shields.io/badge/Discord-Join_us-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
+    <a href="https://discord.gg/dU8eVGpJ8h"><img src="https://img.shields.io/badge/Discord-Join_us-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
     <a href="https://crates.io/crates/kite_sql/"><img src="https://img.shields.io/crates/v/kite_sql.svg"></a>
     <a href="https://github.com/KipData/KiteSQL" target="_blank">
     <img src="https://img.shields.io/github/stars/KipData/KiteSQL.svg?style=social" alt="github star"/>

@@ -340,7 +340,6 @@ fn default_optimizer_pipeline() -> HepOptimizerPipeline {
             vec![
                 NormalizationRuleImpl::LimitProjectTranspose,
                 NormalizationRuleImpl::PushLimitThroughJoin,
-                NormalizationRuleImpl::PushLimitIntoTableScan,
             ],
         )
         .before_batch(
@@ -369,6 +368,11 @@ fn default_optimizer_pipeline() -> HepOptimizerPipeline {
             "Expression Remapper".to_string(),
             HepBatchStrategy::once_topdown(),
             vec![NormalizationRuleImpl::EvaluatorBind],
+        )
+        .after_batch(
+            "Limit Into Scan".to_string(),
+            HepBatchStrategy::fix_point_topdown(10),
+            vec![NormalizationRuleImpl::PushLimitIntoTableScan],
         )
         .implementations(vec![
             // DQL

@@ -70,6 +70,7 @@ impl TableScanOperator {
                     ignore_prefix_len: 0,
                 },
                 lookup: None,
+                residual_predicate: None,
                 covered_deserializers: None,
                 cover_mapping: None,
                 sort_elimination_hint: None,

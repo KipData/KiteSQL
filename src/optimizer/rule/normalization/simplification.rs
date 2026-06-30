@@ -205,6 +205,7 @@ mod test {
         if let Operator::Filter(filter_op) = filter_op.operator {
             let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &arena)
                 .detach(&filter_op.predicate)?
+                .map(|detached| detached.range)
                 .unwrap();
             assert_eq!(
                 range,
@@ -310,7 +311,8 @@ mod test {
             if let Operator::Filter(filter_op) = filter_op.operator {
                 Ok(
                     RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &arena)
-                        .detach(&filter_op.predicate)?,
+                        .detach(&filter_op.predicate)?
+                        .map(|detached| detached.range),
                 )
             } else {
                 Ok(None)
@@ -426,7 +428,9 @@ mod test {
 
         let filter_op = best_plan.childrens.pop_only();
         if let Operator::Filter(filter_op) = filter_op.operator {
-            Ok(RangeDetacher::new("t1", column_id, arena).detach(&filter_op.predicate)?)
+            Ok(RangeDetacher::new("t1", column_id, arena)
+                .detach(&filter_op.predicate)?
+                .map(|detached| detached.range))
         } else {
             Ok(None)
         }
@@ -560,10 +564,7 @@ mod test {
 
         assert_eq!(
             plan_filter(&plan_1, table_state.column_id_by_name("c1"), &mut arena)?,
-            Some(Range::Scope {
-                min: Bound::Excluded(DataValue::Int32(1)),
-                max: Bound::Unbounded,
-            })
+            None
         );
 
         Ok(())
@@ -593,7 +594,10 @@ mod test {
 
         assert_eq!(
             plan_filter(&plan_1, table_state.column_id_by_name("c1"), &mut arena)?,
-            None
+            Some(Range::Scope {
+                min: Bound::Unbounded,
+                max: Bound::Excluded(DataValue::Null),
+            })
         );
 
         Ok(())

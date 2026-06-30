@@ -1076,6 +1076,66 @@ mod test {
     }
 
     #[test]
+    fn test_secondary_index_exclusive_range_skips_equal_prefix() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        kite_sql.ddl("create table t1 (id int primary key, c1 int)")?;
+        kite_sql.load(CatalogKind::Table("t1".to_string().into()))?;
+        kite_sql
+            .run("insert into t1 values (0, 0), (1, 1), (2, 2), (9, 9), (10, 10)")?
+            .done()?;
+        kite_sql.ddl("create index idx_c1 on t1(c1)")?;
+        kite_sql.load(CatalogKind::Table("t1".to_string().into()))?;
+
+        let transaction = kite_sql.storage.transaction()?;
+        let table = transaction
+            .table(kite_sql.state.table_cache(), "t1".to_string().into())?
+            .unwrap()
+            .clone();
+        let plan_arena = PlanArena::new(kite_sql.state.table_arena());
+        let c1_column = table
+            .get_column_by_name("c1")
+            .ok_or_else(|| DatabaseError::column_not_found("c1"))?;
+        let idx_c1 = *table
+            .indexes
+            .iter()
+            .find(|index| plan_arena.index(**index).name == "idx_c1")
+            .ok_or(DatabaseError::InvalidIndex)?;
+        let c1_deserializer = vec![plan_arena.column(c1_column).datatype().serializable()];
+
+        let mut iter = transaction.read_by_index(
+            kite_sql.state.table_cache(),
+            &plan_arena,
+            "t1".to_string().into(),
+            (None, None),
+            vec![c1_column],
+            idx_c1,
+            vec![Range::Scope {
+                min: Bound::Excluded(DataValue::Int32(0)),
+                max: Bound::Excluded(DataValue::Int32(10)),
+            }],
+            false,
+            Some(c1_deserializer),
+            None,
+        )?;
+
+        let mut values = Vec::new();
+        while let Some(tuple) = crate::storage::next_tuple_for_test(&mut iter)? {
+            values.push(tuple.values[0].clone());
+        }
+        assert_eq!(
+            values,
+            vec![
+                DataValue::Int32(1),
+                DataValue::Int32(2),
+                DataValue::Int32(9),
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_read_by_index_cover() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;

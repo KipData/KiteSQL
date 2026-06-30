@@ -34,20 +34,20 @@ use crate::optimizer::rule::normalization::simplification::ConstantCalculation;
 use crate::optimizer::rule::normalization::simplification::SimplifyFilter;
 use crate::optimizer::rule::normalization::top_k::TopK;
 use crate::planner::LogicalPlan;
-mod agg_elimination;
 mod column_pruning;
 mod combine_operators;
 mod compilation_in_advance;
+mod elimination;
 mod min_max_top_k;
 mod parameterized_index;
 mod pushdown_limit;
 mod pushdown_predicates;
 mod simplification;
 mod top_k;
-pub(crate) use agg_elimination::{
+pub(crate) use compilation_in_advance::evaluator_bind_current;
+pub(crate) use elimination::{
     apply_annotated_post_rules, apply_scan_order_hint, OrderHintKind, ScanOrderHint,
 };
-pub(crate) use compilation_in_advance::evaluator_bind_current;
 pub(crate) use parameterized_index::ParameterizeMarkApply;
 pub(crate) use simplification::constant_calculation_current;
 

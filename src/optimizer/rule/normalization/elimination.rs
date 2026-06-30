@@ -21,7 +21,7 @@ use crate::planner::operator::sort::SortField;
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
 use crate::planner::{Childrens, LogicalPlan};
-use crate::types::index::IndexOrderHint;
+use crate::types::index::{IndexLookup, IndexOrderHint};
 
 pub struct EliminateRedundantSort;
 
@@ -57,6 +57,47 @@ impl NormalizationRule for EliminateRedundantSort {
                 limit: Some(limit),
             });
             plan.physical_option = Some(PhysicalOption::new(PlanImpl::Limit, SortOption::Follow));
+            return Ok(true);
+        }
+
+        Ok(replace_with_only_child(plan))
+    }
+}
+
+pub struct EliminateIndexFilter;
+
+impl NormalizationRule for EliminateIndexFilter {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        _: &mut crate::planner::PlanArena,
+    ) -> Result<bool, DatabaseError> {
+        if !matches!(plan.operator, Operator::Filter(_)) {
+            return Ok(false);
+        }
+
+        let residual = {
+            let Some(child) = only_child_mut(plan) else {
+                return Ok(false);
+            };
+            let Some(PhysicalOption {
+                plan: PlanImpl::IndexScan(index_info),
+                ..
+            }) = child.physical_option.as_ref()
+            else {
+                return Ok(false);
+            };
+            if !matches!(index_info.lookup, Some(IndexLookup::Static(_))) {
+                return Ok(false);
+            }
+            index_info.residual_predicate.clone()
+        };
+
+        if let Some(residual) = residual {
+            let Operator::Filter(filter_op) = &mut plan.operator else {
+                unreachable!("filter operator checked before residual rewrite");
+            };
+            filter_op.predicate = residual;
             return Ok(true);
         }
 
@@ -253,6 +294,9 @@ pub(crate) fn apply_annotated_post_rules(
     if EliminateRedundantSort.apply(plan, arena)? {
         changed = true;
     }
+    if EliminateIndexFilter.apply(plan, arena)? {
+        changed = true;
+    }
     if UseStreamDistinct.apply(plan, arena)? {
         changed = true;
     }
@@ -382,7 +426,7 @@ pub(crate) fn covers<T>(
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use super::{EliminateRedundantSort, UseStreamDistinct};
+    use super::{EliminateIndexFilter, EliminateRedundantSort, UseStreamDistinct};
     use crate::catalog::{ColumnCatalog, TableName};
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
@@ -473,12 +517,54 @@ mod tests {
             meta,
             sort_option: sort_option.clone(),
             lookup: None,
+            residual_predicate: None,
             covered_deserializers: None,
             cover_mapping: None,
             sort_elimination_hint: None,
             stream_distinct_hint: None,
         };
         (index_info, sort_option)
+    }
+
+    fn build_filter_with_selected_index(
+        arena: &mut crate::planner::PlanArena,
+        predicate: ScalarExpression,
+        residual: Option<ScalarExpression>,
+    ) -> LogicalPlan {
+        let column = arena.alloc_column(ColumnCatalog::new_dummy("c1".to_string()));
+        let sort_field = SortField::new(ScalarExpression::column_expr(column, 0), true, false);
+        let (mut index_info, sort_option) = build_index_info(arena, vec![sort_field], 0);
+        index_info.lookup = Some(IndexLookup::Static(Range::Scope {
+            min: Bound::Unbounded,
+            max: Bound::Unbounded,
+        }));
+        index_info.residual_predicate = residual;
+
+        let mut scan = LogicalPlan::new(
+            Operator::TableScan(TableScanOperator {
+                table_name: ::std::sync::Arc::from("t1"),
+                columns: vec![column],
+                limit: (None, None),
+                index_infos: vec![index_info.clone()],
+                with_pk: false,
+            }),
+            Childrens::None,
+        );
+        scan.physical_option = Some(PhysicalOption::new(
+            PlanImpl::IndexScan(Box::new(index_info)),
+            sort_option,
+        ));
+
+        let mut filter = LogicalPlan::new(
+            Operator::Filter(FilterOperator {
+                predicate,
+                is_optimized: false,
+                having: false,
+            }),
+            Childrens::Only(Box::new(scan)),
+        );
+        filter.physical_option = Some(PhysicalOption::new(PlanImpl::Filter, SortOption::Follow));
+        filter
     }
 
     fn build_distinct_scan_plan(
@@ -510,6 +596,7 @@ mod tests {
             }),
             sort_option: sort_option.clone(),
             lookup: None,
+            residual_predicate: None,
             covered_deserializers: None,
             cover_mapping: None,
             sort_elimination_hint: None,
@@ -537,6 +624,64 @@ mod tests {
         );
 
         (plan, sort_option)
+    }
+
+    #[test]
+    fn exact_index_filter_is_removed_after_physical_selection() -> Result<(), DatabaseError> {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = crate::planner::PlanArena::new(&table_arena);
+        let predicate = ScalarExpression::Constant(DataValue::Boolean(true));
+        let mut plan = build_filter_with_selected_index(&mut arena, predicate, None);
+
+        let rule = EliminateIndexFilter;
+        assert!(rule.apply(&mut plan, &mut arena)?);
+        assert!(matches!(plan.operator, Operator::TableScan(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn partial_index_filter_keeps_residual_after_physical_selection() -> Result<(), DatabaseError> {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = crate::planner::PlanArena::new(&table_arena);
+        let predicate = ScalarExpression::Constant(DataValue::Boolean(true));
+        let residual = ScalarExpression::Constant(DataValue::Boolean(false));
+        let mut plan =
+            build_filter_with_selected_index(&mut arena, predicate, Some(residual.clone()));
+
+        let rule = EliminateIndexFilter;
+        assert!(rule.apply(&mut plan, &mut arena)?);
+        let Operator::Filter(filter_op) = &plan.operator else {
+            unreachable!("residual predicate should keep filter");
+        };
+        assert_eq!(filter_op.predicate, residual);
+        Ok(())
+    }
+
+    #[test]
+    fn probe_index_filter_is_not_removed_after_physical_selection() -> Result<(), DatabaseError> {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = crate::planner::PlanArena::new(&table_arena);
+        let predicate = ScalarExpression::Constant(DataValue::Boolean(true));
+        let mut plan = build_filter_with_selected_index(&mut arena, predicate, None);
+        let Childrens::Only(child) = plan.childrens.as_mut() else {
+            unreachable!("filter should have a scan child");
+        };
+        let Operator::TableScan(scan_op) = &mut child.operator else {
+            unreachable!("filter child should be a table scan");
+        };
+        scan_op.index_infos[0].lookup = Some(IndexLookup::Probe);
+        let Some(physical_option) = child.physical_option.as_mut() else {
+            unreachable!("scan should have selected physical option");
+        };
+        let PlanImpl::IndexScan(index_info) = &mut physical_option.plan else {
+            unreachable!("scan should have selected index scan");
+        };
+        index_info.lookup = Some(IndexLookup::Probe);
+
+        let rule = EliminateIndexFilter;
+        assert!(!rule.apply(&mut plan, &mut arena)?);
+        assert!(matches!(plan.operator, Operator::Filter(_)));
+        Ok(())
     }
 
     #[test]

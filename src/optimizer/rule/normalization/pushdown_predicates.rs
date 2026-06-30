@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::expression::range_detacher::{Range, RangeDetacher};
+use crate::expression::range_detacher::{DetachedPredicate, Range, RangeDetacher};
 use crate::expression::visitor_mut::{PositionShift, VisitorMut};
 use crate::expression::{BinaryOperator, ScalarExpression};
 use crate::iter_ext::Itertools;
@@ -27,7 +27,7 @@ use crate::types::index::{IndexInfo, IndexLookup, IndexMetaRef, IndexType};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use std::ops::Bound;
-use std::{mem, slice};
+use std::{borrow::Cow, mem, slice};
 
 const EMPTY_SCHEMA: [crate::catalog::ColumnRef; 0] = [];
 
@@ -244,6 +244,7 @@ impl NormalizationRule for PushPredicateIntoScan {
         for IndexInfo {
             meta,
             lookup,
+            residual_predicate,
             covered_deserializers,
             cover_mapping,
             sort_option,
@@ -261,7 +262,7 @@ impl NormalizationRule for PushPredicateIntoScan {
                 return Err(DatabaseError::InvalidIndex);
             };
             let index_meta = arena.index(*meta);
-            *lookup = match index_meta.ty {
+            let detached = match index_meta.ty {
                 IndexType::PrimaryKey { is_multiple: false }
                 | IndexType::Unique
                 | IndexType::Normal => RangeDetacher::new(
@@ -269,18 +270,20 @@ impl NormalizationRule for PushPredicateIntoScan {
                     &index_meta.column_ids[0],
                     arena,
                 )
-                .detach(&filter_op.predicate)?
-                .map(IndexLookup::Static),
+                .detach(&filter_op.predicate)?,
                 IndexType::PrimaryKey { is_multiple: true } | IndexType::Composite => {
                     Self::composite_range(filter_op, *meta, ignore_prefix_len, arena)?
-                        .map(IndexLookup::Static)
                 }
             };
-            if lookup.is_none() {
+            let Some(detached) = detached else {
+                *lookup = None;
+                *residual_predicate = None;
                 continue;
-            }
+            };
             changed = true;
 
+            *lookup = Some(IndexLookup::Static(detached.range));
+            *residual_predicate = detached.residual;
             *covered_deserializers = None;
             *cover_mapping = None;
 
@@ -330,24 +333,33 @@ impl PushPredicateIntoScan {
         meta: IndexMetaRef,
         ignore_prefix_len: &mut usize,
         arena: &crate::planner::PlanArena,
-    ) -> Result<Option<Range>, DatabaseError> {
+    ) -> Result<Option<DetachedPredicate>, DatabaseError> {
         let meta = arena.index(meta);
         let mut res = None;
         let mut eq_ranges = Vec::with_capacity(meta.column_ids.len());
         let mut apply_column_count = 0;
+        let mut residual = Some(Cow::Borrowed(&op.predicate));
 
         for column_id in meta.column_ids.iter() {
-            if let Some(range) = RangeDetacher::new(meta.table_name.as_ref(), column_id, arena)
-                .detach(&op.predicate)?
-            {
-                apply_column_count += 1;
+            let Some(predicate) = residual.take() else {
+                break;
+            };
+            let Some(detached) = RangeDetacher::new(meta.table_name.as_ref(), column_id, arena)
+                .detach(predicate.as_ref())?
+            else {
+                residual = Some(predicate);
+                break;
+            };
+            residual = detached.residual.map(Cow::Owned);
 
-                if range.only_eq() {
-                    eq_ranges.push(range);
-                    continue;
-                }
-                res = range.combining_eqs(&eq_ranges);
+            let range = detached.range;
+            apply_column_count += 1;
+
+            if range.only_eq() {
+                eq_ranges.push(range);
+                continue;
             }
+            res = range.combining_eqs(&eq_ranges);
             break;
         }
         *ignore_prefix_len = eq_ranges.len();
@@ -357,7 +369,7 @@ impl PushPredicateIntoScan {
                 res = range.combining_eqs(&eq_ranges);
             }
         }
-        Ok(res.map(|range| {
+        let range = res.map(|range| {
             if range.only_eq() && apply_column_count != meta.column_ids.len() {
                 fn eq_to_scope(range: Range) -> Range {
                     match range {
@@ -380,6 +392,10 @@ impl PushPredicateIntoScan {
                 return eq_to_scope(range);
             }
             range
+        });
+        Ok(range.map(|range| DetachedPredicate {
+            range,
+            residual: residual.map(|predicate| predicate.into_owned()),
         }))
     }
 }
@@ -501,7 +517,7 @@ mod tests {
     use crate::binder::test::build_t1_table;
     use crate::catalog::{ColumnCatalog, ColumnDesc, TableName};
     use crate::errors::DatabaseError;
-    use crate::expression::range_detacher::Range;
+    use crate::expression::range_detacher::{Range, RangeDetacher};
     use crate::expression::{BinaryOperator, ScalarExpression};
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
     use crate::optimizer::heuristic::optimizer::{
@@ -524,6 +540,46 @@ mod tests {
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         builder.build().instantiate(plan).find_best(None, arena)
+    }
+
+    fn build_test_column(
+        arena: &mut PlanArena,
+        table_name: &TableName,
+        id: crate::types::ColumnId,
+        name: &str,
+    ) -> Result<crate::catalog::ColumnRef, DatabaseError> {
+        let mut column = ColumnCatalog::new(
+            name.to_string(),
+            false,
+            ColumnDesc::new(LogicalType::Integer, None, false, None)?,
+        );
+        column.set_ref_table(table_name.clone(), id, false);
+        Ok(arena.alloc_column(column))
+    }
+
+    fn cmp_predicate(
+        op: BinaryOperator,
+        column: crate::catalog::ColumnRef,
+        position: usize,
+        value: i32,
+    ) -> ScalarExpression {
+        ScalarExpression::Binary {
+            op,
+            left_expr: Box::new(ScalarExpression::column_expr(column, position)),
+            right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(value))),
+            evaluator: None,
+            ty: LogicalType::Boolean,
+        }
+    }
+
+    fn and_predicate(left: ScalarExpression, right: ScalarExpression) -> ScalarExpression {
+        ScalarExpression::Binary {
+            op: BinaryOperator::And,
+            left_expr: Box::new(left),
+            right_expr: Box::new(right),
+            evaluator: None,
+            ty: LogicalType::Boolean,
+        }
     }
 
     #[test]
@@ -564,6 +620,140 @@ mod tests {
         } else {
             unreachable!("Should be a filter operator")
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_composite_range_consumes_prefix_equalities_continuously() -> Result<(), DatabaseError> {
+        let table_name: TableName = ::std::sync::Arc::from("mock_table");
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let c1 = build_test_column(&mut arena, &table_name, 1, "c1")?;
+        let c2 = build_test_column(&mut arena, &table_name, 2, "c2")?;
+        let c3 = build_test_column(&mut arena, &table_name, 3, "c3")?;
+        let c4 = build_test_column(&mut arena, &table_name, 4, "c4")?;
+        let index_meta = arena.alloc_index(IndexMeta {
+            id: 0,
+            column_ids: vec![1, 2, 3],
+            table_name: table_name.clone(),
+            pk_ty: LogicalType::Integer,
+            value_ty: LogicalType::Tuple(vec![
+                LogicalType::Integer,
+                LogicalType::Integer,
+                LogicalType::Integer,
+            ]),
+            name: "idx_c1_c2_c3".to_string(),
+            ty: IndexType::Composite,
+        });
+        let predicate = and_predicate(
+            and_predicate(
+                cmp_predicate(BinaryOperator::Eq, c1, 0, 1),
+                cmp_predicate(BinaryOperator::Eq, c2, 1, 2),
+            ),
+            and_predicate(
+                cmp_predicate(BinaryOperator::Eq, c3, 2, 3),
+                cmp_predicate(BinaryOperator::Eq, c4, 3, 4),
+            ),
+        );
+        let filter = FilterOperator {
+            predicate,
+            is_optimized: false,
+            having: false,
+        };
+        let mut ignore_prefix_len = 0;
+
+        let detached = super::PushPredicateIntoScan::composite_range(
+            &filter,
+            index_meta,
+            &mut ignore_prefix_len,
+            &arena,
+        )?
+        .expect("composite prefix should be consumed");
+
+        assert_eq!(ignore_prefix_len, 3);
+        assert_eq!(
+            detached.range,
+            Range::Eq(DataValue::Tuple(
+                vec![
+                    DataValue::Int32(1),
+                    DataValue::Int32(2),
+                    DataValue::Int32(3),
+                ],
+                false,
+            ))
+        );
+        let residual = detached.residual.expect("c4 predicate should remain");
+        let residual_detached = RangeDetacher::new(table_name.as_ref(), &4, &arena)
+            .detach(&residual)?
+            .expect("residual should be the c4 predicate");
+        assert_eq!(residual_detached.range, Range::Eq(DataValue::Int32(4)));
+        assert_eq!(residual_detached.residual, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_composite_range_stops_consuming_after_first_non_equality() -> Result<(), DatabaseError>
+    {
+        let table_name: TableName = ::std::sync::Arc::from("mock_table");
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let c1 = build_test_column(&mut arena, &table_name, 1, "c1")?;
+        let c2 = build_test_column(&mut arena, &table_name, 2, "c2")?;
+        let c3 = build_test_column(&mut arena, &table_name, 3, "c3")?;
+        let index_meta = arena.alloc_index(IndexMeta {
+            id: 0,
+            column_ids: vec![1, 2, 3],
+            table_name: table_name.clone(),
+            pk_ty: LogicalType::Integer,
+            value_ty: LogicalType::Tuple(vec![
+                LogicalType::Integer,
+                LogicalType::Integer,
+                LogicalType::Integer,
+            ]),
+            name: "idx_c1_c2_c3".to_string(),
+            ty: IndexType::Composite,
+        });
+        let predicate = and_predicate(
+            and_predicate(
+                cmp_predicate(BinaryOperator::Eq, c1, 0, 1),
+                cmp_predicate(BinaryOperator::Gt, c2, 1, 2),
+            ),
+            cmp_predicate(BinaryOperator::Eq, c3, 2, 3),
+        );
+        let filter = FilterOperator {
+            predicate,
+            is_optimized: false,
+            having: false,
+        };
+        let mut ignore_prefix_len = 0;
+
+        let detached = super::PushPredicateIntoScan::composite_range(
+            &filter,
+            index_meta,
+            &mut ignore_prefix_len,
+            &arena,
+        )?
+        .expect("composite prefix should be consumed");
+
+        assert_eq!(ignore_prefix_len, 1);
+        assert_eq!(
+            detached.range,
+            Range::Scope {
+                min: Bound::Excluded(DataValue::Tuple(
+                    vec![DataValue::Int32(1), DataValue::Int32(2)],
+                    false,
+                )),
+                max: Bound::Excluded(DataValue::Tuple(vec![DataValue::Int32(1)], true)),
+            }
+        );
+        let residual = detached.residual.expect("c3 predicate should remain");
+        let residual_detached = RangeDetacher::new(table_name.as_ref(), &3, &arena)
+            .detach(&residual)?
+            .expect("residual should be the c3 predicate");
+        assert_eq!(residual_detached.range, Range::Eq(DataValue::Int32(3)));
+        assert_eq!(residual_detached.residual, None);
 
         Ok(())
     }
@@ -638,6 +828,7 @@ mod tests {
                             ignore_prefix_len: 0,
                         },
                         lookup: None,
+                        residual_predicate: None,
                         covered_deserializers: None,
                         cover_mapping: None,
                         sort_elimination_hint: None,
@@ -650,6 +841,7 @@ mod tests {
                             ignore_prefix_len: 0,
                         },
                         lookup: None,
+                        residual_predicate: None,
                         covered_deserializers: None,
                         cover_mapping: None,
                         sort_elimination_hint: None,
