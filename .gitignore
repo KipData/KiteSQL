@@ -23,6 +23,8 @@ kitesql_bench
 sqlite_bench
 kite_sql_tpcc
 copy.csv
+copy_query.csv
+lcov.info
 
 tests/data/row_20000.csv
 tests/data/distinct_rows.csv

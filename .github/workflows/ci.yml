@@ -48,6 +48,28 @@ jobs:
       - name: Run sqllogictest suite
         run: make test-slt
   # 4
+  coverage:
+    name: Rust coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate Codecov report
+        run: make codecov
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          flags: rust
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+  # 5
   wasm-tests:
     name: Wasm cargo tests
     runs-on: ubuntu-latest
@@ -65,7 +87,7 @@ jobs:
 
       - name: Run wasm-bindgen tests (wasm32 target)
         run: make test-wasm
-  # 5
+  # 6
   wasm-examples:
     name: Wasm examples (nodejs)
     runs-on: ubuntu-latest
@@ -86,7 +108,7 @@ jobs:
 
       - name: Run wasm example scripts
         run: make wasm-examples
-  # 6
+  # 7
   native-examples:
     name: Native examples
     runs-on: ubuntu-latest
@@ -97,7 +119,7 @@ jobs:
 
       - name: Run native examples
         run: make native-examples
-  # 7
+  # 8
   python-tests:
     name: Python bindings tests
     runs-on: ubuntu-latest

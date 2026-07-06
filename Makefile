@@ -9,8 +9,10 @@ TPCC_PPROF_OUTPUT ?= /tmp/tpcc_lmdb.svg
 TPCC_HEAPTRACK_MEASURE_TIME ?= 300
 TPCC_HEAPTRACK_OUTPUT ?= /tmp/tpcc_lmdb_heaptrack
 TPCC_SQLITE_PROFILE ?= balanced
+CODECOV_OUTPUT ?= lcov.info
+COVERAGE_REPORT_ARGS ?= --ignore-filename-regex '(^|/)(tests|tpcc)/'
 
-.PHONY: test test-python test-wasm test-slt test-all wasm-build check tpcc tpcc-kitesql-rocksdb tpcc-kitesql-lmdb tpcc-lmdb-flamegraph tpcc-lmdb-heaptrack tpcc-sqlite tpcc-sqlite-practical tpcc-sqlite-balanced tpcc-dual cargo-check build wasm-examples native-examples fmt clippy
+.PHONY: test test-python test-wasm test-slt test-all codecov codecov-html wasm-build check tpcc tpcc-kitesql-rocksdb tpcc-kitesql-lmdb tpcc-lmdb-flamegraph tpcc-lmdb-heaptrack tpcc-sqlite tpcc-sqlite-practical tpcc-sqlite-balanced tpcc-dual cargo-check build wasm-examples native-examples fmt clippy
 
 ## Run default Rust tests in the current environment (non-WASM).
 test:
@@ -42,6 +44,25 @@ test-slt:
 
 ## Convenience target to run every suite in sequence.
 test-all: test test-wasm test-slt test-python
+
+## Generate an lcov coverage report for Codecov upload.
+codecov:
+	bash -c "set -euo pipefail; \
+		source <($(CARGO) llvm-cov show-env --sh); \
+		$(CARGO) llvm-cov clean --workspace; \
+		$(CARGO) test --all; \
+		$(CARGO) run -p sqllogictest-test -- --path '$(SQLLOGIC_PATH)'; \
+		$(CARGO) llvm-cov report $(COVERAGE_REPORT_ARGS) --lcov --output-path \"$(CODECOV_OUTPUT)\""
+
+## Generate a local HTML coverage report.
+codecov-html:
+	bash -c "set -euo pipefail; \
+		source <($(CARGO) llvm-cov show-env --sh); \
+		$(CARGO) llvm-cov clean --workspace; \
+		$(CARGO) test --all; \
+		$(CARGO) run -p sqllogictest-test -- --path '$(SQLLOGIC_PATH)'; \
+		$(CARGO) llvm-cov report $(COVERAGE_REPORT_ARGS) --html"
+	@echo "Coverage report: $${CARGO_TARGET_DIR:-target}/llvm-cov/html/index.html"
 
 ## Run formatting (check mode) across the workspace.
 fmt:
