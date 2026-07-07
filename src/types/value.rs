@@ -1732,6 +1732,14 @@ mod test {
     use std::cmp::Ordering;
     use std::io::Cursor;
 
+    fn utf8(value: &str) -> DataValue {
+        DataValue::Utf8 {
+            value: value.to_string(),
+            ty: Utf8Type::Variable(None),
+            unit: CharLengthUnits::Characters,
+        }
+    }
+
     #[test]
     fn test_tuple_partial_cmp() {
         let tuple_1 = DataValue::Tuple(vec![DataValue::Int32(1), DataValue::Int32(2)], false);
@@ -1744,7 +1752,107 @@ mod test {
         assert_eq!(tuple_2.partial_cmp(&tuple_with_null), Some(Ordering::Less));
         assert_eq!(lower_prefix.partial_cmp(&tuple_1), Some(Ordering::Less));
         assert_eq!(upper_prefix.partial_cmp(&tuple_1), Some(Ordering::Greater));
+        assert_eq!(tuple_1.partial_cmp(&lower_prefix), Some(Ordering::Greater));
+        assert_eq!(tuple_1.partial_cmp(&upper_prefix), Some(Ordering::Less));
         assert_eq!(DataValue::Null.partial_cmp(&DataValue::Int32(1)), None);
+    }
+
+    #[test]
+    fn test_data_value_eq_and_partial_cmp_scalar_variants() {
+        let same_type_ordered = vec![
+            (DataValue::Boolean(false), DataValue::Boolean(true)),
+            (
+                DataValue::Float32(OrderedFloat(1.0)),
+                DataValue::Float32(OrderedFloat(2.0)),
+            ),
+            (
+                DataValue::Float64(OrderedFloat(1.0)),
+                DataValue::Float64(OrderedFloat(2.0)),
+            ),
+            (DataValue::Int8(1), DataValue::Int8(2)),
+            (DataValue::Int16(1), DataValue::Int16(2)),
+            (DataValue::Int32(1), DataValue::Int32(2)),
+            (DataValue::Int64(1), DataValue::Int64(2)),
+            (DataValue::UInt8(1), DataValue::UInt8(2)),
+            (DataValue::UInt16(1), DataValue::UInt16(2)),
+            (DataValue::UInt32(1), DataValue::UInt32(2)),
+            (DataValue::UInt64(1), DataValue::UInt64(2)),
+            (utf8("a"), utf8("b")),
+            (DataValue::Date32(1), DataValue::Date32(2)),
+            (DataValue::Date64(1), DataValue::Date64(2)),
+            (DataValue::Time32(1, 0), DataValue::Time32(2, 0)),
+            (
+                DataValue::Time64(1, 0, false),
+                DataValue::Time64(2, 0, false),
+            ),
+            #[cfg(feature = "decimal")]
+            (
+                DataValue::Decimal(Decimal::new(1, 0)),
+                DataValue::Decimal(Decimal::new(2, 0)),
+            ),
+            (
+                DataValue::Tuple(vec![DataValue::Int32(1)], false),
+                DataValue::Tuple(vec![DataValue::Int32(2)], false),
+            ),
+        ];
+
+        for (lower, upper) in same_type_ordered {
+            assert_eq!(lower, lower.clone());
+            assert_eq!(upper, upper.clone());
+            assert_ne!(lower, upper);
+            assert_eq!(lower.partial_cmp(&upper), Some(Ordering::Less));
+            assert_eq!(upper.partial_cmp(&lower), Some(Ordering::Greater));
+        }
+
+        assert_eq!(DataValue::Null, DataValue::Null);
+        assert_eq!(
+            DataValue::Null.partial_cmp(&DataValue::Null),
+            Some(Ordering::Equal)
+        );
+    }
+
+    #[test]
+    fn test_data_value_mismatched_variants_are_not_comparable() {
+        let mismatch_cases = vec![
+            (DataValue::Boolean(true), DataValue::Null),
+            (DataValue::Float32(OrderedFloat(1.0)), DataValue::Null),
+            (DataValue::Float64(OrderedFloat(1.0)), DataValue::Null),
+            (DataValue::Int8(1), DataValue::Null),
+            (DataValue::Int16(1), DataValue::Null),
+            (DataValue::Int32(1), DataValue::Null),
+            (DataValue::Int64(1), DataValue::Null),
+            (DataValue::UInt8(1), DataValue::Null),
+            (DataValue::UInt16(1), DataValue::Null),
+            (DataValue::UInt32(1), DataValue::Null),
+            (DataValue::UInt64(1), DataValue::Null),
+            (utf8("kite"), DataValue::Null),
+            (DataValue::Null, DataValue::Int32(1)),
+            (DataValue::Date32(1), DataValue::Null),
+            (DataValue::Date64(1), DataValue::Null),
+            (DataValue::Time32(1, 0), DataValue::Null),
+            (DataValue::Time64(1, 0, false), DataValue::Null),
+            #[cfg(feature = "decimal")]
+            (DataValue::Decimal(Decimal::new(1, 0)), DataValue::Null),
+            (
+                DataValue::Tuple(vec![DataValue::Int32(1)], false),
+                DataValue::Null,
+            ),
+        ];
+
+        for (left, right) in mismatch_cases {
+            assert_ne!(left, right);
+            assert_eq!(left.partial_cmp(&right), None);
+        }
+    }
+
+    #[cfg(feature = "decimal")]
+    #[test]
+    fn test_decimal_accessor_rejects_non_decimal_values() {
+        assert_eq!(
+            DataValue::Decimal(Decimal::new(123, 2)).decimal(),
+            Some(Decimal::new(123, 2))
+        );
+        assert_eq!(DataValue::Int32(123).decimal(), None);
     }
 
     #[test]
