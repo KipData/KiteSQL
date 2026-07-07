@@ -57,7 +57,7 @@ codecov:
 		mkdir -p '$(COVERAGE_PROFILE_DIR)'; \
 		CARGO_INCREMENTAL=0 RUSTFLAGS=\"$${RUSTFLAGS:-} $(COVERAGE_RUSTFLAGS)\" LLVM_PROFILE_FILE='$(COVERAGE_PROFILE_DIR)/kitesql-%p-%m.profraw' $(CARGO) test --all --features decimal; \
 		CARGO_INCREMENTAL=0 RUSTFLAGS=\"$${RUSTFLAGS:-} $(COVERAGE_RUSTFLAGS)\" LLVM_PROFILE_FILE='$(COVERAGE_PROFILE_DIR)/kitesql-%p-%m.profraw' $(CARGO) run -p sqllogictest-test -- --path '$(SQLLOGIC_PATH)'; \
-		$(GRCOV) . --binary-path ./target/debug -s . -t lcov $(COVERAGE_REPORT_ARGS) -o '$(CODECOV_OUTPUT)'"
+		$(GRCOV) . --binary-path \"$${CARGO_TARGET_DIR:-target}/debug\" -s . -t lcov $(COVERAGE_REPORT_ARGS) -o '$(CODECOV_OUTPUT)'"
 
 ## Generate a local HTML coverage report.
 codecov-html:
@@ -67,7 +67,7 @@ codecov-html:
 		mkdir -p '$(COVERAGE_PROFILE_DIR)' '$(COVERAGE_HTML_DIR)'; \
 		CARGO_INCREMENTAL=0 RUSTFLAGS=\"$${RUSTFLAGS:-} $(COVERAGE_RUSTFLAGS)\" LLVM_PROFILE_FILE='$(COVERAGE_PROFILE_DIR)/kitesql-%p-%m.profraw' $(CARGO) test --all --features decimal; \
 		CARGO_INCREMENTAL=0 RUSTFLAGS=\"$${RUSTFLAGS:-} $(COVERAGE_RUSTFLAGS)\" LLVM_PROFILE_FILE='$(COVERAGE_PROFILE_DIR)/kitesql-%p-%m.profraw' $(CARGO) run -p sqllogictest-test -- --path '$(SQLLOGIC_PATH)'; \
-		$(GRCOV) . --binary-path ./target/debug -s . -t html $(COVERAGE_REPORT_ARGS) -o '$(COVERAGE_HTML_DIR)'"
+		$(GRCOV) . --binary-path \"$${CARGO_TARGET_DIR:-target}/debug\" -s . -t html $(COVERAGE_REPORT_ARGS) -o '$(COVERAGE_HTML_DIR)'"
 	@echo "Coverage report: $(COVERAGE_HTML_DIR)/index.html"
 
 ## Run formatting (check mode) across the workspace.
