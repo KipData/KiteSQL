@@ -120,6 +120,7 @@ macro_rules! numeric_unary_evaluator_definition {
     };
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
@@ -136,6 +137,10 @@ mod test {
 
     fn create(ty: LogicalType, op: UnaryOperator) -> Result<UnaryEvaluatorRef, DatabaseError> {
         unary_create(Cow::Owned(ty), op)
+    }
+
+    fn assert_panics(f: impl FnOnce() + std::panic::UnwindSafe) {
+        assert!(std::panic::catch_unwind(f).is_err());
     }
 
     #[test]
@@ -157,8 +162,40 @@ mod test {
     }
 
     #[test]
+    fn test_unary_eval_rejects_invalid_positions() {
+        assert_panics(|| {
+            let evaluator = UnaryEvaluatorRef::new(u16::MAX);
+            let _ = evaluator.unary_eval(&DataValue::Int32(1));
+        });
+    }
+
+    #[test]
     fn test_numeric_unary_evaluators() -> Result<(), DatabaseError> {
         let cases = vec![
+            (
+                LogicalType::Tinyint,
+                UnaryOperator::Plus,
+                DataValue::Int8(7),
+                DataValue::Int8(7),
+            ),
+            (
+                LogicalType::Tinyint,
+                UnaryOperator::Minus,
+                DataValue::Int8(7),
+                DataValue::Int8(-7),
+            ),
+            (
+                LogicalType::Smallint,
+                UnaryOperator::Plus,
+                DataValue::Int16(7),
+                DataValue::Int16(7),
+            ),
+            (
+                LogicalType::Smallint,
+                UnaryOperator::Minus,
+                DataValue::Int16(7),
+                DataValue::Int16(-7),
+            ),
             (
                 LogicalType::Integer,
                 UnaryOperator::Plus,
@@ -173,15 +210,33 @@ mod test {
             ),
             (
                 LogicalType::Bigint,
+                UnaryOperator::Plus,
+                DataValue::Int64(7),
+                DataValue::Int64(7),
+            ),
+            (
+                LogicalType::Bigint,
                 UnaryOperator::Minus,
                 DataValue::Int64(7),
                 DataValue::Int64(-7),
+            ),
+            (
+                LogicalType::Float,
+                UnaryOperator::Plus,
+                DataValue::Float32(OrderedFloat(1.5)),
+                DataValue::Float32(OrderedFloat(1.5)),
             ),
             (
                 LogicalType::Double,
                 UnaryOperator::Minus,
                 DataValue::Float64(OrderedFloat(1.5)),
                 DataValue::Float64(OrderedFloat(-1.5)),
+            ),
+            (
+                LogicalType::Float,
+                UnaryOperator::Minus,
+                DataValue::Float32(OrderedFloat(1.5)),
+                DataValue::Float32(OrderedFloat(-1.5)),
             ),
         ];
 
@@ -212,6 +267,20 @@ mod test {
             err,
             DatabaseError::UnsupportedUnaryOperator(LogicalType::Boolean, UnaryOperator::Plus)
         ));
+        assert!(matches!(
+            create(LogicalType::Date, UnaryOperator::Plus),
+            Err(DatabaseError::UnsupportedUnaryOperator(
+                LogicalType::Date,
+                UnaryOperator::Plus
+            ))
+        ));
+        assert!(matches!(
+            create(LogicalType::Integer, UnaryOperator::Not),
+            Err(DatabaseError::UnsupportedUnaryOperator(
+                LogicalType::Integer,
+                UnaryOperator::Not
+            ))
+        ));
     }
 
     #[test]
@@ -237,3 +306,4 @@ mod test {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

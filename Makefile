@@ -1,5 +1,6 @@
 # Helper variables (override on invocation if needed).
 CARGO ?= cargo
+GRCOV ?= grcov
 WASM_PACK ?= wasm-pack
 SQLLOGIC_PATH ?= tests/slt/**/*.slt
 PYO3_PYTHON ?= /usr/bin/python3.12
@@ -10,7 +11,10 @@ TPCC_HEAPTRACK_MEASURE_TIME ?= 300
 TPCC_HEAPTRACK_OUTPUT ?= /tmp/tpcc_lmdb_heaptrack
 TPCC_SQLITE_PROFILE ?= balanced
 CODECOV_OUTPUT ?= lcov.info
-COVERAGE_REPORT_ARGS ?= --ignore-filename-regex '(^|/)(tests|tpcc)/'
+COVERAGE_PROFILE_DIR ?= target/grcov/profraw
+COVERAGE_HTML_DIR ?= target/grcov/html
+COVERAGE_RUSTFLAGS ?= -Cinstrument-coverage
+COVERAGE_REPORT_ARGS ?= --llvm --ignore-not-existing --keep-only 'src/**' --ignore 'src/**/tests/**' --ignore 'tests/**' --ignore 'tpcc/**' --excl-start 'GRCOV_EXCL_START' --excl-stop 'GRCOV_EXCL_STOP'
 
 .PHONY: test test-python test-wasm test-slt test-all codecov codecov-html wasm-build check tpcc tpcc-kitesql-rocksdb tpcc-kitesql-lmdb tpcc-lmdb-flamegraph tpcc-lmdb-heaptrack tpcc-sqlite tpcc-sqlite-practical tpcc-sqlite-balanced tpcc-dual cargo-check build wasm-examples native-examples fmt clippy
 
@@ -48,21 +52,23 @@ test-all: test test-wasm test-slt test-python
 ## Generate an lcov coverage report for Codecov upload.
 codecov:
 	bash -c "set -euo pipefail; \
-		source <($(CARGO) llvm-cov show-env --sh); \
-		$(CARGO) llvm-cov clean --workspace; \
-		$(CARGO) test --all; \
-		$(CARGO) run -p sqllogictest-test -- --path '$(SQLLOGIC_PATH)'; \
-		$(CARGO) llvm-cov report $(COVERAGE_REPORT_ARGS) --lcov --output-path \"$(CODECOV_OUTPUT)\""
+		command -v $(GRCOV) >/dev/null || { echo 'grcov is not installed; run: cargo install grcov'; exit 1; }; \
+		rm -rf '$(COVERAGE_PROFILE_DIR)' '$(CODECOV_OUTPUT)'; \
+		mkdir -p '$(COVERAGE_PROFILE_DIR)'; \
+		CARGO_INCREMENTAL=0 RUSTFLAGS=\"$${RUSTFLAGS:-} $(COVERAGE_RUSTFLAGS)\" LLVM_PROFILE_FILE='$(COVERAGE_PROFILE_DIR)/kitesql-%p-%m.profraw' $(CARGO) test --all --features decimal; \
+		CARGO_INCREMENTAL=0 RUSTFLAGS=\"$${RUSTFLAGS:-} $(COVERAGE_RUSTFLAGS)\" LLVM_PROFILE_FILE='$(COVERAGE_PROFILE_DIR)/kitesql-%p-%m.profraw' $(CARGO) run -p sqllogictest-test -- --path '$(SQLLOGIC_PATH)'; \
+		$(GRCOV) . --binary-path ./target/debug -s . -t lcov $(COVERAGE_REPORT_ARGS) -o '$(CODECOV_OUTPUT)'"
 
 ## Generate a local HTML coverage report.
 codecov-html:
 	bash -c "set -euo pipefail; \
-		source <($(CARGO) llvm-cov show-env --sh); \
-		$(CARGO) llvm-cov clean --workspace; \
-		$(CARGO) test --all; \
-		$(CARGO) run -p sqllogictest-test -- --path '$(SQLLOGIC_PATH)'; \
-		$(CARGO) llvm-cov report $(COVERAGE_REPORT_ARGS) --html"
-	@echo "Coverage report: $${CARGO_TARGET_DIR:-target}/llvm-cov/html/index.html"
+		command -v $(GRCOV) >/dev/null || { echo 'grcov is not installed; run: cargo install grcov'; exit 1; }; \
+		rm -rf '$(COVERAGE_PROFILE_DIR)' '$(COVERAGE_HTML_DIR)'; \
+		mkdir -p '$(COVERAGE_PROFILE_DIR)' '$(COVERAGE_HTML_DIR)'; \
+		CARGO_INCREMENTAL=0 RUSTFLAGS=\"$${RUSTFLAGS:-} $(COVERAGE_RUSTFLAGS)\" LLVM_PROFILE_FILE='$(COVERAGE_PROFILE_DIR)/kitesql-%p-%m.profraw' $(CARGO) test --all --features decimal; \
+		CARGO_INCREMENTAL=0 RUSTFLAGS=\"$${RUSTFLAGS:-} $(COVERAGE_RUSTFLAGS)\" LLVM_PROFILE_FILE='$(COVERAGE_PROFILE_DIR)/kitesql-%p-%m.profraw' $(CARGO) run -p sqllogictest-test -- --path '$(SQLLOGIC_PATH)'; \
+		$(GRCOV) . --binary-path ./target/debug -s . -t html $(COVERAGE_REPORT_ARGS) -o '$(COVERAGE_HTML_DIR)'"
+	@echo "Coverage report: $(COVERAGE_HTML_DIR)/index.html"
 
 ## Run formatting (check mode) across the workspace.
 fmt:

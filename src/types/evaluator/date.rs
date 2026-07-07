@@ -62,9 +62,11 @@ crate::define_cast_evaluator!(date32_to_datetime_cast_eval, DataValue::Date32(va
     }
 );
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
+    use crate::errors::DatabaseError;
     use crate::types::value::Utf8Type;
     use chrono::Datelike;
 
@@ -102,5 +104,23 @@ mod test {
                     .timestamp()
             )
         );
+        assert_eq!(
+            date_plus_binary_eval(&DataValue::Date32(1), &DataValue::Date32(2)).unwrap(),
+            DataValue::Date32(3)
+        );
+        let invalid = DataValue::Date32(i32::MAX);
+        assert!(matches!(
+            date32_to_char_cast_eval(10, CharLengthUnits::Characters, &invalid),
+            Err(DatabaseError::CastFail { .. })
+        ));
+        assert!(matches!(
+            date32_to_varchar_cast_eval(Some(10), CharLengthUnits::Characters, &invalid),
+            Err(DatabaseError::CastFail { .. })
+        ));
+        assert!(matches!(
+            date32_to_datetime_cast_eval(&invalid),
+            Err(DatabaseError::CastFail { .. })
+        ));
     }
 }
+// GRCOV_EXCL_STOP

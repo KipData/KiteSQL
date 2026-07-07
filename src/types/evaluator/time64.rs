@@ -139,7 +139,7 @@ crate::define_cast_evaluator!(
             })?;
 
         Ok(DataValue::Time32(
-            DataValue::pack(value, nano, target_precision),
+            DataValue::pack_time(value, nano, target_precision),
             target_precision,
         ))
     }
@@ -158,6 +158,7 @@ time64_binary!(time64_lt_eq_binary_eval, <=);
 time64_binary!(time64_eq_binary_eval, ==);
 time64_binary!(time64_not_eq_binary_eval, !=);
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
@@ -173,6 +174,44 @@ mod test {
             )
             .unwrap(),
             DataValue::Boolean(true)
+        );
+        let left = DataValue::Time64(1_738_734_177_256, 3, false);
+        let right = DataValue::Time64(1_738_734_177_000, 3, false);
+        assert_eq!(
+            time64_gt_binary_eval(&left, &right).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            time64_gt_eq_binary_eval(&left, &left).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            time64_lt_binary_eval(&right, &left).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            time64_lt_eq_binary_eval(&right, &right).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            time64_not_eq_binary_eval(&left, &right).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            time64_eq_binary_eval(&left, &DataValue::Null).unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            time64_eq_binary_eval(&DataValue::Null, &left).unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            time64_eq_binary_eval(&DataValue::Null, &DataValue::Null).unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            time64_eq_binary_eval(&DataValue::Time64(i64::MAX, 0, false), &left).unwrap(),
+            DataValue::Null
         );
     }
 
@@ -222,11 +261,22 @@ mod test {
         );
         assert_eq!(
             time64_to_time_cast_eval(Some(3), &value).unwrap(),
-            DataValue::Time32(DataValue::pack(3 * 3600 + 4 * 60 + 5, 123_000_000, 3), 3)
+            DataValue::Time32(
+                DataValue::pack_time(3 * 3600 + 4 * 60 + 5, 123_000_000, 3),
+                3
+            )
         );
         assert_eq!(
             time64_to_timestamp_cast_eval(Some(3), true, &value).unwrap(),
             DataValue::Time64(timestamp, 3, true)
         );
+
+        let invalid = DataValue::Time64(i64::MAX, 0, false);
+        assert!(time64_to_char_cast_eval(23, CharLengthUnits::Characters, &invalid).is_err());
+        assert!(time64_to_varchar_cast_eval(None, CharLengthUnits::Characters, &invalid).is_err());
+        assert!(time64_to_date_cast_eval(&invalid).is_err());
+        assert!(time64_to_datetime_cast_eval(&invalid).is_err());
+        assert!(time64_to_time_cast_eval(Some(0), &invalid).is_err());
     }
 }
+// GRCOV_EXCL_STOP

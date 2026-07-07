@@ -25,8 +25,8 @@ pub fn time_plus_binary_eval(
 ) -> Result<DataValue, DatabaseError> {
     Ok(match (left, right) {
         (DataValue::Time32(v1, p1), DataValue::Time32(v2, p2)) => {
-            let (mut v1, n1) = DataValue::unpack(*v1, *p1);
-            let (v2, n2) = DataValue::unpack(*v2, *p2);
+            let (mut v1, n1) = DataValue::unpack_time(*v1, *p1);
+            let (v2, n2) = DataValue::unpack_time(*v2, *p2);
             let mut n = n1 + n2;
             while n > ONE_SEC_TO_NANO {
                 v1 += 1;
@@ -36,7 +36,7 @@ pub fn time_plus_binary_eval(
             if v1 + v2 > ONE_DAY_TO_SEC {
                 return Ok(DataValue::Null);
             }
-            DataValue::Time32(DataValue::pack(v1 + v2, n, p), p)
+            DataValue::Time32(DataValue::pack_time(v1 + v2, n, p), p)
         }
         (DataValue::Time32(..), DataValue::Null)
         | (DataValue::Null, DataValue::Time32(..))
@@ -50,8 +50,8 @@ pub fn time_minus_binary_eval(
 ) -> Result<DataValue, DatabaseError> {
     Ok(match (left, right) {
         (DataValue::Time32(v1, p1), DataValue::Time32(v2, p2, ..)) => {
-            let (mut v1, mut n1) = DataValue::unpack(*v1, *p1);
-            let (v2, n2) = DataValue::unpack(*v2, *p2);
+            let (mut v1, mut n1) = DataValue::unpack_time(*v1, *p1);
+            let (v2, n2) = DataValue::unpack_time(*v2, *p2);
             while n1 < n2 {
                 v1 -= 1;
                 n1 += ONE_SEC_TO_NANO;
@@ -60,7 +60,7 @@ pub fn time_minus_binary_eval(
                 return Ok(DataValue::Null);
             }
             let p = if p2 > p1 { *p2 } else { *p1 };
-            DataValue::Time32(DataValue::pack(v1 - v2, n1 - n2, p), p)
+            DataValue::Time32(DataValue::pack_time(v1 - v2, n1 - n2, p), p)
         }
         (DataValue::Time32(..), DataValue::Null)
         | (DataValue::Null, DataValue::Time32(..))
@@ -74,8 +74,8 @@ macro_rules! time32_order_binary {
         pub fn $name(left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
             Ok(match (left, right) {
                 (DataValue::Time32(v1, p1), DataValue::Time32(v2, p2, ..)) => {
-                    let (v1, n1) = DataValue::unpack(*v1, *p1);
-                    let (v2, n2) = DataValue::unpack(*v2, *p2);
+                    let (v1, n1) = DataValue::unpack_time(*v1, *p1);
+                    let (v2, n2) = DataValue::unpack_time(*v2, *p2);
                     DataValue::Boolean(v1.cmp(&v2).then_with(|| n1.cmp(&n2)).$is_order())
                 }
                 (DataValue::Time32(..), DataValue::Null)
@@ -147,6 +147,7 @@ pub fn time_not_eq_binary_eval(
     })
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
@@ -170,11 +171,102 @@ mod test {
             .unwrap(),
             DataValue::Boolean(true)
         );
+        assert_eq!(
+            time_minus_binary_eval(
+                &DataValue::Time32(DataValue::pack_time(10, 500_000_000, 3), 3),
+                &DataValue::Time32(DataValue::pack_time(3, 700_000_000, 3), 3),
+            )
+            .unwrap(),
+            DataValue::Time32(DataValue::pack_time(6, 800_000_000, 3), 3)
+        );
+        assert_eq!(
+            time_minus_binary_eval(
+                &DataValue::Time32(DataValue::pack_time(1, 0, 0), 0),
+                &DataValue::Time32(DataValue::pack_time(2, 0, 0), 0),
+            )
+            .unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            time_plus_binary_eval(
+                &DataValue::Time32(DataValue::pack_time(ONE_DAY_TO_SEC, 0, 0), 0),
+                &DataValue::Time32(DataValue::pack_time(1, 0, 0), 0),
+            )
+            .unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            time_lt_binary_eval(
+                &DataValue::Time32(DataValue::pack_time(1, 0, 0), 0),
+                &DataValue::Time32(DataValue::pack_time(2, 0, 0), 0),
+            )
+            .unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            time_lt_eq_binary_eval(
+                &DataValue::Time32(DataValue::pack_time(2, 0, 0), 0),
+                &DataValue::Time32(DataValue::pack_time(2, 0, 0), 0),
+            )
+            .unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            time_eq_binary_eval(
+                &DataValue::Time32(DataValue::pack_time(2, 0, 0), 0),
+                &DataValue::Time32(DataValue::pack_time(2, 0, 0), 0),
+            )
+            .unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            time_not_eq_binary_eval(
+                &DataValue::Time32(DataValue::pack_time(2, 0, 0), 0),
+                &DataValue::Time32(DataValue::pack_time(3, 0, 0), 0),
+            )
+            .unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            time_not_eq_binary_eval(
+                &DataValue::Time32(DataValue::pack_time(2, 0, 0), 0),
+                &DataValue::Null
+            )
+            .unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            time_plus_binary_eval(
+                &DataValue::Null,
+                &DataValue::Time32(DataValue::pack_time(1, 0, 0), 0),
+            )
+            .unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            time_minus_binary_eval(
+                &DataValue::Null,
+                &DataValue::Time32(DataValue::pack_time(1, 0, 0), 0),
+            )
+            .unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            time_eq_binary_eval(
+                &DataValue::Null,
+                &DataValue::Time32(DataValue::pack_time(1, 0, 0), 0),
+            )
+            .unwrap(),
+            DataValue::Null
+        );
     }
 
     #[test]
     fn test_time32_cast_evaluators() {
-        let value = DataValue::Time32(DataValue::pack(3 * 3600 + 4 * 60 + 5, 123_000_000, 3), 3);
+        let value = DataValue::Time32(
+            DataValue::pack_time(3 * 3600 + 4 * 60 + 5, 123_000_000, 3),
+            3,
+        );
         assert_eq!(
             time32_to_char_cast_eval(12, CharLengthUnits::Characters, &value).unwrap(),
             DataValue::Utf8 {
@@ -192,5 +284,15 @@ mod test {
             }
         );
         assert_eq!(time32_to_time_cast_eval(Some(3), &value).unwrap(), value);
+        let invalid = DataValue::Time32(u32::MAX, 0);
+        assert!(matches!(
+            time32_to_char_cast_eval(8, CharLengthUnits::Characters, &invalid),
+            Err(DatabaseError::CastFail { .. })
+        ));
+        assert!(matches!(
+            time32_to_varchar_cast_eval(Some(8), CharLengthUnits::Characters, &invalid),
+            Err(DatabaseError::CastFail { .. })
+        ));
     }
 }
+// GRCOV_EXCL_STOP

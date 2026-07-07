@@ -123,6 +123,7 @@ pub fn boolean_not_eq_binary_eval(
     })
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
@@ -130,6 +131,11 @@ mod test {
 
     #[test]
     fn test_boolean_binary_evaluators() {
+        assert_eq!(
+            boolean_not_unary_eval(&DataValue::Boolean(true)),
+            DataValue::Boolean(false)
+        );
+        assert_eq!(boolean_not_unary_eval(&DataValue::Null), DataValue::Null);
         assert_eq!(
             boolean_and_binary_eval(&DataValue::Boolean(true), &DataValue::Boolean(true)).unwrap(),
             DataValue::Boolean(true)
@@ -139,8 +145,37 @@ mod test {
             DataValue::Boolean(false)
         );
         assert_eq!(
+            boolean_and_binary_eval(&DataValue::Boolean(true), &DataValue::Null).unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
             boolean_or_binary_eval(&DataValue::Boolean(false), &DataValue::Boolean(true)).unwrap(),
             DataValue::Boolean(true)
+        );
+        assert_eq!(
+            boolean_or_binary_eval(&DataValue::Boolean(true), &DataValue::Null).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            boolean_or_binary_eval(&DataValue::Boolean(false), &DataValue::Null).unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            boolean_eq_binary_eval(&DataValue::Boolean(true), &DataValue::Boolean(true)).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            boolean_eq_binary_eval(&DataValue::Boolean(true), &DataValue::Null).unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            boolean_not_eq_binary_eval(&DataValue::Boolean(true), &DataValue::Boolean(false))
+                .unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            boolean_not_eq_binary_eval(&DataValue::Boolean(true), &DataValue::Null).unwrap(),
+            DataValue::Null
         );
     }
 
@@ -223,3 +258,4 @@ mod test {
         );
     }
 }
+// GRCOV_EXCL_STOP

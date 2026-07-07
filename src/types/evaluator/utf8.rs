@@ -143,7 +143,7 @@ mod chrono_cast {
                     .map(|time| (time.num_seconds_from_midnight(), time.nanosecond()))?,
             };
 
-            Ok(DataValue::Time32(DataValue::pack(value, nano, precision), precision))
+            Ok(DataValue::Time32(DataValue::pack_time(value, nano, precision), precision))
         }
     );
 
@@ -344,6 +344,7 @@ fn next_char_at(input: &str, index: usize) -> Option<(char, usize)> {
     Some((ch, index + ch.len_utf8()))
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
@@ -357,10 +358,34 @@ mod test {
         }
     }
 
+    fn assert_panics(f: impl FnOnce() + std::panic::UnwindSafe) {
+        assert!(std::panic::catch_unwind(f).is_err());
+    }
+
     #[test]
     fn test_utf8_binary_evaluators() {
         assert_eq!(
+            utf8_gt_binary_eval(&utf8("b"), &utf8("a")).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            utf8_gt_eq_binary_eval(&utf8("a"), &utf8("a")).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
             utf8_lt_binary_eval(&utf8("a"), &utf8("b")).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            utf8_lt_eq_binary_eval(&utf8("a"), &utf8("a")).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            utf8_eq_binary_eval(&utf8("a"), &utf8("a")).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            utf8_not_eq_binary_eval(&utf8("a"), &utf8("b")).unwrap(),
             DataValue::Boolean(true)
         );
         assert_eq!(
@@ -374,6 +399,14 @@ mod test {
         assert_eq!(
             utf8_not_like_binary_eval(None, &utf8("kite"), &utf8("ki%")).unwrap(),
             DataValue::Boolean(false)
+        );
+        assert_eq!(
+            utf8_like_binary_eval(None, &utf8("kite"), &DataValue::Null).unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            utf8_not_like_binary_eval(None, &DataValue::Null, &utf8("ki%")).unwrap(),
+            DataValue::Null
         );
     }
 
@@ -414,6 +447,12 @@ mod test {
             ("好a", "__", None, true),
             ("好a", "_", None, false),
             ("你好", "你%", None, true),
+            ("abc", "a_d", None, false),
+            ("abc", "a%_d", None, false),
+            ("abc", "a%c_", None, false),
+            ("a%b", "a@%b", Some('@'), true),
+            ("a_b", "a@_b", Some('@'), true),
+            ("ab", "a@", Some('@'), false),
         ];
 
         for (value, pattern, escape_char, expected) in cases {
@@ -508,7 +547,7 @@ mod test {
         );
         assert_eq!(
             utf8_to_time_cast_eval(Some(0), &utf8("03:04:05")).unwrap(),
-            DataValue::Time32(DataValue::pack(3 * 3600 + 4 * 60 + 5, 0, 0), 0)
+            DataValue::Time32(DataValue::pack_time(3 * 3600 + 4 * 60 + 5, 0, 0), 0)
         );
         assert_eq!(
             utf8_to_time_cast_eval(Some(3), &utf8("03:04:05.123")).unwrap(),
@@ -519,7 +558,7 @@ mod test {
                 )
                 .unwrap();
                 DataValue::Time32(
-                    DataValue::pack(time.num_seconds_from_midnight(), time.nanosecond(), 3),
+                    DataValue::pack_time(time.num_seconds_from_midnight(), time.nanosecond(), 3),
                     3,
                 )
             }
@@ -551,8 +590,80 @@ mod test {
             )
         );
         assert_eq!(
+            utf8_to_timestamp_cast_eval(Some(0), true, &utf8("2024-01-02 03:04:05")).unwrap(),
+            DataValue::Time64(
+                chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
+                    .unwrap()
+                    .and_hms_opt(3, 4, 5)
+                    .unwrap()
+                    .and_utc()
+                    .timestamp(),
+                0,
+                true,
+            )
+        );
+        assert_eq!(
+            utf8_to_timestamp_cast_eval(Some(6), false, &utf8("2024-01-02 03:04:05.123456"))
+                .unwrap(),
+            DataValue::Time64(
+                chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
+                    .unwrap()
+                    .and_hms_micro_opt(3, 4, 5, 123_456)
+                    .unwrap()
+                    .and_utc()
+                    .timestamp_micros(),
+                6,
+                false,
+            )
+        );
+        assert_eq!(
+            utf8_to_timestamp_cast_eval(
+                Some(9),
+                true,
+                &utf8("2024-01-02 03:04:05.123456789+00:00")
+            )
+            .unwrap(),
+            DataValue::Time64(
+                chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
+                    .unwrap()
+                    .and_hms_nano_opt(3, 4, 5, 123_456_789)
+                    .unwrap()
+                    .and_utc()
+                    .timestamp_nanos_opt()
+                    .unwrap(),
+                9,
+                true,
+            )
+        );
+        assert_eq!(
+            utf8_to_timestamp_cast_eval(Some(9), false, &utf8("2024-01-02 03:04:05.123456789"))
+                .unwrap(),
+            DataValue::Time64(
+                chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
+                    .unwrap()
+                    .and_hms_nano_opt(3, 4, 5, 123_456_789)
+                    .unwrap()
+                    .and_utc()
+                    .timestamp_nanos_opt()
+                    .unwrap(),
+                9,
+                false,
+            )
+        );
+        assert_eq!(
             utf8_to_decimal_cast_eval(&utf8("12.34")).unwrap(),
             DataValue::Decimal(Decimal::from_str("12.34").unwrap())
         );
+
+        assert_panics(|| {
+            let _ = utf8_to_timestamp_cast_eval(Some(4), false, &utf8("2024-01-02 03:04:05.1234"))
+                .unwrap();
+        });
+        assert_panics(|| {
+            let _ =
+                utf8_to_timestamp_cast_eval(Some(4), true, &utf8("2024-01-02 03:04:05.1234+00:00"))
+                    .unwrap();
+        });
     }
 }
+// GRCOV_EXCL_STOP

@@ -113,6 +113,7 @@ float32_binary!(
 
 crate::define_float_cast_evaluators!(Float32, Float32, f32, LogicalType::Float, from_f32);
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
@@ -188,4 +189,81 @@ mod test {
             DataValue::Decimal(Decimal::new(15, 1))
         );
     }
+
+    #[test]
+    fn test_float32_unary_and_binary_evaluators() {
+        let left = DataValue::Float32(OrderedFloat(5.5));
+        let right = DataValue::Float32(OrderedFloat(2.0));
+
+        assert_eq!(float32_plus_unary_eval(&left), left);
+        assert_eq!(
+            float32_minus_unary_eval(&left),
+            DataValue::Float32(OrderedFloat(-5.5))
+        );
+        assert_eq!(float32_minus_unary_eval(&DataValue::Null), DataValue::Null);
+
+        let cases = vec![
+            (
+                float32_plus_binary_eval(&left, &right).unwrap(),
+                DataValue::Float32(OrderedFloat(7.5)),
+            ),
+            (
+                float32_minus_binary_eval(&left, &right).unwrap(),
+                DataValue::Float32(OrderedFloat(3.5)),
+            ),
+            (
+                float32_multiply_binary_eval(&left, &right).unwrap(),
+                DataValue::Float32(OrderedFloat(11.0)),
+            ),
+            (
+                float32_divide_binary_eval(&left, &right).unwrap(),
+                DataValue::Float64(OrderedFloat(2.75)),
+            ),
+            (
+                float32_gt_binary_eval(&left, &right).unwrap(),
+                DataValue::Boolean(true),
+            ),
+            (
+                float32_gt_eq_binary_eval(&left, &right).unwrap(),
+                DataValue::Boolean(true),
+            ),
+            (
+                float32_lt_binary_eval(&left, &right).unwrap(),
+                DataValue::Boolean(false),
+            ),
+            (
+                float32_lt_eq_binary_eval(&left, &right).unwrap(),
+                DataValue::Boolean(false),
+            ),
+            (
+                float32_eq_binary_eval(&left, &right).unwrap(),
+                DataValue::Boolean(false),
+            ),
+            (
+                float32_not_eq_binary_eval(&left, &right).unwrap(),
+                DataValue::Boolean(true),
+            ),
+            (
+                float32_mod_binary_eval(&left, &right).unwrap(),
+                DataValue::Float32(OrderedFloat(1.5)),
+            ),
+        ];
+        for (actual, expected) in cases {
+            assert_eq!(actual, expected);
+        }
+
+        assert_eq!(
+            float32_plus_binary_eval(&left, &DataValue::Null).unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            float32_plus_binary_eval(&DataValue::Null, &right).unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            float32_plus_binary_eval(&DataValue::Null, &DataValue::Null).unwrap(),
+            DataValue::Null
+        );
+    }
 }
+// GRCOV_EXCL_STOP

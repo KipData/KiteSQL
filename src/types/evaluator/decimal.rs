@@ -137,6 +137,7 @@ decimal_binary!(
     |v1: &rust_decimal::Decimal, v2: &rust_decimal::Decimal| DataValue::Decimal(v1 % v2)
 );
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
@@ -209,4 +210,74 @@ mod test {
             DataValue::UInt64(12)
         );
     }
+
+    #[test]
+    fn test_decimal_binary_evaluators() {
+        let left = DataValue::Decimal(Decimal::new(55, 1));
+        let right = DataValue::Decimal(Decimal::new(20, 1));
+
+        let cases = vec![
+            (
+                decimal_plus_binary_eval(&left, &right).unwrap(),
+                DataValue::Decimal(Decimal::new(75, 1)),
+            ),
+            (
+                decimal_minus_binary_eval(&left, &right).unwrap(),
+                DataValue::Decimal(Decimal::new(35, 1)),
+            ),
+            (
+                decimal_multiply_binary_eval(&left, &right).unwrap(),
+                DataValue::Decimal(Decimal::new(1100, 2)),
+            ),
+            (
+                decimal_divide_binary_eval(&left, &right).unwrap(),
+                DataValue::Decimal(Decimal::new(275, 2)),
+            ),
+            (
+                decimal_gt_binary_eval(&left, &right).unwrap(),
+                DataValue::Boolean(true),
+            ),
+            (
+                decimal_gt_eq_binary_eval(&left, &right).unwrap(),
+                DataValue::Boolean(true),
+            ),
+            (
+                decimal_lt_binary_eval(&left, &right).unwrap(),
+                DataValue::Boolean(false),
+            ),
+            (
+                decimal_lt_eq_binary_eval(&left, &right).unwrap(),
+                DataValue::Boolean(false),
+            ),
+            (
+                decimal_eq_binary_eval(&left, &right).unwrap(),
+                DataValue::Boolean(false),
+            ),
+            (
+                decimal_not_eq_binary_eval(&left, &right).unwrap(),
+                DataValue::Boolean(true),
+            ),
+            (
+                decimal_mod_binary_eval(&left, &right).unwrap(),
+                DataValue::Decimal(Decimal::new(15, 1)),
+            ),
+        ];
+        for (actual, expected) in cases {
+            assert_eq!(actual, expected);
+        }
+
+        assert_eq!(
+            decimal_plus_binary_eval(&left, &DataValue::Null).unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            decimal_plus_binary_eval(&DataValue::Null, &right).unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            decimal_plus_binary_eval(&DataValue::Null, &DataValue::Null).unwrap(),
+            DataValue::Null
+        );
+    }
 }
+// GRCOV_EXCL_STOP

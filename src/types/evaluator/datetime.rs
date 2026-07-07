@@ -72,7 +72,7 @@ crate::define_cast_evaluator!(
                 cast_fail(LogicalType::DateTime, LogicalType::Time(this.precision))
             })?;
 
-        Ok(DataValue::Time32(DataValue::pack(value, 0, 0), precision))
+        Ok(DataValue::Time32(DataValue::pack_time(value, 0, 0), precision))
     }
 );
 crate::define_cast_evaluator!(
@@ -85,9 +85,11 @@ crate::define_cast_evaluator!(
     }
 );
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
+    use crate::errors::DatabaseError;
     use crate::types::value::Utf8Type;
     use crate::types::CharLengthUnits;
 
@@ -127,7 +129,7 @@ mod test {
         );
         assert_eq!(
             date64_to_time_cast_eval(Some(0), &value).unwrap(),
-            DataValue::Time32(DataValue::pack(3 * 3600 + 4 * 60 + 5, 0, 0), 0)
+            DataValue::Time32(DataValue::pack_time(3 * 3600 + 4 * 60 + 5, 0, 0), 0)
         );
         assert_eq!(
             date64_to_timestamp_cast_eval(Some(0), true, &value).unwrap(),
@@ -142,5 +144,28 @@ mod test {
                 true,
             )
         );
+        assert_eq!(
+            date_time_eq_binary_eval(&value, &value).unwrap(),
+            DataValue::Boolean(true)
+        );
+
+        let invalid = DataValue::Date64(i64::MAX);
+        assert!(matches!(
+            date64_to_char_cast_eval(19, CharLengthUnits::Characters, &invalid),
+            Err(DatabaseError::CastFail { .. })
+        ));
+        assert!(matches!(
+            date64_to_varchar_cast_eval(Some(19), CharLengthUnits::Characters, &invalid),
+            Err(DatabaseError::CastFail { .. })
+        ));
+        assert!(matches!(
+            date64_to_date_cast_eval(&invalid),
+            Err(DatabaseError::CastFail { .. })
+        ));
+        assert!(matches!(
+            date64_to_time_cast_eval(Some(0), &invalid),
+            Err(DatabaseError::CastFail { .. })
+        ));
     }
 }
+// GRCOV_EXCL_STOP

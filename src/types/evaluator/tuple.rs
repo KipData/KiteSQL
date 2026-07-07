@@ -114,6 +114,8 @@ pub(crate) fn eval_tuple_cast(
         _ => unsafe { hint::unreachable_unchecked() },
     }
 }
+
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
@@ -121,6 +123,73 @@ mod test {
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
     use std::borrow::Cow;
+
+    fn tuple(values: Vec<DataValue>) -> DataValue {
+        DataValue::Tuple(values, false)
+    }
+
+    #[test]
+    fn test_tuple_binary_evaluators() {
+        let left = tuple(vec![DataValue::Int32(1), DataValue::Int32(2)]);
+        let same = tuple(vec![DataValue::Int32(1), DataValue::Int32(2)]);
+        let greater = tuple(vec![DataValue::Int32(1), DataValue::Int32(3)]);
+        let shorter_lower = tuple(vec![DataValue::Int32(1)]);
+        let shorter_upper = DataValue::Tuple(vec![DataValue::Int32(1)], true);
+        let incomparable = tuple(vec![DataValue::Int32(1), DataValue::Boolean(true)]);
+
+        assert_eq!(
+            tuple_eq_binary_eval(&left, &same).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            tuple_not_eq_binary_eval(&left, &greater).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            tuple_gt_binary_eval(&greater, &left).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            tuple_gt_eq_binary_eval(&left, &same).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            tuple_lt_binary_eval(&left, &greater).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            tuple_lt_eq_binary_eval(&left, &same).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            tuple_lt_binary_eval(&shorter_lower, &left).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            tuple_gt_binary_eval(&shorter_upper, &left).unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            tuple_lt_binary_eval(&incomparable, &left).unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            tuple_eq_binary_eval(&DataValue::Null, &DataValue::Null).unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            tuple_not_eq_binary_eval(&DataValue::Boolean(true), &DataValue::Null).unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            tuple_gt_binary_eval(&DataValue::Null, &DataValue::Boolean(true)).unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            tuple_lt_eq_binary_eval(&DataValue::Null, &DataValue::Null).unwrap(),
+            DataValue::Null
+        );
+    }
 
     #[test]
     fn test_tuple_cast_eval() {
@@ -152,5 +221,7 @@ mod test {
                 .unwrap(),
             DataValue::Tuple(vec![DataValue::Int64(1), DataValue::Int32(2)], false)
         );
+        assert_eq!(evaluator.eval(&DataValue::Null).unwrap(), DataValue::Null);
     }
 }
+// GRCOV_EXCL_STOP

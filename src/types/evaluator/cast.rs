@@ -1146,6 +1146,7 @@ impl CastEvaluatorRef {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
@@ -1180,6 +1181,17 @@ mod test {
         value: &DataValue,
     ) -> Result<DataValue, DatabaseError> {
         create(from, to)?.eval(value)
+    }
+
+    fn assert_panics(f: impl FnOnce() + std::panic::UnwindSafe) {
+        assert!(std::panic::catch_unwind(f).is_err());
+    }
+
+    fn assert_cast_ref_panics(pos: u16, params: CastEvaluatorParams, value: DataValue) {
+        assert_panics(|| {
+            let evaluator = CastEvaluatorRef::new(pos, params);
+            let _ = evaluator.eval(&value).unwrap();
+        });
     }
 
     #[test]
@@ -1229,6 +1241,49 @@ mod test {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn test_cast_evaluators_reject_invalid_positions_and_params() {
+        let cases = vec![
+            (
+                CAST_BOOLEAN * CAST_TYPE_STRIDE + CAST_CHAR,
+                CastEvaluatorParams::Unit,
+                DataValue::Boolean(true),
+            ),
+            (
+                CAST_CHAR * CAST_TYPE_STRIDE + CAST_TIME,
+                CastEvaluatorParams::Unit,
+                utf8("03:04:05"),
+            ),
+            (
+                CAST_CHAR * CAST_TYPE_STRIDE + CAST_TIMESTAMP,
+                CastEvaluatorParams::Unit,
+                utf8("2024-01-02 03:04:05"),
+            ),
+            #[cfg(feature = "decimal")]
+            (
+                CAST_FLOAT * CAST_TYPE_STRIDE + CAST_DECIMAL,
+                CastEvaluatorParams::Unit,
+                DataValue::Float32(OrderedFloat(1.0)),
+            ),
+            #[cfg(feature = "decimal")]
+            (
+                CAST_DECIMAL * CAST_TYPE_STRIDE + CAST_TIME,
+                CastEvaluatorParams::Unit,
+                DataValue::Decimal(Decimal::new(1, 0)),
+            ),
+            (
+                CAST_TUPLE * CAST_TYPE_STRIDE + CAST_TUPLE,
+                CastEvaluatorParams::Unit,
+                DataValue::Tuple(vec![DataValue::Int32(1)], false),
+            ),
+            (u16::MAX, CastEvaluatorParams::Unit, DataValue::Int32(1)),
+        ];
+
+        for (pos, params, value) in cases {
+            assert_cast_ref_panics(pos, params, value);
+        }
     }
 
     #[test]
@@ -1350,6 +1405,92 @@ mod test {
     }
 
     #[test]
+    fn test_cast_create_dispatches_integer_casts() -> Result<(), DatabaseError> {
+        let cases = vec![
+            (
+                LogicalType::Tinyint,
+                DataValue::Int8(1),
+                DataValue::Float64(OrderedFloat(1.0)),
+            ),
+            (
+                LogicalType::Smallint,
+                DataValue::Int16(2),
+                DataValue::Float64(OrderedFloat(2.0)),
+            ),
+            (
+                LogicalType::Integer,
+                DataValue::Int32(3),
+                DataValue::Float64(OrderedFloat(3.0)),
+            ),
+            (
+                LogicalType::Bigint,
+                DataValue::Int64(4),
+                DataValue::Float64(OrderedFloat(4.0)),
+            ),
+            (
+                LogicalType::UTinyint,
+                DataValue::UInt8(5),
+                DataValue::Float64(OrderedFloat(5.0)),
+            ),
+            (
+                LogicalType::USmallint,
+                DataValue::UInt16(6),
+                DataValue::Float64(OrderedFloat(6.0)),
+            ),
+            (
+                LogicalType::UInteger,
+                DataValue::UInt32(7),
+                DataValue::Float64(OrderedFloat(7.0)),
+            ),
+            (
+                LogicalType::UBigint,
+                DataValue::UInt64(8),
+                DataValue::Float64(OrderedFloat(8.0)),
+            ),
+        ];
+
+        for (from, value, expected) in cases {
+            assert_eq!(cast_eval(from, LogicalType::Double, &value)?, expected);
+        }
+
+        assert_eq!(
+            cast_eval(
+                LogicalType::Integer,
+                LogicalType::Char(1, CharLengthUnits::Characters),
+                &DataValue::Int32(9),
+            )?,
+            DataValue::Utf8 {
+                value: "9".to_string(),
+                ty: Utf8Type::Fixed(1),
+                unit: CharLengthUnits::Characters,
+            }
+        );
+        assert_eq!(
+            cast_eval(
+                LogicalType::UInteger,
+                LogicalType::Varchar(Some(2), CharLengthUnits::Characters),
+                &DataValue::UInt32(10),
+            )?,
+            DataValue::Utf8 {
+                value: "10".to_string(),
+                ty: Utf8Type::Variable(Some(2)),
+                unit: CharLengthUnits::Characters,
+            }
+        );
+        #[cfg(feature = "decimal")]
+        assert_eq!(
+            cast_eval(
+                LogicalType::Smallint,
+                LogicalType::Decimal(None, Some(1)),
+                &DataValue::Int16(12),
+            )?,
+            DataValue::Decimal(Decimal::new(120, 1))
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_cast_create_dispatches_utf8_casts() -> Result<(), DatabaseError> {
         assert_eq!(
             cast_eval(
@@ -1370,6 +1511,38 @@ mod test {
         assert_eq!(
             cast_eval(
                 LogicalType::Varchar(None, CharLengthUnits::Characters),
+                LogicalType::Tinyint,
+                &utf8("12")
+            )?,
+            DataValue::Int8(12)
+        );
+        assert_eq!(
+            cast_eval(
+                LogicalType::Varchar(None, CharLengthUnits::Characters),
+                LogicalType::UTinyint,
+                &utf8("12")
+            )?,
+            DataValue::UInt8(12)
+        );
+        assert_eq!(
+            cast_eval(
+                LogicalType::Varchar(None, CharLengthUnits::Characters),
+                LogicalType::Smallint,
+                &utf8("12")
+            )?,
+            DataValue::Int16(12)
+        );
+        assert_eq!(
+            cast_eval(
+                LogicalType::Varchar(None, CharLengthUnits::Characters),
+                LogicalType::USmallint,
+                &utf8("12")
+            )?,
+            DataValue::UInt16(12)
+        );
+        assert_eq!(
+            cast_eval(
+                LogicalType::Varchar(None, CharLengthUnits::Characters),
                 LogicalType::UInteger,
                 &utf8("12")
             )?,
@@ -1378,10 +1551,34 @@ mod test {
         assert_eq!(
             cast_eval(
                 LogicalType::Varchar(None, CharLengthUnits::Characters),
+                LogicalType::Bigint,
+                &utf8("12")
+            )?,
+            DataValue::Int64(12)
+        );
+        assert_eq!(
+            cast_eval(
+                LogicalType::Varchar(None, CharLengthUnits::Characters),
+                LogicalType::UBigint,
+                &utf8("12")
+            )?,
+            DataValue::UInt64(12)
+        );
+        assert_eq!(
+            cast_eval(
+                LogicalType::Varchar(None, CharLengthUnits::Characters),
                 LogicalType::Float,
                 &utf8("1.5")
             )?,
             DataValue::Float32(OrderedFloat(1.5))
+        );
+        assert_eq!(
+            cast_eval(
+                LogicalType::Varchar(None, CharLengthUnits::Characters),
+                LogicalType::Double,
+                &utf8("1.5")
+            )?,
+            DataValue::Float64(OrderedFloat(1.5))
         );
         assert_eq!(
             cast_eval(
@@ -1444,7 +1641,7 @@ mod test {
                 LogicalType::Time(Some(0)),
                 &utf8("03:04:05"),
             )?,
-            DataValue::Time32(DataValue::pack(3 * 3600 + 4 * 60 + 5, 0, 0), 0)
+            DataValue::Time32(DataValue::pack_time(3 * 3600 + 4 * 60 + 5, 0, 0), 0)
         );
         assert_eq!(
             cast_eval(
@@ -1525,6 +1722,30 @@ mod test {
             cast_eval(LogicalType::DateTime, LogicalType::Date, &datetime)?,
             date
         );
+        assert_eq!(
+            cast_eval(
+                LogicalType::DateTime,
+                LogicalType::Char(19, CharLengthUnits::Characters),
+                &datetime,
+            )?,
+            DataValue::Utf8 {
+                value: "2024-01-02 03:04:05".to_string(),
+                ty: Utf8Type::Fixed(19),
+                unit: CharLengthUnits::Characters,
+            }
+        );
+        assert_eq!(
+            cast_eval(
+                LogicalType::DateTime,
+                LogicalType::Varchar(Some(19), CharLengthUnits::Characters),
+                &datetime,
+            )?,
+            DataValue::Utf8 {
+                value: "2024-01-02 03:04:05".to_string(),
+                ty: Utf8Type::Variable(Some(19)),
+                unit: CharLengthUnits::Characters,
+            }
+        );
         assert!(matches!(
             cast_eval(LogicalType::DateTime, LogicalType::Time(Some(0)), &datetime)?,
             DataValue::Time32(_, 0)
@@ -1575,6 +1796,54 @@ mod test {
             )?,
             DataValue::Time64(*timestamp_value, 3, true)
         );
+        assert_eq!(
+            cast_eval(
+                LogicalType::Time(Some(0)),
+                LogicalType::Char(8, CharLengthUnits::Characters),
+                &DataValue::Time32(DataValue::pack_time(3 * 3600 + 4 * 60 + 5, 0, 0), 0),
+            )?,
+            DataValue::Utf8 {
+                value: "03:04:05".to_string(),
+                ty: Utf8Type::Fixed(8),
+                unit: CharLengthUnits::Characters,
+            }
+        );
+        assert_eq!(
+            cast_eval(
+                LogicalType::Time(Some(0)),
+                LogicalType::Varchar(Some(8), CharLengthUnits::Characters),
+                &DataValue::Time32(DataValue::pack_time(3 * 3600 + 4 * 60 + 5, 0, 0), 0),
+            )?,
+            DataValue::Utf8 {
+                value: "03:04:05".to_string(),
+                ty: Utf8Type::Variable(Some(8)),
+                unit: CharLengthUnits::Characters,
+            }
+        );
+        assert_eq!(
+            cast_eval(
+                LogicalType::TimeStamp(Some(3), false),
+                LogicalType::Char(23, CharLengthUnits::Characters),
+                &timestamp,
+            )?,
+            DataValue::Utf8 {
+                value: "2024-01-02 03:04:05.123".to_string(),
+                ty: Utf8Type::Fixed(23),
+                unit: CharLengthUnits::Characters,
+            }
+        );
+        assert_eq!(
+            cast_eval(
+                LogicalType::TimeStamp(Some(3), false),
+                LogicalType::Varchar(Some(23), CharLengthUnits::Characters),
+                &timestamp,
+            )?,
+            DataValue::Utf8 {
+                value: "2024-01-02 03:04:05.123".to_string(),
+                ty: Utf8Type::Variable(Some(23)),
+                unit: CharLengthUnits::Characters,
+            }
+        );
 
         Ok(())
     }
@@ -1606,8 +1875,33 @@ mod test {
             create(LogicalType::Date, LogicalType::Boolean),
             Err(DatabaseError::CastFail { .. })
         ));
+        assert_eq!(
+            create(LogicalType::Integer, LogicalType::Integer)?.eval(&DataValue::Int32(1))?,
+            DataValue::Int32(1)
+        );
 
         Ok(())
+    }
+
+    #[cfg(feature = "decimal")]
+    #[test]
+    fn test_float_to_decimal_cast_rejects_nan() {
+        assert!(matches!(
+            cast_eval(
+                LogicalType::Float,
+                LogicalType::Decimal(Some(4), Some(2)),
+                &DataValue::Float32(OrderedFloat(f32::NAN)),
+            ),
+            Err(DatabaseError::CastFail { .. })
+        ));
+        assert!(matches!(
+            cast_eval(
+                LogicalType::Double,
+                LogicalType::Decimal(Some(4), Some(2)),
+                &DataValue::Float64(OrderedFloat(f64::NAN)),
+            ),
+            Err(DatabaseError::CastFail { .. })
+        ));
     }
 
     #[cfg(feature = "decimal")]
@@ -1662,3 +1956,4 @@ mod test {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

@@ -646,3 +646,168 @@ impl LogicalType {
         }
     }
 }
+
+// GRCOV_EXCL_START
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    fn roundtrip(
+        serializer: TupleValueSerializableImpl,
+        value: DataValue,
+    ) -> Result<DataValue, DatabaseError> {
+        let mut bytes = Vec::new();
+        serializer.to_raw(&value, &mut bytes)?;
+        serializer.from_raw(&mut Cursor::new(bytes.as_slice()))
+    }
+
+    fn assert_panics(f: impl FnOnce() + std::panic::UnwindSafe) {
+        assert!(std::panic::catch_unwind(f).is_err());
+    }
+
+    #[test]
+    fn test_tuple_value_serializable_impl_roundtrips_all_value_variants(
+    ) -> Result<(), DatabaseError> {
+        let cases = vec![
+            (
+                TupleValueSerializableImpl::Boolean,
+                DataValue::Boolean(true),
+            ),
+            (TupleValueSerializableImpl::Int8, DataValue::Int8(-1)),
+            (TupleValueSerializableImpl::Int16, DataValue::Int16(-2)),
+            (TupleValueSerializableImpl::Int32, DataValue::Int32(-3)),
+            (TupleValueSerializableImpl::Int64, DataValue::Int64(-4)),
+            (TupleValueSerializableImpl::UInt8, DataValue::UInt8(1)),
+            (TupleValueSerializableImpl::UInt16, DataValue::UInt16(2)),
+            (TupleValueSerializableImpl::UInt32, DataValue::UInt32(3)),
+            (TupleValueSerializableImpl::UInt64, DataValue::UInt64(4)),
+            (
+                TupleValueSerializableImpl::Float32,
+                DataValue::Float32(OrderedFloat(1.5)),
+            ),
+            (
+                TupleValueSerializableImpl::Float64,
+                DataValue::Float64(OrderedFloat(2.5)),
+            ),
+            (
+                TupleValueSerializableImpl::Char {
+                    len: 4,
+                    unit: CharLengthUnits::Characters,
+                },
+                DataValue::Utf8 {
+                    value: "ab".to_string(),
+                    ty: Utf8Type::Fixed(4),
+                    unit: CharLengthUnits::Characters,
+                },
+            ),
+            (
+                TupleValueSerializableImpl::Char {
+                    len: 70,
+                    unit: CharLengthUnits::Octets,
+                },
+                DataValue::Utf8 {
+                    value: "ab".to_string(),
+                    ty: Utf8Type::Fixed(70),
+                    unit: CharLengthUnits::Octets,
+                },
+            ),
+            (
+                TupleValueSerializableImpl::Varchar {
+                    len: Some(8),
+                    unit: CharLengthUnits::Characters,
+                },
+                DataValue::Utf8 {
+                    value: "kite".to_string(),
+                    ty: Utf8Type::Variable(Some(8)),
+                    unit: CharLengthUnits::Characters,
+                },
+            ),
+            (TupleValueSerializableImpl::Date, DataValue::Date32(123)),
+            (TupleValueSerializableImpl::DateTime, DataValue::Date64(456)),
+            (
+                TupleValueSerializableImpl::Time { precision: Some(3) },
+                DataValue::Time32(789, 3),
+            ),
+            (
+                TupleValueSerializableImpl::Timestamp {
+                    precision: Some(6),
+                    zone: true,
+                },
+                DataValue::Time64(101_112, 6, true),
+            ),
+            #[cfg(feature = "decimal")]
+            (
+                TupleValueSerializableImpl::Decimal,
+                DataValue::Decimal(Decimal::new(1234, 2)),
+            ),
+        ];
+
+        for (serializer, value) in cases {
+            assert_eq!(roundtrip(serializer, value.clone())?, value);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_tuple_value_serializable_impl_filling_and_skip() -> Result<(), DatabaseError> {
+        let serializer = TupleValueSerializableImpl::UInt64;
+        let value = DataValue::UInt64(42);
+        let mut bytes = Vec::new();
+        serializer.to_raw(&value, &mut bytes)?;
+
+        let mut values = Vec::new();
+        serializer.filling_value(&mut Cursor::new(bytes.as_slice()), &mut values)?;
+        assert_eq!(values, vec![value]);
+
+        let skip_fixed = TupleValueSerializableImpl::SkipFixed(2);
+        assert_eq!(
+            skip_fixed.from_raw(&mut Cursor::new([1_u8, 2, 3].as_slice()))?,
+            DataValue::Null
+        );
+        let mut values = vec![DataValue::Int32(1)];
+        skip_fixed.filling_value(&mut Cursor::new([1_u8, 2, 3].as_slice()), &mut values)?;
+        assert_eq!(values, vec![DataValue::Int32(1)]);
+
+        let skip_variable = TupleValueSerializableImpl::SkipVariable;
+        let mut bytes = Vec::new();
+        write_u32_le(&mut bytes, 3)?;
+        bytes.extend_from_slice(&[1, 2, 3, 4]);
+        assert_eq!(
+            skip_variable.from_raw(&mut Cursor::new(bytes.as_slice()))?,
+            DataValue::Null
+        );
+        let mut values = vec![DataValue::Int32(2)];
+        skip_variable.filling_value(&mut Cursor::new(bytes.as_slice()), &mut values)?;
+        assert_eq!(values, vec![DataValue::Int32(2)]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_logical_type_serializable_and_skip_serializable() {
+        assert_eq!(
+            LogicalType::UBigint.serializable(),
+            TupleValueSerializableImpl::UInt64
+        );
+        assert_eq!(
+            LogicalType::Char(8, CharLengthUnits::Octets).skip_serializable(),
+            TupleValueSerializableImpl::SkipFixed(8)
+        );
+        assert_eq!(
+            LogicalType::Varchar(None, CharLengthUnits::Characters).skip_serializable(),
+            TupleValueSerializableImpl::SkipVariable
+        );
+        assert_eq!(
+            LogicalType::SqlNull.skip_serializable(),
+            TupleValueSerializableImpl::SkipFixed(0)
+        );
+        assert_panics(|| {
+            let _ = LogicalType::SqlNull.serializable();
+        });
+        assert_panics(|| {
+            let _ = LogicalType::Tuple(vec![LogicalType::Integer]).serializable();
+        });
+    }
+}
+// GRCOV_EXCL_STOP

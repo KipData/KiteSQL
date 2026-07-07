@@ -651,11 +651,11 @@ impl DataValue {
         Ok(())
     }
 
-    pub fn pack(a: u32, b: u32, precision: u64) -> u32 {
-        assert!(b <= ONE_SEC_TO_NANO);
-        assert!(a <= ONE_DAY_TO_SEC);
-        // Scale down `a` to fit
-        let scaled_b = b / (1000000000 / 10_u32.pow(precision as u32)); // Now 0-1_000_000
+    pub fn pack_time(secs: u32, nanos: u32, precision: u64) -> u32 {
+        assert!(nanos <= ONE_SEC_TO_NANO);
+        assert!(secs <= ONE_DAY_TO_SEC);
+        // Scale down `nanos` to fit
+        let scaled_nanos = nanos / (1000000000 / 10_u32.pow(precision as u32)); // Now 0-1_000_000
         let p = match precision {
             1 => 28,
             2 => 25,
@@ -663,10 +663,10 @@ impl DataValue {
             4 => 18,
             _ => 31,
         };
-        (scaled_b << p) | a
+        (scaled_nanos << p) | secs
     }
 
-    pub fn unpack(combined: u32, precision: u64) -> (u32, u32) {
+    pub fn unpack_time(combined: u32, precision: u64) -> (u32, u32) {
         let p = match precision {
             1 => 28,
             2 => 25,
@@ -674,9 +674,12 @@ impl DataValue {
             4 => 18,
             _ => 31,
         };
-        let scaled_a = combined >> p;
-        let b = combined & (2_u32.pow(p) - 1);
-        (b, scaled_a * (1000000000 / 10_u32.pow(precision as u32)))
+        let scaled_nanos = combined >> p;
+        let secs = combined & (2_u32.pow(p) - 1);
+        (
+            secs,
+            scaled_nanos * (1000000000 / 10_u32.pow(precision as u32)),
+        )
     }
 
     #[inline]
@@ -1417,7 +1420,7 @@ impl DataValue {
     }
 
     fn time_format<'a>(v: u32, precision: u64) -> Option<DelayedFormat<StrftimeItems<'a>>> {
-        let (v, n) = Self::unpack(v, precision);
+        let (v, n) = Self::unpack_time(v, precision);
         NaiveTime::from_num_seconds_from_midnight_opt(v, n)
             .map(|time| time.format(TIME_FMT_WITHOUT_ZONE))
     }
@@ -1584,7 +1587,7 @@ impl From<Option<&NaiveDateTime>> for DataValue {
 impl From<&NaiveTime> for DataValue {
     fn from(value: &NaiveTime) -> Self {
         DataValue::Time32(
-            Self::pack(value.num_seconds_from_midnight(), value.nanosecond(), 4),
+            Self::pack_time(value.num_seconds_from_midnight(), value.nanosecond(), 4),
             6,
         )
     }
@@ -1595,7 +1598,7 @@ impl From<Option<&NaiveTime>> for DataValue {
     fn from(value: Option<&NaiveTime>) -> Self {
         if let Some(value) = value {
             DataValue::Time32(
-                Self::pack(value.num_seconds_from_midnight(), value.nanosecond(), 4),
+                Self::pack_time(value.num_seconds_from_midnight(), value.nanosecond(), 4),
                 0,
             )
         } else {
@@ -1719,14 +1722,17 @@ impl fmt::Debug for DataValue {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use crate::errors::DatabaseError;
-    use crate::storage::table_codec::BumpBytes;
+    use crate::storage::table_codec::{BumpBytes, NOTNULL_TAG, NULL_TAG};
     use crate::types::value::{DataValue, TupleMappingRef, Utf8Type};
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
     use bumpalo::Bump;
+    #[cfg(feature = "time")]
+    use chrono::{Datelike, Timelike};
     use ordered_float::OrderedFloat;
     use rust_decimal::Decimal;
     use std::cmp::Ordering;
@@ -1738,6 +1744,659 @@ mod test {
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         }
+    }
+
+    fn fixed_utf8(value: &str, len: u32, unit: CharLengthUnits) -> DataValue {
+        DataValue::Utf8 {
+            value: value.to_string(),
+            ty: Utf8Type::Fixed(len),
+            unit,
+        }
+    }
+
+    fn roundtrip_memcomparable(value: &DataValue, ty: &LogicalType) -> DataValue {
+        let mut bytes = Vec::new();
+        value.memcomparable_encode(&mut bytes).unwrap();
+        DataValue::memcomparable_decode(&mut Cursor::new(bytes), ty).unwrap()
+    }
+
+    fn assert_panics(f: impl FnOnce() + std::panic::UnwindSafe) {
+        assert!(std::panic::catch_unwind(f).is_err());
+    }
+
+    #[test]
+    fn test_data_value_accessors_and_constructors() {
+        assert_eq!(DataValue::Boolean(true).bool(), Some(true));
+        assert_eq!(DataValue::Int8(-1).i8(), Some(-1));
+        assert_eq!(DataValue::Int16(-2).i16(), Some(-2));
+        assert_eq!(DataValue::Int32(-3).i32(), Some(-3));
+        assert_eq!(DataValue::Int64(-4).i64(), Some(-4));
+        assert_eq!(DataValue::UInt8(1).u8(), Some(1));
+        assert_eq!(DataValue::UInt16(2).u16(), Some(2));
+        assert_eq!(DataValue::UInt32(3).u32(), Some(3));
+        assert_eq!(DataValue::UInt64(4).u64(), Some(4));
+        assert_eq!(DataValue::Float32(OrderedFloat(1.25)).float(), Some(1.25));
+        assert_eq!(DataValue::Float64(OrderedFloat(2.5)).double(), Some(2.5));
+        assert_eq!(utf8("kite").utf8(), Some("kite"));
+        assert_eq!(DataValue::Int32(1).utf8(), None);
+
+        assert_eq!(
+            DataValue::new_utf8("kite".to_string()),
+            DataValue::Utf8 {
+                value: "kite".to_string(),
+                ty: Utf8Type::Fixed(4),
+                unit: CharLengthUnits::Characters,
+            }
+        );
+        assert_eq!(DataValue::Null.bool(), None);
+        assert_eq!(DataValue::Null.float(), None);
+        assert_eq!(DataValue::Null.double(), None);
+    }
+
+    #[test]
+    fn test_data_value_len_helpers() {
+        assert!(!DataValue::check_string_len(
+            "中",
+            1,
+            CharLengthUnits::Characters
+        ));
+        assert!(DataValue::check_string_len(
+            "中",
+            2,
+            CharLengthUnits::Octets
+        ));
+
+        assert_eq!(utf8("ab").serialized_len_hint(), 6);
+        assert_eq!(
+            fixed_utf8("ab", 4, CharLengthUnits::Characters).serialized_len_hint(),
+            8
+        );
+        assert_eq!(
+            fixed_utf8("ab", 4, CharLengthUnits::Octets).serialized_len_hint(),
+            4
+        );
+        assert_eq!(DataValue::Null.serialized_len_hint(), 0);
+        assert_eq!(DataValue::Boolean(true).serialized_len_hint(), 1);
+        assert_eq!(DataValue::Int16(1).serialized_len_hint(), 2);
+        assert_eq!(DataValue::Int32(1).serialized_len_hint(), 4);
+        assert_eq!(DataValue::Int64(1).serialized_len_hint(), 8);
+        assert_eq!(
+            DataValue::Tuple(vec![DataValue::Int8(1), DataValue::Int32(2)], false)
+                .serialized_len_hint(),
+            5
+        );
+        #[cfg(feature = "decimal")]
+        assert_eq!(
+            DataValue::Decimal(Decimal::new(1, 0)).serialized_len_hint(),
+            16
+        );
+
+        assert!(utf8("ab")
+            .check_len(&LogicalType::Varchar(Some(2), CharLengthUnits::Characters))
+            .is_ok());
+        assert!(matches!(
+            utf8("abc").check_len(&LogicalType::Varchar(Some(2), CharLengthUnits::Characters)),
+            Err(DatabaseError::TooLong)
+        ));
+        assert!(matches!(
+            fixed_utf8("中", 2, CharLengthUnits::Octets)
+                .check_len(&LogicalType::Char(2, CharLengthUnits::Octets)),
+            Err(DatabaseError::TooLong)
+        ));
+
+        #[cfg(feature = "decimal")]
+        {
+            assert!(DataValue::Decimal(Decimal::new(123, 2))
+                .check_len(&LogicalType::Decimal(Some(3), Some(2)))
+                .is_ok());
+            assert!(matches!(
+                DataValue::Decimal(Decimal::new(1234, 2))
+                    .check_len(&LogicalType::Decimal(Some(3), Some(2))),
+                Err(DatabaseError::TooLong)
+            ));
+            assert!(matches!(
+                DataValue::Decimal(Decimal::new(123, 3))
+                    .check_len(&LogicalType::Decimal(Some(3), Some(2))),
+                Err(DatabaseError::TooLong)
+            ));
+        }
+    }
+
+    #[test]
+    fn test_data_value_pack_unpack_init_and_logical_type() {
+        for precision in [0, 1, 2, 3, 4] {
+            let packed = DataValue::pack_time(3, 400_000_000, precision);
+            let (seconds, nanos) = DataValue::unpack_time(packed, precision);
+            assert_eq!(seconds, 3);
+            assert_eq!(
+                nanos,
+                400_000_000 / (1_000_000_000 / 10_u32.pow(precision as u32))
+                    * (1_000_000_000 / 10_u32.pow(precision as u32))
+            );
+        }
+
+        let init_cases = vec![
+            (LogicalType::SqlNull, DataValue::Null),
+            (LogicalType::Boolean, DataValue::Boolean(false)),
+            (LogicalType::Tinyint, DataValue::Int8(0)),
+            (LogicalType::UTinyint, DataValue::UInt8(0)),
+            (LogicalType::Smallint, DataValue::Int16(0)),
+            (LogicalType::USmallint, DataValue::UInt16(0)),
+            (LogicalType::Integer, DataValue::Int32(0)),
+            (LogicalType::UInteger, DataValue::UInt32(0)),
+            (LogicalType::Bigint, DataValue::Int64(0)),
+            (LogicalType::UBigint, DataValue::UInt64(0)),
+            (LogicalType::Float, DataValue::Float32(OrderedFloat(0.0))),
+            (LogicalType::Double, DataValue::Float64(OrderedFloat(0.0))),
+            (
+                LogicalType::Char(3, CharLengthUnits::Characters),
+                fixed_utf8("", 3, CharLengthUnits::Characters),
+            ),
+            (
+                LogicalType::Varchar(Some(3), CharLengthUnits::Octets),
+                DataValue::Utf8 {
+                    value: String::new(),
+                    ty: Utf8Type::Variable(Some(3)),
+                    unit: CharLengthUnits::Octets,
+                },
+            ),
+            #[cfg(feature = "decimal")]
+            (
+                LogicalType::Decimal(None, None),
+                DataValue::Decimal(Decimal::new(0, 0)),
+            ),
+        ];
+        for (ty, expected) in init_cases {
+            assert_eq!(DataValue::init(&ty), expected);
+        }
+
+        assert_eq!(
+            DataValue::init(&LogicalType::Tuple(vec![LogicalType::Integer])),
+            DataValue::Tuple(vec![DataValue::Int32(0)], false)
+        );
+        assert_eq!(
+            DataValue::init(&LogicalType::Date).logical_type(),
+            LogicalType::Date
+        );
+        assert_eq!(
+            DataValue::init(&LogicalType::DateTime).logical_type(),
+            LogicalType::DateTime
+        );
+        assert_eq!(
+            DataValue::init(&LogicalType::Time(Some(3))),
+            DataValue::Time32(0, 3)
+        );
+        assert_eq!(
+            DataValue::init(&LogicalType::Time(None)),
+            DataValue::Time32(0, 0)
+        );
+        assert_eq!(
+            DataValue::init(&LogicalType::TimeStamp(None, true)).logical_type(),
+            LogicalType::TimeStamp(None, false)
+        );
+        assert_eq!(
+            DataValue::init(&LogicalType::TimeStamp(Some(3), false)).logical_type(),
+            LogicalType::TimeStamp(None, false)
+        );
+        assert_eq!(
+            DataValue::init(&LogicalType::TimeStamp(Some(6), false)).logical_type(),
+            LogicalType::TimeStamp(None, false)
+        );
+        assert_eq!(
+            DataValue::init(&LogicalType::TimeStamp(Some(9), false)).logical_type(),
+            LogicalType::TimeStamp(None, false)
+        );
+        assert_panics(|| {
+            let _ = DataValue::init(&LogicalType::TimeStamp(Some(5), false));
+        });
+
+        let logical_type_cases = vec![
+            (DataValue::Null, LogicalType::SqlNull),
+            (DataValue::Boolean(true), LogicalType::Boolean),
+            (DataValue::Float32(OrderedFloat(1.0)), LogicalType::Float),
+            (DataValue::Float64(OrderedFloat(1.0)), LogicalType::Double),
+            (DataValue::Int8(1), LogicalType::Tinyint),
+            (DataValue::Int16(1), LogicalType::Smallint),
+            (DataValue::Int32(1), LogicalType::Integer),
+            (DataValue::Int64(1), LogicalType::Bigint),
+            (DataValue::UInt8(1), LogicalType::UTinyint),
+            (DataValue::UInt16(1), LogicalType::USmallint),
+            (DataValue::UInt32(1), LogicalType::UInteger),
+            (DataValue::UInt64(1), LogicalType::UBigint),
+            (
+                utf8("a"),
+                LogicalType::Varchar(None, CharLengthUnits::Characters),
+            ),
+            (
+                fixed_utf8("a", 1, CharLengthUnits::Characters),
+                LogicalType::Char(1, CharLengthUnits::Characters),
+            ),
+            (DataValue::Date32(1), LogicalType::Date),
+            (DataValue::Date64(1), LogicalType::DateTime),
+            (DataValue::Time32(1, 2), LogicalType::Time(None)),
+            (
+                DataValue::Time64(1, 2, true),
+                LogicalType::TimeStamp(None, false),
+            ),
+            #[cfg(feature = "decimal")]
+            (
+                DataValue::Decimal(Decimal::new(1, 0)),
+                LogicalType::Decimal(None, None),
+            ),
+            (
+                DataValue::Tuple(vec![DataValue::Int32(1)], false),
+                LogicalType::Tuple(vec![LogicalType::Integer]),
+            ),
+        ];
+        for (value, expected) in logical_type_cases {
+            assert_eq!(value.logical_type(), expected);
+        }
+    }
+
+    #[test]
+    fn test_memcomparable_roundtrips_scalar_variants() {
+        let cases = vec![
+            (DataValue::Boolean(true), LogicalType::Boolean),
+            (DataValue::Boolean(false), LogicalType::Boolean),
+            (DataValue::UInt8(1), LogicalType::UTinyint),
+            (DataValue::UInt16(2), LogicalType::USmallint),
+            (DataValue::UInt32(3), LogicalType::UInteger),
+            (DataValue::UInt64(4), LogicalType::UBigint),
+            (DataValue::Date32(10), LogicalType::Date),
+            (DataValue::Date64(20), LogicalType::DateTime),
+            (DataValue::Time32(30, 3), LogicalType::Time(Some(3))),
+            (
+                DataValue::Time64(40, 6, true),
+                LogicalType::TimeStamp(Some(6), true),
+            ),
+            (
+                fixed_utf8("ab", 2, CharLengthUnits::Characters),
+                LogicalType::Char(2, CharLengthUnits::Characters),
+            ),
+            #[cfg(feature = "decimal")]
+            (
+                DataValue::Decimal(Decimal::new(123, 2)),
+                LogicalType::Decimal(None, None),
+            ),
+        ];
+        for (value, ty) in cases {
+            assert_eq!(roundtrip_memcomparable(&value, &ty), value);
+        }
+
+        let mut nulls_first = Vec::new();
+        DataValue::Null
+            .memcomparable_encode_with_null_order(&mut nulls_first, true)
+            .unwrap();
+        let mut not_null = Vec::new();
+        DataValue::Int32(1)
+            .memcomparable_encode_with_null_order(&mut not_null, true)
+            .unwrap();
+        assert!(nulls_first < not_null);
+        assert_eq!(nulls_first[0], NOTNULL_TAG);
+        assert_eq!(not_null[0], NULL_TAG);
+
+        let mut bytes = Vec::new();
+        DataValue::encode_string(&mut bytes, b"12345678");
+        DataValue::encode_string(&mut bytes, b"9");
+        assert_eq!(
+            DataValue::decode_string(&mut Cursor::new(bytes)).unwrap(),
+            b"12345678".to_vec()
+        );
+
+        assert_eq!(
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(vec![NULL_TAG]),
+                &LogicalType::Integer
+            )
+            .unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            DataValue::memcomparable_decode(
+                &mut Cursor::new(vec![NOTNULL_TAG]),
+                &LogicalType::SqlNull
+            )
+            .unwrap(),
+            DataValue::Null
+        );
+    }
+
+    #[test]
+    fn test_memcomparable_decode_rejects_invalid_strings() {
+        let mut invalid_marker = vec![NOTNULL_TAG];
+        invalid_marker.extend_from_slice(&[0; 8]);
+        invalid_marker.push(0);
+        assert!(DataValue::memcomparable_decode(
+            &mut Cursor::new(invalid_marker),
+            &LogicalType::Varchar(None, CharLengthUnits::Characters)
+        )
+        .is_err());
+
+        let invalid_utf8 = vec![NOTNULL_TAG, 0xff, 0, 0, 0, 0, 0, 0, 0, 248];
+        assert!(DataValue::memcomparable_decode(
+            &mut Cursor::new(invalid_utf8),
+            &LogicalType::Varchar(None, CharLengthUnits::Characters)
+        )
+        .is_err());
+    }
+
+    #[cfg(feature = "decimal")]
+    #[test]
+    fn test_decimal_memcomparable_roundtrip_and_errors() {
+        let decimals = vec![
+            Decimal::ZERO,
+            Decimal::new(125, 1),
+            Decimal::new(123, 5),
+            Decimal::new(-125, 1),
+            Decimal::new(-123, 5),
+            Decimal::from_i128_with_scale(10_i128.pow(24), 0),
+            Decimal::from_i128_with_scale(-10_i128.pow(24), 0),
+        ];
+        for decimal in decimals {
+            let mut bytes = Vec::new();
+            DataValue::serialize_decimal(decimal, &mut bytes).unwrap();
+            assert_eq!(
+                DataValue::deserialize_decimal(Cursor::new(bytes)).unwrap(),
+                decimal
+            );
+        }
+
+        assert!(matches!(
+            DataValue::deserialize_decimal(Cursor::new(vec![0xff])),
+            Err(DatabaseError::InvalidValue(_))
+        ));
+
+        let mut integer_decimal = Decimal::new(12345, 2);
+        DataValue::decimal_round_i(&Some(1), &mut integer_decimal);
+        assert_eq!(integer_decimal, Decimal::new(1234, 1));
+
+        let mut float_decimal = Decimal::new(126, 2);
+        DataValue::decimal_round_f(&Some(1), &mut float_decimal);
+        assert_eq!(float_decimal, Decimal::new(13, 1));
+
+        // `None` scale is a no-op: the decimal is left unchanged.
+        DataValue::decimal_round_i(&None, &mut integer_decimal);
+        assert_eq!(integer_decimal, Decimal::new(1234, 1));
+        DataValue::decimal_round_f(&None, &mut float_decimal);
+        assert_eq!(float_decimal, Decimal::new(13, 1));
+    }
+
+    #[test]
+    fn test_data_value_truth_cast_prefix_and_formatting() {
+        assert!(!DataValue::Null.is_true().unwrap());
+        assert!(DataValue::Boolean(true).is_true().unwrap());
+        assert!(!DataValue::Boolean(false).is_true().unwrap());
+        assert!(matches!(
+            DataValue::Int32(1).is_true(),
+            Err(DatabaseError::InvalidType)
+        ));
+
+        assert_eq!(
+            DataValue::Int32(1).cast(&LogicalType::Bigint).unwrap(),
+            DataValue::Int64(1)
+        );
+        assert_eq!(
+            utf8("ab")
+                .cast(&LogicalType::Char(2, CharLengthUnits::Characters))
+                .unwrap(),
+            fixed_utf8("ab", 2, CharLengthUnits::Characters)
+        );
+        assert_eq!(
+            DataValue::Null.cast(&LogicalType::Integer).unwrap(),
+            DataValue::Null
+        );
+
+        assert_eq!(
+            DataValue::Null.common_prefix_length(&DataValue::Null),
+            Some(0)
+        );
+        assert_eq!(
+            DataValue::Null.common_prefix_length(&DataValue::Int32(1)),
+            None
+        );
+        assert_eq!(utf8("abc").common_prefix_length(&utf8("abd")), Some(2));
+        assert_eq!(utf8("abc").common_prefix_length(&utf8("abcdef")), Some(3));
+        assert_eq!(
+            DataValue::Int32(1).common_prefix_length(&DataValue::Int64(1)),
+            Some(0)
+        );
+
+        let display_cases = vec![
+            (DataValue::Boolean(true), "true", "Boolean(true)"),
+            (DataValue::Float32(OrderedFloat(1.5)), "1.5", "Float32(1.5)"),
+            (DataValue::Float64(OrderedFloat(2.0)), "2.0", "Float64(2.0)"),
+            (DataValue::Int8(-1), "-1", "Int8(-1)"),
+            (DataValue::Int16(-2), "-2", "Int16(-2)"),
+            (DataValue::Int32(-3), "-3", "Int32(-3)"),
+            (DataValue::Int64(-4), "-4", "Int64(-4)"),
+            (DataValue::UInt8(1), "1", "UInt8(1)"),
+            (DataValue::UInt16(2), "2", "UInt16(2)"),
+            (DataValue::UInt32(3), "3", "UInt32(3)"),
+            (DataValue::UInt64(4), "4", "UInt64(4)"),
+            (utf8("kite"), "kite", "Utf8(\"kite\")"),
+            (DataValue::Null, "null", "null"),
+            #[cfg(feature = "decimal")]
+            (
+                DataValue::Decimal(Decimal::new(123, 2)),
+                "1.23",
+                "Decimal(1.23)",
+            ),
+            (
+                DataValue::Tuple(vec![DataValue::Int32(1), utf8("a")], true),
+                "(1, a)",
+                "Tuple((1, a) [is upper])",
+            ),
+            (
+                DataValue::Time64(0, 0, false),
+                "1970-01-01 00:00:00",
+                "Time64(1970-01-01 00:00:00)",
+            ),
+        ];
+        for (value, display, debug) in display_cases {
+            assert_eq!(value.to_string(), display);
+            assert_eq!(format!("{value:?}"), debug);
+        }
+    }
+
+    #[test]
+    fn test_data_value_hash_distinguishes_variants() {
+        fn hash(value: &DataValue) -> u64 {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(value, &mut hasher);
+            std::hash::Hasher::finish(&hasher)
+        }
+
+        // The whole point of the hand-written `Hash` impl is the per-variant
+        // discriminant byte: values sharing the same inner bits but differing
+        // in type must not collide.
+        let same_bits = [
+            DataValue::Int8(1),
+            DataValue::Int16(1),
+            DataValue::Int32(1),
+            DataValue::Int64(1),
+            DataValue::UInt8(1),
+            DataValue::UInt16(1),
+            DataValue::UInt32(1),
+            DataValue::UInt64(1),
+            DataValue::Date32(1),
+            DataValue::Time32(1, 0),
+        ];
+        for (i, a) in same_bits.iter().enumerate() {
+            assert_eq!(hash(a), hash(&a.clone()), "{a:?} hashed unstably");
+            for b in &same_bits[i + 1..] {
+                assert_ne!(hash(a), hash(b), "{a:?} and {b:?} collided");
+            }
+        }
+    }
+
+    #[test]
+    fn test_data_value_nested_tuple_ordering() {
+        assert_eq!(
+            DataValue::Tuple(
+                vec![DataValue::Tuple(vec![DataValue::Int32(1)], false)],
+                false
+            )
+            .partial_cmp(&DataValue::Tuple(
+                vec![DataValue::Tuple(vec![DataValue::Int32(2)], false)],
+                false,
+            )),
+            Some(Ordering::Less)
+        );
+    }
+
+    #[test]
+    fn test_data_value_from_impls() {
+        assert_eq!(DataValue::from(Some(1_i8)), DataValue::Int8(1));
+        assert_eq!(DataValue::from(None::<i8>), DataValue::Null);
+        assert_eq!(DataValue::from(Some(2_i16)), DataValue::Int16(2));
+        assert_eq!(DataValue::from(None::<i16>), DataValue::Null);
+        assert_eq!(DataValue::from(Some(3_i32)), DataValue::Int32(3));
+        assert_eq!(DataValue::from(None::<i32>), DataValue::Null);
+        assert_eq!(DataValue::from(Some(4_i64)), DataValue::Int64(4));
+        assert_eq!(DataValue::from(None::<i64>), DataValue::Null);
+        assert_eq!(DataValue::from(Some(true)), DataValue::Boolean(true));
+        assert_eq!(DataValue::from(None::<bool>), DataValue::Null);
+        assert_eq!(DataValue::from(Some(5_u8)), DataValue::UInt8(5));
+        assert_eq!(DataValue::from(None::<u8>), DataValue::Null);
+        assert_eq!(DataValue::from(Some(6_u16)), DataValue::UInt16(6));
+        assert_eq!(DataValue::from(None::<u16>), DataValue::Null);
+        assert_eq!(DataValue::from(Some(7_u32)), DataValue::UInt32(7));
+        assert_eq!(DataValue::from(None::<u32>), DataValue::Null);
+        assert_eq!(DataValue::from(Some(8_u64)), DataValue::UInt64(8));
+        assert_eq!(DataValue::from(None::<u64>), DataValue::Null);
+        #[cfg(feature = "decimal")]
+        {
+            assert_eq!(
+                DataValue::from(Some(Decimal::new(9, 0))),
+                DataValue::Decimal(Decimal::new(9, 0))
+            );
+            assert_eq!(DataValue::from(None::<Decimal>), DataValue::Null);
+        }
+        assert_eq!(
+            DataValue::from(1.5_f32),
+            DataValue::Float32(OrderedFloat(1.5))
+        );
+        assert_eq!(
+            DataValue::from(Some(2.5_f32)),
+            DataValue::Float32(OrderedFloat(2.5))
+        );
+        assert_eq!(DataValue::from(None::<f32>), DataValue::Null);
+        assert_eq!(
+            DataValue::from(Some(3.5_f64)),
+            DataValue::Float64(OrderedFloat(3.5))
+        );
+        assert_eq!(DataValue::from(None::<f64>), DataValue::Null);
+        assert_eq!(
+            DataValue::from(Some("abc".to_string())),
+            DataValue::Utf8 {
+                value: "abc".to_string(),
+                ty: Utf8Type::Variable(None),
+                unit: CharLengthUnits::Characters,
+            }
+        );
+        assert_eq!(DataValue::from(None::<String>), DataValue::Null);
+    }
+
+    #[cfg(feature = "time")]
+    #[test]
+    fn test_time_accessors_conversions_and_formatting() {
+        let date = chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let datetime = date.and_hms_opt(3, 4, 5).unwrap();
+        let time = chrono::NaiveTime::from_hms_milli_opt(3, 4, 5, 123).unwrap();
+
+        assert_eq!(DataValue::from(&date).date(), Some(date));
+        assert_eq!(DataValue::from(&datetime).datetime(), Some(datetime));
+        assert!(matches!(DataValue::from(&time), DataValue::Time32(_, 6)));
+        assert_eq!(
+            DataValue::from(Some(&date)),
+            DataValue::Date32(date.num_days_from_ce())
+        );
+        assert_eq!(
+            DataValue::from(Some(&datetime)),
+            DataValue::Date64(datetime.and_utc().timestamp())
+        );
+        assert!(matches!(
+            DataValue::from(Some(&time)),
+            DataValue::Time32(_, 0)
+        ));
+        assert_eq!(
+            DataValue::Time32(3 * 3600 + 4 * 60 + 5, 0).time(),
+            Some(chrono::NaiveTime::from_hms_opt(3, 4, 5).unwrap())
+        );
+        assert_eq!(
+            DataValue::from(Option::<&chrono::NaiveDate>::None),
+            DataValue::Null
+        );
+        assert_eq!(
+            DataValue::from(Option::<&chrono::NaiveDateTime>::None),
+            DataValue::Null
+        );
+        assert_eq!(
+            DataValue::from(Option::<&chrono::NaiveTime>::None),
+            DataValue::Null
+        );
+        assert_eq!(DataValue::Int32(1).date(), None);
+        assert_eq!(DataValue::Int32(1).datetime(), None);
+        assert_eq!(DataValue::Int32(1).time(), None);
+
+        let date_value = DataValue::Date32(date.num_days_from_ce());
+        let datetime_value = DataValue::Date64(datetime.and_utc().timestamp());
+        let time_value = DataValue::Time32(
+            DataValue::pack_time(3 * 3600 + 4 * 60 + 5, 123_000_000, 3),
+            3,
+        );
+        let timestamp_value = DataValue::Time64(datetime.and_utc().timestamp(), 0, false);
+        assert_eq!(date_value.to_string(), "2024-01-02");
+        assert_eq!(format!("{date_value:?}"), "Date32(2024-01-02)");
+        assert_eq!(datetime_value.to_string(), "2024-01-02 03:04:05");
+        assert_eq!(format!("{datetime_value:?}"), "Date64(2024-01-02 03:04:05)");
+        assert_eq!(time_value.to_string(), "03:04:05.123");
+        assert_eq!(format!("{time_value:?}"), "Time32(03:04:05.123)");
+        assert_eq!(timestamp_value.to_string(), "2024-01-02 03:04:05");
+        assert_eq!(
+            format!("{timestamp_value:?}"),
+            "Time64(2024-01-02 03:04:05)"
+        );
+
+        let utc = datetime.and_utc();
+        assert_eq!(DataValue::timestamp_precision(utc, 0), utc.timestamp());
+        assert_eq!(
+            DataValue::timestamp_precision(utc, 3),
+            utc.timestamp_millis()
+        );
+        assert_eq!(
+            DataValue::timestamp_precision(utc, 6),
+            utc.timestamp_micros()
+        );
+        assert_eq!(
+            DataValue::from_timestamp_precision(utc.timestamp(), 0),
+            Some(utc)
+        );
+        assert_eq!(
+            DataValue::from_timestamp_precision(utc.timestamp_millis(), 3),
+            Some(utc)
+        );
+        assert_eq!(
+            DataValue::from_timestamp_precision(utc.timestamp_micros(), 6),
+            Some(utc)
+        );
+        let nanos_utc = utc.with_nanosecond(123_456_789).unwrap();
+        let nanos = DataValue::timestamp_precision(nanos_utc, 9);
+        assert_eq!(
+            DataValue::from_timestamp_precision(nanos, 9),
+            Some(nanos_utc)
+        );
+        assert!(matches!(
+            DataValue::init(&LogicalType::TimeStamp(Some(9), true)),
+            DataValue::Time64(_, 9, true)
+        ));
+        assert!(DataValue::from_timestamp_precision(i64::MAX, 0).is_none());
+        assert_panics(|| {
+            let _ = DataValue::timestamp_precision(utc, 5);
+        });
+        assert_panics(|| {
+            let _ = DataValue::from_timestamp_precision(0, 5);
+        });
     }
 
     #[test]
@@ -2509,3 +3168,4 @@ mod test {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

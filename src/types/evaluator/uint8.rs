@@ -19,6 +19,7 @@ use crate::types::LogicalType;
 numeric_binary_evaluator_definition!(Uint8, DataValue::UInt8);
 crate::define_integer_cast_evaluators!(Uint8, UInt8, u8, LogicalType::UTinyint);
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
@@ -97,3 +98,4 @@ mod test {
         );
     }
 }
+// GRCOV_EXCL_STOP

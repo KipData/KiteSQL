@@ -181,6 +181,7 @@ float64_binary!(
     }
 );
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
@@ -193,6 +194,28 @@ mod test {
     fn test_float64_binary_and_cast_evaluators() {
         let value = DataValue::Float64(ordered_float::OrderedFloat(1.5));
 
+        assert_eq!(float64_plus_unary_eval(&value), value);
+        assert_eq!(
+            float64_minus_unary_eval(&value),
+            DataValue::Float64(ordered_float::OrderedFloat(-1.5))
+        );
+        assert_eq!(float64_minus_unary_eval(&DataValue::Null), DataValue::Null);
+        assert_eq!(
+            float64_plus_binary_eval(
+                &DataValue::Float64(ordered_float::OrderedFloat(1.5)),
+                &DataValue::Float64(ordered_float::OrderedFloat(2.0)),
+            )
+            .unwrap(),
+            DataValue::Float64(ordered_float::OrderedFloat(3.5))
+        );
+        assert_eq!(
+            float64_minus_binary_eval(
+                &DataValue::Float64(ordered_float::OrderedFloat(1.5)),
+                &DataValue::Float64(ordered_float::OrderedFloat(2.0)),
+            )
+            .unwrap(),
+            DataValue::Float64(ordered_float::OrderedFloat(-0.5))
+        );
         assert_eq!(
             float64_multiply_binary_eval(
                 &DataValue::Float64(ordered_float::OrderedFloat(1.5)),
@@ -200,6 +223,74 @@ mod test {
             )
             .unwrap(),
             DataValue::Float64(ordered_float::OrderedFloat(3.0))
+        );
+        assert_eq!(
+            float64_divide_binary_eval(
+                &DataValue::Float64(ordered_float::OrderedFloat(3.0)),
+                &DataValue::Float64(ordered_float::OrderedFloat(2.0)),
+            )
+            .unwrap(),
+            DataValue::Float64(ordered_float::OrderedFloat(1.5))
+        );
+        assert_eq!(
+            float64_gt_binary_eval(
+                &DataValue::Float64(ordered_float::OrderedFloat(3.0)),
+                &DataValue::Float64(ordered_float::OrderedFloat(2.0)),
+            )
+            .unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            float64_gt_eq_binary_eval(
+                &DataValue::Float64(ordered_float::OrderedFloat(3.0)),
+                &DataValue::Float64(ordered_float::OrderedFloat(3.0)),
+            )
+            .unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            float64_lt_binary_eval(
+                &DataValue::Float64(ordered_float::OrderedFloat(2.0)),
+                &DataValue::Float64(ordered_float::OrderedFloat(3.0)),
+            )
+            .unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            float64_lt_eq_binary_eval(
+                &DataValue::Float64(ordered_float::OrderedFloat(3.0)),
+                &DataValue::Float64(ordered_float::OrderedFloat(3.0)),
+            )
+            .unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            float64_eq_binary_eval(
+                &DataValue::Float64(ordered_float::OrderedFloat(3.0)),
+                &DataValue::Float64(ordered_float::OrderedFloat(3.0)),
+            )
+            .unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            float64_not_eq_binary_eval(
+                &DataValue::Float64(ordered_float::OrderedFloat(3.0)),
+                &DataValue::Float64(ordered_float::OrderedFloat(2.0)),
+            )
+            .unwrap(),
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            float64_mod_binary_eval(
+                &DataValue::Float64(ordered_float::OrderedFloat(5.5)),
+                &DataValue::Float64(ordered_float::OrderedFloat(2.0)),
+            )
+            .unwrap(),
+            DataValue::Float64(ordered_float::OrderedFloat(1.5))
+        );
+        assert_eq!(
+            float64_plus_binary_eval(&value, &DataValue::Null).unwrap(),
+            DataValue::Null
         );
         assert_eq!(
             float64_to_float_cast_eval(&value).unwrap(),
@@ -262,5 +353,15 @@ mod test {
             float64_to_decimal_cast_eval(None, Some(1), &value).unwrap(),
             DataValue::Decimal(Decimal::new(15, 1))
         );
+        #[cfg(feature = "decimal")]
+        assert!(matches!(
+            float64_to_decimal_cast_eval(
+                Some(4),
+                Some(2),
+                &DataValue::Float64(ordered_float::OrderedFloat(f64::NAN)),
+            ),
+            Err(DatabaseError::CastFail { .. })
+        ));
     }
 }
+// GRCOV_EXCL_STOP

@@ -656,6 +656,7 @@ macro_rules! numeric_binary_evaluator_definition {
     };
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
@@ -664,12 +665,36 @@ mod test {
     use crate::serdes::{ReferenceSerialization, ReferenceTables};
     use crate::storage::rocksdb::RocksTransaction;
     use crate::types::evaluator::BinaryEvaluatorRef;
+    use crate::types::value::DataValue;
     use crate::types::LogicalType;
+    use ordered_float::OrderedFloat;
+    #[cfg(feature = "decimal")]
+    use rust_decimal::Decimal;
     use std::borrow::Cow;
     use std::io::{Cursor, Seek, SeekFrom};
 
     fn create(ty: LogicalType, op: BinaryOperator) -> Result<BinaryEvaluatorRef, DatabaseError> {
         binary_create(Cow::Owned(ty), op)
+    }
+
+    fn eval(
+        ty: LogicalType,
+        op: BinaryOperator,
+        left: &DataValue,
+        right: &DataValue,
+    ) -> Result<DataValue, DatabaseError> {
+        create(ty, op)?.binary_eval(left, right)
+    }
+
+    fn assert_panics(f: impl FnOnce() + std::panic::UnwindSafe) {
+        assert!(std::panic::catch_unwind(f).is_err());
+    }
+
+    fn assert_binary_ref_panics(pos: u16, params: BinaryEvaluatorParams, value: &DataValue) {
+        assert_panics(|| {
+            let evaluator = BinaryEvaluatorRef::new(pos, params);
+            let _ = evaluator.binary_eval(value, value).unwrap();
+        });
     }
 
     #[test]
@@ -716,4 +741,181 @@ mod test {
 
         Ok(())
     }
+
+    #[test]
+    fn test_binary_create_dispatches_numeric_time_and_decimal_evaluators(
+    ) -> Result<(), DatabaseError> {
+        let numeric_cases = vec![
+            (
+                LogicalType::Tinyint,
+                DataValue::Int8(1),
+                DataValue::Int8(2),
+                DataValue::Int8(3),
+            ),
+            (
+                LogicalType::Smallint,
+                DataValue::Int16(1),
+                DataValue::Int16(2),
+                DataValue::Int16(3),
+            ),
+            (
+                LogicalType::Integer,
+                DataValue::Int32(1),
+                DataValue::Int32(2),
+                DataValue::Int32(3),
+            ),
+            (
+                LogicalType::Bigint,
+                DataValue::Int64(1),
+                DataValue::Int64(2),
+                DataValue::Int64(3),
+            ),
+            (
+                LogicalType::UTinyint,
+                DataValue::UInt8(1),
+                DataValue::UInt8(2),
+                DataValue::UInt8(3),
+            ),
+            (
+                LogicalType::USmallint,
+                DataValue::UInt16(1),
+                DataValue::UInt16(2),
+                DataValue::UInt16(3),
+            ),
+            (
+                LogicalType::UInteger,
+                DataValue::UInt32(1),
+                DataValue::UInt32(2),
+                DataValue::UInt32(3),
+            ),
+            (
+                LogicalType::UBigint,
+                DataValue::UInt64(1),
+                DataValue::UInt64(2),
+                DataValue::UInt64(3),
+            ),
+            (
+                LogicalType::Float,
+                DataValue::Float32(OrderedFloat(1.0)),
+                DataValue::Float32(2.0.into()),
+                DataValue::Float32(3.0.into()),
+            ),
+            (
+                LogicalType::Double,
+                DataValue::Float64(OrderedFloat(1.0)),
+                DataValue::Float64(2.0.into()),
+                DataValue::Float64(3.0.into()),
+            ),
+        ];
+
+        for (ty, left, right, expected) in numeric_cases {
+            assert_eq!(eval(ty, BinaryOperator::Plus, &left, &right)?, expected);
+        }
+
+        assert_eq!(
+            eval(
+                LogicalType::DateTime,
+                BinaryOperator::Eq,
+                &DataValue::Date64(1),
+                &DataValue::Date64(1),
+            )?,
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            eval(
+                LogicalType::Time(Some(0)),
+                BinaryOperator::Plus,
+                &DataValue::Time32(DataValue::pack_time(1, 0, 0), 0),
+                &DataValue::Time32(DataValue::pack_time(2, 0, 0), 0),
+            )?,
+            DataValue::Time32(DataValue::pack_time(3, 0, 0), 0)
+        );
+        assert_eq!(
+            eval(
+                LogicalType::Time(Some(0)),
+                BinaryOperator::Minus,
+                &DataValue::Time32(DataValue::pack_time(3, 0, 0), 0),
+                &DataValue::Time32(DataValue::pack_time(2, 0, 0), 0),
+            )?,
+            DataValue::Time32(DataValue::pack_time(1, 0, 0), 0)
+        );
+        assert_eq!(
+            eval(
+                LogicalType::TimeStamp(Some(0), false),
+                BinaryOperator::NotEq,
+                &DataValue::Time64(1, 0, false),
+                &DataValue::Time64(2, 0, false),
+            )?,
+            DataValue::Boolean(true)
+        );
+        assert_eq!(
+            eval(
+                LogicalType::Boolean,
+                BinaryOperator::NotEq,
+                &DataValue::Boolean(true),
+                &DataValue::Boolean(false),
+            )?,
+            DataValue::Boolean(true)
+        );
+        #[cfg(feature = "decimal")]
+        assert_eq!(
+            eval(
+                LogicalType::Decimal(None, Some(1)),
+                BinaryOperator::Plus,
+                &DataValue::Decimal(Decimal::new(10, 1)),
+                &DataValue::Decimal(Decimal::new(20, 1)),
+            )?,
+            DataValue::Decimal(Decimal::new(30, 1))
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_binary_create_rejects_unsupported_operators() {
+        let cases = vec![
+            (LogicalType::Integer, BinaryOperator::Like(None)),
+            (LogicalType::Time(Some(0)), BinaryOperator::Multiply),
+            (LogicalType::TimeStamp(Some(0), false), BinaryOperator::Plus),
+            (LogicalType::Boolean, BinaryOperator::Plus),
+            (
+                LogicalType::Varchar(None, crate::types::CharLengthUnits::Characters),
+                BinaryOperator::Plus,
+            ),
+            (
+                LogicalType::Tuple(vec![LogicalType::Integer]),
+                BinaryOperator::Plus,
+            ),
+        ];
+
+        for (ty, op) in cases {
+            assert!(matches!(
+                create(ty, op),
+                Err(DatabaseError::UnsupportedBinaryOperator(..))
+            ));
+        }
+    }
+
+    #[test]
+    fn test_binary_eval_rejects_invalid_positions_and_params() {
+        let value = DataValue::Utf8 {
+            value: "abc".to_string(),
+            ty: crate::types::value::Utf8Type::Variable(None),
+            unit: crate::types::CharLengthUnits::Characters,
+        };
+        for offset in [UTF8_LIKE_OFFSET, UTF8_NOT_LIKE_OFFSET] {
+            assert_binary_ref_panics(
+                binary_pos(BINARY_UTF8_BASE, offset),
+                BinaryEvaluatorParams::Unit,
+                &value,
+            );
+        }
+        assert_panics(|| {
+            let evaluator = BinaryEvaluatorRef::new(u16::MAX, BinaryEvaluatorParams::Unit);
+            let _ = evaluator
+                .binary_eval(&DataValue::Int32(1), &DataValue::Int32(1))
+                .unwrap();
+        });
+    }
 }
+// GRCOV_EXCL_STOP

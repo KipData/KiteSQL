@@ -275,10 +275,14 @@ impl Tuple {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    use super::TupleLike;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::iter_ext::Itertools;
+    use crate::planner::{PlanArena, TableArenaCell};
+    use crate::types::serialize::TupleValueSerializable;
     use crate::types::tuple::Tuple;
     use crate::types::value::{DataValue, Utf8Type};
     use crate::types::CharLengthUnits;
@@ -286,6 +290,15 @@ mod tests {
     use ordered_float::OrderedFloat;
     use rust_decimal::Decimal;
     use std::sync::Arc;
+
+    struct OneValueTupleLike(DataValue);
+
+    impl super::TupleLike for OneValueTupleLike {
+        fn value_at(&self, index: usize) -> &DataValue {
+            assert_eq!(index, 0);
+            &self.0
+        }
+    }
 
     #[test]
     fn test_tuple_serialize_to_and_deserialize_from() {
@@ -573,4 +586,118 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_schema_view_and_tuple_like_impls() {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let schema = vec![
+            arena.alloc_column(ColumnCatalog::new(
+                "id".to_string(),
+                false,
+                ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
+            )),
+            arena.alloc_column(ColumnCatalog::new(
+                "name".to_string(),
+                true,
+                ColumnDesc::new(
+                    LogicalType::Varchar(None, CharLengthUnits::Characters),
+                    None,
+                    true,
+                    None,
+                )
+                .unwrap(),
+            )),
+        ];
+        let view = super::SchemaView::new(&schema, &arena);
+
+        assert_eq!(view.len(), 2);
+        assert!(!view.is_empty());
+        assert_eq!(view.get(0).unwrap().name(), "id");
+        assert_eq!(view.position("name"), Some(1));
+        assert_eq!(
+            view.iter()
+                .map(|column| column.name().to_string())
+                .collect_vec(),
+            vec!["id".to_string(), "name".to_string()]
+        );
+
+        let tuple = Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(2)]);
+        assert_eq!(super::TupleLike::value_at(&tuple, 1), &DataValue::Int32(2));
+        assert_eq!(
+            super::TupleLike::as_slice(&tuple).unwrap(),
+            tuple.values.as_slice()
+        );
+        assert_eq!(
+            super::TupleLike::value_at(&tuple.values[..], 0),
+            &DataValue::Int32(1)
+        );
+        assert_eq!(super::TupleLike::value_at(&&tuple, 0), &DataValue::Int32(1));
+        assert_eq!(
+            super::TupleLike::as_slice(&&tuple).unwrap(),
+            tuple.values.as_slice()
+        );
+        assert_eq!(
+            super::TupleLike::value_at(&tuple.values.as_slice(), 1),
+            &DataValue::Int32(2)
+        );
+        let tuple_like: &dyn super::TupleLike = &tuple;
+        assert_eq!(
+            super::TupleLike::value_at(&tuple_like, 1),
+            &DataValue::Int32(2)
+        );
+        assert_eq!(
+            super::TupleLike::as_slice(&tuple_like).unwrap(),
+            tuple.values.as_slice()
+        );
+        let one = OneValueTupleLike(DataValue::Int32(9));
+        assert_eq!(super::TupleLike::as_slice(&one), None);
+        assert_eq!(super::TupleLike::value_at(&one, 0), &DataValue::Int32(9));
+
+        let left = Tuple::new(None, vec![DataValue::Int32(1)]);
+        let right = Tuple::new(None, vec![DataValue::Int32(2)]);
+        let split = super::SplitTupleRef::new(&left, &right);
+        assert_eq!(split.value_at(0), &DataValue::Int32(1));
+        assert_eq!(split.value_at(1), &DataValue::Int32(2));
+        let split = super::SplitTupleRef::from_slices(&left.values, &right.values);
+        assert_eq!(split.value_at(1), &DataValue::Int32(2));
+        let tuple_slice: &[DataValue] = (&tuple).into();
+        assert_eq!(tuple_slice, tuple.values.as_slice());
+        assert_eq!(
+            super::TupleLike::as_slice(&tuple.values[..]).unwrap(),
+            tuple.values.as_slice()
+        );
+        assert_eq!(
+            super::TupleLike::as_slice(&tuple.values.as_slice()).unwrap(),
+            tuple.values.as_slice()
+        );
+    }
+
+    #[test]
+    fn test_tuple_deserialize_null_bits_and_primary_projection() {
+        let serializers = [
+            LogicalType::Integer.serializable(),
+            LogicalType::Integer.serializable(),
+        ];
+        let mut bytes = vec![0b1000_0000];
+        serializers[1]
+            .to_raw(&DataValue::Int32(7), &mut bytes)
+            .unwrap();
+
+        let mut tuple = Tuple::default();
+        tuple
+            .deserialize_from_into(serializers.iter(), &bytes, 2)
+            .unwrap();
+        assert_eq!(tuple.values, vec![DataValue::Null, DataValue::Int32(7)]);
+
+        assert_eq!(
+            Tuple::primary_projection(&[1], &tuple.values),
+            DataValue::Int32(7)
+        );
+        assert_eq!(
+            Tuple::primary_projection(&[0, 1], &tuple.values),
+            DataValue::Tuple(vec![DataValue::Null, DataValue::Int32(7)], false)
+        );
+    }
 }
+// GRCOV_EXCL_STOP

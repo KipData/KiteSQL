@@ -20,6 +20,7 @@ numeric_unary_evaluator_definition!(Int8, DataValue::Int8);
 numeric_binary_evaluator_definition!(Int8, DataValue::Int8);
 crate::define_integer_cast_evaluators!(Int8, Int8, i8, LogicalType::Tinyint);
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
@@ -98,3 +99,4 @@ mod test {
         );
     }
 }
+// GRCOV_EXCL_STOP

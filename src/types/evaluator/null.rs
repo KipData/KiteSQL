@@ -27,6 +27,7 @@ pub fn null_cast_eval(_value: &DataValue) -> Result<DataValue, DatabaseError> {
     Ok(DataValue::Null)
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
@@ -40,3 +41,4 @@ mod test {
         assert_eq!(null_cast_eval(&DataValue::Null).unwrap(), DataValue::Null);
     }
 }
+// GRCOV_EXCL_STOP

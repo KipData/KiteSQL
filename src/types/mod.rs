@@ -458,6 +458,7 @@ impl std::fmt::Display for LogicalType {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod test {
     use crate::errors::DatabaseError;
@@ -465,7 +466,420 @@ pub(crate) mod test {
     use crate::storage::rocksdb::RocksTransaction;
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
+    #[cfg(feature = "time")]
+    use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+    #[cfg(feature = "decimal")]
+    use rust_decimal::Decimal;
+    use std::borrow::Cow;
     use std::io::{Cursor, Seek, SeekFrom};
+
+    #[test]
+    fn test_char_length_units_display() {
+        assert_eq!(CharLengthUnits::Characters.to_string(), "CHARACTERS");
+        assert_eq!(CharLengthUnits::Octets.to_string(), "OCTETS");
+    }
+
+    #[test]
+    fn test_logical_type_type_trans() {
+        assert_eq!(
+            LogicalType::type_trans::<bool>(),
+            Some(LogicalType::Boolean)
+        );
+        assert_eq!(LogicalType::type_trans::<i8>(), Some(LogicalType::Tinyint));
+        assert_eq!(
+            LogicalType::type_trans::<i16>(),
+            Some(LogicalType::Smallint)
+        );
+        assert_eq!(LogicalType::type_trans::<i32>(), Some(LogicalType::Integer));
+        assert_eq!(LogicalType::type_trans::<i64>(), Some(LogicalType::Bigint));
+        assert_eq!(LogicalType::type_trans::<u8>(), Some(LogicalType::UTinyint));
+        assert_eq!(
+            LogicalType::type_trans::<u16>(),
+            Some(LogicalType::USmallint)
+        );
+        assert_eq!(
+            LogicalType::type_trans::<u32>(),
+            Some(LogicalType::UInteger)
+        );
+        assert_eq!(LogicalType::type_trans::<u64>(), Some(LogicalType::UBigint));
+        assert_eq!(LogicalType::type_trans::<f32>(), Some(LogicalType::Float));
+        assert_eq!(LogicalType::type_trans::<f64>(), Some(LogicalType::Double));
+        assert_eq!(
+            LogicalType::type_trans::<String>(),
+            Some(LogicalType::Varchar(None, CharLengthUnits::Characters))
+        );
+        assert_eq!(LogicalType::type_trans::<Vec<u8>>(), None);
+
+        #[cfg(feature = "decimal")]
+        assert_eq!(
+            LogicalType::type_trans::<Decimal>(),
+            Some(LogicalType::Decimal(None, None))
+        );
+        #[cfg(feature = "time")]
+        {
+            assert_eq!(
+                LogicalType::type_trans::<NaiveDate>(),
+                Some(LogicalType::Date)
+            );
+            assert_eq!(
+                LogicalType::type_trans::<NaiveDateTime>(),
+                Some(LogicalType::DateTime)
+            );
+            assert_eq!(
+                LogicalType::type_trans::<NaiveTime>(),
+                Some(LogicalType::Time(Some(0)))
+            );
+        }
+    }
+
+    #[test]
+    fn test_logical_type_raw_len() {
+        let fixed = vec![
+            (LogicalType::SqlNull, Some(0)),
+            (LogicalType::Boolean, Some(1)),
+            (LogicalType::Tinyint, Some(1)),
+            (LogicalType::UTinyint, Some(1)),
+            (LogicalType::Smallint, Some(2)),
+            (LogicalType::USmallint, Some(2)),
+            (LogicalType::Integer, Some(4)),
+            (LogicalType::UInteger, Some(4)),
+            (LogicalType::Bigint, Some(8)),
+            (LogicalType::UBigint, Some(8)),
+            (LogicalType::Float, Some(4)),
+            (LogicalType::Double, Some(8)),
+            (LogicalType::Char(4, CharLengthUnits::Octets), Some(4)),
+            (LogicalType::Decimal(None, None), Some(16)),
+            (LogicalType::Date, Some(4)),
+            (LogicalType::DateTime, Some(8)),
+            (LogicalType::Time(None), Some(4)),
+            (LogicalType::TimeStamp(None, false), Some(8)),
+        ];
+        for (ty, len) in fixed {
+            assert_eq!(ty.raw_len(), len);
+        }
+
+        assert_eq!(
+            LogicalType::Char(4, CharLengthUnits::Characters).raw_len(),
+            None
+        );
+        assert_eq!(
+            LogicalType::Varchar(Some(4), CharLengthUnits::Octets).raw_len(),
+            None
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_logical_type_raw_len_tuple_panics() {
+        let _ = LogicalType::Tuple(vec![LogicalType::Integer]).raw_len();
+    }
+
+    #[test]
+    fn test_logical_type_numeric_helpers() {
+        assert_eq!(
+            LogicalType::numeric(),
+            vec![
+                LogicalType::Tinyint,
+                LogicalType::UTinyint,
+                LogicalType::Smallint,
+                LogicalType::USmallint,
+                LogicalType::Integer,
+                LogicalType::UInteger,
+                LogicalType::Bigint,
+                LogicalType::UBigint,
+                LogicalType::Float,
+                LogicalType::Double,
+            ]
+        );
+
+        for ty in LogicalType::numeric() {
+            assert!(ty.is_numeric());
+        }
+        assert!(LogicalType::Decimal(None, None).is_numeric());
+        assert!(!LogicalType::Boolean.is_numeric());
+        assert!(LogicalType::Integer.is_signed_numeric());
+        assert!(!LogicalType::UInteger.is_signed_numeric());
+        assert!(LogicalType::UInteger.is_unsigned_numeric());
+        assert!(!LogicalType::Integer.is_unsigned_numeric());
+        assert!(LogicalType::Float.is_floating_point_numeric());
+        assert!(LogicalType::Double.is_floating_point_numeric());
+        assert!(!LogicalType::Bigint.is_floating_point_numeric());
+    }
+
+    #[test]
+    fn test_logical_type_max_logical_type() -> Result<(), DatabaseError> {
+        let integer = LogicalType::Integer;
+        assert!(matches!(
+            LogicalType::max_logical_type(&integer, &integer)?,
+            Cow::Borrowed(LogicalType::Integer)
+        ));
+        assert_eq!(
+            LogicalType::max_logical_type(&LogicalType::SqlNull, &LogicalType::Boolean)?.as_ref(),
+            &LogicalType::Boolean
+        );
+        assert_eq!(
+            LogicalType::max_logical_type(&LogicalType::Boolean, &LogicalType::SqlNull)?.as_ref(),
+            &LogicalType::Boolean
+        );
+        assert_eq!(
+            LogicalType::max_logical_type(
+                &LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Bigint]),
+                &LogicalType::Tuple(vec![LogicalType::Integer])
+            )?
+            .as_ref(),
+            &LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Bigint])
+        );
+        assert_eq!(
+            LogicalType::max_logical_type(
+                &LogicalType::Tuple(vec![LogicalType::Integer]),
+                &LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Bigint])
+            )?
+            .as_ref(),
+            &LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Bigint])
+        );
+
+        let numeric_cases = vec![
+            (
+                LogicalType::Integer,
+                LogicalType::Bigint,
+                LogicalType::Bigint,
+            ),
+            (
+                LogicalType::UInteger,
+                LogicalType::Bigint,
+                LogicalType::Bigint,
+            ),
+            (
+                LogicalType::UTinyint,
+                LogicalType::Smallint,
+                LogicalType::Smallint,
+            ),
+            (
+                LogicalType::Decimal(Some(4), Some(1)),
+                LogicalType::Decimal(None, Some(2)),
+                LogicalType::Decimal(Some(4), Some(2)),
+            ),
+            (
+                LogicalType::Tinyint,
+                LogicalType::Tinyint,
+                LogicalType::Tinyint,
+            ),
+            (
+                LogicalType::Bigint,
+                LogicalType::UInteger,
+                LogicalType::Bigint,
+            ),
+            (
+                LogicalType::Integer,
+                LogicalType::USmallint,
+                LogicalType::Integer,
+            ),
+            (
+                LogicalType::Smallint,
+                LogicalType::UTinyint,
+                LogicalType::Smallint,
+            ),
+            (
+                LogicalType::Decimal(None, None),
+                LogicalType::Decimal(None, None),
+                LogicalType::Decimal(None, None),
+            ),
+            (
+                LogicalType::Decimal(None, Some(1)),
+                LogicalType::Decimal(None, Some(2)),
+                LogicalType::Decimal(None, Some(2)),
+            ),
+        ];
+        for (left, right, expected) in numeric_cases {
+            assert_eq!(
+                LogicalType::max_logical_type(&left, &right)?.as_ref(),
+                &expected
+            );
+        }
+        assert!(matches!(
+            LogicalType::max_logical_type(&LogicalType::Bigint, &LogicalType::UBigint),
+            Err(DatabaseError::Incomparable(..))
+        ));
+        assert!(matches!(
+            LogicalType::max_logical_type(&LogicalType::Integer, &LogicalType::UInteger),
+            Err(DatabaseError::Incomparable(..))
+        ));
+        assert!(matches!(
+            LogicalType::max_logical_type(&LogicalType::Tinyint, &LogicalType::UTinyint),
+            Err(DatabaseError::Incomparable(..))
+        ));
+
+        assert_eq!(
+            LogicalType::combine_numeric_types(&LogicalType::Bigint, &LogicalType::Boolean)?
+                .as_ref(),
+            &LogicalType::Double
+        );
+        assert_eq!(
+            LogicalType::combine_numeric_types(&LogicalType::Integer, &LogicalType::Boolean)?
+                .as_ref(),
+            &LogicalType::Bigint
+        );
+        assert_eq!(
+            LogicalType::combine_numeric_types(&LogicalType::Smallint, &LogicalType::Boolean)?
+                .as_ref(),
+            &LogicalType::Integer
+        );
+        assert_eq!(
+            LogicalType::combine_numeric_types(&LogicalType::Tinyint, &LogicalType::Boolean)?
+                .as_ref(),
+            &LogicalType::Smallint
+        );
+
+        assert_eq!(
+            LogicalType::max_logical_type(
+                &LogicalType::Char(2, CharLengthUnits::Characters),
+                &LogicalType::Varchar(Some(8), CharLengthUnits::Octets)
+            )?,
+            Cow::Owned(LogicalType::Varchar(None, CharLengthUnits::Characters))
+        );
+        #[cfg(feature = "time")]
+        {
+            assert_eq!(
+                LogicalType::max_logical_type(
+                    &LogicalType::Date,
+                    &LogicalType::Varchar(None, CharLengthUnits::Characters)
+                )?,
+                Cow::Owned(LogicalType::Date)
+            );
+            assert_eq!(
+                LogicalType::max_logical_type(&LogicalType::Date, &LogicalType::DateTime)?,
+                Cow::Owned(LogicalType::DateTime)
+            );
+            assert_eq!(
+                LogicalType::max_logical_type(
+                    &LogicalType::DateTime,
+                    &LogicalType::Varchar(None, CharLengthUnits::Characters)
+                )?,
+                Cow::Owned(LogicalType::DateTime)
+            );
+        }
+
+        assert!(matches!(
+            LogicalType::max_logical_type(&LogicalType::Boolean, &LogicalType::Date),
+            Err(DatabaseError::Incomparable(..))
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_logical_type_can_implicit_cast() {
+        let castable = vec![
+            (LogicalType::Integer, LogicalType::Integer),
+            (LogicalType::SqlNull, LogicalType::Boolean),
+            (LogicalType::Tinyint, LogicalType::Smallint),
+            (LogicalType::Tinyint, LogicalType::Decimal(None, None)),
+            (LogicalType::UTinyint, LogicalType::Integer),
+            (LogicalType::UTinyint, LogicalType::Decimal(None, None)),
+            (LogicalType::Smallint, LogicalType::Bigint),
+            (LogicalType::Smallint, LogicalType::Decimal(None, None)),
+            (LogicalType::USmallint, LogicalType::Bigint),
+            (LogicalType::USmallint, LogicalType::Decimal(None, None)),
+            (LogicalType::Integer, LogicalType::Double),
+            (LogicalType::UInteger, LogicalType::Double),
+            (LogicalType::Bigint, LogicalType::Decimal(None, None)),
+            (LogicalType::UBigint, LogicalType::Decimal(None, None)),
+            (LogicalType::Float, LogicalType::Decimal(None, None)),
+            (LogicalType::Double, LogicalType::Decimal(None, None)),
+            (LogicalType::Date, LogicalType::DateTime),
+            (
+                LogicalType::Date,
+                LogicalType::Char(10, CharLengthUnits::Characters),
+            ),
+            (
+                LogicalType::DateTime,
+                LogicalType::Varchar(None, CharLengthUnits::Characters),
+            ),
+            (LogicalType::TimeStamp(None, false), LogicalType::Date),
+            (
+                LogicalType::Time(None),
+                LogicalType::Char(8, CharLengthUnits::Characters),
+            ),
+        ];
+        for (from, to) in castable {
+            assert!(LogicalType::can_implicit_cast(&from, &to), "{from} -> {to}");
+        }
+
+        let not_castable = vec![
+            (LogicalType::Boolean, LogicalType::Integer),
+            (LogicalType::Tinyint, LogicalType::UTinyint),
+            (LogicalType::UTinyint, LogicalType::Tinyint),
+            (LogicalType::Smallint, LogicalType::USmallint),
+            (LogicalType::USmallint, LogicalType::Smallint),
+            (
+                LogicalType::Char(1, CharLengthUnits::Characters),
+                LogicalType::Varchar(None, CharLengthUnits::Characters),
+            ),
+            (
+                LogicalType::Varchar(None, CharLengthUnits::Characters),
+                LogicalType::Integer,
+            ),
+            (LogicalType::Decimal(None, None), LogicalType::Double),
+            (
+                LogicalType::Tuple(vec![LogicalType::Integer]),
+                LogicalType::Integer,
+            ),
+        ];
+        for (from, to) in not_castable {
+            assert!(
+                !LogicalType::can_implicit_cast(&from, &to),
+                "{from} -> {to}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_logical_type_display() {
+        let cases = vec![
+            (LogicalType::SqlNull, "SqlNull"),
+            (LogicalType::Boolean, "Boolean"),
+            (LogicalType::Tinyint, "Tinyint"),
+            (LogicalType::UTinyint, "UTinyint"),
+            (LogicalType::Smallint, "Smallint"),
+            (LogicalType::USmallint, "USmallint"),
+            (LogicalType::Integer, "Integer"),
+            (LogicalType::UInteger, "UInteger"),
+            (LogicalType::Bigint, "Bigint"),
+            (LogicalType::UBigint, "UBigint"),
+            (LogicalType::Float, "Float"),
+            (LogicalType::Double, "Double"),
+            (
+                LogicalType::Char(4, CharLengthUnits::Characters),
+                "Char(4, CHARACTERS)",
+            ),
+            (
+                LogicalType::Varchar(Some(4), CharLengthUnits::Octets),
+                "Varchar(Some(4), OCTETS)",
+            ),
+            (LogicalType::Date, "Date"),
+            (LogicalType::DateTime, "DateTime"),
+            (
+                LogicalType::TimeStamp(Some(3), true),
+                "TimeStamp(Some(3), true)",
+            ),
+            (LogicalType::Time(Some(3)), "Time(Some(3))"),
+            (
+                LogicalType::Decimal(Some(4), Some(2)),
+                "Decimal(Some(4), Some(2))",
+            ),
+            (
+                LogicalType::Tuple(vec![
+                    LogicalType::Integer,
+                    LogicalType::Varchar(None, CharLengthUnits::Characters),
+                ]),
+                "(Integer, Varchar(None, CHARACTERS))",
+            ),
+        ];
+
+        for (ty, expected) in cases {
+            assert_eq!(ty.to_string(), expected);
+        }
+    }
 
     #[test]
     fn test_logic_type_serialization() -> Result<(), DatabaseError> {
@@ -594,3 +1008,4 @@ pub(crate) mod test {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP
