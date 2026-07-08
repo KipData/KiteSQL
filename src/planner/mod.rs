@@ -400,3 +400,164 @@ impl crate::serdes::ReferenceSerialization for LogicalPlan {
         })
     }
 }
+
+// GRCOV_EXCL_START
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
+    use crate::planner::operator::describe::DescribeOperator;
+    use crate::planner::operator::limit::LimitOperator;
+    use crate::planner::operator::table_scan::TableScanOperator;
+    use crate::planner::operator::{PlanImpl, SortOption};
+    use crate::types::LogicalType;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    fn column(name: &str, ty: LogicalType, arena: &mut PlanArena) -> ColumnRef {
+        arena.alloc_column(ColumnCatalog::new(
+            name.to_string(),
+            true,
+            ColumnDesc::new(ty, None, false, None).unwrap(),
+        ))
+    }
+
+    fn table_scan(table: &str, columns: Vec<ColumnRef>) -> LogicalPlan {
+        LogicalPlan::new(
+            Operator::TableScan(TableScanOperator {
+                table_name: table.to_string().into(),
+                columns,
+                limit: (None, None),
+                index_infos: Vec::new(),
+                with_pk: false,
+            }),
+            Childrens::None,
+        )
+    }
+
+    fn schema_names(schema: &[ColumnRef], arena: &PlanArena) -> Vec<String> {
+        schema
+            .iter()
+            .map(|column| arena.column(*column).name().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn childrens_iterates_and_pops_expected_plans() {
+        let left = LogicalPlan::new(Operator::ShowTable, Childrens::None);
+        let right = LogicalPlan::new(Operator::ShowView, Childrens::None);
+
+        assert_eq!(Childrens::None.iter().count(), 0);
+
+        let only = Childrens::Only(Box::new(left.clone()));
+        assert_eq!(only.iter().count(), 1);
+        assert!(matches!(only.pop_only().operator, Operator::ShowTable));
+
+        let twins = Childrens::Twins {
+            left: Box::new(left),
+            right: Box::new(right),
+        };
+        let operators = twins
+            .iter()
+            .map(|plan| format!("{}", plan.operator))
+            .collect::<Vec<_>>();
+        assert_eq!(operators, vec!["Show Tables", "Show Views"]);
+
+        let (left, right) = twins.pop_twins();
+        assert!(matches!(left.operator, Operator::ShowTable));
+        assert!(matches!(right.operator, Operator::ShowView));
+    }
+
+    #[test]
+    fn logical_plan_collects_tables_explains_and_hashes_without_schema_cache() {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let id = column("id", LogicalType::Integer, &mut arena);
+        let scan = table_scan("users", vec![id]);
+        let mut plan = LimitOperator::build(Some(2), Some(5), scan);
+        plan.physical_option = Some(PhysicalOption::new(PlanImpl::Limit, SortOption::Follow));
+
+        let tables = plan
+            .referenced_table()
+            .into_iter()
+            .map(|table| table.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(tables, vec!["users"]);
+        assert_eq!(
+            plan.explain(&mut arena, 0),
+            "Limit 5, Offset 2 [Limit => (Sort Option: Follow)] TableScan users -> [#0]"
+        );
+
+        let _ = plan.output_schema(&mut arena);
+        let cloned = plan.clone();
+        assert_eq!(plan, cloned);
+
+        let mut left = DefaultHasher::new();
+        let mut right = DefaultHasher::new();
+        plan.hash(&mut left);
+        cloned.hash(&mut right);
+        assert_eq!(left.finish(), right.finish());
+    }
+
+    #[test]
+    fn output_schema_inherits_from_child_and_can_be_recursively_reset() {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let id = column("id", LogicalType::Integer, &mut arena);
+        let name = column(
+            "name",
+            LogicalType::Varchar(None, crate::types::CharLengthUnits::Characters),
+            &mut arena,
+        );
+        let scan = table_scan("users", vec![id]);
+        let mut plan = LimitOperator::build(None, Some(10), scan);
+
+        let schema = plan.output_schema(&mut arena).clone();
+        assert_eq!(schema_names(&schema, &arena), vec!["id"]);
+
+        if let Childrens::Only(child) = plan.childrens.as_mut() {
+            if let Operator::TableScan(scan) = &mut child.operator {
+                scan.columns = vec![name];
+            }
+        }
+
+        let cached = plan.output_schema(&mut arena).clone();
+        assert_eq!(schema_names(&cached, &arena), vec!["id"]);
+
+        plan.reset_output_schema_cache_recursive();
+        let recomputed = plan.output_schema(&mut arena).clone();
+        assert_eq!(schema_names(&recomputed, &arena), vec!["name"]);
+    }
+
+    #[test]
+    fn dummy_operators_produce_expected_output_schema() {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let cases = [
+            (Operator::ShowTable, vec!["TABLE"]),
+            (Operator::ShowView, vec!["VIEW"]),
+            (Operator::Explain, vec!["PLAN"]),
+            (
+                Operator::Describe(DescribeOperator {
+                    table_name: "users".into(),
+                }),
+                vec![
+                    "FIELD",
+                    "TYPE",
+                    "LEN",
+                    "NULL",
+                    "Key",
+                    "DEFAULT",
+                    "COLUMN_REF",
+                ],
+            ),
+        ];
+
+        for (operator, expected) in cases {
+            let mut plan = LogicalPlan::new(operator, Childrens::None);
+            let schema = plan.output_schema(&mut arena).clone();
+            assert_eq!(schema_names(&schema, &arena), expected);
+        }
+    }
+}
+// GRCOV_EXCL_STOP

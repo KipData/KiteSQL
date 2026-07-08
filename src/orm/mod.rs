@@ -3117,3 +3117,747 @@ fn orm_list<E: BindSource, M: Model>(executor: E) -> Result<OrmIter<E::Iter, M>,
     })?
     .orm::<M>())
 }
+
+// GRCOV_EXCL_START
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::types::tuple::{Schema, SchemaView};
+    use std::sync::Arc;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct User;
+
+    #[derive(Default, Debug, PartialEq, Eq)]
+    struct OrmUnitUser {
+        id: i32,
+        name: String,
+        age: Option<i32>,
+    }
+
+    const ORM_UNIT_USER_FIELDS: &[OrmField] = &[
+        OrmField {
+            column: "id",
+            column_index: 0,
+            placeholder: "id",
+            primary_key: true,
+            unique: false,
+        },
+        OrmField {
+            column: "name",
+            column_index: 1,
+            placeholder: "name",
+            primary_key: false,
+            unique: false,
+        },
+        OrmField {
+            column: "age",
+            column_index: 2,
+            placeholder: "age",
+            primary_key: false,
+            unique: false,
+        },
+    ];
+
+    impl OrmUnitUser {
+        fn id() -> Field<Self, i32> {
+            Field::new("orm_unit_users", "id")
+        }
+
+        fn name() -> Field<Self, String> {
+            Field::new("orm_unit_users", "name")
+        }
+
+        fn age() -> Field<Self, Option<i32>> {
+            Field::new("orm_unit_users", "age")
+        }
+    }
+
+    impl FromQueryRow for OrmUnitUser {
+        fn from_query_row(
+            schema: &SchemaView<'_, '_>,
+            tuple: &mut Tuple,
+        ) -> Result<Self, DatabaseError> {
+            Ok(Self {
+                id: take_value_at(tuple, schema.position("id"), "id")?,
+                name: take_value_at(tuple, schema.position("name"), "name")?,
+                age: take_value_at(tuple, schema.position("age"), "age")?,
+            })
+        }
+    }
+
+    impl Model for OrmUnitUser {
+        type PrimaryKey = i32;
+
+        fn table_name() -> &'static str {
+            "orm_unit_users"
+        }
+
+        fn fields() -> &'static [OrmField] {
+            ORM_UNIT_USER_FIELDS
+        }
+
+        fn params(&self) -> Vec<(&'static str, DataValue)> {
+            vec![
+                ("id", self.id.to_data_value()),
+                ("name", self.name.to_data_value()),
+                ("age", self.age.to_data_value()),
+            ]
+        }
+
+        fn primary_key(&self) -> &Self::PrimaryKey {
+            &self.id
+        }
+    }
+
+    #[derive(Default, Debug, PartialEq, Eq)]
+    struct OrmUnitOrder {
+        id: i32,
+        user_id: i32,
+        amount: i32,
+    }
+
+    const ORM_UNIT_ORDER_FIELDS: &[OrmField] = &[
+        OrmField {
+            column: "id",
+            column_index: 0,
+            placeholder: "id",
+            primary_key: true,
+            unique: false,
+        },
+        OrmField {
+            column: "user_id",
+            column_index: 1,
+            placeholder: "user_id",
+            primary_key: false,
+            unique: false,
+        },
+        OrmField {
+            column: "amount",
+            column_index: 2,
+            placeholder: "amount",
+            primary_key: false,
+            unique: false,
+        },
+    ];
+
+    impl OrmUnitOrder {
+        fn id() -> Field<Self, i32> {
+            Field::new("orm_unit_orders", "id")
+        }
+
+        fn user_id() -> Field<Self, i32> {
+            Field::new("orm_unit_orders", "user_id")
+        }
+
+        fn amount() -> Field<Self, i32> {
+            Field::new("orm_unit_orders", "amount")
+        }
+    }
+
+    impl FromQueryRow for OrmUnitOrder {
+        fn from_query_row(
+            schema: &SchemaView<'_, '_>,
+            tuple: &mut Tuple,
+        ) -> Result<Self, DatabaseError> {
+            Ok(Self {
+                id: take_value_at(tuple, schema.position("id"), "id")?,
+                user_id: take_value_at(tuple, schema.position("user_id"), "user_id")?,
+                amount: take_value_at(tuple, schema.position("amount"), "amount")?,
+            })
+        }
+    }
+
+    impl Model for OrmUnitOrder {
+        type PrimaryKey = i32;
+
+        fn table_name() -> &'static str {
+            "orm_unit_orders"
+        }
+
+        fn fields() -> &'static [OrmField] {
+            ORM_UNIT_ORDER_FIELDS
+        }
+
+        fn params(&self) -> Vec<(&'static str, DataValue)> {
+            vec![
+                ("id", self.id.to_data_value()),
+                ("user_id", self.user_id.to_data_value()),
+                ("amount", self.amount.to_data_value()),
+            ]
+        }
+
+        fn primary_key(&self) -> &Self::PrimaryKey {
+            &self.id
+        }
+    }
+
+    fn build_orm_unit_database(
+    ) -> Result<crate::db::Database<crate::storage::memory::MemoryStorage>, DatabaseError> {
+        let mut database = crate::db::DataBaseBuilder::path("./orm-unit-test").build_in_memory()?;
+        database
+            .ddl("create table orm_unit_users (id int primary key, name varchar, age int null)")?;
+        database
+            .ddl("create table orm_unit_orders (id int primary key, user_id int, amount int)")?;
+
+        for user in [
+            OrmUnitUser {
+                id: 1,
+                name: "Alice".to_string(),
+                age: Some(18),
+            },
+            OrmUnitUser {
+                id: 2,
+                name: "Bob".to_string(),
+                age: Some(20),
+            },
+            OrmUnitUser {
+                id: 3,
+                name: "Cara".to_string(),
+                age: None,
+            },
+        ] {
+            database.insert(&user)?;
+        }
+
+        for order in [
+            OrmUnitOrder {
+                id: 1,
+                user_id: 1,
+                amount: 100,
+            },
+            OrmUnitOrder {
+                id: 2,
+                user_id: 1,
+                amount: 150,
+            },
+            OrmUnitOrder {
+                id: 3,
+                user_id: 2,
+                amount: 200,
+            },
+        ] {
+            database.insert(&order)?;
+        }
+
+        Ok(database)
+    }
+
+    #[test]
+    fn field_accessors_and_sort_build_expected_metadata() {
+        let field = Field::<User, i32>::new("users", "id");
+        assert_eq!(field.table_name(), "users");
+        assert_eq!(field.column_name(), "id");
+
+        let asc = Field::<User, i32>::new("users", "id").asc();
+        assert_eq!(asc.field.table_name(), "users");
+        assert_eq!(asc.field.column_name(), "id");
+        assert!(asc.asc);
+        assert!(!asc.nulls_first);
+
+        let desc_nulls_first = Field::<User, i32>::new("users", "id").desc().nulls_first();
+        assert!(!desc_nulls_first.asc);
+        assert!(desc_nulls_first.nulls_first);
+
+        let asc_nulls_last = Field::<User, i32>::new("users", "id")
+            .nulls_first()
+            .asc()
+            .nulls_last();
+        assert!(asc_nulls_last.asc);
+        assert!(!asc_nulls_last.nulls_first);
+    }
+
+    #[test]
+    fn describe_column_decodes_projected_tuple_values() -> Result<(), DatabaseError> {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let arena = PlanArena::new(&table_arena);
+        let schema: Schema = Vec::new();
+        let schema_view = SchemaView::new(&schema, &arena);
+        let mut tuple = Tuple::new(
+            None,
+            vec![
+                DataValue::from("id".to_string()),
+                DataValue::from("Integer".to_string()),
+                DataValue::Int32(4),
+                DataValue::from("true".to_string()),
+                DataValue::from("PRI".to_string()),
+                DataValue::Null,
+            ],
+        );
+
+        let column = DescribeColumn::from_query_row(&schema_view, &mut tuple)?;
+        assert_eq!(
+            column,
+            DescribeColumn {
+                field: "id".to_string(),
+                data_type: "Integer".to_string(),
+                len: "4".to_string(),
+                nullable: true,
+                key: "PRI".to_string(),
+                default: "null".to_string(),
+            }
+        );
+        assert!(tuple
+            .values
+            .iter()
+            .all(|value| matches!(value, DataValue::Null)));
+        assert_eq!(describe_text_value(None), "");
+
+        Ok(())
+    }
+
+    #[test]
+    fn data_value_conversion_traits_handle_scalars_options_and_errors() -> Result<(), DatabaseError>
+    {
+        assert_eq!(i32::from_data_value(DataValue::Int32(7))?, 7);
+        assert_eq!(
+            String::from_data_value(DataValue::from("kite".to_string()))?,
+            "kite"
+        );
+        assert_eq!(
+            Arc::<str>::from_data_value(DataValue::from("sql".to_string()))?,
+            Arc::<str>::from("sql")
+        );
+        assert_eq!(Option::<i32>::from_data_value(DataValue::Null)?, None);
+        assert_eq!(
+            Option::<i32>::from_data_value(DataValue::Int32(9))?,
+            Some(9)
+        );
+
+        assert_eq!(true.to_data_value(), DataValue::Boolean(true));
+        assert_eq!("name".to_data_value(), DataValue::from("name".to_string()));
+        assert_eq!(Option::<i32>::None.to_data_value(), DataValue::Null);
+        assert_eq!(Some(3i32).to_data_value(), DataValue::Int32(3));
+
+        assert_eq!(
+            <i32 as ModelColumnType>::logical_type(),
+            LogicalType::Integer
+        );
+        assert!(!<i32 as ModelColumnType>::nullable());
+        assert_eq!(
+            <Option<String> as ModelColumnType>::logical_type(),
+            LogicalType::Varchar(None, CharLengthUnits::Characters)
+        );
+        assert!(<Option<String> as ModelColumnType>::nullable());
+
+        let err = i32::from_data_value(DataValue::from("not-int".to_string())).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("failed to convert Varchar(None, CHARACTERS) value"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn tuple_projection_helpers_cast_extract_and_report_width_mismatch() -> Result<(), DatabaseError>
+    {
+        let mut tuple = Tuple::new(
+            None,
+            vec![DataValue::Int8(7), DataValue::from("seven".to_string())],
+        );
+        assert_eq!(take_value_at::<i32>(&mut tuple, Some(0), "id")?, 7);
+        assert!(matches!(tuple.values[0], DataValue::Null));
+        assert!(matches!(
+            take_value_at::<i32>(&mut tuple, None, "missing"),
+            Err(DatabaseError::ColumnNotFound { .. })
+        ));
+
+        let mut tuple = Tuple::new(
+            None,
+            vec![DataValue::Int32(1), DataValue::from("one".to_string())],
+        );
+        let projected = <(i32, String) as FromQueryTuple>::from_query_tuple(&mut tuple)?;
+        assert_eq!(projected, (1, "one".to_string()));
+        assert!(tuple
+            .values
+            .iter()
+            .all(|value| matches!(value, DataValue::Null)));
+
+        let mut too_wide = Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(2)]);
+        assert!(matches!(
+            extract_value_from_tuple::<i32>(&mut too_wide),
+            Err(DatabaseError::MisMatch(
+                "one projected expression",
+                "the query result"
+            ))
+        ));
+
+        let mut too_narrow = Tuple::new(None, vec![DataValue::Int32(1)]);
+        assert!(matches!(
+            <(i32, i32) as FromQueryTuple>::from_query_tuple(&mut too_narrow),
+            Err(DatabaseError::MisMatch(
+                "the expected tuple projection width",
+                "the query result"
+            ))
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn database_and_transaction_orm_helpers_bind_expected_plans() -> Result<(), DatabaseError> {
+        let mut database = crate::db::DataBaseBuilder::path("./orm-unit-test").build_in_memory()?;
+        database
+            .ddl("create table orm_unit_users (id int primary key, name varchar, age int null)")?;
+        database.create_view("orm_unit_user_names", |ctx| {
+            ctx.from::<OrmUnitUser>()?
+                .project_scalars((OrmUnitUser::id(), OrmUnitUser::name()))?
+                .finish()
+        })?;
+
+        database.insert(&OrmUnitUser {
+            id: 1,
+            name: "Alice".to_string(),
+            age: Some(18),
+        })?;
+        database.insert_many([
+            OrmUnitUser {
+                id: 2,
+                name: "Bob".to_string(),
+                age: Some(20),
+            },
+            OrmUnitUser {
+                id: 3,
+                name: "Cara".to_string(),
+                age: None,
+            },
+        ])?;
+        assert!(matches!(
+            database.analyze_model::<OrmUnitUser>(),
+            Err(DatabaseError::TooManyBuckets(100, 3))
+        ));
+
+        assert_eq!(
+            database.get::<OrmUnitUser>(&1)?,
+            Some(OrmUnitUser {
+                id: 1,
+                name: "Alice".to_string(),
+                age: Some(18),
+            })
+        );
+        assert_eq!(
+            database
+                .fetch::<OrmUnitUser>()?
+                .collect::<Result<Vec<_>, _>>()?
+                .len(),
+            3
+        );
+        assert!(database
+            .show_views()?
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .any(|view| view == "orm_unit_user_names"));
+        assert!(database
+            .describe::<OrmUnitUser>()?
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .any(|column| column.field == "name"));
+
+        let mut tx = database.new_transaction()?;
+        tx.insert(&OrmUnitUser {
+            id: 4,
+            name: "Dora".to_string(),
+            age: Some(40),
+        })?;
+        tx.insert_many([
+            OrmUnitUser {
+                id: 5,
+                name: "Eve".to_string(),
+                age: None,
+            },
+            OrmUnitUser {
+                id: 6,
+                name: "Finn".to_string(),
+                age: Some(60),
+            },
+        ])?;
+        assert!(matches!(
+            tx.analyze::<OrmUnitUser>(),
+            Err(DatabaseError::TooManyBuckets(100, 6))
+        ));
+
+        assert_eq!(tx.get::<OrmUnitUser>(&4)?.unwrap().name, "Dora");
+        assert_eq!(
+            tx.fetch::<OrmUnitUser>()?
+                .collect::<Result<Vec<_>, _>>()?
+                .len(),
+            6
+        );
+        assert!(tx
+            .show_tables()?
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .any(|table| table == "orm_unit_users"));
+        assert!(tx
+            .show_views()?
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .any(|view| view == "orm_unit_user_names"));
+        assert!(tx
+            .describe::<OrmUnitUser>()?
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .any(|column| column.field == "age"));
+
+        let plan = tx.explain(|ctx| {
+            ctx.from::<OrmUnitUser>()?
+                .filter(|expr| expr.column(OrmUnitUser::id())?.gte(4))?
+                .project_scalar(OrmUnitUser::name())?
+                .finish()
+        })?;
+        assert_eq!(
+            plan,
+            concat!(
+                "Projection [#2] [Project => (Sort Option: Follow)] ",
+                "Filter (#1 >= 4), Is Having: false [Filter => (Sort Option: Follow)] ",
+                "TableScan orm_unit_users -> [#1, #2] [SeqScan => (Sort Option: None)]"
+            ),
+            "{plan}"
+        );
+
+        tx.commit()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn expression_scope_helpers_build_filter_projection_and_sort_exprs() -> Result<(), DatabaseError>
+    {
+        let database = build_orm_unit_database()?;
+
+        let expression_plan = database.explain(|ctx| {
+            ctx.from::<OrmUnitUser>()?
+                .filter(|e| {
+                    let not_null = e.is_not_null(e.column(OrmUnitUser::age())?);
+                    let in_range = e.between(e.column(OrmUnitUser::age())?, 18, 25);
+                    let not_bob = e.ne(e.column(OrmUnitUser::name())?, "Bob")?;
+                    let not_missing = e.not(e.eq(e.column(OrmUnitUser::name())?, "Missing")?)?;
+                    e.and(e.and(not_null, in_range)?, e.and(not_bob, not_missing)?)
+                })?
+                .project_value(|e| {
+                    e.function("upper", [e.column(OrmUnitUser::name())?])?
+                        .alias("upper_name")
+                        .cast(LogicalType::Varchar(None, CharLengthUnits::Characters))
+                })?
+                .order_by_expr(|e| Ok(e.column(OrmUnitUser::age())?.desc()))?
+                .finish()
+        })?;
+        assert_eq!(
+            expression_plan,
+            concat!(
+                "Projection [upper_name] [Project => (Sort Option: Follow)] ",
+                "Sort By #3 Desc Nulls Last [Sort => (Sort Option: OrderBy: (#3 Desc Nulls Last) ignore_prefix_len: 0)] ",
+                "Filter ((#3 is not null && ((#3 >= 18) && (#3 <= 25))) && (!(#2 != Bob) && (#2 = Missing))), Is Having: false ",
+                "[Filter => (Sort Option: Follow)] TableScan orm_unit_users -> [#2, #3] [SeqScan => (Sort Option: None)]"
+            ),
+            "{expression_plan}"
+        );
+
+        let list_plan = database.explain(|ctx| {
+            ctx.from::<OrmUnitUser>()?
+                .filter(|e| {
+                    let id = e.column(OrmUnitUser::id())?;
+                    let in_list = id.clone().in_list([1, 2, 3])?;
+                    let not_in_list = id.not_in_list([3])?;
+                    in_list.and(not_in_list)
+                })?
+                .project_scalar(OrmUnitUser::id())?
+                .order_by(SortField::from(ScalarExpression::from(1_i32)).asc())?
+                .finish()
+        })?;
+        assert_eq!(
+            list_plan,
+            concat!(
+                "Projection [#1] [Project => (Sort Option: Follow)] ",
+                "Sort By 1 Asc Nulls Last [Sort => (Sort Option: OrderBy: (1 Asc Nulls Last) ignore_prefix_len: 0)] ",
+                "Filter (((#1 = 3) || ((#1 = 2) || (#1 = 1))) && (#1 != 3)), Is Having: false ",
+                "[Filter => (Sort Option: Follow)] TableScan orm_unit_users -> [#1] [SeqScan => (Sort Option: None)]"
+            ),
+            "{list_plan}"
+        );
+
+        let nullable_plan = database.explain(|ctx| {
+            ctx.from::<OrmUnitUser>()?
+                .filter(|e| {
+                    let age = e.column(OrmUnitUser::age())?;
+                    let outside = e.not_between(age.clone(), 10, 30);
+                    let null_age = e.is_null(age);
+                    e.or(outside, null_age)
+                })?
+                .project_scalar(OrmUnitUser::id())?
+                .finish()
+        })?;
+        assert_eq!(
+            nullable_plan,
+            concat!(
+                "Projection [#1] [Project => (Sort Option: Follow)] ",
+                "Filter (((#3 < 10) || (#3 > 30)) || #3 is null), Is Having: false ",
+                "[Filter => (Sort Option: Follow)] TableScan orm_unit_users -> [#1, #3] [SeqScan => (Sort Option: None)]"
+            ),
+            "{nullable_plan}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn query_builder_wrappers_cover_group_having_and_join_variants() -> Result<(), DatabaseError> {
+        let database = build_orm_unit_database()?;
+
+        let grouped_plan = database.explain(|ctx| {
+            ctx.from::<OrmUnitOrder>()?
+                .project_tuple(|e| {
+                    Ok(vec![
+                        e.column(OrmUnitOrder::user_id())?,
+                        e.aggregate("sum", [e.column(OrmUnitOrder::amount())?])?,
+                    ])
+                })?
+                .group_by(|e| e.column(OrmUnitOrder::user_id()))?
+                .having(|e| {
+                    e.aggregate("sum", [e.column(OrmUnitOrder::amount())?])?
+                        .gte(200)
+                })?
+                .order_by_expr(|e| Ok(e.column(OrmUnitOrder::user_id())?.asc()))?
+                .finish()
+        })?;
+        assert_eq!(
+            grouped_plan,
+            concat!(
+                "Projection [#5, #7] [Project => (Sort Option: Follow)] ",
+                "Sort By #5 Asc Nulls Last [Sort => (Sort Option: OrderBy: (#5 Asc Nulls Last) ignore_prefix_len: 0)] ",
+                "Filter (Sum(#6) >= 200), Is Having: true [Filter => (Sort Option: Follow)] ",
+                "Aggregate [Sum(#6)] -> Group By [#5] [HashAggregate => (Sort Option: None)] ",
+                "TableScan orm_unit_orders -> [#5, #6] [SeqScan => (Sort Option: None)]"
+            ),
+            "{grouped_plan}"
+        );
+
+        let right_join_plan = database.explain(|ctx| {
+            ctx.from::<OrmUnitUser>()?
+                .right_join::<OrmUnitOrder, _>(|e| {
+                    e.column(OrmUnitUser::id())?
+                        .eq(e.column(OrmUnitOrder::user_id())?)
+                })?
+                .project_scalar(OrmUnitUser::id())?
+                .finish()
+        })?;
+        assert_eq!(
+            right_join_plan,
+            concat!(
+                "Projection [#1] [Project => (Sort Option: Follow)] ",
+                "RightOuter Join On #1 = #5 [HashJoin => (Sort Option: None)] ",
+                "TableScan orm_unit_users -> [#1] [SeqScan => (Sort Option: None)] ",
+                "TableScan orm_unit_orders -> [#5] [SeqScan => (Sort Option: None)]"
+            ),
+            "{right_join_plan}"
+        );
+
+        let full_join_plan = database.explain(|ctx| {
+            ctx.from::<OrmUnitUser>()?
+                .full_join::<OrmUnitOrder, _>(|e| {
+                    e.column(OrmUnitUser::id())?
+                        .eq(e.column(OrmUnitOrder::user_id())?)
+                })?
+                .project_scalar(OrmUnitUser::id())?
+                .finish()
+        })?;
+        assert_eq!(
+            full_join_plan,
+            concat!(
+                "Projection [#1] [Project => (Sort Option: Follow)] ",
+                "Full Join On #1 = #5 [HashJoin => (Sort Option: None)] ",
+                "TableScan orm_unit_users -> [#1] [SeqScan => (Sort Option: None)] ",
+                "TableScan orm_unit_orders -> [#5] [SeqScan => (Sort Option: None)]"
+            ),
+            "{full_join_plan}"
+        );
+
+        let cross_join_plan = database.explain(|ctx| {
+            ctx.from::<OrmUnitUser>()?
+                .cross_join::<OrmUnitOrder>()?
+                .project_scalars((OrmUnitUser::id(), OrmUnitOrder::id()))?
+                .finish()
+        })?;
+        assert_eq!(
+            cross_join_plan,
+            concat!(
+                "Projection [#1, #4] [Project => (Sort Option: Follow)] ",
+                "Cross Join Nothing [NestLoopJoin => (Sort Option: None)] ",
+                "TableScan orm_unit_users -> [#1] [SeqScan => (Sort Option: None)] ",
+                "TableScan orm_unit_orders -> [#4] [SeqScan => (Sort Option: None)]"
+            ),
+            "{cross_join_plan}"
+        );
+
+        let inner_using_plan = database.explain(|ctx| {
+            ctx.from::<OrmUnitUser>()?
+                .inner_join_using::<OrmUnitOrder>(["id"])?
+                .project_scalar(OrmUnitUser::id())?
+                .finish()
+        })?;
+        assert_eq!(
+            inner_using_plan,
+            concat!(
+                "Projection [#1] [Project => (Sort Option: Follow)] ",
+                "Inner Join On #1 = #4 [HashJoin => (Sort Option: None)] ",
+                "TableScan orm_unit_users -> [#1] [SeqScan => (Sort Option: None)] ",
+                "TableScan orm_unit_orders -> [#4] [SeqScan => (Sort Option: None)]"
+            ),
+            "{inner_using_plan}"
+        );
+
+        let left_using_plan = database.explain(|ctx| {
+            ctx.from::<OrmUnitUser>()?
+                .left_join_using::<OrmUnitOrder>(["id"])?
+                .project_scalar(OrmUnitUser::id())?
+                .finish()
+        })?;
+        assert_eq!(
+            left_using_plan,
+            concat!(
+                "Projection [#1] [Project => (Sort Option: Follow)] ",
+                "LeftOuter Join On #1 = #4 [HashJoin => (Sort Option: None)] ",
+                "TableScan orm_unit_users -> [#1] [SeqScan => (Sort Option: None)] ",
+                "TableScan orm_unit_orders -> [#4] [SeqScan => (Sort Option: None)]"
+            ),
+            "{left_using_plan}"
+        );
+
+        let right_using_plan = database.explain(|ctx| {
+            ctx.from::<OrmUnitUser>()?
+                .right_join_using::<OrmUnitOrder>(["id"])?
+                .project_scalar(OrmUnitUser::id())?
+                .finish()
+        })?;
+        assert_eq!(
+            right_using_plan,
+            concat!(
+                "Projection [#1] [Project => (Sort Option: Follow)] ",
+                "RightOuter Join On #1 = #4 [HashJoin => (Sort Option: None)] ",
+                "TableScan orm_unit_users -> [#1] [SeqScan => (Sort Option: None)] ",
+                "TableScan orm_unit_orders -> [#4] [SeqScan => (Sort Option: None)]"
+            ),
+            "{right_using_plan}"
+        );
+
+        let full_using_plan = database.explain(|ctx| {
+            ctx.from::<OrmUnitUser>()?
+                .full_join_using::<OrmUnitOrder>(["id"])?
+                .project_scalar(OrmUnitUser::id())?
+                .finish()
+        })?;
+        assert_eq!(
+            full_using_plan,
+            concat!(
+                "Projection [#1] [Project => (Sort Option: Follow)] ",
+                "Full Join On #1 = #4 [HashJoin => (Sort Option: None)] ",
+                "TableScan orm_unit_users -> [#1] [SeqScan => (Sort Option: None)] ",
+                "TableScan orm_unit_orders -> [#4] [SeqScan => (Sort Option: None)]"
+            ),
+            "{full_using_plan}"
+        );
+
+        Ok(())
+    }
+}
+// GRCOV_EXCL_STOP

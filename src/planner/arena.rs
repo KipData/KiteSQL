@@ -524,10 +524,14 @@ impl MetaArena for PlanArena<'_> {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
+    use crate::types::index::{IndexMeta, IndexType};
     use crate::types::LogicalType;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     fn column(name: &str) -> ColumnCatalog {
         ColumnCatalog::new(
@@ -541,6 +545,18 @@ mod tests {
         let mut column = column(name);
         column.set_ref_table("t".to_string().into(), if is_temp { 0 } else { 1 }, is_temp);
         column
+    }
+
+    fn index_meta(name: &str) -> IndexMeta {
+        IndexMeta {
+            id: 1,
+            column_ids: vec![1],
+            table_name: "t".into(),
+            pk_ty: LogicalType::Integer,
+            value_ty: LogicalType::Integer,
+            name: name.to_string(),
+            ty: IndexType::Normal,
+        }
     }
 
     #[test]
@@ -597,4 +613,73 @@ mod tests {
         assert_eq!(table_arena.borrow().column(first).name(), "a");
         assert_eq!(second.pos(), 1);
     }
+
+    #[test]
+    fn arena_default_alloc_columns_dummy_debug_and_index_paths() {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+
+        let schema = MetaArena::alloc_columns(&mut plan_arena, [column("a"), column("b")]);
+        assert_eq!(schema.len(), 2);
+        assert_eq!(plan_arena.allocated_columns_len(), 2);
+        assert_eq!(plan_arena.column(schema[0]).name(), "a");
+
+        let dummy = plan_arena.alloc_dummy("TABLE");
+        assert_eq!(plan_arena.column(dummy).name(), "TABLE");
+        assert!(format!("{:?}", table_arena).contains("columns_len"));
+        assert_eq!(plan_arena.temp_table().to_string(), "_temp_table_0_");
+
+        let first_index = plan_arena.alloc_index(index_meta("idx_a"));
+        assert_eq!(plan_arena.alloc_index(index_meta("idx_a")), first_index);
+        assert_eq!(plan_arena.index(first_index).name, "idx_a");
+
+        plan_arena.materialize_into_table_arena();
+        let mut second_plan_arena = crate::planner::PlanArena::new(&table_arena);
+        assert_eq!(
+            second_plan_arena.alloc_index(index_meta("idx_a")),
+            first_index
+        );
+    }
+
+    #[test]
+    fn table_arena_index_reuse_and_recycled_access_guards() {
+        let mut arena = crate::planner::TableArena::default();
+        let first_column = arena.alloc_column(column("a"));
+        let first_index = arena.alloc_index(index_meta("idx_a"));
+
+        arena.columns[first_column.pos()].live = false;
+        arena.indexes[first_index.pos()].live = false;
+
+        let column_panic = catch_unwind(AssertUnwindSafe(|| {
+            let _ = arena.column(first_column);
+        }));
+        assert!(column_panic.is_err());
+
+        let index_panic = catch_unwind(AssertUnwindSafe(|| {
+            let _ = arena.index(first_index);
+        }));
+        assert!(index_panic.is_err());
+
+        assert_eq!(arena.alloc_column(column("b")), first_column);
+        assert_eq!(arena.alloc_index(index_meta("idx_b")), first_index);
+    }
+
+    #[test]
+    fn plan_arena_detects_table_arena_mutation_in_debug_builds() {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+
+        table_arena.borrow_mut().alloc_column(column("late"));
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            plan_arena.alloc_column(column("plan"));
+        }));
+
+        if cfg!(debug_assertions) {
+            assert!(result.is_err());
+        } else {
+            assert!(result.is_ok());
+        }
+    }
 }
+// GRCOV_EXCL_STOP

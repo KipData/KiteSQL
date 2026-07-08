@@ -14,6 +14,7 @@ CODECOV_OUTPUT ?= lcov.info
 COVERAGE_PROFILE_DIR ?= target/grcov/profraw
 COVERAGE_HTML_DIR ?= target/grcov/html
 COVERAGE_RUSTFLAGS ?= -Cinstrument-coverage
+COVERAGE_TEST_FEATURES ?= decimal,orm
 COVERAGE_REPORT_ARGS ?= --llvm --ignore-not-existing --keep-only 'src/**' --ignore 'src/**/tests/**' --ignore 'tests/**' --ignore 'tpcc/**' --excl-start 'GRCOV_EXCL_START' --excl-stop 'GRCOV_EXCL_STOP'
 
 .PHONY: test test-python test-wasm test-slt test-all codecov codecov-html wasm-build check tpcc tpcc-kitesql-rocksdb tpcc-kitesql-lmdb tpcc-lmdb-flamegraph tpcc-lmdb-heaptrack tpcc-sqlite tpcc-sqlite-practical tpcc-sqlite-balanced tpcc-dual cargo-check build wasm-examples native-examples fmt clippy
@@ -55,7 +56,7 @@ codecov:
 		command -v $(GRCOV) >/dev/null || { echo 'grcov is not installed; run: cargo install grcov'; exit 1; }; \
 		rm -rf '$(COVERAGE_PROFILE_DIR)' '$(CODECOV_OUTPUT)'; \
 		mkdir -p '$(COVERAGE_PROFILE_DIR)'; \
-		CARGO_INCREMENTAL=0 RUSTFLAGS=\"$${RUSTFLAGS:-} $(COVERAGE_RUSTFLAGS)\" LLVM_PROFILE_FILE='$(COVERAGE_PROFILE_DIR)/kitesql-%p-%m.profraw' $(CARGO) test --all --features decimal; \
+		CARGO_INCREMENTAL=0 RUSTFLAGS=\"$${RUSTFLAGS:-} $(COVERAGE_RUSTFLAGS)\" LLVM_PROFILE_FILE='$(COVERAGE_PROFILE_DIR)/kitesql-%p-%m.profraw' $(CARGO) test --all --features '$(COVERAGE_TEST_FEATURES)'; \
 		CARGO_INCREMENTAL=0 RUSTFLAGS=\"$${RUSTFLAGS:-} $(COVERAGE_RUSTFLAGS)\" LLVM_PROFILE_FILE='$(COVERAGE_PROFILE_DIR)/kitesql-%p-%m.profraw' $(CARGO) run -p sqllogictest-test -- --path '$(SQLLOGIC_PATH)'; \
 		$(GRCOV) . --binary-path \"$${CARGO_TARGET_DIR:-target}/debug\" -s . -t lcov $(COVERAGE_REPORT_ARGS) -o '$(CODECOV_OUTPUT)'"
 
@@ -65,7 +66,7 @@ codecov-html:
 		command -v $(GRCOV) >/dev/null || { echo 'grcov is not installed; run: cargo install grcov'; exit 1; }; \
 		rm -rf '$(COVERAGE_PROFILE_DIR)' '$(COVERAGE_HTML_DIR)'; \
 		mkdir -p '$(COVERAGE_PROFILE_DIR)' '$(COVERAGE_HTML_DIR)'; \
-		CARGO_INCREMENTAL=0 RUSTFLAGS=\"$${RUSTFLAGS:-} $(COVERAGE_RUSTFLAGS)\" LLVM_PROFILE_FILE='$(COVERAGE_PROFILE_DIR)/kitesql-%p-%m.profraw' $(CARGO) test --all --features decimal; \
+		CARGO_INCREMENTAL=0 RUSTFLAGS=\"$${RUSTFLAGS:-} $(COVERAGE_RUSTFLAGS)\" LLVM_PROFILE_FILE='$(COVERAGE_PROFILE_DIR)/kitesql-%p-%m.profraw' $(CARGO) test --all --features '$(COVERAGE_TEST_FEATURES)'; \
 		CARGO_INCREMENTAL=0 RUSTFLAGS=\"$${RUSTFLAGS:-} $(COVERAGE_RUSTFLAGS)\" LLVM_PROFILE_FILE='$(COVERAGE_PROFILE_DIR)/kitesql-%p-%m.profraw' $(CARGO) run -p sqllogictest-test -- --path '$(SQLLOGIC_PATH)'; \
 		$(GRCOV) . --binary-path \"$${CARGO_TARGET_DIR:-target}/debug\" -s . -t html $(COVERAGE_REPORT_ARGS) -o '$(COVERAGE_HTML_DIR)'"
 	@echo "Coverage report: $(COVERAGE_HTML_DIR)/index.html"

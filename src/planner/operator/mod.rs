@@ -430,3 +430,611 @@ impl fmt::Display for PlanImpl {
         }
     }
 }
+
+// GRCOV_EXCL_START
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::catalog::view::View;
+    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
+    use crate::expression::function::table::{
+        ArcTableFunctionImpl, TableFunction, TableFunctionCatalog, TableFunctionImpl,
+    };
+    use crate::expression::ScalarExpression;
+    use crate::function::numbers::Numbers;
+    use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
+    use crate::planner::operator::delete::DeleteOperator;
+    use crate::planner::operator::mark_apply::MarkApplyQuantifier;
+    use crate::planner::operator::set_membership::SetMembershipKind;
+    use crate::planner::operator::sort::SortField;
+    use crate::planner::operator::values::ValuesOperator;
+    use crate::planner::{Childrens, LogicalPlan, TableArenaCell};
+    use crate::types::index::{IndexInfo, IndexMetaRef, IndexType};
+    use crate::types::value::DataValue;
+    use crate::types::LogicalType;
+
+    fn column_catalog(name: &str) -> ColumnCatalog {
+        ColumnCatalog::new(
+            name.to_string(),
+            true,
+            ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
+        )
+    }
+
+    fn column(name: &str, arena: &mut PlanArena) -> ColumnRef {
+        arena.alloc_column(column_catalog(name))
+    }
+
+    fn index_info() -> IndexInfo {
+        IndexInfo {
+            meta: IndexMetaRef::new(4),
+            sort_option: SortOption::None,
+            lookup: None,
+            residual_predicate: None,
+            covered_deserializers: None,
+            cover_mapping: None,
+            sort_elimination_hint: None,
+            stream_distinct_hint: None,
+        }
+    }
+
+    fn column_expr(column: ColumnRef, position: usize) -> ScalarExpression {
+        ScalarExpression::column_expr(column, position)
+    }
+
+    fn referenced_columns(operator: &Operator, arena: &mut PlanArena) -> Vec<ColumnRef> {
+        let mut columns = Vec::new();
+        operator.visit_referenced_columns(arena, &mut |_, column| {
+            columns.push(*column);
+            true
+        });
+        columns
+    }
+
+    #[test]
+    fn physical_option_and_sort_option_display() {
+        let sort_field = SortField::new(ScalarExpression::from(1i32), false, true);
+        let sort_option = SortOption::OrderBy {
+            fields: vec![sort_field],
+            ignore_prefix_len: 2,
+        };
+        assert_eq!(
+            sort_option.to_string(),
+            "OrderBy: (1 Desc Nulls First) ignore_prefix_len: 2"
+        );
+        assert_eq!(SortOption::Follow.to_string(), "Follow");
+        assert_eq!(SortOption::None.to_string(), "None");
+
+        let physical = PhysicalOption::new(PlanImpl::TopK, sort_option.clone());
+        assert_eq!(
+            physical.to_string(),
+            "TopK => (Sort Option: OrderBy: (1 Desc Nulls First) ignore_prefix_len: 2)"
+        );
+        assert_eq!(physical.sort_option(), &sort_option);
+    }
+
+    #[test]
+    fn plan_impl_display_covers_physical_variants() {
+        let cases = [
+            (PlanImpl::Dummy, "Dummy"),
+            (PlanImpl::SimpleAggregate, "SimpleAggregate"),
+            (PlanImpl::HashAggregate, "HashAggregate"),
+            (PlanImpl::StreamDistinct, "StreamDistinct"),
+            (PlanImpl::ScalarApply, "ScalarApply"),
+            (PlanImpl::MarkApply, "MarkApply"),
+            (PlanImpl::Filter, "Filter"),
+            (PlanImpl::HashJoin, "HashJoin"),
+            (PlanImpl::NestLoopJoin, "NestLoopJoin"),
+            (PlanImpl::Project, "Project"),
+            (PlanImpl::ScalarSubquery, "ScalarSubquery"),
+            (PlanImpl::SeqScan, "SeqScan"),
+            (PlanImpl::FunctionScan, "FunctionScan"),
+            (PlanImpl::Sort, "Sort"),
+            (PlanImpl::Limit, "Limit"),
+            (PlanImpl::TopK, "TopK"),
+            (PlanImpl::Values, "Values"),
+            (PlanImpl::Insert, "Insert"),
+            (PlanImpl::Update, "Update"),
+            (PlanImpl::Delete, "Delete"),
+            (PlanImpl::AddColumn, "AddColumn"),
+            (PlanImpl::ChangeColumn, "ChangeColumn"),
+            (PlanImpl::DropColumn, "DropColumn"),
+            (PlanImpl::CreateTable, "CreateTable"),
+            (PlanImpl::DropTable, "DropTable"),
+            (PlanImpl::Truncate, "Truncate"),
+            (PlanImpl::Show, "Show"),
+            (PlanImpl::Analyze, "Analyze"),
+        ];
+
+        for (plan, expected) in cases {
+            assert_eq!(plan.to_string(), expected);
+        }
+        assert_eq!(
+            PlanImpl::IndexScan(Box::new(index_info())).to_string(),
+            "IndexScan By #4 => EMPTY"
+        );
+    }
+
+    #[test]
+    fn referenced_column_helpers_stop_on_predicate_result() {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let left = column("left", &mut arena);
+        let right = column("right", &mut arena);
+        let values = Operator::Values(ValuesOperator {
+            rows: vec![vec![DataValue::Int32(1), DataValue::Int32(2)]],
+            schema_ref: vec![left, right],
+        });
+
+        assert!(values.any_referenced_column(&mut arena, |column| *column == right));
+        assert!(!values
+            .any_referenced_column(&mut arena, |column| { *column != left && *column != right }));
+        assert!(values
+            .all_referenced_columns(&mut arena, |column| { *column == left || *column == right }));
+        assert!(!values.all_referenced_columns(&mut arena, |column| *column == left));
+
+        let delete = Operator::Delete(DeleteOperator {
+            table_name: "users".into(),
+            primary_keys: vec![left],
+        });
+        assert!(delete.any_referenced_column(&mut arena, |column| *column == left));
+        assert!(Operator::Dummy.all_referenced_columns(&mut arena, |_| false));
+        assert!(!Operator::Dummy.any_referenced_column(&mut arena, |_| true));
+    }
+
+    #[test]
+    fn referenced_column_visitor_covers_expression_driven_variants() {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let a = column("a", &mut arena);
+        let b = column("b", &mut arena);
+        let c = column("c", &mut arena);
+        let d = column("d", &mut arena);
+
+        let aggregate = Operator::Aggregate(AggregateOperator {
+            agg_calls: vec![column_expr(a, 0)],
+            groupby_exprs: vec![column_expr(b, 1)],
+            is_distinct: false,
+        });
+        assert_eq!(referenced_columns(&aggregate, &mut arena), vec![a, b]);
+
+        let mark_apply =
+            Operator::MarkApply(MarkApplyOperator::new_exists(d, vec![column_expr(c, 2)]));
+        assert_eq!(referenced_columns(&mark_apply, &mut arena), vec![c]);
+
+        let filter = Operator::Filter(FilterOperator {
+            predicate: column_expr(a, 0),
+            is_optimized: false,
+            having: false,
+        });
+        assert_eq!(referenced_columns(&filter, &mut arena), vec![a]);
+
+        let join = Operator::Join(JoinOperator {
+            join_type: join::JoinType::Inner,
+            on: JoinCondition::On {
+                on: vec![(column_expr(a, 0), column_expr(b, 1))],
+                filter: Some(column_expr(c, 2)),
+            },
+        });
+        assert_eq!(referenced_columns(&join, &mut arena), vec![a, b, c]);
+        assert!(!join.all_referenced_columns(&mut arena, |column| *column == a));
+
+        let project = Operator::Project(ProjectOperator {
+            exprs: vec![column_expr(b, 1), column_expr(c, 2)],
+        });
+        assert_eq!(referenced_columns(&project, &mut arena), vec![b, c]);
+
+        let table_scan = Operator::TableScan(TableScanOperator {
+            table_name: "users".into(),
+            columns: vec![a, d],
+            limit: (None, None),
+            index_infos: Vec::new(),
+            with_pk: false,
+        });
+        assert_eq!(referenced_columns(&table_scan, &mut arena), vec![a, d]);
+
+        let function_scan = Operator::FunctionScan(FunctionScanOperator {
+            table_function: TableFunction {
+                args: vec![column_expr(c, 2)],
+                catalog: TableFunctionCatalog {
+                    schema: Vec::new(),
+                    inner: ArcTableFunctionImpl(Numbers::new()),
+                },
+            },
+        });
+        assert_eq!(referenced_columns(&function_scan, &mut arena), vec![c]);
+
+        let sort = Operator::Sort(SortOperator {
+            sort_fields: vec![SortField::from(column_expr(a, 0))],
+            limit: None,
+        });
+        assert_eq!(referenced_columns(&sort, &mut arena), vec![a]);
+
+        let top_k = Operator::TopK(TopKOperator {
+            sort_fields: vec![SortField::from(column_expr(b, 1))],
+            limit: 3,
+            offset: None,
+        });
+        assert_eq!(referenced_columns(&top_k, &mut arena), vec![b]);
+
+        let union = Operator::Union(UnionOperator {
+            left_schema_ref: vec![a],
+            _right_schema_ref: vec![b],
+        });
+        assert_eq!(referenced_columns(&union, &mut arena), vec![a, b]);
+
+        let set_membership = Operator::SetMembership(SetMembershipOperator {
+            kind: SetMembershipKind::Intersect,
+            left_schema_ref: vec![c],
+            _right_schema_ref: vec![d],
+        });
+        assert_eq!(referenced_columns(&set_membership, &mut arena), vec![c, d]);
+
+        let delete = Operator::Delete(DeleteOperator {
+            table_name: "users".into(),
+            primary_keys: vec![a],
+        });
+        assert_eq!(referenced_columns(&delete, &mut arena), vec![a]);
+
+        let no_reference_operators = [
+            Operator::ScalarApply(ScalarApplyOperator),
+            Operator::ScalarSubquery(ScalarSubqueryOperator),
+            Operator::Analyze(AnalyzeOperator {
+                table_name: "users".into(),
+                index_metas: vec![IndexMetaRef::new(1)],
+                histogram_buckets: Some(8),
+            }),
+        ];
+        for operator in no_reference_operators {
+            assert!(referenced_columns(&operator, &mut arena).is_empty());
+        }
+    }
+
+    #[test]
+    fn mark_apply_constructors_and_accessors_cover_quantified_paths() {
+        let left = LogicalPlan::new(Operator::ShowTable, Childrens::None);
+        let right = LogicalPlan::new(Operator::ShowView, Childrens::None);
+        let output = ColumnRef::new(10);
+        let probe = ScalarExpression::from(true);
+
+        let mut any = MarkApplyOperator::new_in(output, vec![ScalarExpression::from(1_i32)]);
+        assert_eq!(any.to_string(), "MarkAnyApply");
+        assert_eq!(any.predicates().len(), 1);
+        any.predicates_mut().push(ScalarExpression::from(2_i32));
+        assert_eq!(any.predicates().len(), 2);
+        assert_eq!(*any.output_column(), output);
+        assert!(any.parameterized_probe().is_none());
+        any.set_parameterized_probe(Some(probe.clone()));
+        assert_eq!(any.parameterized_probe(), Some(&probe));
+        any.set_parameterized_probe(None);
+        assert!(any.parameterized_probe().is_none());
+
+        let all = MarkApplyOperator::new_quantified(
+            MarkApplyQuantifier::All,
+            output,
+            vec![ScalarExpression::from(false)],
+        );
+        assert_eq!(all.to_string(), "MarkAllApply");
+
+        let in_plan = MarkApplyOperator::build_in(
+            left.clone(),
+            right.clone(),
+            output,
+            vec![ScalarExpression::from(1_i32)],
+        );
+        assert_eq!(in_plan.operator.to_string(), "MarkAnyApply");
+        assert!(matches!(*in_plan.childrens, Childrens::Twins { .. }));
+
+        let all_plan = MarkApplyOperator::build_quantified(
+            left,
+            right,
+            MarkApplyQuantifier::All,
+            output,
+            vec![ScalarExpression::from(1_i32)],
+        );
+        assert_eq!(all_plan.operator.to_string(), "MarkAllApply");
+        assert!(matches!(*all_plan.childrens, Childrens::Twins { .. }));
+    }
+
+    #[test]
+    fn ddl_operator_display_formats_table_index_and_column_actions() {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let id = column("id", &mut arena);
+        let name = column("name", &mut arena);
+
+        let view = View {
+            name: "active_users".into(),
+            plan: Box::new(LogicalPlan::new(Operator::ShowTable, Childrens::None)),
+            schema: vec![id],
+        };
+
+        let cases = [
+            (
+                Operator::CreateTable(CreateTableOperator {
+                    table_name: "users".into(),
+                    columns: vec![column_catalog("id"), column_catalog("name")],
+                    if_not_exists: true,
+                }),
+                "Create users -> [id, name], If Not Exists: true",
+            ),
+            (
+                Operator::CreateIndex(CreateIndexOperator {
+                    table_name: "users".into(),
+                    columns: vec![id, name],
+                    index_name: "idx_users_name".to_string(),
+                    if_not_exists: false,
+                    ty: IndexType::Normal,
+                }),
+                "Create Index On users -> [#0, #1], If Not Exists: false",
+            ),
+            (
+                Operator::CreateView(CreateViewOperator {
+                    view,
+                    or_replace: true,
+                }),
+                "Create View as View active_users, Or Replace: true",
+            ),
+            (
+                Operator::DropTable(DropTableOperator {
+                    table_name: "users".into(),
+                    if_exists: true,
+                }),
+                "Drop Table users, If Exists: true",
+            ),
+            (
+                Operator::DropView(DropViewOperator {
+                    view_name: "active_users".into(),
+                    if_exists: false,
+                }),
+                "Drop View active_users, If Exists: false",
+            ),
+            (
+                Operator::DropColumn(DropColumnOperator {
+                    table_name: "users".into(),
+                    column_name: "age".to_string(),
+                    if_exists: true,
+                }),
+                "Drop age -> users, If Exists: true",
+            ),
+            (
+                Operator::AddColumn(AddColumnOperator {
+                    table_name: "users".into(),
+                    if_not_exists: true,
+                    column: column_catalog("age"),
+                }),
+                "Add age -> users, If Not Exists: true",
+            ),
+            (
+                Operator::ChangeColumn(ChangeColumnOperator {
+                    table_name: "users".into(),
+                    old_column_name: "age".to_string(),
+                    new_column_name: "age_years".to_string(),
+                    data_type: LogicalType::Integer,
+                    default_change: DefaultChange::Drop,
+                    not_null_change: NotNullChange::Set,
+                }),
+                "Change age -> users.age_years (Integer, Drop, Set)",
+            ),
+            (
+                Operator::Truncate(TruncateOperator {
+                    table_name: "users".into(),
+                }),
+                "Truncate users",
+            ),
+        ];
+
+        for (operator, expected) in cases {
+            assert_eq!(operator.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn dml_values_describe_and_analyze_display_formats_payloads() {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let id = column("id", &mut arena);
+
+        let cases = [
+            (
+                Operator::Insert(InsertOperator {
+                    table_name: "users".into(),
+                    is_overwrite: true,
+                    is_mapping_by_name: false,
+                }),
+                "Insert users, Is Overwrite: true, Is Mapping By Name: false",
+            ),
+            (
+                Operator::Update(UpdateOperator {
+                    table_name: "users".into(),
+                    value_exprs: vec![(id, ScalarExpression::from(7_i32))],
+                }),
+                "Update users set #0 -> 7",
+            ),
+            (
+                Operator::Delete(DeleteOperator {
+                    table_name: "users".into(),
+                    primary_keys: vec![id],
+                }),
+                "Delete users",
+            ),
+            (
+                Operator::Describe(DescribeOperator {
+                    table_name: "users".into(),
+                }),
+                "Describe users",
+            ),
+            (
+                Operator::Values(ValuesOperator {
+                    rows: vec![
+                        vec![DataValue::Int32(1), DataValue::Int32(2)],
+                        vec![DataValue::Int32(3)],
+                    ],
+                    schema_ref: vec![id],
+                }),
+                "Values [1, 2], [3], RowsLen: 2",
+            ),
+            (
+                Operator::Analyze(AnalyzeOperator {
+                    table_name: "users".into(),
+                    index_metas: vec![IndexMetaRef::new(3)],
+                    histogram_buckets: Some(128),
+                }),
+                "Analyze users -> [#3]",
+            ),
+        ];
+
+        for (operator, expected) in cases {
+            assert_eq!(operator.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn sort_and_top_k_display_fields_and_build_single_child_plan() {
+        let descending_nulls_first = SortField::from(ScalarExpression::from(9_i32))
+            .desc()
+            .nulls_first();
+        let ascending_nulls_last = SortField::new(ScalarExpression::from(1_i32), false, true)
+            .asc()
+            .nulls_last();
+
+        let sort = Operator::Sort(SortOperator {
+            sort_fields: vec![descending_nulls_first.clone(), ascending_nulls_last.clone()],
+            limit: Some(10),
+        });
+        assert_eq!(
+            sort.to_string(),
+            "Sort By 9 Desc Nulls First, 1 Asc Nulls Last, Limit 10"
+        );
+
+        let child = LogicalPlan::new(Operator::ShowTable, Childrens::None);
+        let top_k = TopKOperator::build(vec![descending_nulls_first], 5, Some(2), child);
+        assert_eq!(
+            top_k.operator.to_string(),
+            "Top 5, Offset 2, Sort By 9 Desc Nulls First"
+        );
+        assert!(matches!(*top_k.childrens, Childrens::Only(_)));
+
+        let top_k_without_offset = Operator::TopK(TopKOperator {
+            sort_fields: vec![ascending_nulls_last],
+            limit: 3,
+            offset: None,
+        });
+        assert_eq!(
+            top_k_without_offset.to_string(),
+            "Top 3, Sort By 1 Asc Nulls Last"
+        );
+    }
+
+    #[test]
+    fn drop_index_build_preserves_operator_payload_and_children() {
+        let plan = DropIndexOperator::build(
+            "users".into(),
+            "idx_users_id".to_string(),
+            true,
+            Childrens::None,
+        );
+
+        assert_eq!(
+            plan.operator.to_string(),
+            "Drop Index idx_users_id On users, If Exists: true"
+        );
+        assert!(matches!(*plan.childrens, Childrens::None));
+    }
+
+    #[test]
+    fn function_scan_display_and_build_preserve_table_function() {
+        let table_arena = TableArenaCell::default();
+        let numbers = Numbers::new();
+        let mut schema = Vec::new();
+        numbers.output_schema_into(table_arena.borrow_mut(), &mut schema);
+        let table_function = TableFunction {
+            args: vec![ScalarExpression::from(3_i32)],
+            catalog: TableFunctionCatalog {
+                schema,
+                inner: ArcTableFunctionImpl(numbers),
+            },
+        };
+
+        let plan = FunctionScanOperator::build(table_function);
+
+        assert_eq!(plan.operator.to_string(), "Function Scan: numbers");
+        assert!(matches!(*plan.childrens, Childrens::None));
+    }
+
+    #[test]
+    fn set_membership_display_and_build_cover_both_kinds() {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let left_col = column("left_id", &mut arena);
+        let right_col = column("right_id", &mut arena);
+        let left = LogicalPlan::new(Operator::ShowTable, Childrens::None);
+        let right = LogicalPlan::new(Operator::ShowView, Childrens::None);
+
+        let plan = SetMembershipOperator::build(
+            SetMembershipKind::Intersect,
+            vec![left_col],
+            vec![right_col],
+            left,
+            right,
+        );
+
+        assert_eq!(plan.operator.to_string(), "Intersect: [#0]");
+        assert!(matches!(*plan.childrens, Childrens::Twins { .. }));
+        assert_eq!(
+            Operator::SetMembership(SetMembershipOperator {
+                kind: SetMembershipKind::Except,
+                left_schema_ref: vec![left_col],
+                _right_schema_ref: vec![right_col],
+            })
+            .to_string(),
+            "Except: [#0]"
+        );
+    }
+
+    #[test]
+    fn scalar_apply_and_subquery_build_expected_child_shapes() {
+        let left = LogicalPlan::new(Operator::ShowTable, Childrens::None);
+        let right = LogicalPlan::new(Operator::ShowView, Childrens::None);
+
+        let apply = ScalarApplyOperator::build(left.clone(), right);
+        assert_eq!(apply.operator.to_string(), "ScalarApply");
+        assert!(matches!(*apply.childrens, Childrens::Twins { .. }));
+
+        let subquery = ScalarSubqueryOperator::build(left);
+        assert_eq!(subquery.operator.to_string(), "ScalarSubquery");
+        assert!(matches!(*subquery.childrens, Childrens::Only(_)));
+    }
+
+    #[cfg(feature = "copy")]
+    #[test]
+    fn copy_from_file_display_formats_source_table_and_schema() {
+        use crate::binder::copy::{ExtSource, FileFormat};
+        use std::path::PathBuf;
+
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let id = column("id", &mut arena);
+        let name = column("name", &mut arena);
+
+        let operator = Operator::CopyFromFile(CopyFromFileOperator {
+            table: "users".into(),
+            source: ExtSource {
+                path: PathBuf::from("/tmp/users.csv"),
+                format: FileFormat::Csv {
+                    delimiter: ',',
+                    quote: '"',
+                    escape: None,
+                    header: true,
+                },
+            },
+            schema_ref: vec![id, name],
+        });
+
+        assert_eq!(
+            operator.to_string(),
+            "Copy /tmp/users.csv -> users [#0, #1]"
+        );
+    }
+}
+// GRCOV_EXCL_STOP

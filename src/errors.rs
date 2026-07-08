@@ -518,3 +518,334 @@ fn build_sql_highlight(sql: &str, span: &SqlErrorSpan) -> Option<String> {
 
     Some(out.trim_end().to_string())
 }
+
+// GRCOV_EXCL_START
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::expression::{BinaryOperator, UnaryOperator};
+    use crate::types::value::DataValue;
+    use std::error::Error;
+
+    fn span(line: usize, start: usize, end: usize) -> SqlErrorSpan {
+        SqlErrorSpan {
+            line,
+            start,
+            end,
+            highlight: None,
+        }
+    }
+
+    #[test]
+    fn span_aware_errors_format_location_and_highlight() {
+        let err = DatabaseError::column_not_found("missing").with_span(span(2, 8, 14));
+        assert_eq!(
+            err.to_string(),
+            "column: `missing` not found at line 2, range 8..14"
+        );
+        assert_eq!(err.sql_error_span().unwrap().line, 2);
+
+        let err = err.with_sql_context("select *\nfrom missing\nwhere id = 1");
+        let highlight = err
+            .sql_error_span()
+            .and_then(|span| span.highlight.as_ref())
+            .expect("highlight is added from SQL context");
+        assert!(highlight.contains("--> line 2"));
+        assert!(highlight.contains("2 | from missing"));
+        assert!(highlight.lines().any(|line| line.contains('^')));
+        assert!(err.to_string().contains("\n--> line 2"));
+    }
+
+    #[test]
+    fn sql_context_preserves_existing_highlight_and_ignores_invalid_spans() {
+        let mut existing = span(1, 1, 3);
+        existing.highlight = Some("custom highlight".to_string());
+        let err = DatabaseError::not_null_column("id")
+            .with_span(existing)
+            .with_sql_context("select id");
+        assert_eq!(
+            err.sql_error_span().unwrap().highlight.as_deref(),
+            Some("custom highlight")
+        );
+        assert_eq!(
+            err.to_string(),
+            "column: `id` cannot be null\ncustom highlight"
+        );
+
+        let err = DatabaseError::invalid_table("t")
+            .with_span(span(0, 1, 2))
+            .with_sql_context("select * from t");
+        assert!(err.sql_error_span().unwrap().highlight.is_none());
+        assert_eq!(err.to_string(), "invalid table: `t` at line 0, range 1..2");
+
+        let err = DatabaseError::invalid_table("missing")
+            .with_span(span(3, 1, 4))
+            .with_sql_context("select 1");
+        assert!(err.sql_error_span().unwrap().highlight.is_none());
+        assert_eq!(
+            err.to_string(),
+            "invalid table: `missing` at line 3, range 1..4"
+        );
+    }
+
+    #[test]
+    fn constructors_attach_expected_payloads() {
+        assert_eq!(
+            DatabaseError::invalid_column("c").to_string(),
+            "invalid column: `c`"
+        );
+        assert_eq!(
+            DatabaseError::function_not_found("lower").to_string(),
+            "function: `lower` not found"
+        );
+        assert_eq!(
+            DatabaseError::parameter_not_found("p").to_string(),
+            "parameter: `p` not found"
+        );
+        assert_eq!(DatabaseError::not_null().to_string(), "cannot be null");
+        assert_eq!(
+            DatabaseError::not_null_column("name").to_string(),
+            "column: `name` cannot be null"
+        );
+
+        assert!(DatabaseError::TableNotFound
+            .with_span(span(1, 1, 1))
+            .sql_error_span()
+            .is_none());
+    }
+
+    #[test]
+    fn span_helpers_attach_context_to_remaining_span_aware_variants() {
+        let cast = DatabaseError::CastFail {
+            from: LogicalType::Boolean,
+            to: LogicalType::Integer,
+            span: None,
+        }
+        .with_span(span(1, 8, 11));
+        assert_eq!(
+            cast.to_string(),
+            "cast fail: Boolean -> Integer at line 1, range 8..11"
+        );
+        assert_eq!(cast.sql_error_span().unwrap().start, 8);
+
+        let cast = cast.with_sql_context("select true");
+        assert!(cast.to_string().contains("\n--> line 1"));
+
+        let parameter = DatabaseError::parameter_not_found("tenant_id")
+            .with_span(span(1, 15, 24))
+            .with_sql_context("select :tenant_id");
+        assert_eq!(parameter.sql_error_span().unwrap().line, 1);
+        assert!(parameter
+            .to_string()
+            .contains("parameter: `tenant_id` not found\n--> line 1"));
+    }
+
+    #[test]
+    fn display_formats_common_error_variants() {
+        let cases = [
+            (DatabaseError::AggMiss("sum".into()), "agg miss: sum"),
+            (DatabaseError::CacheSizeOverFlow, "cache size overflow"),
+            (
+                DatabaseError::CastFail {
+                    from: LogicalType::Integer,
+                    to: LogicalType::Varchar(None, crate::types::CharLengthUnits::Characters),
+                    span: None,
+                },
+                "cast fail: Integer -> Varchar(None, CHARACTERS)",
+            ),
+            (
+                DatabaseError::ColumnIdNotFound("7".into()),
+                "column id: `7` not found",
+            ),
+            (
+                DatabaseError::DuplicateColumn("id".into()),
+                "column: `id` already exists",
+            ),
+            (
+                DatabaseError::DuplicateSourceHash("v".into()),
+                "table or view: `v` hash already exists",
+            ),
+            (
+                DatabaseError::DuplicateIndex("idx".into()),
+                "index: `idx` already exists",
+            ),
+            (
+                DatabaseError::Incomparable(LogicalType::Integer, LogicalType::Boolean),
+                "can not compare two types: Integer and Boolean",
+            ),
+            (
+                DatabaseError::InvalidValue("NaN".into()),
+                "invalid value: NaN",
+            ),
+            (
+                DatabaseError::MisMatch("left", "right"),
+                "left and right do not match",
+            ),
+            (
+                DatabaseError::TupleIdNotFound(DataValue::Int32(3)),
+                "tuple id: 3 not found",
+            ),
+            (
+                DatabaseError::TooManyBuckets(8, 3),
+                "there are more buckets: 8 than elements: 3",
+            ),
+            (
+                DatabaseError::UnsupportedUnaryOperator(LogicalType::Integer, UnaryOperator::Not),
+                "unsupported unary operator: Integer cannot support ! for calculations",
+            ),
+            (
+                DatabaseError::UnsupportedBinaryOperator(
+                    LogicalType::Boolean,
+                    BinaryOperator::Plus,
+                ),
+                "unsupported binary operator: Boolean cannot support + for calculations",
+            ),
+            (
+                DatabaseError::ValuesLenMismatch(2, 3),
+                "values length not match, expect 2, got 3",
+            ),
+        ];
+
+        for (err, expected) in cases {
+            assert_eq!(err.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn display_formats_remaining_simple_error_variants() {
+        let cases = [
+            (DatabaseError::ChannelClose, "channel close"),
+            (DatabaseError::ColumnsEmpty, "columns empty"),
+            (
+                DatabaseError::DefaultNotColumnRef,
+                "default cannot be a column related to the table",
+            ),
+            (DatabaseError::DefaultNotExist, "default does not exist"),
+            (DatabaseError::DuplicatePrimaryKey, "duplicate primary key"),
+            (DatabaseError::EmptyPlan, "empty plan"),
+            (DatabaseError::EmptyStatement, "sql statement is empty"),
+            (DatabaseError::EvaluatorNotFound, "evaluator not found"),
+            (DatabaseError::InvalidIndex, "invalid index"),
+            (DatabaseError::InvalidType, "invalid type"),
+            (
+                DatabaseError::NeedNullAbleOrDefault,
+                "add column must be nullable or specify a default value",
+            ),
+            (DatabaseError::NoTransactionBegin, "no transaction begin"),
+            (DatabaseError::OverFlow, "over flow"),
+            (
+                DatabaseError::PrimaryKeyNotFound,
+                "must contain primary key!",
+            ),
+            (
+                DatabaseError::PrimaryKeyTooManyLayers,
+                "primaryKey only allows single or multiple values",
+            ),
+            (
+                DatabaseError::SharedNotAlign,
+                "the number of caches cannot be divisible by the number of shards",
+            ),
+            (DatabaseError::SourceNotFound, "the table or view not found"),
+            (DatabaseError::TableExists, "the table already exists"),
+            (DatabaseError::TableNotFound, "the table not found"),
+            (
+                DatabaseError::TransactionAlreadyExists,
+                "transaction already exists",
+            ),
+            (DatabaseError::TooLong, "too long"),
+            (
+                DatabaseError::UnsupportedStmt("merge".into()),
+                "unsupported statement: merge",
+            ),
+            (DatabaseError::ViewExists, "the view already exists"),
+            (DatabaseError::ViewNotFound, "the view not found"),
+        ];
+
+        for (err, expected) in cases {
+            assert_eq!(err.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn source_returns_inner_errors_for_conversion_variants() {
+        let parse_int: DatabaseError = "not-int".parse::<i32>().unwrap_err().into();
+        let parse_float: DatabaseError = "not-float".parse::<f64>().unwrap_err().into();
+        let parse_bool: DatabaseError = "not-bool".parse::<bool>().unwrap_err().into();
+        let bytes = vec![0xff];
+        let utf8: DatabaseError = std::str::from_utf8(&bytes).unwrap_err().into();
+        let from_utf8: DatabaseError = String::from_utf8(vec![0xff]).unwrap_err().into();
+        let io: DatabaseError = std::io::Error::new(std::io::ErrorKind::Other, "disk").into();
+        let try_from_int: DatabaseError = u8::try_from(300_u16).unwrap_err().into();
+
+        for err in [
+            parse_int,
+            parse_float,
+            parse_bool,
+            utf8,
+            from_utf8,
+            io,
+            try_from_int,
+        ] {
+            assert!(Error::source(&err).is_some(), "{err}");
+        }
+        assert!(Error::source(&DatabaseError::TableNotFound).is_none());
+    }
+
+    #[test]
+    fn display_formats_conversion_error_variants() {
+        let parse_int: DatabaseError = "not-int".parse::<i32>().unwrap_err().into();
+        let parse_float: DatabaseError = "not-float".parse::<f64>().unwrap_err().into();
+        let parse_bool: DatabaseError = "not-bool".parse::<bool>().unwrap_err().into();
+        let bytes = vec![0xff];
+        let utf8: DatabaseError = std::str::from_utf8(&bytes).unwrap_err().into();
+        let from_utf8: DatabaseError = String::from_utf8(vec![0xff]).unwrap_err().into();
+        let io: DatabaseError = std::io::Error::new(std::io::ErrorKind::Other, "disk").into();
+        let try_from_int: DatabaseError = u8::try_from(300_u16).unwrap_err().into();
+
+        assert!(parse_int.to_string().starts_with("parser int:"));
+        assert!(parse_float.to_string().starts_with("parser float:"));
+        assert!(parse_bool.to_string().starts_with("parser bool:"));
+        assert!(utf8.to_string().starts_with("utf8:"));
+        assert!(from_utf8.to_string().starts_with("from utf8:"));
+        assert_eq!(io.to_string(), "io: disk");
+        assert!(try_from_int.to_string().starts_with("try from int:"));
+
+        #[cfg(feature = "copy")]
+        {
+            let mut reader = csv::Reader::from_reader("a\n1,2\n".as_bytes());
+            let csv_err = reader.records().next().unwrap().unwrap_err();
+            let err = DatabaseError::from(csv_err);
+            assert!(err.to_string().starts_with("csv error:"));
+            assert!(Error::source(&err).is_some());
+        }
+
+        #[cfg(feature = "time")]
+        {
+            let err: DatabaseError = chrono::NaiveDate::parse_from_str("not-a-date", "%Y-%m-%d")
+                .unwrap_err()
+                .into();
+            assert!(err.to_string().starts_with("parser date:"));
+            assert!(Error::source(&err).is_some());
+        }
+
+        #[cfg(feature = "parser")]
+        {
+            let dialect = sqlparser::dialect::GenericDialect {};
+            let err: DatabaseError = sqlparser::parser::Parser::parse_sql(&dialect, "select")
+                .unwrap_err()
+                .into();
+            assert!(err.to_string().starts_with("parser sql:"));
+            assert!(Error::source(&err).is_some());
+        }
+
+        #[cfg(feature = "decimal")]
+        {
+            let err: DatabaseError = rust_decimal::Decimal::from_str_exact("not-a-decimal")
+                .unwrap_err()
+                .into();
+            assert!(err.to_string().starts_with("try from decimal:"));
+            assert!(Error::source(&err).is_some());
+        }
+    }
+}
+// GRCOV_EXCL_STOP
