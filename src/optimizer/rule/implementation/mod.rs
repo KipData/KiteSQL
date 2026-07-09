@@ -420,3 +420,337 @@ impl ImplementationRule for ImplementationRuleImpl {
         Ok(())
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use crate::binder::test::build_t1_table;
+    use crate::errors::DatabaseError;
+    use crate::expression::function::table::{
+        ArcTableFunctionImpl, TableFunction, TableFunctionCatalog, TableFunctionImpl,
+    };
+    use crate::function::numbers::Numbers;
+    use crate::optimizer::core::rule::{ImplementationRule, MatchPattern};
+    use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
+    use crate::optimizer::rule::implementation::{
+        ImplementationRuleImpl, ImplementationRuleRootTag,
+    };
+    use crate::planner::operator::function_scan::FunctionScanOperator;
+    use crate::planner::operator::top_k::TopKOperator;
+    use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
+    use crate::planner::{Childrens, LogicalPlan, PlanArena, TableArenaCell};
+    use crate::storage::StatisticsMetaCache;
+    use crate::types::value::DataValue;
+
+    fn find_operator<'a, F>(plan: &'a LogicalPlan, predicate: F) -> Option<&'a Operator>
+    where
+        F: Fn(&Operator) -> bool + Copy,
+    {
+        if predicate(&plan.operator) {
+            return Some(&plan.operator);
+        }
+
+        match plan.childrens.as_ref() {
+            Childrens::Only(child) => find_operator(child, predicate),
+            Childrens::Twins { left, right } => {
+                find_operator(left, predicate).or_else(|| find_operator(right, predicate))
+            }
+            Childrens::None => None,
+        }
+    }
+
+    fn with_operator_from_sql<F, R>(
+        sql: &str,
+        predicate: F,
+        f: impl FnOnce(Operator, &PlanArena) -> Result<R, DatabaseError>,
+    ) -> Result<R, DatabaseError>
+    where
+        F: Fn(&Operator) -> bool + Copy,
+    {
+        let tables = build_t1_table()?;
+        let mut arena = PlanArena::new(&tables.table_arena);
+        let plan = tables.plan_with_arena(sql, &mut arena)?;
+        let operator = find_operator(&plan, predicate).cloned().ok_or_else(|| {
+            DatabaseError::UnsupportedStmt(format!("operator not found for {sql}"))
+        })?;
+        f(operator, &arena)
+    }
+
+    fn best_option(
+        rule: ImplementationRuleImpl,
+        operator: &Operator,
+        arena: &PlanArena,
+    ) -> Result<PhysicalOption, DatabaseError> {
+        assert!((rule.pattern().predicate)(operator));
+
+        let statistics_cache = StatisticsMetaCache::default();
+        let loader = StatisticMetaLoader::new(&statistics_cache);
+        let mut best = None;
+        rule.update_best_option(operator, arena, &loader, &mut best)?;
+
+        Ok(best
+            .expect("implementation rule should produce an option")
+            .0)
+    }
+
+    fn assert_sql_rule(
+        sql: &str,
+        rule: ImplementationRuleImpl,
+        predicate: impl Fn(&Operator) -> bool + Copy,
+        expected_plan: PlanImpl,
+    ) -> Result<(), DatabaseError> {
+        let option = with_operator_from_sql(sql, predicate, |operator, arena| {
+            best_option(rule, &operator, arena)
+        })?;
+
+        assert_eq!(option.plan, expected_plan);
+        Ok(())
+    }
+
+    #[test]
+    fn test_single_mapping_implementations() -> Result<(), DatabaseError> {
+        assert_sql_rule(
+            "select count(c1) from t1",
+            ImplementationRuleImpl::SimpleAggregate,
+            |op| matches!(op, Operator::Aggregate(agg) if agg.groupby_exprs.is_empty()),
+            PlanImpl::SimpleAggregate,
+        )?;
+        assert_sql_rule(
+            "select c1, count(c2) from t1 group by c1",
+            ImplementationRuleImpl::GroupByAggregate,
+            |op| matches!(op, Operator::Aggregate(agg) if !agg.groupby_exprs.is_empty()),
+            PlanImpl::HashAggregate,
+        )?;
+        assert_sql_rule(
+            "select 1",
+            ImplementationRuleImpl::Dummy,
+            |op| matches!(op, Operator::Dummy),
+            PlanImpl::Dummy,
+        )?;
+        assert_sql_rule(
+            "select * from t1 where c1 = 1",
+            ImplementationRuleImpl::Filter,
+            |op| matches!(op, Operator::Filter(_)),
+            PlanImpl::Filter,
+        )?;
+        assert_sql_rule(
+            "select * from t1 limit 1",
+            ImplementationRuleImpl::Limit,
+            |op| matches!(op, Operator::Limit(_)),
+            PlanImpl::Limit,
+        )?;
+        assert_sql_rule(
+            "select * from t1 where exists(select * from t2)",
+            ImplementationRuleImpl::MarkApply,
+            |op| matches!(op, Operator::MarkApply(_)),
+            PlanImpl::MarkApply,
+        )?;
+        assert_sql_rule(
+            "select c1 from t1",
+            ImplementationRuleImpl::Projection,
+            |op| matches!(op, Operator::Project(_)),
+            PlanImpl::Project,
+        )?;
+        assert_sql_rule(
+            "select (select c3 from t2 limit 1) from t1",
+            ImplementationRuleImpl::ScalarApply,
+            |op| matches!(op, Operator::ScalarApply(_)),
+            PlanImpl::ScalarApply,
+        )?;
+        assert_sql_rule(
+            "select (select c3 from t2 limit 1) from t1",
+            ImplementationRuleImpl::ScalarSubquery,
+            |op| matches!(op, Operator::ScalarSubquery(_)),
+            PlanImpl::ScalarSubquery,
+        )?;
+        assert_sql_rule(
+            "values (1, 2)",
+            ImplementationRuleImpl::Values,
+            |op| matches!(op, Operator::Values(_)),
+            PlanImpl::Values,
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_join_sort_topk_and_function_scan_implementations() -> Result<(), DatabaseError> {
+        assert_sql_rule(
+            "select * from t1 join t2 on c1 = c3",
+            ImplementationRuleImpl::HashJoin,
+            |op| matches!(op, Operator::Join(_)),
+            PlanImpl::HashJoin,
+        )?;
+        assert_sql_rule(
+            "select * from t1 cross join t2",
+            ImplementationRuleImpl::HashJoin,
+            |op| matches!(op, Operator::Join(_)),
+            PlanImpl::NestLoopJoin,
+        )?;
+
+        with_operator_from_sql(
+            "select * from t1 order by c1",
+            |op| matches!(op, Operator::Sort(_)),
+            |sort, arena| {
+                let sort_option = best_option(ImplementationRuleImpl::Sort, &sort, arena)?;
+                assert_eq!(sort_option.plan, PlanImpl::Sort);
+                assert!(matches!(
+                    sort_option.sort_option(),
+                    SortOption::OrderBy {
+                        fields,
+                        ignore_prefix_len: 0,
+                    } if fields.len() == 1
+                ));
+
+                let Operator::Sort(sort_op) = sort else {
+                    unreachable!("sort operator expected")
+                };
+                let topk = Operator::TopK(TopKOperator {
+                    sort_fields: sort_op.sort_fields,
+                    limit: 5,
+                    offset: Some(2),
+                });
+                let topk_option = best_option(ImplementationRuleImpl::TopK, &topk, arena)?;
+                assert_eq!(topk_option.plan, PlanImpl::TopK);
+                assert!(matches!(
+                    topk_option.sort_option(),
+                    SortOption::OrderBy {
+                        fields,
+                        ignore_prefix_len: 0,
+                    } if fields.len() == 1
+                ));
+
+                let function_operator = function_scan_operator();
+                let function_option = best_option(
+                    ImplementationRuleImpl::FunctionScan,
+                    &function_operator,
+                    arena,
+                )?;
+                assert_eq!(function_option.plan, PlanImpl::FunctionScan);
+
+                Ok(())
+            },
+        )?;
+
+        Ok(())
+    }
+
+    fn function_scan_operator() -> Operator {
+        let table_arena = TableArenaCell::default();
+        let numbers = Numbers::new();
+        let mut schema = Vec::new();
+        numbers.output_schema_into(table_arena.borrow_mut(), &mut schema);
+        let table_function = TableFunction {
+            args: vec![DataValue::Int32(3).into()],
+            catalog: TableFunctionCatalog {
+                schema,
+                inner: ArcTableFunctionImpl(numbers),
+            },
+        };
+
+        Operator::FunctionScan(FunctionScanOperator { table_function })
+    }
+
+    #[test]
+    fn test_dml_and_ddl_implementations() -> Result<(), DatabaseError> {
+        assert_sql_rule(
+            "analyze table t1",
+            ImplementationRuleImpl::Analyze,
+            |op| matches!(op, Operator::Analyze(_)),
+            PlanImpl::Analyze,
+        )?;
+        assert_sql_rule(
+            "delete from t1 where c1 = 1",
+            ImplementationRuleImpl::Delete,
+            |op| matches!(op, Operator::Delete(_)),
+            PlanImpl::Delete,
+        )?;
+        assert_sql_rule(
+            "insert into t1 values (1, 2)",
+            ImplementationRuleImpl::Insert,
+            |op| matches!(op, Operator::Insert(_)),
+            PlanImpl::Insert,
+        )?;
+        assert_sql_rule(
+            "update t1 set c2 = 3 where c1 = 1",
+            ImplementationRuleImpl::Update,
+            |op| matches!(op, Operator::Update(_)),
+            PlanImpl::Update,
+        )?;
+        #[cfg(feature = "copy")]
+        assert_sql_rule(
+            "copy t1 from 'in.csv'",
+            ImplementationRuleImpl::CopyFromFile,
+            |op| matches!(op, Operator::CopyFromFile(_)),
+            PlanImpl::CopyFromFile,
+        )?;
+        #[cfg(feature = "copy")]
+        assert_sql_rule(
+            "copy t1 to 'out.csv'",
+            ImplementationRuleImpl::CopyToFile,
+            |op| matches!(op, Operator::CopyToFile(_)),
+            PlanImpl::CopyToFile,
+        )?;
+        assert_sql_rule(
+            "alter table t1 add column c5 int null",
+            ImplementationRuleImpl::AddColumn,
+            |op| matches!(op, Operator::AddColumn(_)),
+            PlanImpl::AddColumn,
+        )?;
+        assert_sql_rule(
+            "alter table t1 alter column c2 type bigint",
+            ImplementationRuleImpl::ChangeColumn,
+            |op| matches!(op, Operator::ChangeColumn(_)),
+            PlanImpl::ChangeColumn,
+        )?;
+        assert_sql_rule(
+            "alter table t1 drop column c2",
+            ImplementationRuleImpl::DropColumn,
+            |op| matches!(op, Operator::DropColumn(_)),
+            PlanImpl::DropColumn,
+        )?;
+        assert_sql_rule(
+            "create table t3 (id int primary key)",
+            ImplementationRuleImpl::CreateTable,
+            |op| matches!(op, Operator::CreateTable(_)),
+            PlanImpl::CreateTable,
+        )?;
+        assert_sql_rule(
+            "drop table t1",
+            ImplementationRuleImpl::DropTable,
+            |op| matches!(op, Operator::DropTable(_)),
+            PlanImpl::DropTable,
+        )?;
+        assert_sql_rule(
+            "truncate table t1",
+            ImplementationRuleImpl::Truncate,
+            |op| matches!(op, Operator::Truncate(_)),
+            PlanImpl::Truncate,
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_root_tag_groups_and_unsupported_operator() {
+        assert_eq!(
+            ImplementationRuleImpl::SimpleAggregate.root_tag(),
+            ImplementationRuleRootTag::Aggregate
+        );
+        assert_eq!(
+            ImplementationRuleImpl::GroupByAggregate.root_tag(),
+            ImplementationRuleRootTag::Aggregate
+        );
+        assert_eq!(
+            ImplementationRuleImpl::SeqScan.root_tag(),
+            ImplementationRuleRootTag::TableScan
+        );
+        assert_eq!(
+            ImplementationRuleImpl::IndexScan.root_tag(),
+            ImplementationRuleRootTag::TableScan
+        );
+        assert_eq!(
+            ImplementationRuleRootTag::from_operator(&Operator::ShowTable),
+            None
+        );
+    }
+}

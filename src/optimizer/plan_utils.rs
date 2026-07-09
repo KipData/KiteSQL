@@ -115,3 +115,105 @@ pub fn wrap_child_with(plan: &mut LogicalPlan, child_idx: usize, operator: Opera
 fn take_childrens(plan: &mut LogicalPlan) -> Childrens {
     mem::replace(&mut *plan.childrens, Childrens::None)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn leaf(operator: Operator) -> LogicalPlan {
+        LogicalPlan::new(operator, Childrens::None)
+    }
+
+    #[test]
+    fn child_accessors_cover_all_child_shapes() {
+        let mut none = leaf(Operator::Dummy);
+        assert_eq!(child_count(&none), 0);
+        assert!(only_child(&none).is_none());
+        assert!(only_child_mut(&mut none).is_none());
+        assert!(left_child_mut(&mut none).is_none());
+        assert!(right_child_mut(&mut none).is_none());
+        assert!(child(&none, 0).is_none());
+        assert!(children(&none).is_empty());
+
+        let mut only = LogicalPlan::new(
+            Operator::Dummy,
+            Childrens::Only(Box::new(leaf(Operator::ShowTable))),
+        );
+        assert_eq!(child_count(&only), 1);
+        assert!(matches!(
+            only_child(&only).unwrap().operator,
+            Operator::ShowTable
+        ));
+        assert!(only_child_mut(&mut only).is_some());
+        assert!(left_child_mut(&mut only).is_some());
+        assert!(right_child_mut(&mut only).is_none());
+        assert!(matches!(
+            child(&only, 0).unwrap().operator,
+            Operator::ShowTable
+        ));
+        assert!(child(&only, 1).is_none());
+        assert_eq!(children(&only).len(), 1);
+
+        let mut twins = LogicalPlan::new(
+            Operator::Dummy,
+            Childrens::Twins {
+                left: Box::new(leaf(Operator::ShowTable)),
+                right: Box::new(leaf(Operator::ShowView)),
+            },
+        );
+        assert_eq!(child_count(&twins), 2);
+        assert!(only_child(&twins).is_none());
+        assert!(left_child_mut(&mut twins).is_some());
+        assert!(right_child_mut(&mut twins).is_some());
+        assert!(matches!(
+            child(&twins, 0).unwrap().operator,
+            Operator::ShowTable
+        ));
+        assert!(matches!(
+            child(&twins, 1).unwrap().operator,
+            Operator::ShowView
+        ));
+        assert!(child(&twins, 2).is_none());
+        assert_eq!(children(&twins).len(), 2);
+    }
+
+    #[test]
+    fn replace_and_wrap_child_helpers_update_expected_slots() {
+        let mut only = LogicalPlan::new(
+            Operator::Dummy,
+            Childrens::Only(Box::new(leaf(Operator::ShowTable))),
+        );
+        assert!(replace_with_only_child(&mut only));
+        assert!(matches!(only.operator, Operator::ShowTable));
+        assert!(matches!(only.childrens.as_ref(), Childrens::None));
+        assert!(!replace_with_only_child(&mut only));
+
+        let mut parent = LogicalPlan::new(
+            Operator::Dummy,
+            Childrens::Twins {
+                left: Box::new(LogicalPlan::new(
+                    Operator::ShowView,
+                    Childrens::Only(Box::new(leaf(Operator::ShowTable))),
+                )),
+                right: Box::new(leaf(Operator::Dummy)),
+            },
+        );
+        assert!(replace_child_with_only_child(&mut parent, 0));
+        assert!(matches!(
+            child(&parent, 0).unwrap().operator,
+            Operator::ShowTable
+        ));
+        assert!(!replace_child_with_only_child(&mut parent, 1));
+        assert!(!replace_child_with_only_child(&mut parent, 2));
+
+        assert!(wrap_child_with(&mut parent, 1, Operator::ShowView));
+        let wrapped = child(&parent, 1).unwrap();
+        assert!(matches!(wrapped.operator, Operator::ShowView));
+        assert!(matches!(wrapped.childrens.as_ref(), Childrens::Only(_)));
+        assert!(matches!(
+            only_child(wrapped).unwrap().operator,
+            Operator::Dummy
+        ));
+        assert!(!wrap_child_with(&mut parent, 2, Operator::ShowView));
+    }
+}

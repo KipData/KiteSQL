@@ -177,21 +177,75 @@ impl ReferenceTables {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use crate::serdes::ReferenceTables;
+    use crate::errors::DatabaseError;
+    use crate::serdes::{ReferenceSerialization, ReferenceTables};
+    use crate::storage::rocksdb::RocksTransaction;
+    use std::collections::BTreeMap;
+    use std::fmt::Debug;
     use std::io;
-    use std::io::{Seek, SeekFrom};
+    use std::io::{Cursor, Seek, SeekFrom};
+    use std::marker::PhantomData;
+    use std::path::PathBuf;
+
+    fn round_trip<S>(source: S) -> Result<S, DatabaseError>
+    where
+        S: ReferenceSerialization + PartialEq + Debug,
+    {
+        let mut reference_tables = ReferenceTables::new();
+        let mut arena = crate::planner::TableArena::default();
+        let mut cursor = Cursor::new(Vec::new());
+
+        source.encode(&mut cursor, false, &mut reference_tables, &arena)?;
+        cursor.seek(SeekFrom::Start(0))?;
+
+        S::decode::<RocksTransaction, _, _>(&mut cursor, None, &reference_tables, &mut arena)
+    }
 
     #[test]
     fn test_to_raw() -> io::Result<()> {
         let mut reference_tables = ReferenceTables::new();
+        assert!(reference_tables.is_empty());
         reference_tables.push_or_replace(&"t1".to_string().into());
         reference_tables.push_or_replace(&"t2".to_string().into());
+        assert_eq!(
+            reference_tables.push_or_replace(&"t1".to_string().into()),
+            0
+        );
+        assert_eq!(reference_tables.len(), 2);
+        assert_eq!(reference_tables.get(1).as_ref(), "t2");
 
         let mut cursor = io::Cursor::new(Vec::new());
         reference_tables.to_raw(&mut cursor)?;
 
         cursor.seek(SeekFrom::Start(0))?;
         assert_eq!(reference_tables, ReferenceTables::from_raw(&mut cursor)?);
+
+        reference_tables.clear();
+        assert!(reference_tables.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_round_trip_basic_containers() -> Result<(), DatabaseError> {
+        assert_eq!(round_trip([3u32, 5u32])?, [3u32, 5u32]);
+        assert_eq!(round_trip(PhantomData::<String>)?, PhantomData::<String>);
+        let path = PathBuf::from("kitesql-serde-path.csv");
+        assert_eq!(round_trip(path.clone())?, path);
+
+        let mut source = BTreeMap::new();
+        source.insert("alpha".to_string(), 11i32);
+        source.insert("beta".to_string(), 29i32);
+        assert_eq!(round_trip(source.clone())?, source);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_round_trip_char_uses_existing_two_byte_encoding() -> Result<(), DatabaseError> {
+        assert_eq!(round_trip('a')?, 'a');
+        assert_eq!(round_trip('é')?, 'é');
+        assert!(round_trip('𐍈').is_err());
 
         Ok(())
     }

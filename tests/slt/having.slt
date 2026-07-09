@@ -38,3 +38,25 @@ query II
 select y as b, count(*) as total from test where x > 0 group by b having count(*) > 1 order by b
 ----
 2 2
+
+query I rowsort
+select x from test group by x having substring(cast(x as varchar(10)) from 1 for 1) = '1'
+----
+1
+11
+
+query I
+select x from test group by x having coalesce(x, 0) = 1
+----
+1
+
+query I
+select x from test group by x having case when x = 1 then x else x end = 1
+----
+1
+
+query I rowsort
+select x from test group by x having x between 1 and 10
+----
+1
+2

@@ -17,6 +17,7 @@ use std::collections::HashSet;
 use super::{Binder, QueryBindStep};
 use crate::errors::DatabaseError;
 use crate::expression::function::scala::ScalarFunction;
+use crate::expression::visitor::{walk_expr, Visitor};
 use crate::expression::visitor_mut::{walk_mut_expr, VisitorMut};
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
@@ -321,148 +322,57 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             return Ok(());
         }
 
+        HavingOrderByValidator::new(&self.context.group_by_exprs, &self.context.agg_calls)
+            .visit(expr)
+    }
+}
+
+struct HavingOrderByValidator<'a> {
+    group_by_exprs: &'a [ScalarExpression],
+    agg_calls: &'a [ScalarExpression],
+}
+
+impl<'a> HavingOrderByValidator<'a> {
+    fn new(group_by_exprs: &'a [ScalarExpression], agg_calls: &'a [ScalarExpression]) -> Self {
+        Self {
+            group_by_exprs,
+            agg_calls,
+        }
+    }
+
+    fn agg_miss(expr: &ScalarExpression) -> DatabaseError {
+        DatabaseError::AggMiss(format!(
+            "expression '{expr}' must appear in the GROUP BY clause or be used in an aggregate function"
+        ))
+    }
+}
+
+impl<'expr> Visitor<'expr> for HavingOrderByValidator<'_> {
+    fn visit(&mut self, expr: &'expr ScalarExpression) -> Result<(), DatabaseError> {
         match expr {
             ScalarExpression::AggCall { .. } => {
-                if self.context.group_by_exprs.contains(expr)
-                    || self.context.agg_calls.contains(expr)
-                {
-                    return Ok(());
+                if self.group_by_exprs.contains(expr) || self.agg_calls.contains(expr) {
+                    Ok(())
+                } else {
+                    Err(Self::agg_miss(expr))
                 }
-
-                Err(DatabaseError::AggMiss(format!(
-                    "expression '{expr}' must appear in the GROUP BY clause or be used in an aggregate function"
-                )))
             }
-            ScalarExpression::ColumnRef { .. } | ScalarExpression::Alias { .. } => {
-                if self.context.group_by_exprs.contains(expr) {
-                    return Ok(());
+            ScalarExpression::ColumnRef { .. } => {
+                if self.group_by_exprs.contains(expr) {
+                    Ok(())
+                } else {
+                    Err(Self::agg_miss(expr))
                 }
-                if matches!(expr, ScalarExpression::Alias { .. }) {
-                    return self.validate_having_orderby(expr.unpack_alias_ref());
+            }
+            ScalarExpression::Alias { .. } => {
+                if self.group_by_exprs.contains(expr) {
+                    Ok(())
+                } else {
+                    self.visit(expr.unpack_alias_ref())
                 }
-
-                Err(DatabaseError::AggMiss(format!(
-                    "expression '{expr}' must appear in the GROUP BY clause or be used in an aggregate function"
-                )))
             }
-
-            ScalarExpression::TypeCast { expr, .. } => self.validate_having_orderby(expr),
-            ScalarExpression::IsNull { expr, .. } => self.validate_having_orderby(expr),
-            ScalarExpression::Unary { expr, .. } => self.validate_having_orderby(expr),
-            ScalarExpression::In { expr, args, .. } => {
-                self.validate_having_orderby(expr)?;
-                for arg in args {
-                    self.validate_having_orderby(arg)?;
-                }
-                Ok(())
-            }
-            ScalarExpression::Binary {
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                self.validate_having_orderby(left_expr)?;
-                self.validate_having_orderby(right_expr)?;
-                Ok(())
-            }
-            ScalarExpression::Between {
-                expr,
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                self.validate_having_orderby(expr)?;
-                self.validate_having_orderby(left_expr)?;
-                self.validate_having_orderby(right_expr)?;
-                Ok(())
-            }
-            ScalarExpression::SubString {
-                expr,
-                for_expr,
-                from_expr,
-            } => {
-                self.validate_having_orderby(expr)?;
-                if let Some(expr) = for_expr {
-                    self.validate_having_orderby(expr)?;
-                }
-                if let Some(expr) = from_expr {
-                    self.validate_having_orderby(expr)?;
-                }
-                Ok(())
-            }
-            ScalarExpression::Position { expr, in_expr } => {
-                self.validate_having_orderby(expr)?;
-                self.validate_having_orderby(in_expr)?;
-                Ok(())
-            }
-            ScalarExpression::Trim {
-                expr,
-                trim_what_expr,
-                ..
-            } => {
-                self.validate_having_orderby(expr)?;
-                if let Some(trim_what_expr) = trim_what_expr {
-                    self.validate_having_orderby(trim_what_expr)?;
-                }
-                Ok(())
-            }
-            ScalarExpression::Constant(_) => Ok(()),
-            ScalarExpression::Empty => unreachable!(),
-            ScalarExpression::Tuple(args)
-            | ScalarExpression::ScalaFunction(ScalarFunction { args, .. })
-            | ScalarExpression::Coalesce { exprs: args, .. } => {
-                for expr in args {
-                    self.validate_having_orderby(expr)?;
-                }
-                Ok(())
-            }
-            ScalarExpression::If {
-                condition,
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                self.validate_having_orderby(condition)?;
-                self.validate_having_orderby(left_expr)?;
-                self.validate_having_orderby(right_expr)?;
-
-                Ok(())
-            }
-            ScalarExpression::IfNull {
-                left_expr,
-                right_expr,
-                ..
-            }
-            | ScalarExpression::NullIf {
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                self.validate_having_orderby(left_expr)?;
-                self.validate_having_orderby(right_expr)?;
-
-                Ok(())
-            }
-            ScalarExpression::CaseWhen {
-                operand_expr,
-                expr_pairs,
-                else_expr,
-                ..
-            } => {
-                if let Some(expr) = operand_expr {
-                    self.validate_having_orderby(expr)?;
-                }
-                for (expr_1, expr_2) in expr_pairs {
-                    self.validate_having_orderby(expr_1)?;
-                    self.validate_having_orderby(expr_2)?;
-                }
-                if let Some(expr) = else_expr {
-                    self.validate_having_orderby(expr)?;
-                }
-
-                Ok(())
-            }
-            ScalarExpression::TableFunction(_) => unreachable!(),
+            ScalarExpression::Empty | ScalarExpression::TableFunction(_) => unreachable!(),
+            _ => walk_expr(self, expr),
         }
     }
 }
@@ -538,12 +448,16 @@ impl<'a> VisitorMut<'a> for AggregateOutputBinder<'_, '_> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::AggregateOutputBinder;
+    use crate::binder::test::build_t1_table;
+    use crate::binder::{Binder, BinderContext};
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
     use crate::errors::DatabaseError;
     use crate::expression::agg::AggKind;
     use crate::expression::visitor_mut::VisitorMut;
-    use crate::expression::{AliasType, ScalarExpression};
+    use crate::expression::{AliasType, BinaryOperator, ScalarExpression};
     use crate::planner::PlanArena;
+    use crate::storage::Storage;
+    use crate::types::value::DataValue;
     use crate::types::LogicalType;
 
     fn test_column(arena: &mut PlanArena, name: &str, ty: LogicalType) -> ColumnRef {
@@ -635,6 +549,67 @@ mod tests {
         }
         let expected = ScalarExpression::column_expr(group_output.output_column_ref(&mut arena), 0);
         assert!(target.eq_ignore_colref_pos(&expected, &arena));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_having_orderby_rejects_missing_group_expr() -> Result<(), DatabaseError> {
+        let tables = build_t1_table()?;
+        let scala_functions = Default::default();
+        let table_functions = Default::default();
+        let transaction = tables.storage.transaction()?;
+        let args: [(&'static str, DataValue); 0] = [];
+        let mut binder = Binder::new(
+            BinderContext::new(
+                &tables.table_cache,
+                &tables.view_cache,
+                &transaction,
+                &scala_functions,
+                &table_functions,
+            ),
+            &args,
+            None,
+        );
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let group_column = test_column(&mut arena, "c1", LogicalType::Integer);
+        let missing_column = test_column(&mut arena, "c2", LogicalType::Integer);
+        let group_expr = ScalarExpression::column_expr(group_column, 0);
+        let missing_expr = ScalarExpression::column_expr(missing_column, 1);
+        binder.context.group_by_exprs.push(group_expr.clone());
+
+        binder.validate_having_orderby(&group_expr)?;
+        let group_alias = ScalarExpression::Alias {
+            expr: Box::new(group_expr.clone()),
+            alias: AliasType::Name("group_alias".to_string()),
+        };
+        binder.validate_having_orderby(&group_alias)?;
+
+        assert!(matches!(
+            binder.validate_having_orderby(&missing_expr),
+            Err(DatabaseError::AggMiss(_))
+        ));
+
+        let registered_agg = test_count(missing_expr.clone());
+        binder.context.agg_calls.push(registered_agg.clone());
+        binder.validate_having_orderby(&registered_agg)?;
+        assert!(matches!(
+            binder.validate_having_orderby(&test_count(ScalarExpression::Constant(1_i32.into()))),
+            Err(DatabaseError::AggMiss(_))
+        ));
+
+        let invalid_binary = ScalarExpression::Binary {
+            op: BinaryOperator::Eq,
+            left_expr: Box::new(group_expr),
+            right_expr: Box::new(missing_expr),
+            evaluator: None,
+            ty: LogicalType::Boolean,
+        };
+        assert!(matches!(
+            binder.validate_having_orderby(&invalid_binary),
+            Err(DatabaseError::AggMiss(_))
+        ));
 
         Ok(())
     }

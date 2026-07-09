@@ -22,7 +22,7 @@ use crate::single_mapping;
 use std::sync::LazyLock;
 
 static TRUNCATE_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |op| matches!(op, Operator::DropTable(_)),
+    predicate: |op| matches!(op, Operator::Truncate(_)),
     children: PatternChildrenPredicate::None,
 });
 

@@ -14,7 +14,7 @@ CODECOV_OUTPUT ?= lcov.info
 COVERAGE_PROFILE_DIR ?= target/grcov/profraw
 COVERAGE_HTML_DIR ?= target/grcov/html
 COVERAGE_RUSTFLAGS ?= -Cinstrument-coverage
-COVERAGE_TEST_FEATURES ?= decimal,orm
+COVERAGE_TEST_FEATURES ?= copy,decimal,orm
 COVERAGE_REPORT_ARGS ?= --llvm --ignore-not-existing --keep-only 'src/**' --ignore 'src/**/tests/**' --ignore 'tests/**' --ignore 'tpcc/**' --excl-start 'GRCOV_EXCL_START' --excl-stop 'GRCOV_EXCL_STOP'
 
 .PHONY: test test-python test-wasm test-slt test-all codecov codecov-html wasm-build check tpcc tpcc-kitesql-rocksdb tpcc-kitesql-lmdb tpcc-lmdb-flamegraph tpcc-lmdb-heaptrack tpcc-sqlite tpcc-sqlite-practical tpcc-sqlite-balanced tpcc-dual cargo-check build wasm-examples native-examples fmt clippy

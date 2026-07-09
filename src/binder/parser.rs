@@ -2840,3 +2840,229 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
         Ok(self.build_statement(arena).statement(stmt)?.finish())
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::binder::test::build_t1_table;
+    use crate::binder::BinderContext;
+    use crate::db::DataBaseBuilder;
+    use crate::errors::SqlErrorSpan;
+    use crate::storage::Storage;
+    use sqlparser::tokenizer::Location;
+
+    fn assert_unsupported(err: DatabaseError, expected: &str) {
+        let DatabaseError::UnsupportedStmt(message) = err else {
+            panic!("expected unsupported statement, got {err:?}");
+        };
+        assert!(message.contains(expected), "{message}");
+    }
+
+    fn expect_err<T>(result: Result<T, DatabaseError>) -> DatabaseError {
+        match result {
+            Ok(_) => panic!("expected error"),
+            Err(err) => err,
+        }
+    }
+
+    #[test]
+    fn test_prepare_and_command_type_classification() -> Result<(), DatabaseError> {
+        assert!(matches!(
+            prepare_all(""),
+            Err(DatabaseError::EmptyStatement)
+        ));
+        assert_eq!(command_type(&prepare("select 1")?)?, CommandType::DQL);
+        assert_eq!(
+            command_type(&prepare("create table t (id int primary key)")?)?,
+            CommandType::DDL
+        );
+        assert_eq!(
+            command_type(&prepare("analyze table t")?)?,
+            CommandType::Analyze
+        );
+        assert_eq!(
+            command_type(&prepare("insert into t values (1)")?)?,
+            CommandType::DML
+        );
+        assert_eq!(
+            command_type(&prepare("update t set id = 1")?)?,
+            CommandType::DML
+        );
+        assert_eq!(command_type(&prepare("delete from t")?)?, CommandType::DML);
+        assert_eq!(
+            command_type(&prepare("truncate table t")?)?,
+            CommandType::DML
+        );
+
+        let err = command_type(&prepare("start transaction")?).unwrap_err();
+        assert_unsupported(err, "START TRANSACTION");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_database_entrypoints_reject_catalog_mutation() -> Result<(), DatabaseError> {
+        let mut database = DataBaseBuilder::path(".").build_in_memory()?;
+        let params = &[] as &[(&'static str, DataValue)];
+
+        let ddl = prepare("create table t (id int primary key)")?;
+        assert_unsupported(
+            expect_err(database.execute(&ddl, params)),
+            "DDL and ANALYZE",
+        );
+        assert_unsupported(
+            expect_err(database.run("create table t (id int primary key)")),
+            "DDL and ANALYZE",
+        );
+        assert_unsupported(expect_err(database.ddl("select 1")), "`Database::ddl`");
+
+        let analyze = prepare("analyze table t")?;
+        let mut transaction = database.new_transaction()?;
+        assert_unsupported(
+            expect_err(transaction.execute(&analyze, params)),
+            "not allowed to execute within a transaction",
+        );
+        transaction.commit()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_attach_span_if_absent() {
+        let span = Span::new(Location::new(3, 5), Location::new(3, 5));
+        let err = attach_span_if_absent(DatabaseError::invalid_column("bad"), span);
+        assert_eq!(
+            err.sql_error_span(),
+            Some(&SqlErrorSpan {
+                start: 5,
+                end: 6,
+                line: 3,
+                highlight: None,
+            })
+        );
+
+        let existing = SqlErrorSpan {
+            start: 1,
+            end: 2,
+            line: 1,
+            highlight: None,
+        };
+        let err = attach_span_if_absent(
+            DatabaseError::invalid_column("bad").with_span(existing.clone()),
+            Span::new(Location::new(4, 8), Location::new(4, 9)),
+        );
+        assert_eq!(err.sql_error_span(), Some(&existing));
+
+        let err = attach_span_if_absent(DatabaseError::invalid_column("bad"), Span::empty());
+        assert_eq!(err.sql_error_span(), None);
+    }
+
+    #[test]
+    fn test_alter_table_parser_errors() -> Result<(), DatabaseError> {
+        let tables = build_t1_table()?;
+
+        assert_unsupported(
+            tables
+                .plan("alter table t1 add column c5 int null, add column c6 int null")
+                .unwrap_err(),
+            "only a single ALTER TABLE operation",
+        );
+        assert_unsupported(
+            tables
+                .plan("alter table t1 drop column c1, drop column c2")
+                .unwrap_err(),
+            "only a single ALTER TABLE operation",
+        );
+
+        let mut stmt = prepare("alter table t1 drop column c1")?;
+        let Statement::AlterTable(alter) = &mut stmt else {
+            unreachable!("expected alter table statement")
+        };
+        alter.operations = vec![AlterTableOperation::DropColumn {
+            has_column_keyword: true,
+            column_names: vec![Ident::new("c1"), Ident::new("c2")],
+            if_exists: false,
+            drop_behavior: None,
+        }];
+        let scala_functions = Default::default();
+        let table_functions = Default::default();
+        let transaction = tables.storage.transaction()?;
+        let mut binder = Binder::new(
+            BinderContext::new(
+                &tables.table_cache,
+                &tables.view_cache,
+                &transaction,
+                &scala_functions,
+                &table_functions,
+            ),
+            &[],
+            None,
+        );
+        let mut arena = PlanArena::new(&tables.table_arena);
+        assert_unsupported(
+            binder.bind(&stmt, &mut arena).unwrap_err(),
+            "only dropping a single column",
+        );
+
+        assert!(matches!(
+            tables
+                .plan("alter table t1 rename column c1 to \"bad-name\"")
+                .unwrap_err(),
+            DatabaseError::InvalidColumn { .. }
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_limit_parser_rejects_negative_and_non_constant_values() -> Result<(), DatabaseError> {
+        let tables = build_t1_table()?;
+
+        assert!(matches!(
+            tables.plan("select * from t1 limit -1").unwrap_err(),
+            DatabaseError::InvalidColumn { .. }
+        ));
+        assert!(matches!(
+            tables.plan("select * from t1 limit 1.5").unwrap_err(),
+            DatabaseError::InvalidType
+        ));
+        assert!(matches!(
+            tables.plan("select * from t1 limit c1").unwrap_err(),
+            DatabaseError::InvalidColumn { .. }
+        ));
+
+        Ok(())
+    }
+
+    #[cfg(feature = "copy")]
+    #[test]
+    fn test_copy_file_format_options() -> Result<(), DatabaseError> {
+        let format = copy_file_format(vec![
+            CopyOption::Delimiter('|'),
+            CopyOption::Header(true),
+            CopyOption::Quote('\''),
+            CopyOption::Escape('\\'),
+        ])?;
+        assert_eq!(
+            format,
+            FileFormat::Csv {
+                delimiter: '|',
+                quote: '\'',
+                escape: Some('\\'),
+                header: true,
+            }
+        );
+
+        let source = copy_ext_source(
+            CopyTarget::File {
+                filename: "in.csv".to_string(),
+            },
+            vec![],
+        )?;
+        assert_eq!(source.path, std::path::PathBuf::from("in.csv"));
+        assert!(copy_ext_source(CopyTarget::Stdout, vec![]).is_err());
+        assert!(copy_file_format(vec![CopyOption::Null("NULL".to_string())]).is_err());
+
+        Ok(())
+    }
+}

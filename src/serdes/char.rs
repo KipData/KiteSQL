@@ -25,6 +25,12 @@ impl ReferenceSerialization for char {
         _: &mut ReferenceTables,
         _: &A,
     ) -> Result<(), DatabaseError> {
+        if self.len_utf8() > 2 {
+            return Err(DatabaseError::InvalidValue(format!(
+                "char `{self}` cannot be serialized in two bytes"
+            )));
+        }
+
         let mut buf = [0u8; 2];
         self.encode_utf8(&mut buf);
 
@@ -40,7 +46,6 @@ impl ReferenceSerialization for char {
         let mut buf = [0u8; 2];
         reader.read_exact(&mut buf)?;
 
-        // SAFETY
         Ok(std::str::from_utf8(&buf)?.chars().next().unwrap())
     }
 }
