@@ -398,6 +398,7 @@ fn read_char_length_units<R: Read>(reader: &mut R) -> Result<CharLengthUnits, Da
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod test {
+    use super::{TAG_BOOLEAN, TAG_INT64, TAG_TIME64, TAG_TUPLE, TAG_UTF8};
     use crate::errors::DatabaseError;
     use crate::serdes::{ReferenceSerialization, ReferenceTables};
     use crate::storage::rocksdb::RocksTransaction;
@@ -407,6 +408,14 @@ pub(crate) mod test {
     #[cfg(feature = "decimal")]
     use rust_decimal::Decimal;
     use std::io::{Cursor, Seek, SeekFrom};
+
+    fn assert_invalid_value(bytes: &[u8], expected: &str) {
+        let err = DataValue::decode_reference_value(&mut Cursor::new(bytes)).unwrap_err();
+        assert!(
+            err.to_string().contains(expected),
+            "unexpected error: {err}"
+        );
+    }
 
     #[test]
     fn test_serialization() -> Result<(), DatabaseError> {
@@ -462,6 +471,80 @@ pub(crate) mod test {
             )?;
             assert_eq!(source, decoded);
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_tags_and_truncated_values_are_rejected() {
+        assert_invalid_value(&[u8::MAX], "invalid data value tag");
+        assert_invalid_value(&[TAG_BOOLEAN, 2], "invalid bool value");
+        assert_invalid_value(&[TAG_INT64, 1], "failed to fill whole buffer");
+
+        let mut utf8 = vec![TAG_UTF8];
+        utf8.extend(0u32.to_le_bytes());
+        utf8.extend([0, 2]);
+        assert_invalid_value(&utf8, "invalid option tag");
+
+        let mut utf8 = vec![TAG_UTF8];
+        utf8.extend(0u32.to_le_bytes());
+        utf8.push(2);
+        assert_invalid_value(&utf8, "invalid utf8 type tag");
+
+        let mut utf8 = vec![TAG_UTF8];
+        utf8.extend(0u32.to_le_bytes());
+        utf8.extend([0, 0, 2]);
+        assert_invalid_value(&utf8, "invalid char length units tag");
+
+        let mut time64 = vec![TAG_TIME64];
+        time64.extend(0i64.to_le_bytes());
+        time64.extend(0u64.to_le_bytes());
+        time64.push(2);
+        assert_invalid_value(&time64, "invalid bool value");
+
+        let mut tuple = vec![TAG_TUPLE];
+        tuple.extend(0u32.to_le_bytes());
+        tuple.push(2);
+        assert_invalid_value(&tuple, "invalid bool value");
+    }
+
+    #[test]
+    fn utf8_type_reference_serialization_validates_tags() -> Result<(), DatabaseError> {
+        let values = [
+            Utf8Type::Variable(None),
+            Utf8Type::Variable(Some(32)),
+            Utf8Type::Fixed(8),
+        ];
+        let mut tables = ReferenceTables::new();
+        let mut arena = crate::planner::TableArena::default();
+
+        for (index, value) in values.into_iter().enumerate() {
+            let mut bytes = Vec::new();
+            value.encode(&mut bytes, false, &mut tables, &arena)?;
+            let decoded = Utf8Type::decode::<RocksTransaction, _, _>(
+                &mut Cursor::new(bytes),
+                None,
+                &tables,
+                &mut arena,
+            )?;
+            assert!(matches!(
+                (index, decoded),
+                (0, Utf8Type::Variable(None))
+                    | (1, Utf8Type::Variable(Some(32)))
+                    | (2, Utf8Type::Fixed(8))
+            ));
+        }
+
+        let result = Utf8Type::decode::<RocksTransaction, _, _>(
+            &mut Cursor::new([2]),
+            None,
+            &tables,
+            &mut arena,
+        );
+        let Err(err) = result else {
+            panic!("invalid tag should fail")
+        };
+        assert!(err.to_string().contains("invalid utf8 type tag"));
 
         Ok(())
     }

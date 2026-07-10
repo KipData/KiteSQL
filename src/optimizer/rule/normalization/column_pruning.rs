@@ -1066,4 +1066,60 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_column_pruning_keeps_join_filter_columns_on_both_sides() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table()?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let best_plan = optimize_column_pruning(
+            &table_state,
+            &mut arena,
+            "select c1 from t1 join t2 on c1 = c3 and c2 > c4",
+        )?;
+
+        assert_single_scan_columns(&best_plan, "t1", &arena, &["c1", "c2"]);
+        assert_single_scan_columns(&best_plan, "t2", &arena, &["c3", "c4"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_column_pruning_keeps_mark_apply_predicate_columns() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table()?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let best_plan = optimize_column_pruning(
+            &table_state,
+            &mut arena,
+            "select c1 from t1 where c2 in (select c4 from t2)",
+        )?;
+
+        assert!(contains_operator(&best_plan, |op| matches!(
+            op,
+            Operator::MarkApply(_)
+        )));
+        assert_single_scan_columns(&best_plan, "t1", &arena, &["c1", "c2"]);
+        assert_single_scan_columns(&best_plan, "t2", &arena, &["c4"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_column_pruning_preserves_union_input_mapping() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table()?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let best_plan = optimize_column_pruning(
+            &table_state,
+            &mut arena,
+            "select c1 from t1 union all select c3 from t2",
+        )?;
+
+        assert!(contains_operator(&best_plan, |op| matches!(
+            op,
+            Operator::Union(_)
+        )));
+        assert_single_scan_columns(&best_plan, "t1", &arena, &["c1"]);
+        assert_single_scan_columns(&best_plan, "t2", &arena, &["c3"]);
+
+        Ok(())
+    }
 }

@@ -401,9 +401,27 @@ impl<K> ReferenceSerialization for CountMinSketch<K> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::expression::range_detacher::Range;
-    use crate::optimizer::core::cm_sketch::CountMinSketch;
+    use crate::optimizer::core::cm_sketch::{
+        CountMinSketch, CountMinSketchMeta, CountMinSketchPage,
+    };
+    use crate::planner::TableArena;
+    use crate::serdes::{ReferenceSerialization, ReferenceTables};
+    use crate::storage::rocksdb::RocksTransaction;
     use crate::types::value::DataValue;
     use std::collections::Bound;
+    use std::io::Cursor;
+
+    fn assert_invalid_storage_parts(
+        meta: CountMinSketchMeta,
+        pages: Vec<CountMinSketchPage>,
+        expected: &str,
+    ) {
+        let err = CountMinSketch::<DataValue>::from_storage_parts(meta, pages).unwrap_err();
+        assert!(
+            err.to_string().contains(expected),
+            "unexpected error: {err}"
+        );
+    }
 
     #[test]
     fn test_increment() {
@@ -471,5 +489,86 @@ mod tests {
             cms.estimate(&DataValue::Int32(9)),
             rebuilt.estimate(&DataValue::Int32(9))
         );
+    }
+
+    #[test]
+    fn test_storage_parts_validate_metadata_and_page_layout() {
+        let cms = CountMinSketch::<DataValue>::with_relative_error(0.95, 0.5).unwrap();
+        let (meta, pages) = cms.into_storage_parts(2);
+        let pages = pages.collect::<Vec<_>>();
+
+        for invalid_meta in [
+            CountMinSketchMeta {
+                width: 0,
+                ..meta.clone()
+            },
+            CountMinSketchMeta {
+                k_num: 0,
+                ..meta.clone()
+            },
+            CountMinSketchMeta {
+                page_len: 0,
+                ..meta.clone()
+            },
+        ] {
+            assert_invalid_storage_parts(invalid_meta, pages.clone(), "storage meta is invalid");
+        }
+        assert_invalid_storage_parts(
+            CountMinSketchMeta {
+                width: 3,
+                ..meta.clone()
+            },
+            pages.clone(),
+            "width must be a power of two",
+        );
+
+        let mut invalid_pages = pages.clone();
+        invalid_pages[0].row_idx = meta.k_num;
+        assert_invalid_storage_parts(meta.clone(), invalid_pages, "row index out of bounds");
+
+        let mut invalid_pages = pages.clone();
+        invalid_pages[0].page_idx = 1;
+        assert_invalid_storage_parts(meta.clone(), invalid_pages, "page sequence is invalid");
+
+        let mut invalid_pages = pages.clone();
+        invalid_pages[0].counters.push(0);
+        assert_invalid_storage_parts(meta.clone(), invalid_pages, "page is too large");
+
+        assert_invalid_storage_parts(
+            meta,
+            pages[..pages.len() - 1].to_vec(),
+            "row width mismatch",
+        );
+    }
+
+    #[test]
+    fn test_configuration_clear_and_reference_serialization() {
+        for probability in [-0.1, 1.0, f64::NAN] {
+            assert!(CountMinSketch::<u64>::with_relative_error(probability, 0.1).is_err());
+        }
+        for relative_error in [0.0, -0.1, f64::NAN, f64::MIN_POSITIVE] {
+            assert!(CountMinSketch::<u64>::with_relative_error(0.95, relative_error).is_err());
+        }
+
+        let mut cms = CountMinSketch::<u64>::with_relative_error(0.95, 0.1).unwrap();
+        cms.add(&7, usize::MAX);
+        cms.add(&7, 1);
+        assert_eq!(cms.estimate(&7), usize::MAX);
+        cms.clear();
+        assert_eq!(cms.estimate(&7), 0);
+
+        cms.add(&7, 23);
+        let mut bytes = Vec::new();
+        let mut tables = ReferenceTables::new();
+        let mut arena = TableArena::default();
+        cms.encode(&mut bytes, false, &mut tables, &arena).unwrap();
+        let decoded = CountMinSketch::<u64>::decode::<RocksTransaction, _, _>(
+            &mut Cursor::new(bytes),
+            None,
+            &tables,
+            &mut arena,
+        )
+        .unwrap();
+        assert_eq!(decoded.estimate(&7), 23);
     }
 }

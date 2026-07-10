@@ -2354,4 +2354,83 @@ mod test {
         );
         Ok(())
     }
+
+    #[test]
+    fn test_range_merge_preserves_open_closed_boundaries() {
+        let gt_one = Range::Scope {
+            min: Bound::Excluded(DataValue::Int32(1)),
+            max: Bound::Unbounded,
+        };
+        assert_eq!(
+            RangeDetacher::merge_binary(
+                BinaryOperator::Or,
+                gt_one.clone(),
+                Range::Eq(DataValue::Int32(1)),
+            ),
+            Some(Range::Scope {
+                min: Bound::Included(DataValue::Int32(1)),
+                max: Bound::Unbounded,
+            })
+        );
+        assert_eq!(
+            RangeDetacher::merge_binary(
+                BinaryOperator::And,
+                gt_one,
+                Range::Eq(DataValue::Int32(1)),
+            ),
+            Some(Range::Dummy)
+        );
+
+        let disjoint = RangeDetacher::merge_binary(
+            BinaryOperator::Or,
+            Range::Scope {
+                min: Bound::Included(DataValue::Int32(1)),
+                max: Bound::Included(DataValue::Int32(2)),
+            },
+            Range::Scope {
+                min: Bound::Included(DataValue::Int32(4)),
+                max: Bound::Included(DataValue::Int32(5)),
+            },
+        );
+        assert_eq!(
+            disjoint,
+            Some(Range::SortedRanges(vec![
+                Range::Scope {
+                    min: Bound::Included(DataValue::Int32(1)),
+                    max: Bound::Included(DataValue::Int32(2)),
+                },
+                Range::Scope {
+                    min: Bound::Included(DataValue::Int32(4)),
+                    max: Bound::Included(DataValue::Int32(5)),
+                },
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_combining_eqs_builds_tuple_ranges_and_rejects_non_eq_prefixes() {
+        let suffix = Range::Scope {
+            min: Bound::Included(DataValue::Int32(10)),
+            max: Bound::Excluded(DataValue::Int32(20)),
+        };
+        let prefixes = [
+            Range::Eq(DataValue::Int32(1)),
+            Range::SortedRanges(vec![
+                Range::Eq(DataValue::Int32(2)),
+                Range::Eq(DataValue::Int32(3)),
+            ]),
+        ];
+        let combined = suffix.combining_eqs(&prefixes).unwrap();
+        assert!(matches!(combined, Range::SortedRanges(ref ranges) if ranges.len() == 2));
+        assert!(prefixes[0].only_eq());
+        assert!(prefixes[1].only_eq());
+
+        assert!(suffix
+            .combining_eqs(&[Range::Scope {
+                min: Bound::Unbounded,
+                max: Bound::Unbounded,
+            }])
+            .is_none());
+        assert!(!suffix.only_eq());
+    }
 }
