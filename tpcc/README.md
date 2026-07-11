@@ -46,12 +46,12 @@ Local stable-run 720-second comparison on the machine above:
 
 | Backend | TpmC | New-Order p90 | Payment p90 | Order-Status p90 | Delivery p90 | Stock-Level p90 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| KiteSQL LMDB | 71345 | 0.001s | 0.001s | 0.001s | 0.002s | 0.001s |
-| KiteSQL RocksDB | 40563 | 0.001s | 0.001s | 0.002s | 0.009s | 0.001s |
-| SQLite balanced | 67527 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
-| SQLite practical | 64774 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
+| KiteSQL LMDB | 82871 | 0.001s | 0.001s | 0.001s | 0.002s | 0.001s |
+| KiteSQL RocksDB | 40960 | 0.001s | 0.001s | 0.001s | 0.011s | 0.001s |
+| SQLite balanced | 51637 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
+| SQLite practical | 61424 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
 
-- All rows are from `./scripts/run_tpcc_stable.py --build` at `2026-06-23_00-50-48`.
+- The KiteSQL rows are from `2026-07-11_17-20-24`; the SQLite rows are from `2026-07-11_20-25-01`.
 - The stable-run gates were `temp<=65.0C`, `cpu<=20.0%`, `min_cooldown=300s`, `stable_samples=3`, and `sample_interval=10.0s`.
 - All rows use `--num-ware 1`, `--max-retry 5`, and TPCC's default 720-second measure time.
 - SQLite rows use the `balanced` and `practical` profiles respectively.
@@ -62,11 +62,11 @@ Transaction Summary (elapsed 720.0s)
 +--------------+---------+------+---------+-------+
 | Transaction  | Success | Late | Failure | Total |
 +--------------+---------+------+---------+-------+
-| New-Order    |  856143 |    0 |    8829 | 864972 |
-| Payment      |  856120 |    0 |       0 | 856120 |
-| Order-Status |   85612 |    0 |       0 | 85612 |
-| Delivery     |   85612 |    0 |       0 | 85612 |
-| Stock-Level  |   85612 |    0 |       0 | 85612 |
+| New-Order    |  994454 |    0 |   10137 | 1004591 |
+| Payment      |  994430 |    0 |       0 | 994430 |
+| Order-Status |   99443 |    0 |       0 | 99443 |
+| Delivery     |   99443 |    0 |       0 | 99443 |
+| Stock-Level  |   99443 |    0 |       0 | 99443 |
 +--------------+---------+------+---------+-------+
 <Constraint Check> (all must be [OK])
 [transaction percentage]
@@ -86,35 +86,42 @@ Transaction Summary (elapsed 720.0s)
 
 1.New-Order
 
-0.001, 856143
+0.001, 994388
+0.002,     64
+0.003,      1
+0.004,      1
 
 2.Payment
 
-0.001, 856120
+0.001, 994428
+0.002,      2
 
 3.Order-Status
 
-0.001,  83223
-0.002,   2103
-0.003,    286
+0.001,  96207
+0.002,   2704
+0.003,    532
 
 4.Delivery
 
-0.002,  85606
-0.003,      6
+0.001,  89134
+0.002,  10294
+0.003,     12
+0.004,      2
+0.005,      1
 
 5.Stock-Level
 
-0.001,  85612
+0.001,  99443
 
 <90th Percentile RT (MaxRT)>
-   New-Order : 0.001  (0.001)
-     Payment : 0.001  (0.000)
-Order-Status : 0.001  (0.002)
-    Delivery : 0.002  (0.002)
- Stock-Level : 0.001  (0.000)
+   New-Order : 0.001  (0.003)
+     Payment : 0.001  (0.001)
+Order-Status : 0.001  (0.003)
+    Delivery : 0.002  (0.004)
+ Stock-Level : 0.001  (0.001)
 <TpmC>
-71345 Tpmc
+82871 Tpmc
 ```
 
 ### KiteSQL RocksDB
@@ -123,11 +130,11 @@ Transaction Summary (elapsed 720.0s)
 +--------------+---------+------+---------+-------+
 | Transaction  | Success | Late | Failure | Total |
 +--------------+---------+------+---------+-------+
-| New-Order    |  486763 |    0 |    5029 | 491792 |
-| Payment      |  486739 |    0 |       0 | 486739 |
-| Order-Status |   48674 |    0 |       0 | 48674 |
-| Delivery     |   48674 |    0 |       0 | 48674 |
-| Stock-Level  |   48674 |    0 |       0 | 48674 |
+| New-Order    |  491520 |    0 |    4973 | 496493 |
+| Payment      |  491493 |    0 |       0 | 491493 |
+| Order-Status |   49150 |    0 |       0 | 49150 |
+| Delivery     |   49150 |    0 |       0 | 49150 |
+| Stock-Level  |   49149 |    0 |       0 | 49149 |
 +--------------+---------+------+---------+-------+
 <Constraint Check> (all must be [OK])
 [transaction percentage]
@@ -147,53 +154,58 @@ Transaction Summary (elapsed 720.0s)
 
 1.New-Order
 
-0.001, 486709
-0.002,     54
+0.001, 491385
+0.002,    131
+0.003,      4
 
 2.Payment
 
-0.001, 486736
-0.002,      2
+0.001, 491475
+0.002,     15
+0.003,      1
 
 3.Order-Status
 
-0.001,  43202
-0.002,   4215
-0.003,    717
-0.004,    395
-0.005,    137
-0.006,      7
-0.007,      1
+0.001,  44281
+0.002,   3740
+0.003,    721
+0.004,    320
+0.005,     80
 
 4.Delivery
 
-0.002,   3572
-0.003,   8048
-0.004,   7083
-0.005,   4455
-0.006,   5238
-0.007,   6637
-0.008,   6138
-0.009,   4702
-0.010,   2626
-0.011,    164
-0.012,      4
-0.013,      3
-0.014,      3
-0.022,      1
+0.002,   5008
+0.003,   6120
+0.004,   5573
+0.005,   2405
+0.006,   4233
+0.007,   4778
+0.008,   5329
+0.009,   5870
+0.010,   4851
+0.011,   3188
+0.012,   1585
+0.013,    191
+0.014,      4
+0.015,      2
+0.016,      5
+0.017,      2
+0.018,      4
+0.019,      1
+0.020,      1
 
 5.Stock-Level
 
-0.001,  48674
+0.001,  49149
 
 <90th Percentile RT (MaxRT)>
-   New-Order : 0.001  (0.001)
+   New-Order : 0.001  (0.003)
      Payment : 0.001  (0.007)
-Order-Status : 0.002  (0.007)
-    Delivery : 0.009  (0.022)
+Order-Status : 0.001  (0.008)
+    Delivery : 0.011  (0.019)
  Stock-Level : 0.001  (0.001)
 <TpmC>
-40563 Tpmc
+40960 Tpmc
 ```
 
 ### SQLite balanced
@@ -202,11 +214,11 @@ Transaction Summary (elapsed 720.0s)
 +--------------+---------+------+---------+-------+
 | Transaction  | Success | Late | Failure | Total |
 +--------------+---------+------+---------+-------+
-| New-Order    |  810343 |    0 |    8322 | 818665 |
-| Payment      |  810320 |    0 |       0 | 810320 |
-| Order-Status |   81032 |    0 |       0 | 81032 |
-| Delivery     |   81032 |    0 |       0 | 81032 |
-| Stock-Level  |   81032 |    0 |       0 | 81032 |
+| New-Order    |  619643 |    0 |    6299 | 625942 |
+| Payment      |  619618 |    0 |       0 | 619618 |
+| Order-Status |   61961 |    0 |       0 | 61961 |
+| Delivery     |   61962 |    0 |       0 | 61962 |
+| Stock-Level  |   61962 |    0 |       0 | 61962 |
 +--------------+---------+------+---------+-------+
 <Constraint Check> (all must be [OK])
 [transaction percentage]
@@ -226,33 +238,34 @@ Transaction Summary (elapsed 720.0s)
 
 1.New-Order
 
-0.001, 810329
-0.002,     14
+0.001, 619561
+0.002,     82
 
 2.Payment
 
-0.001, 810320
+0.001, 619618
 
 3.Order-Status
 
-0.001,  81032
+0.001,  61961
 
 4.Delivery
 
-0.001,  81032
+0.001,  61956
+0.002,      6
 
 5.Stock-Level
 
-0.001,  81032
+0.001,  61962
 
 <90th Percentile RT (MaxRT)>
    New-Order : 0.001  (0.001)
-     Payment : 0.001  (0.000)
+     Payment : 0.001  (0.001)
 Order-Status : 0.001  (0.000)
     Delivery : 0.001  (0.001)
  Stock-Level : 0.001  (0.000)
 <TpmC>
-67527 Tpmc
+51637 Tpmc
 ```
 
 ### SQLite practical
@@ -261,11 +274,11 @@ Transaction Summary (elapsed 720.0s)
 +--------------+---------+------+---------+-------+
 | Transaction  | Success | Late | Failure | Total |
 +--------------+---------+------+---------+-------+
-| New-Order    |  777304 |    0 |    8128 | 785432 |
-| Payment      |  777280 |    0 |       0 | 777280 |
-| Order-Status |   77728 |    0 |       0 | 77728 |
-| Delivery     |   77728 |    0 |       0 | 77728 |
-| Stock-Level  |   77728 |    0 |       0 | 77728 |
+| New-Order    |  737086 |    0 |    7349 | 744435 |
+| Payment      |  737064 |    0 |       0 | 737064 |
+| Order-Status |   73706 |    0 |       0 | 73706 |
+| Delivery     |   73706 |    0 |       0 | 73706 |
+| Stock-Level  |   73706 |    0 |       0 | 73706 |
 +--------------+---------+------+---------+-------+
 <Constraint Check> (all must be [OK])
 [transaction percentage]
@@ -285,33 +298,33 @@ Transaction Summary (elapsed 720.0s)
 
 1.New-Order
 
-0.001, 777302
-0.002,      2
+0.001, 737069
+0.002,     17
 
 2.Payment
 
-0.001, 777280
+0.001, 737064
 
 3.Order-Status
 
-0.001,  77728
+0.001,  73706
 
 4.Delivery
 
-0.001,  77728
+0.001,  73706
 
 5.Stock-Level
 
-0.001,  77728
+0.001,  73706
 
 <90th Percentile RT (MaxRT)>
    New-Order : 0.001  (0.001)
-     Payment : 0.001  (0.000)
+     Payment : 0.001  (0.001)
 Order-Status : 0.001  (0.000)
     Delivery : 0.001  (0.001)
  Stock-Level : 0.001  (0.000)
 <TpmC>
-64774 Tpmc
+61424 Tpmc
 ```
 
 ## Refer to

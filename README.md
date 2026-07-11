@@ -203,12 +203,13 @@ Recent stable-run 720-second local comparison on the machine above:
 
 | Backend | TpmC | New-Order p90 | Payment p90 | Order-Status p90 | Delivery p90 | Stock-Level p90 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| KiteSQL LMDB | 71345 | 0.001s | 0.001s | 0.001s | 0.002s | 0.001s |
-| KiteSQL RocksDB | 40563 | 0.001s | 0.001s | 0.002s | 0.009s | 0.001s |
-| SQLite balanced | 67527 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
-| SQLite practical | 64774 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
+| KiteSQL LMDB | 82871 | 0.001s | 0.001s | 0.001s | 0.002s | 0.001s |
+| KiteSQL RocksDB | 40960 | 0.001s | 0.001s | 0.001s | 0.011s | 0.001s |
+| SQLite balanced | 51637 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
+| SQLite practical | 61424 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
 
-These rows are from `./scripts/run_tpcc_stable.py --build` at `2026-06-23_00-50-48`; the detailed raw outputs are recorded in [tpcc/README.md](tpcc/README.md).
+These rows are from the stable runs on `2026-07-11`; the detailed raw outputs are recorded in [tpcc/README.md](tpcc/README.md).
+
 #### 👉[check more](tpcc/README.md)
 
 ## Roadmap
