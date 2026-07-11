@@ -231,6 +231,7 @@ fn run_tpcc<B: BackendControl>(
                 failure[i] += 1;
                 last_error = Some(err);
             } else {
+                tx.commit()?;
                 let rt = transaction_start.elapsed();
                 rt_hist.hist_inc(i, rt);
                 is_succeed = true;
@@ -240,7 +241,6 @@ fn run_tpcc<B: BackendControl>(
                 } else {
                     late[i] += 1;
                 }
-                tx.commit()?;
                 break;
             }
         }
@@ -294,7 +294,6 @@ fn run_tpcc<B: BackendControl>(
     print_constraint_checks(&success, &late);
     print_response_checks(&success, &late);
     println!();
-    rt_hist.finalize();
     rt_hist.hist_report();
     println!("<TpmC>");
     let tpmc = ((success[0] + late[0]) as f64 / (actual_tpcc_time.as_secs_f64() / 60.0)).round();
@@ -705,7 +704,7 @@ fn print_checkpoint(
     checkpoint_idx: usize,
     round: usize,
     test_name: &str,
-    p90: f64,
+    p90_us: u64,
     success: &[usize],
     late: &[usize],
     failure: &[usize],
@@ -721,7 +720,7 @@ fn print_checkpoint(
     };
 
     progress.println(format!(
-        "[CP {checkpoint_idx:>3} | round {round:>6} | {test_name} p90={p90:.3}s | \
+        "[CP {checkpoint_idx:>3} | round {round:>6} | {test_name} p90={p90_us}us | \
 est TpmC {:>6.0} | total fail {:>6}]",
         est_tpmc, total_failure
     ));

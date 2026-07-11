@@ -311,15 +311,14 @@ def extract_tpmc(log_text: str) -> str:
 
 
 def extract_p90(log_text: str, label: str) -> str:
-    marker = "<90th Percentile RT (MaxRT)>"
+    marker = "<90th Percentile RT in us (MaxRT)>"
     if marker not in log_text:
         return "-"
     block = log_text.split(marker, 1)[1]
     for line in block.splitlines():
-        if label not in line:
-            continue
-        parts = line.split()
-        return parts[2] if len(parts) >= 3 else "-"
+        columns = [column.strip() for column in line.strip().strip("|").split("|")]
+        if len(columns) == 3 and columns[0] == label:
+            return columns[1]
     return "-"
 
 
@@ -443,7 +442,7 @@ def write_summary_header(args: argparse.Namespace, summary_file: Path) -> None:
                     f"sample_interval={args.sample_interval_sec}s"
                 ),
                 "",
-                "| Variant | Status | Attempts | Measure Time | TpmC | New-Order p90 | Payment p90 | Order-Status p90 | Delivery p90 | Stock-Level p90 | Notes | Raw Log |",
+                "| Variant | Status | Attempts | Measure Time | TpmC | New-Order p90 (us) | Payment p90 (us) | Order-Status p90 (us) | Delivery p90 (us) | Stock-Level p90 (us) | Notes | Raw Log |",
                 "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
             ]
         )
