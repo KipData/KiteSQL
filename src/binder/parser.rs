@@ -25,7 +25,7 @@ use crate::db::{BindSource, DBTransaction, Database, DatabaseIter, TransactionIt
 use crate::errors::{DatabaseError, SqlErrorSpan};
 use crate::expression;
 use crate::expression::simplify::ConstantCalculator;
-use crate::expression::visitor_mut::VisitorMut;
+use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::expression::{AliasType, ScalarExpression};
 use crate::iter_ext::Itertools;
 use crate::parser::parse_sql;
@@ -338,7 +338,7 @@ struct UpdateExprTargetRemapper<'a, 'p> {
     arena: &'a PlanArena<'p>,
 }
 
-impl VisitorMut<'_> for UpdateExprTargetRemapper<'_, '_> {
+impl ExprVisitorMut<'_> for UpdateExprTargetRemapper<'_, '_> {
     fn visit_column_ref(
         &mut self,
         column: &mut ColumnRef,
@@ -669,7 +669,7 @@ where
     ) -> Result<ScalarExpression, DatabaseError> {
         let mut expr = self.binder.bind_expr(&expr, self.arena)?;
 
-        if expr.any_referenced_column(self.arena, |_, _| true) {
+        if expr.any_referenced_column(self.arena, |_, _| true)? {
             return Err(DatabaseError::UnsupportedStmt(
                 "column is not allowed to exist in default".to_string(),
             ));
@@ -783,7 +783,7 @@ where
                 ColumnOption::Default(expr) => {
                     let mut expr = self.binder.bind_expr(&expr, self.arena)?;
 
-                    if expr.any_referenced_column(self.arena, |_, _| true) {
+                    if expr.any_referenced_column(self.arena, |_, _| true)? {
                         return Err(DatabaseError::UnsupportedStmt(
                             "column is not allowed to exist in `default`".to_string(),
                         ));

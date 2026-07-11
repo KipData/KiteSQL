@@ -23,7 +23,7 @@ use crate::types::evaluator::{BinaryEvaluatorRef, CastEvaluatorRef, UnaryEvaluat
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 
-pub trait Visitor<'a>: Sized {
+pub trait ExprVisitor<'a>: Sized {
     fn visit(&mut self, expr: &'a ScalarExpression) -> Result<(), DatabaseError> {
         walk_expr(self, expr)
     }
@@ -265,7 +265,7 @@ pub trait Visitor<'a>: Sized {
     }
 }
 
-pub fn walk_expr<'a, V: Visitor<'a>>(
+pub fn walk_expr<'a, V: ExprVisitor<'a>>(
     visitor: &mut V,
     expr: &'a ScalarExpression,
 ) -> Result<(), DatabaseError> {

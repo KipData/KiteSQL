@@ -14,7 +14,7 @@
 
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
-use crate::expression::visitor_mut::{walk_mut_expr, VisitorMut};
+use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut};
 use crate::expression::{BinaryOperator, ScalarExpression, UnaryOperator};
 use crate::planner::PlanArena;
 use crate::types::evaluator::{binary_create, unary_create};
@@ -55,7 +55,7 @@ impl<'a, 'p> ConstantCalculator<'a, 'p> {
     }
 }
 
-impl VisitorMut<'_> for ConstantCalculator<'_, '_> {
+impl ExprVisitorMut<'_> for ConstantCalculator<'_, '_> {
     fn visit(&mut self, expr: &'_ mut ScalarExpression) -> Result<(), DatabaseError> {
         match expr {
             ScalarExpression::Unary {
@@ -122,7 +122,7 @@ pub struct Simplify {
     replaces: Vec<Replace>,
 }
 
-impl VisitorMut<'_> for Simplify {
+impl ExprVisitorMut<'_> for Simplify {
     fn visit(&mut self, expr: &'_ mut ScalarExpression) -> Result<(), DatabaseError> {
         match expr {
             ScalarExpression::Unary {

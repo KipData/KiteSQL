@@ -464,7 +464,7 @@ impl<S: Storage> State<S> {
         Ok(())
     }
 
-    fn recycle_table_arena(&mut self) {
+    fn recycle_table_arena(&mut self) -> Result<(), DatabaseError> {
         let mut live_columns = HashSet::new();
         {
             let mut live = |column: &crate::catalog::ColumnRef| {
@@ -479,7 +479,7 @@ impl<S: Storage> State<S> {
 
             let table_arena = self.table_arena.borrow_mut();
             for view in self.view_cache.values() {
-                view.visit_column_refs(table_arena, &mut live);
+                view.visit_column_refs(table_arena, &mut live)?;
             }
 
             for function in self.table_functions.values() {
@@ -491,6 +491,7 @@ impl<S: Storage> State<S> {
         self.table_arena
             .borrow_mut()
             .recycle_unreferenced_positions(live_columns);
+        Ok(())
     }
 
     pub(crate) fn build_plan<'a, 'txn, A: AsRef<[(&'static str, DataValue)]>, F>(
@@ -762,7 +763,7 @@ impl<S: Storage> Database<S> {
                 .map_err(|err| err.with_sql_context(context))?;
         }
         if catalog_changed {
-            unsafe { (&mut *state).recycle_table_arena() };
+            unsafe { (&mut *state).recycle_table_arena() }?;
         }
         Ok(())
     }
@@ -783,7 +784,7 @@ impl<S: Storage> Database<S> {
             }
             CatalogKind::TableFunction(function) => {
                 self.state.load_table_function(function)?;
-                self.state.recycle_table_arena();
+                self.state.recycle_table_arena()?;
                 Ok(())
             }
             CatalogKind::Table(name) => {
@@ -808,7 +809,7 @@ impl<S: Storage> Database<S> {
                     }
                 }
                 self.state.table_cache.insert(name, table);
-                self.state.recycle_table_arena();
+                self.state.recycle_table_arena()?;
                 Ok(())
             }
             CatalogKind::View(name) => {
@@ -825,7 +826,7 @@ impl<S: Storage> Database<S> {
                     )?
                     .ok_or(DatabaseError::ViewNotFound)?;
                 self.state.view_cache.insert(name, view);
-                self.state.recycle_table_arena();
+                self.state.recycle_table_arena()?;
                 Ok(())
             }
         }
@@ -1581,7 +1582,7 @@ pub(crate) mod test {
         filter.visit_referenced_columns(&mut source_plan_arena, &mut |_, column| {
             referenced_columns.push(*column);
             true
-        });
+        })?;
         assert_eq!(referenced_columns.len(), 1);
         assert_eq!(source_plan_arena.column(referenced_columns[0]).name(), "y");
 

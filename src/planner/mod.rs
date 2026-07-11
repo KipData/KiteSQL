@@ -16,6 +16,7 @@ mod arena;
 pub mod operator;
 
 use crate::catalog::TableName;
+use crate::errors::DatabaseError;
 use crate::planner::operator::set_membership::SetMembershipOperator;
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::values::ValuesOperator;
@@ -128,7 +129,11 @@ impl LogicalPlan {
         tables
     }
 
-    pub(crate) fn visit_column_refs<A, F>(&self, arena: &mut A, f: &mut F)
+    pub(crate) fn visit_column_refs<A, F>(
+        &self,
+        arena: &mut A,
+        f: &mut F,
+    ) -> Result<(), DatabaseError>
     where
         A: MetaArena,
         F: FnMut(&crate::catalog::ColumnRef) + ?Sized,
@@ -137,10 +142,11 @@ impl LogicalPlan {
             .visit_referenced_columns(arena, &mut |_, column| {
                 f(column);
                 true
-            });
+            })?;
         for child in self.childrens.iter() {
-            child.visit_column_refs(arena, f);
+            child.visit_column_refs(arena, f)?;
         }
+        Ok(())
     }
 
     pub fn output_schema<'plan>(

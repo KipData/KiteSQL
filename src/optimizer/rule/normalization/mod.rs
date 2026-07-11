@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::expression::visitor_mut::{walk_mut_expr, VisitorMut};
+use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut};
 use crate::expression::{AliasType, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::rule::normalization::column_pruning::ColumnPruning;
@@ -250,7 +250,7 @@ struct PositionRemapper<'a> {
     removed_positions: &'a [usize],
 }
 
-impl<'a> VisitorMut<'a> for PositionRemapper<'_> {
+impl<'a> ExprVisitorMut<'a> for PositionRemapper<'_> {
     fn visit(&mut self, expr: &'a mut ScalarExpression) -> Result<(), DatabaseError> {
         match expr {
             ScalarExpression::ColumnRef { position, .. } => {

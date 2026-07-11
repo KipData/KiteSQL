@@ -17,8 +17,8 @@ use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
 use crate::errors::DatabaseError;
 use crate::expression::function::scala::ScalarFunction;
 use crate::expression::function::table::TableFunction;
-use crate::expression::visitor::{walk_expr, Visitor};
-use crate::expression::visitor_mut::VisitorMut;
+use crate::expression::visitor::{walk_expr, ExprVisitor};
+use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::iter_ext::Itertools;
 use crate::planner::operator::sort::SortField;
 use crate::planner::{MetaArena, PlanArena};
@@ -277,7 +277,7 @@ pub struct BindEvaluator<'a, 'p> {
     pub(crate) arena: &'a PlanArena<'p>,
 }
 
-impl VisitorMut<'_> for BindEvaluator<'_, '_> {
+impl ExprVisitorMut<'_> for BindEvaluator<'_, '_> {
     fn visit_type_cast(
         &mut self,
         expr: &'_ mut ScalarExpression,
@@ -361,7 +361,7 @@ pub struct HasCountStar {
     pub value: bool,
 }
 
-impl Visitor<'_> for HasCountStar {
+impl ExprVisitor<'_> for HasCountStar {
     fn visit_agg(
         &mut self,
         _distinct: bool,
@@ -529,14 +529,14 @@ impl ScalarExpression {
         &self,
         arena: &mut A,
         f: &mut impl FnMut(&mut A, &ColumnRef) -> bool,
-    ) -> bool {
+    ) -> Result<bool, DatabaseError> {
         struct ColumnRefVisitor<'a, A, F> {
             f: &'a mut F,
             keep_going: bool,
             arena: &'a mut A,
         }
 
-        impl<A, F> Visitor<'_> for ColumnRefVisitor<'_, A, F>
+        impl<A, F> ExprVisitor<'_> for ColumnRefVisitor<'_, A, F>
         where
             A: MetaArena,
             F: FnMut(&mut A, &ColumnRef) -> bool,
@@ -559,22 +559,22 @@ impl ScalarExpression {
             keep_going: true,
             arena,
         };
-        visitor.visit(self).unwrap();
-        visitor.keep_going
+        visitor.visit(self)?;
+        Ok(visitor.keep_going)
     }
 
     pub fn any_referenced_column(
         &self,
         arena: &PlanArena,
         mut predicate: impl FnMut(&PlanArena, &ColumnRef) -> bool,
-    ) -> bool {
+    ) -> Result<bool, DatabaseError> {
         struct ColumnRefVisitor<'a, 'p, F> {
             f: &'a mut F,
             any: bool,
             arena: &'a PlanArena<'p>,
         }
 
-        impl<F: FnMut(&PlanArena, &ColumnRef) -> bool> Visitor<'_> for ColumnRefVisitor<'_, '_, F> {
+        impl<F: FnMut(&PlanArena, &ColumnRef) -> bool> ExprVisitor<'_> for ColumnRefVisitor<'_, '_, F> {
             fn visit(&mut self, expr: &ScalarExpression) -> Result<(), DatabaseError> {
                 if !self.any {
                     walk_expr(self, expr)?;
@@ -593,22 +593,22 @@ impl ScalarExpression {
             any: false,
             arena,
         };
-        visitor.visit(self).unwrap();
-        visitor.any
+        visitor.visit(self)?;
+        Ok(visitor.any)
     }
 
     pub fn all_referenced_columns(
         &self,
         arena: &PlanArena,
         mut predicate: impl FnMut(&PlanArena, &ColumnRef) -> bool,
-    ) -> bool {
+    ) -> Result<bool, DatabaseError> {
         struct ColumnRefVisitor<'a, 'p, F> {
             f: &'a mut F,
             all: bool,
             arena: &'a PlanArena<'p>,
         }
 
-        impl<F: FnMut(&PlanArena, &ColumnRef) -> bool> Visitor<'_> for ColumnRefVisitor<'_, '_, F> {
+        impl<F: FnMut(&PlanArena, &ColumnRef) -> bool> ExprVisitor<'_> for ColumnRefVisitor<'_, '_, F> {
             fn visit(&mut self, expr: &ScalarExpression) -> Result<(), DatabaseError> {
                 if self.all {
                     walk_expr(self, expr)?;
@@ -627,16 +627,16 @@ impl ScalarExpression {
             all: true,
             arena,
         };
-        visitor.visit(self).unwrap();
-        visitor.all
+        visitor.visit(self)?;
+        Ok(visitor.all)
     }
 
-    pub fn has_table_ref_column(&self, arena: &PlanArena) -> bool {
+    pub fn has_table_ref_column(&self, arena: &PlanArena) -> Result<bool, DatabaseError> {
         struct TableRefChecker<'arena, 'table> {
             found: bool,
             arena: &'arena PlanArena<'table>,
         }
-        impl Visitor<'_> for TableRefChecker<'_, '_> {
+        impl ExprVisitor<'_> for TableRefChecker<'_, '_> {
             fn visit_column_ref(&mut self, col: &ColumnRef) -> Result<(), DatabaseError> {
                 let col = self.arena.column(*col);
                 if col.table_name().is_some() && col.id().is_some() {
@@ -649,15 +649,15 @@ impl ScalarExpression {
             found: false,
             arena,
         };
-        checker.visit(self).unwrap();
-        checker.found
+        checker.visit(self)?;
+        Ok(checker.found)
     }
 
-    pub fn has_agg_call(&self) -> bool {
+    pub fn has_agg_call(&self) -> Result<bool, DatabaseError> {
         struct AggCallChecker {
             has_agg: bool,
         }
-        impl<'a> Visitor<'a> for AggCallChecker {
+        impl<'a> ExprVisitor<'a> for AggCallChecker {
             fn visit(&mut self, expr: &'a ScalarExpression) -> Result<(), DatabaseError> {
                 if self.has_agg {
                     return Ok(());
@@ -679,8 +679,8 @@ impl ScalarExpression {
             }
         }
         let mut checker = AggCallChecker { has_agg: false };
-        checker.visit(self).unwrap();
-        checker.has_agg
+        checker.visit(self)?;
+        Ok(checker.has_agg)
     }
 
     fn output_name_by<N: fmt::Display>(&self, fn_display: &impl Fn(ColumnRef) -> N) -> String {

@@ -14,9 +14,8 @@
 
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::{DetachedPredicate, Range, RangeDetacher};
-use crate::expression::visitor_mut::{PositionShift, VisitorMut};
+use crate::expression::visitor_mut::{ExprVisitorMut, PositionShift};
 use crate::expression::{BinaryOperator, ScalarExpression};
-use crate::iter_ext::Itertools;
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{replace_with_only_child, wrap_child_with};
 use crate::planner::operator::filter::FilterOperator;
@@ -30,25 +29,79 @@ use std::ops::Bound;
 use std::{borrow::Cow, mem, slice};
 
 const EMPTY_SCHEMA: [crate::catalog::ColumnRef; 0] = [];
+type ClassifiedJoinFilters = (
+    Option<ScalarExpression>,
+    Option<ScalarExpression>,
+    Option<ScalarExpression>,
+    usize,
+);
 
-fn split_conjunctive_predicates(expr: &ScalarExpression) -> Vec<ScalarExpression> {
+fn split_conjunctive_predicates(
+    expr: &ScalarExpression,
+    f: &mut impl FnMut(ScalarExpression) -> Result<(), DatabaseError>,
+) -> Result<(), DatabaseError> {
     match expr {
         ScalarExpression::Binary {
             op: BinaryOperator::And,
             left_expr,
             right_expr,
             ..
-        } => split_conjunctive_predicates(left_expr)
-            .into_iter()
-            .chain(split_conjunctive_predicates(right_expr))
-            .collect_vec(),
-        _ => vec![expr.clone()],
+        } => {
+            split_conjunctive_predicates(left_expr, f)?;
+            split_conjunctive_predicates(right_expr, f)
+        }
+        _ => f(expr.clone()),
     }
+}
+
+fn classify_join_filters(
+    predicate: &ScalarExpression,
+    childrens: &mut Childrens,
+    arena: &mut crate::planner::PlanArena,
+) -> Result<ClassifiedJoinFilters, DatabaseError> {
+    let (left_columns, right_columns): (
+        &[crate::catalog::ColumnRef],
+        &[crate::catalog::ColumnRef],
+    ) = match childrens {
+        Childrens::Only(left) => (left.output_schema(arena), &EMPTY_SCHEMA),
+        Childrens::Twins { left, right } => (left.output_schema(arena), right.output_schema(arena)),
+        Childrens::None => (&EMPTY_SCHEMA, &EMPTY_SCHEMA),
+    };
+    let left_len = left_columns.len();
+    let append_filter = |slot: &mut Option<ScalarExpression>, expr| {
+        *slot = Some(match slot.take() {
+            Some(current) => ScalarExpression::Binary {
+                op: BinaryOperator::And,
+                left_expr: Box::new(current),
+                right_expr: Box::new(expr),
+                evaluator: None,
+                ty: LogicalType::Boolean,
+            },
+            None => expr,
+        });
+    };
+    let mut left_filter = None;
+    let mut right_filter = None;
+    let mut common_filter = None;
+    split_conjunctive_predicates(predicate, &mut |expr| {
+        if expr.all_referenced_columns(arena, |_, column| left_columns.contains(column))? {
+            append_filter(&mut left_filter, expr);
+        } else if expr.all_referenced_columns(arena, |_, column| right_columns.contains(column))? {
+            append_filter(&mut right_filter, expr);
+        } else {
+            append_filter(&mut common_filter, expr);
+        }
+        Ok(())
+    })?;
+    Ok((left_filter, right_filter, common_filter, left_len))
 }
 
 /// reduce filters into a filter, and then build a new LogicalFilter node with input child.
 /// if filters is empty, return the input child.
-fn reduce_filters(filters: Vec<ScalarExpression>, having: bool) -> Option<FilterOperator> {
+fn reduce_filters(
+    filters: impl IntoIterator<Item = ScalarExpression>,
+    having: bool,
+) -> Option<FilterOperator> {
     filters
         .into_iter()
         .reduce(|a, b| ScalarExpression::Binary {
@@ -63,23 +116,6 @@ fn reduce_filters(filters: Vec<ScalarExpression>, having: bool) -> Option<Filter
             is_optimized: false,
             having,
         })
-}
-
-fn localize_right_filters(
-    filters: &mut [ScalarExpression],
-    left_len: usize,
-) -> Result<(), DatabaseError> {
-    if filters.is_empty() {
-        return Ok(());
-    }
-
-    let mut localizer = PositionShift {
-        delta: -(left_len as isize),
-    };
-    for expr in filters {
-        localizer.visit(expr)?;
-    }
-    Ok(())
 }
 
 /// Comments copied from Spark Catalyst PushPredicateThroughJoin
@@ -128,65 +164,55 @@ impl NormalizationRule for PushPredicateThroughJoin {
                 return Ok(false);
             }
 
-            let filter_exprs = split_conjunctive_predicates(&filter_op.predicate);
-            let left_columns: &[crate::catalog::ColumnRef] = match join_plan.childrens.as_mut() {
-                Childrens::Only(left) => left.output_schema(arena),
-                Childrens::Twins { left, .. } => left.output_schema(arena),
-                Childrens::None => &EMPTY_SCHEMA,
-            };
-            let (left_filters, rest): (Vec<_>, Vec<_>) = filter_exprs.into_iter().partition(|f| {
-                f.all_referenced_columns(arena, |_, column| left_columns.contains(column))
-            });
-            let left_len = left_columns.len();
-
-            let right_columns: &[crate::catalog::ColumnRef] = match join_plan.childrens.as_mut() {
-                Childrens::Twins { right, .. } => right.output_schema(arena),
-                _ => &EMPTY_SCHEMA,
-            };
-            let (right_filters, common_filters): (Vec<_>, Vec<_>) =
-                rest.into_iter().partition(|f| {
-                    f.all_referenced_columns(arena, |_, column| right_columns.contains(column))
-                });
+            let (left_filter, mut right_filter, common_filter, left_len) =
+                classify_join_filters(&filter_op.predicate, join_plan.childrens.as_mut(), arena)?;
 
             let mut new_ops = (None, None, None);
-            let replace_filters = match join_type {
+            match join_type {
                 JoinType::Inner => {
-                    if let Some(left_filter_op) = reduce_filters(left_filters, filter_op.having) {
+                    if let Some(left_filter_op) = reduce_filters(left_filter, filter_op.having) {
                         new_ops.0 = Some(Operator::Filter(left_filter_op));
                     }
 
-                    let mut right_filters = right_filters;
-                    localize_right_filters(&mut right_filters, left_len)?;
-                    if let Some(right_filter_op) = reduce_filters(right_filters, filter_op.having) {
+                    if let Some(expr) = &mut right_filter {
+                        PositionShift {
+                            delta: -(left_len as isize),
+                        }
+                        .visit(expr)?;
+                    }
+                    if let Some(right_filter_op) = reduce_filters(right_filter, filter_op.having) {
                         new_ops.1 = Some(Operator::Filter(right_filter_op));
                     }
-
-                    common_filters
+                    new_ops.2 =
+                        reduce_filters(common_filter, filter_op.having).map(Operator::Filter);
                 }
                 JoinType::LeftOuter => {
-                    if let Some(left_filter_op) = reduce_filters(left_filters, filter_op.having) {
+                    if let Some(left_filter_op) = reduce_filters(left_filter, filter_op.having) {
                         new_ops.0 = Some(Operator::Filter(left_filter_op));
                     }
-
-                    common_filters
-                        .into_iter()
-                        .chain(right_filters)
-                        .collect_vec()
+                    new_ops.2 = reduce_filters(
+                        common_filter.into_iter().chain(right_filter),
+                        filter_op.having,
+                    )
+                    .map(Operator::Filter);
                 }
                 JoinType::RightOuter => {
-                    let mut right_filters = right_filters;
-                    localize_right_filters(&mut right_filters, left_len)?;
-                    if let Some(right_filter_op) = reduce_filters(right_filters, filter_op.having) {
+                    if let Some(expr) = &mut right_filter {
+                        PositionShift {
+                            delta: -(left_len as isize),
+                        }
+                        .visit(expr)?;
+                    }
+                    if let Some(right_filter_op) = reduce_filters(right_filter, filter_op.having) {
                         new_ops.1 = Some(Operator::Filter(right_filter_op));
                     }
-
-                    common_filters.into_iter().chain(left_filters).collect_vec()
+                    new_ops.2 = reduce_filters(
+                        common_filter.into_iter().chain(left_filter),
+                        filter_op.having,
+                    )
+                    .map(Operator::Filter);
                 }
-                _ => vec![],
-            };
-
-            if let Some(replace_filter_op) = reduce_filters(replace_filters, filter_op.having) {
-                new_ops.2 = Some(Operator::Filter(replace_filter_op));
+                _ => {}
             }
 
             if let Some(left_op) = new_ops.0 {
@@ -427,25 +453,8 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
             (join_op.join_type, filter_expr)
         };
 
-        let filter_exprs = split_conjunctive_predicates(&filter_expr);
-        let left_columns: &[crate::catalog::ColumnRef] = match plan.childrens.as_mut() {
-            Childrens::Only(left) => left.output_schema(arena),
-            Childrens::Twins { left, .. } => left.output_schema(arena),
-            Childrens::None => &EMPTY_SCHEMA,
-        };
-        let (left_filters, rest): (Vec<_>, Vec<_>) = filter_exprs.into_iter().partition(|expr| {
-            expr.all_referenced_columns(arena, |_, column| left_columns.contains(column))
-        });
-        let left_len = left_columns.len();
-
-        let right_columns: &[crate::catalog::ColumnRef] = match plan.childrens.as_mut() {
-            Childrens::Twins { right, .. } => right.output_schema(arena),
-            _ => &EMPTY_SCHEMA,
-        };
-        let (right_filters, common_filters): (Vec<_>, Vec<_>) =
-            rest.into_iter().partition(|expr| {
-                expr.all_referenced_columns(arena, |_, column| right_columns.contains(column))
-            });
+        let (left_filter, mut right_filter, common_filter, left_len) =
+            classify_join_filters(&filter_expr, plan.childrens.as_mut(), arena)?;
 
         let (push_left, push_right) = match join_type {
             JoinType::Inner => (true, true),
@@ -455,30 +464,29 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
         };
 
         let mut new_ops = (None, None);
-        let mut remaining_filters = common_filters;
-
-        let (left_push, left_remain) = if push_left {
-            (left_filters, Vec::new())
+        let left_remain = if push_left {
+            if let Some(filter_op) = reduce_filters(left_filter, false) {
+                new_ops.0 = Some(Operator::Filter(filter_op));
+            }
+            None
         } else {
-            (Vec::new(), left_filters)
+            left_filter
         };
-        if let Some(filter_op) = reduce_filters(left_push, false) {
-            new_ops.0 = Some(Operator::Filter(filter_op));
-        } else {
-            remaining_filters.extend(left_remain);
-        }
 
-        let (mut right_push, right_remain) = if push_right {
-            (right_filters, Vec::new())
+        let right_remain = if push_right {
+            if let Some(expr) = &mut right_filter {
+                PositionShift {
+                    delta: -(left_len as isize),
+                }
+                .visit(expr)?;
+            }
+            if let Some(filter_op) = reduce_filters(right_filter, false) {
+                new_ops.1 = Some(Operator::Filter(filter_op));
+            }
+            None
         } else {
-            (Vec::new(), right_filters)
+            right_filter
         };
-        localize_right_filters(&mut right_push, left_len)?;
-        if let Some(filter_op) = reduce_filters(right_push, false) {
-            new_ops.1 = Some(Operator::Filter(filter_op));
-        } else {
-            remaining_filters.extend(right_remain);
-        }
 
         let mut applied = false;
         if let Some(left_op) = new_ops.0 {
@@ -488,7 +496,14 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
             applied |= wrap_child_with(plan, 1, right_op);
         }
 
-        let mut join_filter = reduce_filters(remaining_filters, false).map(|op| op.predicate);
+        let mut join_filter = reduce_filters(
+            common_filter
+                .into_iter()
+                .chain(left_remain)
+                .chain(right_remain),
+            false,
+        )
+        .map(|op| op.predicate);
         let filter_changed = match &join_filter {
             Some(expr) => expr != &filter_expr,
             None => true,

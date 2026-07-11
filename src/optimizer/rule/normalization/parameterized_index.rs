@@ -39,7 +39,7 @@ impl NormalizationRule for ParameterizeMarkApply {
                     left.output_schema(arena),
                     right.output_schema(arena),
                     arena,
-                );
+                )?;
                 let new_probe = probe.and_then(|(right_column, left_expr)| {
                     parameterize_right_subtree(right, &right_column, arena).then_some(left_expr)
                 });
@@ -60,17 +60,26 @@ fn find_parameterized_probe(
     left_schema: &Schema,
     right_schema: &Schema,
     arena: &crate::planner::PlanArena,
-) -> Option<(ColumnRef, ScalarExpression)> {
+) -> Result<Option<(ColumnRef, ScalarExpression)>, DatabaseError> {
     match kind {
-        MarkApplyKind::Exists => predicates.iter().find_map(|predicate| {
-            extract_parameterized_probe(predicate, left_schema, right_schema, arena)
-        }),
-        MarkApplyKind::Quantified(MarkApplyQuantifier::Any) => {
-            predicates.first().and_then(|predicate| {
-                extract_parameterized_probe(predicate, left_schema, right_schema, arena)
-            })
+        MarkApplyKind::Exists => {
+            for predicate in predicates {
+                if let Some(probe) =
+                    extract_parameterized_probe(predicate, left_schema, right_schema, arena)?
+                {
+                    return Ok(Some(probe));
+                }
+            }
+            Ok(None)
         }
-        MarkApplyKind::Quantified(MarkApplyQuantifier::All) => None,
+        MarkApplyKind::Quantified(MarkApplyQuantifier::Any) => {
+            if let Some(predicate) = predicates.first() {
+                extract_parameterized_probe(predicate, left_schema, right_schema, arena)
+            } else {
+                Ok(None)
+            }
+        }
+        MarkApplyKind::Quantified(MarkApplyQuantifier::All) => Ok(None),
     }
 }
 
@@ -79,21 +88,23 @@ fn extract_parameterized_probe(
     left_schema: &Schema,
     right_schema: &Schema,
     arena: &crate::planner::PlanArena,
-) -> Option<(ColumnRef, ScalarExpression)> {
+) -> Result<Option<(ColumnRef, ScalarExpression)>, DatabaseError> {
     match predicate.unpack_alias_ref() {
         ScalarExpression::Binary {
             op: BinaryOperator::Eq,
             left_expr,
             right_expr,
             ..
-        } => extract_parameterized_probe_side(
-            left_expr,
-            right_expr,
-            left_schema,
-            right_schema,
-            arena,
-        )
-        .or_else(|| {
+        } => {
+            if let Some(probe) = extract_parameterized_probe_side(
+                left_expr,
+                right_expr,
+                left_schema,
+                right_schema,
+                arena,
+            )? {
+                return Ok(Some(probe));
+            }
             extract_parameterized_probe_side(
                 right_expr,
                 left_expr,
@@ -101,8 +112,8 @@ fn extract_parameterized_probe(
                 right_schema,
                 arena,
             )
-        }),
-        _ => None,
+        }
+        _ => Ok(None),
     }
 }
 
@@ -112,24 +123,26 @@ fn extract_parameterized_probe_side(
     left_schema: &Schema,
     right_schema: &Schema,
     arena: &crate::planner::PlanArena,
-) -> Option<(ColumnRef, ScalarExpression)> {
-    let (right_column, _) = right_expr.unpack_alias_ref().unpack_bound_col(false)?;
+) -> Result<Option<(ColumnRef, ScalarExpression)>, DatabaseError> {
+    let Some((right_column, _)) = right_expr.unpack_alias_ref().unpack_bound_col(false) else {
+        return Ok(None);
+    };
 
     if !schema_contains_column(right_schema, &right_column, arena) {
-        return None;
+        return Ok(None);
     }
     if !left_expr.all_referenced_columns(arena, |arena, candidate| {
         schema_contains_column(left_schema, candidate, arena)
-    }) {
-        return None;
+    })? {
+        return Ok(None);
     }
     if left_expr.any_referenced_column(arena, |arena, candidate| {
         schema_contains_column(right_schema, candidate, arena)
-    }) {
-        return None;
+    })? {
+        return Ok(None);
     }
 
-    Some((right_column, left_expr.clone()))
+    Ok(Some((right_column, left_expr.clone())))
 }
 
 fn parameterize_right_subtree(

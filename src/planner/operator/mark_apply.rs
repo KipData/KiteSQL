@@ -35,9 +35,9 @@ pub enum MarkApplyKind {
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct MarkApplyOperator {
     pub kind: MarkApplyKind,
-    predicates: Vec<ScalarExpression>,
+    pub predicates: Vec<ScalarExpression>,
     output_column: ColumnRef,
-    parameterized_probe: Option<ScalarExpression>,
+    pub parameterized_probe: Option<ScalarExpression>,
 }
 
 impl MarkApplyOperator {

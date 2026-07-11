@@ -14,7 +14,7 @@
 
 use crate::binder::{Binder, QueryBindStep};
 use crate::errors::DatabaseError;
-use crate::expression::visitor_mut::{walk_mut_expr, VisitorMut};
+use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::operator::sort::SortField;
@@ -101,7 +101,7 @@ impl<'a, 'p> DistinctOutputBinder<'a, 'p> {
     }
 }
 
-impl<'a> VisitorMut<'a> for DistinctOutputBinder<'_, '_> {
+impl<'a> ExprVisitorMut<'a> for DistinctOutputBinder<'_, '_> {
     fn visit(&mut self, expr: &'a mut ScalarExpression) -> Result<(), DatabaseError> {
         if let ScalarExpression::Alias {
             expr: inner_expr,
@@ -124,7 +124,7 @@ mod tests {
     use super::DistinctOutputBinder;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
     use crate::errors::DatabaseError;
-    use crate::expression::visitor_mut::VisitorMut;
+    use crate::expression::visitor_mut::ExprVisitorMut;
     use crate::expression::{AliasType, ScalarExpression};
     use crate::planner::PlanArena;
     use crate::types::LogicalType;

@@ -27,7 +27,11 @@ pub struct View {
 }
 
 impl View {
-    pub(crate) fn visit_column_refs<A, F>(&self, arena: &mut A, f: &mut F)
+    pub(crate) fn visit_column_refs<A, F>(
+        &self,
+        arena: &mut A,
+        f: &mut F,
+    ) -> Result<(), crate::errors::DatabaseError>
     where
         A: MetaArena,
         F: FnMut(&ColumnRef) + ?Sized,
@@ -35,7 +39,7 @@ impl View {
         for column in &self.schema {
             f(column);
         }
-        self.plan.visit_column_refs(arena, f);
+        self.plan.visit_column_refs(arena, f)
     }
 }
 

@@ -14,9 +14,9 @@
 
 use crate::errors::DatabaseError;
 use crate::expression::simplify::{ConstantCalculator, Simplify};
-use crate::expression::visitor_mut::VisitorMut;
+use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::optimizer::core::rule::NormalizationRule;
-use crate::planner::operator::join::JoinCondition;
+use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 
@@ -27,43 +27,8 @@ pub(crate) fn constant_calculation_current(
     plan: &mut LogicalPlan,
     arena: &crate::planner::PlanArena,
 ) -> Result<(), DatabaseError> {
-    let operator = &mut plan.operator;
     let mut calculator = ConstantCalculator::new(arena);
-
-    match operator {
-        Operator::Aggregate(op) => {
-            for expr in op.agg_calls.iter_mut().chain(op.groupby_exprs.iter_mut()) {
-                calculator.visit(expr)?;
-            }
-        }
-        Operator::Filter(op) => {
-            calculator.visit(&mut op.predicate)?;
-        }
-        Operator::Join(op) => {
-            if let JoinCondition::On { on, filter } = &mut op.on {
-                for (left_expr, right_expr) in on {
-                    calculator.visit(left_expr)?;
-                    calculator.visit(right_expr)?;
-                }
-                if let Some(expr) = filter {
-                    calculator.visit(expr)?;
-                }
-            }
-        }
-        Operator::Project(op) => {
-            for expr in &mut op.exprs {
-                calculator.visit(expr)?;
-            }
-        }
-        Operator::Sort(op) => {
-            for field in &mut op.sort_fields {
-                calculator.visit(&mut field.expr)?;
-            }
-        }
-        _ => (),
-    }
-
-    Ok(())
+    OperatorExprVisitorMut::new(&mut calculator).visit_operator(&mut plan.operator)
 }
 
 impl ConstantCalculation {

@@ -15,11 +15,15 @@
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::agg::AggKind;
-use crate::expression::visitor::Visitor;
+use crate::expression::visitor::ExprVisitor;
 use crate::expression::{AliasType, HasCountStar, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
-use crate::optimizer::rule::normalization::{remap_expr_positions, remap_exprs_positions};
+use crate::optimizer::rule::normalization::{
+    remap_expr_positions, remap_exprs_positions, PositionRemapper,
+};
 use crate::planner::operator::join::JoinCondition;
+use crate::planner::operator::visitor::{OperatorExprVisitor, OperatorVisitor};
+use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::types::value::{DataValue, Utf8Type};
@@ -79,6 +83,29 @@ impl ReferencedColumns {
     }
 }
 
+struct ReferencedColumnCollector<'a, 'p> {
+    referenced_columns: &'a mut ReferencedColumns,
+    arena: &'a crate::planner::PlanArena<'p>,
+}
+
+impl ExprVisitor<'_> for ReferencedColumnCollector<'_, '_> {
+    fn visit_column_ref(
+        &mut self,
+        column: &crate::catalog::ColumnRef,
+    ) -> Result<(), DatabaseError> {
+        self.referenced_columns.insert(*column, self.arena);
+        Ok(())
+    }
+
+    fn visit_alias(
+        &mut self,
+        expr: &ScalarExpression,
+        _ty: &AliasType,
+    ) -> Result<(), DatabaseError> {
+        self.visit(expr)
+    }
+}
+
 impl ApplyOutcome {
     fn with_arena_capacity(arena: &crate::planner::PlanArena) -> Self {
         Self {
@@ -94,119 +121,88 @@ impl ColumnPruning {
         referenced_columns: &mut ReferencedColumns,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<(), DatabaseError> {
-        match operator {
-            Operator::Aggregate(op) => {
-                Self::extend_expr_referenced_columns(
-                    op.agg_calls.iter().chain(op.groupby_exprs.iter()),
-                    referenced_columns,
-                    arena,
-                )?;
-            }
-            Operator::Filter(op) => {
-                Self::extend_expr_referenced_columns([&op.predicate], referenced_columns, arena)?;
-            }
-            Operator::Join(op) => {
-                if let JoinCondition::On { on, filter } = &op.on {
-                    for (left_expr, right_expr) in on {
-                        Self::extend_expr_referenced_columns(
-                            [left_expr, right_expr],
-                            referenced_columns,
-                            arena,
-                        )?;
-                    }
-                    if let Some(filter_expr) = filter {
-                        Self::extend_expr_referenced_columns(
-                            [filter_expr],
-                            referenced_columns,
-                            arena,
-                        )?;
-                    }
-                }
-            }
-            Operator::Project(op) => {
-                Self::extend_expr_referenced_columns(op.exprs.iter(), referenced_columns, arena)?;
-            }
-            Operator::MarkApply(op) => {
-                Self::extend_expr_referenced_columns(
-                    op.predicates().iter(),
-                    referenced_columns,
-                    arena,
-                )?;
-                referenced_columns.insert(*op.output_column(), arena);
-            }
-            Operator::TableScan(op) => {
-                referenced_columns.extend(op.columns.iter().copied(), arena);
-            }
-            Operator::FunctionScan(op) => {
-                Self::extend_expr_referenced_columns(
-                    op.table_function.args.iter(),
-                    referenced_columns,
-                    arena,
-                )?;
-            }
-            Operator::Sort(op) => {
-                Self::extend_expr_referenced_columns(
-                    op.sort_fields.iter().map(|field| &field.expr),
-                    referenced_columns,
-                    arena,
-                )?;
-            }
-            Operator::TopK(op) => {
-                Self::extend_expr_referenced_columns(
-                    op.sort_fields.iter().map(|field| &field.expr),
-                    referenced_columns,
-                    arena,
-                )?;
-            }
-            Operator::Values(op) => {
-                referenced_columns.extend(op.schema_ref.iter().copied(), arena);
-            }
-            Operator::Union(op) => {
-                referenced_columns.extend(
-                    op.left_schema_ref
-                        .iter()
-                        .chain(op._right_schema_ref.iter())
-                        .copied(),
-                    arena,
-                );
-            }
-            Operator::SetMembership(op) => {
-                referenced_columns.extend(
-                    op.left_schema_ref
-                        .iter()
-                        .chain(op._right_schema_ref.iter())
-                        .copied(),
-                    arena,
-                );
-            }
-            Operator::Delete(op) => {
-                referenced_columns.extend(op.primary_keys.iter().copied(), arena);
-            }
-            Operator::Dummy
-            | Operator::Limit(_)
-            | Operator::ScalarApply(_)
-            | Operator::ScalarSubquery(_)
-            | Operator::Analyze(_)
-            | Operator::ShowTable
-            | Operator::ShowView
-            | Operator::Explain
-            | Operator::Describe(_)
-            | Operator::Insert(_)
-            | Operator::Update(_)
-            | Operator::AddColumn(_)
-            | Operator::ChangeColumn(_)
-            | Operator::DropColumn(_)
-            | Operator::CreateTable(_)
-            | Operator::CreateIndex(_)
-            | Operator::CreateView(_)
-            | Operator::DropTable(_)
-            | Operator::DropView(_)
-            | Operator::DropIndex(_)
-            | Operator::Truncate(_) => {}
-            #[cfg(feature = "copy")]
-            Operator::CopyFromFile(_) | Operator::CopyToFile(_) => {}
+        let mut collector = ReferencedColumnCollector {
+            referenced_columns,
+            arena,
+        };
+        OperatorExprVisitor::new(&mut collector).visit_operator(operator)?;
+
+        struct ReferencedOperatorColumnCollector<'a, 'p> {
+            referenced_columns: &'a mut ReferencedColumns,
+            arena: &'a crate::planner::PlanArena<'p>,
         }
-        Ok(())
+
+        impl<'a> OperatorVisitor<'a> for ReferencedOperatorColumnCollector<'_, '_> {
+            fn visit_mark_apply(
+                &mut self,
+                op: &'a crate::planner::operator::mark_apply::MarkApplyOperator,
+            ) -> Result<(), DatabaseError> {
+                self.referenced_columns
+                    .insert(*op.output_column(), self.arena);
+                Ok(())
+            }
+
+            fn visit_table_scan(
+                &mut self,
+                op: &'a crate::planner::operator::table_scan::TableScanOperator,
+            ) -> Result<(), DatabaseError> {
+                self.referenced_columns
+                    .extend(op.columns.iter().copied(), self.arena);
+                Ok(())
+            }
+
+            fn visit_values(
+                &mut self,
+                op: &'a crate::planner::operator::values::ValuesOperator,
+            ) -> Result<(), DatabaseError> {
+                self.referenced_columns
+                    .extend(op.schema_ref.iter().copied(), self.arena);
+                Ok(())
+            }
+
+            fn visit_union(
+                &mut self,
+                op: &'a crate::planner::operator::union::UnionOperator,
+            ) -> Result<(), DatabaseError> {
+                self.referenced_columns.extend(
+                    op.left_schema_ref
+                        .iter()
+                        .chain(&op._right_schema_ref)
+                        .copied(),
+                    self.arena,
+                );
+                Ok(())
+            }
+
+            fn visit_set_membership(
+                &mut self,
+                op: &'a crate::planner::operator::set_membership::SetMembershipOperator,
+            ) -> Result<(), DatabaseError> {
+                self.referenced_columns.extend(
+                    op.left_schema_ref
+                        .iter()
+                        .chain(&op._right_schema_ref)
+                        .copied(),
+                    self.arena,
+                );
+                Ok(())
+            }
+
+            fn visit_delete(
+                &mut self,
+                op: &'a crate::planner::operator::delete::DeleteOperator,
+            ) -> Result<(), DatabaseError> {
+                self.referenced_columns
+                    .extend(op.primary_keys.iter().copied(), self.arena);
+                Ok(())
+            }
+        }
+
+        ReferencedOperatorColumnCollector {
+            referenced_columns,
+            arena,
+        }
+        .visit_operator(operator)
     }
 
     fn extend_expr_referenced_columns<'a>(
@@ -214,29 +210,6 @@ impl ColumnPruning {
         referenced_columns: &mut ReferencedColumns,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<(), DatabaseError> {
-        struct ReferencedColumnCollector<'a, 'p> {
-            referenced_columns: &'a mut ReferencedColumns,
-            arena: &'a crate::planner::PlanArena<'p>,
-        }
-
-        impl Visitor<'_> for ReferencedColumnCollector<'_, '_> {
-            fn visit_column_ref(
-                &mut self,
-                column: &crate::catalog::ColumnRef,
-            ) -> Result<(), DatabaseError> {
-                self.referenced_columns.insert(*column, self.arena);
-                Ok(())
-            }
-
-            fn visit_alias(
-                &mut self,
-                expr: &ScalarExpression,
-                _ty: &AliasType,
-            ) -> Result<(), DatabaseError> {
-                self.visit(expr)
-            }
-        }
-
         let mut collector = ReferencedColumnCollector {
             referenced_columns,
             arena,
@@ -280,75 +253,8 @@ impl ColumnPruning {
         operator: &mut Operator,
         removed_positions: &[usize],
     ) -> Result<(), DatabaseError> {
-        match operator {
-            Operator::Aggregate(op) => {
-                Self::remap_exprs_after_child_change(
-                    op.agg_calls.iter_mut().chain(op.groupby_exprs.iter_mut()),
-                    removed_positions,
-                )?;
-            }
-            Operator::Filter(op) => {
-                remap_expr_positions(&mut op.predicate, removed_positions)?;
-            }
-            Operator::Project(op) => {
-                remap_exprs_positions(op.exprs.iter_mut(), removed_positions)?;
-            }
-            Operator::MarkApply(op) => {
-                Self::remap_exprs_after_child_change(
-                    op.predicates_mut().iter_mut(),
-                    removed_positions,
-                )?;
-            }
-            Operator::ScalarApply(_) => {}
-            Operator::ScalarSubquery(_) => {}
-            Operator::Sort(op) => {
-                Self::remap_exprs_after_child_change(
-                    op.sort_fields.iter_mut().map(|field| &mut field.expr),
-                    removed_positions,
-                )?;
-            }
-            Operator::TopK(op) => {
-                Self::remap_exprs_after_child_change(
-                    op.sort_fields.iter_mut().map(|field| &mut field.expr),
-                    removed_positions,
-                )?;
-            }
-            Operator::Update(op) => {
-                Self::remap_exprs_after_child_change(
-                    op.value_exprs.iter_mut().map(|(_, expr)| expr),
-                    removed_positions,
-                )?;
-            }
-            Operator::Limit(_)
-            | Operator::Explain
-            | Operator::Insert(_)
-            | Operator::Delete(_)
-            | Operator::Analyze(_)
-            | Operator::Dummy
-            | Operator::TableScan(_)
-            | Operator::Join(_)
-            | Operator::Values(_)
-            | Operator::FunctionScan(_)
-            | Operator::ShowTable
-            | Operator::ShowView
-            | Operator::Describe(_)
-            | Operator::Union(_)
-            | Operator::SetMembership(_)
-            | Operator::AddColumn(_)
-            | Operator::ChangeColumn(_)
-            | Operator::DropColumn(_)
-            | Operator::CreateTable(_)
-            | Operator::CreateIndex(_)
-            | Operator::CreateView(_)
-            | Operator::DropTable(_)
-            | Operator::DropView(_)
-            | Operator::DropIndex(_)
-            | Operator::Truncate(_) => {}
-            #[cfg(feature = "copy")]
-            Operator::CopyFromFile(_) | Operator::CopyToFile(_) => {}
-        }
-
-        Ok(())
+        OperatorExprVisitorMut::new(&mut PositionRemapper { removed_positions })
+            .visit_operator(operator)
     }
 
     fn remap_exprs_after_child_change<'a>(

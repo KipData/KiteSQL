@@ -13,10 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::expression::visitor_mut::VisitorMut;
 use crate::expression::BindEvaluator;
 use crate::optimizer::core::rule::NormalizationRule;
-use crate::planner::operator::join::JoinCondition;
+use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan, PlanArena};
 
@@ -27,94 +26,8 @@ pub(crate) fn evaluator_bind_current(
     plan: &mut LogicalPlan,
     arena: &PlanArena,
 ) -> Result<(), DatabaseError> {
-    let operator = &mut plan.operator;
     let mut evaluator = BindEvaluator { arena };
-
-    match operator {
-        Operator::Join(op) => {
-            match &mut op.on {
-                JoinCondition::On { on, filter } => {
-                    for (left_expr, right_expr) in on {
-                        evaluator.visit(left_expr)?;
-                        evaluator.visit(right_expr)?;
-                    }
-                    if let Some(expr) = filter {
-                        evaluator.visit(expr)?;
-                    }
-                }
-                JoinCondition::None => {}
-            }
-
-            return Ok(());
-        }
-        Operator::Aggregate(op) => {
-            for expr in op.agg_calls.iter_mut().chain(op.groupby_exprs.iter_mut()) {
-                evaluator.visit(expr)?;
-            }
-        }
-        Operator::Filter(op) => {
-            evaluator.visit(&mut op.predicate)?;
-        }
-        Operator::Project(op) => {
-            for expr in op.exprs.iter_mut() {
-                evaluator.visit(expr)?;
-            }
-        }
-        Operator::MarkApply(op) => {
-            for predicate in op.predicates_mut().iter_mut() {
-                evaluator.visit(predicate)?;
-            }
-        }
-        Operator::ScalarApply(_) => {}
-        Operator::Sort(op) => {
-            for sort_field in op.sort_fields.iter_mut() {
-                evaluator.visit(&mut sort_field.expr)?;
-            }
-        }
-        Operator::TopK(op) => {
-            for sort_field in op.sort_fields.iter_mut() {
-                evaluator.visit(&mut sort_field.expr)?;
-            }
-        }
-        Operator::FunctionScan(op) => {
-            for expr in op.table_function.args.iter_mut() {
-                evaluator.visit(expr)?;
-            }
-        }
-        Operator::Update(op) => {
-            for (_, expr) in op.value_exprs.iter_mut() {
-                evaluator.visit(expr)?;
-            }
-        }
-        Operator::Dummy
-        | Operator::TableScan(_)
-        | Operator::Limit(_)
-        | Operator::ScalarSubquery(_)
-        | Operator::Values(_)
-        | Operator::ShowTable
-        | Operator::ShowView
-        | Operator::Explain
-        | Operator::Describe(_)
-        | Operator::Insert(_)
-        | Operator::Delete(_)
-        | Operator::Analyze(_)
-        | Operator::AddColumn(_)
-        | Operator::ChangeColumn(_)
-        | Operator::DropColumn(_)
-        | Operator::CreateTable(_)
-        | Operator::CreateIndex(_)
-        | Operator::CreateView(_)
-        | Operator::DropTable(_)
-        | Operator::DropView(_)
-        | Operator::DropIndex(_)
-        | Operator::Truncate(_)
-        | Operator::Union(_)
-        | Operator::SetMembership(_) => (),
-        #[cfg(feature = "copy")]
-        Operator::CopyFromFile(_) | Operator::CopyToFile(_) => (),
-    }
-
-    Ok(())
+    OperatorExprVisitorMut::new(&mut evaluator).visit_operator(&mut plan.operator)
 }
 
 impl EvaluatorBind {
@@ -164,7 +77,7 @@ mod tests {
     use crate::optimizer::core::rule::NormalizationRule;
     use crate::planner::operator::filter::FilterOperator;
     use crate::planner::operator::function_scan::FunctionScanOperator;
-    use crate::planner::operator::join::{JoinOperator, JoinType};
+    use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
     use crate::planner::operator::mark_apply::MarkApplyOperator;
     use crate::planner::operator::sort::{SortField, SortOperator};
     use crate::planner::operator::top_k::TopKOperator;

@@ -27,7 +27,7 @@ pub(crate) struct PositionShift {
     pub(crate) delta: isize,
 }
 
-impl VisitorMut<'_> for PositionShift {
+impl ExprVisitorMut<'_> for PositionShift {
     fn visit_column_ref(
         &mut self,
         _column: &mut ColumnRef,
@@ -42,7 +42,7 @@ impl VisitorMut<'_> for PositionShift {
     }
 }
 
-pub trait VisitorMut<'a>: Sized {
+pub trait ExprVisitorMut<'a>: Sized {
     fn visit(&mut self, expr: &'a mut ScalarExpression) -> Result<(), DatabaseError> {
         walk_mut_expr(self, expr)
     }
@@ -288,7 +288,7 @@ pub trait VisitorMut<'a>: Sized {
     }
 }
 
-pub fn walk_mut_expr<'a, V: VisitorMut<'a>>(
+pub fn walk_mut_expr<'a, V: ExprVisitorMut<'a>>(
     visitor: &mut V,
     expr: &'a mut ScalarExpression,
 ) -> Result<(), DatabaseError> {

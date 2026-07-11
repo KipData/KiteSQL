@@ -31,7 +31,7 @@ use super::{Binder, BinderContext, QueryBindStep, SetOperatorKind, Source, SubQu
 use crate::catalog::{ColumnRef, ColumnRelation, TableName};
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::joins_nullable;
-use crate::expression::visitor_mut::{walk_mut_expr, PositionShift, VisitorMut};
+use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut, PositionShift};
 use crate::expression::{AliasType, BinaryOperator};
 use crate::iter_ext::Itertools;
 use crate::planner::operator::function_scan::FunctionScanOperator;
@@ -51,7 +51,7 @@ struct RightSidePositionGlobalizer<'a, 'p> {
     arena: &'a crate::planner::PlanArena<'p>,
 }
 
-impl<'a> VisitorMut<'a> for RightSidePositionGlobalizer<'_, '_> {
+impl<'a> ExprVisitorMut<'a> for RightSidePositionGlobalizer<'_, '_> {
     fn visit_column_ref(
         &mut self,
         column: &'a mut ColumnRef,
@@ -80,7 +80,7 @@ struct SplitScopePositionRebinder<'a, 'p> {
     arena: &'a crate::planner::PlanArena<'p>,
 }
 
-impl VisitorMut<'_> for SplitScopePositionRebinder<'_, '_> {
+impl ExprVisitorMut<'_> for SplitScopePositionRebinder<'_, '_> {
     fn visit_column_ref(
         &mut self,
         column: &mut ColumnRef,
@@ -109,7 +109,7 @@ struct MarkerPositionGlobalizer<'a, 'p> {
     arena: &'a crate::planner::PlanArena<'p>,
 }
 
-impl VisitorMut<'_> for MarkerPositionGlobalizer<'_, '_> {
+impl ExprVisitorMut<'_> for MarkerPositionGlobalizer<'_, '_> {
     fn visit_column_ref(
         &mut self,
         column: &mut ColumnRef,
@@ -154,7 +154,7 @@ impl<'a, 'p> ProjectionOutputBinder<'a, 'p> {
     }
 }
 
-impl<'a> VisitorMut<'a> for ProjectionOutputBinder<'_, '_> {
+impl<'a> ExprVisitorMut<'a> for ProjectionOutputBinder<'_, '_> {
     fn visit(&mut self, expr: &'a mut ScalarExpression) -> Result<(), DatabaseError> {
         if let Some(output_ref) = self.output_ref(expr) {
             *expr = output_ref;
@@ -432,8 +432,10 @@ where
 
     #[cfg(feature = "orm")]
     pub fn finish(self) -> Result<LogicalPlan, DatabaseError> {
-        if self.select_list.iter().any(ScalarExpression::has_agg_call) {
-            return self.aggregate_without_group()?.finish();
+        for expr in &self.select_list {
+            if expr.has_agg_call()? {
+                return self.aggregate_without_group()?.finish();
+            }
         }
         self.binder
             .bind_project(self.plan, self.select_list, self.arena)
@@ -801,7 +803,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             arena: &'a crate::planner::PlanArena<'p>,
         }
 
-        impl VisitorMut<'_> for AppendedRightOutputBinder<'_, '_> {
+        impl ExprVisitorMut<'_> for AppendedRightOutputBinder<'_, '_> {
             fn visit_column_ref(
                 &mut self,
                 column: &mut ColumnRef,
@@ -1495,7 +1497,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         plan: &mut LogicalPlan,
         predicates: &[ScalarExpression],
         arena: &mut crate::planner::PlanArena,
-    ) -> Vec<AppendedRightOutput> {
+    ) -> Result<Vec<AppendedRightOutput>, DatabaseError> {
         let output_schema = plan.output_schema(arena).clone();
         let output_len = output_schema.len();
         if let LogicalPlan {
@@ -1505,36 +1507,38 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         } = plan
         {
             let Childrens::Only(child) = childrens.as_mut() else {
-                return Vec::new();
+                return Ok(Vec::new());
             };
             let child_schema = child.output_schema(arena);
             let mut appended_outputs = Vec::new();
-            op.exprs.extend(
-                child_schema
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, column)| {
-                        !output_schema.contains(column)
-                            && predicates.iter().any(|expr| {
-                                expr.any_referenced_column(arena, |arena, candidate| {
-                                    arena.same_column(*candidate, **column)
-                                })
-                            })
-                    })
-                    .map(|(position, column)| {
-                        appended_outputs.push(AppendedRightOutput {
-                            column: *column,
-                            child_position: position,
-                            output_position: output_len + appended_outputs.len(),
-                        });
-                        ScalarExpression::column_expr(*column, position)
-                    }),
-            );
+            for (position, column) in child_schema.iter().enumerate() {
+                if output_schema.contains(column) {
+                    continue;
+                }
+                let mut referenced = false;
+                for expr in predicates {
+                    if expr.any_referenced_column(arena, |arena, candidate| {
+                        arena.same_column(*candidate, *column)
+                    })? {
+                        referenced = true;
+                        break;
+                    }
+                }
+                if referenced {
+                    op.exprs
+                        .push(ScalarExpression::column_expr(*column, position));
+                    appended_outputs.push(AppendedRightOutput {
+                        column: *column,
+                        child_position: position,
+                        output_position: output_len + appended_outputs.len(),
+                    });
+                }
+            }
             plan.reset_output_schema_cache();
-            return appended_outputs;
+            return Ok(appended_outputs);
         }
 
-        Vec::new()
+        Ok(Vec::new())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1565,7 +1569,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
         if correlated {
             let appended_right_outputs =
-                Self::ensure_mark_apply_right_outputs(&mut plan, &apply_predicates, arena);
+                Self::ensure_mark_apply_right_outputs(&mut plan, &apply_predicates, arena)?;
             if !appended_right_outputs.is_empty() {
                 Self::localize_appended_right_outputs(
                     apply_predicates.iter_mut(),
@@ -1618,25 +1622,28 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         plan: &LogicalPlan,
         left_schema: &Schema,
         arena: &mut crate::planner::PlanArena,
-    ) -> bool {
+    ) -> Result<bool, DatabaseError> {
         if !plan
             .operator
             .visit_referenced_columns(arena, &mut |arena, column| {
                 !left_schema
                     .iter()
                     .any(|left| arena.same_column(*left, *column))
-            })
+            })?
         {
-            return true;
+            return Ok(true);
         }
 
         match plan.childrens.as_ref() {
             Childrens::Only(child) => Self::plan_has_correlated_refs(child, left_schema, arena),
             Childrens::Twins { left, right } => {
-                Self::plan_has_correlated_refs(left, left_schema, arena)
-                    || Self::plan_has_correlated_refs(right, left_schema, arena)
+                if Self::plan_has_correlated_refs(left, left_schema, arena)? {
+                    Ok(true)
+                } else {
+                    Self::plan_has_correlated_refs(right, left_schema, arena)
+                }
             }
-            Childrens::None => false,
+            Childrens::None => Ok(false),
         }
     }
 
@@ -1644,7 +1651,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         expr: &ScalarExpression,
         left_schema: &Schema,
         arena: &mut crate::planner::PlanArena,
-    ) -> bool {
+    ) -> Result<bool, DatabaseError> {
         expr.any_referenced_column(arena, |arena, column| {
             left_schema
                 .iter()
@@ -1688,7 +1695,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         match plan.childrens.as_ref() {
             Childrens::Only(_) => {}
             Childrens::Twins { .. } => {
-                if Self::plan_has_correlated_refs(&plan, left_schema, arena) {
+                if Self::plan_has_correlated_refs(&plan, left_schema, arena)? {
                     return Err(DatabaseError::UnsupportedStmt(
                         "correlated EXISTS/NOT EXISTS does not support set or join subqueries"
                             .to_string(),
@@ -1715,7 +1722,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 let mut predicates = Vec::new();
                 Self::split_conjuncts(op.predicate, &mut predicates);
                 for predicate in predicates {
-                    if Self::expr_has_correlated_refs(&predicate, left_schema, arena) {
+                    if Self::expr_has_correlated_refs(&predicate, left_schema, arena)? {
                         correlated_filters.push(predicate);
                     } else {
                         local_filters.push(predicate);
@@ -1775,7 +1782,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 arena,
             ),
             plan => {
-                if Self::plan_has_correlated_refs(&plan, left_schema, arena) {
+                if Self::plan_has_correlated_refs(&plan, left_schema, arena)? {
                     Err(DatabaseError::UnsupportedStmt(
                         "correlated EXISTS/NOT EXISTS only supports filter-based subqueries"
                             .to_string(),
@@ -2142,9 +2149,11 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                                 // example: baz > 1
                                 if left_expr.all_referenced_columns(arena, |_, column| {
                                     fn_or_contains(*column)
-                                }) && right_expr.all_referenced_columns(arena, |_, column| {
-                                    fn_or_contains(*column)
-                                }) {
+                                })? && right_expr
+                                    .all_referenced_columns(arena, |_, column| {
+                                        fn_or_contains(*column)
+                                    })?
+                                {
                                     accum_filter.push(ScalarExpression::Binary {
                                         left_expr,
                                         right_expr,
@@ -2186,9 +2195,10 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                     }
                     _ => {
                         if left_expr
-                            .all_referenced_columns(arena, |_, column| fn_or_contains(*column))
-                            && right_expr
-                                .all_referenced_columns(arena, |_, column| fn_or_contains(*column))
+                            .all_referenced_columns(arena, |_, column| fn_or_contains(*column))?
+                            && right_expr.all_referenced_columns(arena, |_, column| {
+                                fn_or_contains(*column)
+                            })?
                         {
                             accum_filter.push(ScalarExpression::Binary {
                                 left_expr,
@@ -2202,7 +2212,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 }
             }
             expr => {
-                if expr.all_referenced_columns(arena, |_, column| fn_or_contains(*column)) {
+                if expr.all_referenced_columns(arena, |_, column| fn_or_contains(*column))? {
                     // example: baz > 1
                     accum_filter.push(expr);
                 }
@@ -2219,7 +2229,7 @@ mod tests {
     use crate::binder::test::build_t1_table;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
-    use crate::expression::visitor_mut::VisitorMut;
+    use crate::expression::visitor_mut::ExprVisitorMut;
     use crate::expression::{AliasType, ScalarExpression};
     use crate::planner::operator::join::{JoinCondition, JoinType};
     use crate::planner::operator::mark_apply::{

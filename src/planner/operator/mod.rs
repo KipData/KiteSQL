@@ -44,6 +44,8 @@ pub mod truncate;
 pub mod union;
 pub mod update;
 pub mod values;
+pub mod visitor;
+pub mod visitor_mut;
 
 use self::{
     aggregate::AggregateOperator, alter_table::add_column::AddColumnOperator,
@@ -53,6 +55,10 @@ use self::{
     table_scan::TableScanOperator,
 };
 use crate::catalog::ColumnRef;
+use crate::errors::DatabaseError;
+use crate::expression::visitor::{walk_expr, ExprVisitor};
+use crate::expression::ScalarExpression;
+use crate::planner::operator::alter_table::change_column::DefaultChange as ColumnDefaultChange;
 use crate::planner::operator::alter_table::drop_column::DropColumnOperator;
 use crate::planner::operator::analyze::AnalyzeOperator;
 #[cfg(feature = "copy")]
@@ -77,6 +83,7 @@ use crate::planner::operator::truncate::TruncateOperator;
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::update::UpdateOperator;
 use crate::planner::operator::values::ValuesOperator;
+use crate::planner::operator::visitor::OperatorVisitor;
 use crate::planner::{MetaArena, PlanArena};
 use crate::types::index::IndexInfo;
 use kite_sql_serde_macros::ReferenceSerialization;
@@ -200,120 +207,224 @@ impl Operator {
         &self,
         arena: &mut A,
         f: &mut impl FnMut(&mut A, &ColumnRef) -> bool,
-    ) -> bool {
-        match self {
-            Operator::Aggregate(op) => op
-                .agg_calls
-                .iter()
-                .chain(op.groupby_exprs.iter())
-                .all(|expr| expr.visit_referenced_columns(arena, f)),
-            Operator::ScalarApply(_) => true,
-            Operator::MarkApply(op) => op
-                .predicates()
-                .iter()
-                .all(|expr| expr.visit_referenced_columns(arena, f)),
-            Operator::Filter(op) => op.predicate.visit_referenced_columns(arena, f),
-            Operator::Join(op) => {
+    ) -> Result<bool, DatabaseError> {
+        struct ReferencedColumnVisitor<'a, A, F> {
+            arena: &'a mut A,
+            f: &'a mut F,
+            keep_going: bool,
+        }
+
+        impl<'expr, A, F> ExprVisitor<'expr> for ReferencedColumnVisitor<'_, A, F>
+        where
+            F: FnMut(&mut A, &ColumnRef) -> bool,
+        {
+            fn visit(&mut self, expr: &'expr ScalarExpression) -> Result<(), DatabaseError> {
+                if self.keep_going {
+                    walk_expr(self, expr)?;
+                }
+                Ok(())
+            }
+
+            fn visit_column_ref(&mut self, column: &'expr ColumnRef) -> Result<(), DatabaseError> {
+                if self.keep_going {
+                    self.keep_going = (self.f)(self.arena, column);
+                }
+                Ok(())
+            }
+        }
+
+        impl<'operator, A, F> OperatorVisitor<'operator> for ReferencedColumnVisitor<'_, A, F>
+        where
+            F: FnMut(&mut A, &ColumnRef) -> bool,
+        {
+            fn visit_aggregate(
+                &mut self,
+                op: &'operator AggregateOperator,
+            ) -> Result<(), DatabaseError> {
+                for expr in op.agg_calls.iter().chain(&op.groupby_exprs) {
+                    ExprVisitor::visit(self, expr)?;
+                }
+                Ok(())
+            }
+
+            fn visit_mark_apply(
+                &mut self,
+                op: &'operator MarkApplyOperator,
+            ) -> Result<(), DatabaseError> {
+                for expr in &op.predicates {
+                    ExprVisitor::visit(self, expr)?;
+                }
+                if let Some(expr) = &op.parameterized_probe {
+                    ExprVisitor::visit(self, expr)?;
+                }
+                Ok(())
+            }
+
+            fn visit_filter(&mut self, op: &'operator FilterOperator) -> Result<(), DatabaseError> {
+                ExprVisitor::visit(self, &op.predicate)
+            }
+
+            fn visit_join(&mut self, op: &'operator JoinOperator) -> Result<(), DatabaseError> {
                 if let JoinCondition::On { on, filter } = &op.on {
                     for (left_expr, right_expr) in on {
-                        if !left_expr.visit_referenced_columns(arena, f)
-                            || !right_expr.visit_referenced_columns(arena, f)
-                        {
-                            return false;
-                        }
+                        ExprVisitor::visit(self, left_expr)?;
+                        ExprVisitor::visit(self, right_expr)?;
                     }
-
-                    if let Some(filter_expr) = filter {
-                        return filter_expr.visit_referenced_columns(arena, f);
+                    if let Some(expr) = filter {
+                        ExprVisitor::visit(self, expr)?;
                     }
                 }
-                true
+                Ok(())
             }
-            Operator::Project(op) => op
-                .exprs
-                .iter()
-                .all(|expr| expr.visit_referenced_columns(arena, f)),
-            Operator::ScalarSubquery(_) => true,
-            Operator::TableScan(op) => op.columns.iter().all(|column| f(arena, column)),
-            Operator::FunctionScan(op) => op
-                .table_function
-                .args
-                .iter()
-                .all(|expr| expr.visit_referenced_columns(arena, f)),
-            Operator::Sort(op) => op
-                .sort_fields
-                .iter()
-                .map(|field| &field.expr)
-                .all(|expr| expr.visit_referenced_columns(arena, f)),
-            Operator::TopK(op) => op
-                .sort_fields
-                .iter()
-                .map(|field| &field.expr)
-                .all(|expr| expr.visit_referenced_columns(arena, f)),
-            Operator::Values(ValuesOperator { schema_ref, .. }) => {
-                schema_ref.iter().all(|column| f(arena, column))
+
+            fn visit_project(
+                &mut self,
+                op: &'operator ProjectOperator,
+            ) -> Result<(), DatabaseError> {
+                for expr in &op.exprs {
+                    ExprVisitor::visit(self, expr)?;
+                }
+                Ok(())
             }
-            Operator::Union(UnionOperator {
-                left_schema_ref,
-                _right_schema_ref,
-            })
-            | Operator::SetMembership(SetMembershipOperator {
-                left_schema_ref,
-                _right_schema_ref,
-                ..
-            }) => left_schema_ref
-                .iter()
-                .chain(_right_schema_ref.iter())
-                .all(|column| f(arena, column)),
-            Operator::Analyze(_) => true,
-            Operator::Delete(op) => op.primary_keys.iter().all(|column| f(arena, column)),
-            Operator::Dummy
-            | Operator::Limit(_)
-            | Operator::ShowTable
-            | Operator::ShowView
-            | Operator::Explain
-            | Operator::Describe(_)
-            | Operator::Insert(_)
-            | Operator::Update(_)
-            | Operator::AddColumn(_)
-            | Operator::ChangeColumn(_)
-            | Operator::DropColumn(_)
-            | Operator::CreateTable(_)
-            | Operator::CreateIndex(_)
-            | Operator::CreateView(_)
-            | Operator::DropTable(_)
-            | Operator::DropView(_)
-            | Operator::DropIndex(_)
-            | Operator::Truncate(_) => true,
-            #[cfg(feature = "copy")]
-            Operator::CopyFromFile(_) | Operator::CopyToFile(_) => true,
+
+            fn visit_table_scan(
+                &mut self,
+                op: &'operator TableScanOperator,
+            ) -> Result<(), DatabaseError> {
+                for column in &op.columns {
+                    self.visit_column_ref(column)?;
+                }
+                Ok(())
+            }
+
+            fn visit_function_scan(
+                &mut self,
+                op: &'operator FunctionScanOperator,
+            ) -> Result<(), DatabaseError> {
+                for expr in &op.table_function.args {
+                    ExprVisitor::visit(self, expr)?;
+                }
+                Ok(())
+            }
+
+            fn visit_sort(&mut self, op: &'operator SortOperator) -> Result<(), DatabaseError> {
+                for field in &op.sort_fields {
+                    ExprVisitor::visit(self, &field.expr)?;
+                }
+                Ok(())
+            }
+
+            fn visit_top_k(&mut self, op: &'operator TopKOperator) -> Result<(), DatabaseError> {
+                for field in &op.sort_fields {
+                    ExprVisitor::visit(self, &field.expr)?;
+                }
+                Ok(())
+            }
+
+            fn visit_values(&mut self, op: &'operator ValuesOperator) -> Result<(), DatabaseError> {
+                for column in &op.schema_ref {
+                    self.visit_column_ref(column)?;
+                }
+                Ok(())
+            }
+
+            fn visit_union(&mut self, op: &'operator UnionOperator) -> Result<(), DatabaseError> {
+                for column in op.left_schema_ref.iter().chain(&op._right_schema_ref) {
+                    self.visit_column_ref(column)?;
+                }
+                Ok(())
+            }
+
+            fn visit_set_membership(
+                &mut self,
+                op: &'operator SetMembershipOperator,
+            ) -> Result<(), DatabaseError> {
+                for column in op.left_schema_ref.iter().chain(&op._right_schema_ref) {
+                    self.visit_column_ref(column)?;
+                }
+                Ok(())
+            }
+
+            fn visit_delete(&mut self, op: &'operator DeleteOperator) -> Result<(), DatabaseError> {
+                for column in &op.primary_keys {
+                    self.visit_column_ref(column)?;
+                }
+                Ok(())
+            }
+
+            fn visit_update(&mut self, op: &'operator UpdateOperator) -> Result<(), DatabaseError> {
+                for (_, expr) in &op.value_exprs {
+                    ExprVisitor::visit(self, expr)?;
+                }
+                Ok(())
+            }
+
+            fn visit_add_column(
+                &mut self,
+                op: &'operator AddColumnOperator,
+            ) -> Result<(), DatabaseError> {
+                if let Some(expr) = &op.column.desc().default {
+                    ExprVisitor::visit(self, expr)?;
+                }
+                Ok(())
+            }
+
+            fn visit_change_column(
+                &mut self,
+                op: &'operator ChangeColumnOperator,
+            ) -> Result<(), DatabaseError> {
+                if let ColumnDefaultChange::Set(expr) = &op.default_change {
+                    ExprVisitor::visit(self, expr)?;
+                }
+                Ok(())
+            }
+
+            fn visit_create_table(
+                &mut self,
+                op: &'operator CreateTableOperator,
+            ) -> Result<(), DatabaseError> {
+                for column in &op.columns {
+                    if let Some(expr) = &column.desc().default {
+                        ExprVisitor::visit(self, expr)?;
+                    }
+                }
+                Ok(())
+            }
         }
+
+        let mut visitor = ReferencedColumnVisitor {
+            arena,
+            f,
+            keep_going: true,
+        };
+        visitor.visit_operator(self)?;
+        Ok(visitor.keep_going)
     }
 
     pub fn any_referenced_column(
         &self,
         arena: &mut PlanArena,
         mut predicate: impl FnMut(&ColumnRef) -> bool,
-    ) -> bool {
+    ) -> Result<bool, DatabaseError> {
         let mut found = false;
         self.visit_referenced_columns(arena, &mut |_, column| {
             found = predicate(column);
             !found
-        });
-        found
+        })?;
+        Ok(found)
     }
 
     pub fn all_referenced_columns(
         &self,
         arena: &mut PlanArena,
         mut predicate: impl FnMut(&ColumnRef) -> bool,
-    ) -> bool {
+    ) -> Result<bool, DatabaseError> {
         let mut all = true;
         self.visit_referenced_columns(arena, &mut |_, column| {
             all = predicate(column);
             all
-        });
-        all
+        })?;
+        Ok(all)
     }
 }
 
@@ -482,13 +593,16 @@ mod tests {
         ScalarExpression::column_expr(column, position)
     }
 
-    fn referenced_columns(operator: &Operator, arena: &mut PlanArena) -> Vec<ColumnRef> {
+    fn referenced_columns(
+        operator: &Operator,
+        arena: &mut PlanArena,
+    ) -> Result<Vec<ColumnRef>, DatabaseError> {
         let mut columns = Vec::new();
         operator.visit_referenced_columns(arena, &mut |_, column| {
             columns.push(*column);
             true
-        });
-        columns
+        })?;
+        Ok(columns)
     }
 
     #[test]
@@ -556,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn referenced_column_helpers_stop_on_predicate_result() {
+    fn referenced_column_helpers_stop_on_predicate_result() -> Result<(), DatabaseError> {
         let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let left = column("left", &mut arena);
@@ -566,24 +680,26 @@ mod tests {
             schema_ref: vec![left, right],
         });
 
-        assert!(values.any_referenced_column(&mut arena, |column| *column == right));
+        assert!(values.any_referenced_column(&mut arena, |column| *column == right)?);
         assert!(!values
-            .any_referenced_column(&mut arena, |column| { *column != left && *column != right }));
-        assert!(values
-            .all_referenced_columns(&mut arena, |column| { *column == left || *column == right }));
-        assert!(!values.all_referenced_columns(&mut arena, |column| *column == left));
+            .any_referenced_column(&mut arena, |column| { *column != left && *column != right })?);
+        assert!(values.all_referenced_columns(&mut arena, |column| {
+            *column == left || *column == right
+        })?);
+        assert!(!values.all_referenced_columns(&mut arena, |column| *column == left)?);
 
         let delete = Operator::Delete(DeleteOperator {
             table_name: "users".into(),
             primary_keys: vec![left],
         });
-        assert!(delete.any_referenced_column(&mut arena, |column| *column == left));
-        assert!(Operator::Dummy.all_referenced_columns(&mut arena, |_| false));
-        assert!(!Operator::Dummy.any_referenced_column(&mut arena, |_| true));
+        assert!(delete.any_referenced_column(&mut arena, |column| *column == left)?);
+        assert!(Operator::Dummy.all_referenced_columns(&mut arena, |_| false)?);
+        assert!(!Operator::Dummy.any_referenced_column(&mut arena, |_| true)?);
+        Ok(())
     }
 
     #[test]
-    fn referenced_column_visitor_covers_expression_driven_variants() {
+    fn referenced_column_visitor_covers_expression_driven_variants() -> Result<(), DatabaseError> {
         let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let a = column("a", &mut arena);
@@ -596,18 +712,21 @@ mod tests {
             groupby_exprs: vec![column_expr(b, 1)],
             is_distinct: false,
         });
-        assert_eq!(referenced_columns(&aggregate, &mut arena), vec![a, b]);
+        assert_eq!(referenced_columns(&aggregate, &mut arena)?, vec![a, b]);
 
-        let mark_apply =
-            Operator::MarkApply(MarkApplyOperator::new_exists(d, vec![column_expr(c, 2)]));
-        assert_eq!(referenced_columns(&mark_apply, &mut arena), vec![c]);
+        let mut mark_apply = MarkApplyOperator::new_exists(d, vec![column_expr(c, 2)]);
+        mark_apply.set_parameterized_probe(Some(column_expr(d, 3)));
+        assert_eq!(
+            referenced_columns(&Operator::MarkApply(mark_apply), &mut arena)?,
+            vec![c, d]
+        );
 
         let filter = Operator::Filter(FilterOperator {
             predicate: column_expr(a, 0),
             is_optimized: false,
             having: false,
         });
-        assert_eq!(referenced_columns(&filter, &mut arena), vec![a]);
+        assert_eq!(referenced_columns(&filter, &mut arena)?, vec![a]);
 
         let join = Operator::Join(JoinOperator {
             join_type: join::JoinType::Inner,
@@ -616,13 +735,19 @@ mod tests {
                 filter: Some(column_expr(c, 2)),
             },
         });
-        assert_eq!(referenced_columns(&join, &mut arena), vec![a, b, c]);
-        assert!(!join.all_referenced_columns(&mut arena, |column| *column == a));
+        assert_eq!(referenced_columns(&join, &mut arena)?, vec![a, b, c]);
+        assert!(!join.all_referenced_columns(&mut arena, |column| *column == a)?);
 
         let project = Operator::Project(ProjectOperator {
             exprs: vec![column_expr(b, 1), column_expr(c, 2)],
         });
-        assert_eq!(referenced_columns(&project, &mut arena), vec![b, c]);
+        assert_eq!(referenced_columns(&project, &mut arena)?, vec![b, c]);
+
+        let update = Operator::Update(UpdateOperator {
+            table_name: "users".into(),
+            value_exprs: vec![(b, column_expr(a, 0))],
+        });
+        assert_eq!(referenced_columns(&update, &mut arena)?, vec![a]);
 
         let table_scan = Operator::TableScan(TableScanOperator {
             table_name: "users".into(),
@@ -631,7 +756,7 @@ mod tests {
             index_infos: Vec::new(),
             with_pk: false,
         });
-        assert_eq!(referenced_columns(&table_scan, &mut arena), vec![a, d]);
+        assert_eq!(referenced_columns(&table_scan, &mut arena)?, vec![a, d]);
 
         let function_scan = Operator::FunctionScan(FunctionScanOperator {
             table_function: TableFunction {
@@ -642,39 +767,39 @@ mod tests {
                 },
             },
         });
-        assert_eq!(referenced_columns(&function_scan, &mut arena), vec![c]);
+        assert_eq!(referenced_columns(&function_scan, &mut arena)?, vec![c]);
 
         let sort = Operator::Sort(SortOperator {
             sort_fields: vec![SortField::from(column_expr(a, 0))],
             limit: None,
         });
-        assert_eq!(referenced_columns(&sort, &mut arena), vec![a]);
+        assert_eq!(referenced_columns(&sort, &mut arena)?, vec![a]);
 
         let top_k = Operator::TopK(TopKOperator {
             sort_fields: vec![SortField::from(column_expr(b, 1))],
             limit: 3,
             offset: None,
         });
-        assert_eq!(referenced_columns(&top_k, &mut arena), vec![b]);
+        assert_eq!(referenced_columns(&top_k, &mut arena)?, vec![b]);
 
         let union = Operator::Union(UnionOperator {
             left_schema_ref: vec![a],
             _right_schema_ref: vec![b],
         });
-        assert_eq!(referenced_columns(&union, &mut arena), vec![a, b]);
+        assert_eq!(referenced_columns(&union, &mut arena)?, vec![a, b]);
 
         let set_membership = Operator::SetMembership(SetMembershipOperator {
             kind: SetMembershipKind::Intersect,
             left_schema_ref: vec![c],
             _right_schema_ref: vec![d],
         });
-        assert_eq!(referenced_columns(&set_membership, &mut arena), vec![c, d]);
+        assert_eq!(referenced_columns(&set_membership, &mut arena)?, vec![c, d]);
 
         let delete = Operator::Delete(DeleteOperator {
             table_name: "users".into(),
             primary_keys: vec![a],
         });
-        assert_eq!(referenced_columns(&delete, &mut arena), vec![a]);
+        assert_eq!(referenced_columns(&delete, &mut arena)?, vec![a]);
 
         let no_reference_operators = [
             Operator::ScalarApply(ScalarApplyOperator),
@@ -686,8 +811,9 @@ mod tests {
             }),
         ];
         for operator in no_reference_operators {
-            assert!(referenced_columns(&operator, &mut arena).is_empty());
+            assert!(referenced_columns(&operator, &mut arena)?.is_empty());
         }
+        Ok(())
     }
 
     #[test]

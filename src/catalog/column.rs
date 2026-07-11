@@ -244,7 +244,7 @@ impl ColumnDesc {
         if let Some(expr) = &default {
             let table_arena = crate::planner::TableArenaCell::default();
             let plan_arena = crate::planner::PlanArena::new(&table_arena);
-            if expr.has_table_ref_column(&plan_arena) {
+            if expr.has_table_ref_column(&plan_arena)? {
                 return Err(DatabaseError::DefaultNotColumnRef);
             }
         }

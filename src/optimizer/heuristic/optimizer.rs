@@ -32,7 +32,8 @@ use crate::planner::{Childrens, LogicalPlan, PlanArena};
 use std::array;
 use std::ops::Not;
 
-type ScanHintApplier<'a> = dyn Fn(&mut TableScanOperator, &PlanArena) + 'a;
+type ScanHintApplier<'a> =
+    dyn Fn(&mut TableScanOperator, &PlanArena) -> Result<(), DatabaseError> + 'a;
 
 pub struct HepOptimizer<'a> {
     before_batches: &'a [HepBatch],
@@ -74,9 +75,10 @@ impl<'a> HepOptimizer<'a> {
 
         if let Some(loader) = loader {
             if self.implementation_index.is_empty().not() {
-                let apply_no_sort_hints = |_scan_op: &mut TableScanOperator, _arena: &PlanArena| {};
+                let apply_no_sort_hints =
+                    |_scan_op: &mut TableScanOperator, _arena: &PlanArena| Ok(());
                 let apply_no_stream_distinct_hints =
-                    |_scan_op: &mut TableScanOperator, _arena: &PlanArena| {};
+                    |_scan_op: &mut TableScanOperator, _arena: &PlanArena| Ok(());
                 Self::annotate_hints_and_physical_options(
                     &mut self.plan,
                     loader,
@@ -249,8 +251,8 @@ impl<'a> HepOptimizer<'a> {
         arena: &mut PlanArena,
     ) -> Result<(), DatabaseError> {
         if let Operator::TableScan(scan_op) = &mut plan.operator {
-            inherited_sort_hints(scan_op, arena);
-            inherited_stream_distinct_hints(scan_op, arena);
+            inherited_sort_hints(scan_op, arena)?;
+            inherited_stream_distinct_hints(scan_op, arena)?;
         }
 
         {
@@ -337,19 +339,19 @@ impl<'a> HepOptimizer<'a> {
         match operator {
             Operator::Sort(op) => {
                 let child_sort_hints = |scan_op: &mut TableScanOperator, arena: &PlanArena| {
-                    inherited_sort_hints(scan_op, arena);
+                    inherited_sort_hints(scan_op, arena)?;
                     apply_scan_order_hint(
                         scan_op,
                         ScanOrderHint::sort_fields(&op.sort_fields),
                         OrderHintKind::SortElimination,
                         arena,
-                    );
+                    )
                 };
                 f(&child_sort_hints)
             }
             _ if propagate_hints => f(inherited_sort_hints),
             _ => {
-                let no_sort_hints = |_scan_op: &mut TableScanOperator, _arena: &PlanArena| {};
+                let no_sort_hints = |_scan_op: &mut TableScanOperator, _arena: &PlanArena| Ok(());
                 f(&no_sort_hints)
             }
         }
@@ -380,14 +382,14 @@ impl<'a> HepOptimizer<'a> {
                             ScanOrderHint::distinct_groupby(&op.groupby_exprs),
                             OrderHintKind::StreamDistinct,
                             arena,
-                        );
+                        )
                     };
                 f(&child_stream_distinct_hints)
             }
             _ if propagate_hints => f(inherited_stream_distinct_hints),
             _ => {
                 let no_stream_distinct_hints =
-                    |_scan_op: &mut TableScanOperator, _arena: &PlanArena| {};
+                    |_scan_op: &mut TableScanOperator, _arena: &PlanArena| Ok(());
                 f(&no_stream_distinct_hints)
             }
         }

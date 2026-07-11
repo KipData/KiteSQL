@@ -17,8 +17,8 @@ use std::collections::HashSet;
 use super::{Binder, QueryBindStep};
 use crate::errors::DatabaseError;
 use crate::expression::function::scala::ScalarFunction;
-use crate::expression::visitor::{walk_expr, Visitor};
-use crate::expression::visitor_mut::{walk_mut_expr, VisitorMut};
+use crate::expression::visitor::{walk_expr, ExprVisitor};
+use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut};
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
@@ -269,7 +269,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             HashSet::from_iter(group_raw_exprs.iter().copied());
 
         for expr in select_items {
-            if expr.has_agg_call() {
+            if expr.has_agg_call()? {
                 continue;
             }
             group_raw_set.remove(expr);
@@ -347,7 +347,7 @@ impl<'a> HavingOrderByValidator<'a> {
     }
 }
 
-impl<'expr> Visitor<'expr> for HavingOrderByValidator<'_> {
+impl<'expr> ExprVisitor<'expr> for HavingOrderByValidator<'_> {
     fn visit(&mut self, expr: &'expr ScalarExpression) -> Result<(), DatabaseError> {
         match expr {
             ScalarExpression::AggCall { .. } => {
@@ -427,7 +427,7 @@ impl<'a, 'p> AggregateOutputBinder<'a, 'p> {
     }
 }
 
-impl<'a> VisitorMut<'a> for AggregateOutputBinder<'_, '_> {
+impl<'a> ExprVisitorMut<'a> for AggregateOutputBinder<'_, '_> {
     fn visit(&mut self, expr: &'a mut ScalarExpression) -> Result<(), DatabaseError> {
         if let ScalarExpression::Alias {
             expr: inner_expr,
@@ -453,7 +453,7 @@ mod tests {
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
     use crate::errors::DatabaseError;
     use crate::expression::agg::AggKind;
-    use crate::expression::visitor_mut::VisitorMut;
+    use crate::expression::visitor_mut::ExprVisitorMut;
     use crate::expression::{AliasType, BinaryOperator, ScalarExpression};
     use crate::planner::PlanArena;
     use crate::storage::Storage;
