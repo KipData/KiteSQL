@@ -117,6 +117,10 @@ null
 statement error
 select v from set_left union select v from set_right order by set_left.v
 
+# Set-operation inputs must expose the same number of columns.
+statement error
+select v from set_left union all select id, v from set_right
+
 statement ok
 drop table set_right
 

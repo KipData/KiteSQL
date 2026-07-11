@@ -667,6 +667,11 @@ mod tests {
             PlanImpl::IndexScan(Box::new(index_info())).to_string(),
             "IndexScan By #4 => EMPTY"
         );
+        #[cfg(feature = "copy")]
+        {
+            assert_eq!(PlanImpl::CopyFromFile.to_string(), "CopyFromFile");
+            assert_eq!(PlanImpl::CopyToFile.to_string(), "CopyToFile");
+        }
     }
 
     #[test]
@@ -748,6 +753,48 @@ mod tests {
             value_exprs: vec![(b, column_expr(a, 0))],
         });
         assert_eq!(referenced_columns(&update, &mut arena)?, vec![a]);
+
+        let add_column = Operator::AddColumn(AddColumnOperator {
+            table_name: "users".into(),
+            if_not_exists: false,
+            column: ColumnCatalog::new(
+                "added".to_string(),
+                true,
+                ColumnDesc::new(
+                    LogicalType::Integer,
+                    None,
+                    false,
+                    Some(ScalarExpression::from(1_i32)),
+                )?,
+            ),
+        });
+        assert!(referenced_columns(&add_column, &mut arena)?.is_empty());
+
+        let change_column = Operator::ChangeColumn(ChangeColumnOperator {
+            table_name: "users".into(),
+            old_column_name: "old".to_string(),
+            new_column_name: "new".to_string(),
+            data_type: LogicalType::Integer,
+            default_change: DefaultChange::Set(column_expr(b, 1)),
+            not_null_change: NotNullChange::NoChange,
+        });
+        assert_eq!(referenced_columns(&change_column, &mut arena)?, vec![b]);
+
+        let create_table = Operator::CreateTable(CreateTableOperator {
+            table_name: "created".into(),
+            columns: vec![ColumnCatalog::new(
+                "value".to_string(),
+                true,
+                ColumnDesc::new(
+                    LogicalType::Integer,
+                    None,
+                    false,
+                    Some(ScalarExpression::from(2_i32)),
+                )?,
+            )],
+            if_not_exists: false,
+        });
+        assert!(referenced_columns(&create_table, &mut arena)?.is_empty());
 
         let table_scan = Operator::TableScan(TableScanOperator {
             table_name: "users".into(),
@@ -1134,7 +1181,7 @@ mod tests {
 
     #[cfg(feature = "copy")]
     #[test]
-    fn copy_from_file_display_formats_source_table_and_schema() {
+    fn copy_display_formats_source_target_table_and_schema() {
         use crate::binder::copy::{ExtSource, FileFormat};
         use std::path::PathBuf;
 
@@ -1160,6 +1207,21 @@ mod tests {
         assert_eq!(
             operator.to_string(),
             "Copy /tmp/users.csv -> users [#0, #1]"
+        );
+        assert_eq!(
+            Operator::CopyToFile(CopyToFileOperator {
+                target: ExtSource {
+                    path: PathBuf::from("/tmp/output.csv"),
+                    format: FileFormat::Csv {
+                        delimiter: ',',
+                        quote: '"',
+                        escape: None,
+                        header: false,
+                    },
+                },
+            })
+            .to_string(),
+            "Copy To /tmp/output.csv"
         );
     }
 }

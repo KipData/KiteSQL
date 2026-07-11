@@ -234,3 +234,144 @@ fn schema_contains_column(
         .iter()
         .any(|candidate| arena.same_column(*candidate, *column))
 }
+
+// GRCOV_EXCL_START
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::catalog::{ColumnCatalog, ColumnDesc};
+    use crate::optimizer::core::rule::NormalizationRule;
+    use crate::planner::operator::filter::FilterOperator;
+    use crate::planner::{PlanArena, TableArenaCell};
+    use crate::types::LogicalType;
+
+    fn column(arena: &mut PlanArena, name: &str) -> ColumnRef {
+        arena.alloc_column(ColumnCatalog::new(
+            name.to_string(),
+            true,
+            ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
+        ))
+    }
+
+    fn eq(left: ScalarExpression, right: ScalarExpression) -> ScalarExpression {
+        ScalarExpression::Binary {
+            op: BinaryOperator::Eq,
+            left_expr: Box::new(left),
+            right_expr: Box::new(right),
+            evaluator: None,
+            ty: LogicalType::Boolean,
+        }
+    }
+
+    #[test]
+    fn probe_detection_covers_quantifiers_and_rejected_sides() -> Result<(), DatabaseError> {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let left = column(&mut arena, "left");
+        let right = column(&mut arena, "right");
+        let outside = column(&mut arena, "outside");
+        let left_schema = vec![left];
+        let right_schema = vec![right];
+        let overlapping_schema = vec![left, right];
+
+        assert!(find_parameterized_probe(
+            MarkApplyKind::Quantified(MarkApplyQuantifier::Any),
+            &[],
+            &left_schema,
+            &right_schema,
+            &arena,
+        )?
+        .is_none());
+        assert!(find_parameterized_probe(
+            MarkApplyKind::Quantified(MarkApplyQuantifier::All),
+            &[eq(
+                ScalarExpression::column_expr(right, 0),
+                ScalarExpression::column_expr(left, 0),
+            )],
+            &left_schema,
+            &right_schema,
+            &arena,
+        )?
+        .is_none());
+
+        let predicates = vec![
+            ScalarExpression::from(true),
+            eq(
+                ScalarExpression::column_expr(right, 0),
+                ScalarExpression::column_expr(left, 0),
+            ),
+        ];
+        let probe = find_parameterized_probe(
+            MarkApplyKind::Exists,
+            &predicates,
+            &left_schema,
+            &right_schema,
+            &arena,
+        )?
+        .expect("right = left should be parameterizable");
+        assert_eq!(probe.0, right);
+
+        assert!(extract_parameterized_probe(
+            &eq(
+                ScalarExpression::column_expr(right, 0),
+                ScalarExpression::column_expr(outside, 0),
+            ),
+            &left_schema,
+            &right_schema,
+            &arena,
+        )?
+        .is_none());
+        assert!(extract_parameterized_probe(
+            &eq(
+                ScalarExpression::column_expr(right, 0),
+                ScalarExpression::column_expr(right, 0),
+            ),
+            &overlapping_schema,
+            &right_schema,
+            &arena,
+        )?
+        .is_none());
+        assert!(extract_parameterized_probe(
+            &ScalarExpression::from(false),
+            &left_schema,
+            &right_schema,
+            &arena,
+        )?
+        .is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn parameterization_rejects_unsupported_operator_and_child_shapes() -> Result<(), DatabaseError>
+    {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let column = column(&mut arena, "value");
+        let mut plan = LogicalPlan::new(Operator::Dummy, Childrens::None);
+
+        assert!(!ParameterizeMarkApply.apply(&mut plan, &mut arena)?);
+        assert!(!parameterize_right_subtree(&mut plan, &column, &arena));
+
+        let mut filter = LogicalPlan::new(
+            Operator::Filter(FilterOperator {
+                predicate: ScalarExpression::from(true),
+                is_optimized: false,
+                having: false,
+            }),
+            Childrens::None,
+        );
+        assert!(!parameterize_right_subtree(&mut filter, &column, &arena));
+
+        assert_eq!(
+            index_priority(IndexType::PrimaryKey { is_multiple: false }),
+            0
+        );
+        assert_eq!(index_priority(IndexType::Unique), 1);
+        assert_eq!(index_priority(IndexType::Composite), 2);
+        assert_eq!(index_priority(IndexType::Normal), 3);
+
+        Ok(())
+    }
+}
+// GRCOV_EXCL_STOP

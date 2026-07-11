@@ -193,3 +193,10 @@ select a.* from a where v1 >= (select 1)
 1 2 2
 2 3 3
 
+# A table alias column list must match the source width.
+statement error
+select * from a as aliased(only_one)
+
+# Every USING column must exist on both sides.
+statement error
+select * from a join b using (missing)

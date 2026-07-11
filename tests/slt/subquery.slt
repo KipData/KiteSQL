@@ -487,6 +487,21 @@ where exists (
     select id from orders where amount = 300
 );
 
+# EXISTS/IN subqueries are not supported in the SELECT list.
+statement error
+select exists(select id from orders) from users;
+
+# Correlated scalar subqueries are not supported in WHERE.
+statement error
+select * from users
+where id = (select user_id from orders where amount = age);
+
+# Mark-apply and scalar-join subqueries cannot share one WHERE scope yet.
+statement error
+select * from users
+where exists(select 1 from orders)
+  and id = (select max(user_id) from orders);
+
 statement ok
 drop table users;
 
