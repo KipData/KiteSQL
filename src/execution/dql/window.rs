@@ -92,6 +92,7 @@ fn evaluate_partition(
     while peer_start < rows.len() {
         let mut peer_end = peer_start + 1;
         'peer: while peer_end < rows.len() {
+            // TODO: Cache evaluated order keys to avoid recalculating the previous row.
             for field in order_by {
                 if field.expr.eval(Some(&rows[peer_end - 1]))?
                     != field.expr.eval(Some(&rows[peer_end]))?
@@ -135,6 +136,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Window {
             while arena.next_tuple(self.input, plan_arena)? {
                 let tuple = mem::take(arena.result_tuple_mut());
                 let mut same_partition = true;
+                // TODO: Cache evaluated partition keys to avoid recalculating the previous row.
                 for expr in &self.partition_by {
                     if expr.eval(self.rows.last())? != expr.eval(Some(&tuple))? {
                         same_partition = false;

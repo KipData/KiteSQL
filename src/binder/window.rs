@@ -61,22 +61,24 @@ impl ExprVisitorMut<'_> for WindowCollector<'_, '_> {
     }
 }
 
-struct WindowOutputBinder {
-    outputs: Vec<(ColumnRef, usize)>,
+struct WindowOutputBinder<'a> {
+    groups: &'a [WindowGroup],
+    base_position: usize,
 }
 
-impl ExprVisitorMut<'_> for WindowOutputBinder {
+impl ExprVisitorMut<'_> for WindowOutputBinder<'_> {
     fn visit_column_ref(
         &mut self,
         column: &mut ColumnRef,
         position: &mut usize,
     ) -> Result<(), DatabaseError> {
-        if let Some((_, output_position)) = self
-            .outputs
+        if let Some(output_position) = self
+            .groups
             .iter()
-            .find(|(output_column, _)| output_column == column)
+            .flat_map(|group| &group.output_columns)
+            .position(|output_column| output_column == column)
         {
-            *position = *output_position;
+            *position = self.base_position + output_position;
         }
         Ok(())
     }
@@ -203,23 +205,15 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             }
         }
 
-        let mut outputs = Vec::new();
-        let mut position = base_position;
-        for group in &groups {
-            for column in &group.output_columns {
-                outputs.push((*column, position));
-                position += 1;
-            }
-        }
-
-        let mut output_binder = WindowOutputBinder { outputs };
-        for expr in select_list {
+        let mut output_binder = WindowOutputBinder {
+            groups: &groups,
+            base_position,
+        };
+        for expr in select_list
+            .iter_mut()
+            .chain(order_by.iter_mut().flatten().map(|field| &mut field.expr))
+        {
             output_binder.visit(expr)?;
-        }
-        if let Some(order_by) = order_by {
-            for field in order_by {
-                output_binder.visit(&mut field.expr)?;
-            }
         }
 
         for group in groups {
