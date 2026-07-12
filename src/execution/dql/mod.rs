@@ -33,6 +33,7 @@ pub(crate) mod sort;
 pub(crate) mod top_k;
 pub(crate) mod union;
 pub(crate) mod values;
+pub(crate) mod window;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod test {

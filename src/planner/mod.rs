@@ -188,6 +188,14 @@ impl LogicalPlan {
                 Childrens::Only(child) => child.output_schema(arena).clone(),
                 _ => unreachable!(),
             },
+            Operator::Window(op) => match childrens {
+                Childrens::Only(child) => {
+                    let mut schema = child.output_schema(arena).clone();
+                    schema.extend_from_slice(&op.output_columns);
+                    schema
+                }
+                _ => unreachable!(),
+            },
             Operator::ScalarApply(_) | Operator::Join(_) => match childrens {
                 Childrens::Twins { left, right } => {
                     let mut schema = left.output_schema(arena).clone();

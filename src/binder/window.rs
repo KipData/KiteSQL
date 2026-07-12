@@ -1,0 +1,255 @@
+// Copyright 2024 KipData/KiteSQL
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use super::{Binder, QueryBindStep};
+use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
+use crate::errors::DatabaseError;
+use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut};
+use crate::expression::window::{WindowCall, WindowFunction, WindowFunctionKind, WindowSpec};
+use crate::expression::ScalarExpression;
+use crate::planner::operator::sort::{SortField, SortOperator};
+use crate::planner::operator::window::WindowOperator;
+use crate::planner::operator::Operator;
+use crate::planner::{Childrens, LogicalPlan, PlanArena};
+use crate::storage::Transaction;
+use crate::types::value::DataValue;
+use crate::types::LogicalType;
+
+struct WindowCollector<'a, 'p> {
+    arena: &'a mut PlanArena<'p>,
+    windows: Vec<(WindowCall, ColumnRef)>,
+}
+
+impl ExprVisitorMut<'_> for WindowCollector<'_, '_> {
+    fn visit(&mut self, expr: &mut ScalarExpression) -> Result<(), DatabaseError> {
+        let ScalarExpression::WindowCall(window) = expr else {
+            return walk_mut_expr(self, expr);
+        };
+        if let Some((_, output_column)) = self
+            .windows
+            .iter()
+            .find(|(candidate, _)| candidate == window)
+        {
+            *expr = ScalarExpression::column_expr(*output_column, 0);
+            return Ok(());
+        }
+
+        let output_name = expr.output_name(self.arena);
+        let ScalarExpression::WindowCall(window) = std::mem::replace(expr, ScalarExpression::Empty)
+        else {
+            unreachable!()
+        };
+        let output_column = self.arena.alloc_column(ColumnCatalog::new(
+            output_name,
+            true,
+            ColumnDesc::new(window.function.ty.clone(), None, false, None)?,
+        ));
+        self.windows.push((window, output_column));
+        *expr = ScalarExpression::column_expr(output_column, 0);
+        Ok(())
+    }
+}
+
+struct WindowOutputBinder {
+    outputs: Vec<(ColumnRef, usize)>,
+}
+
+impl ExprVisitorMut<'_> for WindowOutputBinder {
+    fn visit_column_ref(
+        &mut self,
+        column: &mut ColumnRef,
+        position: &mut usize,
+    ) -> Result<(), DatabaseError> {
+        if let Some((_, output_position)) = self
+            .outputs
+            .iter()
+            .find(|(output_column, _)| output_column == column)
+        {
+            *position = *output_position;
+        }
+        Ok(())
+    }
+}
+
+struct WindowGroup {
+    partition_by: Vec<ScalarExpression>,
+    order_by: Vec<SortField>,
+    functions: Vec<WindowFunction>,
+    output_columns: Vec<ColumnRef>,
+}
+
+impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
+    pub(crate) fn bind_window_function(
+        &mut self,
+        function_name: String,
+        args: Vec<ScalarExpression>,
+        partition_by: Vec<ScalarExpression>,
+        order_by: Vec<SortField>,
+        arena: &mut PlanArena,
+    ) -> Result<ScalarExpression, DatabaseError> {
+        if !matches!(
+            self.context.step_now(),
+            QueryBindStep::Project | QueryBindStep::Sort
+        ) {
+            return Err(DatabaseError::UnsupportedStmt(
+                "window functions are only allowed in SELECT and ORDER BY".to_string(),
+            ));
+        }
+        for expr in args
+            .iter()
+            .chain(&partition_by)
+            .chain(order_by.iter().map(|field| &field.expr))
+        {
+            if expr.has_window_call()? {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "window functions cannot be nested".to_string(),
+                ));
+            }
+        }
+
+        let (kind, args, ty) = match function_name.as_str() {
+            "row_number" | "rank" | "dense_rank" => {
+                if !args.is_empty() {
+                    return Err(DatabaseError::MisMatch(
+                        "number of ranking function parameters",
+                        "0",
+                    ));
+                }
+                let kind = match function_name.as_str() {
+                    "row_number" => WindowFunctionKind::RowNumber,
+                    "rank" => WindowFunctionKind::Rank,
+                    "dense_rank" => WindowFunctionKind::DenseRank,
+                    _ => unreachable!(),
+                };
+                (kind, args, LogicalType::Bigint)
+            }
+            "count" | "sum" | "avg" | "min" | "max" => {
+                let ScalarExpression::AggCall { kind, args, ty, .. } =
+                    self.bind_function_call(function_name, args, false, arena)?
+                else {
+                    unreachable!()
+                };
+                (WindowFunctionKind::Aggregate(kind), args, ty)
+            }
+            _ => {
+                return Err(DatabaseError::UnsupportedStmt(format!(
+                    "window function `{function_name}` is not supported"
+                )))
+            }
+        };
+
+        Ok(ScalarExpression::WindowCall(WindowCall {
+            function: WindowFunction { kind, args, ty },
+            spec: WindowSpec {
+                partition_by,
+                order_by,
+            },
+        }))
+    }
+
+    pub(crate) fn bind_window(
+        &mut self,
+        mut children: LogicalPlan,
+        select_list: &mut [ScalarExpression],
+        order_by: &mut Option<Vec<SortField>>,
+        arena: &mut PlanArena,
+    ) -> Result<LogicalPlan, DatabaseError> {
+        let mut collector = WindowCollector {
+            arena,
+            windows: Vec::new(),
+        };
+        for expr in select_list.iter_mut() {
+            collector.visit(expr)?;
+        }
+        if let Some(order_by) = order_by.as_mut() {
+            for field in order_by {
+                collector.visit(&mut field.expr)?;
+            }
+        }
+        if collector.windows.is_empty() {
+            return Ok(children);
+        }
+        let windows = collector.windows;
+
+        let base_position = children.output_schema(arena).len();
+        let mut groups: Vec<WindowGroup> = Vec::new();
+        for (window, output_column) in windows {
+            let WindowCall { function, spec } = window;
+            let group_index = groups.iter().position(|group| {
+                group.partition_by == spec.partition_by && group.order_by == spec.order_by
+            });
+
+            if let Some(index) = group_index {
+                groups[index].functions.push(function);
+                groups[index].output_columns.push(output_column);
+            } else {
+                groups.push(WindowGroup {
+                    partition_by: spec.partition_by,
+                    order_by: spec.order_by,
+                    functions: vec![function],
+                    output_columns: vec![output_column],
+                });
+            }
+        }
+
+        let mut outputs = Vec::new();
+        let mut position = base_position;
+        for group in &groups {
+            for column in &group.output_columns {
+                outputs.push((*column, position));
+                position += 1;
+            }
+        }
+
+        let mut output_binder = WindowOutputBinder { outputs };
+        for expr in select_list {
+            output_binder.visit(expr)?;
+        }
+        if let Some(order_by) = order_by {
+            for field in order_by {
+                output_binder.visit(&mut field.expr)?;
+            }
+        }
+
+        for group in groups {
+            let sort_fields = group
+                .partition_by
+                .iter()
+                .cloned()
+                .map(SortField::from)
+                .chain(group.order_by.iter().cloned())
+                .collect::<Vec<_>>();
+            if !sort_fields.is_empty() {
+                children = LogicalPlan::new(
+                    Operator::Sort(SortOperator {
+                        sort_fields,
+                        limit: None,
+                    }),
+                    Childrens::Only(Box::new(children)),
+                );
+            }
+            children = LogicalPlan::new(
+                Operator::Window(WindowOperator {
+                    partition_by: group.partition_by,
+                    order_by: group.order_by,
+                    functions: group.functions,
+                    output_columns: group.output_columns,
+                }),
+                Childrens::Only(Box::new(children)),
+            );
+        }
+        self.context.step(QueryBindStep::Window);
+        Ok(children)
+    }
+}

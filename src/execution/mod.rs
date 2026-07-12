@@ -63,6 +63,7 @@ use crate::execution::dql::sort::Sort;
 use crate::execution::dql::top_k::TopK;
 use crate::execution::dql::union::Union;
 use crate::execution::dql::values::Values;
+use crate::execution::dql::window::Window;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
@@ -203,6 +204,7 @@ pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
     Union(Union),
     Update(Update),
     Values(Values),
+    Window(Window),
     Empty,
 }
 
@@ -342,6 +344,9 @@ impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
             }
             ExecNode::Values(exec) => {
                 <Values as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+            }
+            ExecNode::Window(exec) => {
+                <Window as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
             ExecNode::Empty => unreachable!("executor node re-entered while active"),
         }
@@ -795,6 +800,13 @@ where
         ),
         Operator::Values(op) => <Values as ReadExecutor<'a, T>>::into_executor(
             Values::from(op),
+            arena,
+            plan_arena,
+            cache,
+            transaction,
+        ),
+        Operator::Window(op) => <Window as ReadExecutor<'a, T>>::into_executor(
+            (op, childrens.pop_only()),
             arena,
             plan_arena,
             cache,

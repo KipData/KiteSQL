@@ -337,6 +337,9 @@ impl ScalarExpression {
                 result.unwrap_or(DataValue::Null).cast(ty)
             }
             ScalarExpression::TableFunction(_) => unreachable!(),
+            ScalarExpression::WindowCall(_) => Err(DatabaseError::UnsupportedStmt(
+                "window calls must be evaluated by the window executor".to_string(),
+            )),
         }
     }
 }

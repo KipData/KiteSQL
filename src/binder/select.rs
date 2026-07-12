@@ -232,6 +232,18 @@ where
     orderby: Option<Vec<SortField>>,
 }
 
+pub(crate) struct BindPlanWindowed<'s, 'a, 'b, 'arena, T, A>
+where
+    T: Transaction,
+    A: AsRef<[(&'static str, DataValue)]>,
+{
+    binder: &'s mut Binder<'a, 'b, T, A>,
+    arena: &'s mut crate::planner::PlanArena<'arena>,
+    plan: LogicalPlan,
+    select_list: Vec<ScalarExpression>,
+    orderby: Option<Vec<SortField>>,
+}
+
 pub(crate) struct BindPlanDistinct<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
@@ -357,6 +369,7 @@ where
                 |_binder, _arena, order| Ok(order),
             )?
             .having()?
+            .window()?
             .distinct(false)?
             .order_by()?;
         Ok(BindPlanSelectList {
@@ -379,6 +392,7 @@ where
                 |_binder, _arena, order| Ok(order),
             )?
             .having()?
+            .window()?
             .distinct(false)?
             .order_by()?;
         Ok(BindPlanSelectList {
@@ -433,7 +447,7 @@ where
     #[cfg(feature = "orm")]
     pub fn finish(self) -> Result<LogicalPlan, DatabaseError> {
         for expr in &self.select_list {
-            if expr.has_agg_call()? {
+            if expr.has_agg_call()? || expr.has_window_call()? {
                 return self.aggregate_without_group()?.finish();
             }
         }
@@ -579,6 +593,31 @@ where
 }
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanHaving<'s, 'a, 'b, 'arena, T, A>
+where
+    T: Transaction,
+    A: AsRef<[(&'static str, DataValue)]>,
+{
+    pub(crate) fn window(
+        mut self,
+    ) -> Result<BindPlanWindowed<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
+        self.plan = self.binder.bind_window(
+            self.plan,
+            &mut self.select_list,
+            &mut self.orderby,
+            self.arena,
+        )?;
+
+        Ok(BindPlanWindowed {
+            binder: self.binder,
+            arena: self.arena,
+            plan: self.plan,
+            select_list: self.select_list,
+            orderby: self.orderby,
+        })
+    }
+}
+
+impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanWindowed<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
     A: AsRef<[(&'static str, DataValue)]>,

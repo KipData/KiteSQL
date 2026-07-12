@@ -81,6 +81,8 @@ PRs that modify logic but leave obvious test gaps untouched may be rejected.
 
 ### 3.1 Prefer Simple Code
 
+- Implement functionality with the smallest reasonable change and the simplest correct design.
+- Do not over-engineer or introduce abstractions for hypothetical future requirements.
 - Prefer straightforward control flow
 - Avoid unnecessary abstractions
 - Avoid premature generalization

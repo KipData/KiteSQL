@@ -44,6 +44,7 @@ pub mod range_detacher;
 pub mod simplify;
 pub mod visitor;
 pub mod visitor_mut;
+pub mod window;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrimWhereField {
@@ -157,6 +158,7 @@ pub enum ScalarExpression {
         else_expr: Option<Box<ScalarExpression>>,
         ty: LogicalType,
     },
+    WindowCall(window::WindowCall),
 }
 
 impl From<DataValue> for ScalarExpression {
@@ -498,7 +500,14 @@ impl ScalarExpression {
             }
             | ScalarExpression::CaseWhen {
                 ty: return_type, ..
-            } => Cow::Borrowed(return_type),
+            }
+            | ScalarExpression::WindowCall(window::WindowCall {
+                function:
+                    window::WindowFunction {
+                        ty: return_type, ..
+                    },
+                ..
+            }) => Cow::Borrowed(return_type),
             ScalarExpression::IsNull { .. }
             | ScalarExpression::In { .. }
             | ScalarExpression::Between { .. } => Cow::Owned(LogicalType::Boolean),
@@ -683,6 +692,31 @@ impl ScalarExpression {
         Ok(checker.has_agg)
     }
 
+    pub fn has_window_call(&self) -> Result<bool, DatabaseError> {
+        struct WindowCallChecker(bool);
+
+        impl<'a> ExprVisitor<'a> for WindowCallChecker {
+            fn visit(&mut self, expr: &'a ScalarExpression) -> Result<(), DatabaseError> {
+                if !self.0 {
+                    walk_expr(self, expr)?;
+                }
+                Ok(())
+            }
+
+            fn visit_window(
+                &mut self,
+                _window: &'a window::WindowCall,
+            ) -> Result<(), DatabaseError> {
+                self.0 = true;
+                Ok(())
+            }
+        }
+
+        let mut checker = WindowCallChecker(false);
+        checker.visit(self)?;
+        Ok(checker.0)
+    }
+
     fn output_name_by<N: fmt::Display>(&self, fn_display: &impl Fn(ColumnRef) -> N) -> String {
         match self {
             ScalarExpression::Constant(value) => format!("{value}"),
@@ -742,6 +776,46 @@ impl ScalarExpression {
                     op(kind.allow_distinct(), *distinct),
                     args_str
                 )
+            }
+            ScalarExpression::WindowCall(window) => {
+                let args = window
+                    .function
+                    .args
+                    .iter()
+                    .map(|expr| expr.output_name_by(fn_display))
+                    .join(", ");
+                let function = match window.function.kind {
+                    window::WindowFunctionKind::RowNumber => "row_number".to_string(),
+                    window::WindowFunctionKind::Rank => "rank".to_string(),
+                    window::WindowFunctionKind::DenseRank => "dense_rank".to_string(),
+                    window::WindowFunctionKind::Aggregate(kind) => {
+                        format!("{kind:?}").to_lowercase()
+                    }
+                };
+                let mut spec = Vec::new();
+                if !window.spec.partition_by.is_empty() {
+                    spec.push(format!(
+                        "partition by {}",
+                        window
+                            .spec
+                            .partition_by
+                            .iter()
+                            .map(|expr| expr.output_name_by(fn_display))
+                            .join(", ")
+                    ));
+                }
+                if !window.spec.order_by.is_empty() {
+                    spec.push(format!(
+                        "order by {}",
+                        window
+                            .spec
+                            .order_by
+                            .iter()
+                            .map(ToString::to_string)
+                            .join(", ")
+                    ));
+                }
+                format!("{function}({args}) over ({})", spec.join(" "))
             }
             ScalarExpression::In {
                 args,

@@ -17,6 +17,7 @@ use crate::errors::DatabaseError;
 use crate::expression::agg::AggKind;
 use crate::expression::function::scala::ScalarFunction;
 use crate::expression::function::table::TableFunction;
+use crate::expression::window::WindowCall;
 use crate::expression::TrimWhereField;
 use crate::expression::{AliasType, BinaryOperator, ScalarExpression, UnaryOperator};
 use crate::types::evaluator::{BinaryEvaluatorRef, CastEvaluatorRef, UnaryEvaluatorRef};
@@ -95,6 +96,19 @@ pub trait ExprVisitor<'a>: Sized {
     ) -> Result<(), DatabaseError> {
         for arg in args {
             self.visit(arg)?;
+        }
+        Ok(())
+    }
+
+    fn visit_window(&mut self, window: &'a WindowCall) -> Result<(), DatabaseError> {
+        for expr in window
+            .function
+            .args
+            .iter()
+            .chain(&window.spec.partition_by)
+            .chain(window.spec.order_by.iter().map(|field| &field.expr))
+        {
+            self.visit(expr)?;
         }
         Ok(())
     }
@@ -356,5 +370,6 @@ pub fn walk_expr<'a, V: ExprVisitor<'a>>(
             else_expr.as_deref(),
             ty,
         ),
+        ScalarExpression::WindowCall(window) => visitor.visit_window(window),
     }
 }

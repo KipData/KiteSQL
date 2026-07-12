@@ -24,7 +24,7 @@ mod test {
     use kite_sql::expression::function::FunctionSummary;
     use kite_sql::expression::BinaryOperator;
     use kite_sql::expression::ScalarExpression;
-    use kite_sql::orm::OrmQueryResultExt;
+    use kite_sql::orm::{OrmQueryResultExt, WindowSpec};
     use kite_sql::planner::{MetaArena, PlanArena, TableArena, TableArenaCell};
     use kite_sql::storage::rocksdb::RocksStorage;
     use kite_sql::types::evaluator::binary_create;
@@ -2094,6 +2094,36 @@ mod test {
             category: "beta".to_string(),
             score: 5,
         })?;
+
+        let mut windowed_scores = database
+            .bind(|ctx| {
+                ctx.from::<EventLog>()?
+                    .project_tuple(|e| {
+                        let id = e.column(EventLog::id())?;
+                        let category = e.column(EventLog::category())?;
+                        let score = e.column(EventLog::score())?;
+                        let ordered = WindowSpec::new()
+                            .partition_by(category.clone())
+                            .order_by(score.clone().asc());
+                        let partition = WindowSpec::new().partition_by(category);
+                        Ok(vec![
+                            id,
+                            e.row_number(ordered.clone())?,
+                            e.rank(ordered.clone())?,
+                            e.dense_rank(ordered)?,
+                            e.sum_over(score, partition.clone())?,
+                            e.count_all_over(partition)?,
+                        ])
+                    })?
+                    .finish()
+            })?
+            .project_tuple::<(i32, i64, i64, i64, i32, i32)>()
+            .collect::<Result<Vec<_>, _>>()?;
+        windowed_scores.sort_by_key(|row| row.0);
+        assert_eq!(
+            windowed_scores,
+            vec![(1, 1, 1, 1, 30, 2), (2, 2, 2, 2, 30, 2), (3, 1, 1, 1, 5, 1)]
+        );
 
         let mut grouped_categories = database
             .bind(|ctx| {

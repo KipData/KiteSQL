@@ -1,0 +1,114 @@
+statement ok
+create table window_test(id int primary key, k int, v int null)
+
+statement ok
+insert into window_test values
+    (1, 1, 10),
+    (2, 1, 10),
+    (3, 1, 20),
+    (4, 2, 5),
+    (5, 2, null)
+
+query IIIIII
+select id,
+       row_number() over (partition by k order by v, id),
+       rank() over (partition by k order by v),
+       dense_rank() over (partition by k order by v),
+       sum(v) over (partition by k order by v),
+       sum(v) over (partition by k)
+from window_test
+order by id
+----
+1 1 1 1 20 40
+2 2 1 1 20 40
+3 3 3 2 40 40
+4 1 1 1 5 5
+5 2 2 2 5 5
+
+query III
+select id,
+       row_number() over (partition by k order by v, id),
+       row_number() over (order by v desc, id)
+from window_test
+order by id
+----
+1 1 2
+2 2 3
+3 3 1
+4 1 4
+5 2 5
+
+query T
+explain select
+       row_number() over (partition by k order by v, id),
+       rank() over (partition by k order by v, id),
+       row_number() over (order by v desc, id)
+from window_test
+----
+Projection [#4, #5, #6] [Project => (Sort Option: Follow)] Window [WindowFunction { kind: RowNumber, args: [], ty: Bigint }] -> Order By [#3 Desc Nulls Last, #1 Asc Nulls Last] [Window => (Sort Option: Follow)] Sort By #3 Desc Nulls Last, #1 Asc Nulls Last [Sort => (Sort Option: OrderBy: (#3 Desc Nulls Last, #1 Asc Nulls Last) ignore_prefix_len: 0)] Window [WindowFunction { kind: RowNumber, args: [], ty: Bigint }, WindowFunction { kind: Rank, args: [], ty: Bigint }] -> Partition By [#2] Order By [#3 Asc Nulls Last, #1 Asc Nulls Last] [Window => (Sort Option: Follow)] Sort By #2 Asc Nulls Last, #3 Asc Nulls Last, #1 Asc Nulls Last [Sort => (Sort Option: OrderBy: (#2 Asc Nulls Last, #3 Asc Nulls Last, #1 Asc Nulls Last) ignore_prefix_len: 0)] TableScan window_test -> [#1, #2, #3] [SeqScan => (Sort Option: None)]
+
+query III
+select id,
+       row_number() over (partition by k order by v, id),
+       row_number() over (partition by k order by v, id)
+from window_test
+order by id
+----
+1 1 1
+2 2 2
+3 3 3
+4 1 1
+5 2 2
+
+query IIII
+select k,
+       sum(v),
+       sum(sum(v)) over (order by k),
+       row_number() over (order by k)
+from window_test
+group by k
+order by k
+----
+1 40 40 1
+2 5 45 2
+
+query III
+select id,
+       count(*) over (partition by k),
+       count(v) over (partition by k)
+from window_test
+order by id
+----
+1 3 3
+2 3 3
+3 3 3
+4 2 1
+5 2 1
+
+statement ok
+create view window_view as
+select id, k, row_number() over (partition by k order by v, id) as rn
+from window_test
+
+query III
+select id, k, rn from window_view order by id
+----
+1 1 1
+2 1 2
+3 1 3
+4 2 1
+5 2 2
+
+statement ok
+drop view window_view
+
+statement error
+select sum(v) over (order by id rows between 1 preceding and current row)
+from window_test
+
+statement error
+select row_number() over named_window from window_test
+window named_window as (order by id)
+
+statement error
+select id from window_test qualify id = 1

@@ -501,7 +501,8 @@ impl ColumnPruning {
             | Operator::Filter(_)
             | Operator::Union(_)
             | Operator::SetMembership(_)
-            | Operator::TopK(_) => {
+            | Operator::TopK(_)
+            | Operator::Window(_) => {
                 if matches!(operator, Operator::ScalarApply(_) | Operator::MarkApply(_)) {
                     let mut child_required = required_columns;
                     Self::extend_operator_referenced_columns(operator, &mut child_required, arena)?;

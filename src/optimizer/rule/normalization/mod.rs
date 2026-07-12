@@ -133,7 +133,8 @@ impl NormalizationRuleRootTag {
             | Operator::FunctionScan(_)
             | Operator::Update(_)
             | Operator::Union(_)
-            | Operator::SetMembership(_) => None,
+            | Operator::SetMembership(_)
+            | Operator::Window(_) => None,
             #[cfg(feature = "copy")]
             Operator::CopyFromFile(_) | Operator::CopyToFile(_) => None,
         }

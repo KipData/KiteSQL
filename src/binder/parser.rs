@@ -14,8 +14,7 @@
 
 use super::select::{
     BindPlanAggregated, BindPlanComplete, BindPlanDistinct, BindPlanFiltered, BindPlanFrom,
-    BindPlanHaving, BindPlanProjected, BindPlanSelectList, BindPlanStart, JoinConstraintInput,
-    TableAliasInput,
+    BindPlanProjected, BindPlanSelectList, BindPlanStart, JoinConstraintInput, TableAliasInput,
 };
 use super::{is_valid_identifier, with_query_bind_step, Binder, QueryBindStep, SetOperatorKind};
 #[cfg(feature = "copy")]
@@ -47,6 +46,7 @@ pub(super) use sqlparser::ast::{
     ObjectType, OrderByExpr, OrderByKind, Query, Select, SelectInto, SelectItem,
     SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, Spanned, TableAlias,
     TableConstraint, TableFactor, TableObject, TableWithJoins, TypedString, UnaryOperator, Value,
+    WindowType,
 };
 #[cfg(feature = "copy")]
 pub(super) use sqlparser::ast::{CopyOption, CopySource, CopyTarget};
@@ -1463,7 +1463,7 @@ where
     }
 }
 
-impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanHaving<'s, 'a, 'b, 'arena, T, A>
+impl<'s, 'a: 'b, 'b, 'arena, T, A> super::select::BindPlanWindowed<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
     A: AsRef<[(&'static str, DataValue)]>,
@@ -2392,7 +2392,15 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
         let func_span = func.span();
-        let Function { name, args, .. } = func;
+        let Function {
+            name,
+            args,
+            over,
+            filter,
+            null_treatment,
+            within_group,
+            ..
+        } = func;
         let (func_args, is_distinct) = match args {
             FunctionArguments::List(args) => (
                 args.args.as_slice(),
@@ -2425,8 +2433,76 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
         }
         let function_name = name.to_string().to_lowercase();
 
+        if let Some(over) = over {
+            if filter.is_some() || null_treatment.is_some() || !within_group.is_empty() {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "FILTER, NULL treatment, and WITHIN GROUP are not supported for window functions"
+                        .to_string(),
+                ));
+            }
+            return self
+                .bind_window_call(function_name, args, is_distinct, over, arena)
+                .map_err(|err| attach_span_if_absent(err, func_span));
+        }
+
         self.bind_function_call(function_name, args, is_distinct, arena)
             .map_err(|err| attach_span_if_absent(err, func_span))
+    }
+
+    fn bind_window_call(
+        &mut self,
+        function_name: String,
+        args: Vec<ScalarExpression>,
+        is_distinct: bool,
+        over: &WindowType,
+        arena: &mut PlanArena,
+    ) -> Result<ScalarExpression, DatabaseError> {
+        if !matches!(
+            self.context.step_now(),
+            QueryBindStep::Project | QueryBindStep::Sort
+        ) {
+            return Err(DatabaseError::UnsupportedStmt(
+                "window functions are only allowed in SELECT and ORDER BY".to_string(),
+            ));
+        }
+        if is_distinct {
+            return Err(DatabaseError::UnsupportedStmt(
+                "DISTINCT window aggregates are not supported".to_string(),
+            ));
+        }
+        let WindowType::WindowSpec(spec) = over else {
+            return Err(DatabaseError::UnsupportedStmt(
+                "named windows are not supported".to_string(),
+            ));
+        };
+        if spec.window_name.is_some() {
+            return Err(DatabaseError::UnsupportedStmt(
+                "inherited named windows are not supported".to_string(),
+            ));
+        }
+        if spec.window_frame.is_some() {
+            return Err(DatabaseError::UnsupportedStmt(
+                "explicit window frames are not supported".to_string(),
+            ));
+        }
+
+        let partition_by = spec
+            .partition_by
+            .iter()
+            .map(|expr| self.bind_expr(expr, arena))
+            .collect::<Result<Vec<_>, _>>()?;
+        let order_by = spec
+            .order_by
+            .iter()
+            .map(|OrderByExpr { expr, options, .. }| {
+                Ok(SortField::new(
+                    self.bind_expr(expr, arena)?,
+                    options.asc.unwrap_or(true),
+                    options.nulls_first.unwrap_or(false),
+                ))
+            })
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
+        self.bind_window_function(function_name, args, partition_by, order_by, arena)
     }
 
     pub fn bind_set_expr(
@@ -2511,8 +2587,20 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
             having,
             distinct,
             into,
+            named_window,
+            qualify,
             ..
         } = select;
+        if !named_window.is_empty() {
+            return Err(DatabaseError::UnsupportedStmt(
+                "named windows are not supported".to_string(),
+            ));
+        }
+        if qualify.is_some() {
+            return Err(DatabaseError::UnsupportedStmt(
+                "QUALIFY is not supported".to_string(),
+            ));
+        }
         Ok(self
             .build_plan(arena)
             .from_sql(from)?
@@ -2520,6 +2608,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
             .where_sql(selection.as_ref())?
             .aggregate_sql(group_by, having.as_ref(), orderby)?
             .having()?
+            .window()?
             .distinct_sql(distinct.as_ref())?
             .order_by()?
             .project()?

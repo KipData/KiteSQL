@@ -81,8 +81,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor {
         output.pk = None;
         output.values.clear();
         output.values.reserve(accs.len());
-        for acc in accs {
-            output.values.push(acc.evaluate()?);
+        for mut acc in accs {
+            acc.evaluate()?;
+            output.values.push(acc.result_owned());
         }
         self.returned = true;
         arena.resume();

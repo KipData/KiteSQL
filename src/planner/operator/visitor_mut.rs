@@ -75,6 +75,10 @@ pub trait OperatorVisitorMut<'a>: Sized {
         Ok(())
     }
 
+    fn visit_window(&mut self, _op: &'a mut window::WindowOperator) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
     fn visit_limit(&mut self, _op: &'a mut LimitOperator) -> Result<(), DatabaseError> {
         Ok(())
     }
@@ -276,6 +280,22 @@ impl<'a, V: ExprVisitorMut<'a>> OperatorVisitorMut<'a> for OperatorExprVisitorMu
         Ok(())
     }
 
+    fn visit_window(&mut self, op: &'a mut window::WindowOperator) -> Result<(), DatabaseError> {
+        for expr in op
+            .partition_by
+            .iter_mut()
+            .chain(op.order_by.iter_mut().map(|field| &mut field.expr))
+            .chain(
+                op.functions
+                    .iter_mut()
+                    .flat_map(|function| &mut function.args),
+            )
+        {
+            ExprVisitorMut::visit(self.visitor, expr)?;
+        }
+        Ok(())
+    }
+
     fn visit_top_k(&mut self, op: &'a mut TopKOperator) -> Result<(), DatabaseError> {
         for field in &mut op.sort_fields {
             ExprVisitorMut::visit(self.visitor, &mut field.expr)?;
@@ -360,6 +380,7 @@ pub fn walk_mut_operator<'a, V: OperatorVisitorMut<'a>>(
         Operator::CopyFromFile(op) => visitor.visit_copy_from_file(op),
         #[cfg(feature = "copy")]
         Operator::CopyToFile(op) => visitor.visit_copy_to_file(op),
+        Operator::Window(op) => visitor.visit_window(op),
     }
 }
 
@@ -398,7 +419,7 @@ mod tests {
                 visitor.visit_operator(operator)?;
             }
         }
-        assert_eq!(counter.0, 18);
+        assert_eq!(counter.0, 20);
 
         Ok(())
     }

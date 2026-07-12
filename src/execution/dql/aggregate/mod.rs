@@ -38,35 +38,46 @@ pub trait Accumulator {
     /// updates the accumulator's state from a vector of arrays.
     fn update_value(&mut self, value: &DataValue) -> Result<(), DatabaseError>;
 
-    /// returns its value based on its current state.
-    fn evaluate(self: Box<Self>) -> Result<DataValue, DatabaseError>;
+    /// evaluates its result based on its current state.
+    fn evaluate(&mut self) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
+    fn result(&self) -> &DataValue;
+
+    fn result_owned(self: Box<Self>) -> DataValue;
 }
 
-fn create_accumulator(expr: &ScalarExpression) -> Result<Box<dyn Accumulator>, DatabaseError> {
-    if let ScalarExpression::AggCall {
-        kind, ty, distinct, ..
-    } = expr
-    {
-        Ok(match (kind, distinct) {
-            (AggKind::Count, false) => Box::new(CountAccumulator::new()),
-            (AggKind::Count, true) => Box::new(DistinctCountAccumulator::new()),
-            (AggKind::Sum, false) => Box::new(SumAccumulator::new(Cow::Borrowed(ty))?),
-            (AggKind::Sum, true) => Box::new(DistinctSumAccumulator::new(ty)?),
-            (AggKind::Min, _) => Box::new(MinMaxAccumulator::new(false)),
-            (AggKind::Max, _) => Box::new(MinMaxAccumulator::new(true)),
-            (AggKind::Avg, _) => Box::new(AvgAccumulator::new()),
-        })
-    } else {
-        unreachable!(
-            "create_accumulator called with non-aggregate expression {}",
-            expr
-        );
-    }
+pub(crate) fn create_accumulator(
+    kind: AggKind,
+    ty: &crate::types::LogicalType,
+    distinct: bool,
+) -> Result<Box<dyn Accumulator>, DatabaseError> {
+    Ok(match (kind, distinct) {
+        (AggKind::Count, false) => Box::new(CountAccumulator::new()),
+        (AggKind::Count, true) => Box::new(DistinctCountAccumulator::new()),
+        (AggKind::Sum, false) => Box::new(SumAccumulator::new(Cow::Borrowed(ty))?),
+        (AggKind::Sum, true) => Box::new(DistinctSumAccumulator::new(ty)?),
+        (AggKind::Min, _) => Box::new(MinMaxAccumulator::new(false)),
+        (AggKind::Max, _) => Box::new(MinMaxAccumulator::new(true)),
+        (AggKind::Avg, _) => Box::new(AvgAccumulator::new()),
+    })
 }
 
 #[inline]
 pub(crate) fn create_accumulators(
     exprs: &[ScalarExpression],
 ) -> Result<Vec<Box<dyn Accumulator>>, DatabaseError> {
-    exprs.iter().map(create_accumulator).try_collect()
+    exprs
+        .iter()
+        .map(|expr| {
+            let ScalarExpression::AggCall {
+                kind, ty, distinct, ..
+            } = expr
+            else {
+                unreachable!("create_accumulators called with non-aggregate expression {expr}")
+            };
+            create_accumulator(*kind, ty, *distinct)
+        })
+        .try_collect()
 }

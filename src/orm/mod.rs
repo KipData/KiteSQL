@@ -101,6 +101,13 @@ pub struct FieldSort<M, T> {
     nulls_first: bool,
 }
 
+/// Partitioning and ordering for an ORM window expression.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WindowSpec {
+    partition_by: Vec<ScalarExpression>,
+    order_by: Vec<SortField>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct QuerySource {
     table_name: String,
@@ -325,6 +332,22 @@ pub trait IntoOrmScalarExpression {
     fn into_orm_scalar(self) -> ScalarExpression;
 }
 
+impl WindowSpec {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn partition_by(mut self, expr: impl IntoOrmScalarExpression) -> Self {
+        self.partition_by.push(expr.into_orm_scalar());
+        self
+    }
+
+    pub fn order_by(mut self, field: SortField) -> Self {
+        self.order_by.push(field);
+        self
+    }
+}
+
 impl<E> IntoOrmScalarExpression for E
 where
     E: Into<ScalarExpression>,
@@ -491,6 +514,23 @@ where
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binder()
             .bind_function_call(name.into(), args, false, self.arena())
+            .map(|expr| self.wrap(expr))
+    }
+
+    fn window(
+        self,
+        name: &'static str,
+        args: Vec<ScalarExpression>,
+        spec: WindowSpec,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.binder()
+            .bind_window_function(
+                name.to_string(),
+                args,
+                spec.partition_by,
+                spec.order_by,
+                self.arena(),
+            )
             .map(|expr| self.wrap(expr))
     }
 
@@ -1483,6 +1523,88 @@ where
         E: IntoOrmScalarExpression,
     {
         self.function(name, args)
+    }
+
+    fn aggregate_window(
+        &self,
+        name: &'static str,
+        expr: impl IntoOrmScalarExpression,
+        spec: WindowSpec,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.handle()
+            .window(name, vec![expr.into_orm_scalar()], spec)
+    }
+
+    pub fn row_number(
+        &self,
+        spec: WindowSpec,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.handle().window("row_number", Vec::new(), spec)
+    }
+
+    pub fn rank(
+        &self,
+        spec: WindowSpec,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.handle().window("rank", Vec::new(), spec)
+    }
+
+    pub fn dense_rank(
+        &self,
+        spec: WindowSpec,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.handle().window("dense_rank", Vec::new(), spec)
+    }
+
+    pub fn count_over(
+        &self,
+        expr: impl IntoOrmScalarExpression,
+        spec: WindowSpec,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.aggregate_window("count", expr, spec)
+    }
+
+    pub fn sum_over(
+        &self,
+        expr: impl IntoOrmScalarExpression,
+        spec: WindowSpec,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.aggregate_window("sum", expr, spec)
+    }
+
+    pub fn avg_over(
+        &self,
+        expr: impl IntoOrmScalarExpression,
+        spec: WindowSpec,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.aggregate_window("avg", expr, spec)
+    }
+
+    pub fn min_over(
+        &self,
+        expr: impl IntoOrmScalarExpression,
+        spec: WindowSpec,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.aggregate_window("min", expr, spec)
+    }
+
+    pub fn max_over(
+        &self,
+        expr: impl IntoOrmScalarExpression,
+        spec: WindowSpec,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.aggregate_window("max", expr, spec)
+    }
+
+    pub fn count_all_over(
+        &self,
+        spec: WindowSpec,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.handle().window(
+            "count",
+            vec![Binder::<'bind, 'parent, T, A>::wildcard_expr()],
+            spec,
+        )
     }
 
     pub fn count_all(&self) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {

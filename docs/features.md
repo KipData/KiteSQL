@@ -183,6 +183,11 @@ If `unsafe_txdb_checkpoint` is not enabled, `build_rocksdb()` returns an explici
 - [x] Exists
 - [x] Group By
 - [x] Having
+- [x] Window functions:
+  - `row_number()`, `rank()`, `dense_rank()`
+  - `count()`, `sum()`, `avg()`, `min()`, `max()` with `OVER`
+  - `PARTITION BY` and window `ORDER BY` with the default frame
+  - Explicit frames, named windows, and `QUALIFY` are not yet supported
 - [x] Order By
 - [x] Limit
 - [x] Show Tables

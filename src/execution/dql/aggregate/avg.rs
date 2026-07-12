@@ -23,6 +23,7 @@ use std::borrow::Cow;
 pub struct AvgAccumulator {
     inner: Option<SumAccumulator>,
     count: usize,
+    result: DataValue,
 }
 
 impl AvgAccumulator {
@@ -30,6 +31,7 @@ impl AvgAccumulator {
         Self {
             inner: None,
             count: 0,
+            result: DataValue::Null,
         }
     }
 }
@@ -45,33 +47,67 @@ impl Accumulator for AvgAccumulator {
             };
             acc.update_value(value)?;
             self.count += 1;
+            self.result = DataValue::Null;
         }
 
         Ok(())
     }
 
-    fn evaluate(self: Box<Self>) -> Result<DataValue, DatabaseError> {
-        let Self { inner, count } = *self;
-        let Some(acc) = inner else {
-            return Ok(DataValue::Null);
+    fn evaluate(&mut self) -> Result<(), DatabaseError> {
+        if !self.result.is_null() {
+            return Ok(());
+        }
+        let Some(acc) = &self.inner else {
+            return Ok(());
         };
-        let mut value = acc.into_result();
+        let mut value = Cow::Borrowed(acc.result());
         let value_ty = value.logical_type();
 
-        if count == 0 {
-            return Ok(DataValue::Null);
+        if self.count == 0 {
+            return Ok(());
         }
         let quantity = if value_ty.is_signed_numeric() {
-            DataValue::Int64(count as i64)
+            DataValue::Int64(self.count as i64)
         } else {
-            DataValue::UInt32(count as u32)
+            DataValue::UInt32(self.count as u32)
         };
         let quantity_ty = quantity.logical_type();
 
         if value_ty != quantity_ty {
-            value = value.cast(&quantity_ty)?
+            value = Cow::Owned(value.into_owned().cast(&quantity_ty)?)
         }
         let evaluator = binary_create(Cow::Owned(quantity_ty), BinaryOperator::Divide)?;
-        evaluator.binary_eval(&value, &quantity)
+        self.result = evaluator.binary_eval(value.as_ref(), &quantity)?;
+        Ok(())
+    }
+
+    fn result(&self) -> &DataValue {
+        &self.result
+    }
+
+    fn result_owned(self: Box<Self>) -> DataValue {
+        self.result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalidate_cached_result_after_update() -> Result<(), DatabaseError> {
+        let mut accumulator = AvgAccumulator::new();
+        accumulator.update_value(&DataValue::Int32(2))?;
+        accumulator.evaluate()?;
+        let first = accumulator.result().clone();
+
+        accumulator.update_value(&DataValue::Int32(4))?;
+        accumulator.evaluate()?;
+        let second = accumulator.result().clone();
+
+        assert_ne!(first, second);
+        accumulator.evaluate()?;
+        assert_eq!(&second, accumulator.result());
+        Ok(())
     }
 }

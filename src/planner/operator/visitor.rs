@@ -69,6 +69,10 @@ pub trait OperatorVisitor<'a>: Sized {
         Ok(())
     }
 
+    fn visit_window(&mut self, _op: &'a window::WindowOperator) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
     fn visit_limit(&mut self, _op: &'a LimitOperator) -> Result<(), DatabaseError> {
         Ok(())
     }
@@ -255,6 +259,18 @@ impl<'a, V: ExprVisitor<'a>> OperatorVisitor<'a> for OperatorExprVisitor<'_, V> 
         Ok(())
     }
 
+    fn visit_window(&mut self, op: &'a window::WindowOperator) -> Result<(), DatabaseError> {
+        for expr in op
+            .partition_by
+            .iter()
+            .chain(op.order_by.iter().map(|field| &field.expr))
+            .chain(op.functions.iter().flat_map(|function| &function.args))
+        {
+            ExprVisitor::visit(self.visitor, expr)?;
+        }
+        Ok(())
+    }
+
     fn visit_top_k(&mut self, op: &'a TopKOperator) -> Result<(), DatabaseError> {
         for field in &op.sort_fields {
             ExprVisitor::visit(self.visitor, &field.expr)?;
@@ -336,6 +352,7 @@ pub fn walk_operator<'a, V: OperatorVisitor<'a>>(
         Operator::CopyFromFile(op) => visitor.visit_copy_from_file(op),
         #[cfg(feature = "copy")]
         Operator::CopyToFile(op) => visitor.visit_copy_to_file(op),
+        Operator::Window(op) => visitor.visit_window(op),
     }
 }
 
@@ -350,6 +367,7 @@ pub(crate) mod tests {
         ArcTableFunctionImpl, TableFunction, TableFunctionCatalog,
     };
     use crate::expression::visitor::{walk_expr, ExprVisitor};
+    use crate::expression::window::{WindowFunction, WindowFunctionKind};
     use crate::expression::ScalarExpression;
     use crate::function::numbers::Numbers;
     use crate::planner::operator::alter_table::change_column::NotNullChange;
@@ -442,6 +460,16 @@ pub(crate) mod tests {
             Operator::Values(ValuesOperator {
                 rows: vec![vec![DataValue::Int32(1)]],
                 schema_ref: vec![column_ref],
+            }),
+            Operator::Window(window::WindowOperator {
+                partition_by: vec![17_i32.into()],
+                order_by: vec![SortField::from(ScalarExpression::from(18_i32))],
+                functions: vec![WindowFunction {
+                    kind: WindowFunctionKind::RowNumber,
+                    args: Vec::new(),
+                    ty: LogicalType::Bigint,
+                }],
+                output_columns: vec![column_ref],
             }),
             Operator::ShowTable,
             Operator::ShowView,
@@ -579,7 +607,7 @@ pub(crate) mod tests {
         for operator in &operators {
             visitor.visit_operator(operator)?;
         }
-        assert_eq!(counter.0, 18);
+        assert_eq!(counter.0, 20);
 
         Ok(())
     }

@@ -16,7 +16,6 @@ use std::collections::HashSet;
 
 use super::{Binder, QueryBindStep};
 use crate::errors::DatabaseError;
-use crate::expression::function::scala::ScalarFunction;
 use crate::expression::visitor::{walk_expr, ExprVisitor};
 use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut};
 use crate::planner::LogicalPlan;
@@ -26,6 +25,22 @@ use crate::{
     expression::ScalarExpression,
     planner::operator::{aggregate::AggregateOperator, sort::SortField},
 };
+
+struct AggregateCallCollector<'a> {
+    agg_calls: &'a mut Vec<ScalarExpression>,
+}
+
+impl<'expr> ExprVisitor<'expr> for AggregateCallCollector<'_> {
+    fn visit(&mut self, expr: &'expr ScalarExpression) -> Result<(), DatabaseError> {
+        match expr {
+            ScalarExpression::AggCall { .. } => self.agg_calls.push(expr.clone()),
+            ScalarExpression::Alias { expr, .. } => self.visit(expr)?,
+            ScalarExpression::Empty | ScalarExpression::TableFunction(_) => unreachable!(),
+            _ => walk_expr(self, expr)?,
+        }
+        Ok(())
+    }
+}
 
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     pub fn bind_aggregate(
@@ -48,7 +63,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         select_items: &mut [ScalarExpression],
     ) -> Result<(), DatabaseError> {
         for column in select_items {
-            self.visit_column_agg_expr(column)?;
+            self.collect_aggregate_calls(column)?;
         }
         Ok(())
     }
@@ -77,14 +92,14 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         F: FnMut(&mut Self, I::Item) -> Result<SortField, DatabaseError>,
     {
         if let Some(having) = having.as_mut() {
-            self.visit_column_agg_expr(having)?;
+            self.collect_aggregate_calls(having)?;
         }
         let mut return_orderby = None;
         if let Some(orderby) = orderby {
             let mut fields = Vec::new();
             for orderby in orderby {
-                let mut field = bind_sort_field(self, orderby)?;
-                self.visit_column_agg_expr(&mut field.expr)?;
+                let field = bind_sort_field(self, orderby)?;
+                self.collect_aggregate_calls(&field.expr)?;
                 fields.push(field);
             }
             return_orderby = Some(fields);
@@ -119,119 +134,11 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         Ok(())
     }
 
-    fn visit_column_agg_expr(&mut self, expr: &mut ScalarExpression) -> Result<(), DatabaseError> {
-        match expr {
-            ScalarExpression::AggCall { .. } => {
-                self.context.agg_calls.push(expr.clone());
-            }
-            ScalarExpression::TypeCast { expr, .. } => self.visit_column_agg_expr(expr)?,
-            ScalarExpression::IsNull { expr, .. } => self.visit_column_agg_expr(expr)?,
-            ScalarExpression::Unary { expr, .. } => self.visit_column_agg_expr(expr)?,
-            ScalarExpression::Alias { expr, .. } => self.visit_column_agg_expr(expr)?,
-            ScalarExpression::Binary {
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                self.visit_column_agg_expr(left_expr)?;
-                self.visit_column_agg_expr(right_expr)?;
-            }
-            ScalarExpression::In { expr, args, .. } => {
-                self.visit_column_agg_expr(expr)?;
-                for arg in args {
-                    self.visit_column_agg_expr(arg)?;
-                }
-            }
-            ScalarExpression::Between {
-                expr,
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                self.visit_column_agg_expr(expr)?;
-                self.visit_column_agg_expr(left_expr)?;
-                self.visit_column_agg_expr(right_expr)?;
-            }
-            ScalarExpression::SubString {
-                expr,
-                for_expr,
-                from_expr,
-            } => {
-                self.visit_column_agg_expr(expr)?;
-                if let Some(expr) = for_expr {
-                    self.visit_column_agg_expr(expr)?;
-                }
-                if let Some(expr) = from_expr {
-                    self.visit_column_agg_expr(expr)?;
-                }
-            }
-            ScalarExpression::Position { expr, in_expr } => {
-                self.visit_column_agg_expr(expr)?;
-                self.visit_column_agg_expr(in_expr)?;
-            }
-            ScalarExpression::Trim {
-                expr,
-                trim_what_expr,
-                ..
-            } => {
-                self.visit_column_agg_expr(expr)?;
-                if let Some(trim_what_expr) = trim_what_expr {
-                    self.visit_column_agg_expr(trim_what_expr)?;
-                }
-            }
-            ScalarExpression::Constant(_) | ScalarExpression::ColumnRef { .. } => (),
-            ScalarExpression::Empty => unreachable!(),
-            ScalarExpression::Tuple(args)
-            | ScalarExpression::ScalaFunction(ScalarFunction { args, .. })
-            | ScalarExpression::Coalesce { exprs: args, .. } => {
-                for expr in args {
-                    self.visit_column_agg_expr(expr)?;
-                }
-            }
-            ScalarExpression::If {
-                condition,
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                self.visit_column_agg_expr(condition)?;
-                self.visit_column_agg_expr(left_expr)?;
-                self.visit_column_agg_expr(right_expr)?;
-            }
-            ScalarExpression::IfNull {
-                left_expr,
-                right_expr,
-                ..
-            }
-            | ScalarExpression::NullIf {
-                left_expr,
-                right_expr,
-                ..
-            } => {
-                self.visit_column_agg_expr(left_expr)?;
-                self.visit_column_agg_expr(right_expr)?;
-            }
-            ScalarExpression::CaseWhen {
-                operand_expr,
-                expr_pairs,
-                else_expr,
-                ..
-            } => {
-                if let Some(expr) = operand_expr {
-                    self.visit_column_agg_expr(expr)?;
-                }
-                for (expr_1, expr_2) in expr_pairs {
-                    self.visit_column_agg_expr(expr_1)?;
-                    self.visit_column_agg_expr(expr_2)?;
-                }
-                if let Some(expr) = else_expr {
-                    self.visit_column_agg_expr(expr)?;
-                }
-            }
-            ScalarExpression::TableFunction(_) => unreachable!(),
+    fn collect_aggregate_calls(&mut self, expr: &ScalarExpression) -> Result<(), DatabaseError> {
+        AggregateCallCollector {
+            agg_calls: &mut self.context.agg_calls,
         }
-
-        Ok(())
+        .visit(expr)
     }
 
     /// Validate select exprs must appear in the GROUP BY clause or be used in
@@ -269,6 +176,10 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             HashSet::from_iter(group_raw_exprs.iter().copied());
 
         for expr in select_items {
+            if expr.has_window_call()? {
+                HavingOrderByValidator::new(groupby, &self.context.agg_calls).visit(expr)?;
+                continue;
+            }
             if expr.has_agg_call()? {
                 continue;
             }

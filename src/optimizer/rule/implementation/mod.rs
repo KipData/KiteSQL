@@ -53,6 +53,7 @@ use crate::optimizer::rule::implementation::dql::table_scan::{
 };
 use crate::optimizer::rule::implementation::dql::top_k::TopKImplementation;
 use crate::optimizer::rule::implementation::dql::values::ValuesImplementation;
+use crate::optimizer::rule::implementation::dql::window::WindowImplementation;
 use crate::planner::operator::Operator;
 
 #[repr(usize)]
@@ -86,10 +87,11 @@ pub enum ImplementationRuleRootTag {
     DropColumn,
     DropTable,
     Truncate,
+    Window,
 }
 
 impl ImplementationRuleRootTag {
-    pub const COUNT: usize = Self::Truncate as usize + 1;
+    pub const COUNT: usize = Self::Window as usize + 1;
 
     pub fn from_operator(operator: &Operator) -> Option<Self> {
         match operator {
@@ -121,6 +123,7 @@ impl ImplementationRuleRootTag {
             Operator::DropColumn(_) => Some(Self::DropColumn),
             Operator::DropTable(_) => Some(Self::DropTable),
             Operator::Truncate(_) => Some(Self::Truncate),
+            Operator::Window(_) => Some(Self::Window),
             Operator::ShowTable
             | Operator::ShowView
             | Operator::Explain
@@ -170,6 +173,7 @@ pub enum ImplementationRuleImpl {
     DropColumn,
     DropTable,
     Truncate,
+    Window,
 }
 
 impl MatchPattern for ImplementationRuleImpl {
@@ -205,6 +209,7 @@ impl MatchPattern for ImplementationRuleImpl {
             ImplementationRuleImpl::DropTable => DropTableImplementation.pattern(),
             ImplementationRuleImpl::Truncate => TruncateImplementation.pattern(),
             ImplementationRuleImpl::Analyze => AnalyzeImplementation.pattern(),
+            ImplementationRuleImpl::Window => WindowImplementation.pattern(),
         }
     }
 }
@@ -244,6 +249,7 @@ impl ImplementationRuleImpl {
             ImplementationRuleImpl::DropColumn => ImplementationRuleRootTag::DropColumn,
             ImplementationRuleImpl::DropTable => ImplementationRuleRootTag::DropTable,
             ImplementationRuleImpl::Truncate => ImplementationRuleRootTag::Truncate,
+            ImplementationRuleImpl::Window => ImplementationRuleRootTag::Window,
         }
     }
 }
@@ -293,6 +299,7 @@ impl ImplementationRule for ImplementationRuleImpl {
             ImplementationRuleImpl::DropTable => update!(DropTableImplementation),
             ImplementationRuleImpl::Truncate => update!(TruncateImplementation),
             ImplementationRuleImpl::Analyze => update!(AnalyzeImplementation),
+            ImplementationRuleImpl::Window => update!(WindowImplementation),
         }
 
         Ok(())
@@ -449,6 +456,12 @@ mod tests {
             ImplementationRuleImpl::Values,
             |op| matches!(op, Operator::Values(_)),
             PlanImpl::Values,
+        )?;
+        assert_sql_rule(
+            "select row_number() over (order by c1) from t1",
+            ImplementationRuleImpl::Window,
+            |op| matches!(op, Operator::Window(_)),
+            PlanImpl::Window,
         )?;
         assert_sql_rule(
             "select * from t1",

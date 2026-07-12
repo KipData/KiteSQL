@@ -124,8 +124,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
         output.values.clear();
         output.values.reserve(accs.len() + group_keys.len());
 
-        for acc in accs {
-            output.values.push(acc.evaluate()?);
+        for mut acc in accs {
+            acc.evaluate()?;
+            output.values.push(acc.result_owned());
         }
         output.values.extend(group_keys);
         arena.resume();

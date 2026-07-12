@@ -48,6 +48,7 @@ mod show_table;
 mod show_view;
 mod truncate;
 mod update;
+mod window;
 
 #[cfg(feature = "parser")]
 pub use parser::{command_type, prepare, prepare_all, CommandType, Statement};
@@ -90,6 +91,7 @@ pub enum QueryBindStep {
     Where,
     Agg,
     Having,
+    Window,
     Distinct,
     Sort,
     Project,

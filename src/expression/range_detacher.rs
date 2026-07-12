@@ -348,7 +348,8 @@ impl<'a, 'p> RangeDetacher<'a, 'p> {
                 | ScalarExpression::IfNull { .. }
                 | ScalarExpression::NullIf { .. }
                 | ScalarExpression::Coalesce { .. }
-                | ScalarExpression::CaseWhen { .. } => None,
+                | ScalarExpression::CaseWhen { .. }
+                | ScalarExpression::WindowCall(_) => None,
                 ScalarExpression::Tuple(_)
                 | ScalarExpression::TableFunction(_)
                 | ScalarExpression::Empty => unreachable!(),
@@ -368,7 +369,8 @@ impl<'a, 'p> RangeDetacher<'a, 'p> {
             | ScalarExpression::IfNull { .. }
             | ScalarExpression::NullIf { .. }
             | ScalarExpression::Coalesce { .. }
-            | ScalarExpression::CaseWhen { .. } => None,
+            | ScalarExpression::CaseWhen { .. }
+            | ScalarExpression::WindowCall(_) => None,
             ScalarExpression::TableFunction(_) | ScalarExpression::Empty => unreachable!(),
         })
     }

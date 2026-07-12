@@ -97,6 +97,33 @@ fields, or `order_by_expr` for computed sort expressions. Call `.asc()`,
 `.desc()`, `.nulls_first()`, or `.nulls_last()` when the default
 ascending/nulls-last order is not enough.
 
+Window expressions use `WindowSpec` inside a projection closure:
+
+```rust,ignore
+use kite_sql::orm::WindowSpec;
+
+let rows = database.bind(|ctx| {
+    ctx.from::<EventLog>()?
+        .project_tuple(|e| {
+            let category = e.column(EventLog::category())?;
+            let score = e.column(EventLog::score())?;
+            let spec = WindowSpec::new()
+                .partition_by(category.clone())
+                .order_by(score.clone().desc());
+            Ok(vec![
+                category,
+                e.row_number(spec.clone())?,
+                e.sum_over(score, spec)?,
+            ])
+        })?
+        .finish()
+})?;
+```
+
+Window expressions use the explicit `row_number`, `rank`, `dense_rank`,
+`count_over`, `count_all_over`, `sum_over`, `avg_over`, `min_over`, and
+`max_over` methods.
+
 Joins and set operations use the same binder-backed style:
 
 ```rust,ignore

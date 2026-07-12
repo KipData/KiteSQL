@@ -390,6 +390,7 @@ fn default_optimizer_pipeline() -> HepOptimizerPipeline {
             ImplementationRuleImpl::Sort,
             ImplementationRuleImpl::TopK,
             ImplementationRuleImpl::Values,
+            ImplementationRuleImpl::Window,
             // DML
             ImplementationRuleImpl::Analyze,
             #[cfg(feature = "copy")]

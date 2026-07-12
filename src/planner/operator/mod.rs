@@ -46,6 +46,7 @@ pub mod update;
 pub mod values;
 pub mod visitor;
 pub mod visitor_mut;
+pub mod window;
 
 use self::{
     aggregate::AggregateOperator, alter_table::add_column::AddColumnOperator,
@@ -134,6 +135,7 @@ pub enum Operator {
     CopyFromFile(CopyFromFileOperator),
     #[cfg(feature = "copy")]
     CopyToFile(CopyToFileOperator),
+    Window(window::WindowOperator),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
@@ -200,6 +202,7 @@ pub enum PlanImpl {
     #[cfg(feature = "copy")]
     CopyToFile,
     Analyze,
+    Window,
 }
 
 impl Operator {
@@ -310,6 +313,21 @@ impl Operator {
             fn visit_sort(&mut self, op: &'operator SortOperator) -> Result<(), DatabaseError> {
                 for field in &op.sort_fields {
                     ExprVisitor::visit(self, &field.expr)?;
+                }
+                Ok(())
+            }
+
+            fn visit_window(
+                &mut self,
+                op: &'operator window::WindowOperator,
+            ) -> Result<(), DatabaseError> {
+                for expr in op
+                    .partition_by
+                    .iter()
+                    .chain(op.order_by.iter().map(|field| &field.expr))
+                    .chain(op.functions.iter().flat_map(|function| &function.args))
+                {
+                    ExprVisitor::visit(self, expr)?;
                 }
                 Ok(())
             }
@@ -469,6 +487,7 @@ impl fmt::Display for Operator {
             Operator::CopyToFile(op) => write!(f, "{op}"),
             Operator::Union(op) => write!(f, "{op}"),
             Operator::SetMembership(op) => write!(f, "{op}"),
+            Operator::Window(op) => write!(f, "{op}"),
         }
     }
 }
@@ -538,6 +557,7 @@ impl fmt::Display for PlanImpl {
             #[cfg(feature = "copy")]
             PlanImpl::CopyToFile => write!(f, "CopyToFile"),
             PlanImpl::Analyze => write!(f, "Analyze"),
+            PlanImpl::Window => write!(f, "Window"),
         }
     }
 }
