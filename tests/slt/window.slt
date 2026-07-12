@@ -85,6 +85,11 @@ order by id
 4 2 1
 5 2 1
 
+query I
+select row_number() over () from window_test where id = 1
+----
+1
+
 statement ok
 create view window_view as
 select id, k, row_number() over (partition by k order by v, id) as rn
@@ -112,3 +117,25 @@ window named_window as (order by id)
 
 statement error
 select id from window_test qualify id = 1
+
+statement error
+select count(distinct v) over () from window_test
+
+statement error
+select sum(v) filter (where v > 0) over () from window_test
+
+statement error
+select row_number(id) over () from window_test
+
+statement error
+select lower('x') over () from window_test
+
+statement error
+select sum(row_number() over ()) over () from window_test
+
+statement error
+select id from window_test where row_number() over () = 1
+
+statement error
+select row_number() over (named_window order by id) from window_test
+window named_window as (partition by k)

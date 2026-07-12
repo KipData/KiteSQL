@@ -2111,19 +2111,46 @@ mod test {
                             e.row_number(ordered.clone())?,
                             e.rank(ordered.clone())?,
                             e.dense_rank(ordered)?,
-                            e.sum_over(score, partition.clone())?,
-                            e.count_all_over(partition)?,
+                            e.sum_over(score.clone(), partition.clone())?,
+                            e.count_all_over(partition.clone())?,
+                            e.count_over(score.clone(), partition.clone())?,
+                            e.avg_over(score, partition)?,
                         ])
                     })?
                     .finish()
             })?
-            .project_tuple::<(i32, i64, i64, i64, i32, i32)>()
+            .project_tuple::<(i32, i64, i64, i64, i32, i32, i32, f64)>()
             .collect::<Result<Vec<_>, _>>()?;
         windowed_scores.sort_by_key(|row| row.0);
         assert_eq!(
             windowed_scores,
-            vec![(1, 1, 1, 1, 30, 2), (2, 2, 2, 2, 30, 2), (3, 1, 1, 1, 5, 1)]
+            vec![
+                (1, 1, 1, 1, 30, 2, 2, 15.0),
+                (2, 2, 2, 2, 30, 2, 2, 15.0),
+                (3, 1, 1, 1, 5, 1, 1, 5.0),
+            ]
         );
+
+        let mut windowed_min_max = database
+            .bind(|ctx| {
+                ctx.from::<EventLog>()?
+                    .project_tuple(|e| {
+                        let id = e.column(EventLog::id())?;
+                        let category = e.column(EventLog::category())?;
+                        let score = e.column(EventLog::score())?;
+                        let partition = WindowSpec::new().partition_by(category);
+                        Ok(vec![
+                            id,
+                            e.min_over(score.clone(), partition.clone())?,
+                            e.max_over(score, partition)?,
+                        ])
+                    })?
+                    .finish()
+            })?
+            .project_tuple::<(i32, i32, i32)>()
+            .collect::<Result<Vec<_>, _>>()?;
+        windowed_min_max.sort_by_key(|row| row.0);
+        assert_eq!(windowed_min_max, vec![(1, 10, 20), (2, 10, 20), (3, 5, 5)]);
 
         let mut grouped_categories = database
             .bind(|ctx| {

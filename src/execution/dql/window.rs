@@ -156,3 +156,203 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Window {
         }
     }
 }
+
+// GRCOV_EXCL_START
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
+    use crate::execution::{empty_context, execute_input, try_collect};
+    use crate::expression::agg::AggKind;
+    use crate::expression::window::{
+        WindowFunction as WindowExpressionFunction, WindowFunctionKind,
+    };
+    use crate::planner::operator::values::ValuesOperator;
+    use crate::planner::operator::Operator;
+    use crate::planner::Childrens;
+    use crate::storage::memory::MemoryStorage;
+    use crate::storage::Storage;
+    use crate::types::LogicalType;
+
+    fn column(position: usize) -> ScalarExpression {
+        ScalarExpression::column_expr(ColumnRef::new(position + 1), position)
+    }
+
+    fn rows(values: &[i32]) -> Vec<Tuple> {
+        values
+            .iter()
+            .map(|value| Tuple::new(None, vec![DataValue::Int32(*value)]))
+            .collect()
+    }
+
+    fn functions() -> Vec<Box<dyn WindowFunction>> {
+        vec![
+            function::new(
+                WindowFunctionKind::RowNumber,
+                Vec::new(),
+                LogicalType::Bigint,
+            ),
+            function::new(WindowFunctionKind::Rank, Vec::new(), LogicalType::Bigint),
+            function::new(
+                WindowFunctionKind::DenseRank,
+                Vec::new(),
+                LogicalType::Bigint,
+            ),
+            function::new(
+                WindowFunctionKind::Aggregate(AggKind::Sum),
+                vec![column(0)],
+                LogicalType::Integer,
+            ),
+        ]
+    }
+
+    #[test]
+    fn evaluate_peer_groups() -> Result<(), DatabaseError> {
+        let mut rows = rows(&[10, 10, 20]);
+        evaluate_partition(&mut rows, &[column(0).asc()], &mut functions())?;
+
+        assert_eq!(
+            rows.into_iter().map(|row| row.values).collect::<Vec<_>>(),
+            vec![
+                vec![
+                    10.into(),
+                    1_i64.into(),
+                    1_i64.into(),
+                    1_i64.into(),
+                    20.into()
+                ],
+                vec![
+                    10.into(),
+                    2_i64.into(),
+                    1_i64.into(),
+                    1_i64.into(),
+                    20.into()
+                ],
+                vec![
+                    20.into(),
+                    3_i64.into(),
+                    3_i64.into(),
+                    2_i64.into(),
+                    40.into()
+                ],
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn evaluate_without_order_by() -> Result<(), DatabaseError> {
+        let mut rows = rows(&[3, 7]);
+        evaluate_partition(&mut rows, &[], &mut functions())?;
+
+        assert_eq!(
+            rows.into_iter().map(|row| row.values).collect::<Vec<_>>(),
+            vec![
+                vec![
+                    3.into(),
+                    1_i64.into(),
+                    1_i64.into(),
+                    1_i64.into(),
+                    10.into()
+                ],
+                vec![
+                    7.into(),
+                    2_i64.into(),
+                    1_i64.into(),
+                    1_i64.into(),
+                    10.into()
+                ],
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn evaluate_empty_partition() -> Result<(), DatabaseError> {
+        let mut rows = Vec::new();
+        evaluate_partition(&mut rows, &[], &mut functions())?;
+        assert!(rows.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn execute_partitions() -> Result<(), DatabaseError> {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let input_desc = ColumnDesc::new(LogicalType::Integer, None, false, None)?;
+        let input_columns = ["partition", "value"]
+            .map(|name| {
+                plan_arena.alloc_column(ColumnCatalog::new(
+                    name.to_string(),
+                    true,
+                    input_desc.clone(),
+                ))
+            })
+            .to_vec();
+        let output_desc = ColumnDesc::new(LogicalType::Bigint, None, false, None)?;
+        let output_columns = ["row_number", "rank"]
+            .map(|name| {
+                plan_arena.alloc_column(ColumnCatalog::new(
+                    name.to_string(),
+                    true,
+                    output_desc.clone(),
+                ))
+            })
+            .to_vec();
+        let input = LogicalPlan::new(
+            Operator::Values(ValuesOperator {
+                rows: vec![
+                    vec![1.into(), 10.into()],
+                    vec![1.into(), 10.into()],
+                    vec![1.into(), 20.into()],
+                    vec![2.into(), 5.into()],
+                    vec![2.into(), 7.into()],
+                ],
+                schema_ref: input_columns.clone(),
+            }),
+            Childrens::None,
+        );
+        let operator = WindowOperator {
+            partition_by: vec![ScalarExpression::column_expr(input_columns[0], 0)],
+            order_by: vec![ScalarExpression::column_expr(input_columns[1], 1).asc()],
+            functions: vec![
+                WindowExpressionFunction {
+                    kind: WindowFunctionKind::RowNumber,
+                    args: Vec::new(),
+                    ty: LogicalType::Bigint,
+                },
+                WindowExpressionFunction {
+                    kind: WindowFunctionKind::Rank,
+                    args: Vec::new(),
+                    ty: LogicalType::Bigint,
+                },
+            ],
+            output_columns,
+        };
+        let table_cache = crate::storage::TableCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let storage = MemoryStorage::new();
+        let transaction = storage.transaction()?;
+
+        let tuples = try_collect(execute_input::<_, Window>(
+            (operator, input),
+            empty_context(&table_cache, &view_cache, &meta_cache),
+            plan_arena,
+            &transaction,
+        ))?;
+
+        assert_eq!(
+            tuples.into_iter().map(|row| row.values).collect::<Vec<_>>(),
+            vec![
+                vec![1.into(), 10.into(), 1_i64.into(), 1_i64.into()],
+                vec![1.into(), 10.into(), 2_i64.into(), 1_i64.into()],
+                vec![1.into(), 20.into(), 3_i64.into(), 3_i64.into()],
+                vec![2.into(), 5.into(), 1_i64.into(), 1_i64.into()],
+                vec![2.into(), 7.into(), 2_i64.into(), 2_i64.into()],
+            ]
+        );
+        Ok(())
+    }
+}
+// GRCOV_EXCL_STOP
