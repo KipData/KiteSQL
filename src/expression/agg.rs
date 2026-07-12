@@ -24,6 +24,27 @@ pub enum AggKind {
 }
 
 impl AggKind {
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "avg" => Some(Self::Avg),
+            "max" => Some(Self::Max),
+            "min" => Some(Self::Min),
+            "sum" => Some(Self::Sum),
+            "count" => Some(Self::Count),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Avg => "avg",
+            Self::Max => "max",
+            Self::Min => "min",
+            Self::Sum => "sum",
+            Self::Count => "count",
+        }
+    }
+
     pub fn allow_distinct(&self) -> bool {
         match self {
             AggKind::Avg => false,

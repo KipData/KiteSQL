@@ -94,7 +94,7 @@ struct WindowGroup {
 impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_window_function(
         &mut self,
-        function_name: String,
+        kind: WindowFunctionKind,
         args: Vec<ScalarExpression>,
         partition_by: Vec<ScalarExpression>,
         order_by: Vec<SortField>,
@@ -120,34 +120,25 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             }
         }
 
-        let (kind, args, ty) = match function_name.as_str() {
-            "row_number" | "rank" | "dense_rank" => {
+        let (args, ty) = match kind {
+            WindowFunctionKind::RowNumber
+            | WindowFunctionKind::Rank
+            | WindowFunctionKind::DenseRank => {
                 if !args.is_empty() {
                     return Err(DatabaseError::MisMatch(
                         "number of ranking function parameters",
                         "0",
                     ));
                 }
-                let kind = match function_name.as_str() {
-                    "row_number" => WindowFunctionKind::RowNumber,
-                    "rank" => WindowFunctionKind::Rank,
-                    "dense_rank" => WindowFunctionKind::DenseRank,
-                    _ => unreachable!(),
-                };
-                (kind, args, LogicalType::Bigint)
+                (args, LogicalType::Bigint)
             }
-            "count" | "sum" | "avg" | "min" | "max" => {
-                let ScalarExpression::AggCall { kind, args, ty, .. } =
-                    self.bind_function_call(function_name, args, false, arena)?
+            WindowFunctionKind::Aggregate(agg_kind) => {
+                let ScalarExpression::AggCall { args, ty, .. } =
+                    self.bind_aggregate_function(agg_kind, args, false, arena)?
                 else {
                     unreachable!()
                 };
-                (WindowFunctionKind::Aggregate(kind), args, ty)
-            }
-            _ => {
-                return Err(DatabaseError::UnsupportedStmt(format!(
-                    "window function `{function_name}` is not supported"
-                )))
+                (args, ty)
             }
         };
 

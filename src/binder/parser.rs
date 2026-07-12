@@ -23,8 +23,10 @@ use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
 use crate::db::{BindSource, DBTransaction, Database, DatabaseIter, TransactionIter};
 use crate::errors::{DatabaseError, SqlErrorSpan};
 use crate::expression;
+use crate::expression::agg::AggKind;
 use crate::expression::simplify::ConstantCalculator;
 use crate::expression::visitor_mut::ExprVisitorMut;
+use crate::expression::window::WindowFunctionKind;
 use crate::expression::{AliasType, ScalarExpression};
 use crate::iter_ext::Itertools;
 use crate::parser::parse_sql;
@@ -2440,18 +2442,30 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                         .to_string(),
                 ));
             }
+            let Some(kind) = WindowFunctionKind::from_name(&function_name) else {
+                return Err(attach_span_if_absent(
+                    DatabaseError::UnsupportedStmt(format!(
+                        "window function `{function_name}` is not supported"
+                    )),
+                    func_span,
+                ));
+            };
             return self
-                .bind_window_call(function_name, args, is_distinct, over, arena)
+                .bind_window_call(kind, args, is_distinct, over, arena)
                 .map_err(|err| attach_span_if_absent(err, func_span));
         }
 
-        self.bind_function_call(function_name, args, is_distinct, arena)
-            .map_err(|err| attach_span_if_absent(err, func_span))
+        let result = if let Some(kind) = AggKind::from_name(&function_name) {
+            self.bind_aggregate_function(kind, args, is_distinct, arena)
+        } else {
+            self.bind_function_call(function_name, args, arena)
+        };
+        result.map_err(|err| attach_span_if_absent(err, func_span))
     }
 
     fn bind_window_call(
         &mut self,
-        function_name: String,
+        kind: WindowFunctionKind,
         args: Vec<ScalarExpression>,
         is_distinct: bool,
         over: &WindowType,
@@ -2502,7 +2516,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 ))
             })
             .collect::<Result<Vec<_>, DatabaseError>>()?;
-        self.bind_window_function(function_name, args, partition_by, order_by, arena)
+        self.bind_window_function(kind, args, partition_by, order_by, arena)
     }
 
     pub fn bind_set_expr(

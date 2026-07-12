@@ -784,14 +784,7 @@ impl ScalarExpression {
                     .iter()
                     .map(|expr| expr.output_name_by(fn_display))
                     .join(", ");
-                let function = match window.function.kind {
-                    window::WindowFunctionKind::RowNumber => "row_number".to_string(),
-                    window::WindowFunctionKind::Rank => "rank".to_string(),
-                    window::WindowFunctionKind::DenseRank => "dense_rank".to_string(),
-                    window::WindowFunctionKind::Aggregate(kind) => {
-                        format!("{kind:?}").to_lowercase()
-                    }
-                };
+                let function = window.function.kind.name();
                 let mut spec = Vec::new();
                 if !window.spec.partition_by.is_empty() {
                     spec.push(format!(

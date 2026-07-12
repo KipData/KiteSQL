@@ -26,6 +26,26 @@ pub enum WindowFunctionKind {
     Aggregate(AggKind),
 }
 
+impl WindowFunctionKind {
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "row_number" => Some(Self::RowNumber),
+            "rank" => Some(Self::Rank),
+            "dense_rank" => Some(Self::DenseRank),
+            name => AggKind::from_name(name).map(Self::Aggregate),
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::RowNumber => "row_number",
+            Self::Rank => "rank",
+            Self::DenseRank => "dense_rank",
+            Self::Aggregate(kind) => kind.name(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ReferenceSerialization)]
 pub struct WindowFunction {
     pub kind: WindowFunctionKind,

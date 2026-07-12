@@ -476,76 +476,60 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         })
     }
 
+    pub(crate) fn bind_aggregate_function(
+        &mut self,
+        kind: AggKind,
+        args: Vec<ScalarExpression>,
+        is_distinct: bool,
+        arena: &mut PlanArena,
+    ) -> Result<ScalarExpression, DatabaseError> {
+        let ty = match kind {
+            AggKind::Count => {
+                if args.len() != 1 {
+                    return Err(DatabaseError::MisMatch("number of count() parameters", "1"));
+                }
+                LogicalType::Integer
+            }
+            AggKind::Sum => {
+                if args.len() != 1 {
+                    return Err(DatabaseError::MisMatch("number of sum() parameters", "1"));
+                }
+                args[0].return_type(arena).into_owned()
+            }
+            AggKind::Min => {
+                if args.len() != 1 {
+                    return Err(DatabaseError::MisMatch("number of min() parameters", "1"));
+                }
+                args[0].return_type(arena).into_owned()
+            }
+            AggKind::Max => {
+                if args.len() != 1 {
+                    return Err(DatabaseError::MisMatch("number of max() parameters", "1"));
+                }
+                args[0].return_type(arena).into_owned()
+            }
+            AggKind::Avg => {
+                if args.len() != 1 {
+                    return Err(DatabaseError::MisMatch("number of avg() parameters", "1"));
+                }
+                LogicalType::Double
+            }
+        };
+        Ok(ScalarExpression::AggCall {
+            distinct: is_distinct,
+            kind,
+            args,
+            ty,
+        })
+    }
+
     pub(crate) fn bind_function_call(
         &mut self,
         function_name: String,
         mut args: Vec<ScalarExpression>,
-        is_distinct: bool,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
         match function_name.as_str() {
-            "count" => {
-                if args.len() != 1 {
-                    return Err(DatabaseError::MisMatch("number of count() parameters", "1"));
-                }
-                return Ok(ScalarExpression::AggCall {
-                    distinct: is_distinct,
-                    kind: AggKind::Count,
-                    args,
-                    ty: LogicalType::Integer,
-                });
-            }
-            "sum" => {
-                if args.len() != 1 {
-                    return Err(DatabaseError::MisMatch("number of sum() parameters", "1"));
-                }
-                let ty = args[0].return_type(arena).into_owned();
-
-                return Ok(ScalarExpression::AggCall {
-                    distinct: is_distinct,
-                    kind: AggKind::Sum,
-                    args,
-                    ty,
-                });
-            }
-            "min" => {
-                if args.len() != 1 {
-                    return Err(DatabaseError::MisMatch("number of min() parameters", "1"));
-                }
-                let ty = args[0].return_type(arena).into_owned();
-
-                return Ok(ScalarExpression::AggCall {
-                    distinct: is_distinct,
-                    kind: AggKind::Min,
-                    args,
-                    ty,
-                });
-            }
-            "max" => {
-                if args.len() != 1 {
-                    return Err(DatabaseError::MisMatch("number of max() parameters", "1"));
-                }
-                let ty = args[0].return_type(arena).into_owned();
-
-                return Ok(ScalarExpression::AggCall {
-                    distinct: is_distinct,
-                    kind: AggKind::Max,
-                    args,
-                    ty,
-                });
-            }
-            "avg" => {
-                if args.len() != 1 {
-                    return Err(DatabaseError::MisMatch("number of avg() parameters", "1"));
-                }
-
-                return Ok(ScalarExpression::AggCall {
-                    distinct: is_distinct,
-                    kind: AggKind::Avg,
-                    args,
-                    ty: LogicalType::Double,
-                });
-            }
             "if" => {
                 if args.len() != 3 {
                     return Err(DatabaseError::MisMatch("number of if() parameters", "3"));

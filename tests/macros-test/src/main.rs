@@ -24,7 +24,7 @@ mod test {
     use kite_sql::expression::function::FunctionSummary;
     use kite_sql::expression::BinaryOperator;
     use kite_sql::expression::ScalarExpression;
-    use kite_sql::orm::{OrmQueryResultExt, WindowSpec};
+    use kite_sql::orm::{AggKind, OrmQueryResultExt, WindowSpec};
     use kite_sql::planner::{MetaArena, PlanArena, TableArena, TableArenaCell};
     use kite_sql::storage::rocksdb::RocksStorage;
     use kite_sql::types::evaluator::binary_create;
@@ -982,7 +982,7 @@ mod test {
                 ctx.from::<User>()?
                     .project_value(|e| {
                         let id = e.column(User::id())?;
-                        e.aggregate("sum", vec![id])
+                        e.aggregate(AggKind::Sum, vec![id])
                     })?
                     .finish()
             })?
@@ -1010,7 +1010,7 @@ mod test {
                 ctx.from::<User>()?
                     .project_value(|e| {
                         let id = e.column(User::id())?;
-                        let min_id = e.aggregate("min", vec![id])?;
+                        let min_id = e.aggregate(AggKind::Min, vec![id])?;
                         Ok(e.alias(min_id, "min_user_id"))
                     })?
                     .finish()
@@ -1025,7 +1025,7 @@ mod test {
                 ctx.from::<User>()?
                     .project_value(|e| {
                         let id = e.column(User::id())?;
-                        let max_id = e.aggregate("max", vec![id])?;
+                        let max_id = e.aggregate(AggKind::Max, vec![id])?;
                         Ok(e.alias(max_id, "max_user_id"))
                     })?
                     .finish()
@@ -1200,7 +1200,7 @@ mod test {
                             ctx.from::<User>()?
                                 .project_value(|e| {
                                     let id = e.column(User::id())?;
-                                    e.aggregate("max", vec![id])
+                                    e.aggregate(AggKind::Max, vec![id])
                                 })?
                                 .finish()
                         })
@@ -1860,7 +1860,7 @@ mod test {
                             ctx.from::<User>()?
                                 .project_value(|e| {
                                     let id = e.column(User::id())?;
-                                    e.aggregate("max", vec![id])
+                                    e.aggregate(AggKind::Max, vec![id])
                                 })?
                                 .finish()
                         })?;
@@ -2212,7 +2212,7 @@ mod test {
                     .project_tuple(|e| {
                         let category = e.column(EventLog::category())?;
                         let score = e.column(EventLog::score())?;
-                        let total_score = e.aggregate("sum", vec![score])?;
+                        let total_score = e.aggregate(AggKind::Sum, vec![score])?;
                         Ok(vec![category, e.alias(total_score, "total_score")])
                     })?
                     .group_by_scalar(EventLog::category())?
@@ -2232,7 +2232,7 @@ mod test {
                     .project_tuple(|e| {
                         let category = e.column(EventLog::category())?;
                         let score = e.column(EventLog::score())?;
-                        let total_score = e.aggregate("sum", vec![score])?;
+                        let total_score = e.aggregate(AggKind::Sum, vec![score])?;
                         let total_count = e.count_all()?;
                         Ok(vec![
                             category,
@@ -2256,7 +2256,7 @@ mod test {
                 .project_tuple(|e| {
                     let category = e.column(EventLog::category())?;
                     let score = e.column(EventLog::score())?;
-                    let total_score = e.aggregate("sum", vec![score])?;
+                    let total_score = e.aggregate(AggKind::Sum, vec![score])?;
                     let total_count = e.count_all()?;
                     Ok(vec![
                         category,
@@ -2333,7 +2333,7 @@ mod test {
                             ctx.from::<User>()?
                                 .project_value(|e| {
                                     let id = e.column(User::id())?;
-                                    e.aggregate("max", vec![id])
+                                    e.aggregate(AggKind::Max, vec![id])
                                 })?
                                 .finish()
                         })?;
@@ -2401,7 +2401,7 @@ mod test {
                             ctx.from::<User>()?
                                 .project_value(|e| {
                                     let id = e.column(User::id())?;
-                                    e.aggregate("max", vec![id])
+                                    e.aggregate(AggKind::Max, vec![id])
                                 })?
                                 .finish()
                         })
@@ -2447,7 +2447,7 @@ mod test {
                 ctx.from::<User>()?
                     .project_value(|e| {
                         let id = e.column(User::id())?;
-                        e.aggregate("max", vec![id])
+                        e.aggregate(AggKind::Max, vec![id])
                     })?
                     .having(|e| {
                         let max_id = e.scalar_subquery(|ctx| {
