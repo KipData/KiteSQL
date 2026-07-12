@@ -66,3 +66,26 @@ impl Accumulator for MinMaxAccumulator {
         self.result
     }
 }
+
+// GRCOV_EXCL_START
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn min_max_results() -> Result<(), DatabaseError> {
+        for (is_max, expected) in [(false, 1), (true, 3)] {
+            let mut accumulator = MinMaxAccumulator::new(is_max);
+            for value in [DataValue::Null, 3.into(), 1.into(), 2.into()] {
+                accumulator.update_value(&value)?;
+            }
+            assert_eq!(accumulator.result(), &DataValue::Int32(expected));
+            assert_eq!(
+                Box::new(accumulator).result_owned(),
+                DataValue::Int32(expected)
+            );
+        }
+        Ok(())
+    }
+}
+// GRCOV_EXCL_STOP

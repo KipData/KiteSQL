@@ -108,6 +108,25 @@ mod tests {
         assert_ne!(first, second);
         accumulator.evaluate()?;
         assert_eq!(&second, accumulator.result());
+        assert_eq!(Box::new(accumulator).result_owned(), second);
+        Ok(())
+    }
+
+    #[test]
+    fn empty_and_unsigned_results() -> Result<(), DatabaseError> {
+        let mut empty = AvgAccumulator::new();
+        empty.evaluate()?;
+        assert_eq!(empty.result(), &DataValue::Null);
+        assert_eq!(Box::new(empty).result_owned(), DataValue::Null);
+
+        let mut accumulator = AvgAccumulator::new();
+        accumulator.update_value(&DataValue::UInt32(2))?;
+        accumulator.update_value(&DataValue::UInt32(4))?;
+        accumulator.evaluate()?;
+        assert_eq!(
+            Box::new(accumulator).result_owned(),
+            DataValue::Float64(3.0.into())
+        );
         Ok(())
     }
 }

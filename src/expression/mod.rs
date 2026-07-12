@@ -1116,6 +1116,7 @@ mod test {
     use crate::expression::function::table::{
         ArcTableFunctionImpl, TableFunction, TableFunctionCatalog, TableFunctionImpl,
     };
+    use crate::expression::window::{WindowCall, WindowFunction, WindowFunctionKind, WindowSpec};
     use crate::expression::TrimWhereField;
     use crate::expression::{AliasType, BinaryOperator, ScalarExpression, UnaryOperator};
     use crate::function::current_date::CurrentDate;
@@ -1595,6 +1596,23 @@ mod test {
                 else_expr: None,
                 ty: LogicalType::Integer,
             },
+            Some(&context),
+            &mut reference_tables,
+            &mut plan_arena,
+        )?;
+        fn_assert(
+            &mut cursor,
+            ScalarExpression::WindowCall(WindowCall {
+                function: WindowFunction {
+                    kind: WindowFunctionKind::Aggregate(AggKind::Sum),
+                    args: vec![ScalarExpression::Constant(1.into())],
+                    ty: LogicalType::Integer,
+                },
+                spec: WindowSpec {
+                    partition_by: vec![ScalarExpression::Constant(2.into())],
+                    order_by: vec![ScalarExpression::Constant(3.into()).desc()],
+                },
+            }),
             Some(&context),
             &mut reference_tables,
             &mut plan_arena,

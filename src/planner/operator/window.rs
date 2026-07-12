@@ -58,3 +58,68 @@ impl fmt::Display for WindowOperator {
         Ok(())
     }
 }
+
+// GRCOV_EXCL_START
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::expression::window::WindowFunctionKind;
+    use crate::planner::TableArena;
+    use crate::serdes::{ReferenceSerialization, ReferenceTables};
+    use crate::storage::rocksdb::RocksTransaction;
+    use crate::types::LogicalType;
+    use std::io::{Cursor, Seek, SeekFrom};
+
+    fn operator(partition_by: Vec<ScalarExpression>, order_by: Vec<SortField>) -> WindowOperator {
+        WindowOperator {
+            partition_by,
+            order_by,
+            functions: vec![WindowFunction {
+                kind: WindowFunctionKind::RowNumber,
+                args: Vec::new(),
+                ty: LogicalType::Bigint,
+            }],
+            output_columns: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn display_window_spec() {
+        let function = "Window [WindowFunction { kind: RowNumber, args: [], ty: Bigint }]";
+        assert_eq!(operator(Vec::new(), Vec::new()).to_string(), function);
+        assert_eq!(
+            operator(vec![1.into()], Vec::new()).to_string(),
+            format!("{function} -> Partition By [1]")
+        );
+        assert_eq!(
+            operator(Vec::new(), vec![ScalarExpression::from(2).desc()]).to_string(),
+            format!("{function} -> Order By [2 Desc Nulls Last]")
+        );
+        assert_eq!(
+            operator(vec![1.into()], vec![ScalarExpression::from(2).desc()]).to_string(),
+            format!("{function} -> Partition By [1] Order By [2 Desc Nulls Last]")
+        );
+    }
+
+    #[test]
+    fn serialization_roundtrip() -> Result<(), crate::errors::DatabaseError> {
+        let source = operator(vec![1.into()], vec![ScalarExpression::from(2).desc()]);
+        let mut cursor = Cursor::new(Vec::new());
+        let mut reference_tables = ReferenceTables::new();
+        let arena = TableArena::default();
+        source.encode(&mut cursor, false, &mut reference_tables, &arena)?;
+        cursor.seek(SeekFrom::Start(0))?;
+
+        assert_eq!(
+            WindowOperator::decode::<RocksTransaction, _, _>(
+                &mut cursor,
+                None,
+                &reference_tables,
+                &mut TableArena::default(),
+            )?,
+            source
+        );
+        Ok(())
+    }
+}
+// GRCOV_EXCL_STOP

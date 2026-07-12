@@ -66,10 +66,8 @@ impl DistinctCountAccumulator {
 
 impl Accumulator for DistinctCountAccumulator {
     fn update_value(&mut self, value: &DataValue) -> Result<(), DatabaseError> {
-        if !value.is_null() {
-            if self.distinct_values.insert(value.clone()) {
-                self.result = DataValue::Int32(self.distinct_values.len() as i32);
-            }
+        if !value.is_null() && self.distinct_values.insert(value.clone()) {
+            self.result = DataValue::Int32(self.distinct_values.len() as i32);
         }
 
         Ok(())
@@ -83,3 +81,32 @@ impl Accumulator for DistinctCountAccumulator {
         self.result
     }
 }
+
+// GRCOV_EXCL_START
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn count_results() -> Result<(), DatabaseError> {
+        let mut accumulator = CountAccumulator::new();
+        for value in [DataValue::Null, 1.into(), 1.into()] {
+            accumulator.update_value(&value)?;
+        }
+        assert_eq!(accumulator.result(), &DataValue::Int32(2));
+        assert_eq!(Box::new(accumulator).result_owned(), DataValue::Int32(2));
+        Ok(())
+    }
+
+    #[test]
+    fn distinct_count_results() -> Result<(), DatabaseError> {
+        let mut accumulator = DistinctCountAccumulator::new();
+        for value in [DataValue::Null, 1.into(), 1.into(), 2.into()] {
+            accumulator.update_value(&value)?;
+        }
+        assert_eq!(accumulator.result(), &DataValue::Int32(2));
+        assert_eq!(Box::new(accumulator).result_owned(), DataValue::Int32(2));
+        Ok(())
+    }
+}
+// GRCOV_EXCL_STOP

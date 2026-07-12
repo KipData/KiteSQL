@@ -91,3 +91,32 @@ impl Accumulator for DistinctSumAccumulator {
         self.inner.result
     }
 }
+
+// GRCOV_EXCL_START
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sum_results() -> Result<(), DatabaseError> {
+        let mut accumulator = SumAccumulator::new(Cow::Borrowed(&LogicalType::Integer))?;
+        for value in [DataValue::Null, 2.into(), 3.into()] {
+            accumulator.update_value(&value)?;
+        }
+        assert_eq!(accumulator.result(), &DataValue::Int32(5));
+        assert_eq!(Box::new(accumulator).result_owned(), DataValue::Int32(5));
+        Ok(())
+    }
+
+    #[test]
+    fn distinct_sum_results() -> Result<(), DatabaseError> {
+        let mut accumulator = DistinctSumAccumulator::new(&LogicalType::Integer)?;
+        for value in [DataValue::Null, 2.into(), 2.into(), 3.into()] {
+            accumulator.update_value(&value)?;
+        }
+        assert_eq!(accumulator.result(), &DataValue::Int32(5));
+        assert_eq!(Box::new(accumulator).result_owned(), DataValue::Int32(5));
+        Ok(())
+    }
+}
+// GRCOV_EXCL_STOP
