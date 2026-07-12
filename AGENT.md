@@ -151,6 +151,8 @@ KiteSQL aims to stay easy to build, easy to audit, and easy to understand.
 
 A valid PR should:
 
+- Follow the repository pull request template
+- Describe test coverage and verified behavior instead of listing commands that were run
 - Compile cleanly
 - Pass all tests via make
 - Include new tests if behavior changes
