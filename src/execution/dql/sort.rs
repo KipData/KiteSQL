@@ -23,6 +23,7 @@ use crate::types::tuple::Tuple;
 use bumpalo::Bump;
 use std::cmp::Ordering;
 use std::mem::{self, transmute, MaybeUninit};
+use std::ops::{Deref, DerefMut};
 
 pub(crate) type BumpVec<'bump, T> = bumpalo::collections::Vec<'bump, T>;
 
@@ -51,17 +52,35 @@ impl<'a, T> NullableVec<'a, T> {
     }
 
     #[inline]
-    pub(crate) fn into_iter(self) -> impl Iterator<Item = T> + 'a {
-        self.0
-            .into_iter()
-            .map(|item| unsafe { item.assume_init_read() })
+    pub(crate) fn pop(&mut self) -> Option<T> {
+        self.0.pop().map(|item| unsafe { item.assume_init() })
+    }
+
+    pub(crate) fn truncate(&mut self, len: usize) {
+        while self.len() > len {
+            self.pop();
+        }
     }
 }
 
-pub(crate) fn sort_tuples<'a>(
+impl<T> Deref for NullableVec<'_, T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { std::slice::from_raw_parts(self.0.as_ptr().cast(), self.0.len()) }
+    }
+}
+
+impl<T> DerefMut for NullableVec<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { std::slice::from_raw_parts_mut(self.0.as_mut_ptr().cast(), self.0.len()) }
+    }
+}
+
+pub(crate) fn sort_tuples(
     sort_fields: &[SortField],
-    mut tuples: NullableVec<'a, (usize, Tuple)>,
-) -> Result<impl Iterator<Item = Tuple> + 'a, DatabaseError> {
+    tuples: &mut NullableVec<'_, (usize, Tuple)>,
+) -> Result<(), DatabaseError> {
     let fn_nulls_first = |nulls_first: bool| {
         if nulls_first {
             Ordering::Greater
@@ -114,12 +133,12 @@ pub(crate) fn sort_tuples<'a>(
     });
     drop(eval_values);
 
-    Ok(tuples.into_iter().map(|(_, tuple)| tuple))
+    Ok(())
 }
 
 pub struct Sort {
-    output: Option<Box<dyn Iterator<Item = Tuple>>>,
-    arena: Box<Bump>,
+    rows: NullableVec<'static, (usize, Tuple)>,
+    _arena: Box<Bump>,
     sort_fields: Vec<SortField>,
     limit: Option<usize>,
     input: ExecId,
@@ -136,9 +155,15 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Sort {
         transaction: &T,
     ) -> ExecId {
         let input = build_read(arena, plan_arena, input, cache, transaction);
+        let sort_arena = Box::<Bump>::default();
+        let rows = unsafe {
+            transmute::<NullableVec<'_, (usize, Tuple)>, NullableVec<'static, (usize, Tuple)>>(
+                NullableVec::new(&sort_arena),
+            )
+        };
         arena.push(ExecNode::Sort(Sort {
-            output: None,
-            arena: Box::<Bump>::default(),
+            rows,
+            _arena: sort_arena,
             sort_fields,
             limit,
             input,
@@ -152,31 +177,23 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort {
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
-        if self.output.is_none() {
-            let mut tuples = NullableVec::new(&self.arena);
-
-            while arena.next_tuple(self.input, plan_arena)? {
-                let offset = tuples.len();
-                tuples.put((offset, mem::take(arena.result_tuple_mut())));
+        loop {
+            if let Some((_, tuple)) = self.rows.pop() {
+                arena.produce_tuple(tuple);
+                return Ok(());
             }
-
-            let limit = self.limit.unwrap_or(tuples.len());
-            let rows = sort_tuples(&self.sort_fields, tuples)?;
-            // The arena lives at a stable boxed address, so we can keep the iterator
-            // and resume it across executor polls.
-            self.output = Some(unsafe {
-                transmute::<Box<dyn Iterator<Item = Tuple> + '_>, Box<dyn Iterator<Item = Tuple>>>(
-                    Box::new(rows.take(limit)),
-                )
-            });
+            while arena.next_tuple(self.input, plan_arena)? {
+                let offset = self.rows.len();
+                self.rows.put((offset, mem::take(arena.result_tuple_mut())));
+            }
+            if self.rows.is_empty() {
+                arena.finish();
+                return Ok(());
+            }
+            sort_tuples(&self.sort_fields, &mut self.rows)?;
+            self.rows.truncate(self.limit.unwrap_or(self.rows.len()));
+            self.rows.reverse();
         }
-
-        if let Some(tuple) = self.output.as_mut().and_then(std::iter::Iterator::next) {
-            arena.produce_tuple(tuple);
-        } else {
-            arena.finish();
-        }
-        Ok(())
     }
 }
 
@@ -191,6 +208,17 @@ mod test {
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use bumpalo::Bump;
+
+    fn sorted_rows<'a>(
+        sort_fields: &[SortField],
+        mut tuples: NullableVec<'a, (usize, Tuple)>,
+    ) -> Result<impl Iterator<Item = Tuple> + 'a, DatabaseError> {
+        sort_tuples(sort_fields, &mut tuples)?;
+        Ok(tuples.0.into_iter().map(|item| {
+            let (_, tuple) = unsafe { item.assume_init() };
+            tuple
+        }))
+    }
 
     #[test]
     fn test_single_value_desc_and_null_first() -> Result<(), DatabaseError> {
@@ -295,19 +323,19 @@ mod test {
             }
         };
 
-        fn_asc_and_nulls_first_eq(Box::new(sort_tuples(
+        fn_asc_and_nulls_first_eq(Box::new(sorted_rows(
             &fn_sort_fields(true, true),
             fn_tuples(),
         )?));
-        fn_asc_and_nulls_last_eq(Box::new(sort_tuples(
+        fn_asc_and_nulls_last_eq(Box::new(sorted_rows(
             &fn_sort_fields(true, false),
             fn_tuples(),
         )?));
-        fn_desc_and_nulls_first_eq(Box::new(sort_tuples(
+        fn_desc_and_nulls_first_eq(Box::new(sorted_rows(
             &fn_sort_fields(false, true),
             fn_tuples(),
         )?));
-        fn_desc_and_nulls_last_eq(Box::new(sort_tuples(
+        fn_desc_and_nulls_last_eq(Box::new(sorted_rows(
             &fn_sort_fields(false, false),
             fn_tuples(),
         )?));
@@ -525,19 +553,19 @@ mod test {
                 }
             };
 
-        fn_asc_1_and_nulls_first_1_and_asc_2_and_nulls_first_2_eq(Box::new(sort_tuples(
+        fn_asc_1_and_nulls_first_1_and_asc_2_and_nulls_first_2_eq(Box::new(sorted_rows(
             &fn_sort_fields(true, true, true, true),
             fn_tuples(),
         )?));
-        fn_asc_1_and_nulls_last_1_and_asc_2_and_nulls_first_2_eq(Box::new(sort_tuples(
+        fn_asc_1_and_nulls_last_1_and_asc_2_and_nulls_first_2_eq(Box::new(sorted_rows(
             &fn_sort_fields(true, false, true, true),
             fn_tuples(),
         )?));
-        fn_desc_1_and_nulls_first_1_and_asc_2_and_nulls_first_2_eq(Box::new(sort_tuples(
+        fn_desc_1_and_nulls_first_1_and_asc_2_and_nulls_first_2_eq(Box::new(sorted_rows(
             &fn_sort_fields(false, true, true, true),
             fn_tuples(),
         )?));
-        fn_desc_1_and_nulls_last_1_and_asc_2_and_nulls_first_2_eq(Box::new(sort_tuples(
+        fn_desc_1_and_nulls_last_1_and_asc_2_and_nulls_first_2_eq(Box::new(sorted_rows(
             &fn_sort_fields(false, false, true, true),
             fn_tuples(),
         )?));

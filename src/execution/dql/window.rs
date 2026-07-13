@@ -13,29 +13,30 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+use crate::execution::dql::sort::{sort_tuples, NullableVec};
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
-use crate::expression::ScalarExpression;
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::window::WindowOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
-use std::mem;
+use bumpalo::Bump;
+use std::mem::{self, transmute};
 
 mod function;
 
 use function::WindowFunction;
 
 pub struct Window {
-    partition_by: Vec<ScalarExpression>,
-    order_by: Vec<SortField>,
+    rows: NullableVec<'static, (usize, Tuple)>,
+    _arena: Box<Bump>,
+    sort_fields: Vec<SortField>,
+    partition_by_len: usize,
     functions: Vec<Box<dyn WindowFunction>>,
     input: ExecId,
-    pending: Option<Tuple>,
-    rows: Vec<Tuple>,
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Window {
@@ -50,8 +51,8 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Window {
     ) -> ExecId {
         let input = build_read(arena, plan_arena, input, cache, transaction);
         let WindowOperator {
-            partition_by,
-            order_by,
+            sort_fields,
+            partition_by_len,
             functions: window_functions,
             ..
         } = operator;
@@ -60,27 +61,33 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Window {
             let crate::expression::window::WindowFunction { kind, args, ty } = function;
             functions.push(function::new(kind, args, ty));
         }
+        let window_arena = Box::<Bump>::default();
+        let rows = unsafe {
+            transmute::<NullableVec<'_, (usize, Tuple)>, NullableVec<'static, (usize, Tuple)>>(
+                NullableVec::new(&window_arena),
+            )
+        };
         arena.push(ExecNode::Window(Window {
-            partition_by,
-            order_by,
+            rows,
+            _arena: window_arena,
+            sort_fields,
+            partition_by_len,
             functions,
             input,
-            pending: None,
-            rows: Vec::new(),
         }))
     }
 }
 
 fn evaluate_partition(
-    rows: &mut [Tuple],
+    rows: &mut [(usize, Tuple)],
     order_by: &[SortField],
     functions: &mut [Box<dyn WindowFunction>],
 ) -> Result<(), DatabaseError> {
     let Some(first) = rows.first() else {
         return Ok(());
     };
-    let output_offset = first.values.len();
-    for row in rows.iter_mut() {
+    let output_offset = first.1.values.len();
+    for (_, row) in rows.iter_mut() {
         row.values
             .resize(output_offset + functions.len(), DataValue::Null);
     }
@@ -94,8 +101,8 @@ fn evaluate_partition(
         'peer: while peer_end < rows.len() {
             // TODO: Cache evaluated order keys to avoid recalculating the previous row.
             for field in order_by {
-                if field.expr.eval(Some(&rows[peer_end - 1]))?
-                    != field.expr.eval(Some(&rows[peer_end]))?
+                if field.expr.eval(Some(&rows[peer_end - 1].1))?
+                    != field.expr.eval(Some(&rows[peer_end].1))?
                 {
                     break 'peer;
                 }
@@ -118,40 +125,44 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Window {
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         loop {
-            if let Some(tuple) = self.rows.pop() {
+            if let Some((_, tuple)) = self.rows.pop() {
                 arena.produce_tuple(tuple);
                 return Ok(());
             }
 
-            let first = if let Some(tuple) = self.pending.take() {
-                tuple
-            } else if arena.next_tuple(self.input, plan_arena)? {
-                mem::take(arena.result_tuple_mut())
-            } else {
+            while arena.next_tuple(self.input, plan_arena)? {
+                let offset = self.rows.len();
+                self.rows.put((offset, mem::take(arena.result_tuple_mut())));
+            }
+            if self.rows.is_empty() {
                 arena.finish();
                 return Ok(());
-            };
-            self.rows.push(first);
-
-            while arena.next_tuple(self.input, plan_arena)? {
-                let tuple = mem::take(arena.result_tuple_mut());
-                let mut same_partition = true;
-                // TODO: Cache evaluated partition keys to avoid recalculating the previous row.
-                for expr in &self.partition_by {
-                    if expr.eval(self.rows.last())? != expr.eval(Some(&tuple))? {
-                        same_partition = false;
-                        break;
-                    }
-                }
-                if same_partition {
-                    self.rows.push(tuple);
-                } else {
-                    self.pending = Some(tuple);
-                    break;
-                }
+            }
+            if !self.sort_fields.is_empty() {
+                sort_tuples(&self.sort_fields, &mut self.rows)?;
             }
 
-            evaluate_partition(&mut self.rows, &self.order_by, &mut self.functions)?;
+            let mut partition_start = 0;
+            while partition_start < self.rows.len() {
+                let mut partition_end = partition_start + 1;
+                'partition: while partition_end < self.rows.len() {
+                    // TODO: Cache evaluated partition keys to avoid recalculating the previous row.
+                    for field in &self.sort_fields[..self.partition_by_len] {
+                        if field.expr.eval(Some(&self.rows[partition_end - 1].1))?
+                            != field.expr.eval(Some(&self.rows[partition_end].1))?
+                        {
+                            break 'partition;
+                        }
+                    }
+                    partition_end += 1;
+                }
+                evaluate_partition(
+                    &mut self.rows[partition_start..partition_end],
+                    &self.sort_fields[self.partition_by_len..],
+                    &mut self.functions,
+                )?;
+                partition_start = partition_end;
+            }
             self.rows.reverse();
         }
     }
@@ -167,6 +178,7 @@ mod tests {
     use crate::expression::window::{
         WindowFunction as WindowExpressionFunction, WindowFunctionKind,
     };
+    use crate::expression::ScalarExpression;
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
     use crate::planner::Childrens;
@@ -178,10 +190,11 @@ mod tests {
         ScalarExpression::column_expr(ColumnRef::new(position + 1), position)
     }
 
-    fn rows(values: &[i32]) -> Vec<Tuple> {
+    fn rows(values: &[i32]) -> Vec<(usize, Tuple)> {
         values
             .iter()
-            .map(|value| Tuple::new(None, vec![DataValue::Int32(*value)]))
+            .enumerate()
+            .map(|(index, value)| (index, Tuple::new(None, vec![DataValue::Int32(*value)])))
             .collect()
     }
 
@@ -212,7 +225,9 @@ mod tests {
         evaluate_partition(&mut rows, &[column(0).asc()], &mut functions())?;
 
         assert_eq!(
-            rows.into_iter().map(|row| row.values).collect::<Vec<_>>(),
+            rows.into_iter()
+                .map(|(_, row)| row.values)
+                .collect::<Vec<_>>(),
             vec![
                 vec![
                     10.into(),
@@ -246,7 +261,9 @@ mod tests {
         evaluate_partition(&mut rows, &[], &mut functions())?;
 
         assert_eq!(
-            rows.into_iter().map(|row| row.values).collect::<Vec<_>>(),
+            rows.into_iter()
+                .map(|(_, row)| row.values)
+                .collect::<Vec<_>>(),
             vec![
                 vec![
                     3.into(),
@@ -302,19 +319,22 @@ mod tests {
         let input = LogicalPlan::new(
             Operator::Values(ValuesOperator {
                 rows: vec![
-                    vec![1.into(), 10.into()],
-                    vec![1.into(), 10.into()],
+                    vec![2.into(), 7.into()],
                     vec![1.into(), 20.into()],
                     vec![2.into(), 5.into()],
-                    vec![2.into(), 7.into()],
+                    vec![1.into(), 10.into()],
+                    vec![1.into(), 10.into()],
                 ],
                 schema_ref: input_columns.clone(),
             }),
             Childrens::None,
         );
         let operator = WindowOperator {
-            partition_by: vec![ScalarExpression::column_expr(input_columns[0], 0)],
-            order_by: vec![ScalarExpression::column_expr(input_columns[1], 1).asc()],
+            sort_fields: vec![
+                ScalarExpression::column_expr(input_columns[0], 0).asc(),
+                ScalarExpression::column_expr(input_columns[1], 1).asc(),
+            ],
+            partition_by_len: 1,
             functions: vec![
                 WindowExpressionFunction {
                     kind: WindowFunctionKind::RowNumber,

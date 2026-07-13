@@ -29,7 +29,7 @@ pub(super) trait WindowFunction {
 
     fn evaluate(
         &mut self,
-        rows: &mut [Tuple],
+        rows: &mut [(usize, Tuple)],
         peer: Range<usize>,
         peer_index: usize,
         output_position: usize,
@@ -41,13 +41,13 @@ struct RowNumber;
 impl WindowFunction for RowNumber {
     fn evaluate(
         &mut self,
-        rows: &mut [Tuple],
+        rows: &mut [(usize, Tuple)],
         peer: Range<usize>,
         _peer_index: usize,
         output_position: usize,
     ) -> Result<(), DatabaseError> {
         let start = peer.start;
-        for (offset, row) in rows[peer].iter_mut().enumerate() {
+        for (offset, (_, row)) in rows[peer].iter_mut().enumerate() {
             row.values[output_position] = DataValue::Int64((start + offset + 1) as i64);
         }
         Ok(())
@@ -61,7 +61,7 @@ struct Rank {
 impl WindowFunction for Rank {
     fn evaluate(
         &mut self,
-        rows: &mut [Tuple],
+        rows: &mut [(usize, Tuple)],
         peer: Range<usize>,
         peer_index: usize,
         output_position: usize,
@@ -71,7 +71,7 @@ impl WindowFunction for Rank {
         } else {
             peer.start + 1
         };
-        for row in &mut rows[peer] {
+        for (_, row) in &mut rows[peer] {
             row.values[output_position] = DataValue::Int64(rank as i64);
         }
         Ok(())
@@ -93,7 +93,7 @@ impl WindowFunction for Aggregate {
 
     fn evaluate(
         &mut self,
-        rows: &mut [Tuple],
+        rows: &mut [(usize, Tuple)],
         peer: Range<usize>,
         _peer_index: usize,
         output_position: usize,
@@ -101,12 +101,12 @@ impl WindowFunction for Aggregate {
         let Some(accumulator) = self.accumulator.as_mut() else {
             unreachable!()
         };
-        for row in &rows[peer.clone()] {
+        for (_, row) in &rows[peer.clone()] {
             accumulator.update_value(&self.arg.eval(Some(row))?)?;
         }
         accumulator.evaluate()?;
         let result = accumulator.result();
-        for row in &mut rows[peer] {
+        for (_, row) in &mut rows[peer] {
             row.values[output_position] = result.clone();
         }
         Ok(())

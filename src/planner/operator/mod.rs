@@ -322,9 +322,9 @@ impl Operator {
                 op: &'operator window::WindowOperator,
             ) -> Result<(), DatabaseError> {
                 for expr in op
-                    .partition_by
+                    .sort_fields
                     .iter()
-                    .chain(op.order_by.iter().map(|field| &field.expr))
+                    .map(|field| &field.expr)
                     .chain(op.functions.iter().flat_map(|function| &function.args))
                 {
                     ExprVisitor::visit(self, expr)?;

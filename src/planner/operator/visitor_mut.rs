@@ -282,9 +282,9 @@ impl<'a, V: ExprVisitorMut<'a>> OperatorVisitorMut<'a> for OperatorExprVisitorMu
 
     fn visit_window(&mut self, op: &'a mut window::WindowOperator) -> Result<(), DatabaseError> {
         for expr in op
-            .partition_by
+            .sort_fields
             .iter_mut()
-            .chain(op.order_by.iter_mut().map(|field| &mut field.expr))
+            .map(|field| &mut field.expr)
             .chain(
                 op.functions
                     .iter_mut()

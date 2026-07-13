@@ -557,8 +557,8 @@ impl ImplementationRuleIndex {
             Operator::Values(_) if self.contains(ImplementationRuleImpl::Values) => {
                 Some(PhysicalOption::new(PlanImpl::Values, SortOption::None))
             }
-            Operator::Window(_) if self.contains(ImplementationRuleImpl::Window) => {
-                Some(PhysicalOption::new(PlanImpl::Window, SortOption::Follow))
+            Operator::Window(op) if self.contains(ImplementationRuleImpl::Window) => {
+                Some(PhysicalOption::new(PlanImpl::Window, op.sort_option()))
             }
             Operator::Analyze(_) if self.contains(ImplementationRuleImpl::Analyze) => {
                 Some(PhysicalOption::new(PlanImpl::Analyze, SortOption::None))

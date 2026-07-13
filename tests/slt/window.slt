@@ -45,7 +45,7 @@ explain select
        row_number() over (order by v desc, id)
 from window_test
 ----
-Projection [#4, #5, #6] [Project => (Sort Option: Follow)] Window [WindowFunction { kind: RowNumber, args: [], ty: Bigint }] -> Order By [#3 Desc Nulls Last, #1 Asc Nulls Last] [Window => (Sort Option: Follow)] Sort By #3 Desc Nulls Last, #1 Asc Nulls Last [Sort => (Sort Option: OrderBy: (#3 Desc Nulls Last, #1 Asc Nulls Last) ignore_prefix_len: 0)] Window [WindowFunction { kind: RowNumber, args: [], ty: Bigint }, WindowFunction { kind: Rank, args: [], ty: Bigint }] -> Partition By [#2] Order By [#3 Asc Nulls Last, #1 Asc Nulls Last] [Window => (Sort Option: Follow)] Sort By #2 Asc Nulls Last, #3 Asc Nulls Last, #1 Asc Nulls Last [Sort => (Sort Option: OrderBy: (#2 Asc Nulls Last, #3 Asc Nulls Last, #1 Asc Nulls Last) ignore_prefix_len: 0)] TableScan window_test -> [#1, #2, #3] [SeqScan => (Sort Option: None)]
+Projection [#4, #5, #6] [Project => (Sort Option: Follow)] Window [WindowFunction { kind: RowNumber, args: [], ty: Bigint }] -> Order By [#3 Desc Nulls Last, #1 Asc Nulls Last] [Window => (Sort Option: OrderBy: (#3 Desc Nulls Last, #1 Asc Nulls Last) ignore_prefix_len: 0)] Window [WindowFunction { kind: RowNumber, args: [], ty: Bigint }, WindowFunction { kind: Rank, args: [], ty: Bigint }] -> Partition By [#2] Order By [#3 Asc Nulls Last, #1 Asc Nulls Last] [Window => (Sort Option: OrderBy: (#2 Asc Nulls Last, #3 Asc Nulls Last, #1 Asc Nulls Last) ignore_prefix_len: 0)] TableScan window_test -> [#1, #2, #3] [SeqScan => (Sort Option: None)]
 
 query III
 select id,

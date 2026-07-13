@@ -261,9 +261,9 @@ impl<'a, V: ExprVisitor<'a>> OperatorVisitor<'a> for OperatorExprVisitor<'_, V> 
 
     fn visit_window(&mut self, op: &'a window::WindowOperator) -> Result<(), DatabaseError> {
         for expr in op
-            .partition_by
+            .sort_fields
             .iter()
-            .chain(op.order_by.iter().map(|field| &field.expr))
+            .map(|field| &field.expr)
             .chain(op.functions.iter().flat_map(|function| &function.args))
         {
             ExprVisitor::visit(self.visitor, expr)?;
@@ -462,8 +462,11 @@ pub(crate) mod tests {
                 schema_ref: vec![column_ref],
             }),
             Operator::Window(window::WindowOperator {
-                partition_by: vec![17_i32.into()],
-                order_by: vec![SortField::from(ScalarExpression::from(18_i32))],
+                sort_fields: vec![
+                    SortField::from(ScalarExpression::from(17_i32)),
+                    SortField::from(ScalarExpression::from(18_i32)),
+                ],
+                partition_by_len: 1,
                 functions: vec![WindowFunction {
                     kind: WindowFunctionKind::RowNumber,
                     args: Vec::new(),

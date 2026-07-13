@@ -14,22 +14,36 @@
 
 use crate::catalog::ColumnRef;
 use crate::expression::window::WindowFunction;
-use crate::expression::ScalarExpression;
 use crate::iter_ext::Itertools;
 use crate::planner::operator::sort::SortField;
+use crate::planner::operator::SortOption;
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct WindowOperator {
-    pub partition_by: Vec<ScalarExpression>,
-    pub order_by: Vec<SortField>,
+    pub sort_fields: Vec<SortField>,
+    pub partition_by_len: usize,
     pub functions: Vec<WindowFunction>,
     pub output_columns: Vec<ColumnRef>,
 }
 
+impl WindowOperator {
+    pub(crate) fn sort_option(&self) -> SortOption {
+        if self.sort_fields.is_empty() {
+            SortOption::Follow
+        } else {
+            SortOption::OrderBy {
+                fields: self.sort_fields.clone(),
+                ignore_prefix_len: 0,
+            }
+        }
+    }
+}
+
 impl fmt::Display for WindowOperator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (partition_by, order_by) = self.sort_fields.split_at(self.partition_by_len);
         write!(
             f,
             "Window [{}]",
@@ -38,21 +52,24 @@ impl fmt::Display for WindowOperator {
                 .map(|expr| format!("{expr:?}"))
                 .join(", ")
         )?;
-        if !self.partition_by.is_empty() || !self.order_by.is_empty() {
+        if !self.sort_fields.is_empty() {
             write!(f, " ->")?;
         }
-        if !self.partition_by.is_empty() {
+        if !partition_by.is_empty() {
             write!(
                 f,
                 " Partition By [{}]",
-                self.partition_by.iter().map(ToString::to_string).join(", ")
+                partition_by
+                    .iter()
+                    .map(|field| field.expr.to_string())
+                    .join(", ")
             )?;
         }
-        if !self.order_by.is_empty() {
+        if !order_by.is_empty() {
             write!(
                 f,
                 " Order By [{}]",
-                self.order_by.iter().map(ToString::to_string).join(", ")
+                order_by.iter().map(ToString::to_string).join(", ")
             )?;
         }
         Ok(())
@@ -64,6 +81,7 @@ impl fmt::Display for WindowOperator {
 mod tests {
     use super::*;
     use crate::expression::window::WindowFunctionKind;
+    use crate::expression::ScalarExpression;
     use crate::planner::TableArena;
     use crate::serdes::{ReferenceSerialization, ReferenceTables};
     use crate::storage::rocksdb::RocksTransaction;
@@ -71,9 +89,14 @@ mod tests {
     use std::io::{Cursor, Seek, SeekFrom};
 
     fn operator(partition_by: Vec<ScalarExpression>, order_by: Vec<SortField>) -> WindowOperator {
+        let partition_by_len = partition_by.len();
         WindowOperator {
-            partition_by,
-            order_by,
+            sort_fields: partition_by
+                .into_iter()
+                .map(SortField::from)
+                .chain(order_by)
+                .collect(),
+            partition_by_len,
             functions: vec![WindowFunction {
                 kind: WindowFunctionKind::RowNumber,
                 args: Vec::new(),
@@ -98,6 +121,20 @@ mod tests {
         assert_eq!(
             operator(vec![1.into()], vec![ScalarExpression::from(2).desc()]).to_string(),
             format!("{function} -> Partition By [1] Order By [2 Desc Nulls Last]")
+        );
+        assert_eq!(
+            operator(Vec::new(), Vec::new()).sort_option(),
+            SortOption::Follow
+        );
+        assert_eq!(
+            operator(vec![1.into()], vec![ScalarExpression::from(2).desc()]).sort_option(),
+            SortOption::OrderBy {
+                fields: vec![
+                    ScalarExpression::from(1).asc(),
+                    ScalarExpression::from(2).desc(),
+                ],
+                ignore_prefix_len: 0,
+            }
         );
     }
 

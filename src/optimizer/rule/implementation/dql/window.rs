@@ -16,8 +16,7 @@ use crate::errors::DatabaseError;
 use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
 use crate::optimizer::core::rule::{BestPhysicalOption, ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
-use crate::single_mapping;
+use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
 use std::sync::LazyLock;
 
 static WINDOW_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
@@ -28,8 +27,27 @@ static WINDOW_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
 #[derive(Clone)]
 pub struct WindowImplementation;
 
-single_mapping!(
-    WindowImplementation,
-    WINDOW_PATTERN,
-    PhysicalOption::new(PlanImpl::Window, SortOption::Follow)
-);
+impl MatchPattern for WindowImplementation {
+    fn pattern(&self) -> &Pattern {
+        &WINDOW_PATTERN
+    }
+}
+
+impl ImplementationRule for WindowImplementation {
+    fn update_best_option(
+        &self,
+        op: &Operator,
+        _: &crate::planner::PlanArena,
+        _: &StatisticMetaLoader<'_>,
+        best_physical_option: &mut BestPhysicalOption,
+    ) -> Result<(), DatabaseError> {
+        if let Operator::Window(op) = op {
+            crate::optimizer::core::rule::keep_best_physical_option(
+                best_physical_option,
+                PhysicalOption::new(PlanImpl::Window, op.sort_option()),
+                None,
+            );
+        }
+        Ok(())
+    }
+}
