@@ -3997,5 +3997,55 @@ mod tests {
 
         Ok(())
     }
+
+    #[cfg(feature = "spill")]
+    #[test]
+    fn query_builder_force_spill_aggregate_and_distinct() -> Result<(), DatabaseError> {
+        let database = build_orm_unit_database()?;
+
+        let plan = database.explain(|ctx| {
+            ctx.from::<OrmUnitOrder>()?
+                .project_tuple(|e| {
+                    Ok(vec![
+                        e.column(OrmUnitOrder::user_id())?,
+                        e.aggregate(AggKind::Sum, [e.column(OrmUnitOrder::amount())?])?,
+                    ])
+                })?
+                .force_spill()?
+                .group_by(|e| e.column(OrmUnitOrder::user_id()))?
+                .order_by_expr(|e| Ok(e.column(OrmUnitOrder::user_id())?.asc()))?
+                .finish()
+        })?;
+        assert_eq!(
+            plan,
+            concat!(
+                "Projection [#5, #7] [Project => (Sort Option: Follow)] ",
+                "Aggregate [Sum(#6)] -> Group By [#5] [StreamAggregate => (Sort Option: Follow)] ",
+                "Sort By #5 Asc Nulls Last [Sort => (Sort Option: OrderBy: (#5 Asc Nulls Last) ignore_prefix_len: 0)] ",
+                "TableScan orm_unit_orders -> [#5, #6] [SeqScan => (Sort Option: None)]"
+            ),
+            "{plan}"
+        );
+
+        let distinct_plan = database.explain(|ctx| {
+            ctx.from::<OrmUnitOrder>()?
+                .project_scalar(OrmUnitOrder::user_id())?
+                .force_spill()?
+                .distinct()?
+                .finish()
+        })?;
+        assert_eq!(
+            distinct_plan,
+            concat!(
+                "Projection [#5] [Project => (Sort Option: Follow)] ",
+                "Aggregate [] -> Group By [#5] [StreamDistinct => (Sort Option: Follow)] ",
+                "Sort By #5 Asc Nulls Last [Sort => (Sort Option: OrderBy: (#5 Asc Nulls Last) ignore_prefix_len: 0)] ",
+                "TableScan orm_unit_orders -> [#5] [SeqScan => (Sort Option: None)]"
+            ),
+            "{distinct_plan}"
+        );
+
+        Ok(())
+    }
 }
 // GRCOV_EXCL_STOP

@@ -164,6 +164,7 @@ mod tests {
             groupby_exprs: vec![ScalarExpression::column_expr(schema_ref[0], 0)],
             agg_calls: vec![],
             is_distinct: true,
+            force_spill: false,
         };
         let plan = LogicalPlan::new(Operator::Aggregate(agg), Childrens::Only(Box::new(input)));
         let plan = optimize_exprs(plan, &mut plan_arena)?;
@@ -220,6 +221,7 @@ mod tests {
             ],
             agg_calls: vec![],
             is_distinct: true,
+            force_spill: false,
         };
         let plan = LogicalPlan::new(Operator::Aggregate(agg), Childrens::Only(Box::new(input)));
         let plan = optimize_exprs(plan, &mut plan_arena)?;

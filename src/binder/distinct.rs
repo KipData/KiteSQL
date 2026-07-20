@@ -27,6 +27,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         &mut self,
         children: LogicalPlan,
         select_list: Vec<ScalarExpression>,
+        force_spill: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
         self.context.step(QueryBindStep::Distinct);
 
@@ -35,6 +36,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             vec![],
             select_list,
             true,
+            force_spill,
         ))
     }
 

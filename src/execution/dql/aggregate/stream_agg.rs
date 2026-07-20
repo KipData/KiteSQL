@@ -171,6 +171,7 @@ mod tests {
                 },
             ],
             is_distinct: false,
+            force_spill: false,
         };
         let table_cache = crate::storage::TableCache::default();
         let view_cache = crate::storage::ViewCache::default();
@@ -215,6 +216,7 @@ mod tests {
             groupby_exprs: vec![ScalarExpression::column_expr(column, 0)],
             agg_calls: Vec::new(),
             is_distinct: false,
+            force_spill: false,
         };
         let table_cache = crate::storage::TableCache::default();
         let view_cache = crate::storage::ViewCache::default();

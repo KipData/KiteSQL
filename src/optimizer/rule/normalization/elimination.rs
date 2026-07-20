@@ -15,9 +15,9 @@
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::optimizer::core::rule::NormalizationRule;
-use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child};
+use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child, wrap_child_with};
 use crate::planner::operator::limit::LimitOperator;
-use crate::planner::operator::sort::SortField;
+use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
 use crate::planner::{Childrens, LogicalPlan};
@@ -45,7 +45,7 @@ impl NormalizationRule for EliminateRedundantSort {
             None => return Ok(false),
         };
         mark_sort_preserving_indexes(child, &sort_fields, arena)?;
-        let can_remove = ensure_index_order(child, &sort_fields, arena);
+        let can_remove = ensure_order(child, &sort_fields, arena);
 
         if !can_remove {
             return Ok(false);
@@ -276,10 +276,56 @@ impl NormalizationRule for UseStreamAggregate {
             Some(child) => child,
             None => return Ok(false),
         };
-        if !ensure_stream_aggregate_order(child, &required, arena) {
+        if !ensure_order(child, &required, arena) {
             return Ok(false);
         }
 
+        plan.physical_option = Some(PhysicalOption::new(implementation, SortOption::Follow));
+        Ok(true)
+    }
+}
+
+pub struct ForceSpillAggregate;
+
+impl NormalizationRule for ForceSpillAggregate {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        _: &mut crate::planner::PlanArena,
+    ) -> Result<bool, DatabaseError> {
+        let (implementation, sort_fields) = match (&plan.operator, &plan.physical_option) {
+            (
+                Operator::Aggregate(op),
+                Some(PhysicalOption {
+                    plan: PlanImpl::HashAggregate,
+                    ..
+                }),
+            ) if op.force_spill && !op.groupby_exprs.is_empty() => {
+                let implementation = if op.is_distinct && op.agg_calls.is_empty() {
+                    PlanImpl::StreamDistinct
+                } else {
+                    PlanImpl::StreamAggregate
+                };
+                (implementation, groupby_sort_fields(&op.groupby_exprs))
+            }
+            _ => return Ok(false),
+        };
+
+        if !cfg!(feature = "spill") {
+            return Err(DatabaseError::UnsupportedStmt(
+                "FORCE_AGG_SPILL requires the `spill` feature".to_string(),
+            ));
+        }
+
+        let sort_option = SortOption::OrderBy {
+            fields: sort_fields.clone(),
+            ignore_prefix_len: 0,
+        };
+        if !wrap_child_with(plan, 0, Operator::Sort(SortOperator { sort_fields })) {
+            return Ok(false);
+        }
+        let sort = only_child_mut(plan).expect("aggregate child was wrapped with sort");
+        sort.physical_option = Some(PhysicalOption::new(PlanImpl::Sort, sort_option));
         plan.physical_option = Some(PhysicalOption::new(implementation, SortOption::Follow));
         Ok(true)
     }
@@ -300,11 +346,15 @@ pub(crate) fn apply_annotated_post_rules(
     if UseStreamAggregate.apply(plan, arena)? {
         changed = true;
     }
+    // Run last so an existing ordered child is reused before a forced spill adds a Sort.
+    if ForceSpillAggregate.apply(plan, arena)? {
+        changed = true;
+    }
 
     Ok(changed)
 }
 
-fn ensure_stream_aggregate_order(
+fn ensure_order(
     plan: &mut LogicalPlan,
     required: &[SortField],
     arena: &crate::planner::PlanArena,
@@ -323,54 +373,21 @@ fn ensure_stream_aggregate_order(
 
     if let Some(physical_option) = plan.physical_option.as_ref() {
         match physical_option.sort_option() {
-            SortOption::OrderBy { .. }
-                if covers(
+            SortOption::OrderBy { .. } => {
+                return covers(
                     required,
                     physical_option.sort_option(),
                     |required, provided| sort_field_matches(required, provided, arena),
-                ) =>
-            {
-                return true
+                );
             }
-            SortOption::OrderBy { .. } => {}
             SortOption::Follow => {
                 if let Childrens::Only(child) = plan.childrens.as_mut() {
-                    if ensure_stream_aggregate_order(child, required, arena) {
+                    if ensure_order(child, required, arena) {
                         return true;
                     }
                 }
             }
             SortOption::None => {}
-        }
-    }
-
-    false
-}
-
-fn ensure_index_order(
-    plan: &mut LogicalPlan,
-    required: &[SortField],
-    arena: &crate::planner::PlanArena,
-) -> bool {
-    if let Some(PhysicalOption {
-        plan: PlanImpl::IndexScan(index_info),
-        ..
-    }) = plan.physical_option.as_ref()
-    {
-        if covers(required, &index_info.sort_option, |required, provided| {
-            sort_field_matches(required, provided, arena)
-        }) {
-            return true;
-        }
-    }
-
-    if let Some(physical_option) = plan.physical_option.as_ref() {
-        if matches!(physical_option.sort_option(), SortOption::Follow) {
-            if let Childrens::Only(child) = plan.childrens.as_mut() {
-                if ensure_index_order(child, required, arena) {
-                    return true;
-                }
-            }
         }
     }
 
@@ -426,7 +443,9 @@ pub(crate) fn covers<T>(
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use super::{EliminateIndexFilter, EliminateRedundantSort, UseStreamAggregate};
+    use super::{
+        EliminateIndexFilter, EliminateRedundantSort, ForceSpillAggregate, UseStreamAggregate,
+    };
     use crate::catalog::{ColumnCatalog, TableName};
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
@@ -618,6 +637,7 @@ mod tests {
                 groupby_exprs: vec![ScalarExpression::column_expr(c1, 0)],
                 agg_calls: vec![],
                 is_distinct: true,
+                force_spill: false,
             }),
             Childrens::Only(Box::new(scan)),
         );
@@ -888,6 +908,7 @@ mod tests {
             unreachable!()
         };
         op.is_distinct = false;
+        op.force_spill = true;
         let Childrens::Only(child) = plan.childrens.as_mut() else {
             unreachable!()
         };
@@ -912,6 +933,12 @@ mod tests {
                 ..
             })
         ));
+        let force_spill = ForceSpillAggregate;
+        assert!(!force_spill.apply(&mut plan, &mut arena)?);
+        assert!(!matches!(
+            plan.childrens.as_ref(),
+            Childrens::Only(child) if matches!(child.operator, Operator::Sort(_))
+        ));
 
         let (mut unordered, _) = build_distinct_scan_plan(&mut arena);
         let Operator::Aggregate(op) = &mut unordered.operator else {
@@ -929,6 +956,52 @@ mod tests {
                 plan: PlanImpl::HashAggregate,
                 ..
             })
+        ));
+        Ok(())
+    }
+
+    #[cfg(feature = "spill")]
+    #[test]
+    fn force_spill_distinct_sorts_unordered_input() -> Result<(), DatabaseError> {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = crate::planner::PlanArena::new(&table_arena);
+        let (mut plan, _) = build_distinct_scan_plan(&mut arena);
+        let Operator::Aggregate(op) = &mut plan.operator else {
+            unreachable!()
+        };
+        op.force_spill = true;
+        let expected_fields = super::groupby_sort_fields(&op.groupby_exprs);
+        plan.physical_option = Some(PhysicalOption::new(
+            PlanImpl::HashAggregate,
+            SortOption::None,
+        ));
+
+        let rule = ForceSpillAggregate;
+        assert!(rule.apply(&mut plan, &mut arena)?);
+        assert!(matches!(
+            plan.physical_option,
+            Some(PhysicalOption {
+                plan: PlanImpl::StreamDistinct,
+                ..
+            })
+        ));
+        let Childrens::Only(sort) = plan.childrens.as_ref() else {
+            unreachable!()
+        };
+        assert!(matches!(
+            &sort.operator,
+            Operator::Sort(SortOperator { sort_fields }) if sort_fields == &expected_fields
+        ));
+        assert!(matches!(
+            sort.physical_option,
+            Some(PhysicalOption {
+                plan: PlanImpl::Sort,
+                ..
+            })
+        ));
+        assert!(matches!(
+            sort.childrens.as_ref(),
+            Childrens::Only(child) if matches!(child.operator, Operator::TableScan(_))
         ));
         Ok(())
     }

@@ -24,6 +24,7 @@ pub struct AggregateOperator {
     pub groupby_exprs: Vec<ScalarExpression>,
     pub agg_calls: Vec<ScalarExpression>,
     pub is_distinct: bool,
+    pub force_spill: bool,
 }
 
 impl AggregateOperator {
@@ -32,12 +33,14 @@ impl AggregateOperator {
         agg_calls: Vec<ScalarExpression>,
         groupby_exprs: Vec<ScalarExpression>,
         is_distinct: bool,
+        force_spill: bool,
     ) -> LogicalPlan {
         LogicalPlan::new(
             Operator::Aggregate(Self {
                 groupby_exprs,
                 agg_calls,
                 is_distinct,
+                force_spill,
             }),
             Childrens::Only(Box::new(children)),
         )

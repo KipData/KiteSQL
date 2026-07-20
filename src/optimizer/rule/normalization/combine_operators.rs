@@ -438,9 +438,10 @@ mod tests {
             vec![],
             vec![column_expr(&mut arena, "c2", 1)],
             false,
+            false,
         );
         let expr = column_expr(&mut arena, "c2", 0);
-        let mut plan = AggregateOperator::build(child, vec![], vec![expr], true);
+        let mut plan = AggregateOperator::build(child, vec![], vec![expr], true, false);
 
         assert!(CollapseGroupByAgg.apply(&mut plan, &mut arena)?);
         let Operator::Aggregate(op) = &plan.operator else {

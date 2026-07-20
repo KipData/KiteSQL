@@ -42,6 +42,42 @@ See [the ORM guide](../src/orm/README.md) for the full ORM guide, including:
 - public ORM structs, enums, and traits
 - related `ResultIter::orm::<M>()` integration
 
+### Spill-backed Aggregation: `features = ["spill"]`
+
+The native-only `spill` feature bounds memory usage for large grouped
+aggregations. It is not enabled by default and cannot be combined with `wasm`.
+
+For SQL, place the optimizer hint immediately after `SELECT`:
+
+```sql
+SELECT /*+ FORCE_AGG_SPILL */ user_id, COUNT(*)
+FROM orders
+GROUP BY user_id
+ORDER BY user_id;
+```
+
+For ORM queries, enable both `orm` and `spill`, then call `force_spill()` before
+`group_by()` or `distinct()` so the option is passed when the aggregate plan is
+built:
+
+```rust,ignore
+let grouped = database.bind(|ctx| {
+    ctx.from::<Order>()?
+        .project_tuple(|e| {
+            Ok(vec![e.column(Order::user_id())?, e.count_all()?])
+        })?
+        .force_spill()?
+        .group_by(|e| e.column(Order::user_id()))?
+        .order_by(Order::user_id())?
+        .finish()
+})?;
+```
+
+KiteSQL still reuses an already ordered input when possible. Otherwise it adds
+an external sort on the group keys and executes a streaming aggregate. The
+hint is intended for grouped aggregates or `DISTINCT`; an aggregate without
+group keys already uses constant-size accumulator state.
+
 ### User-Defined Function: `features = ["macros"]`
 ```rust
 scala_function!(TestFunction::test(LogicalType::Integer, LogicalType::Integer) -> LogicalType::Integer => |v1: DataValue, v2: DataValue| {

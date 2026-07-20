@@ -1424,6 +1424,7 @@ where
         group_by: &GroupByExpr,
         having: Option<&Expr>,
         orderby: Option<&[OrderByExpr]>,
+        force_spill: bool,
     ) -> Result<BindPlanAggregated<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
         let group_by = with_query_bind_step!(self.binder, QueryBindStep::Agg, {
             match group_by {
@@ -1452,16 +1453,22 @@ where
                 })
             })
             .transpose()?;
-        self.aggregate(group_by, having, orderby, |binder, arena, orderby| {
-            let OrderByExpr { expr, options, .. } = orderby;
-            with_query_bind_step!(binder, QueryBindStep::Sort, {
-                SortField::new(
-                    binder.bind_expr(expr, arena)?,
-                    options.asc.is_none_or(|asc| asc),
-                    options.nulls_first.unwrap_or(false),
-                )
-            })
-        })
+        self.aggregate(
+            group_by,
+            having,
+            orderby,
+            force_spill,
+            |binder, arena, orderby| {
+                let OrderByExpr { expr, options, .. } = orderby;
+                with_query_bind_step!(binder, QueryBindStep::Sort, {
+                    SortField::new(
+                        binder.bind_expr(expr, arena)?,
+                        options.asc.is_none_or(|asc| asc),
+                        options.nulls_first.unwrap_or(false),
+                    )
+                })
+            },
+        )
     }
 }
 
@@ -1473,8 +1480,9 @@ where
     pub(crate) fn distinct_sql(
         self,
         distinct: Option<&Distinct>,
+        force_spill: bool,
     ) -> Result<BindPlanDistinct<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
-        self.distinct(matches!(distinct, Some(Distinct::Distinct)))
+        self.distinct(matches!(distinct, Some(Distinct::Distinct)), force_spill)
     }
 }
 
@@ -2594,6 +2602,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let Select {
+            optimizer_hint,
             projection,
             from,
             selection,
@@ -2615,15 +2624,23 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 "QUALIFY is not supported".to_string(),
             ));
         }
+        let force_spill = optimizer_hint
+            .as_ref()
+            .is_some_and(|hint| hint.text.trim().eq_ignore_ascii_case("FORCE_AGG_SPILL"));
+        if force_spill && !cfg!(feature = "spill") {
+            return Err(DatabaseError::UnsupportedStmt(
+                "FORCE_AGG_SPILL requires the `spill` feature".to_string(),
+            ));
+        }
         Ok(self
             .build_plan(arena)
             .from_sql(from)?
             .select_list_from_sql(projection)?
             .where_sql(selection.as_ref())?
-            .aggregate_sql(group_by, having.as_ref(), orderby)?
+            .aggregate_sql(group_by, having.as_ref(), orderby, force_spill)?
             .having()?
             .window()?
-            .distinct_sql(distinct.as_ref())?
+            .distinct_sql(distinct.as_ref(), force_spill)?
             .order_by()?
             .project()?
             .select_into_sql(into.as_ref())?

@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use sqlparser::parser::ParserError;
-use sqlparser::{ast::Statement, dialect::PostgreSqlDialect, parser::Parser};
+use sqlparser::{ast::Statement, dialect::GenericDialect, parser::Parser};
 
-const DIALECT: PostgreSqlDialect = PostgreSqlDialect {};
+const DIALECT: GenericDialect = GenericDialect {};
 
 /// Parse a string to a collection of statements.
 ///
@@ -31,4 +31,26 @@ const DIALECT: PostgreSqlDialect = PostgreSqlDialect {};
 /// ```
 pub fn parse_sql<S: AsRef<str>>(sql: S) -> Result<Vec<Statement>, ParserError> {
     Parser::parse_sql(&DIALECT, sql.as_ref())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_sql;
+    use sqlparser::ast::{SetExpr, Statement};
+
+    #[test]
+    fn parses_optimizer_hint() {
+        let statements = parse_sql("SELECT /*+ FORCE_AGG_SPILL */ a FROM t").unwrap();
+        let Statement::Query(query) = &statements[0] else {
+            panic!("expected query statement");
+        };
+        let SetExpr::Select(select) = query.body.as_ref() else {
+            panic!("expected select query");
+        };
+
+        assert_eq!(
+            select.optimizer_hint.as_ref().map(|hint| hint.text.trim()),
+            Some("FORCE_AGG_SPILL")
+        );
+    }
 }

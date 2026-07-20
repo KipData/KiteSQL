@@ -417,6 +417,7 @@ pub(crate) mod tests {
                 groupby_exprs: vec![1_i32.into()],
                 agg_calls: vec![2_i32.into()],
                 is_distinct: false,
+                force_spill: false,
             }),
             Operator::ScalarApply(ScalarApplyOperator),
             Operator::MarkApply(mark_apply),

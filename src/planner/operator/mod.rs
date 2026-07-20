@@ -739,6 +739,7 @@ mod tests {
             agg_calls: vec![column_expr(a, 0)],
             groupby_exprs: vec![column_expr(b, 1)],
             is_distinct: false,
+            force_spill: false,
         });
         assert_eq!(referenced_columns(&aggregate, &mut arena)?, vec![a, b]);
 

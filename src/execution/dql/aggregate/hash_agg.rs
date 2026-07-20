@@ -184,6 +184,7 @@ mod test {
                     ty: LogicalType::Integer,
                 }],
                 is_distinct: false,
+                force_spill: false,
             }),
             Childrens::Only(Box::new(input)),
         );

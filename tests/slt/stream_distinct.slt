@@ -55,5 +55,19 @@ select distinct c1 from distinct_t where c1 < 10 and c1 > 0;
 8
 9
 
+# forced spill aggregate
+query II rowsort
+select /*+ FORCE_AGG_SPILL */ c1, count(c2) from distinct_t where c1 < 10 and c1 > 0 group by c1;
+----
+1 10000
+2 10000
+3 10000
+4 10000
+5 10000
+6 10000
+7 10000
+8 10000
+9 10000
+
 statement ok
 drop table distinct_t;
