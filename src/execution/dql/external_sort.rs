@@ -146,25 +146,35 @@ fn finish_sort<'on_flush>(
 struct RunCursor<'source> {
     remaining_segments: usize,
     reader: SegmentReader<'source, BufReader<File>, SortRow>,
+    head: Option<SortRow>,
 }
 
 impl<'source> RunCursor<'source> {
     fn new(source: &'source SpillReader<SortRow>, run: &Run) -> Result<Self, DatabaseError> {
         let mut reader = source.open_segment_reader()?;
         reader.reset(run.first_segment)?;
-        Ok(Self {
+        let mut cursor = Self {
             remaining_segments: run.segment_count - 1,
             reader,
-        })
+            head: None,
+        };
+        let _ = cursor.next()?;
+        Ok(cursor)
+    }
+
+    fn peek(&self) -> Option<&SortRow> {
+        self.head.as_ref()
     }
 
     fn next(&mut self) -> Result<Option<SortRow>, DatabaseError> {
+        let head = self.head.take();
         loop {
             if let Some(row) = self.reader.next() {
-                return row.map(Some);
+                self.head = Some(row?);
+                return Ok(head);
             }
             if self.remaining_segments == 0 {
-                return Ok(None);
+                return Ok(head);
             }
             if !self.reader.start_next_segment()? {
                 return Err(DatabaseError::InvalidValue(
@@ -200,34 +210,29 @@ fn merge_pass<'on_flush>(
     let mut target = SpillVec::new();
     target_runs.clear();
     target_runs.reserve(source_runs.len().div_ceil(fan_in));
-    let mut cursors = Vec::with_capacity(fan_in);
     // Perf: a loser tree or binary heap would reduce head selection from O(K) to O(log K), but
     // K is deliberately small, so a linear scan keeps the merge state and update path simpler.
-    let mut heads = Vec::with_capacity(fan_in);
+    let mut cursors = Vec::with_capacity(fan_in);
 
     for run_group in source_runs.chunks(fan_in) {
-        heads.clear();
         cursors.clear();
         for run in run_group {
             cursors.push(RunCursor::new(&source, run)?);
-        }
-        for cursor in &mut cursors {
-            heads.push(cursor.next()?);
         }
         let mut first_segment = None;
         let mut segment_count = 0;
 
         loop {
             let mut selected = None;
-            for (index, row) in heads.iter().enumerate() {
-                let Some(row) = row else {
+            for (index, cursor) in cursors.iter().enumerate() {
+                let Some(row) = cursor.peek() else {
                     continue;
                 };
                 let Some(current) = selected else {
                     selected = Some(index);
                     continue;
                 };
-                let Some(current_row) = heads[current].as_ref() else {
+                let Some(current_row) = cursors[current].peek() else {
                     selected = Some(index);
                     continue;
                 };
@@ -244,7 +249,7 @@ fn merge_pass<'on_flush>(
             let Some(selected) = selected else {
                 break;
             };
-            let Some(row) = heads[selected].take() else {
+            let Some(row) = cursors[selected].next()? else {
                 return Err(DatabaseError::InvalidValue(
                     "sort merge selected an empty run".to_string(),
                 ));
@@ -253,7 +258,6 @@ fn merge_pass<'on_flush>(
                 first_segment.get_or_insert(segment);
                 segment_count += 1;
             }
-            heads[selected] = cursors[selected].next()?;
         }
 
         if let Some(segment) = target.flush()? {
