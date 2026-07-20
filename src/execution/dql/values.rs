@@ -13,8 +13,6 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-#[cfg(feature = "spill")]
-use crate::execution::spill::{SpillReader, SpillVec};
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::planner::operator::values::ValuesOperator;
 use crate::storage::Transaction;
@@ -23,21 +21,16 @@ use crate::types::value::DataValue;
 use std::mem;
 
 pub struct Values {
-    #[cfg(not(feature = "spill"))]
     rows: std::vec::IntoIter<Vec<DataValue>>,
-    #[cfg(feature = "spill")]
-    rows: SpillReader<Vec<DataValue>>,
     schema_ref: Schema,
 }
 
 impl From<ValuesOperator> for Values {
     fn from(ValuesOperator { rows, schema_ref }: ValuesOperator) -> Self {
-        #[cfg(feature = "spill")]
-        let rows = SpillVec::from(rows).into_iter();
-        #[cfg(not(feature = "spill"))]
-        let rows = rows.into_iter();
-
-        Values { rows, schema_ref }
+        Values {
+            rows: rows.into_iter(),
+            schema_ref,
+        }
     }
 }
 
@@ -62,12 +55,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values {
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
-        #[cfg(feature = "spill")]
-        let next_row = self.rows.next().transpose()?;
-        #[cfg(not(feature = "spill"))]
-        let next_row = self.rows.next();
-
-        let Some(mut values) = next_row else {
+        let Some(mut values) = self.rows.next() else {
             arena.finish();
             return Ok(());
         };
@@ -82,29 +70,6 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values {
         output.pk = None;
         output.values = values;
         arena.resume();
-        Ok(())
-    }
-}
-
-#[cfg(all(test, feature = "spill"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn large_values_are_read_back_from_spill_in_order() -> Result<(), DatabaseError> {
-        let rows = (0..=1024)
-            .map(|value| vec![DataValue::Int32(value as i32)])
-            .collect::<Vec<_>>();
-        let mut values = Values::from(ValuesOperator {
-            rows: rows.clone(),
-            schema_ref: Vec::new(),
-        });
-        let mut restored = Vec::new();
-        while let Some(row) = values.rows.next().transpose()? {
-            restored.push(row);
-        }
-
-        assert_eq!(restored, rows);
         Ok(())
     }
 }

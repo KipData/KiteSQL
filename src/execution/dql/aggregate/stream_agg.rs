@@ -90,7 +90,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor {
                 group_keys.push(expr.eval(Some(tuple))?);
             }
 
-            match &self.group_keys {
+            match &mut self.group_keys {
                 None => {
                     self.accs = create_accumulators(&self.agg_calls)?;
                     update_accumulators(&mut self.accs, &self.agg_calls, tuple)?;
@@ -99,12 +99,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor {
                 Some(current_keys) if current_keys == &group_keys => {
                     update_accumulators(&mut self.accs, &self.agg_calls, tuple)?;
                 }
-                Some(_) => {
+                Some(current_keys) => {
                     let mut next_accs = create_accumulators(&self.agg_calls)?;
                     update_accumulators(&mut next_accs, &self.agg_calls, tuple)?;
-                    let current_keys = self.group_keys.replace(group_keys).unwrap();
+                    mem::swap(current_keys, &mut group_keys);
                     let current_accs = mem::replace(&mut self.accs, next_accs);
-                    write_aggregate_output(arena.result_tuple_mut(), current_accs, current_keys)?;
+                    write_aggregate_output(arena.result_tuple_mut(), current_accs, group_keys)?;
                     arena.resume();
                     return Ok(());
                 }
