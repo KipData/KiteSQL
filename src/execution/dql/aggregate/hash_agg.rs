@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::dql::aggregate::{create_accumulators, Accumulator};
+use crate::execution::dql::aggregate::{
+    create_accumulators, update_accumulators, write_aggregate_output, Accumulator,
+};
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
@@ -21,33 +23,11 @@ use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
-use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use std::collections::hash_map::IntoIter as HashMapIntoIter;
 use std::collections::HashMap;
 
 type HashAggOutput = HashMapIntoIter<Vec<DataValue>, Vec<Box<dyn Accumulator>>>;
-
-fn update_accumulators(
-    accs: &mut [Box<dyn Accumulator>],
-    agg_calls: &[ScalarExpression],
-    tuple: &Tuple,
-) -> Result<(), DatabaseError> {
-    for (acc, expr) in accs.iter_mut().zip(agg_calls.iter()) {
-        let ScalarExpression::AggCall { args, .. } = expr else {
-            unreachable!()
-        };
-        if args.len() > 1 {
-            return Err(DatabaseError::UnsupportedStmt(
-                "currently aggregate functions only support a single Column as a parameter"
-                    .to_string(),
-            ));
-        }
-        let value = args[0].eval(Some(tuple))?;
-        acc.update_value(&value)?;
-    }
-    Ok(())
-}
 
 pub struct HashAggExecutor {
     agg_calls: Vec<ScalarExpression>,
@@ -118,17 +98,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
             return Ok(());
         };
 
-        let output = arena.result_tuple_mut();
-
-        output.pk = None;
-        output.values.clear();
-        output.values.reserve(accs.len() + group_keys.len());
-
-        for mut acc in accs {
-            acc.evaluate()?;
-            output.values.push(acc.result_owned());
-        }
-        output.values.extend(group_keys);
+        write_aggregate_output(arena.result_tuple_mut(), accs, group_keys)?;
         arena.resume();
         Ok(())
     }

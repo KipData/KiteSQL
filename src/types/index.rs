@@ -77,7 +77,7 @@ pub struct IndexInfo {
     pub(crate) covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
     pub(crate) cover_mapping: Option<Vec<usize>>,
     pub(crate) sort_elimination_hint: Option<IndexOrderHint>,
-    pub(crate) stream_distinct_hint: Option<IndexOrderHint>,
+    pub(crate) stream_aggregate_hint: Option<IndexOrderHint>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, ReferenceSerialization)]
@@ -200,7 +200,7 @@ mod tests {
             covered_deserializers: None,
             cover_mapping: None,
             sort_elimination_hint: None,
-            stream_distinct_hint: None,
+            stream_aggregate_hint: None,
         }
     }
 
@@ -363,7 +363,7 @@ mod tests {
             covered_deserializers: Some(vec![LogicalType::Integer.serializable()]),
             cover_mapping: Some(vec![0]),
             sort_elimination_hint: Some(IndexOrderHint::new(1)),
-            stream_distinct_hint: Some(IndexOrderHint::new(1)),
+            stream_aggregate_hint: Some(IndexOrderHint::new(1)),
         };
 
         assert_eq!(

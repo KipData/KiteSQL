@@ -46,6 +46,7 @@ use crate::execution::dml::insert::Insert;
 use crate::execution::dml::update::Update;
 use crate::execution::dql::aggregate::hash_agg::HashAggExecutor;
 use crate::execution::dql::aggregate::simple_agg::SimpleAggExecutor;
+use crate::execution::dql::aggregate::stream_agg::StreamAggExecutor;
 use crate::execution::dql::aggregate::stream_distinct::StreamDistinctExecutor;
 use crate::execution::dql::describe::Describe;
 use crate::execution::dql::dummy::Dummy;
@@ -204,6 +205,7 @@ pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
     ShowViews(ShowViews<'a, T>),
     SimpleAgg(SimpleAggExecutor),
     Sort(Sort),
+    StreamAgg(StreamAggExecutor),
     StreamDistinct(StreamDistinctExecutor),
     TopK(TopK),
     Truncate(Truncate),
@@ -336,6 +338,9 @@ impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
             }
             ExecNode::Sort(exec) => {
                 <Sort as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+            }
+            ExecNode::StreamAgg(exec) => {
+                <StreamAggExecutor as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
             ExecNode::StreamDistinct(exec) => {
                 <StreamDistinctExecutor as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
@@ -661,6 +666,20 @@ where
                 )
             {
                 <StreamDistinctExecutor as ReadExecutor<'a, T>>::into_executor(
+                    (op, input),
+                    arena,
+                    plan_arena,
+                    cache,
+                    transaction,
+                )
+            } else if matches!(
+                physical_option,
+                Some(PhysicalOption {
+                    plan: PlanImpl::StreamAggregate,
+                    ..
+                })
+            ) {
+                <StreamAggExecutor as ReadExecutor<'a, T>>::into_executor(
                     (op, input),
                     arena,
                     plan_arena,

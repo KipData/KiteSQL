@@ -291,8 +291,7 @@ impl<T: SpillCodec> WriteState<'_, T> {
         self.buffer.push(value);
         self.buffer_bytes = self.buffer_bytes.saturating_add(value_size);
 
-        let should_flush = self.buffer.len() >= max_rows || self.buffer_bytes >= max_bytes;
-        if should_flush {
+        if self.buffer.len() >= max_rows || self.buffer_bytes >= max_bytes {
             self.start_spilling()?;
             return self.flush();
         }

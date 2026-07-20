@@ -125,7 +125,7 @@ impl ImplementationRule for IndexScanImplementation {
                         .map(|hint| hint.cover_num())
                         .unwrap_or(0)
                         + index_info
-                            .stream_distinct_hint
+                            .stream_aggregate_hint
                             .map(|hint| hint.cover_num())
                             .unwrap_or(0);
                     if hint_sum > 0 {

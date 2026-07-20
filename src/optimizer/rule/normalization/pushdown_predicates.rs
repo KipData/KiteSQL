@@ -275,7 +275,7 @@ impl NormalizationRule for PushPredicateIntoScan {
             cover_mapping,
             sort_option,
             sort_elimination_hint: _,
-            stream_distinct_hint: _,
+            stream_aggregate_hint: _,
         } in &mut scan_op.index_infos
         {
             if lookup.is_some() {
@@ -847,7 +847,7 @@ mod tests {
                         covered_deserializers: None,
                         cover_mapping: None,
                         sort_elimination_hint: None,
-                        stream_distinct_hint: None,
+                        stream_aggregate_hint: None,
                     },
                     IndexInfo {
                         meta: index_meta_aligned,
@@ -860,7 +860,7 @@ mod tests {
                         covered_deserializers: None,
                         cover_mapping: None,
                         sort_elimination_hint: None,
-                        stream_distinct_hint: None,
+                        stream_aggregate_hint: None,
                     },
                 ],
                 with_pk: false,

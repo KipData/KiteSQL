@@ -16,6 +16,12 @@ explain select distinct c1 from distinct_t where c1 < 10 and c1 > 0;
 ----
 Projection [#2] [Project => (Sort Option: Follow)] Aggregate [] -> Group By [#2] [StreamDistinct => (Sort Option: Follow)] TableScan distinct_t -> [#2] [IndexScan By #1 => (0, 10) Covered => (Sort Option: OrderBy: (#2 Asc Nulls Last) ignore_prefix_len: 0)]
 
+# stream aggregate
+query T
+explain select c1, count(c2) from distinct_t where c1 < 10 and c1 > 0 group by c1;
+----
+Projection [#2, #4] [Project => (Sort Option: Follow)] Aggregate [Count(#3)] -> Group By [#2] [StreamAggregate => (Sort Option: Follow)] TableScan distinct_t -> [#2, #3] [IndexScan By #1 => (0, 10) => (Sort Option: OrderBy: (#2 Asc Nulls Last) ignore_prefix_len: 0)]
+
 statement ok
 drop index distinct_t.distinct_t_c1_index;
 

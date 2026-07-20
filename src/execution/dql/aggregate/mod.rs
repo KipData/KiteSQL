@@ -17,6 +17,7 @@ mod count;
 pub mod hash_agg;
 mod min_max;
 pub mod simple_agg;
+pub mod stream_agg;
 pub mod stream_distinct;
 mod sum;
 
@@ -28,6 +29,7 @@ use crate::execution::dql::aggregate::sum::{DistinctSumAccumulator, SumAccumulat
 use crate::expression::agg::AggKind;
 use crate::expression::ScalarExpression;
 use crate::iter_ext::Itertools;
+use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use std::borrow::Cow;
 
@@ -80,4 +82,41 @@ pub(crate) fn create_accumulators(
             create_accumulator(*kind, ty, *distinct)
         })
         .try_collect()
+}
+
+pub(crate) fn update_accumulators(
+    accs: &mut [Box<dyn Accumulator>],
+    agg_calls: &[ScalarExpression],
+    tuple: &Tuple,
+) -> Result<(), DatabaseError> {
+    for (acc, expr) in accs.iter_mut().zip(agg_calls.iter()) {
+        let ScalarExpression::AggCall { args, .. } = expr else {
+            unreachable!()
+        };
+        if args.len() > 1 {
+            return Err(DatabaseError::UnsupportedStmt(
+                "currently aggregate functions only support a single Column as a parameter"
+                    .to_string(),
+            ));
+        }
+        let value = args[0].eval(Some(tuple))?;
+        acc.update_value(&value)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn write_aggregate_output(
+    output: &mut Tuple,
+    accs: Vec<Box<dyn Accumulator>>,
+    group_keys: Vec<DataValue>,
+) -> Result<(), DatabaseError> {
+    output.pk = None;
+    output.values.clear();
+    output.values.reserve(accs.len() + group_keys.len());
+    for mut acc in accs {
+        acc.evaluate()?;
+        output.values.push(acc.result_owned());
+    }
+    output.values.extend(group_keys);
+    Ok(())
 }

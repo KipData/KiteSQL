@@ -172,6 +172,7 @@ pub enum PlanImpl {
     Dummy,
     SimpleAggregate,
     HashAggregate,
+    StreamAggregate,
     StreamDistinct,
     ScalarApply,
     MarkApply,
@@ -527,6 +528,7 @@ impl fmt::Display for PlanImpl {
             PlanImpl::Dummy => write!(f, "Dummy"),
             PlanImpl::SimpleAggregate => write!(f, "SimpleAggregate"),
             PlanImpl::HashAggregate => write!(f, "HashAggregate"),
+            PlanImpl::StreamAggregate => write!(f, "StreamAggregate"),
             PlanImpl::StreamDistinct => write!(f, "StreamDistinct"),
             PlanImpl::ScalarApply => write!(f, "ScalarApply"),
             PlanImpl::MarkApply => write!(f, "MarkApply"),
@@ -605,7 +607,7 @@ mod tests {
             covered_deserializers: None,
             cover_mapping: None,
             sort_elimination_hint: None,
-            stream_distinct_hint: None,
+            stream_aggregate_hint: None,
         }
     }
 
@@ -653,6 +655,7 @@ mod tests {
             (PlanImpl::Dummy, "Dummy"),
             (PlanImpl::SimpleAggregate, "SimpleAggregate"),
             (PlanImpl::HashAggregate, "HashAggregate"),
+            (PlanImpl::StreamAggregate, "StreamAggregate"),
             (PlanImpl::StreamDistinct, "StreamDistinct"),
             (PlanImpl::ScalarApply, "ScalarApply"),
             (PlanImpl::MarkApply, "MarkApply"),
