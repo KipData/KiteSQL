@@ -57,16 +57,15 @@ ORDER BY user_id;
 ```
 
 For ORM queries, enable both `orm` and `spill`, then call `force_spill()` before
-`group_by()` or `distinct()` so the option is passed when the aggregate plan is
-built:
+building the projection and aggregate plan:
 
 ```rust,ignore
 let grouped = database.bind(|ctx| {
     ctx.from::<Order>()?
+        .force_spill()?
         .project_tuple(|e| {
             Ok(vec![e.column(Order::user_id())?, e.count_all()?])
         })?
-        .force_spill()?
         .group_by(|e| e.column(Order::user_id()))?
         .order_by(Order::user_id())?
         .finish()
@@ -77,6 +76,33 @@ KiteSQL still reuses an already ordered input when possible. Otherwise it adds
 an external sort on the group keys and executes a streaming aggregate. The
 hint is intended for grouped aggregates or `DISTINCT`; an aggregate without
 group keys already uses constant-size accumulator state.
+
+### Nested-loop Join Hint
+
+Use `FORCE_NEST_LOOP_JOIN` to select the nested-loop implementation for joins
+in the current `SELECT` query block:
+
+```sql
+SELECT /*+ FORCE_NEST_LOOP_JOIN */ orders.id, users.name
+FROM orders
+JOIN users ON orders.user_id = users.id;
+```
+
+ORM queries can select the same implementation before adding joins:
+
+```rust,ignore
+let joined = database.bind(|ctx| {
+    ctx.from::<Order>()?
+        .force_nested_loop()
+        .inner_join::<User, _>(|e| {
+            e.column(Order::user_id())?.eq(e.column(User::id())?)
+        })?
+        .finish()
+})?;
+```
+
+It avoids Hash Join's build-side tuple materialization, but may perform
+substantially more work on large inputs.
 
 ### User-Defined Function: `features = ["macros"]`
 ```rust

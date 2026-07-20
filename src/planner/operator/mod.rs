@@ -759,6 +759,7 @@ mod tests {
 
         let join = Operator::Join(JoinOperator {
             join_type: join::JoinType::Inner,
+            force_nested_loop: false,
             on: JoinCondition::On {
                 on: vec![(column_expr(a, 0), column_expr(b, 1))],
                 filter: Some(column_expr(c, 2)),

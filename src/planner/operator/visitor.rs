@@ -432,6 +432,7 @@ pub(crate) mod tests {
                     filter: Some(8_i32.into()),
                 },
                 join_type: JoinType::Inner,
+                force_nested_loop: false,
             }),
             Operator::Project(ProjectOperator {
                 exprs: vec![9_i32.into()],

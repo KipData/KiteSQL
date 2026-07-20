@@ -561,6 +561,8 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
 pub struct Binder<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> {
     pub(crate) context: BinderContext<'a, T>,
     pub(crate) args: &'a A,
+    pub(crate) force_spill: bool,
+    pub(crate) force_nested_loop: bool,
     with_pk: Option<TableName>,
     pub(crate) parent: Option<&'parent BinderContext<'a, T>>,
 }
@@ -574,6 +576,8 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
         Binder {
             context,
             args,
+            force_spill: false,
+            force_nested_loop: false,
             with_pk: None,
             parent,
         }

@@ -28,6 +28,11 @@ select a, b, c, d from x join y on a = c;
 1   2   1   6
 1   3   1   6
 
+query T
+explain select /*+ FORCE_NEST_LOOP_JOIN */ a, b, c, d from x join y on a = c;
+----
+Projection [#10, #11, #12, #13] [Project => (Sort Option: Follow)] Inner Join On #2 = #5 [NestLoopJoin => (Sort Option: None)] TableScan x -> [#2, #3] [SeqScan => (Sort Option: None)] TableScan y -> [#5, #6] [SeqScan => (Sort Option: None)]
+
 query IIII
 select a, b, c, d, e, f from x join y on a = c and c < 5 join z on e = a and f = 5;
 ----

@@ -102,7 +102,7 @@ struct ActiveLeftState {
 
 impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for NestedLoopJoin {
     fn from(
-        (JoinOperator { on, join_type }, left_input, right_input): (
+        (JoinOperator { on, join_type, .. }, left_input, right_input): (
             JoinOperator,
             LogicalPlan,
             LogicalPlan,
@@ -633,6 +633,7 @@ mod test {
                     filter: Some(filter),
                 },
                 join_type: JoinType::Inner,
+                force_nested_loop: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
@@ -685,6 +686,7 @@ mod test {
                     filter: Some(filter),
                 },
                 join_type: JoinType::LeftOuter,
+                force_nested_loop: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
@@ -766,6 +768,7 @@ mod test {
                     filter: Some(filter),
                 },
                 join_type: JoinType::Cross,
+                force_nested_loop: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
@@ -818,6 +821,7 @@ mod test {
                     filter: None,
                 },
                 join_type: JoinType::Cross,
+                force_nested_loop: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
@@ -885,6 +889,7 @@ mod test {
                     filter: None,
                 },
                 join_type: JoinType::Cross,
+                force_nested_loop: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
@@ -927,6 +932,7 @@ mod test {
                     filter: Some(filter),
                 },
                 join_type: JoinType::RightOuter,
+                force_nested_loop: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
@@ -1003,6 +1009,7 @@ mod test {
                     filter: Some(filter),
                 },
                 join_type: JoinType::Full,
+                force_nested_loop: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
@@ -1146,6 +1153,7 @@ mod test {
                     filter: Some(filter_expr),
                 },
                 join_type: JoinType::RightOuter,
+                force_nested_loop: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),

@@ -48,7 +48,6 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         children: LogicalPlan,
         agg_calls: Vec<ScalarExpression>,
         groupby_exprs: Vec<ScalarExpression>,
-        force_spill: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
         self.context.step(QueryBindStep::Agg);
         Ok(AggregateOperator::build(
@@ -56,7 +55,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             agg_calls,
             groupby_exprs,
             false,
-            force_spill,
+            self.force_spill,
         ))
     }
 

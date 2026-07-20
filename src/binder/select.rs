@@ -193,8 +193,6 @@ where
     pub(crate) arena: &'s mut crate::planner::PlanArena<'arena>,
     pub(super) plan: LogicalPlan,
     pub(super) select_list: Vec<ScalarExpression>,
-    #[cfg(feature = "orm")]
-    force_spill: bool,
     pub(crate) _marker: std::marker::PhantomData<M>,
 }
 
@@ -344,8 +342,6 @@ where
             arena: self.arena,
             plan: self.plan,
             select_list,
-            #[cfg(feature = "orm")]
-            force_spill: false,
             _marker: std::marker::PhantomData,
         }
     }
@@ -364,68 +360,48 @@ where
 
     #[cfg(feature = "orm")]
     pub(crate) fn group_by_expr(self, expr: ScalarExpression) -> Result<Self, DatabaseError> {
-        let force_spill: bool = self.force_spill;
         let sorted = self
             .filter_expr(None)?
             .aggregate(
                 vec![expr],
                 None,
                 None::<Vec<SortField>>,
-                force_spill,
                 |_binder, _arena, order| Ok(order),
             )?
             .having()?
             .window()?
-            .distinct(false, force_spill)?
+            .distinct(false)?
             .order_by()?;
         Ok(BindPlanSelectList {
             binder: sorted.binder,
             arena: sorted.arena,
             plan: sorted.plan,
             select_list: sorted.select_list,
-            force_spill,
             _marker: std::marker::PhantomData,
         })
     }
 
     #[cfg(feature = "orm")]
     pub(crate) fn aggregate_without_group(self) -> Result<Self, DatabaseError> {
-        let force_spill = self.force_spill;
         let sorted = self
             .filter_expr(None)?
             .aggregate(
                 Vec::new(),
                 None,
                 None::<Vec<SortField>>,
-                force_spill,
                 |_binder, _arena, order| Ok(order),
             )?
             .having()?
             .window()?
-            .distinct(false, force_spill)?
+            .distinct(false)?
             .order_by()?;
         Ok(BindPlanSelectList {
             binder: sorted.binder,
             arena: sorted.arena,
             plan: sorted.plan,
             select_list: sorted.select_list,
-            force_spill,
             _marker: std::marker::PhantomData,
         })
-    }
-
-    /// Forces subsequent grouped aggregate or distinct operations to use spill-backed execution.
-    ///
-    /// Call this before `group_by` or `distinct`.
-    #[cfg(feature = "orm")]
-    pub fn force_spill(mut self) -> Result<Self, DatabaseError> {
-        if !cfg!(feature = "spill") {
-            return Err(DatabaseError::UnsupportedStmt(
-                "force_spill requires the `spill` feature".to_string(),
-            ));
-        }
-        self.force_spill = true;
-        Ok(self)
     }
 
     #[cfg(feature = "orm")]
@@ -448,9 +424,7 @@ where
             self.select_list.iter_mut(),
             self.arena,
         )?;
-        self.plan = self
-            .binder
-            .bind_distinct(self.plan, distinct_outputs, self.force_spill)?;
+        self.plan = self.binder.bind_distinct(self.plan, distinct_outputs)?;
         Ok(self)
     }
 
@@ -535,7 +509,6 @@ where
         group_by: Vec<ScalarExpression>,
         having: Option<ScalarExpression>,
         orderby: Option<impl IntoIterator<Item = O>>,
-        force_spill: bool,
         mut bind_sort_field: impl FnMut(
             &mut Binder<'a, 'b, T, A>,
             &mut crate::planner::PlanArena<'arena>,
@@ -581,9 +554,9 @@ where
                 output_exprs,
                 self.arena,
             )?;
-            self.plan =
-                self.binder
-                    .bind_aggregate(self.plan, agg_calls, group_by_exprs, force_spill)?;
+            self.plan = self
+                .binder
+                .bind_aggregate(self.plan, agg_calls, group_by_exprs)?;
         }
 
         Ok(BindPlanAggregated {
@@ -652,7 +625,6 @@ where
     pub(crate) fn distinct(
         mut self,
         distinct: bool,
-        force_spill: bool,
     ) -> Result<BindPlanDistinct<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
         if distinct {
             let distinct_outputs = self.select_list.clone();
@@ -665,9 +637,7 @@ where
                 self.binder
                     .bind_distinct_orderby_exprs(&distinct_outputs, orderby, self.arena)?;
             }
-            self.plan = self
-                .binder
-                .bind_distinct(self.plan, distinct_outputs, force_spill)?;
+            self.plan = self.binder.bind_distinct(self.plan, distinct_outputs)?;
         }
 
         Ok(BindPlanDistinct {
@@ -914,6 +884,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
     }
 
     fn build_join_from_split_scope_predicates(
+        &self,
         mut children: LogicalPlan,
         mut plan: LogicalPlan,
         join_ty: JoinType,
@@ -961,6 +932,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             plan,
             join_condition,
             join_ty,
+            self.force_nested_loop,
         ))
     }
 
@@ -1081,7 +1053,6 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                             },
                         ),
                         distinct_exprs,
-                        false,
                     )?)
                 }
             }
@@ -1106,8 +1077,8 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                         .map(|(position, column)| ScalarExpression::column_expr(column, position))
                         .collect_vec();
 
-                    left_plan = self.bind_distinct(left_plan, left_distinct_exprs, false)?;
-                    right_plan = self.bind_distinct(right_plan, right_distinct_exprs, false)?;
+                    left_plan = self.bind_distinct(left_plan, left_distinct_exprs)?;
+                    right_plan = self.bind_distinct(right_plan, right_distinct_exprs)?;
                     left_schema = left_plan.output_schema(arena);
                     right_schema = right_plan.output_schema(arena);
                 }
@@ -1434,7 +1405,13 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         )?;
         Self::localize_join_condition_from_join_scope(&mut on, left_len)?;
 
-        Ok(LJoinOperator::build(left, right, on, join_type))
+        Ok(LJoinOperator::build(
+            left,
+            right,
+            on,
+            join_type,
+            self.force_nested_loop,
+        ))
     }
 
     pub(crate) fn bind_where_expr(
@@ -1531,7 +1508,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                                     .to_string(),
                             ));
                         }
-                        children = Self::build_join_from_split_scope_predicates(
+                        children = self.build_join_from_split_scope_predicates(
                             children,
                             plan,
                             JoinType::Inner,

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::Operator;
+use super::{Operator, PlanImpl};
 use crate::expression::ScalarExpression;
 use crate::iter_ext::Itertools;
 use crate::planner::{Childrens, LogicalPlan};
@@ -50,6 +50,7 @@ pub enum JoinCondition {
 pub struct JoinOperator {
     pub on: JoinCondition,
     pub join_type: JoinType,
+    pub force_nested_loop: bool,
 }
 
 impl JoinOperator {
@@ -58,14 +59,27 @@ impl JoinOperator {
         right: LogicalPlan,
         on: JoinCondition,
         join_type: JoinType,
+        force_nested_loop: bool,
     ) -> LogicalPlan {
         LogicalPlan::new(
-            Operator::Join(JoinOperator { on, join_type }),
+            Operator::Join(JoinOperator {
+                on,
+                join_type,
+                force_nested_loop,
+            }),
             Childrens::Twins {
                 left: Box::new(left),
                 right: Box::new(right),
             },
         )
+    }
+
+    pub(crate) fn plan_impl(&self) -> PlanImpl {
+        match (&self.on, self.force_nested_loop) {
+            (_, true) => PlanImpl::NestLoopJoin,
+            (JoinCondition::On { on, .. }, false) if !on.is_empty() => PlanImpl::HashJoin,
+            _ => PlanImpl::NestLoopJoin,
+        }
     }
 }
 
@@ -113,5 +127,26 @@ impl fmt::Display for JoinCondition {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forced_nested_loop_overrides_equi_join() {
+        let mut operator = JoinOperator {
+            on: JoinCondition::On {
+                on: vec![(1_i32.into(), 2_i32.into())],
+                filter: None,
+            },
+            join_type: JoinType::Inner,
+            force_nested_loop: false,
+        };
+        assert_eq!(operator.plan_impl(), PlanImpl::HashJoin);
+
+        operator.force_nested_loop = true;
+        assert_eq!(operator.plan_impl(), PlanImpl::NestLoopJoin);
     }
 }

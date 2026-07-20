@@ -25,7 +25,6 @@ use crate::optimizer::rule::normalization::{
     apply_annotated_post_rules, apply_scan_order_hint, constant_calculation_current,
     evaluator_bind_current, NormalizationRuleImpl, OrderHintKind, ScanOrderHint, WholeTreePassKind,
 };
-use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
 use crate::planner::{Childrens, LogicalPlan, PlanArena};
@@ -502,11 +501,7 @@ impl ImplementationRuleIndex {
                 Some(PhysicalOption::new(PlanImpl::Filter, SortOption::Follow))
             }
             Operator::Join(join_op) if self.contains(ImplementationRuleImpl::HashJoin) => {
-                let plan = match &join_op.on {
-                    JoinCondition::On { on, .. } if !on.is_empty() => PlanImpl::HashJoin,
-                    _ => PlanImpl::NestLoopJoin,
-                };
-                Some(PhysicalOption::new(plan, SortOption::None))
+                Some(PhysicalOption::new(join_op.plan_impl(), SortOption::None))
             }
             Operator::Limit(_) if self.contains(ImplementationRuleImpl::Limit) => {
                 Some(PhysicalOption::new(PlanImpl::Limit, SortOption::Follow))
