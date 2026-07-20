@@ -487,6 +487,196 @@ mod tests {
     }
 
     #[test]
+    fn spill_vec_rejects_operations_after_failure() {
+        let mut failed = SpillVec {
+            writer: Err(DatabaseError::InvalidValue("failed spill".to_string())),
+            max_rows: 1,
+            max_bytes: 1,
+        };
+
+        assert!(matches!(
+            failed.push(row(1)),
+            Err(DatabaseError::InvalidValue(message))
+                if message == "cannot append to a failed SpillVec"
+        ));
+        assert!(matches!(
+            failed.flush(),
+            Err(DatabaseError::InvalidValue(message))
+                if message == "cannot flush a failed SpillVec"
+        ));
+
+        let mut reader = failed.into_iter();
+        assert!(matches!(
+            reader.next(),
+            Some(Err(DatabaseError::InvalidValue(message))) if message == "failed spill"
+        ));
+        assert!(reader.next().is_none());
+    }
+
+    #[test]
+    fn spill_reader_rejects_segment_reader_for_memory_values() {
+        let values = SpillVec::from(vec![row(1)]).into_iter();
+
+        assert!(matches!(
+            values.open_segment_reader(),
+            Err(DatabaseError::InvalidValue(message))
+                if message == "cannot open a segment reader for an in-memory SpillVec"
+        ));
+    }
+
+    #[test]
+    fn segment_reader_rejects_invalid_segments() {
+        let empty_segment_bytes = 0_u64.to_le_bytes().to_vec();
+        let mut empty_segment =
+            SegmentReader::<_, Vec<DataValue>>::new(empty_segment_bytes.as_slice());
+        assert!(matches!(
+            empty_segment.start_next_segment(),
+            Err(DatabaseError::InvalidValue(message))
+                if message == "spill segment cannot be empty"
+        ));
+
+        let truncated_segment_bytes = 1_u64.to_le_bytes().to_vec();
+        let mut truncated_segment =
+            SegmentReader::<_, Vec<DataValue>>::new(truncated_segment_bytes.as_slice());
+        assert!(truncated_segment.start_next_segment().unwrap());
+        assert!(truncated_segment.next().transpose().is_err());
+
+        let mut end_offset =
+            SegmentReader::<_, Vec<DataValue>>::new(std::io::Cursor::new(Vec::new()));
+        assert!(matches!(
+            end_offset.reset(0),
+            Err(DatabaseError::InvalidValue(message))
+                if message == "spill segment offset points to end of file"
+        ));
+    }
+
+    #[test]
+    fn write_state_rejects_flush_without_spill_file() -> Result<(), DatabaseError> {
+        let mut empty = WriteState {
+            buffer: Vec::<Vec<DataValue>>::new(),
+            buffer_bytes: 0,
+            file: None,
+            on_flush: None,
+        };
+        assert_eq!(empty.flush()?, None);
+
+        let mut missing_file = WriteState {
+            buffer: vec![row(1)],
+            buffer_bytes: 0,
+            file: None,
+            on_flush: None,
+        };
+        assert!(matches!(
+            missing_file.flush(),
+            Err(DatabaseError::InvalidValue(message))
+                if message == "cannot flush without a spill file"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn from_records_push_failure_for_later_read() {
+        struct FailingEncode;
+
+        impl SpillCodec for FailingEncode {
+            fn encode<W: Write>(&self, _: &mut W) -> Result<(), DatabaseError> {
+                Err(DatabaseError::InvalidValue("encode failed".to_string()))
+            }
+
+            fn decode<R: Read>(_: &mut R) -> Result<Self, DatabaseError> {
+                Ok(Self)
+            }
+
+            fn estimated_size(&self) -> usize {
+                0
+            }
+        }
+
+        let values = SpillVec::from(
+            std::iter::repeat_with(|| FailingEncode)
+                .take(DEFAULT_MAX_ROWS)
+                .collect::<Vec<_>>(),
+        );
+        assert!(matches!(
+            values.writer,
+            Err(DatabaseError::InvalidValue(message)) if message == "encode failed"
+        ));
+        let _ = FailingEncode::decode(&mut [].as_slice()).unwrap();
+    }
+
+    #[test]
+    fn spill_reader_reports_decode_errors() -> Result<(), DatabaseError> {
+        struct FailingDecode;
+
+        impl SpillCodec for FailingDecode {
+            fn encode<W: Write>(&self, _: &mut W) -> Result<(), DatabaseError> {
+                Ok(())
+            }
+
+            fn decode<R: Read>(_: &mut R) -> Result<Self, DatabaseError> {
+                Err(DatabaseError::InvalidValue("decode failed".to_string()))
+            }
+
+            fn estimated_size(&self) -> usize {
+                0
+            }
+        }
+
+        let mut values = SpillVec::new().limit(1, usize::MAX);
+        let _ = values.push(FailingDecode)?;
+        let mut reader = values.into_iter();
+        assert!(matches!(
+            reader.next(),
+            Some(Err(DatabaseError::InvalidValue(message))) if message == "decode failed"
+        ));
+        assert!(reader.next().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn spill_reader_reports_truncated_segment_header() -> Result<(), DatabaseError> {
+        let path = std::env::temp_dir().join(format!(
+            "kitesql-spill-test-{}-{}.tmp",
+            std::process::id(),
+            NEXT_SPILL_FILE_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        {
+            let mut file = File::create(&path)?;
+            file.write_all(&1_u64.to_le_bytes())?;
+            row(1).encode(&mut file)?;
+            file.write_all(&[0])?;
+        }
+
+        let mut reader = SpillReader {
+            state: ReadState::Spilled {
+                reader: SegmentReader::new(File::open(&path)?),
+                tail: Vec::<Vec<DataValue>>::new().into_iter(),
+                _file_guard: SpillFileGuard { path },
+            },
+        };
+
+        assert_eq!(reader.next().transpose()?, Some(row(1)));
+        assert!(reader.next().transpose().is_err());
+        assert!(reader.next().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn open_segment_reader_propagates_file_open_errors() -> Result<(), DatabaseError> {
+        let mut values = SpillVec::new().limit(1, usize::MAX);
+        let _ = values.push(row(1))?;
+        let source = values.into_iter();
+        let mut path = None;
+        if let ReadState::Spilled { _file_guard, .. } = &source.state {
+            path = Some(_file_guard.path.clone());
+        }
+        std::fs::remove_file(path.expect("expected spilled reader"))?;
+
+        assert!(source.open_segment_reader().is_err());
+        Ok(())
+    }
+
+    #[test]
     fn on_flush_runs_before_memory_read_and_segment_flush() -> Result<(), DatabaseError> {
         fn reverse(rows: &mut [Vec<DataValue>]) -> Result<(), DatabaseError> {
             rows.reverse();
@@ -525,6 +715,36 @@ mod tests {
         let mut bytes = Vec::new();
         tuple.encode(&mut bytes)?;
         assert_eq!(Tuple::decode(&mut bytes.as_slice())?, tuple);
+        Ok(())
+    }
+
+    #[test]
+    fn codec_handles_option_and_nested_tuple_edges() -> Result<(), DatabaseError> {
+        let mut encoded_none = Vec::new();
+        Option::<DataValue>::None.encode(&mut encoded_none)?;
+        assert_eq!(
+            Option::<DataValue>::decode(&mut encoded_none.as_slice())?,
+            None
+        );
+
+        assert!(matches!(
+            Option::<DataValue>::decode(&mut [2].as_slice()),
+            Err(DatabaseError::InvalidValue(message))
+                if message == "invalid spill option tag: 2"
+        ));
+
+        let some = Some(DataValue::new_utf8("spill".to_string()));
+        let none = Option::<DataValue>::None;
+        assert!(some.estimated_size() > none.estimated_size());
+
+        let nested = DataValue::Tuple(
+            vec![
+                DataValue::new_utf8("outer".to_string()),
+                DataValue::Tuple(vec![DataValue::new_utf8("inner".to_string())], false),
+            ],
+            false,
+        );
+        assert!(nested.estimated_size() > std::mem::size_of::<DataValue>());
         Ok(())
     }
 }
