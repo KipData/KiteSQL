@@ -1376,7 +1376,6 @@ pub(crate) mod test {
         while iter
             .next_tuple(|_, tuple| {
                 println!("{tuple:#?}");
-                ()
             })?
             .is_some()
         {}

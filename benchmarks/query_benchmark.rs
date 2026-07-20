@@ -112,9 +112,15 @@ fn query_on_execute(c: &mut Criterion) {
         let kite_label = format!("KiteSQL: {name} by '{case}'");
         c.bench_function(&kite_label, |b| {
             b.iter(|| {
-                for tuple in database.run(case).unwrap() {
-                    let _ = tuple.unwrap();
-                }
+                let mut tuples = database.run(case).unwrap();
+                while tuples
+                    .next_tuple(|_, tuple| {
+                        std::hint::black_box(tuple);
+                    })
+                    .unwrap()
+                    .is_some()
+                {}
+                tuples.done().unwrap();
             })
         });
 

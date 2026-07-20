@@ -143,7 +143,7 @@ fn main() -> Result<(), DatabaseError> {
 - Cargo features:
   - `rocksdb` is enabled by default
   - `parser` is enabled by default and provides the SQL parser frontend
-  - `spill` optionally enables spill-backed
+  - `spill` optionally enables spill-backed external sorting and aggregation
   - `spill` and `wasm` are mutually exclusive
   - `lmdb` is optional
   - `unsafe_txdb_checkpoint` enables experimental checkpoint support for RocksDB `TransactionDB`

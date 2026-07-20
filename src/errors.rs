@@ -774,7 +774,7 @@ mod tests {
         let bytes = vec![0xff];
         let utf8: DatabaseError = std::str::from_utf8(&bytes).unwrap_err().into();
         let from_utf8: DatabaseError = String::from_utf8(vec![0xff]).unwrap_err().into();
-        let io: DatabaseError = std::io::Error::new(std::io::ErrorKind::Other, "disk").into();
+        let io: DatabaseError = std::io::Error::other("disk").into();
         let try_from_int: DatabaseError = u8::try_from(300_u16).unwrap_err().into();
 
         for err in [
@@ -799,7 +799,7 @@ mod tests {
         let bytes = vec![0xff];
         let utf8: DatabaseError = std::str::from_utf8(&bytes).unwrap_err().into();
         let from_utf8: DatabaseError = String::from_utf8(vec![0xff]).unwrap_err().into();
-        let io: DatabaseError = std::io::Error::new(std::io::ErrorKind::Other, "disk").into();
+        let io: DatabaseError = std::io::Error::other("disk").into();
         let try_from_int: DatabaseError = u8::try_from(300_u16).unwrap_err().into();
 
         assert!(parse_int.to_string().starts_with("parser int:"));

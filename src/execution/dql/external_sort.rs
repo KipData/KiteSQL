@@ -201,7 +201,8 @@ fn merge_pass<'on_flush>(
     target_runs.clear();
     target_runs.reserve(source_runs.len().div_ceil(fan_in));
     let mut cursors = Vec::with_capacity(fan_in);
-    // Perf: loser tree or binary heap would reduce the O(K) head selection to O(log K), but K is small and
+    // Perf: a loser tree or binary heap would reduce head selection from O(K) to O(log K), but
+    // K is deliberately small, so a linear scan keeps the merge state and update path simpler.
     let mut heads = Vec::with_capacity(fan_in);
 
     for run_group in source_runs.chunks(fan_in) {

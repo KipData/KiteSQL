@@ -626,7 +626,7 @@ mod tests {
 
         let dummy = plan_arena.alloc_dummy("TABLE");
         assert_eq!(plan_arena.column(dummy).name(), "TABLE");
-        assert!(format!("{:?}", table_arena).contains("columns_len"));
+        assert!(format!("{table_arena:?}").contains("columns_len"));
         assert_eq!(plan_arena.temp_table().to_string(), "_temp_table_0_");
 
         let first_index = plan_arena.alloc_index(index_meta("idx_a"));

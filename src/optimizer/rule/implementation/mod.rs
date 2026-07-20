@@ -326,7 +326,7 @@ mod tests {
     use crate::storage::StatisticsMetaCache;
     use crate::types::value::DataValue;
 
-    fn find_operator<'a, F>(plan: &'a LogicalPlan, predicate: F) -> Option<&'a Operator>
+    fn find_operator<F>(plan: &LogicalPlan, predicate: F) -> Option<&Operator>
     where
         F: Fn(&Operator) -> bool + Copy,
     {
