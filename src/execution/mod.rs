@@ -16,6 +16,8 @@ pub(crate) mod ddl;
 mod ddl_apply;
 pub(crate) mod dml;
 pub(crate) mod dql;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod spill;
 
 pub(crate) use ddl_apply::DDLApply;
 
