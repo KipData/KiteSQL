@@ -485,7 +485,6 @@ mod tests {
         LogicalPlan::new(
             Operator::Sort(SortOperator {
                 sort_fields: required_fields,
-                limit: None,
             }),
             Childrens::Only(Box::new(filter)),
         )
@@ -792,7 +791,6 @@ mod tests {
         let mut plan = LogicalPlan::new(
             Operator::Sort(SortOperator {
                 sort_fields: vec![sort_field],
-                limit: None,
             }),
             Childrens::Only(Box::new(table_scan)),
         );
@@ -946,7 +944,6 @@ mod tests {
         let mut plan = LogicalPlan::new(
             Operator::Sort(SortOperator {
                 sort_fields: vec![sort_field],
-                limit: None,
             }),
             Childrens::Only(Box::new(filter)),
         );

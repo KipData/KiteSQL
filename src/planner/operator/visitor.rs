@@ -446,7 +446,6 @@ pub(crate) mod tests {
             Operator::FunctionScan(FunctionScanOperator { table_function }),
             Operator::Sort(SortOperator {
                 sort_fields: vec![SortField::from(ScalarExpression::from(13_i32))],
-                limit: None,
             }),
             Operator::Limit(LimitOperator {
                 offset: None,

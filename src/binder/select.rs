@@ -1909,10 +1909,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         self.context.step(QueryBindStep::Sort);
 
         Ok(LogicalPlan::new(
-            Operator::Sort(SortOperator {
-                sort_fields,
-                limit: None,
-            }),
+            Operator::Sort(SortOperator { sort_fields }),
             Childrens::Only(Box::new(children)),
         ))
     }

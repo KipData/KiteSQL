@@ -20,6 +20,7 @@ use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::LogicalPlan;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
+use crate::types::value::DataValue;
 use bumpalo::Bump;
 use std::cmp::Ordering;
 use std::mem::{self, transmute, MaybeUninit};
@@ -55,11 +56,11 @@ impl<'a, T> NullableVec<'a, T> {
     pub(crate) fn pop(&mut self) -> Option<T> {
         self.0.pop().map(|item| unsafe { item.assume_init() })
     }
+}
 
-    pub(crate) fn truncate(&mut self, len: usize) {
-        while self.len() > len {
-            self.pop();
-        }
+impl<T> Drop for NullableVec<'_, T> {
+    fn drop(&mut self) {
+        while self.pop().is_some() {}
     }
 }
 
@@ -81,13 +82,6 @@ pub(crate) fn sort_tuples(
     sort_fields: &[SortField],
     tuples: &mut NullableVec<'_, (usize, Tuple)>,
 ) -> Result<(), DatabaseError> {
-    let fn_nulls_first = |nulls_first: bool| {
-        if nulls_first {
-            Ordering::Greater
-        } else {
-            Ordering::Less
-        }
-    };
     // Extract the results of calculating SortFields to avoid double calculation
     // of data during comparison.
     let mut eval_values = vec![Vec::with_capacity(tuples.len()); sort_fields.len()];
@@ -101,46 +95,56 @@ pub(crate) fn sort_tuples(
     tuples.0.sort_by(|tuple_1, tuple_2| {
         let (i_1, _) = unsafe { tuple_1.assume_init_ref() };
         let (i_2, _) = unsafe { tuple_2.assume_init_ref() };
-        let mut ordering = Ordering::Equal;
-
-        for (
-            x,
-            SortField {
-                asc, nulls_first, ..
-            },
-        ) in sort_fields.iter().enumerate()
-        {
-            let value_1 = &eval_values[x][*i_1];
-            let value_2 = &eval_values[x][*i_2];
-
-            ordering = match (value_1.is_null(), value_2.is_null()) {
-                (false, true) => fn_nulls_first(*nulls_first),
-                (true, false) => fn_nulls_first(*nulls_first).reverse(),
-                _ => {
-                    let mut ordering = value_1.partial_cmp(value_2).unwrap_or(Ordering::Equal);
-                    if !*asc {
-                        ordering = ordering.reverse();
-                    }
-                    ordering
-                }
-            };
-            if ordering != Ordering::Equal {
-                break;
-            }
-        }
-
-        ordering
+        compare_sort_keys(
+            sort_fields,
+            eval_values.iter().map(|values| &values[*i_1]),
+            eval_values.iter().map(|values| &values[*i_2]),
+        )
     });
     drop(eval_values);
 
     Ok(())
 }
 
+pub(crate) fn compare_sort_keys<'a>(
+    sort_fields: &[SortField],
+    left: impl Iterator<Item = &'a DataValue>,
+    right: impl Iterator<Item = &'a DataValue>,
+) -> Ordering {
+    for (
+        (value_1, value_2),
+        SortField {
+            asc, nulls_first, ..
+        },
+    ) in left.zip(right).zip(sort_fields.iter())
+    {
+        let null_ordering = if *nulls_first {
+            Ordering::Greater
+        } else {
+            Ordering::Less
+        };
+        let ordering = match (value_1.is_null(), value_2.is_null()) {
+            (false, true) => null_ordering,
+            (true, false) => null_ordering.reverse(),
+            _ => {
+                let mut ordering = value_1.partial_cmp(value_2).unwrap_or(Ordering::Equal);
+                if !*asc {
+                    ordering = ordering.reverse();
+                }
+                ordering
+            }
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    Ordering::Equal
+}
+
 pub struct Sort {
     rows: NullableVec<'static, (usize, Tuple)>,
     _arena: Box<Bump>,
     sort_fields: Vec<SortField>,
-    limit: Option<usize>,
     input: ExecId,
 }
 
@@ -148,7 +152,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Sort {
     type Input = (SortOperator, LogicalPlan);
 
     fn into_executor(
-        (SortOperator { sort_fields, limit }, input): Self::Input,
+        (SortOperator { sort_fields }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
         cache: ExecutionContext<'_>,
@@ -165,7 +169,6 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Sort {
             rows,
             _arena: sort_arena,
             sort_fields,
-            limit,
             input,
         }))
     }
@@ -191,7 +194,6 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort {
                 return Ok(());
             }
             sort_tuples(&self.sort_fields, &mut self.rows)?;
-            self.rows.truncate(self.limit.unwrap_or(self.rows.len()));
             self.rows.reverse();
         }
     }
@@ -208,16 +210,39 @@ mod test {
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use bumpalo::Bump;
+    use std::cell::Cell;
+
+    #[test]
+    fn nullable_vec_drops_values() {
+        struct DropValue<'a>(&'a Cell<usize>);
+
+        impl Drop for DropValue<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        let dropped = Cell::new(0);
+        let arena = Bump::new();
+        {
+            let mut values = NullableVec::new(&arena);
+            values.put(DropValue(&dropped));
+            values.put(DropValue(&dropped));
+        }
+        assert_eq!(dropped.get(), 2);
+    }
 
     fn sorted_rows<'a>(
         sort_fields: &[SortField],
         mut tuples: NullableVec<'a, (usize, Tuple)>,
     ) -> Result<impl Iterator<Item = Tuple> + 'a, DatabaseError> {
         sort_tuples(sort_fields, &mut tuples)?;
-        Ok(tuples.0.into_iter().map(|item| {
-            let (_, tuple) = unsafe { item.assume_init() };
-            tuple
-        }))
+        let mut rows = Vec::with_capacity(tuples.len());
+        while let Some((_, tuple)) = tuples.pop() {
+            rows.push(tuple);
+        }
+        rows.reverse();
+        Ok(rows.into_iter())
     }
 
     #[test]

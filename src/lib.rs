@@ -102,6 +102,11 @@
 #![allow(unused_doc_comments)]
 extern crate core;
 
+#[cfg(all(feature = "spill", feature = "wasm", not(clippy)))]
+compile_error!("features `spill` and `wasm` are mutually exclusive");
+#[cfg(all(feature = "spill", target_arch = "wasm32"))]
+compile_error!("feature `spill` is not supported on wasm32 targets");
+
 pub mod binder;
 pub mod catalog;
 pub mod db;

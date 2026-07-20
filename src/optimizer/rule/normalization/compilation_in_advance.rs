@@ -135,7 +135,6 @@ mod tests {
             }),
             Operator::Sort(SortOperator {
                 sort_fields: vec![SortField::from(expr())],
-                limit: None,
             }),
             Operator::TopK(TopKOperator {
                 sort_fields: vec![SortField::from(expr())],

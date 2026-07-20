@@ -16,7 +16,7 @@ pub(crate) mod ddl;
 mod ddl_apply;
 pub(crate) mod dml;
 pub(crate) mod dql;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "spill")]
 pub(crate) mod spill;
 
 pub(crate) use ddl_apply::DDLApply;
@@ -50,6 +50,8 @@ use crate::execution::dql::aggregate::stream_distinct::StreamDistinctExecutor;
 use crate::execution::dql::describe::Describe;
 use crate::execution::dql::dummy::Dummy;
 use crate::execution::dql::explain::Explain;
+#[cfg(feature = "spill")]
+use crate::execution::dql::external_sort::ExternalSort;
 use crate::execution::dql::filter::Filter;
 use crate::execution::dql::function_scan::FunctionScan;
 use crate::execution::dql::index_scan::IndexScan;
@@ -182,6 +184,8 @@ pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
     DropView(DropView),
     Dummy(Dummy),
     Explain(Explain),
+    #[cfg(feature = "spill")]
+    ExternalSort(ExternalSort),
     Filter(Filter),
     FunctionScan(FunctionScan),
     HashAgg(HashAggExecutor),
@@ -274,6 +278,10 @@ impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
             }
             ExecNode::Explain(exec) => {
                 <Explain as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+            }
+            #[cfg(feature = "spill")]
+            ExecNode::ExternalSort(exec) => {
+                <ExternalSort as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
             ExecNode::Filter(exec) => {
                 <Filter as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
@@ -779,13 +787,28 @@ where
             cache,
             transaction,
         ),
-        Operator::Sort(op) => <Sort as ReadExecutor<'a, T>>::into_executor(
-            (op, childrens.pop_only()),
-            arena,
-            plan_arena,
-            cache,
-            transaction,
-        ),
+        Operator::Sort(op) => {
+            #[cfg(feature = "spill")]
+            {
+                <ExternalSort as ReadExecutor<'a, T>>::into_executor(
+                    (op, childrens.pop_only()),
+                    arena,
+                    plan_arena,
+                    cache,
+                    transaction,
+                )
+            }
+            #[cfg(not(feature = "spill"))]
+            {
+                <Sort as ReadExecutor<'a, T>>::into_executor(
+                    (op, childrens.pop_only()),
+                    arena,
+                    plan_arena,
+                    cache,
+                    transaction,
+                )
+            }
+        }
         Operator::Limit(op) => <Limit as ReadExecutor<'a, T>>::into_executor(
             (op, childrens.pop_only()),
             arena,

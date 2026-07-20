@@ -21,7 +21,7 @@ COVERAGE_REPORT_ARGS ?= --llvm --ignore-not-existing --keep-only 'src/**' --igno
 
 ## Run default Rust tests in the current environment (non-WASM).
 test:
-	$(CARGO) test --all
+	$(CARGO) test --all --features spill
 
 ## Run Python binding API tests implemented with pyo3.
 test-python:

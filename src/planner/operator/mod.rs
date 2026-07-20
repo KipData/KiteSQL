@@ -838,7 +838,6 @@ mod tests {
 
         let sort = Operator::Sort(SortOperator {
             sort_fields: vec![SortField::from(column_expr(a, 0))],
-            limit: None,
         });
         assert_eq!(referenced_columns(&sort, &mut arena)?, vec![a]);
 
@@ -1093,11 +1092,10 @@ mod tests {
 
         let sort = Operator::Sort(SortOperator {
             sort_fields: vec![descending_nulls_first.clone(), ascending_nulls_last.clone()],
-            limit: Some(10),
         });
         assert_eq!(
             sort.to_string(),
-            "Sort By 9 Desc Nulls First, 1 Asc Nulls Last, Limit 10"
+            "Sort By 9 Desc Nulls First, 1 Asc Nulls Last"
         );
 
         let child = LogicalPlan::new(Operator::ShowTable, Childrens::None);

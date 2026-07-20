@@ -64,8 +64,6 @@ impl From<ScalarExpression> for SortField {
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct SortOperator {
     pub sort_fields: Vec<SortField>,
-    /// Support push down limit to sort plan.
-    pub limit: Option<usize>,
 }
 
 impl fmt::Display for SortOperator {
@@ -75,13 +73,7 @@ impl fmt::Display for SortOperator {
             .iter()
             .map(|sort_field| format!("{sort_field}"))
             .join(", ");
-        write!(f, "Sort By {sort_fields}")?;
-
-        if let Some(limit) = self.limit {
-            write!(f, ", Limit {limit}")?;
-        }
-
-        Ok(())
+        write!(f, "Sort By {sort_fields}")
     }
 }
 

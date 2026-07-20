@@ -16,6 +16,8 @@ pub(crate) mod aggregate;
 pub(crate) mod describe;
 pub(crate) mod dummy;
 pub(crate) mod explain;
+#[cfg(feature = "spill")]
+pub(crate) mod external_sort;
 pub(crate) mod filter;
 pub(crate) mod function_scan;
 pub(crate) mod index_scan;

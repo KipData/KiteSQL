@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "spill")]
 use crate::execution::spill::{SpillReader, SpillVec};
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::planner::operator::values::ValuesOperator;
@@ -23,18 +23,18 @@ use crate::types::value::DataValue;
 use std::mem;
 
 pub struct Values {
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(not(feature = "spill"))]
     rows: std::vec::IntoIter<Vec<DataValue>>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(feature = "spill")]
     rows: SpillReader<Vec<DataValue>>,
     schema_ref: Schema,
 }
 
 impl From<ValuesOperator> for Values {
     fn from(ValuesOperator { rows, schema_ref }: ValuesOperator) -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(feature = "spill")]
         let rows = SpillVec::from(rows).into_iter();
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(not(feature = "spill"))]
         let rows = rows.into_iter();
 
         Values { rows, schema_ref }
@@ -62,9 +62,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values {
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(feature = "spill")]
         let next_row = self.rows.next().transpose()?;
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(not(feature = "spill"))]
         let next_row = self.rows.next();
 
         let Some(mut values) = next_row else {
@@ -86,7 +86,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values {
     }
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(all(test, feature = "spill"))]
 mod tests {
     use super::*;
 
