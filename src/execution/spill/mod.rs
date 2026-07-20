@@ -40,8 +40,6 @@ pub(crate) trait SpillCodec: Sized {
 
 pub(crate) struct SpillVec<'on_flush, T: SpillCodec> {
     writer: Result<WriteState<'on_flush, T>, DatabaseError>,
-    max_rows: usize,
-    max_bytes: usize,
 }
 
 pub(crate) struct SpillReader<T: SpillCodec> {
@@ -53,6 +51,8 @@ struct WriteState<'on_flush, T: SpillCodec> {
     buffer_bytes: usize,
     file: Option<SpillFileWriter>,
     on_flush: Option<OnFlush<'on_flush, T>>,
+    max_rows: usize,
+    max_bytes: usize,
 }
 
 type OnFlush<'on_flush, T> = Box<dyn FnMut(&mut Vec<T>) -> Result<(), DatabaseError> + 'on_flush>;
@@ -64,8 +64,7 @@ enum ReadState<T: SpillCodec> {
         tail: std::vec::IntoIter<T>,
         _file_guard: SpillFileGuard,
     },
-    Failed(DatabaseError),
-    Exhausted,
+    Exhausted(Option<DatabaseError>),
 }
 
 impl<'on_flush, T: SpillCodec> SpillVec<'on_flush, T> {
@@ -76,9 +75,9 @@ impl<'on_flush, T: SpillCodec> SpillVec<'on_flush, T> {
                 buffer_bytes: 0,
                 file: None,
                 on_flush: None,
+                max_rows: DEFAULT_MAX_ROWS,
+                max_bytes: DEFAULT_MAX_BYTES,
             }),
-            max_rows: DEFAULT_MAX_ROWS,
-            max_bytes: DEFAULT_MAX_BYTES,
         }
     }
 
@@ -86,8 +85,10 @@ impl<'on_flush, T: SpillCodec> SpillVec<'on_flush, T> {
     pub(crate) fn limit(mut self, max_rows: usize, max_bytes: usize) -> Self {
         assert!(max_rows > 0, "spill row limit must be positive");
         assert!(max_bytes > 0, "spill byte limit must be positive");
-        self.max_rows = max_rows;
-        self.max_bytes = max_bytes;
+        if let Ok(state) = &mut self.writer {
+            state.max_rows = max_rows;
+            state.max_bytes = max_bytes;
+        }
         self
     }
 
@@ -105,7 +106,7 @@ impl<'on_flush, T: SpillCodec> SpillVec<'on_flush, T> {
         let state = self.writer.as_mut().map_err(|_| {
             DatabaseError::InvalidValue("cannot append to a failed SpillVec".to_string())
         })?;
-        state.push(value, self.max_rows, self.max_bytes)
+        state.push(value)
     }
 
     pub(crate) fn is_spilled(&self) -> bool {
@@ -143,8 +144,10 @@ impl<T: SpillCodec> IntoIterator for SpillVec<'_, T> {
 
     fn into_iter(self) -> Self::IntoIter {
         let state = match self.writer {
-            Ok(writer) => writer.into_read().unwrap_or_else(ReadState::Failed),
-            Err(error) => ReadState::Failed(error),
+            Ok(writer) => writer
+                .into_read()
+                .unwrap_or_else(|error| ReadState::Exhausted(Some(error))),
+            Err(error) => ReadState::Exhausted(Some(error)),
         };
         SpillReader { state }
     }
@@ -154,14 +157,6 @@ impl<T: SpillCodec> Iterator for SpillReader<T> {
     type Item = Result<T, DatabaseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if matches!(self.state, ReadState::Failed(_)) {
-            let ReadState::Failed(error) = std::mem::replace(&mut self.state, ReadState::Exhausted)
-            else {
-                unreachable!()
-            };
-            return Some(Err(error));
-        }
-
         let result = match &mut self.state {
             ReadState::Memory(rows) => Ok(rows.next()),
             ReadState::Spilled { reader, tail, .. } => loop {
@@ -175,17 +170,16 @@ impl<T: SpillCodec> Iterator for SpillReader<T> {
                     },
                 }
             },
-            ReadState::Exhausted => return None,
-            ReadState::Failed(_) => unreachable!(),
+            ReadState::Exhausted(error) => return error.take().map(Err),
         };
         match result {
             Ok(Some(value)) => Some(Ok(value)),
             Ok(None) => {
-                self.state = ReadState::Exhausted;
+                self.state = ReadState::Exhausted(None);
                 None
             }
             Err(error) => {
-                self.state = ReadState::Exhausted;
+                self.state = ReadState::Exhausted(None);
                 Some(Err(error))
             }
         }
@@ -281,17 +275,12 @@ impl<R: Read, T: SpillCodec> Iterator for SegmentReader<'_, R, T> {
 }
 
 impl<T: SpillCodec> WriteState<'_, T> {
-    fn push(
-        &mut self,
-        value: T,
-        max_rows: usize,
-        max_bytes: usize,
-    ) -> Result<Option<SegmentOffset>, DatabaseError> {
+    fn push(&mut self, value: T) -> Result<Option<SegmentOffset>, DatabaseError> {
         let value_size = value.estimated_size();
         self.buffer.push(value);
         self.buffer_bytes = self.buffer_bytes.saturating_add(value_size);
 
-        if self.buffer.len() >= max_rows || self.buffer_bytes >= max_bytes {
+        if self.buffer.len() >= self.max_rows || self.buffer_bytes >= self.max_bytes {
             self.start_spilling()?;
             return self.flush();
         }
@@ -379,10 +368,10 @@ impl SpillFileWriter {
         tail: std::vec::IntoIter<T>,
     ) -> Result<ReadState<T>, DatabaseError> {
         self.file.flush()?;
-        let file = File::open(&self.file_guard.path)?;
+        self.file.seek(SeekFrom::Start(0))?;
         // Flushed segments are always a prefix; the in-memory buffer is its ordered tail.
         Ok(ReadState::Spilled {
-            reader: SegmentReader::new(file),
+            reader: SegmentReader::new(self.file),
             tail,
             _file_guard: self.file_guard,
         })
@@ -490,8 +479,6 @@ mod tests {
     fn spill_vec_rejects_operations_after_failure() {
         let mut failed = SpillVec {
             writer: Err(DatabaseError::InvalidValue("failed spill".to_string())),
-            max_rows: 1,
-            max_bytes: 1,
         };
 
         assert!(matches!(
@@ -557,6 +544,8 @@ mod tests {
             buffer_bytes: 0,
             file: None,
             on_flush: None,
+            max_rows: DEFAULT_MAX_ROWS,
+            max_bytes: DEFAULT_MAX_BYTES,
         };
         assert_eq!(empty.flush()?, None);
 
@@ -565,6 +554,8 @@ mod tests {
             buffer_bytes: 0,
             file: None,
             on_flush: None,
+            max_rows: DEFAULT_MAX_ROWS,
+            max_bytes: DEFAULT_MAX_BYTES,
         };
         assert!(matches!(
             missing_file.flush(),
