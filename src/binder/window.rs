@@ -19,6 +19,7 @@ use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut};
 use crate::expression::window::{WindowCall, WindowFunction, WindowFunctionKind, WindowSpec};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::sort::SortField;
+use crate::planner::operator::sort::SortOperator;
 use crate::planner::operator::window::WindowOperator;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan, PlanArena};
@@ -209,14 +210,23 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
 
         for group in groups {
             let partition_by_len = group.partition_by.len();
+            let sort_fields: Vec<_> = group
+                .partition_by
+                .into_iter()
+                .map(SortField::from)
+                .chain(group.order_by)
+                .collect();
+            if !sort_fields.is_empty() {
+                children = LogicalPlan::new(
+                    Operator::Sort(SortOperator {
+                        sort_fields: sort_fields.clone(),
+                    }),
+                    Childrens::Only(Box::new(children)),
+                );
+            }
             children = LogicalPlan::new(
                 Operator::Window(WindowOperator {
-                    sort_fields: group
-                        .partition_by
-                        .into_iter()
-                        .map(SortField::from)
-                        .chain(group.order_by)
-                        .collect(),
+                    sort_fields,
                     partition_by_len,
                     functions: group.functions,
                     output_columns: group.output_columns,
