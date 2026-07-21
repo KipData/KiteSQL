@@ -31,6 +31,7 @@ pub(super) trait WindowFunction {
         &mut self,
         rows: &mut [(usize, Tuple)],
         peer: Range<usize>,
+        peer_start: usize,
         peer_index: usize,
         output_position: usize,
     ) -> Result<(), DatabaseError>;
@@ -43,12 +44,12 @@ impl WindowFunction for RowNumber {
         &mut self,
         rows: &mut [(usize, Tuple)],
         peer: Range<usize>,
+        _peer_start: usize,
         _peer_index: usize,
         output_position: usize,
     ) -> Result<(), DatabaseError> {
-        let start = peer.start;
-        for (offset, (_, row)) in rows[peer].iter_mut().enumerate() {
-            row.values[output_position] = DataValue::Int64((start + offset + 1) as i64);
+        for (row_index, row) in &mut rows[peer] {
+            row.values[output_position] = DataValue::Int64((*row_index + 1) as i64);
         }
         Ok(())
     }
@@ -63,13 +64,14 @@ impl WindowFunction for Rank {
         &mut self,
         rows: &mut [(usize, Tuple)],
         peer: Range<usize>,
+        peer_start: usize,
         peer_index: usize,
         output_position: usize,
     ) -> Result<(), DatabaseError> {
         let rank = if self.dense {
             peer_index + 1
         } else {
-            peer.start + 1
+            peer_start + 1
         };
         for (_, row) in &mut rows[peer] {
             row.values[output_position] = DataValue::Int64(rank as i64);
@@ -95,6 +97,7 @@ impl WindowFunction for Aggregate {
         &mut self,
         rows: &mut [(usize, Tuple)],
         peer: Range<usize>,
+        _peer_start: usize,
         _peer_index: usize,
         output_position: usize,
     ) -> Result<(), DatabaseError> {
