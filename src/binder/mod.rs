@@ -22,6 +22,7 @@ macro_rules! with_query_bind_step {
     }};
 }
 
+#[cfg(feature = "orm")]
 pub(crate) use with_query_bind_step;
 
 pub mod aggregate;
@@ -65,7 +66,7 @@ use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::JoinType;
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
-use crate::planner::{LogicalPlan, PlanArena};
+use crate::planner::{LogicalPlan, PlanArena, PlanRef};
 use crate::storage::{TableCache, Transaction, ViewCache};
 use crate::types::tuple::Schema;
 use crate::types::value::DataValue;
@@ -132,6 +133,13 @@ pub struct BoundSource<'a> {
     pub(crate) alias: Option<TableName>,
     pub(crate) join_type: Option<JoinType>,
     pub(crate) source: Source<'a>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CteBinding {
+    pub(crate) table_name: TableName,
+    pub(crate) depth: usize,
+    pub(crate) plan_ref: PlanRef,
 }
 
 impl BoundSource<'_> {
@@ -231,6 +239,8 @@ pub struct BinderContext<'a, T: Transaction> {
     // Tips: retain binding order so wildcard expansion and position derivation
     // follow FROM/JOIN order directly.
     pub(crate) bind_table: Vec<BoundSource<'a>>,
+    pub(crate) ctes: Vec<CteBinding>,
+    pub(crate) cte_depth: usize,
     // alias
     expr_aliases: BTreeMap<(Option<String>, String), ScalarExpression>,
     table_aliases: HashMap<TableName, TableName>,
@@ -295,6 +305,8 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
             view_cache,
             transaction,
             bind_table: Default::default(),
+            ctes: Default::default(),
+            cte_depth: 0,
             expr_aliases: Default::default(),
             table_aliases: Default::default(),
             group_by_exprs: vec![],
@@ -319,6 +331,8 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
             view_cache: self.view_cache,
             transaction: self.transaction,
             bind_table: self.bind_table.clone(),
+            ctes: self.ctes.clone(),
+            cte_depth: self.cte_depth,
             expr_aliases: self.expr_aliases.clone(),
             table_aliases: self.table_aliases.clone(),
             group_by_exprs: self.group_by_exprs.clone(),
@@ -336,13 +350,40 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
     /// This is used while binding an independent input, such as the right side
     /// of a join, before merging its newly bound sources into the parent scope.
     pub(crate) fn fork_empty(&self) -> Self {
-        BinderContext::new(
+        let mut context = BinderContext::new(
             self.table_cache,
             self.view_cache,
             self.transaction,
             self.scala_functions,
             self.table_functions,
-        )
+        );
+        context.ctes = self.ctes.clone();
+        context.cte_depth = self.cte_depth;
+        context
+    }
+
+    pub(crate) fn cte(&self, table_name: &TableName) -> Option<&CteBinding> {
+        self.ctes
+            .iter()
+            .rev()
+            .find(|cte| cte.table_name == *table_name)
+    }
+
+    pub(crate) fn add_cte(&mut self, cte: CteBinding) -> Result<(), DatabaseError> {
+        if self
+            .ctes
+            .iter()
+            .rev()
+            .take_while(|binding| binding.depth == cte.depth)
+            .any(|binding| binding.table_name == cte.table_name)
+        {
+            return Err(DatabaseError::UnsupportedStmt(format!(
+                "duplicate CTE name: {}",
+                cte.table_name
+            )));
+        }
+        self.ctes.push(cte);
+        Ok(())
     }
 
     pub fn step(&mut self, bind_step: QueryBindStep) {

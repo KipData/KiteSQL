@@ -16,7 +16,7 @@ use super::select::{
     BindPlanAggregated, BindPlanComplete, BindPlanDistinct, BindPlanFiltered, BindPlanFrom,
     BindPlanProjected, BindPlanSelectList, BindPlanStart, JoinConstraintInput, TableAliasInput,
 };
-use super::{is_valid_identifier, with_query_bind_step, Binder, QueryBindStep, SetOperatorKind};
+use super::{is_valid_identifier, Binder, CteBinding, QueryBindStep, SetOperatorKind};
 #[cfg(feature = "copy")]
 use crate::binder::copy::{ExtSource, FileFormat};
 use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
@@ -2838,9 +2838,49 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let origin_step = self.context.step_now();
+        let cte_checkpoint = self.context.ctes.len();
+        let origin_cte_depth = self.context.cte_depth;
+        if let Some(with) = &query.with {
+            if with.recursive {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "recursive CTEs are not supported".to_string(),
+                ));
+            }
+            self.context.cte_depth += 1;
 
-        if let Some(_with) = &query.with {
-            // TODO support with clause.
+            for cte in &with.cte_tables {
+                if cte.from.is_some() {
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "CTE FROM clauses are not supported".to_string(),
+                    ));
+                }
+                if matches!(
+                    cte.materialized,
+                    Some(sqlparser::ast::CteAsMaterialized::Materialized)
+                ) {
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "materialized CTEs are not supported".to_string(),
+                    ));
+                }
+
+                let alias = sql_table_alias(cte.alias.clone());
+                let mut binder = Binder::new(self.context.fork(), self.args, Some(&self.context));
+                let plan = binder.bind_query(&cte.query, arena)?;
+                let source_name = arena.temp_table();
+                let plan = binder.bind_alias(
+                    plan,
+                    &alias.columns,
+                    alias.name.clone(),
+                    source_name,
+                    arena,
+                )?;
+                let plan_ref = arena.alloc_plan(plan);
+                self.context.add_cte(CteBinding {
+                    table_name: alias.name,
+                    depth: self.context.cte_depth,
+                    plan_ref,
+                })?;
+            }
         }
 
         let order_by_exprs = if let Some(order_by) = &query.order_by {
@@ -2883,6 +2923,8 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
             plan = self.bind_limit(plan, limit_clause, arena)?;
         }
 
+        self.context.ctes.truncate(cte_checkpoint);
+        self.context.cte_depth = origin_cte_depth;
         self.context.step(origin_step);
         Ok(plan)
     }
@@ -3156,6 +3198,36 @@ mod tests {
             tables.plan("select * from t1 limit c1").unwrap_err(),
             DatabaseError::InvalidColumn { .. }
         ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_bind_non_recursive_ctes() -> Result<(), DatabaseError> {
+        let tables = build_t1_table()?;
+        let mut arena = PlanArena::new(&tables.table_arena);
+        let mut plan = tables.plan_with_arena(
+            "with first(a) as (select c1 from t1), \
+             second as (select a from first) select a from second",
+            &mut arena,
+        )?;
+
+        let schema = plan.output_schema(&mut arena);
+        assert_eq!(schema.len(), 1);
+        assert_eq!(arena.column(schema[0]).name(), "a");
+
+        assert_unsupported(
+            tables
+                .plan("with recursive cte as (select 1) select * from cte")
+                .unwrap_err(),
+            "recursive CTEs",
+        );
+        assert_unsupported(
+            tables
+                .plan("with cte as (select 1), cte as (select 2) select * from cte")
+                .unwrap_err(),
+            "duplicate CTE name",
+        );
 
         Ok(())
     }

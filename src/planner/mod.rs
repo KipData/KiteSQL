@@ -24,6 +24,7 @@ use crate::planner::operator::{Operator, PhysicalOption};
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::hash::{Hash, Hasher};
 
+pub(crate) use arena::PlanRef;
 pub use arena::{MetaArena, PlanArena, TableArena, TableArenaCell};
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]

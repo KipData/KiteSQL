@@ -1,0 +1,92 @@
+statement ok
+CREATE TABLE cte_source (id INT PRIMARY KEY, value INT)
+
+statement ok
+INSERT INTO cte_source VALUES (1, 10), (2, 20), (3, 30)
+
+query II
+WITH selected AS (
+    SELECT id, value FROM cte_source WHERE id > 1
+)
+SELECT id, value FROM selected ORDER BY id
+----
+2 20
+3 30
+
+query II
+WITH
+first(id, amount) AS (
+    SELECT id, value FROM cte_source
+),
+second AS (
+    SELECT id, amount FROM first WHERE amount >= 20
+)
+SELECT id, amount FROM second ORDER BY id
+----
+2 20
+3 30
+
+query II
+WITH selected AS (
+    SELECT id FROM cte_source WHERE id <= 2
+)
+SELECT left_cte.id, right_cte.id
+FROM selected AS left_cte
+JOIN selected AS right_cte ON left_cte.id = right_cte.id
+ORDER BY left_cte.id
+----
+1 1
+2 2
+
+query I
+WITH cte_source AS (
+    SELECT 42 AS id
+)
+SELECT id FROM cte_source
+----
+42
+
+query I
+WITH selected AS (
+    SELECT id FROM cte_source WHERE id = 2
+)
+SELECT id FROM cte_source
+WHERE EXISTS (SELECT 1 FROM selected)
+ORDER BY id
+----
+1
+2
+3
+
+query II
+WITH scoped(value) AS (SELECT 1)
+SELECT outer_cte.value, nested.value
+FROM scoped AS outer_cte
+CROSS JOIN (
+    WITH scoped(value) AS (SELECT 2)
+    SELECT value FROM scoped
+) AS nested
+----
+1 2
+
+statement error
+WITH first AS (SELECT * FROM second), second AS (SELECT 1)
+SELECT * FROM first
+
+statement error
+WITH duplicate AS (SELECT 1), duplicate AS (SELECT 2)
+SELECT * FROM duplicate
+
+statement error
+WITH RECURSIVE recursive_cte AS (
+    SELECT 1
+    UNION ALL
+    SELECT * FROM recursive_cte
+)
+SELECT * FROM recursive_cte
+
+statement error
+WITH selected AS MATERIALIZED (
+    SELECT id FROM cte_source
+)
+SELECT * FROM selected
