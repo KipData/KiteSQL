@@ -112,6 +112,17 @@ pub trait OperatorVisitor<'a>: Sized {
         Ok(())
     }
 
+    fn visit_recursive_cte(&mut self, _op: &'a RecursiveCteOperator) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
+    fn visit_recursive_scan(
+        &mut self,
+        _op: &'a RecursiveScanOperator,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
     fn visit_insert(&mut self, _op: &'a InsertOperator) -> Result<(), DatabaseError> {
         Ok(())
     }
@@ -334,6 +345,8 @@ pub fn walk_operator<'a, V: OperatorVisitor<'a>>(
         Operator::Describe(op) => visitor.visit_describe(op),
         Operator::SetMembership(op) => visitor.visit_set_membership(op),
         Operator::Union(op) => visitor.visit_union(op),
+        Operator::RecursiveCte(op) => visitor.visit_recursive_cte(op),
+        Operator::RecursiveScan(op) => visitor.visit_recursive_scan(op),
         Operator::Insert(op) => visitor.visit_insert(op),
         Operator::Update(op) => visitor.visit_update(op),
         Operator::Delete(op) => visitor.visit_delete(op),
@@ -563,6 +576,16 @@ pub(crate) mod tests {
                 table_name: "t1".into(),
             }),
         ];
+        let operators = {
+            let mut with_recursive_operators = operators;
+            with_recursive_operators.push(Operator::RecursiveCte(RecursiveCteOperator {
+                schema_ref: vec![column_ref],
+            }));
+            with_recursive_operators.push(Operator::RecursiveScan(RecursiveScanOperator {
+                schema_ref: vec![column_ref],
+            }));
+            with_recursive_operators
+        };
         #[cfg(feature = "copy")]
         let operators = {
             let mut with_copy_operators = operators;

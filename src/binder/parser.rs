@@ -16,7 +16,7 @@ use super::select::{
     BindPlanAggregated, BindPlanComplete, BindPlanDistinct, BindPlanFiltered, BindPlanFrom,
     BindPlanProjected, BindPlanSelectList, BindPlanStart, JoinConstraintInput, TableAliasInput,
 };
-use super::{is_valid_identifier, with_query_bind_step, Binder, QueryBindStep, SetOperatorKind};
+use super::{is_valid_identifier, Binder, CteBinding, QueryBindStep, SetOperatorKind};
 #[cfg(feature = "copy")]
 use crate::binder::copy::{ExtSource, FileFormat};
 use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
@@ -34,6 +34,7 @@ use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNul
 use crate::planner::operator::join::{JoinCondition, JoinOperator as LJoinOperator, JoinType};
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
 use crate::planner::operator::project::ProjectOperator;
+use crate::planner::operator::recursive_cte::{RecursiveCteOperator, RecursiveScanOperator};
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan, PlanArena};
@@ -2832,15 +2833,171 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
         Ok(select_items)
     }
 
+    fn bind_cte_plan(
+        &mut self,
+        cte: &sqlparser::ast::Cte,
+        alias: &TableAliasInput,
+        arena: &mut PlanArena,
+    ) -> Result<LogicalPlan, DatabaseError> {
+        let mut binder = Binder::new(self.context.fork(), self.args, Some(&self.context));
+        let plan = binder.bind_query(&cte.query, arena)?;
+        let source_name = arena.temp_table();
+        binder.bind_alias(plan, &alias.columns, alias.name.clone(), source_name, arena)
+    }
+
+    fn add_cte_plan(
+        &mut self,
+        table_name: TableName,
+        plan: LogicalPlan,
+        arena: &mut PlanArena,
+    ) -> Result<(), DatabaseError> {
+        let plan_ref = arena.alloc_plan(plan);
+        self.context.add_cte(CteBinding {
+            table_name,
+            depth: self.context.cte_depth,
+            plan_ref,
+        })
+    }
+
+    fn bind_recursive_cte_plan(
+        &mut self,
+        cte: &sqlparser::ast::Cte,
+        alias: &TableAliasInput,
+        arena: &mut PlanArena,
+    ) -> Result<LogicalPlan, DatabaseError> {
+        if cte.query.with.is_some()
+            || cte.query.order_by.is_some()
+            || cte.query.limit_clause.is_some()
+        {
+            return Err(DatabaseError::UnsupportedStmt(
+                "recursive CTE query clauses are not supported".to_string(),
+            ));
+        }
+
+        let SetExpr::SetOperation {
+            op: SetOperator::Union,
+            set_quantifier: SetQuantifier::All,
+            left,
+            right,
+        } = cte.query.body.as_ref()
+        else {
+            return Err(DatabaseError::UnsupportedStmt(
+                "recursive CTEs require a top-level UNION ALL".to_string(),
+            ));
+        };
+
+        let mut anchor_binder = Binder::new(self.context.fork(), self.args, Some(&self.context));
+        let anchor = anchor_binder.bind_set_expr(left, arena)?;
+        if anchor
+            .referenced_table()
+            .iter()
+            .any(|table| table == &alias.name)
+        {
+            return Err(DatabaseError::UnsupportedStmt(
+                "the recursive CTE cannot be referenced by its anchor".to_string(),
+            ));
+        }
+
+        let source_name = arena.temp_table();
+        let mut anchor = anchor_binder.bind_alias(
+            anchor,
+            &alias.columns,
+            alias.name.clone(),
+            source_name,
+            arena,
+        )?;
+        let schema = anchor.output_schema(arena).clone();
+        let scan = LogicalPlan::new(
+            Operator::RecursiveScan(RecursiveScanOperator {
+                schema_ref: schema.clone(),
+            }),
+            Childrens::None,
+        );
+
+        let cte_checkpoint = self.context.cte_checkpoint();
+        self.add_cte_plan(alias.name.clone(), scan, arena)?;
+        let recursive = {
+            let mut binder = Binder::new(self.context.fork(), self.args, Some(&self.context));
+            binder.bind_set_expr(right, arena)
+        };
+        self.context.restore_ctes(cte_checkpoint);
+        let mut recursive = recursive?;
+
+        fn recursive_scan_count(plan: &LogicalPlan) -> usize {
+            usize::from(matches!(&plan.operator, Operator::RecursiveScan(_)))
+                + plan
+                    .childrens
+                    .iter()
+                    .map(recursive_scan_count)
+                    .sum::<usize>()
+        }
+
+        if recursive_scan_count(&recursive) != 1 {
+            return Err(DatabaseError::UnsupportedStmt(
+                "the recursive term must reference its CTE exactly once".to_string(),
+            ));
+        }
+
+        let recursive_schema = recursive.output_schema(arena);
+        if schema.len() != recursive_schema.len() {
+            return Err(DatabaseError::MisMatch(
+                "the anchor column count",
+                "the recursive column count",
+            ));
+        }
+        if !schema
+            .iter()
+            .zip(recursive_schema)
+            .all(|(anchor, recursive)| {
+                arena.column(*anchor).datatype() == arena.column(*recursive).datatype()
+            })
+        {
+            return Err(DatabaseError::UnsupportedStmt(
+                "recursive CTE column types must match the anchor".to_string(),
+            ));
+        }
+
+        Ok(RecursiveCteOperator::build(schema, anchor, recursive))
+    }
+
     pub(crate) fn bind_query(
         &mut self,
         query: &Query,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let origin_step = self.context.step_now();
+        let cte_checkpoint = self.context.cte_checkpoint();
+        if let Some(with) = &query.with {
+            if with.recursive && with.cte_tables.len() != 1 {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "only one recursive CTE is supported".to_string(),
+                ));
+            }
 
-        if let Some(_with) = &query.with {
-            // TODO support with clause.
+            self.context.cte_depth += 1;
+            for cte in &with.cte_tables {
+                if cte.from.is_some() {
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "CTE FROM clauses are not supported".to_string(),
+                    ));
+                }
+                if matches!(
+                    cte.materialized,
+                    Some(sqlparser::ast::CteAsMaterialized::Materialized)
+                ) {
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "materialized CTEs are not supported".to_string(),
+                    ));
+                }
+
+                let alias = sql_table_alias(cte.alias.clone());
+                let plan = if with.recursive {
+                    self.bind_recursive_cte_plan(cte, &alias, arena)?
+                } else {
+                    self.bind_cte_plan(cte, &alias, arena)?
+                };
+                self.add_cte_plan(alias.name, plan, arena)?;
+            }
         }
 
         let order_by_exprs = if let Some(order_by) = &query.order_by {
@@ -2883,6 +3040,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
             plan = self.bind_limit(plan, limit_clause, arena)?;
         }
 
+        self.context.restore_ctes(cte_checkpoint);
         self.context.step(origin_step);
         Ok(plan)
     }
@@ -3156,6 +3314,36 @@ mod tests {
             tables.plan("select * from t1 limit c1").unwrap_err(),
             DatabaseError::InvalidColumn { .. }
         ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_bind_non_recursive_ctes() -> Result<(), DatabaseError> {
+        let tables = build_t1_table()?;
+        let mut arena = PlanArena::new(&tables.table_arena);
+        let mut plan = tables.plan_with_arena(
+            "with first(a) as (select c1 from t1), \
+             second as (select a from first) select a from second",
+            &mut arena,
+        )?;
+
+        let schema = plan.output_schema(&mut arena);
+        assert_eq!(schema.len(), 1);
+        assert_eq!(arena.column(schema[0]).name(), "a");
+
+        assert_unsupported(
+            tables
+                .plan("with recursive cte as (select 1) select * from cte")
+                .unwrap_err(),
+            "recursive CTEs",
+        );
+        assert_unsupported(
+            tables
+                .plan("with cte as (select 1), cte as (select 2) select * from cte")
+                .unwrap_err(),
+            "duplicate CTE name",
+        );
 
         Ok(())
     }

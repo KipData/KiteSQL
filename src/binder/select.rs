@@ -1192,6 +1192,27 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
     ) -> Result<LogicalPlan, DatabaseError> {
         let table_alias = alias.as_ref().map(|alias| alias.name.clone());
 
+        if let Some(plan_ref) = self.context.cte(&table_name).map(|cte| cte.plan_ref) {
+            let mut plan = arena.plan(plan_ref).clone();
+            if let Some(alias) = alias {
+                plan = self.bind_alias(
+                    plan,
+                    &alias.columns,
+                    alias.name.clone(),
+                    table_name.clone(),
+                    arena,
+                )?;
+            }
+            let output_schema = plan.output_schema(arena).clone();
+            self.context.add_bound_source(
+                table_name,
+                table_alias,
+                join_type,
+                Source::Schema(output_schema),
+            );
+            return Ok(plan);
+        }
+
         let with_pk = self.is_scan_with_pk(&table_name);
         let source = self
             .context

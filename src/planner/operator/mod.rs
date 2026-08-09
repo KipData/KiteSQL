@@ -34,6 +34,7 @@ pub mod join;
 pub mod limit;
 pub mod mark_apply;
 pub mod project;
+pub mod recursive_cte;
 pub mod scalar_apply;
 pub mod scalar_subquery;
 pub mod set_membership;
@@ -48,6 +49,7 @@ pub mod visitor;
 pub mod visitor_mut;
 pub mod window;
 
+use self::recursive_cte::{RecursiveCteOperator, RecursiveScanOperator};
 use self::{
     aggregate::AggregateOperator, alter_table::add_column::AddColumnOperator,
     alter_table::change_column::ChangeColumnOperator, filter::FilterOperator, join::JoinOperator,
@@ -114,6 +116,8 @@ pub enum Operator {
     Describe(DescribeOperator),
     SetMembership(SetMembershipOperator),
     Union(UnionOperator),
+    RecursiveCte(RecursiveCteOperator),
+    RecursiveScan(RecursiveScanOperator),
     // DML
     Insert(InsertOperator),
     Update(UpdateOperator),
@@ -354,6 +358,26 @@ impl Operator {
                 Ok(())
             }
 
+            fn visit_recursive_cte(
+                &mut self,
+                op: &'operator RecursiveCteOperator,
+            ) -> Result<(), DatabaseError> {
+                for column in &op.schema_ref {
+                    self.visit_column_ref(column)?;
+                }
+                Ok(())
+            }
+
+            fn visit_recursive_scan(
+                &mut self,
+                op: &'operator RecursiveScanOperator,
+            ) -> Result<(), DatabaseError> {
+                for column in &op.schema_ref {
+                    self.visit_column_ref(column)?;
+                }
+                Ok(())
+            }
+
             fn visit_set_membership(
                 &mut self,
                 op: &'operator SetMembershipOperator,
@@ -487,6 +511,8 @@ impl fmt::Display for Operator {
             #[cfg(feature = "copy")]
             Operator::CopyToFile(op) => write!(f, "{op}"),
             Operator::Union(op) => write!(f, "{op}"),
+            Operator::RecursiveCte(op) => write!(f, "{op}"),
+            Operator::RecursiveScan(op) => write!(f, "{op}"),
             Operator::SetMembership(op) => write!(f, "{op}"),
             Operator::Window(op) => write!(f, "{op}"),
         }
@@ -884,6 +910,34 @@ mod tests {
         for operator in no_reference_operators {
             assert!(referenced_columns(&operator, &mut arena)?.is_empty());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn recursive_operators_visit_display_and_build() -> Result<(), DatabaseError> {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let value = column("value", &mut arena);
+        let depth = column("depth", &mut arena);
+        let schema = vec![value, depth];
+
+        let recursive_cte = Operator::RecursiveCte(RecursiveCteOperator {
+            schema_ref: schema.clone(),
+        });
+        assert_eq!(referenced_columns(&recursive_cte, &mut arena)?, schema);
+        assert_eq!(recursive_cte.to_string(), "Recursive CTE: [#0, #1]");
+
+        let recursive_scan = Operator::RecursiveScan(RecursiveScanOperator {
+            schema_ref: schema.clone(),
+        });
+        assert_eq!(referenced_columns(&recursive_scan, &mut arena)?, schema);
+        assert_eq!(recursive_scan.to_string(), "Recursive Scan: [#0, #1]");
+
+        let anchor = LogicalPlan::new(Operator::ShowTable, Childrens::None);
+        let recursive = LogicalPlan::new(Operator::ShowView, Childrens::None);
+        let plan = RecursiveCteOperator::build(schema, anchor, recursive);
+        assert!(matches!(plan.operator, Operator::RecursiveCte(_)));
+        assert!(matches!(*plan.childrens, Childrens::Twins { .. }));
         Ok(())
     }
 

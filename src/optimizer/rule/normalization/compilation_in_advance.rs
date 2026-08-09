@@ -36,14 +36,16 @@ impl EvaluatorBind {
             Childrens::Only(child) => Self::_apply(child, arena)?,
             Childrens::Twins { left, right } => {
                 Self::_apply(left, arena)?;
-                if matches!(
+                let bind_right = matches!(
                     plan.operator,
                     Operator::ScalarApply(_)
                         | Operator::MarkApply(_)
                         | Operator::Join(_)
                         | Operator::Union(_)
                         | Operator::SetMembership(_)
-                ) {
+                );
+                let bind_right = bind_right || matches!(plan.operator, Operator::RecursiveCte(_));
+                if bind_right {
                     Self::_apply(right, arena)?;
                 }
             }

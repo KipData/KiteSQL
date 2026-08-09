@@ -134,25 +134,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             &mut PlanArena<'arena>,
         ) -> Result<LogicalPlan, DatabaseError>,
     {
-        let BinderContext {
-            table_cache,
-            view_cache,
-            transaction,
-            scala_functions,
-            table_functions,
-            ..
-        } = &self.context;
-        let mut binder = Binder::new(
-            BinderContext::new(
-                table_cache,
-                view_cache,
-                *transaction,
-                scala_functions,
-                table_functions,
-            ),
-            self.args,
-            Some(&self.context),
-        );
+        let mut binder = Binder::new(self.context.fork_empty(), self.args, Some(&self.context));
         let sub_query = build(&mut binder, arena)?;
         let correlated = binder.context.has_outer_refs();
         Ok((sub_query, correlated))

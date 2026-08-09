@@ -134,6 +134,7 @@ impl ImplementationRuleRootTag {
             | Operator::CreateView(_)
             | Operator::DropView(_)
             | Operator::DropIndex(_) => None,
+            Operator::RecursiveCte(_) | Operator::RecursiveScan(_) => None,
         }
     }
 }

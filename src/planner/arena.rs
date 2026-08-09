@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
+use crate::planner::LogicalPlan;
 use crate::types::index::{IndexMeta, IndexMetaRef};
 use crate::types::tuple::Schema;
 use std::cell::UnsafeCell;
@@ -54,6 +55,12 @@ pub struct PlanArena<'a> {
     temp_table_id: usize,
     columns: Vec<ColumnCatalog>,
     indexes: Vec<IndexMeta>,
+    plans: Vec<LogicalPlan>,
+}
+
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
+pub(crate) struct PlanRef {
+    pos: usize,
 }
 
 pub trait MetaArena {
@@ -340,6 +347,7 @@ impl<'a> PlanArena<'a> {
             temp_table_id: 0,
             columns: Vec::new(),
             indexes: Vec::new(),
+            plans: Vec::new(),
         }
     }
 
@@ -432,6 +440,18 @@ impl<'a> PlanArena<'a> {
         let table_name = format!("_temp_table_{}_", self.temp_table_id);
         self.temp_table_id += 1;
         table_name.into()
+    }
+
+    pub(crate) fn alloc_plan(&mut self, plan: LogicalPlan) -> PlanRef {
+        let plan_ref = PlanRef {
+            pos: self.plans.len(),
+        };
+        self.plans.push(plan);
+        plan_ref
+    }
+
+    pub(crate) fn plan(&self, plan_ref: PlanRef) -> &LogicalPlan {
+        &self.plans[plan_ref.pos]
     }
 
     pub fn column(&self, column: ColumnRef) -> &ColumnCatalog {

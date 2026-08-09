@@ -17,6 +17,7 @@ pub mod operator;
 
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
+use crate::planner::operator::recursive_cte::{RecursiveCteOperator, RecursiveScanOperator};
 use crate::planner::operator::set_membership::SetMembershipOperator;
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::values::ValuesOperator;
@@ -24,6 +25,7 @@ use crate::planner::operator::{Operator, PhysicalOption};
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::hash::{Hash, Hasher};
 
+pub(crate) use arena::PlanRef;
 pub use arena::{MetaArena, PlanArena, TableArena, TableArenaCell};
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
@@ -239,6 +241,8 @@ impl LogicalPlan {
                 left_schema_ref: schema_ref,
                 ..
             }) => schema_ref.clone(),
+            Operator::RecursiveCte(RecursiveCteOperator { schema_ref })
+            | Operator::RecursiveScan(RecursiveScanOperator { schema_ref }) => schema_ref.clone(),
             Operator::Dummy => Vec::new(),
             Operator::ShowTable => Self::dummy_schema(arena, ["TABLE"]),
             Operator::ShowView => Self::dummy_schema(arena, ["VIEW"]),
