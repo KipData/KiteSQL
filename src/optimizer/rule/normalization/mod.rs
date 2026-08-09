@@ -135,6 +135,8 @@ impl NormalizationRuleRootTag {
             | Operator::Union(_)
             | Operator::SetMembership(_)
             | Operator::Window(_) => None,
+            #[cfg(feature = "spill")]
+            Operator::RecursiveCte(_) | Operator::RecursiveScan(_) => None,
             #[cfg(feature = "copy")]
             Operator::CopyFromFile(_) | Operator::CopyToFile(_) => None,
         }

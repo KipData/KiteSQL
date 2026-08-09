@@ -59,6 +59,8 @@ use crate::execution::dql::index_scan::IndexScan;
 use crate::execution::dql::join::hash_join::HashJoin;
 use crate::execution::dql::limit::Limit;
 use crate::execution::dql::projection::Projection;
+#[cfg(feature = "spill")]
+use crate::execution::dql::recursive_cte::{RecursiveCte, RecursiveInput, RecursiveScan};
 use crate::execution::dql::scalar_subquery::ScalarSubquery;
 use crate::execution::dql::seq_scan::SeqScan;
 use crate::execution::dql::set_membership::SetMembership;
@@ -197,6 +199,10 @@ pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
     MarkApply(MarkApply),
     NestedLoopJoin(NestedLoopJoin),
     Projection(Projection),
+    #[cfg(feature = "spill")]
+    RecursiveCte(RecursiveCte<'a, T>),
+    #[cfg(feature = "spill")]
+    RecursiveScan(RecursiveScan),
     ScalarApply(ScalarApply),
     ScalarSubquery(ScalarSubquery),
     SetMembership(SetMembership),
@@ -315,6 +321,14 @@ impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
             ExecNode::Projection(exec) => {
                 <Projection as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
+            #[cfg(feature = "spill")]
+            ExecNode::RecursiveCte(exec) => {
+                <RecursiveCte<'a, T> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+            }
+            #[cfg(feature = "spill")]
+            ExecNode::RecursiveScan(exec) => {
+                <RecursiveScan as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+            }
             ExecNode::ScalarApply(exec) => {
                 <ScalarApply as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
@@ -377,6 +391,8 @@ pub(crate) struct ExecArena<'a, T: Transaction + 'a> {
     transaction: *mut T,
     runtime_probe_stack: Vec<RuntimeIndexProbe>,
     ddl_apply: Vec<DDLApply>,
+    #[cfg(feature = "spill")]
+    recursive_input: Option<RecursiveInput>,
 }
 
 pub(crate) struct ExecArenaLocalState<'b, 'a, T: Transaction + 'a> {
@@ -425,6 +441,8 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
             transaction: std::ptr::null_mut(),
             runtime_probe_stack: Vec::new(),
             ddl_apply: Vec::new(),
+            #[cfg(feature = "spill")]
+            recursive_input: None,
         }
     }
 }
@@ -536,6 +554,28 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
 
     pub(crate) fn runtime_probe_depth(&self) -> usize {
         self.runtime_probe_stack.len()
+    }
+
+    #[cfg(feature = "spill")]
+    pub(crate) fn set_recursive_input(&mut self, input: RecursiveInput) {
+        debug_assert!(self.recursive_input.is_none());
+        self.recursive_input = Some(input);
+    }
+
+    #[cfg(feature = "spill")]
+    pub(crate) fn take_recursive_input(&mut self) -> RecursiveInput {
+        self.recursive_input
+            .take()
+            .expect("recursive input initialized")
+    }
+
+    #[cfg(feature = "spill")]
+    pub(crate) fn reset_for_rebuild(&mut self) {
+        debug_assert!(self.runtime_probe_stack.is_empty());
+        debug_assert!(self.ddl_apply.is_empty());
+        self.nodes.clear();
+        self.result.status = None;
+        self.recursive_input = None;
     }
 
     #[inline]
@@ -886,6 +926,22 @@ where
         ),
         Operator::Union(_) => <Union as ReadExecutor<'a, T>>::into_executor(
             Union::from(childrens.pop_twins()),
+            arena,
+            plan_arena,
+            cache,
+            transaction,
+        ),
+        #[cfg(feature = "spill")]
+        Operator::RecursiveCte(_) => <RecursiveCte<'a, T> as ReadExecutor<'a, T>>::into_executor(
+            childrens.pop_twins(),
+            arena,
+            plan_arena,
+            cache,
+            transaction,
+        ),
+        #[cfg(feature = "spill")]
+        Operator::RecursiveScan(op) => <RecursiveScan as ReadExecutor<'a, T>>::into_executor(
+            op,
             arena,
             plan_arena,
             cache,

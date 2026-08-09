@@ -662,8 +662,24 @@ impl ColumnPruning {
                     }
                 }
             }
+            #[cfg(feature = "spill")]
+            Operator::RecursiveCte(_) => {
+                changed |= Self::apply_twins(
+                    required_columns,
+                    true,
+                    childrens,
+                    outcome,
+                    output_start,
+                    arena,
+                )?;
+                outcome.removed_positions.truncate(output_start);
+            }
             // Last Operator
             Operator::Dummy | Operator::Values(_) | Operator::FunctionScan(_) => {
+                outcome.removed_positions.truncate(output_start);
+            }
+            #[cfg(feature = "spill")]
+            Operator::RecursiveScan(_) => {
                 outcome.removed_positions.truncate(output_start);
             }
             Operator::Explain => {

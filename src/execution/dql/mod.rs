@@ -25,6 +25,8 @@ pub(crate) mod join;
 pub(crate) mod limit;
 pub(crate) mod mark_apply;
 pub(crate) mod projection;
+#[cfg(feature = "spill")]
+pub(crate) mod recursive_cte;
 pub(crate) mod scalar_apply;
 pub(crate) mod scalar_subquery;
 pub(crate) mod seq_scan;

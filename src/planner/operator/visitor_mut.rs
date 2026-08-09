@@ -118,6 +118,22 @@ pub trait OperatorVisitorMut<'a>: Sized {
         Ok(())
     }
 
+    #[cfg(feature = "spill")]
+    fn visit_recursive_cte(
+        &mut self,
+        _op: &'a mut RecursiveCteOperator,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
+    #[cfg(feature = "spill")]
+    fn visit_recursive_scan(
+        &mut self,
+        _op: &'a mut RecursiveScanOperator,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
     fn visit_insert(&mut self, _op: &'a mut InsertOperator) -> Result<(), DatabaseError> {
         Ok(())
     }
@@ -362,6 +378,10 @@ pub fn walk_mut_operator<'a, V: OperatorVisitorMut<'a>>(
         Operator::Describe(op) => visitor.visit_describe(op),
         Operator::SetMembership(op) => visitor.visit_set_membership(op),
         Operator::Union(op) => visitor.visit_union(op),
+        #[cfg(feature = "spill")]
+        Operator::RecursiveCte(op) => visitor.visit_recursive_cte(op),
+        #[cfg(feature = "spill")]
+        Operator::RecursiveScan(op) => visitor.visit_recursive_scan(op),
         Operator::Insert(op) => visitor.visit_insert(op),
         Operator::Update(op) => visitor.visit_update(op),
         Operator::Delete(op) => visitor.visit_delete(op),

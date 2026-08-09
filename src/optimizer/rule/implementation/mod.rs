@@ -134,6 +134,8 @@ impl ImplementationRuleRootTag {
             | Operator::CreateView(_)
             | Operator::DropView(_)
             | Operator::DropIndex(_) => None,
+            #[cfg(feature = "spill")]
+            Operator::RecursiveCte(_) | Operator::RecursiveScan(_) => None,
         }
     }
 }

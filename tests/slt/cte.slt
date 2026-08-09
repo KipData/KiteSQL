@@ -77,13 +77,109 @@ statement error
 WITH duplicate AS (SELECT 1), duplicate AS (SELECT 2)
 SELECT * FROM duplicate
 
-statement error
-WITH RECURSIVE recursive_cte AS (
+query I
+WITH RECURSIVE recursive_cte(value) AS (
     SELECT 1
     UNION ALL
-    SELECT * FROM recursive_cte
+    SELECT value + 1 FROM recursive_cte WHERE value < 5
 )
-SELECT * FROM recursive_cte
+SELECT value FROM recursive_cte ORDER BY value
+----
+1
+2
+3
+4
+5
+
+query T
+EXPLAIN WITH RECURSIVE recursive_cte(value) AS (
+    SELECT 1
+    UNION ALL
+    SELECT value + 1 FROM recursive_cte WHERE value < 3
+)
+SELECT value FROM recursive_cte
+----
+Projection [#4] [Project => (Sort Option: Follow)] Recursive CTE: [#4] Projection [(#3) as (#4)] [Project => (Sort Option: Follow)] Projection [1] [Project => (Sort Option: Follow)] Dummy [Dummy => (Sort Option: None)] Projection [(#4 + 1)] [Project => (Sort Option: Follow)] Filter (#4 < 3), Is Having: false [Filter => (Sort Option: Follow)] Recursive Scan: [#4]
+
+query I
+WITH RECURSIVE recursive_cte(value) AS (
+    SELECT 1
+    UNION ALL
+    SELECT value FROM recursive_cte WHERE FALSE
+)
+SELECT value FROM recursive_cte
+----
+1
+
+query I
+WITH RECURSIVE recursive_cte(value) AS (
+    SELECT 1
+    UNION ALL
+    SELECT value + 1
+    FROM recursive_cte
+    CROSS JOIN table(numbers(2))
+    WHERE value < 3
+)
+SELECT count(*) FROM recursive_cte
+----
+7
+
+query I
+WITH RECURSIVE recursive_cte(value) AS (
+    SELECT 1
+    UNION ALL
+    SELECT value + 1 FROM recursive_cte
+)
+SELECT value FROM recursive_cte LIMIT 5
+----
+1
+2
+3
+4
+5
+
+query II
+WITH RECURSIVE recursive_cte(value) AS (
+    SELECT 1
+    UNION ALL
+    SELECT value + 1 FROM recursive_cte WHERE value < 3
+)
+SELECT left_cte.value, right_cte.value
+FROM recursive_cte AS left_cte
+JOIN recursive_cte AS right_cte ON left_cte.value = right_cte.value
+ORDER BY left_cte.value
+----
+1 1
+2 2
+3 3
+
+query I
+WITH RECURSIVE recursive_cte(value) AS (
+    SELECT number FROM table(numbers(1100))
+    UNION ALL
+    SELECT value FROM recursive_cte WHERE value < 0
+)
+SELECT count(*) FROM recursive_cte
+----
+1100
+
+statement error
+WITH RECURSIVE recursive_cte(value) AS (
+    SELECT 1
+    UNION ALL
+    SELECT left_cte.value + 1
+    FROM recursive_cte AS left_cte
+    JOIN recursive_cte AS right_cte ON left_cte.value = right_cte.value
+)
+SELECT value FROM recursive_cte
+
+statement error
+WITH RECURSIVE recursive_cte(value) AS (
+    SELECT 1
+    UNION
+    SELECT value + 1 FROM recursive_cte WHERE value < 3
+)
+SELECT value FROM recursive_cte
 
 statement error
 WITH selected AS MATERIALIZED (

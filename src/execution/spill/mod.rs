@@ -174,10 +174,7 @@ impl<T: SpillCodec> Iterator for SpillReader<T> {
         };
         match result {
             Ok(Some(value)) => Some(Ok(value)),
-            Ok(None) => {
-                self.state = ReadState::Exhausted(None);
-                None
-            }
+            Ok(None) => None,
             Err(error) => {
                 self.state = ReadState::Exhausted(None);
                 Some(Err(error))
@@ -187,6 +184,21 @@ impl<T: SpillCodec> Iterator for SpillReader<T> {
 }
 
 impl<T: SpillCodec> SpillReader<T> {
+    /// Rewinds a fully flushed spill file. The reader must not contain an in-memory tail.
+    pub(crate) fn reset(&mut self) -> Result<(), DatabaseError> {
+        let ReadState::Spilled { reader, tail, .. } = &mut self.state else {
+            return Err(DatabaseError::InvalidValue(
+                "cannot reset an in-memory SpillReader".to_string(),
+            ));
+        };
+        if tail.len() != 0 {
+            return Err(DatabaseError::InvalidValue(
+                "cannot reset a SpillReader with an in-memory tail".to_string(),
+            ));
+        }
+        reader.reset(0)
+    }
+
     pub(crate) fn open_segment_reader<'source>(
         &'source self,
     ) -> Result<SegmentReader<'source, BufReader<File>, T>, DatabaseError> {
@@ -436,6 +448,25 @@ mod tests {
         ));
         let restored = reader.collect::<Result<Vec<_>, _>>()?;
         assert_eq!(restored, (0..5).map(row).collect::<Vec<_>>());
+        Ok(())
+    }
+
+    #[test]
+    fn reset_replays_a_fully_flushed_reader_after_eof() -> Result<(), DatabaseError> {
+        let mut values = SpillVec::new().limit(2, usize::MAX);
+        for value in 0..5 {
+            let _ = values.push(row(value))?;
+        }
+        let _ = values.flush()?;
+
+        let mut reader = values.into_iter();
+        let first = reader.by_ref().collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(reader.next().transpose()?, None);
+        reader.reset()?;
+        let second = reader.collect::<Result<Vec<_>, _>>()?;
+        let expected = (0..5).map(row).collect::<Vec<_>>();
+        assert_eq!(first, expected);
+        assert_eq!(second, expected);
         Ok(())
     }
 

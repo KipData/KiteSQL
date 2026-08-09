@@ -142,6 +142,12 @@ pub(crate) struct CteBinding {
     pub(crate) plan_ref: PlanRef,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct CteCheckpoint {
+    len: usize,
+    depth: usize,
+}
+
 impl BoundSource<'_> {
     pub(crate) fn matches_name(&self, table_name: &str) -> bool {
         self.table_name.as_ref() == table_name
@@ -239,7 +245,7 @@ pub struct BinderContext<'a, T: Transaction> {
     // Tips: retain binding order so wildcard expansion and position derivation
     // follow FROM/JOIN order directly.
     pub(crate) bind_table: Vec<BoundSource<'a>>,
-    pub(crate) ctes: Vec<CteBinding>,
+    ctes: Vec<CteBinding>,
     pub(crate) cte_depth: usize,
     // alias
     expr_aliases: BTreeMap<(Option<String>, String), ScalarExpression>,
@@ -384,6 +390,18 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
         }
         self.ctes.push(cte);
         Ok(())
+    }
+
+    pub(crate) fn cte_checkpoint(&self) -> CteCheckpoint {
+        CteCheckpoint {
+            len: self.ctes.len(),
+            depth: self.cte_depth,
+        }
+    }
+
+    pub(crate) fn restore_ctes(&mut self, checkpoint: CteCheckpoint) {
+        self.ctes.truncate(checkpoint.len);
+        self.cte_depth = checkpoint.depth;
     }
 
     pub fn step(&mut self, bind_step: QueryBindStep) {
