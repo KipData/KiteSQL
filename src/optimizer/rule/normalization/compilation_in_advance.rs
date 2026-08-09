@@ -44,7 +44,6 @@ impl EvaluatorBind {
                         | Operator::Union(_)
                         | Operator::SetMembership(_)
                 );
-                #[cfg(feature = "spill")]
                 let bind_right = bind_right || matches!(plan.operator, Operator::RecursiveCte(_));
                 if bind_right {
                     Self::_apply(right, arena)?;

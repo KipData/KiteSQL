@@ -112,12 +112,10 @@ pub trait OperatorVisitor<'a>: Sized {
         Ok(())
     }
 
-    #[cfg(feature = "spill")]
     fn visit_recursive_cte(&mut self, _op: &'a RecursiveCteOperator) -> Result<(), DatabaseError> {
         Ok(())
     }
 
-    #[cfg(feature = "spill")]
     fn visit_recursive_scan(
         &mut self,
         _op: &'a RecursiveScanOperator,
@@ -347,9 +345,7 @@ pub fn walk_operator<'a, V: OperatorVisitor<'a>>(
         Operator::Describe(op) => visitor.visit_describe(op),
         Operator::SetMembership(op) => visitor.visit_set_membership(op),
         Operator::Union(op) => visitor.visit_union(op),
-        #[cfg(feature = "spill")]
         Operator::RecursiveCte(op) => visitor.visit_recursive_cte(op),
-        #[cfg(feature = "spill")]
         Operator::RecursiveScan(op) => visitor.visit_recursive_scan(op),
         Operator::Insert(op) => visitor.visit_insert(op),
         Operator::Update(op) => visitor.visit_update(op),
@@ -580,7 +576,6 @@ pub(crate) mod tests {
                 table_name: "t1".into(),
             }),
         ];
-        #[cfg(feature = "spill")]
         let operators = {
             let mut with_recursive_operators = operators;
             with_recursive_operators.push(Operator::RecursiveCte(RecursiveCteOperator {

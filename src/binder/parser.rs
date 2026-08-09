@@ -34,7 +34,6 @@ use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNul
 use crate::planner::operator::join::{JoinCondition, JoinOperator as LJoinOperator, JoinType};
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
 use crate::planner::operator::project::ProjectOperator;
-#[cfg(feature = "spill")]
 use crate::planner::operator::recursive_cte::{RecursiveCteOperator, RecursiveScanOperator};
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::Operator;
@@ -2860,7 +2859,6 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
         })
     }
 
-    #[cfg(feature = "spill")]
     fn bind_recursive_cte_plan(
         &mut self,
         cte: &sqlparser::ast::Cte,
@@ -2970,18 +2968,10 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
         let origin_step = self.context.step_now();
         let cte_checkpoint = self.context.cte_checkpoint();
         if let Some(with) = &query.with {
-            if with.recursive {
-                #[cfg(not(feature = "spill"))]
+            if with.recursive && with.cte_tables.len() != 1 {
                 return Err(DatabaseError::UnsupportedStmt(
-                    "recursive CTEs require the spill feature".to_string(),
+                    "only one recursive CTE is supported".to_string(),
                 ));
-
-                #[cfg(feature = "spill")]
-                if with.cte_tables.len() != 1 {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "only one recursive CTE is supported".to_string(),
-                    ));
-                }
             }
 
             self.context.cte_depth += 1;
@@ -3002,12 +2992,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
 
                 let alias = sql_table_alias(cte.alias.clone());
                 let plan = if with.recursive {
-                    #[cfg(feature = "spill")]
-                    {
-                        self.bind_recursive_cte_plan(cte, &alias, arena)?
-                    }
-                    #[cfg(not(feature = "spill"))]
-                    unreachable!()
+                    self.bind_recursive_cte_plan(cte, &alias, arena)?
                 } else {
                     self.bind_cte_plan(cte, &alias, arena)?
                 };

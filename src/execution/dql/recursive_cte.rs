@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+#[cfg(feature = "spill")]
 use crate::execution::spill::{SpillReader, SpillVec};
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
@@ -25,7 +26,10 @@ use std::mem;
 
 pub(crate) enum RecursiveInput {
     One(Option<Tuple>),
+    #[cfg(feature = "spill")]
     Many(SpillReader<Tuple>),
+    #[cfg(not(feature = "spill"))]
+    Many(std::vec::IntoIter<Tuple>),
 }
 
 impl Iterator for RecursiveInput {
@@ -34,7 +38,10 @@ impl Iterator for RecursiveInput {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::One(tuple) => tuple.take().map(Ok),
+            #[cfg(feature = "spill")]
             Self::Many(rows) => rows.next(),
+            #[cfg(not(feature = "spill"))]
+            Self::Many(rows) => rows.next().map(Ok),
         }
     }
 }
@@ -47,8 +54,17 @@ enum RecursiveRows {
         tuple: Tuple,
         output_done: bool,
     },
+    #[cfg(feature = "spill")]
     Writing(SpillVec<'static, Tuple>),
+    #[cfg(feature = "spill")]
     Reading(SpillReader<Tuple>),
+    #[cfg(not(feature = "spill"))]
+    Writing(Vec<Tuple>),
+    #[cfg(not(feature = "spill"))]
+    Reading {
+        rows: Vec<Tuple>,
+        output_index: usize,
+    },
 }
 
 impl RecursiveRows {
@@ -65,14 +81,29 @@ impl RecursiveRows {
                 output_done: false,
             } => {
                 let first = mem::take(first);
-                let mut rows = SpillVec::new();
-                let _ = rows.push(first)?;
-                let _ = rows.push(tuple)?;
-                *self = Self::Writing(rows);
+                #[cfg(feature = "spill")]
+                {
+                    let mut rows = SpillVec::new();
+                    let _ = rows.push(first)?;
+                    let _ = rows.push(tuple)?;
+                    *self = Self::Writing(rows);
+                }
+                #[cfg(not(feature = "spill"))]
+                {
+                    *self = Self::Writing(vec![first, tuple]);
+                }
             }
+            #[cfg(feature = "spill")]
             Self::Writing(rows) => {
                 let _ = rows.push(tuple)?;
             }
+            #[cfg(not(feature = "spill"))]
+            Self::Writing(rows) => rows.push(tuple),
+            #[cfg(feature = "spill")]
+            Self::One { .. } | Self::Reading(_) => {
+                unreachable!("cannot append to a finished recursive generation")
+            }
+            #[cfg(not(feature = "spill"))]
             Self::One { .. } | Self::Reading { .. } => {
                 unreachable!("cannot append to a finished recursive generation")
             }
@@ -82,10 +113,16 @@ impl RecursiveRows {
 
     fn finish(self) -> Result<Self, DatabaseError> {
         match self {
+            #[cfg(feature = "spill")]
             Self::Writing(mut rows) => {
                 let _ = rows.flush()?;
                 Ok(Self::Reading(rows.into_iter()))
             }
+            #[cfg(not(feature = "spill"))]
+            Self::Writing(rows) => Ok(Self::Reading {
+                rows,
+                output_index: 0,
+            }),
             rows => Ok(rows),
         }
     }
@@ -100,7 +137,14 @@ impl RecursiveRows {
                 *output_done = true;
                 Ok(Some(tuple.clone()))
             }
+            #[cfg(feature = "spill")]
             Self::Reading(reader) => reader.next().transpose(),
+            #[cfg(not(feature = "spill"))]
+            Self::Reading { rows, output_index } => {
+                let tuple = rows.get(*output_index).cloned();
+                *output_index += usize::from(tuple.is_some());
+                Ok(tuple)
+            }
             Self::Writing(_) => unreachable!("recursive generation must be finished first"),
         }
     }
@@ -109,10 +153,13 @@ impl RecursiveRows {
         match self {
             Self::Empty => Ok(None),
             Self::One { tuple, .. } => Ok(Some(RecursiveInput::One(Some(tuple)))),
+            #[cfg(feature = "spill")]
             Self::Reading(mut reader) => {
                 reader.reset()?;
                 Ok(Some(RecursiveInput::Many(reader)))
             }
+            #[cfg(not(feature = "spill"))]
+            Self::Reading { rows, .. } => Ok(Some(RecursiveInput::Many(rows.into_iter()))),
             Self::Writing(_) => unreachable!("recursive generation must be finished first"),
         }
     }
@@ -288,6 +335,7 @@ mod tests {
     use std::borrow::Cow;
     use tempfile::TempDir;
 
+    #[cfg(feature = "spill")]
     #[test]
     fn spilled_generation_is_written_once_and_replayed_for_scan() -> Result<(), DatabaseError> {
         let expected = (0..1100)
@@ -300,6 +348,30 @@ mod tests {
 
         let mut working = rows.finish()?;
         assert!(matches!(&working, RecursiveRows::Reading(_)));
+        let mut output = Vec::new();
+        while let Some(tuple) = working.next_output()? {
+            output.push(tuple);
+        }
+        assert_eq!(output, expected);
+
+        let scan = working.into_input()?.unwrap();
+        assert_eq!(scan.collect::<Result<Vec<_>, _>>()?, expected);
+        Ok(())
+    }
+
+    #[cfg(not(feature = "spill"))]
+    #[test]
+    fn memory_generation_is_replayed_for_scan() -> Result<(), DatabaseError> {
+        let expected = (0..3)
+            .map(|value| Tuple::new(None, vec![DataValue::Int32(value)]))
+            .collect::<Vec<_>>();
+        let mut rows = RecursiveRows::default();
+        for tuple in expected.iter().cloned() {
+            rows.push(tuple)?;
+        }
+
+        let mut working = rows.finish()?;
+        assert!(matches!(&working, RecursiveRows::Reading { .. }));
         let mut output = Vec::new();
         while let Some(tuple) = working.next_output()? {
             output.push(tuple);

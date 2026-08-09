@@ -662,7 +662,6 @@ impl ColumnPruning {
                     }
                 }
             }
-            #[cfg(feature = "spill")]
             Operator::RecursiveCte(_) => {
                 changed |= Self::apply_twins(
                     required_columns,
@@ -678,7 +677,6 @@ impl ColumnPruning {
             Operator::Dummy | Operator::Values(_) | Operator::FunctionScan(_) => {
                 outcome.removed_positions.truncate(output_start);
             }
-            #[cfg(feature = "spill")]
             Operator::RecursiveScan(_) => {
                 outcome.removed_positions.truncate(output_start);
             }

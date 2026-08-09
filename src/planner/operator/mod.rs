@@ -34,7 +34,6 @@ pub mod join;
 pub mod limit;
 pub mod mark_apply;
 pub mod project;
-#[cfg(feature = "spill")]
 pub mod recursive_cte;
 pub mod scalar_apply;
 pub mod scalar_subquery;
@@ -50,7 +49,6 @@ pub mod visitor;
 pub mod visitor_mut;
 pub mod window;
 
-#[cfg(feature = "spill")]
 use self::recursive_cte::{RecursiveCteOperator, RecursiveScanOperator};
 use self::{
     aggregate::AggregateOperator, alter_table::add_column::AddColumnOperator,
@@ -118,9 +116,7 @@ pub enum Operator {
     Describe(DescribeOperator),
     SetMembership(SetMembershipOperator),
     Union(UnionOperator),
-    #[cfg(feature = "spill")]
     RecursiveCte(RecursiveCteOperator),
-    #[cfg(feature = "spill")]
     RecursiveScan(RecursiveScanOperator),
     // DML
     Insert(InsertOperator),
@@ -362,7 +358,6 @@ impl Operator {
                 Ok(())
             }
 
-            #[cfg(feature = "spill")]
             fn visit_recursive_cte(
                 &mut self,
                 op: &'operator RecursiveCteOperator,
@@ -373,7 +368,6 @@ impl Operator {
                 Ok(())
             }
 
-            #[cfg(feature = "spill")]
             fn visit_recursive_scan(
                 &mut self,
                 op: &'operator RecursiveScanOperator,
@@ -517,9 +511,7 @@ impl fmt::Display for Operator {
             #[cfg(feature = "copy")]
             Operator::CopyToFile(op) => write!(f, "{op}"),
             Operator::Union(op) => write!(f, "{op}"),
-            #[cfg(feature = "spill")]
             Operator::RecursiveCte(op) => write!(f, "{op}"),
-            #[cfg(feature = "spill")]
             Operator::RecursiveScan(op) => write!(f, "{op}"),
             Operator::SetMembership(op) => write!(f, "{op}"),
             Operator::Window(op) => write!(f, "{op}"),
@@ -921,7 +913,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "spill")]
     #[test]
     fn recursive_operators_visit_display_and_build() -> Result<(), DatabaseError> {
         let table_arena = TableArenaCell::default();

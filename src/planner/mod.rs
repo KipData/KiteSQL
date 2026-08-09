@@ -17,7 +17,6 @@ pub mod operator;
 
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
-#[cfg(feature = "spill")]
 use crate::planner::operator::recursive_cte::{RecursiveCteOperator, RecursiveScanOperator};
 use crate::planner::operator::set_membership::SetMembershipOperator;
 use crate::planner::operator::union::UnionOperator;
@@ -242,7 +241,6 @@ impl LogicalPlan {
                 left_schema_ref: schema_ref,
                 ..
             }) => schema_ref.clone(),
-            #[cfg(feature = "spill")]
             Operator::RecursiveCte(RecursiveCteOperator { schema_ref })
             | Operator::RecursiveScan(RecursiveScanOperator { schema_ref }) => schema_ref.clone(),
             Operator::Dummy => Vec::new(),
