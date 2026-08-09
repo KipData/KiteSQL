@@ -186,3 +186,55 @@ WITH selected AS MATERIALIZED (
     SELECT id FROM cte_source
 )
 SELECT * FROM selected
+
+statement error
+WITH RECURSIVE first(x) AS (
+    SELECT 1 UNION ALL SELECT x FROM first
+), second(x) AS (
+    SELECT 1 UNION ALL SELECT x FROM second
+)
+SELECT * FROM first
+
+statement error
+WITH RECURSIVE recursive_cte(value) AS (
+    SELECT 1
+    UNION ALL
+    SELECT value FROM recursive_cte ORDER BY value
+)
+SELECT * FROM recursive_cte
+
+statement error
+WITH RECURSIVE cte_source(id, value) AS (
+    SELECT id, value FROM cte_source
+    UNION ALL
+    SELECT id, value FROM cte_source
+)
+SELECT * FROM cte_source
+
+statement error
+WITH RECURSIVE recursive_cte(value) AS (
+    SELECT 1
+    UNION ALL
+    SELECT 2
+)
+SELECT * FROM recursive_cte
+
+statement error
+WITH RECURSIVE recursive_cte(value) AS (
+    SELECT 1
+    UNION ALL
+    SELECT value, value FROM recursive_cte
+)
+SELECT * FROM recursive_cte
+
+statement error
+WITH RECURSIVE recursive_cte(value) AS (
+    SELECT 1
+    UNION ALL
+    SELECT 'value' FROM recursive_cte
+)
+SELECT * FROM recursive_cte
+
+statement error
+WITH selected AS (SELECT 1) FROM cte_source
+SELECT * FROM selected
