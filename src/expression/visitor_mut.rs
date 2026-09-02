@@ -26,6 +26,19 @@ use crate::types::evaluator::{BinaryEvaluatorRef, CastEvaluatorRef, UnaryEvaluat
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 
+pub(crate) struct ExprCloner;
+
+impl ExprVisitorMut for ExprCloner {
+    fn visit(
+        &mut self,
+        expr: &mut ExprRef,
+        arena: &mut PlanArena<'_>,
+    ) -> Result<(), DatabaseError> {
+        *expr = arena.alloc_expression(arena.expression(*expr).clone());
+        walk_mut_expr(self, expr, arena)
+    }
+}
+
 pub(crate) struct PositionShift {
     pub(crate) delta: isize,
 }

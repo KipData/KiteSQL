@@ -427,6 +427,26 @@ impl<'a> PlanArena<'a> {
         self.table_arena
     }
 
+    fn append_expressions_to_table_arena(&self, table_arena: &mut TableArena) {
+        for expression in &self.expressions {
+            table_arena.expressions.push(TableArenaExpression {
+                expression: expression.clone(),
+                live: true,
+            });
+        }
+    }
+
+    pub(crate) fn materialize_expressions_into_table_arena(&self) {
+        self.assert_table_arena_unchanged();
+        if self.expressions.is_empty() {
+            return;
+        }
+
+        let table_arena = self.table_arena.borrow_mut();
+        self.append_expressions_to_table_arena(table_arena);
+        table_arena.increment_version();
+    }
+
     pub(crate) fn materialize_into_table_arena(&self) {
         self.assert_table_arena_unchanged();
 
@@ -451,12 +471,7 @@ impl<'a> PlanArena<'a> {
                 live: true,
             });
         }
-        for expression in &self.expressions {
-            table_arena.expressions.push(TableArenaExpression {
-                expression: expression.clone(),
-                live: true,
-            });
-        }
+        self.append_expressions_to_table_arena(table_arena);
         if !self.columns.is_empty() || !self.indexes.is_empty() || !self.expressions.is_empty() {
             table_arena.increment_version();
         }

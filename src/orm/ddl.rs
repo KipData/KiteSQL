@@ -1,5 +1,11 @@
 use super::*;
 
+enum OrmDefaultChange {
+    NoChange,
+    Set(ScalarExpression),
+    Drop,
+}
+
 impl<S: Storage> Database<S> {
     fn table_catalog(&self, table_name: &str) -> Result<Option<TableCatalog>, DatabaseError> {
         let transaction = self.storage.transaction()?;
@@ -140,10 +146,10 @@ impl<S: Storage> Database<S> {
     /// when the underlying DDL supports them. Primary-key changes and unique
     /// constraint changes still return an error so you can handle them manually.
     pub fn migrate<M: Model>(&mut self) -> Result<(), DatabaseError> {
-        let columns = M::columns(self.state.table_arena().borrow_mut());
-        if columns.is_empty() {
+        let fields = M::fields();
+        if fields.is_empty() {
             return Err(DatabaseError::UnsupportedStmt(
-                "ORM migration requires Model::columns(); #[derive(Model)] provides it automatically"
+                "ORM migration requires Model::fields(); #[derive(Model)] provides it automatically"
                     .to_string(),
             ));
         }
@@ -168,11 +174,11 @@ impl<S: Storage> Database<S> {
             (table_primary_key, current_columns)
         };
 
-        let model_primary_key = columns
+        let model_primary_key = fields
             .iter()
-            .find(|column| column.desc().is_primary())
+            .find(|field| field.primary_key)
             .ok_or(DatabaseError::PrimaryKeyNotFound)?;
-        if table_primary_key.name() != model_primary_key.name()
+        if table_primary_key.name() != model_primary_key.column
             || !model_column_matches_catalog(
                 model_primary_key,
                 &table_primary_key,
@@ -184,80 +190,78 @@ impl<S: Storage> Database<S> {
                 M::table_name(),
             )));
         }
-        let model_columns = columns
+        let model_columns = fields
             .iter()
-            .map(|column| (column.name(), column))
+            .map(|field| (field.column, field))
             .collect::<BTreeMap<_, _>>();
         let mut handled_current = BTreeMap::new();
         let mut handled_model = BTreeMap::new();
 
-        for column in &columns {
-            let Some(current_column) = current_columns.get(column.name()) else {
+        for field in fields {
+            let Some(current_column) = current_columns.get(field.column) else {
                 continue;
             };
             handled_current.insert(current_column.name().to_string(), ());
-            handled_model.insert(column.name(), ());
+            handled_model.insert(field.column, ());
 
-            if column.desc().is_primary() != current_column.desc().is_primary() {
+            if field.primary_key != current_column.desc().is_primary() {
                 return Err(DatabaseError::InvalidValue(::std::format!(
                     "ORM migration does not support changing the primary key for table `{}`",
                     M::table_name(),
                 )));
             }
-            if column.desc().is_unique() != current_column.desc().is_unique() {
+            if field.unique != current_column.desc().is_unique() {
                 return Err(DatabaseError::InvalidValue(::std::format!(
                     "ORM migration cannot automatically change unique constraint on column `{}` of table `{}`",
-                    column.name(),
+                    field.column,
                     M::table_name(),
                 )));
             }
             if model_column_matches_catalog(
-                column,
+                field,
                 current_column,
                 &PlanArena::new(self.state.table_arena()),
             )? {
                 continue;
             }
 
-            if !model_column_type_matches_catalog(column, current_column) {
+            if !model_column_type_matches_catalog(field, current_column) {
                 execute_change_column(
                     self,
                     M::table_name(),
-                    column.name(),
-                    column.name(),
-                    column.datatype().clone(),
-                    DefaultChange::NoChange,
+                    field.column,
+                    field.column,
+                    field.data_type.clone(),
+                    OrmDefaultChange::NoChange,
                     NotNullChange::NoChange,
                 )?;
             }
 
             let arena = PlanArena::new(self.state.table_arena());
-            if model_column_default(column, &arena)?
-                != catalog_column_default(current_column, &arena)?
-            {
+            if model_column_default(field) != catalog_column_default(current_column, &arena) {
                 execute_change_column(
                     self,
                     M::table_name(),
-                    column.name(),
-                    column.name(),
-                    column.datatype().clone(),
-                    match column.desc().default {
-                        Some(expr) => DefaultChange::Set(expr),
-                        None => DefaultChange::Drop,
+                    field.column,
+                    field.column,
+                    field.data_type.clone(),
+                    match field.default.clone() {
+                        Some(expr) => OrmDefaultChange::Set(expr),
+                        None => OrmDefaultChange::Drop,
                     },
                     NotNullChange::NoChange,
                 )?;
             }
 
-            if column.nullable() != current_column.nullable() {
+            if field.nullable != current_column.nullable() {
                 execute_change_column(
                     self,
                     M::table_name(),
-                    column.name(),
-                    column.name(),
-                    column.datatype().clone(),
-                    DefaultChange::NoChange,
-                    if column.nullable() {
+                    field.column,
+                    field.column,
+                    field.data_type.clone(),
+                    OrmDefaultChange::NoChange,
+                    if field.nullable {
                         NotNullChange::Drop
                     } else {
                         NotNullChange::Set
@@ -267,9 +271,9 @@ impl<S: Storage> Database<S> {
         }
 
         let mut rename_pairs = Vec::new();
-        let unmatched_model_columns = columns
+        let unmatched_model_columns = fields
             .iter()
-            .filter(|column| !handled_model.contains_key(column.name()))
+            .filter(|field| !handled_model.contains_key(field.column))
             .collect::<Vec<_>>();
         let unmatched_current_columns = current_columns
             .values()
@@ -277,8 +281,8 @@ impl<S: Storage> Database<S> {
             .cloned()
             .collect::<Vec<_>>();
 
-        for model_column in &unmatched_model_columns {
-            if model_column.desc().is_primary() {
+        for model_field in &unmatched_model_columns {
+            if model_field.primary_key {
                 continue;
             }
             let mut candidates = Vec::new();
@@ -287,7 +291,7 @@ impl<S: Storage> Database<S> {
                 .filter(|column| !column.desc().is_primary())
             {
                 if model_column_rename_compatible(
-                    model_column,
+                    model_field,
                     column,
                     &PlanArena::new(self.state.table_arena()),
                 )? {
@@ -301,7 +305,7 @@ impl<S: Storage> Database<S> {
             let mut reverse_candidates = Vec::new();
             for other in unmatched_model_columns
                 .iter()
-                .filter(|other| !other.desc().is_primary())
+                .filter(|other| !other.primary_key)
             {
                 if model_column_rename_compatible(
                     other,
@@ -314,9 +318,9 @@ impl<S: Storage> Database<S> {
             if reverse_candidates.len() != 1 {
                 continue;
             }
-            rename_pairs.push((current_column.name().to_string(), model_column.name()));
+            rename_pairs.push((current_column.name().to_string(), model_field.column));
             handled_current.insert(current_column.name().to_string(), ());
-            handled_model.insert(model_column.name(), ());
+            handled_model.insert(model_field.column, ());
         }
 
         for (old_name, new_name) in rename_pairs {
@@ -329,7 +333,7 @@ impl<S: Storage> Database<S> {
                 &old_name,
                 new_name,
                 current_column.datatype().clone(),
-                DefaultChange::NoChange,
+                OrmDefaultChange::NoChange,
                 NotNullChange::NoChange,
             )?;
         }
@@ -351,21 +355,21 @@ impl<S: Storage> Database<S> {
             execute_drop_column(self, M::table_name(), column.name())?;
         }
 
-        for column in &columns {
-            if handled_model.contains_key(column.name())
-                || current_columns.contains_key(column.name())
+        for field in fields {
+            if handled_model.contains_key(field.column)
+                || current_columns.contains_key(field.column)
             {
                 continue;
             }
-            if column.desc().is_primary() {
+            if field.primary_key {
                 return Err(DatabaseError::InvalidValue(::std::format!(
                     "ORM migration cannot add a new primary key column `{}` to an existing table `{}`",
-                    column.name(),
+                    field.column,
                     M::table_name(),
                 )));
             }
 
-            execute_add_column(self, M::table_name(), column)?;
+            execute_add_column(self, M::table_name(), field)?;
         }
 
         for index in M::indexes() {
@@ -428,8 +432,11 @@ fn execute_create_table<S: Storage, M: Model>(
     database: &mut Database<S>,
     if_not_exists: bool,
 ) -> Result<(), DatabaseError> {
-    let columns = M::columns(database.state.table_arena().borrow_mut());
-    database.execute_mut("ORM CREATE TABLE", &[], move |binder, _| {
+    database.execute_mut("ORM CREATE TABLE", &[], move |binder, arena| {
+        let columns = M::fields()
+            .iter()
+            .map(|field| field.to_column_catalog(arena))
+            .collect::<Result<Vec<_>, _>>()?;
         binder.bind_create_table(M::table_name().into(), columns, if_not_exists)
     })
 }
@@ -517,12 +524,17 @@ fn execute_change_column<S: Storage>(
     old_column_name: &str,
     new_column_name: &str,
     data_type: LogicalType,
-    default_change: DefaultChange,
+    default_change: OrmDefaultChange,
     not_null_change: NotNullChange,
 ) -> Result<(), DatabaseError> {
     let old_column_name = old_column_name.to_string();
     let new_column_name = new_column_name.to_string();
-    database.execute_mut("ORM CHANGE COLUMN", &[], move |binder, _| {
+    database.execute_mut("ORM CHANGE COLUMN", &[], move |binder, arena| {
+        let default_change = match default_change {
+            OrmDefaultChange::Set(expr) => DefaultChange::Set(arena.alloc_expression(expr)),
+            OrmDefaultChange::Drop => DefaultChange::Drop,
+            OrmDefaultChange::NoChange => DefaultChange::NoChange,
+        };
         binder.bind_change_column(
             table_name.into(),
             old_column_name,
@@ -548,11 +560,11 @@ fn execute_drop_column<S: Storage>(
 fn execute_add_column<S: Storage>(
     database: &mut Database<S>,
     table_name: &'static str,
-    column: &ColumnCatalog,
+    field: &OrmField,
 ) -> Result<(), DatabaseError> {
-    let column = column.clone();
-    database.execute_mut("ORM ADD COLUMN", &[], move |binder, _| {
-        binder.bind_add_column(table_name.into(), column, false)
+    let field = field.clone();
+    database.execute_mut("ORM ADD COLUMN", &[], move |binder, arena| {
+        binder.bind_add_column(table_name.into(), field.to_column_catalog(arena)?, false)
     })
 }
 

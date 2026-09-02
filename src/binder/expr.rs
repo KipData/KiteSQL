@@ -90,14 +90,17 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
 
         for (position, expr) in exprs.into_iter().enumerate() {
             let (alias_expr, alias_ref) = self.bind_temp_table_alias(expr, position, arena);
+            let predicate_alias = arena.alloc_expression(alias_expr);
+            // The projection evaluates against the subquery-local tuple, while the
+            // predicate evaluates against the combined left/right tuple. Clone the
+            // complete expression graph so position rewrites in either context do
+            // not mutate the other one through shared ExprRefs.
+            let projection_alias = predicate_alias.clone_expression(arena)?;
             if !is_tuple {
-                let alias_plan = Self::build_project_plan(
-                    sub_query,
-                    vec![arena.alloc_expression(alias_expr.clone())],
-                );
-                return Ok((alias_expr, alias_plan));
+                let alias_plan = Self::build_project_plan(sub_query, vec![projection_alias]);
+                return Ok((arena.expression(predicate_alias).clone(), alias_plan));
             }
-            alias_exprs.push(arena.alloc_expression(alias_expr));
+            alias_exprs.push(projection_alias);
             alias_refs.push(alias_ref);
         }
 
@@ -329,8 +332,11 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 .iter()
                 .find(|((table, column), _)| table.is_none() && column == column_name)
             {
+                // ORDER BY evaluates the alias against projection output, while
+                // the select expression is rewritten against projection input.
+                // Keep their position-sensitive expression graphs independent.
                 return Ok(ScalarExpression::Alias {
-                    expr: *expr,
+                    expr: expr.clone_expression(arena)?,
                     alias: AliasType::Name(column_name.to_string()),
                 });
             }

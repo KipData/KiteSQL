@@ -72,12 +72,12 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         &mut self,
         select_list: &mut [ExprRef],
         mut group_by_exprs: Vec<ExprRef>,
-        arena: &PlanArena<'_>,
+        arena: &mut PlanArena<'_>,
     ) -> Result<(), DatabaseError> {
         self.validate_groupby_illegal_column(select_list, &group_by_exprs, arena)?;
 
         for expr in group_by_exprs.iter_mut() {
-            self.visit_group_by_expr(select_list, *expr, arena);
+            self.visit_group_by_expr(select_list, *expr, arena)?;
         }
         Ok(())
     }
@@ -214,8 +214,8 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         &mut self,
         select_list: &mut [ExprRef],
         expr: ExprRef,
-        arena: &PlanArena<'_>,
-    ) {
+        arena: &mut PlanArena<'_>,
+    ) -> Result<(), DatabaseError> {
         if let ScalarExpression::Alias { alias, .. } = arena.expression(expr) {
             if let Some(i) = select_list.iter().position(|inner_expr| {
                 if let ScalarExpression::Alias {
@@ -227,8 +227,12 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                     false
                 }
             }) {
-                self.context.group_by_exprs.push(select_list[i]);
-                return;
+                // GROUP BY evaluates against the aggregate input, while the select
+                // expression is later rewritten against aggregate output.
+                self.context
+                    .group_by_exprs
+                    .push(select_list[i].clone_expression(arena)?);
+                return Ok(());
             }
         }
 
@@ -236,8 +240,11 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             .iter()
             .position(|column| column.eq_ignore_colref_pos(expr, arena))
         {
-            self.context.group_by_exprs.push(select_list[i])
+            self.context
+                .group_by_exprs
+                .push(select_list[i].clone_expression(arena)?);
         }
+        Ok(())
     }
 
     /// Validate having or orderby clause is valid, if SQL has group by clause.

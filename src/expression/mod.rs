@@ -735,6 +735,15 @@ impl ExprRef {
         eq_col::eq_ignore_colref_pos(self, other, arena)
     }
 
+    pub(crate) fn clone_expression(
+        self,
+        arena: &mut PlanArena<'_>,
+    ) -> Result<ExprRef, DatabaseError> {
+        let mut cloned = self;
+        crate::expression::visitor_mut::ExprCloner.visit(&mut cloned, arena)?;
+        Ok(cloned)
+    }
+
     pub fn unpack_alias(self, arena: &impl MetaArena) -> ExprRef {
         if let ScalarExpression::Alias {
             alias: AliasType::Expr(expr),

@@ -37,7 +37,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             Source::Table(table) => {
                 TableScanOperator::build(table_name.clone(), table, true, arena)
             }
-            Source::View(view) => Ok(LogicalPlan::clone(&view.plan)),
+            Source::View(view) => view.plan.clone_plan(arena),
             Source::Schema(_) => Err(DatabaseError::UnsupportedStmt(
                 "derived source cannot be rebound as a base relation".to_string(),
             )),

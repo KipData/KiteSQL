@@ -37,7 +37,7 @@ mod ddl;
 mod dml;
 mod dql;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 /// Static metadata about a single model field.
 ///
 /// This type is primarily consumed by code generated from `#[derive(Model)]`.
@@ -45,9 +45,30 @@ mod dql;
 pub struct OrmField {
     pub column: &'static str,
     pub column_index: usize,
-    pub placeholder: &'static str,
+    pub data_type: LogicalType,
+    pub nullable: bool,
+    pub default: Option<ScalarExpression>,
     pub primary_key: bool,
     pub unique: bool,
+}
+
+impl OrmField {
+    fn to_column_catalog(&self, arena: &mut PlanArena<'_>) -> Result<ColumnCatalog, DatabaseError> {
+        let default = self
+            .default
+            .clone()
+            .map(|expr| arena.alloc_expression(expr));
+        Ok(ColumnCatalog::new(
+            self.column.to_string(),
+            self.nullable,
+            crate::catalog::ColumnDesc::new(
+                self.data_type.clone(),
+                self.primary_key.then_some(self.column_index),
+                self.unique,
+                default,
+            )?,
+        ))
+    }
 }
 
 /// One row returned by [`Database::describe`] or [`DBTransaction::describe`].
@@ -2659,8 +2680,8 @@ where
             .ok_or_else(|| DatabaseError::column_not_found(field.column.to_string()))?;
         let column_catalog = arena.column(column);
         let value = params
-            .get(field.placeholder)
-            .ok_or_else(|| DatabaseError::parameter_not_found(field.placeholder))?
+            .get(field.column)
+            .ok_or_else(|| DatabaseError::parameter_not_found(field.column))?
             .clone()
             .cast(column_catalog.datatype())?;
         value.check_len(column_catalog.datatype())?;
@@ -2703,14 +2724,6 @@ pub trait Model: Sized + FromQueryRow {
 
     /// Returns metadata for every persisted field on the model.
     fn fields() -> &'static [OrmField];
-
-    /// Returns persisted column catalogs for the model.
-    ///
-    /// `#[derive(Model)]` generates this automatically. Manual implementations
-    /// can override it to opt into [`Database::migrate`](crate::orm::Database::migrate).
-    fn columns(_arena: &mut crate::planner::TableArena) -> Vec<ColumnCatalog> {
-        Vec::new()
-    }
 
     /// Returns secondary indexes declared by the model.
     fn indexes() -> &'static [(&'static str, &'static [&'static str], bool)] {
@@ -3210,46 +3223,43 @@ impl_from_query_tuple!(
     (A, B, C, D, E, F, G, H),
 );
 
-fn model_column_default(
-    model: &ColumnCatalog,
-    arena: &PlanArena<'_>,
-) -> Result<Option<DataValue>, DatabaseError> {
-    model.default_value(arena)
+fn model_column_default(model: &OrmField) -> Option<&ScalarExpression> {
+    model.default.as_ref()
 }
 
-fn catalog_column_default(
+fn catalog_column_default<'a>(
     column: &ColumnCatalog,
-    arena: &PlanArena<'_>,
-) -> Result<Option<DataValue>, DatabaseError> {
-    column.default_value(arena)
+    arena: &'a PlanArena<'_>,
+) -> Option<&'a ScalarExpression> {
+    column.desc().default.map(|expr| arena.expression(expr))
 }
 
-fn model_column_type_matches_catalog(model: &ColumnCatalog, column: &ColumnCatalog) -> bool {
-    model.datatype() == column.datatype()
+fn model_column_type_matches_catalog(model: &OrmField, column: &ColumnCatalog) -> bool {
+    model.data_type == *column.datatype()
 }
 
 fn model_column_matches_catalog(
-    model: &ColumnCatalog,
+    model: &OrmField,
     column: &ColumnCatalog,
     arena: &PlanArena<'_>,
 ) -> Result<bool, DatabaseError> {
-    Ok(model.desc().is_primary() == column.desc().is_primary()
-        && model.desc().is_unique() == column.desc().is_unique()
-        && model.nullable() == column.nullable()
+    Ok(model.primary_key == column.desc().is_primary()
+        && model.unique == column.desc().is_unique()
+        && model.nullable == column.nullable()
         && model_column_type_matches_catalog(model, column)
-        && model_column_default(model, arena)? == catalog_column_default(column, arena)?)
+        && model_column_default(model) == catalog_column_default(column, arena))
 }
 
 fn model_column_rename_compatible(
-    model: &ColumnCatalog,
+    model: &OrmField,
     column: &ColumnCatalog,
     arena: &PlanArena<'_>,
 ) -> Result<bool, DatabaseError> {
-    Ok(model.desc().is_primary() == column.desc().is_primary()
-        && model.desc().is_unique() == column.desc().is_unique()
-        && model.nullable() == column.nullable()
+    Ok(model.primary_key == column.desc().is_primary()
+        && model.unique == column.desc().is_unique()
+        && model.nullable == column.nullable()
         && model_column_type_matches_catalog(model, column)
-        && model_column_default(model, arena)? == catalog_column_default(column, arena)?)
+        && model_column_default(model) == catalog_column_default(column, arena))
 }
 
 fn extract_optional_model<I, M>(iter: I) -> Result<Option<M>, DatabaseError>
@@ -3392,21 +3402,27 @@ mod tests {
         OrmField {
             column: "id",
             column_index: 0,
-            placeholder: "id",
+            data_type: LogicalType::Integer,
+            nullable: false,
+            default: None,
             primary_key: true,
             unique: false,
         },
         OrmField {
             column: "name",
             column_index: 1,
-            placeholder: "name",
+            data_type: LogicalType::Varchar(None, CharLengthUnits::Characters),
+            nullable: false,
+            default: None,
             primary_key: false,
             unique: false,
         },
         OrmField {
             column: "age",
             column_index: 2,
-            placeholder: "age",
+            data_type: LogicalType::Integer,
+            nullable: true,
+            default: None,
             primary_key: false,
             unique: false,
         },
@@ -3474,21 +3490,27 @@ mod tests {
         OrmField {
             column: "id",
             column_index: 0,
-            placeholder: "id",
+            data_type: LogicalType::Integer,
+            nullable: false,
+            default: None,
             primary_key: true,
             unique: false,
         },
         OrmField {
             column: "user_id",
             column_index: 1,
-            placeholder: "user_id",
+            data_type: LogicalType::Integer,
+            nullable: false,
+            default: None,
             primary_key: false,
             unique: false,
         },
         OrmField {
             column: "amount",
             column_index: 2,
-            placeholder: "amount",
+            data_type: LogicalType::Integer,
+            nullable: false,
+            default: None,
             primary_key: false,
             unique: false,
         },

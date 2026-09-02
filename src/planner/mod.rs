@@ -17,10 +17,12 @@ pub mod operator;
 
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
+use crate::expression::visitor_mut::ExprCloner;
 use crate::planner::operator::recursive_cte::{RecursiveCteOperator, RecursiveScanOperator};
 use crate::planner::operator::set_membership::SetMembershipOperator;
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::values::ValuesOperator;
+use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
 use crate::planner::operator::{Operator, PhysicalOption};
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
@@ -148,6 +150,32 @@ impl LogicalPlan {
             physical_option: None,
             output_schema: None,
         }
+    }
+
+    pub(crate) fn clone_plan(
+        &self,
+        arena: &mut PlanArena<'_>,
+    ) -> Result<LogicalPlan, DatabaseError> {
+        fn clone_expressions(
+            plan: &mut LogicalPlan,
+            cloner: &mut ExprCloner,
+            arena: &mut PlanArena<'_>,
+        ) -> Result<(), DatabaseError> {
+            OperatorExprVisitorMut::new(cloner, arena).visit_operator(&mut plan.operator)?;
+            match plan.childrens.as_mut() {
+                Childrens::Only(child) => clone_expressions(child, cloner, arena)?,
+                Childrens::Twins { left, right } => {
+                    clone_expressions(left, cloner, arena)?;
+                    clone_expressions(right, cloner, arena)?;
+                }
+                Childrens::None => {}
+            }
+            Ok(())
+        }
+
+        let mut plan = self.clone();
+        clone_expressions(&mut plan, &mut ExprCloner, arena)?;
+        Ok(plan)
     }
 
     pub(crate) fn take(&mut self) -> Self {

@@ -1201,7 +1201,11 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             Source::Table(table) => {
                 TableScanOperator::build(table_name.clone(), table, with_pk, arena)?
             }
-            Source::View(view) => LogicalPlan::clone(&view.plan),
+            Source::View(view) => {
+                // Cached view expressions live in the persistent arena. Clone the
+                // complete graph before optimizer passes rewrite expression nodes.
+                view.plan.clone_plan(arena)?
+            }
             Source::Schema(_) => {
                 return Err(DatabaseError::UnsupportedStmt(
                     "derived source cannot be rebound as a base relation".to_string(),
