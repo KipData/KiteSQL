@@ -122,7 +122,6 @@ mod test {
     use crate::types::evaluator::cast_create;
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
-    use std::borrow::Cow;
 
     fn tuple(values: Vec<DataValue>) -> DataValue {
         DataValue::Tuple(values, false)
@@ -194,14 +193,11 @@ mod test {
     #[test]
     fn test_tuple_cast_eval() {
         let evaluator = cast_create(
-            Cow::Owned(LogicalType::Tuple(vec![
+            &LogicalType::Tuple(vec![
                 LogicalType::Integer,
                 LogicalType::Varchar(None, CharLengthUnits::Characters),
-            ])),
-            Cow::Owned(LogicalType::Tuple(vec![
-                LogicalType::Bigint,
-                LogicalType::Integer,
-            ])),
+            ]),
+            &LogicalType::Tuple(vec![LogicalType::Bigint, LogicalType::Integer]),
         )
         .unwrap();
 

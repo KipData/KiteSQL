@@ -1,0 +1,173 @@
+# Correlated IN/NOT IN should use a parameterized index probe.
+statement ok
+create table in_outer(id int primary key, a int);
+
+statement ok
+create table in_inner(id int primary key, v int);
+
+statement ok
+create table in_inner_nn(id int primary key, v int);
+
+statement ok
+create index in_inner_v_index on in_inner(v);
+
+statement ok
+create index in_inner_nn_v_index on in_inner_nn(v);
+
+statement ok
+insert into in_outer values (0, null), (1, 1), (2, 2), (3, 3);
+
+statement ok
+insert into in_inner values (0, 2), (1, null);
+
+statement ok
+insert into in_inner_nn values (0, 2);
+
+query T
+explain select id from in_outer where a in (select v from in_inner where in_inner.v = in_outer.a);
+----
+Projection [in_outer.id] [Project => (Sort Option: Follow)] Filter _temp_table_1_.true, Is Having: false [Filter => (Sort Option: Follow)] MarkAnyApply TableScan in_outer -> [in_outer.id, in_outer.a] [SeqScan => (Sort Option: None)] Projection [in_inner.v] [Project => (Sort Option: Follow)] TableScan in_inner -> [in_inner.v] [IndexScan By in_inner_v_index => Probe ? => (Sort Option: OrderBy: (in_inner.v Asc Nulls Last) ignore_prefix_len: 0)]
+
+query T
+explain select id from in_outer where a not in (select v from in_inner where in_inner.v = in_outer.a);
+----
+Projection [in_outer.id] [Project => (Sort Option: Follow)] Filter !_temp_table_1_.true, Is Having: false [Filter => (Sort Option: Follow)] MarkAnyApply TableScan in_outer -> [in_outer.id, in_outer.a] [SeqScan => (Sort Option: None)] Projection [in_inner.v] [Project => (Sort Option: Follow)] TableScan in_inner -> [in_inner.v] [IndexScan By in_inner_v_index => Probe ? => (Sort Option: OrderBy: (in_inner.v Asc Nulls Last) ignore_prefix_len: 0)]
+
+query T
+explain select id from in_outer where a in (select v from in_inner_nn where in_inner_nn.v = in_outer.a);
+----
+Projection [in_outer.id] [Project => (Sort Option: Follow)] Filter _temp_table_1_.true, Is Having: false [Filter => (Sort Option: Follow)] MarkAnyApply TableScan in_outer -> [in_outer.id, in_outer.a] [SeqScan => (Sort Option: None)] Projection [in_inner_nn.v] [Project => (Sort Option: Follow)] TableScan in_inner_nn -> [in_inner_nn.v] [IndexScan By in_inner_nn_v_index => Probe ? => (Sort Option: OrderBy: (in_inner_nn.v Asc Nulls Last) ignore_prefix_len: 0)]
+
+query T
+explain select id from in_outer where a not in (select v from in_inner_nn where in_inner_nn.v = in_outer.a);
+----
+Projection [in_outer.id] [Project => (Sort Option: Follow)] Filter !_temp_table_1_.true, Is Having: false [Filter => (Sort Option: Follow)] MarkAnyApply TableScan in_outer -> [in_outer.id, in_outer.a] [SeqScan => (Sort Option: None)] Projection [in_inner_nn.v] [Project => (Sort Option: Follow)] TableScan in_inner_nn -> [in_inner_nn.v] [IndexScan By in_inner_nn_v_index => Probe ? => (Sort Option: OrderBy: (in_inner_nn.v Asc Nulls Last) ignore_prefix_len: 0)]
+
+query I rowsort
+select id from in_outer where a in (select v from in_inner where in_inner.v = in_outer.a) order by id;
+----
+2
+
+query I rowsort
+select id from in_outer where a not in (select v from in_inner where in_inner.v = in_outer.a) order by id;
+----
+0
+1
+3
+
+query I rowsort
+select id from in_outer where a in (select v from in_inner_nn where in_inner_nn.v = in_outer.a) order by id;
+----
+2
+
+query I rowsort
+select id from in_outer where a not in (select v from in_inner_nn where in_inner_nn.v = in_outer.a) order by id;
+----
+0
+1
+3
+
+# Correlated IN/NOT IN with an additional correlated predicate should still
+# retain the parameterized probe and the projected predicate column.
+statement ok
+create table in_outer_flag(id int primary key, a int, b int);
+
+statement ok
+create table in_inner_flag(id int primary key, v int, flag int);
+
+statement ok
+create table in_inner_flag_nn(id int primary key, v int, flag int);
+
+statement ok
+create index in_inner_flag_v_index on in_inner_flag(v);
+
+statement ok
+create index in_inner_flag_nn_v_index on in_inner_flag_nn(v);
+
+statement ok
+insert into in_outer_flag values (0, null, 1), (1, 1, 1), (2, 2, 1), (3, 3, 1);
+
+statement ok
+insert into in_inner_flag values (0, 2, 1), (1, null, 1);
+
+statement ok
+insert into in_inner_flag_nn values (0, 2, 1);
+
+query T
+explain select id from in_outer_flag where a in (select v from in_inner_flag where in_inner_flag.flag = in_outer_flag.b);
+----
+Projection [in_outer_flag.id] [Project => (Sort Option: Follow)] Filter _temp_table_1_.true, Is Having: false [Filter => (Sort Option: Follow)] MarkAnyApply TableScan in_outer_flag -> [in_outer_flag.id, in_outer_flag.a, in_outer_flag.b] [SeqScan => (Sort Option: None)] Projection [in_inner_flag.v, in_inner_flag.flag] [Project => (Sort Option: Follow)] TableScan in_inner_flag -> [in_inner_flag.v, in_inner_flag.flag] [IndexScan By in_inner_flag_v_index => Probe ? => (Sort Option: OrderBy: (in_inner_flag.v Asc Nulls Last) ignore_prefix_len: 0)]
+
+query T
+explain select id from in_outer_flag where a not in (select v from in_inner_flag where in_inner_flag.flag = in_outer_flag.b);
+----
+Projection [in_outer_flag.id] [Project => (Sort Option: Follow)] Filter !_temp_table_1_.true, Is Having: false [Filter => (Sort Option: Follow)] MarkAnyApply TableScan in_outer_flag -> [in_outer_flag.id, in_outer_flag.a, in_outer_flag.b] [SeqScan => (Sort Option: None)] Projection [in_inner_flag.v, in_inner_flag.flag] [Project => (Sort Option: Follow)] TableScan in_inner_flag -> [in_inner_flag.v, in_inner_flag.flag] [IndexScan By in_inner_flag_v_index => Probe ? => (Sort Option: OrderBy: (in_inner_flag.v Asc Nulls Last) ignore_prefix_len: 0)]
+
+query T
+explain select id from in_outer_flag where a in (select v from in_inner_flag_nn where in_inner_flag_nn.flag = in_outer_flag.b);
+----
+Projection [in_outer_flag.id] [Project => (Sort Option: Follow)] Filter _temp_table_1_.true, Is Having: false [Filter => (Sort Option: Follow)] MarkAnyApply TableScan in_outer_flag -> [in_outer_flag.id, in_outer_flag.a, in_outer_flag.b] [SeqScan => (Sort Option: None)] Projection [in_inner_flag_nn.v, in_inner_flag_nn.flag] [Project => (Sort Option: Follow)] TableScan in_inner_flag_nn -> [in_inner_flag_nn.v, in_inner_flag_nn.flag] [IndexScan By in_inner_flag_nn_v_index => Probe ? => (Sort Option: OrderBy: (in_inner_flag_nn.v Asc Nulls Last) ignore_prefix_len: 0)]
+
+query T
+explain select id from in_outer_flag where a not in (select v from in_inner_flag_nn where in_inner_flag_nn.flag = in_outer_flag.b);
+----
+Projection [in_outer_flag.id] [Project => (Sort Option: Follow)] Filter !_temp_table_1_.true, Is Having: false [Filter => (Sort Option: Follow)] MarkAnyApply TableScan in_outer_flag -> [in_outer_flag.id, in_outer_flag.a, in_outer_flag.b] [SeqScan => (Sort Option: None)] Projection [in_inner_flag_nn.v, in_inner_flag_nn.flag] [Project => (Sort Option: Follow)] TableScan in_inner_flag_nn -> [in_inner_flag_nn.v, in_inner_flag_nn.flag] [IndexScan By in_inner_flag_nn_v_index => Probe ? => (Sort Option: OrderBy: (in_inner_flag_nn.v Asc Nulls Last) ignore_prefix_len: 0)]
+
+query I rowsort
+select id from in_outer_flag where a in (select v from in_inner_flag where in_inner_flag.flag = in_outer_flag.b) order by id;
+----
+2
+
+query I rowsort
+select id from in_outer_flag where a not in (select v from in_inner_flag where in_inner_flag.flag = in_outer_flag.b) order by id;
+----
+
+query I rowsort
+select id from in_outer_flag where a in (select v from in_inner_flag_nn where in_inner_flag_nn.flag = in_outer_flag.b) order by id;
+----
+2
+
+query I rowsort
+select id from in_outer_flag where a not in (select v from in_inner_flag_nn where in_inner_flag_nn.flag = in_outer_flag.b) order by id;
+----
+1
+3
+
+# Correlated EXISTS/NOT EXISTS should use a parameterized index probe while
+# retaining non-index correlated predicates.
+statement ok
+create table exists_outer(id int primary key, a int, b int);
+
+statement ok
+create table exists_inner(id int primary key, v int, flag int);
+
+statement ok
+create index exists_inner_v_index on exists_inner(v);
+
+statement ok
+insert into exists_outer values (0, 1, 1), (1, 1, 2), (2, 2, null), (3, 3, 1);
+
+statement ok
+insert into exists_inner values (0, 1, 1), (1, 1, null), (2, 2, 1);
+
+query T
+explain select id from exists_outer where exists (select 1 from exists_inner where exists_inner.v = exists_outer.a and exists_inner.flag = exists_outer.b);
+----
+Projection [exists_outer.id] [Project => (Sort Option: Follow)] Filter _temp_table_0_.true, Is Having: false [Filter => (Sort Option: Follow)] MarkExistsApply TableScan exists_outer -> [exists_outer.id, exists_outer.a, exists_outer.b] [SeqScan => (Sort Option: None)] TableScan exists_inner -> [exists_inner.id, exists_inner.v, exists_inner.flag] [IndexScan By exists_inner_v_index => Probe ? => (Sort Option: OrderBy: (exists_inner.v Asc Nulls Last) ignore_prefix_len: 0)]
+
+query T
+explain select id from exists_outer where not exists (select 1 from exists_inner where exists_inner.v = exists_outer.a and exists_inner.flag = exists_outer.b);
+----
+Projection [exists_outer.id] [Project => (Sort Option: Follow)] Filter !_temp_table_0_.true, Is Having: false [Filter => (Sort Option: Follow)] MarkExistsApply TableScan exists_outer -> [exists_outer.id, exists_outer.a, exists_outer.b] [SeqScan => (Sort Option: None)] TableScan exists_inner -> [exists_inner.id, exists_inner.v, exists_inner.flag] [IndexScan By exists_inner_v_index => Probe ? => (Sort Option: OrderBy: (exists_inner.v Asc Nulls Last) ignore_prefix_len: 0)]
+
+query I rowsort
+select id from exists_outer where exists (select 1 from exists_inner where exists_inner.v = exists_outer.a and exists_inner.flag = exists_outer.b) order by id;
+----
+0
+
+query I rowsort
+select id from exists_outer where not exists (select 1 from exists_inner where exists_inner.v = exists_outer.a and exists_inner.flag = exists_outer.b) order by id;
+----
+1
+2
+3

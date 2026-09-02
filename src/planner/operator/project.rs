@@ -12,23 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::expression::ScalarExpression;
-use crate::iter_ext::Itertools;
+use crate::planner::{fmt_explain_list, Explain, ExprRef, PlanArena};
 use kite_sql_serde_macros::ReferenceSerialization;
-use std::fmt;
-use std::fmt::Formatter;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct ProjectOperator {
-    pub exprs: Vec<ScalarExpression>,
+    pub exprs: Vec<ExprRef>,
 }
 
-impl fmt::Display for ProjectOperator {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let exprs = self.exprs.iter().map(|expr| format!("{expr}")).join(", ");
-
-        write!(f, "Projection [{exprs}]")?;
-
-        Ok(())
+impl Explain for ProjectOperator {
+    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Projection [")?;
+        fmt_explain_list(&self.exprs, ", ", arena, f)?;
+        f.write_str("]")
     }
 }

@@ -18,7 +18,7 @@ use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::operator::sort::SortField;
-use crate::planner::LogicalPlan;
+use crate::planner::{ExprRef, LogicalPlan, PlanArena};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
 
@@ -26,7 +26,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
     pub fn bind_distinct(
         &mut self,
         children: LogicalPlan,
-        select_list: Vec<ScalarExpression>,
+        select_list: Vec<ExprRef>,
     ) -> Result<LogicalPlan, DatabaseError> {
         self.context.step(QueryBindStep::Distinct);
 
@@ -41,82 +41,83 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
 
     pub fn bind_distinct_output_exprs<'c>(
         &mut self,
-        select_list: &[ScalarExpression],
-        exprs: impl IntoIterator<Item = &'c mut ScalarExpression>,
+        select_list: &[ExprRef],
+        exprs: impl IntoIterator<Item = &'c mut ExprRef>,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<(), DatabaseError> {
-        let mut binder = DistinctOutputBinder::new(select_list, arena);
+        let mut binder = DistinctOutputBinder::new(select_list);
         for expr in exprs {
-            binder.visit(expr)?;
+            binder.visit(expr, arena)?;
         }
         Ok(())
     }
 
     pub fn bind_distinct_orderby_exprs(
         &mut self,
-        select_list: &[ScalarExpression],
+        select_list: &[ExprRef],
         orderby: &mut [SortField],
         arena: &mut crate::planner::PlanArena,
     ) -> Result<(), DatabaseError> {
-        let mut binder = DistinctOutputBinder::new(select_list, arena);
+        let mut binder = DistinctOutputBinder::new(select_list);
 
         for field in orderby {
-            field.expr = binder.output_ref(&field.expr).ok_or_else(|| {
+            let output = binder.output_ref(field.expr, arena).ok_or_else(|| {
                 DatabaseError::InvalidValue(format!(
                     "for SELECT DISTINCT, ORDER BY expressions must appear in select list: '{}'",
-                    field.expr
+                    field.expr.output_name(arena)
                 ))
             })?;
+            field.expr = arena.alloc_expression(output);
         }
 
         Ok(())
     }
 }
 
-struct DistinctOutputBinder<'a, 'p> {
-    select_list: &'a [ScalarExpression],
-    arena: &'a mut crate::planner::PlanArena<'p>,
+struct DistinctOutputBinder<'a> {
+    select_list: &'a [ExprRef],
 }
 
-impl<'a, 'p> DistinctOutputBinder<'a, 'p> {
-    fn new(
-        select_list: &'a [ScalarExpression],
-        arena: &'a mut crate::planner::PlanArena<'p>,
-    ) -> Self {
-        Self { select_list, arena }
+impl<'a> DistinctOutputBinder<'a> {
+    fn new(select_list: &'a [ExprRef]) -> Self {
+        Self { select_list }
     }
 
-    fn output_ref(&mut self, expr: &ScalarExpression) -> Option<ScalarExpression> {
+    fn output_ref(&mut self, expr: ExprRef, arena: &mut PlanArena<'_>) -> Option<ScalarExpression> {
         self.select_list
             .iter()
             .position(|candidate| {
-                candidate.eq_ignore_colref_pos(expr, self.arena)
+                candidate.eq_ignore_colref_pos(expr, arena)
                     || candidate
-                        .unpack_alias_ref()
-                        .eq_ignore_colref_pos(expr.unpack_alias_ref(), self.arena)
+                        .unpack_alias(arena)
+                        .eq_ignore_colref_pos(expr.unpack_alias(arena), arena)
             })
             .map(|position| {
-                let output_expr = &self.select_list[position];
-                ScalarExpression::column_expr(output_expr.output_column_ref(self.arena), position)
+                let output_expr = self.select_list[position];
+                ScalarExpression::column_expr(output_expr.output_column_ref(arena), position)
             })
     }
 }
 
-impl<'a> ExprVisitorMut<'a> for DistinctOutputBinder<'_, '_> {
-    fn visit(&mut self, expr: &'a mut ScalarExpression) -> Result<(), DatabaseError> {
+impl ExprVisitorMut for DistinctOutputBinder<'_> {
+    fn visit(
+        &mut self,
+        expr: &mut ExprRef,
+        arena: &mut PlanArena<'_>,
+    ) -> Result<(), DatabaseError> {
         if let ScalarExpression::Alias {
-            expr: inner_expr,
             alias: crate::expression::AliasType::Name(_),
-        } = expr
+            ..
+        } = arena.expression(*expr)
         {
-            return self.visit(inner_expr);
+            return walk_mut_expr(self, expr, arena);
         }
 
-        if let Some(output_ref) = self.output_ref(expr) {
-            *expr = output_ref;
+        if let Some(output_ref) = self.output_ref(*expr, arena) {
+            *expr = arena.alloc_expression(output_ref);
             return Ok(());
         }
-        walk_mut_expr(self, expr)
+        walk_mut_expr(self, expr, arena)
     }
 }
 
@@ -145,37 +146,38 @@ mod tests {
         let left_column = test_column(&mut arena, "c1", LogicalType::Integer);
         let right_column = test_column(&mut arena, "c2", LogicalType::Integer);
 
-        let left_expr = ScalarExpression::column_expr(left_column, 0);
-        let right_expr = ScalarExpression::column_expr(right_column, 1);
-        let second_output = right_expr.clone();
-        let select_output = ScalarExpression::Alias {
-            expr: Box::new(left_expr.clone()),
+        let left_expr = arena.alloc_expression(ScalarExpression::column_expr(left_column, 0));
+        let right_expr = arena.alloc_expression(ScalarExpression::column_expr(right_column, 1));
+        let second_output = right_expr;
+        let select_output = arena.alloc_expression(ScalarExpression::Alias {
+            expr: left_expr,
             alias: AliasType::Name("v".to_string()),
-        };
-        let select_list = [select_output.clone(), right_expr.clone()];
+        });
+        let select_list = [select_output, right_expr];
 
-        let mut order_by_alias = ScalarExpression::Alias {
-            expr: Box::new(left_expr),
+        let mut order_by_alias = arena.alloc_expression(ScalarExpression::Alias {
+            expr: left_expr,
             alias: AliasType::Name("v".to_string()),
-        };
+        });
         let mut order_by_second = right_expr;
         {
-            let mut binder = DistinctOutputBinder::new(&select_list, &mut arena);
-            binder.visit(&mut order_by_alias)?;
-            binder.visit(&mut order_by_second)?;
+            let mut binder = DistinctOutputBinder::new(&select_list);
+            binder.visit(&mut order_by_alias, &mut arena)?;
+            binder.visit(&mut order_by_second, &mut arena)?;
         }
-        let expected_alias = ScalarExpression::Alias {
-            expr: Box::new(ScalarExpression::column_expr(
-                select_output.output_column_ref(&mut arena),
-                0,
-            )),
+        let select_column = select_output.output_column_ref(&mut arena);
+        let expected_inner =
+            arena.alloc_expression(ScalarExpression::column_expr(select_column, 0));
+        let expected_alias = arena.alloc_expression(ScalarExpression::Alias {
+            expr: expected_inner,
             alias: AliasType::Name("v".to_string()),
-        };
-        assert!(order_by_alias.eq_ignore_colref_pos(&expected_alias, &arena));
+        });
+        assert!(order_by_alias.eq_ignore_colref_pos(expected_alias, &arena));
 
+        let second_column = second_output.output_column_ref(&mut arena);
         let expected_second =
-            ScalarExpression::column_expr(second_output.output_column_ref(&mut arena), 1);
-        assert!(order_by_second.eq_ignore_colref_pos(&expected_second, &arena));
+            arena.alloc_expression(ScalarExpression::column_expr(second_column, 1));
+        assert!(order_by_second.eq_ignore_colref_pos(expected_second, &arena));
 
         Ok(())
     }
@@ -185,25 +187,25 @@ mod tests {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let column = test_column(&mut arena, "c1", LogicalType::Integer);
-        let expr = ScalarExpression::column_expr(column, 0);
-        let select_output = ScalarExpression::Alias {
-            expr: Box::new(expr.clone()),
+        let expr = arena.alloc_expression(ScalarExpression::column_expr(column, 0));
+        let select_output = arena.alloc_expression(ScalarExpression::Alias {
+            expr,
             alias: AliasType::Name("v".to_string()),
-        };
+        });
 
-        let mut target = ScalarExpression::Alias {
-            expr: Box::new(ScalarExpression::Constant(1_i32.into())),
-            alias: AliasType::Expr(Box::new(expr)),
-        };
+        let constant = arena.alloc_expression(ScalarExpression::Constant(1_i32.into()));
+        let mut target = arena.alloc_expression(ScalarExpression::Alias {
+            expr: constant,
+            alias: AliasType::Expr(expr),
+        });
 
         {
-            let mut binder =
-                DistinctOutputBinder::new(std::slice::from_ref(&select_output), &mut arena);
-            binder.visit(&mut target)?;
+            let mut binder = DistinctOutputBinder::new(std::slice::from_ref(&select_output));
+            binder.visit(&mut target, &mut arena)?;
         }
-        let expected =
-            ScalarExpression::column_expr(select_output.output_column_ref(&mut arena), 0);
-        assert!(target.eq_ignore_colref_pos(&expected, &arena));
+        let output_column = select_output.output_column_ref(&mut arena);
+        let expected = arena.alloc_expression(ScalarExpression::column_expr(output_column, 0));
+        assert!(target.eq_ignore_colref_pos(expected, &arena));
 
         Ok(())
     }

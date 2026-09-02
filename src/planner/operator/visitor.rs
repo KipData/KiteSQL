@@ -16,6 +16,7 @@ use super::alter_table::change_column::DefaultChange;
 use super::*;
 use crate::errors::DatabaseError;
 use crate::expression::visitor::ExprVisitor;
+use crate::planner::MetaArena;
 
 pub trait OperatorVisitor<'a>: Sized {
     fn visit_operator(&mut self, operator: &'a Operator) -> Result<(), DatabaseError> {
@@ -190,46 +191,47 @@ pub trait OperatorVisitor<'a>: Sized {
     }
 }
 
-pub struct OperatorExprVisitor<'a, V> {
+pub struct OperatorExprVisitor<'a, V, A> {
     visitor: &'a mut V,
+    arena: &'a A,
 }
 
-impl<'a, V> OperatorExprVisitor<'a, V> {
-    pub fn new(visitor: &'a mut V) -> Self {
-        Self { visitor }
+impl<'a, V, A> OperatorExprVisitor<'a, V, A> {
+    pub fn new(visitor: &'a mut V, arena: &'a A) -> Self {
+        Self { visitor, arena }
     }
 }
 
-impl<'a, V: ExprVisitor<'a>> OperatorVisitor<'a> for OperatorExprVisitor<'_, V> {
+impl<'a, V: ExprVisitor<A>, A: MetaArena> OperatorVisitor<'a> for OperatorExprVisitor<'_, V, A> {
     fn visit_aggregate(&mut self, op: &'a AggregateOperator) -> Result<(), DatabaseError> {
         for expr in op.agg_calls.iter().chain(&op.groupby_exprs) {
-            ExprVisitor::visit(self.visitor, expr)?;
+            ExprVisitor::visit(self.visitor, *expr, self.arena)?;
         }
         Ok(())
     }
 
     fn visit_mark_apply(&mut self, op: &'a MarkApplyOperator) -> Result<(), DatabaseError> {
         for expr in &op.predicates {
-            ExprVisitor::visit(self.visitor, expr)?;
+            ExprVisitor::visit(self.visitor, *expr, self.arena)?;
         }
         if let Some(expr) = &op.parameterized_probe {
-            ExprVisitor::visit(self.visitor, expr)?;
+            ExprVisitor::visit(self.visitor, *expr, self.arena)?;
         }
         Ok(())
     }
 
     fn visit_filter(&mut self, op: &'a FilterOperator) -> Result<(), DatabaseError> {
-        ExprVisitor::visit(self.visitor, &op.predicate)
+        ExprVisitor::visit(self.visitor, op.predicate, self.arena)
     }
 
     fn visit_join(&mut self, op: &'a JoinOperator) -> Result<(), DatabaseError> {
         if let JoinCondition::On { on, filter } = &op.on {
             for (left_expr, right_expr) in on {
-                ExprVisitor::visit(self.visitor, left_expr)?;
-                ExprVisitor::visit(self.visitor, right_expr)?;
+                ExprVisitor::visit(self.visitor, *left_expr, self.arena)?;
+                ExprVisitor::visit(self.visitor, *right_expr, self.arena)?;
             }
             if let Some(expr) = filter {
-                ExprVisitor::visit(self.visitor, expr)?;
+                ExprVisitor::visit(self.visitor, *expr, self.arena)?;
             }
         }
         Ok(())
@@ -237,7 +239,7 @@ impl<'a, V: ExprVisitor<'a>> OperatorVisitor<'a> for OperatorExprVisitor<'_, V> 
 
     fn visit_project(&mut self, op: &'a ProjectOperator) -> Result<(), DatabaseError> {
         for expr in &op.exprs {
-            ExprVisitor::visit(self.visitor, expr)?;
+            ExprVisitor::visit(self.visitor, *expr, self.arena)?;
         }
         Ok(())
     }
@@ -246,11 +248,11 @@ impl<'a, V: ExprVisitor<'a>> OperatorVisitor<'a> for OperatorExprVisitor<'_, V> 
         for index_info in &op.index_infos {
             if let SortOption::OrderBy { fields, .. } = &index_info.sort_option {
                 for field in fields {
-                    ExprVisitor::visit(self.visitor, &field.expr)?;
+                    ExprVisitor::visit(self.visitor, field.expr, self.arena)?;
                 }
             }
             if let Some(expr) = &index_info.residual_predicate {
-                ExprVisitor::visit(self.visitor, expr)?;
+                ExprVisitor::visit(self.visitor, *expr, self.arena)?;
             }
         }
         Ok(())
@@ -258,14 +260,14 @@ impl<'a, V: ExprVisitor<'a>> OperatorVisitor<'a> for OperatorExprVisitor<'_, V> 
 
     fn visit_function_scan(&mut self, op: &'a FunctionScanOperator) -> Result<(), DatabaseError> {
         for expr in &op.table_function.args {
-            ExprVisitor::visit(self.visitor, expr)?;
+            ExprVisitor::visit(self.visitor, *expr, self.arena)?;
         }
         Ok(())
     }
 
     fn visit_sort(&mut self, op: &'a SortOperator) -> Result<(), DatabaseError> {
         for field in &op.sort_fields {
-            ExprVisitor::visit(self.visitor, &field.expr)?;
+            ExprVisitor::visit(self.visitor, field.expr, self.arena)?;
         }
         Ok(())
     }
@@ -277,35 +279,35 @@ impl<'a, V: ExprVisitor<'a>> OperatorVisitor<'a> for OperatorExprVisitor<'_, V> 
             .map(|field| &field.expr)
             .chain(op.functions.iter().flat_map(|function| &function.args))
         {
-            ExprVisitor::visit(self.visitor, expr)?;
+            ExprVisitor::visit(self.visitor, *expr, self.arena)?;
         }
         Ok(())
     }
 
     fn visit_top_k(&mut self, op: &'a TopKOperator) -> Result<(), DatabaseError> {
         for field in &op.sort_fields {
-            ExprVisitor::visit(self.visitor, &field.expr)?;
+            ExprVisitor::visit(self.visitor, field.expr, self.arena)?;
         }
         Ok(())
     }
 
     fn visit_update(&mut self, op: &'a UpdateOperator) -> Result<(), DatabaseError> {
         for (_, expr) in &op.value_exprs {
-            ExprVisitor::visit(self.visitor, expr)?;
+            ExprVisitor::visit(self.visitor, *expr, self.arena)?;
         }
         Ok(())
     }
 
     fn visit_add_column(&mut self, op: &'a AddColumnOperator) -> Result<(), DatabaseError> {
         if let Some(expr) = &op.column.desc().default {
-            ExprVisitor::visit(self.visitor, expr)?;
+            ExprVisitor::visit(self.visitor, *expr, self.arena)?;
         }
         Ok(())
     }
 
     fn visit_change_column(&mut self, op: &'a ChangeColumnOperator) -> Result<(), DatabaseError> {
         if let DefaultChange::Set(expr) = &op.default_change {
-            ExprVisitor::visit(self.visitor, expr)?;
+            ExprVisitor::visit(self.visitor, *expr, self.arena)?;
         }
         Ok(())
     }
@@ -313,7 +315,7 @@ impl<'a, V: ExprVisitor<'a>> OperatorVisitor<'a> for OperatorExprVisitor<'_, V> 
     fn visit_create_table(&mut self, op: &'a CreateTableOperator) -> Result<(), DatabaseError> {
         for column in &op.columns {
             if let Some(expr) = &column.desc().default {
-                ExprVisitor::visit(self.visitor, expr)?;
+                ExprVisitor::visit(self.visitor, *expr, self.arena)?;
             }
         }
         Ok(())
@@ -387,20 +389,21 @@ pub(crate) mod tests {
     use crate::planner::operator::join::{JoinOperator, JoinType};
     use crate::planner::operator::mark_apply::MarkApplyOperator;
     use crate::planner::operator::set_membership::SetMembershipKind;
+    use crate::planner::ExprRef;
     use crate::planner::{Childrens, LogicalPlan};
     use crate::types::index::{IndexInfo, IndexMetaRef, IndexType};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
 
-    fn index_info() -> IndexInfo {
+    fn index_info(sort_expr: ExprRef, residual_predicate: ExprRef) -> IndexInfo {
         IndexInfo {
             meta: IndexMetaRef::new(0),
             sort_option: SortOption::OrderBy {
-                fields: vec![SortField::from(ScalarExpression::from(10_i32))],
+                fields: vec![SortField::from(sort_expr)],
                 ignore_prefix_len: 0,
             },
             lookup: None,
-            residual_predicate: Some(11_i32.into()),
+            residual_predicate: Some(residual_predicate),
             covered_deserializers: None,
             cover_mapping: None,
             sort_elimination_hint: None,
@@ -408,17 +411,23 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn all_operators() -> Result<Vec<Operator>, DatabaseError> {
+    pub(crate) fn all_operators(
+        arena: &mut crate::planner::PlanArena,
+    ) -> Result<Vec<Operator>, DatabaseError> {
+        let expressions = (0_i32..=18)
+            .map(|value| arena.alloc_expression(ScalarExpression::from(value)))
+            .collect::<Vec<_>>();
+        let expr = |value: usize| expressions[value];
         let column_ref = ColumnRef::new(0);
         let column = ColumnCatalog::new(
             "value".to_string(),
             false,
-            ColumnDesc::new(LogicalType::Integer, None, false, Some(12_i32.into()))?,
+            ColumnDesc::new(LogicalType::Integer, None, false, Some(expr(12)))?,
         );
-        let mut mark_apply = MarkApplyOperator::new_exists(column_ref, vec![3_i32.into()]);
-        mark_apply.set_parameterized_probe(Some(4_i32.into()));
+        let mut mark_apply = MarkApplyOperator::new_exists(column_ref, vec![expr(3)]);
+        mark_apply.set_parameterized_probe(Some(expr(4)));
         let table_function = TableFunction {
-            args: vec![8_i32.into()],
+            args: vec![expr(8)],
             catalog: TableFunctionCatalog {
                 schema: Vec::new(),
                 inner: ArcTableFunctionImpl(Numbers::new()),
@@ -427,47 +436,47 @@ pub(crate) mod tests {
         let operators = vec![
             Operator::Dummy,
             Operator::Aggregate(AggregateOperator {
-                groupby_exprs: vec![1_i32.into()],
-                agg_calls: vec![2_i32.into()],
+                groupby_exprs: vec![expr(1)],
+                agg_calls: vec![expr(2)],
                 is_distinct: false,
                 force_spill: false,
             }),
             Operator::ScalarApply(ScalarApplyOperator),
             Operator::MarkApply(mark_apply),
             Operator::Filter(FilterOperator {
-                predicate: 5_i32.into(),
+                predicate: expr(5),
                 is_optimized: false,
                 having: false,
             }),
             Operator::Join(JoinOperator {
                 on: JoinCondition::On {
-                    on: vec![(6_i32.into(), 7_i32.into())],
-                    filter: Some(8_i32.into()),
+                    on: vec![(expr(6), expr(7))],
+                    filter: Some(expr(8)),
                 },
                 join_type: JoinType::Inner,
                 force_nested_loop: false,
             }),
             Operator::Project(ProjectOperator {
-                exprs: vec![9_i32.into()],
+                exprs: vec![expr(9)],
             }),
             Operator::ScalarSubquery(ScalarSubqueryOperator),
             Operator::TableScan(TableScanOperator {
                 table_name: "t1".into(),
                 columns: vec![column_ref],
                 limit: (None, None),
-                index_infos: vec![index_info()],
+                index_infos: vec![index_info(expr(10), expr(11))],
                 with_pk: false,
             }),
             Operator::FunctionScan(FunctionScanOperator { table_function }),
             Operator::Sort(SortOperator {
-                sort_fields: vec![SortField::from(ScalarExpression::from(13_i32))],
+                sort_fields: vec![SortField::from(expr(13))],
             }),
             Operator::Limit(LimitOperator {
                 offset: None,
                 limit: Some(1),
             }),
             Operator::TopK(TopKOperator {
-                sort_fields: vec![SortField::from(ScalarExpression::from(14_i32))],
+                sort_fields: vec![SortField::from(expr(14))],
                 limit: 1,
                 offset: None,
             }),
@@ -476,10 +485,7 @@ pub(crate) mod tests {
                 schema_ref: vec![column_ref],
             }),
             Operator::Window(window::WindowOperator {
-                sort_fields: vec![
-                    SortField::from(ScalarExpression::from(17_i32)),
-                    SortField::from(ScalarExpression::from(18_i32)),
-                ],
+                sort_fields: vec![SortField::from(expr(17)), SortField::from(expr(18))],
                 partition_by_len: 1,
                 functions: vec![WindowFunction {
                     kind: WindowFunctionKind::RowNumber,
@@ -510,7 +516,7 @@ pub(crate) mod tests {
             }),
             Operator::Update(UpdateOperator {
                 table_name: "t1".into(),
-                value_exprs: vec![(column_ref, 15_i32.into())],
+                value_exprs: vec![(column_ref, expr(15))],
             }),
             Operator::Delete(DeleteOperator {
                 table_name: "t1".into(),
@@ -531,7 +537,7 @@ pub(crate) mod tests {
                 old_column_name: "value".to_string(),
                 new_column_name: "value".to_string(),
                 data_type: LogicalType::Integer,
-                default_change: DefaultChange::Set(16_i32.into()),
+                default_change: DefaultChange::Set(expr(16)),
                 not_null_change: NotNullChange::NoChange,
             }),
             Operator::DropColumn(DropColumnOperator {
@@ -612,10 +618,14 @@ pub(crate) mod tests {
     #[derive(Default)]
     struct ExpressionCounter(usize);
 
-    impl<'a> ExprVisitor<'a> for ExpressionCounter {
-        fn visit(&mut self, expr: &'a ScalarExpression) -> Result<(), DatabaseError> {
+    impl ExprVisitor<crate::planner::PlanArena<'_>> for ExpressionCounter {
+        fn visit(
+            &mut self,
+            expr: ExprRef,
+            arena: &crate::planner::PlanArena<'_>,
+        ) -> Result<(), DatabaseError> {
             self.0 += 1;
-            walk_expr(self, expr)
+            walk_expr(self, expr, arena)
         }
     }
 
@@ -624,13 +634,15 @@ pub(crate) mod tests {
         struct NoopVisitor;
         impl OperatorVisitor<'_> for NoopVisitor {}
 
-        let operators = all_operators()?;
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = crate::planner::PlanArena::new(&table_arena);
+        let operators = all_operators(&mut arena)?;
         for operator in &operators {
             NoopVisitor.visit_operator(operator)?;
         }
 
         let mut counter = ExpressionCounter::default();
-        let mut visitor = OperatorExprVisitor::new(&mut counter);
+        let mut visitor = OperatorExprVisitor::new(&mut counter, &arena);
         for operator in &operators {
             visitor.visit_operator(operator)?;
         }

@@ -272,11 +272,11 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                 let data_type = #data_type;
                 let default = #default_tokens
                     .map(|value| {
-                        ::kite_sql::expression::ScalarExpression::Constant(
+                        arena.alloc_expression(::kite_sql::expression::ScalarExpression::Constant(
                             value
                                 .cast(&data_type)
                                 .expect("failed to cast ORM default value to column type"),
-                        )
+                        ))
                     });
                 let desc = ::kite_sql::catalog::column::ColumnDesc::new(
                     data_type,
@@ -449,13 +449,10 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                 ]
             }
 
-            fn columns() -> &'static [::kite_sql::catalog::column::ColumnCatalog] {
-                static ORM_COLUMNS: ::std::sync::LazyLock<::std::vec::Vec<::kite_sql::catalog::column::ColumnCatalog>> = ::std::sync::LazyLock::new(|| {
-                    vec![
-                        #(#orm_columns),*
-                    ]
-                });
-                ORM_COLUMNS.as_slice()
+            fn columns(arena: &mut ::kite_sql::planner::TableArena) -> ::std::vec::Vec<::kite_sql::catalog::column::ColumnCatalog> {
+                vec![
+                    #(#orm_columns),*
+                ]
             }
 
             fn indexes() -> &'static [(&'static str, &'static [&'static str], bool)] {

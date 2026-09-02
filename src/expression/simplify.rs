@@ -14,14 +14,13 @@
 
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
-use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut};
-use crate::expression::{BinaryOperator, ScalarExpression, UnaryOperator};
-use crate::planner::PlanArena;
+use crate::expression::visitor_mut::ExprVisitorMut;
+use crate::expression::{BinaryOperator, ScalarExpression, TypeCast, UnaryOperator};
+use crate::planner::{ExprRef, PlanArena};
 use crate::types::evaluator::{binary_create, unary_create};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use std::borrow::Cow;
-use std::mem;
 
 #[derive(Debug)]
 enum Replace {
@@ -31,8 +30,8 @@ enum Replace {
 
 #[derive(Debug)]
 struct ReplaceBinary {
-    column_expr: ScalarExpression,
-    val_expr: ScalarExpression,
+    column_expr: ExprRef,
+    val_expr: ExprRef,
     op: BinaryOperator,
     ty: LogicalType,
     is_column_left: bool,
@@ -40,23 +39,25 @@ struct ReplaceBinary {
 
 #[derive(Debug)]
 struct ReplaceUnary {
-    child_expr: ScalarExpression,
+    child_expr: ExprRef,
     op: UnaryOperator,
     ty: LogicalType,
 }
 
-pub struct ConstantCalculator<'a, 'p> {
-    arena: &'a PlanArena<'p>,
-}
+pub struct ConstantCalculator;
 
-impl<'a, 'p> ConstantCalculator<'a, 'p> {
-    pub fn new(arena: &'a PlanArena<'p>) -> Self {
-        Self { arena }
+impl ConstantCalculator {
+    pub fn new(_arena: &PlanArena<'_>) -> Self {
+        Self
     }
 }
 
-impl ExprVisitorMut<'_> for ConstantCalculator<'_, '_> {
-    fn visit(&mut self, expr: &'_ mut ScalarExpression) -> Result<(), DatabaseError> {
+impl ExprVisitorMut for ConstantCalculator {
+    fn visit_expression(
+        &mut self,
+        expr: &mut ScalarExpression,
+        arena: &mut PlanArena<'_>,
+    ) -> Result<bool, DatabaseError> {
         match expr {
             ScalarExpression::Unary {
                 op,
@@ -64,15 +65,15 @@ impl ExprVisitorMut<'_> for ConstantCalculator<'_, '_> {
                 evaluator,
                 ty,
             } => {
-                self.visit(arg_expr)?;
+                self.visit(arg_expr, arena)?;
 
-                if let ScalarExpression::Constant(unary_val) = arg_expr.as_ref() {
+                if let ScalarExpression::Constant(unary_val) = arena.expression(*arg_expr) {
                     let value = if let Some(evaluator) = evaluator {
                         evaluator.unary_eval(unary_val)
                     } else {
                         unary_create(Cow::Borrowed(ty), *op)?.unary_eval(unary_val)
                     };
-                    let _ = mem::replace(expr, ScalarExpression::Constant(value));
+                    *expr = ScalarExpression::Constant(value);
                 }
             }
             ScalarExpression::Binary {
@@ -81,39 +82,40 @@ impl ExprVisitorMut<'_> for ConstantCalculator<'_, '_> {
                 right_expr,
                 ..
             } => {
-                let left_ty = left_expr.return_type(self.arena);
-                let right_ty = right_expr.return_type(self.arena);
-                let ty = LogicalType::max_logical_type(&left_ty, &right_ty)?.into_owned();
-                self.visit(left_expr)?;
-                self.visit(right_expr)?;
+                let ty = LogicalType::max_logical_type(
+                    &left_expr.return_type(arena),
+                    &right_expr.return_type(arena),
+                )?
+                .into_owned();
+                self.visit(left_expr, arena)?;
+                self.visit(right_expr, arena)?;
 
                 if let (
                     ScalarExpression::Constant(left_val),
                     ScalarExpression::Constant(right_val),
-                ) = (left_expr.as_mut(), right_expr.as_mut())
+                ) = (arena.expression(*left_expr), arena.expression(*right_expr))
                 {
                     let evaluator = binary_create(Cow::Borrowed(&ty), *op)?;
-
-                    *left_val = mem::replace(left_val, DataValue::Null).cast(&ty)?;
-                    *right_val = mem::replace(right_val, DataValue::Null).cast(&ty)?;
-                    let value = evaluator.binary_eval(left_val, right_val)?;
-                    let _ = mem::replace(expr, ScalarExpression::Constant(value));
+                    let left_val = left_val.clone().cast(&ty)?;
+                    let right_val = right_val.clone().cast(&ty)?;
+                    let value = evaluator.binary_eval(&left_val, &right_val)?;
+                    *expr = ScalarExpression::Constant(value);
                 }
             }
             ScalarExpression::TypeCast {
                 expr: arg_expr, ty, ..
             } => {
-                self.visit(arg_expr)?;
+                self.visit(arg_expr, arena)?;
 
-                if let ScalarExpression::Constant(value) = arg_expr.as_mut() {
-                    let casted = mem::replace(value, DataValue::Null).cast(ty)?;
-                    let _ = mem::replace(expr, ScalarExpression::Constant(casted));
+                if let ScalarExpression::Constant(value) = arena.expression(*arg_expr) {
+                    let casted = value.clone().cast(ty)?;
+                    *expr = ScalarExpression::Constant(casted);
                 }
             }
-            _ => walk_mut_expr(self, expr)?,
+            _ => return Ok(true),
         }
 
-        Ok(())
+        Ok(false)
     }
 }
 
@@ -122,8 +124,12 @@ pub struct Simplify {
     replaces: Vec<Replace>,
 }
 
-impl ExprVisitorMut<'_> for Simplify {
-    fn visit(&mut self, expr: &'_ mut ScalarExpression) -> Result<(), DatabaseError> {
+impl ExprVisitorMut for Simplify {
+    fn visit_expression(
+        &mut self,
+        expr: &mut ScalarExpression,
+        arena: &mut PlanArena<'_>,
+    ) -> Result<bool, DatabaseError> {
         match expr {
             ScalarExpression::Unary {
                 op,
@@ -133,8 +139,8 @@ impl ExprVisitorMut<'_> for Simplify {
             } => {
                 let op = *op;
                 let ty = ty.clone();
-                let child_expr = arg_expr.as_ref().clone();
-                let value = if let Some(value) = arg_expr.unpack_val() {
+                let child_expr = *arg_expr;
+                let value = if let Some(value) = arg_expr.unpack_val(arena) {
                     Some(if let Some(evaluator) = evaluator {
                         evaluator.unary_eval(&value)
                     } else {
@@ -145,11 +151,11 @@ impl ExprVisitorMut<'_> for Simplify {
                 };
 
                 if let Some(value) = value {
-                    let _ = mem::replace(expr, ScalarExpression::Constant(value));
+                    *expr = ScalarExpression::Constant(value);
                 } else if matches!(op, UnaryOperator::Not) {
-                    if let Some(new_expr) = Self::take_negated_range_comparison(arg_expr) {
-                        let _ = mem::replace(expr, new_expr);
-                        self.visit(expr)?;
+                    if let Some(new_expr) = Self::take_negated_range_comparison(*arg_expr, arena) {
+                        *expr = new_expr;
+                        return self.visit_expression(expr, arena);
                     } else {
                         self.replaces
                             .push(Replace::Unary(ReplaceUnary { child_expr, op, ty }));
@@ -166,28 +172,28 @@ impl ExprVisitorMut<'_> for Simplify {
                 ty,
                 ..
             } => {
-                self.fix_expr(left_expr, right_expr, op)?;
+                self.fix_expr(left_expr, right_expr, op, arena)?;
 
                 // `(c1 - 1) and (c1 + 2)` cannot fix!
-                self.fix_expr(right_expr, left_expr, op)?;
+                self.fix_expr(right_expr, left_expr, op, arena)?;
 
                 if let Some(new_expr) =
-                    Self::take_bool_normalized_range_comparison(*op, left_expr, right_expr)
+                    Self::take_bool_normalized_range_comparison(*op, *left_expr, *right_expr, arena)
                 {
-                    let _ = mem::replace(expr, new_expr);
-                    self.visit(expr)?;
-                    return Ok(());
+                    *expr = new_expr;
+                    return self.visit_expression(expr, arena);
                 }
 
                 if Self::is_arithmetic(op) {
                     match (
-                        left_expr.unpack_bound_col(false),
-                        right_expr.unpack_bound_col(false),
+                        left_expr.unpack_bound_col(arena, false),
+                        right_expr.unpack_bound_col(arena, false),
                     ) {
                         (Some((col, position)), None) => {
                             self.replaces.push(Replace::Binary(ReplaceBinary {
-                                column_expr: ScalarExpression::column_expr(col, position),
-                                val_expr: mem::replace(right_expr, ScalarExpression::Empty),
+                                column_expr: arena
+                                    .alloc_expression(ScalarExpression::column_expr(col, position)),
+                                val_expr: *right_expr,
                                 op: *op,
                                 ty: ty.clone(),
                                 is_column_left: true,
@@ -195,8 +201,9 @@ impl ExprVisitorMut<'_> for Simplify {
                         }
                         (None, Some((col, position))) => {
                             self.replaces.push(Replace::Binary(ReplaceBinary {
-                                column_expr: ScalarExpression::column_expr(col, position),
-                                val_expr: mem::replace(left_expr, ScalarExpression::Empty),
+                                column_expr: arena
+                                    .alloc_expression(ScalarExpression::column_expr(col, position)),
+                                val_expr: *left_expr,
                                 op: *op,
                                 ty: ty.clone(),
                                 is_column_left: false,
@@ -204,17 +211,19 @@ impl ExprVisitorMut<'_> for Simplify {
                         }
                         (None, None) => {
                             if self.replaces.is_empty() {
-                                return Ok(());
+                                return Ok(false);
                             }
 
                             match (
-                                left_expr.unpack_bound_col(true),
-                                right_expr.unpack_bound_col(true),
+                                left_expr.unpack_bound_col(arena, true),
+                                right_expr.unpack_bound_col(arena, true),
                             ) {
                                 (Some((col, position)), None) => {
                                     self.replaces.push(Replace::Binary(ReplaceBinary {
-                                        column_expr: ScalarExpression::column_expr(col, position),
-                                        val_expr: mem::replace(right_expr, ScalarExpression::Empty),
+                                        column_expr: arena.alloc_expression(
+                                            ScalarExpression::column_expr(col, position),
+                                        ),
+                                        val_expr: *right_expr,
                                         op: *op,
                                         ty: ty.clone(),
                                         is_column_left: true,
@@ -222,8 +231,10 @@ impl ExprVisitorMut<'_> for Simplify {
                                 }
                                 (None, Some((col, position))) => {
                                     self.replaces.push(Replace::Binary(ReplaceBinary {
-                                        column_expr: ScalarExpression::column_expr(col, position),
-                                        val_expr: mem::replace(left_expr, ScalarExpression::Empty),
+                                        column_expr: arena.alloc_expression(
+                                            ScalarExpression::column_expr(col, position),
+                                        ),
+                                        val_expr: *left_expr,
                                         op: *op,
                                         ty: ty.clone(),
                                         is_column_left: false,
@@ -236,17 +247,15 @@ impl ExprVisitorMut<'_> for Simplify {
                     }
                 }
             }
-            ScalarExpression::TypeCast { .. } => {
-                if let Some(val) = expr.unpack_val() {
-                    let _ = mem::replace(expr, ScalarExpression::Constant(val));
+            ScalarExpression::TypeCast { expr: arg, ty, .. } => {
+                if let Some(value) = arg.unpack_val(arena).and_then(|value| value.cast(ty).ok()) {
+                    *expr = ScalarExpression::Constant(value);
                 }
             }
-            ScalarExpression::IsNull { .. } => {
-                if let Some(val) = expr.unpack_val() {
-                    let _ = mem::replace(
-                        expr,
-                        ScalarExpression::Constant(DataValue::Boolean(val.is_null())),
-                    );
+            ScalarExpression::IsNull { negated, expr: arg } => {
+                if let Some(value) = arg.unpack_val(arena) {
+                    *expr =
+                        ScalarExpression::Constant(DataValue::Boolean(value.is_null() != *negated));
                 }
             }
             ScalarExpression::In {
@@ -255,7 +264,7 @@ impl ExprVisitorMut<'_> for Simplify {
                 args,
             } => {
                 if args.is_empty() {
-                    return Ok(());
+                    return Ok(false);
                 }
 
                 let (op_1, op_2) = if *negated {
@@ -265,8 +274,8 @@ impl ExprVisitorMut<'_> for Simplify {
                 };
                 let mut new_expr = ScalarExpression::Binary {
                     op: op_1,
-                    left_expr: arg_expr.clone(),
-                    right_expr: Box::new(args.remove(0)),
+                    left_expr: *arg_expr,
+                    right_expr: args.remove(0),
                     evaluator: None,
                     ty: LogicalType::Boolean,
                 };
@@ -274,21 +283,20 @@ impl ExprVisitorMut<'_> for Simplify {
                 for arg in args.drain(..) {
                     new_expr = ScalarExpression::Binary {
                         op: op_2,
-                        left_expr: Box::new(ScalarExpression::Binary {
+                        left_expr: arena.alloc_expression(ScalarExpression::Binary {
                             op: op_1,
-                            left_expr: arg_expr.clone(),
-                            right_expr: Box::new(arg),
+                            left_expr: *arg_expr,
+                            right_expr: arg,
                             evaluator: None,
                             ty: LogicalType::Boolean,
                         }),
-                        right_expr: Box::new(new_expr),
+                        right_expr: arena.alloc_expression(new_expr),
                         evaluator: None,
                         ty: LogicalType::Boolean,
-                    }
+                    };
                 }
-                let _ = mem::replace(expr, new_expr);
-
-                walk_mut_expr(self, expr)?;
+                *expr = new_expr;
+                return Ok(true);
             }
             ScalarExpression::Between {
                 negated,
@@ -305,34 +313,30 @@ impl ExprVisitorMut<'_> for Simplify {
                         BinaryOperator::LtEq,
                     )
                 };
-                let new_expr = ScalarExpression::Binary {
+                *expr = ScalarExpression::Binary {
                     op,
-                    left_expr: Box::new(ScalarExpression::Binary {
+                    left_expr: arena.alloc_expression(ScalarExpression::Binary {
                         op: left_op,
-                        left_expr: arg_expr.clone(),
-                        right_expr: mem::replace(left_expr, Box::new(ScalarExpression::Empty)),
+                        left_expr: *arg_expr,
+                        right_expr: *left_expr,
                         evaluator: None,
                         ty: LogicalType::Boolean,
                     }),
-                    right_expr: Box::new(ScalarExpression::Binary {
+                    right_expr: arena.alloc_expression(ScalarExpression::Binary {
                         op: right_op,
-                        left_expr: mem::replace(arg_expr, Box::new(ScalarExpression::Empty)),
-                        right_expr: mem::replace(right_expr, Box::new(ScalarExpression::Empty)),
+                        left_expr: *arg_expr,
+                        right_expr: *right_expr,
                         evaluator: None,
                         ty: LogicalType::Boolean,
                     }),
                     evaluator: None,
                     ty: LogicalType::Boolean,
                 };
-
-                let _ = mem::replace(expr, new_expr);
-
-                walk_mut_expr(self, expr)?;
+                return Ok(true);
             }
-            _ => walk_mut_expr(self, expr)?,
+            _ => return Ok(true),
         }
-
-        Ok(())
+        Ok(false)
     }
 }
 
@@ -357,64 +361,73 @@ impl Simplify {
         }
     }
 
-    fn take_range_comparison(expr: &mut Box<ScalarExpression>) -> Option<ScalarExpression> {
-        match expr.as_ref() {
-            ScalarExpression::Binary { op, .. } if Self::negate_range_comparison(*op).is_some() => {
-                Some(mem::replace(expr.as_mut(), ScalarExpression::Empty))
+    fn take_range_comparison(expr: ExprRef, arena: &PlanArena<'_>) -> Option<ScalarExpression> {
+        match arena.expression(expr) {
+            expression @ ScalarExpression::Binary { op, .. }
+                if Self::negate_range_comparison(*op).is_some() =>
+            {
+                Some(expression.clone())
             }
             _ => None,
         }
     }
 
-    fn take_negated_range_comparison(expr: &mut Box<ScalarExpression>) -> Option<ScalarExpression> {
-        match expr.as_mut() {
+    fn take_negated_range_comparison(
+        expr: ExprRef,
+        arena: &PlanArena<'_>,
+    ) -> Option<ScalarExpression> {
+        let mut expression = arena.expression(expr).clone();
+        match &mut expression {
             ScalarExpression::Binary { op, .. } => {
                 *op = Self::negate_range_comparison(*op)?;
-                Some(mem::replace(expr.as_mut(), ScalarExpression::Empty))
+                Some(expression)
             }
             _ => None,
         }
     }
 
-    fn boolean_constant(expr: &ScalarExpression) -> Option<bool> {
-        match expr {
+    fn boolean_constant(expr: ExprRef, arena: &PlanArena<'_>) -> Option<bool> {
+        match arena.expression(expr) {
             ScalarExpression::Constant(DataValue::Boolean(value)) => Some(*value),
             _ => None,
         }
     }
 
     fn take_range_comparison_with_polarity(
-        expr: &mut Box<ScalarExpression>,
+        expr: ExprRef,
         positive: bool,
+        arena: &PlanArena<'_>,
     ) -> Option<ScalarExpression> {
         if positive {
-            Self::take_range_comparison(expr)
+            Self::take_range_comparison(expr, arena)
         } else {
-            Self::take_negated_range_comparison(expr)
+            Self::take_negated_range_comparison(expr, arena)
         }
     }
 
     fn take_bool_normalized_range_comparison(
         op: BinaryOperator,
-        left_expr: &mut Box<ScalarExpression>,
-        right_expr: &mut Box<ScalarExpression>,
+        left_expr: ExprRef,
+        right_expr: ExprRef,
+        arena: &PlanArena<'_>,
     ) -> Option<ScalarExpression> {
         let is_eq = matches!(op, BinaryOperator::Eq);
-        let is_not_eq = matches!(op, BinaryOperator::NotEq);
-        if !is_eq && !is_not_eq {
+        if !matches!(op, BinaryOperator::Eq | BinaryOperator::NotEq) {
             return None;
         }
 
-        if let Some(value) = Self::boolean_constant(right_expr) {
+        if let Some(value) = Self::boolean_constant(right_expr, arena) {
             return Self::take_range_comparison_with_polarity(
                 left_expr,
                 if is_eq { value } else { !value },
+                arena,
             );
         }
-        if let Some(value) = Self::boolean_constant(left_expr) {
+        if let Some(value) = Self::boolean_constant(left_expr, arena) {
             return Self::take_range_comparison_with_polarity(
                 right_expr,
                 if is_eq { value } else { !value },
+                arena,
             );
         }
 
@@ -423,21 +436,24 @@ impl Simplify {
 
     fn fix_expr(
         &mut self,
-        left_expr: &mut Box<ScalarExpression>,
-        right_expr: &mut Box<ScalarExpression>,
+        left_expr: &mut ExprRef,
+        right_expr: &mut ExprRef,
         op: &mut BinaryOperator,
+        arena: &mut PlanArena<'_>,
     ) -> Result<(), DatabaseError> {
-        self.visit(left_expr)?;
+        self.visit(left_expr, arena)?;
 
         if Self::is_arithmetic(op) {
             return Ok(());
         }
         while let Some(replace) = self.replaces.pop() {
             match replace {
-                Replace::Binary(binary) => Self::fix_binary(binary, left_expr, right_expr, op),
+                Replace::Binary(binary) => {
+                    Self::fix_binary(binary, left_expr, right_expr, op, arena)
+                }
                 Replace::Unary(unary) => {
-                    Self::fix_unary(unary, left_expr, right_expr, op);
-                    self.fix_expr(left_expr, right_expr, op)?;
+                    Self::fix_unary(unary, left_expr, right_expr, op, arena);
+                    self.fix_expr(left_expr, right_expr, op, arena)?;
                 }
             }
         }
@@ -447,58 +463,53 @@ impl Simplify {
 
     fn fix_unary(
         replace_unary: ReplaceUnary,
-        col_expr: &mut Box<ScalarExpression>,
-        val_expr: &mut Box<ScalarExpression>,
+        col_expr: &mut ExprRef,
+        val_expr: &mut ExprRef,
         op: &mut BinaryOperator,
+        arena: &mut PlanArena<'_>,
     ) {
         let ReplaceUnary {
             child_expr,
             op: fix_op,
             ty: fix_ty,
         } = replace_unary;
-        let _ = mem::replace(col_expr, Box::new(child_expr));
+        *col_expr = child_expr;
 
-        let expr = mem::replace(val_expr, Box::new(ScalarExpression::Empty));
-        let _ = mem::replace(
-            val_expr,
-            Box::new(ScalarExpression::Unary {
-                op: fix_op,
-                expr,
-                evaluator: None,
-                ty: fix_ty,
-            }),
-        );
-        let _ = mem::replace(
-            op,
-            match fix_op {
-                UnaryOperator::Plus => *op,
-                UnaryOperator::Minus => match *op {
-                    BinaryOperator::Plus => BinaryOperator::Minus,
-                    BinaryOperator::Minus => BinaryOperator::Plus,
-                    BinaryOperator::Multiply => BinaryOperator::Divide,
-                    BinaryOperator::Divide => BinaryOperator::Multiply,
-                    BinaryOperator::Gt => BinaryOperator::Lt,
-                    BinaryOperator::Lt => BinaryOperator::Gt,
-                    BinaryOperator::GtEq => BinaryOperator::LtEq,
-                    BinaryOperator::LtEq => BinaryOperator::GtEq,
-                    source_op => source_op,
-                },
-                UnaryOperator::Not => match *op {
-                    BinaryOperator::Gt => BinaryOperator::Lt,
-                    BinaryOperator::Lt => BinaryOperator::Gt,
-                    BinaryOperator::GtEq => BinaryOperator::LtEq,
-                    BinaryOperator::LtEq => BinaryOperator::GtEq,
-                    source_op => source_op,
-                },
+        *val_expr = arena.alloc_expression(ScalarExpression::Unary {
+            op: fix_op,
+            expr: *val_expr,
+            evaluator: None,
+            ty: fix_ty,
+        });
+        *op = match fix_op {
+            UnaryOperator::Plus => *op,
+            UnaryOperator::Minus => match *op {
+                BinaryOperator::Plus => BinaryOperator::Minus,
+                BinaryOperator::Minus => BinaryOperator::Plus,
+                BinaryOperator::Multiply => BinaryOperator::Divide,
+                BinaryOperator::Divide => BinaryOperator::Multiply,
+                BinaryOperator::Gt => BinaryOperator::Lt,
+                BinaryOperator::Lt => BinaryOperator::Gt,
+                BinaryOperator::GtEq => BinaryOperator::LtEq,
+                BinaryOperator::LtEq => BinaryOperator::GtEq,
+                source_op => source_op,
             },
-        );
+            UnaryOperator::Not => match *op {
+                BinaryOperator::Gt => BinaryOperator::Lt,
+                BinaryOperator::Lt => BinaryOperator::Gt,
+                BinaryOperator::GtEq => BinaryOperator::LtEq,
+                BinaryOperator::LtEq => BinaryOperator::GtEq,
+                source_op => source_op,
+            },
+        };
     }
 
     fn fix_binary(
         replace_binary: ReplaceBinary,
-        left_expr: &mut Box<ScalarExpression>,
-        right_expr: &mut Box<ScalarExpression>,
+        left_expr: &mut ExprRef,
+        right_expr: &mut ExprRef,
         op: &mut BinaryOperator,
+        arena: &mut PlanArena<'_>,
     ) {
         let ReplaceBinary {
             column_expr,
@@ -521,70 +532,58 @@ impl Simplify {
             BinaryOperator::LtEq => BinaryOperator::GtEq,
             source_op => source_op,
         };
-        let temp_expr = mem::replace(right_expr, Box::new(ScalarExpression::Empty));
         let (fixed_op, fixed_left_expr, fixed_right_expr) = if is_column_left {
-            (op_flip(fix_op), temp_expr, Box::new(val_expr))
+            (op_flip(fix_op), *right_expr, val_expr)
         } else {
             if matches!(fix_op, BinaryOperator::Minus | BinaryOperator::Multiply) {
-                let _ = mem::replace(op, comparison_flip(*op));
+                *op = comparison_flip(*op);
             }
-            (fix_op, Box::new(val_expr), temp_expr)
+            (fix_op, val_expr, *right_expr)
         };
 
-        let _ = mem::replace(left_expr, Box::new(column_expr));
-        let _ = mem::replace(
-            right_expr,
-            Box::new(ScalarExpression::Binary {
-                op: fixed_op,
-                left_expr: fixed_left_expr,
-                right_expr: fixed_right_expr,
-                evaluator: None,
-                ty: fix_ty,
-            }),
-        );
+        *left_expr = column_expr;
+        *right_expr = arena.alloc_expression(ScalarExpression::Binary {
+            op: fixed_op,
+            left_expr: fixed_left_expr,
+            right_expr: fixed_right_expr,
+            evaluator: None,
+            ty: fix_ty,
+        });
     }
 }
 
-impl ScalarExpression {
-    pub(crate) fn unpack_val(&self) -> Option<DataValue> {
-        match self {
+impl ExprRef {
+    pub(crate) fn unpack_val(self, arena: &PlanArena<'_>) -> Option<DataValue> {
+        match arena.expression(self) {
             ScalarExpression::Constant(val) => Some(val.clone()),
-            ScalarExpression::Alias { expr, .. } => expr.unpack_val(),
+            ScalarExpression::Alias { expr, .. } => expr.unpack_val(arena),
             ScalarExpression::TypeCast { expr, ty, .. } => {
-                expr.unpack_val().and_then(|val| val.cast(ty).ok())
+                expr.unpack_val(arena).and_then(|val| val.cast(ty).ok())
             }
-            ScalarExpression::IsNull { expr, .. } => expr
-                .unpack_val()
-                .map(|val| DataValue::Boolean(val.is_null())),
+            ScalarExpression::IsNull { negated, expr } => Some(DataValue::Boolean(
+                expr.unpack_val(arena)?.is_null() != *negated,
+            )),
             ScalarExpression::Unary {
                 expr,
                 op,
                 evaluator,
                 ty,
-                ..
-            } => {
-                let value = expr.unpack_val()?;
-                let unary_value = if let Some(evaluator) = evaluator {
-                    evaluator.unary_eval(&value)
-                } else {
-                    unary_create(Cow::Borrowed(ty), *op)
-                        .ok()?
-                        .unary_eval(&value)
-                };
-                Some(unary_value)
-            }
+            } => Some(if let Some(evaluator) = evaluator {
+                evaluator.unary_eval(&expr.unpack_val(arena)?)
+            } else {
+                unary_create(Cow::Borrowed(ty), *op)
+                    .ok()?
+                    .unary_eval(&expr.unpack_val(arena)?)
+            }),
             ScalarExpression::Binary {
                 left_expr,
                 right_expr,
                 op,
                 ty,
                 evaluator,
-                ..
             } => {
-                let mut left = left_expr.unpack_val()?;
-                let mut right = right_expr.unpack_val()?;
-                left = left.cast(ty).ok()?;
-                right = right.cast(ty).ok()?;
+                let left = left_expr.unpack_val(arena)?.cast(ty).ok()?;
+                let right = right_expr.unpack_val(arena)?.cast(ty).ok()?;
                 if let Some(evaluator) = evaluator {
                     evaluator.binary_eval(&left, &right)
                 } else {
@@ -598,11 +597,15 @@ impl ScalarExpression {
         }
     }
 
-    pub(crate) fn unpack_bound_col(&self, is_deep: bool) -> Option<(ColumnRef, usize)> {
-        match self {
+    pub(crate) fn unpack_bound_col(
+        self,
+        arena: &PlanArena<'_>,
+        is_deep: bool,
+    ) -> Option<(ColumnRef, usize)> {
+        match arena.expression(self) {
             ScalarExpression::ColumnRef { column, position } => Some((*column, *position)),
-            ScalarExpression::Alias { expr, .. } => expr.unpack_bound_col(is_deep),
-            ScalarExpression::Unary { expr, .. } => expr.unpack_bound_col(is_deep),
+            ScalarExpression::Alias { expr, .. } => expr.unpack_bound_col(arena, is_deep),
+            ScalarExpression::Unary { expr, .. } => expr.unpack_bound_col(arena, is_deep),
             ScalarExpression::Binary {
                 left_expr,
                 right_expr,
@@ -613,8 +616,8 @@ impl ScalarExpression {
                 }
 
                 left_expr
-                    .unpack_bound_col(true)
-                    .or_else(|| right_expr.unpack_bound_col(true))
+                    .unpack_bound_col(arena, true)
+                    .or_else(|| right_expr.unpack_bound_col(arena, true))
             }
             _ => None,
         }

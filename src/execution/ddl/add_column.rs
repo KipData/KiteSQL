@@ -86,7 +86,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for AddColumn {
             return Err(DatabaseError::DuplicateColumn(column.name().to_string()));
         }
 
-        let default_value = column.default_value()?;
+        let default_value = column.default_value(plan_arena)?;
 
         let (unique_index_id, apply) = {
             let (transaction, table_codec) = arena.transaction_codec_mut();

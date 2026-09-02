@@ -18,7 +18,7 @@ use crate::execution::dql::join::hash::{
 };
 use crate::execution::dql::join::hash_join::BuildState;
 use crate::execution::dql::join::RowBitmap;
-use crate::expression::ScalarExpression;
+use crate::planner::{ExprRef, PlanArena};
 use crate::types::tuple::{SplitTupleRef, Tuple};
 use crate::types::value::DataValue;
 
@@ -33,7 +33,8 @@ impl JoinProbeState for LeftJoinState {
         &mut self,
         probe_state: &mut ProbeState,
         build_state: Option<&mut BuildState>,
-        filter_expr: Option<&ScalarExpression>,
+        filter_expr: Option<&ExprRef>,
+        plan_arena: &PlanArena<'_>,
     ) -> Result<Option<Tuple>, DatabaseError> {
         if probe_state.is_keys_has_null {
             probe_state.finished = true;
@@ -52,7 +53,7 @@ impl JoinProbeState for LeftJoinState {
             if let Some(filter_expr) = filter_expr {
                 let full_values =
                     SplitTupleRef::from_slices(values, &probe_state.probe_tuple.values);
-                if !filter(&full_values, filter_expr)? {
+                if !filter(&full_values, filter_expr, plan_arena)? {
                     probe_state.has_filtered = true;
                     self.bits.insert(*i);
                     continue;
@@ -80,7 +81,8 @@ impl JoinProbeState for LeftJoinState {
     fn left_drop_next(
         &mut self,
         left_drop_state: &mut LeftDropState,
-        _filter_expr: Option<&ScalarExpression>,
+        _filter_expr: Option<&ExprRef>,
+        _plan_arena: &PlanArena<'_>,
     ) -> Result<Option<Tuple>, DatabaseError> {
         let full_schema_len = self.right_schema_len + self.left_schema_len;
 

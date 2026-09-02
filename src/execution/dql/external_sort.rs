@@ -93,7 +93,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ExternalSort {
             let mut runs = Vec::new();
             while arena.next_tuple(self.input, plan_arena)? {
                 let tuple = mem::take(arena.result_tuple_mut());
-                if let Some(segment) = rows.push(SortRow::new(sort_fields, tuple)?)? {
+                if let Some(segment) = rows.push(SortRow::new(sort_fields, tuple, plan_arena)?)? {
                     runs.push(Run::new(segment, 1));
                 }
             }
@@ -299,10 +299,10 @@ mod test {
             ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
         ));
         let sort_fields = vec![SortField {
-            expr: ScalarExpression::ColumnRef {
+            expr: plan_arena.alloc_expression(ScalarExpression::ColumnRef {
                 column: sort_column,
                 position: 0,
-            },
+            }),
             asc: true,
             nulls_first: false,
         }];
@@ -311,7 +311,11 @@ mod test {
             .limit(4, usize::MAX)
             .on_flush(|rows| sort_segment(&sort_fields, rows));
         for value in [DataValue::Int32(2), DataValue::Null, DataValue::Int32(1)] {
-            let _ = rows.push(SortRow::new(&sort_fields, Tuple::new(None, vec![value]))?)?;
+            let _ = rows.push(SortRow::new(
+                &sort_fields,
+                Tuple::new(None, vec![value]),
+                &plan_arena,
+            )?)?;
         }
 
         let values = finish_sort(rows, Vec::new(), &sort_fields, 2)?
@@ -334,10 +338,10 @@ mod test {
             ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
         ));
         let sort_fields = vec![SortField {
-            expr: ScalarExpression::ColumnRef {
+            expr: plan_arena.alloc_expression(ScalarExpression::ColumnRef {
                 column: sort_column,
                 position: 0,
-            },
+            }),
             asc: false,
             nulls_first: true,
         }];
@@ -362,7 +366,7 @@ mod test {
                 Some(DataValue::Int32(sequence as i32)),
                 vec![value, DataValue::Int32(sequence as i32)],
             );
-            if let Some(segment) = rows.push(SortRow::new(&sort_fields, tuple)?)? {
+            if let Some(segment) = rows.push(SortRow::new(&sort_fields, tuple, &plan_arena)?)? {
                 runs.push(Run::new(segment, 1));
             }
         }
@@ -411,18 +415,18 @@ mod test {
         ));
         let sort_fields = vec![
             SortField {
-                expr: ScalarExpression::ColumnRef {
+                expr: plan_arena.alloc_expression(ScalarExpression::ColumnRef {
                     column: key_column,
                     position: 0,
-                },
+                }),
                 asc: false,
                 nulls_first: true,
             },
             SortField {
-                expr: ScalarExpression::ColumnRef {
+                expr: plan_arena.alloc_expression(ScalarExpression::ColumnRef {
                     column: sequence_column,
                     position: 1,
-                },
+                }),
                 asc: true,
                 nulls_first: false,
             },
@@ -439,7 +443,7 @@ mod test {
             };
             let sequence = DataValue::Int32(sequence as i32);
             let tuple = Tuple::new(Some(sequence.clone()), vec![key, sequence]);
-            if let Some(segment) = rows.push(SortRow::new(&sort_fields, tuple)?)? {
+            if let Some(segment) = rows.push(SortRow::new(&sort_fields, tuple, &plan_arena)?)? {
                 runs.push(Run::new(segment, 1));
             }
         }

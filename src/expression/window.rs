@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use crate::expression::agg::AggKind;
-use crate::expression::ScalarExpression;
 use crate::planner::operator::sort::SortField;
+use crate::planner::ExprRef;
 use crate::types::LogicalType;
 use kite_sql_serde_macros::ReferenceSerialization;
 
@@ -49,13 +49,13 @@ impl WindowFunctionKind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ReferenceSerialization)]
 pub struct WindowFunction {
     pub kind: WindowFunctionKind,
-    pub args: Vec<ScalarExpression>,
+    pub args: Vec<ExprRef>,
     pub ty: LogicalType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ReferenceSerialization)]
 pub struct WindowSpec {
-    pub partition_by: Vec<ScalarExpression>,
+    pub partition_by: Vec<ExprRef>,
     pub order_by: Vec<SortField>,
 }
 

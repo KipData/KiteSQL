@@ -141,10 +141,15 @@ impl MarkApply {
     fn parameterized_probe_value(
         &self,
         left_tuple: &Tuple,
+        plan_arena: &crate::planner::PlanArena<'_>,
     ) -> Result<Option<DataValue>, DatabaseError> {
         self.op
             .parameterized_probe()
-            .map(|probe| probe.eval(Some(left_tuple)))
+            .map(|probe| {
+                plan_arena
+                    .expression(*probe)
+                    .eval(plan_arena, Some(left_tuple))
+            })
             .transpose()
     }
 
@@ -158,11 +163,11 @@ impl MarkApply {
             MarkApplyKind::Exists => self.with_right_input(
                 arena,
                 plan_arena,
-                self.parameterized_probe_value(left_tuple)?,
+                self.parameterized_probe_value(left_tuple, plan_arena)?,
                 |arena, plan_arena, right_input| {
                     while arena.next_tuple(right_input, plan_arena)? {
                         let right_tuple = arena.result_tuple();
-                        if self.exists_predicate_matched(left_tuple, right_tuple)? {
+                        if self.exists_predicate_matched(left_tuple, right_tuple, plan_arena)? {
                             return Ok(DataValue::Boolean(true));
                         }
                     }
@@ -171,7 +176,7 @@ impl MarkApply {
                 },
             ),
             MarkApplyKind::Quantified(MarkApplyQuantifier::Any) => {
-                if let Some(probe_value) = self.parameterized_probe_value(left_tuple)? {
+                if let Some(probe_value) = self.parameterized_probe_value(left_tuple, plan_arena)? {
                     if !probe_value.is_null() {
                         if self.with_right_input(
                             arena,
@@ -180,8 +185,11 @@ impl MarkApply {
                             |arena, plan_arena, right_input| {
                                 while arena.next_tuple(right_input, plan_arena)? {
                                     let right_tuple = arena.result_tuple();
-                                    if self.quantified_predicate_outcome(left_tuple, right_tuple)?
-                                        == QuantifiedPredicateOutcome::True
+                                    if self.quantified_predicate_outcome(
+                                        left_tuple,
+                                        right_tuple,
+                                        plan_arena,
+                                    )? == QuantifiedPredicateOutcome::True
                                     {
                                         return Ok(true);
                                     }
@@ -200,8 +208,11 @@ impl MarkApply {
                             |arena, plan_arena, right_input| {
                                 while arena.next_tuple(right_input, plan_arena)? {
                                     let right_tuple = arena.result_tuple();
-                                    if self.quantified_predicate_outcome(left_tuple, right_tuple)?
-                                        == QuantifiedPredicateOutcome::Null
+                                    if self.quantified_predicate_outcome(
+                                        left_tuple,
+                                        right_tuple,
+                                        plan_arena,
+                                    )? == QuantifiedPredicateOutcome::Null
                                     {
                                         return Ok(true);
                                     }
@@ -253,7 +264,7 @@ impl MarkApply {
 
         while arena.next_tuple(right_input, plan_arena)? {
             let right_tuple = arena.result_tuple();
-            match self.quantified_predicate_outcome(left_tuple, right_tuple)? {
+            match self.quantified_predicate_outcome(left_tuple, right_tuple, plan_arena)? {
                 QuantifiedPredicateOutcome::True => {
                     if matches!(quantifier, MarkApplyQuantifier::Any) {
                         return Ok(DataValue::Boolean(true));
@@ -283,11 +294,15 @@ impl MarkApply {
         &self,
         left_tuple: &Tuple,
         right_tuple: &Tuple,
+        plan_arena: &crate::planner::PlanArena<'_>,
     ) -> Result<bool, DatabaseError> {
         let values = SplitTupleRef::new(left_tuple, right_tuple);
 
         for predicate in self.op.predicates() {
-            match predicate.eval(Some(values))? {
+            match plan_arena
+                .expression(*predicate)
+                .eval(plan_arena, Some(values))?
+            {
                 DataValue::Boolean(true) => {}
                 DataValue::Boolean(false) | DataValue::Null => return Ok(false),
                 _ => return Err(DatabaseError::InvalidType),
@@ -301,8 +316,9 @@ impl MarkApply {
         &self,
         left_tuple: &Tuple,
         right_tuple: &Tuple,
+        plan_arena: &crate::planner::PlanArena<'_>,
     ) -> Result<QuantifiedPredicateOutcome, DatabaseError> {
-        match self.eval_predicates(left_tuple, right_tuple)? {
+        match self.eval_predicates(left_tuple, right_tuple, plan_arena)? {
             Some(DataValue::Boolean(true)) => Ok(QuantifiedPredicateOutcome::True),
             Some(DataValue::Boolean(false)) => Ok(QuantifiedPredicateOutcome::False),
             Some(DataValue::Null) => Ok(QuantifiedPredicateOutcome::Null),
@@ -315,6 +331,7 @@ impl MarkApply {
         &self,
         left_tuple: &Tuple,
         right_tuple: &Tuple,
+        plan_arena: &crate::planner::PlanArena<'_>,
     ) -> Result<Option<DataValue>, DatabaseError> {
         let values = SplitTupleRef::new(left_tuple, right_tuple);
         // probe_predicate is in predicate, always first
@@ -325,14 +342,21 @@ impl MarkApply {
             .ok_or(DatabaseError::InvalidType)?;
 
         for predicate in correlated_predicates {
-            match predicate.eval(Some(values))? {
+            match plan_arena
+                .expression(*predicate)
+                .eval(plan_arena, Some(values))?
+            {
                 DataValue::Boolean(true) => {}
                 DataValue::Boolean(false) | DataValue::Null => return Ok(None),
                 _ => return Err(DatabaseError::InvalidType),
             }
         }
 
-        Ok(Some(probe_predicate.eval(Some(values))?))
+        Ok(Some(
+            plan_arena
+                .expression(*probe_predicate)
+                .eval(plan_arena, Some(values))?,
+        ))
     }
 }
 
@@ -344,7 +368,7 @@ mod tests {
     use crate::expression::{BinaryOperator, ScalarExpression};
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
-    use crate::planner::{Childrens, LogicalPlan};
+    use crate::planner::{Childrens, ExprRef, LogicalPlan};
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
     use crate::types::evaluator::binary_create;
@@ -413,21 +437,26 @@ mod tests {
     }
 
     fn build_equality_predicate(
+        plan_arena: &mut crate::planner::PlanArena,
         left_column: ColumnRef,
         left_position: usize,
         right_column: ColumnRef,
         right_position: usize,
-    ) -> Result<ScalarExpression, DatabaseError> {
-        Ok(ScalarExpression::Binary {
+    ) -> Result<ExprRef, DatabaseError> {
+        let left_expr =
+            plan_arena.alloc_expression(ScalarExpression::column_expr(left_column, left_position));
+        let right_expr = plan_arena
+            .alloc_expression(ScalarExpression::column_expr(right_column, right_position));
+        Ok(plan_arena.alloc_expression(ScalarExpression::Binary {
             op: BinaryOperator::Eq,
-            left_expr: Box::new(ScalarExpression::column_expr(left_column, left_position)),
-            right_expr: Box::new(ScalarExpression::column_expr(right_column, right_position)),
+            left_expr,
+            right_expr,
             evaluator: Some(binary_create(
                 Cow::Owned(LogicalType::Integer),
                 BinaryOperator::Eq,
             )?),
             ty: LogicalType::Boolean,
-        })
+        }))
     }
 
     #[test]
@@ -447,7 +476,7 @@ mod tests {
         let left_column = left.output_schema(&mut plan_arena)[0];
         let right_column = right.output_schema(&mut plan_arena)[0];
 
-        let predicate = build_equality_predicate(left_column, 0, right_column, 1)?;
+        let predicate = build_equality_predicate(&mut plan_arena, left_column, 0, right_column, 1)?;
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
@@ -498,7 +527,7 @@ mod tests {
         let left_column = left.output_schema(&mut plan_arena)[0];
         let right_column = right.output_schema(&mut plan_arena)[0];
 
-        let predicate = build_equality_predicate(left_column, 0, right_column, 1)?;
+        let predicate = build_equality_predicate(&mut plan_arena, left_column, 0, right_column, 1)?;
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
@@ -564,13 +593,16 @@ mod tests {
         let right_flag_column = right_schema[1];
 
         let probe_predicate =
-            build_equality_predicate(left_value_column, 0, right_value_column, 2)?;
-        let flag_predicate = build_equality_predicate(left_flag_column, 1, right_flag_column, 3)?;
+            build_equality_predicate(&mut plan_arena, left_value_column, 0, right_value_column, 2)?;
+        let flag_predicate =
+            build_equality_predicate(&mut plan_arena, left_flag_column, 1, right_flag_column, 3)?;
         let mut op = MarkApplyOperator::new_exists(
             build_marker_column(&mut plan_arena),
             vec![probe_predicate, flag_predicate],
         );
-        op.set_parameterized_probe(Some(ScalarExpression::column_expr(left_value_column, 0)));
+        let probe =
+            plan_arena.alloc_expression(ScalarExpression::column_expr(left_value_column, 0));
+        op.set_parameterized_probe(Some(probe));
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
@@ -615,10 +647,13 @@ mod tests {
         );
         let left_value_column = left.output_schema(&mut plan_arena)[0];
         let right_value_column = right.output_schema(&mut plan_arena)[0];
-        let predicate = build_equality_predicate(left_value_column, 0, right_value_column, 1)?;
+        let predicate =
+            build_equality_predicate(&mut plan_arena, left_value_column, 0, right_value_column, 1)?;
         let mut op =
             MarkApplyOperator::new_in(build_marker_column(&mut plan_arena), vec![predicate]);
-        op.set_parameterized_probe(Some(ScalarExpression::column_expr(left_value_column, 0)));
+        let probe =
+            plan_arena.alloc_expression(ScalarExpression::column_expr(left_value_column, 0));
+        op.set_parameterized_probe(Some(probe));
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
@@ -663,10 +698,13 @@ mod tests {
         );
         let left_value_column = left.output_schema(&mut plan_arena)[0];
         let right_value_column = right.output_schema(&mut plan_arena)[0];
-        let predicate = build_equality_predicate(left_value_column, 0, right_value_column, 1)?;
+        let predicate =
+            build_equality_predicate(&mut plan_arena, left_value_column, 0, right_value_column, 1)?;
         let mut op =
             MarkApplyOperator::new_in(build_marker_column(&mut plan_arena), vec![predicate]);
-        op.set_parameterized_probe(Some(ScalarExpression::column_expr(left_value_column, 0)));
+        op.set_parameterized_probe(Some(
+            plan_arena.alloc_expression(ScalarExpression::column_expr(left_value_column, 0)),
+        ));
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
@@ -715,7 +753,7 @@ mod tests {
         let left_column = left.output_schema(&mut plan_arena)[0];
         let right_column = right.output_schema(&mut plan_arena)[0];
 
-        let predicate = build_equality_predicate(left_column, 0, right_column, 1)?;
+        let predicate = build_equality_predicate(&mut plan_arena, left_column, 0, right_column, 1)?;
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
@@ -763,7 +801,7 @@ mod tests {
         let left_column = left.output_schema(&mut plan_arena)[0];
         let right_column = right.output_schema(&mut plan_arena)[0];
 
-        let predicate = build_equality_predicate(left_column, 0, right_column, 1)?;
+        let predicate = build_equality_predicate(&mut plan_arena, left_column, 0, right_column, 1)?;
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
@@ -816,17 +854,22 @@ mod tests {
         let right_value_column = right_schema[0];
         let right_flag_column = right_schema[1];
 
-        let probe_predicate = build_equality_predicate(left_column, 0, right_value_column, 1)?;
-        let correlated_predicate = ScalarExpression::Binary {
+        let probe_predicate =
+            build_equality_predicate(&mut plan_arena, left_column, 0, right_value_column, 1)?;
+        let correlated_left =
+            plan_arena.alloc_expression(ScalarExpression::column_expr(right_flag_column, 2));
+        let correlated_right =
+            plan_arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(1)));
+        let correlated_predicate = plan_arena.alloc_expression(ScalarExpression::Binary {
             op: BinaryOperator::Eq,
-            left_expr: Box::new(ScalarExpression::column_expr(right_flag_column, 2)),
-            right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(1))),
+            left_expr: correlated_left,
+            right_expr: correlated_right,
             evaluator: Some(binary_create(
                 std::borrow::Cow::Owned(LogicalType::Integer),
                 BinaryOperator::Eq,
             )?),
             ty: LogicalType::Boolean,
-        };
+        });
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;

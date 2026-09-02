@@ -15,6 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::expression::function::scala::ScalarFunction;
 use crate::expression::{AliasType, BinaryOperator, ScalarExpression, TrimWhereField};
+use crate::planner::{ExprRef, PlanArena};
 use crate::types::evaluator::binary_create;
 use crate::types::tuple::TupleLike;
 use crate::types::value::{DataValue, Utf8Type};
@@ -24,8 +25,13 @@ use std::cmp;
 use std::cmp::Ordering;
 
 macro_rules! eval_to_num {
-    ($num_expr:expr, $tuple:expr) => {
-        if let Some(num_i32) = $num_expr.eval($tuple)?.cast(&LogicalType::Integer)?.i32() {
+    ($num_expr:expr, $arena:expr, $tuple:expr) => {
+        if let Some(num_i32) = $arena
+            .expression(*$num_expr)
+            .eval($arena, $tuple)?
+            .cast(&LogicalType::Integer)?
+            .i32()
+        {
             num_i32
         } else {
             return Ok(DataValue::Null);
@@ -34,7 +40,11 @@ macro_rules! eval_to_num {
 }
 
 impl ScalarExpression {
-    pub fn eval<T: TupleLike + Copy>(&self, tuple: Option<T>) -> Result<DataValue, DatabaseError> {
+    pub fn eval<T: TupleLike + Copy>(
+        &self,
+        arena: &PlanArena<'_>,
+        tuple: Option<T>,
+    ) -> Result<DataValue, DatabaseError> {
         match self {
             ScalarExpression::Constant(val) => Ok(val.clone()),
             ScalarExpression::ColumnRef { position, .. } => {
@@ -48,15 +58,15 @@ impl ScalarExpression {
                     return Ok(DataValue::Null);
                 };
                 if let AliasType::Expr(inner_expr) = alias {
-                    inner_expr.eval(Some(tuple))
+                    arena.expression(*inner_expr).eval(arena, Some(tuple))
                 } else {
-                    expr.eval(Some(tuple))
+                    arena.expression(*expr).eval(arena, Some(tuple))
                 }
             }
             ScalarExpression::TypeCast {
                 expr, evaluator, ..
             } => {
-                let value = expr.eval(tuple)?;
+                let value = arena.expression(*expr).eval(arena, tuple)?;
                 if let Some(evaluator) = evaluator {
                     evaluator.eval(&value)
                 } else {
@@ -69,8 +79,8 @@ impl ScalarExpression {
                 evaluator,
                 ..
             } => {
-                let left = left_expr.eval(tuple)?;
-                let right = right_expr.eval(tuple)?;
+                let left = arena.expression(*left_expr).eval(arena, tuple)?;
+                let right = arena.expression(*right_expr).eval(arena, tuple)?;
 
                 evaluator
                     .as_ref()
@@ -78,7 +88,7 @@ impl ScalarExpression {
                     .binary_eval(&left, &right)
             }
             ScalarExpression::IsNull { expr, negated } => {
-                let mut is_null = expr.eval(tuple)?.is_null();
+                let mut is_null = arena.expression(*expr).eval(arena, tuple)?.is_null();
                 if *negated {
                     is_null = !is_null;
                 }
@@ -89,7 +99,7 @@ impl ScalarExpression {
                 args,
                 negated,
             } => {
-                let value = expr.eval(tuple)?;
+                let value = arena.expression(*expr).eval(arena, tuple)?;
                 if value.is_null() {
                     return Ok(DataValue::Null);
                 }
@@ -97,7 +107,7 @@ impl ScalarExpression {
                 let mut matched = false;
                 let mut saw_null = false;
                 for arg in args {
-                    let arg_value = arg.eval(tuple)?;
+                    let arg_value = arena.expression(*arg).eval(arena, tuple)?;
 
                     if arg_value.is_null() {
                         saw_null = true;
@@ -120,7 +130,7 @@ impl ScalarExpression {
             ScalarExpression::Unary {
                 expr, evaluator, ..
             } => {
-                let value = expr.eval(tuple)?;
+                let value = arena.expression(*expr).eval(arena, tuple)?;
 
                 Ok(evaluator
                     .as_ref()
@@ -136,9 +146,9 @@ impl ScalarExpression {
                 right_expr,
                 negated,
             } => {
-                let value = expr.eval(tuple)?;
-                let left = left_expr.eval(tuple)?;
-                let right = right_expr.eval(tuple)?;
+                let value = arena.expression(*expr).eval(arena, tuple)?;
+                let left = arena.expression(*left_expr).eval(arena, tuple)?;
+                let right = arena.expression(*right_expr).eval(arena, tuple)?;
 
                 let mut is_between = match (
                     value.partial_cmp(&left).map(Ordering::is_ge),
@@ -158,14 +168,15 @@ impl ScalarExpression {
                 for_expr,
                 from_expr,
             } => {
-                if let Some(mut string) = expr
-                    .eval(tuple)?
+                if let Some(mut string) = arena
+                    .expression(*expr)
+                    .eval(arena, tuple)?
                     .cast(&LogicalType::Varchar(None, CharLengthUnits::Characters))?
                     .utf8()
                     .map(String::from)
                 {
                     if let Some(from_expr) = from_expr {
-                        let mut from = eval_to_num!(from_expr, tuple).saturating_sub(1);
+                        let mut from = eval_to_num!(from_expr, arena, tuple).saturating_sub(1);
                         let len_i = string.len() as i32;
 
                         while from < 0 {
@@ -177,7 +188,8 @@ impl ScalarExpression {
                         string = string.split_off(from as usize);
                     }
                     if let Some(for_expr) = for_expr {
-                        let for_i = cmp::min(eval_to_num!(for_expr, tuple) as usize, string.len());
+                        let for_i =
+                            cmp::min(eval_to_num!(for_expr, arena, tuple) as usize, string.len());
                         let _ = string.split_off(for_i);
                     }
 
@@ -191,16 +203,17 @@ impl ScalarExpression {
                 }
             }
             ScalarExpression::Position { expr, in_expr } => {
-                let unpack = |expr: &ScalarExpression| -> Result<String, DatabaseError> {
-                    Ok(expr
-                        .eval(tuple)?
+                let unpack = |expr: ExprRef| -> Result<String, DatabaseError> {
+                    Ok(arena
+                        .expression(expr)
+                        .eval(arena, tuple)?
                         .cast(&LogicalType::Varchar(None, CharLengthUnits::Characters))?
                         .utf8()
                         .map(String::from)
                         .unwrap_or("".to_owned()))
                 };
-                let pattern = unpack(expr)?;
-                let str = unpack(in_expr)?;
+                let pattern = unpack(*expr)?;
+                let str = unpack(*in_expr)?;
                 Ok(DataValue::Int32(
                     str.find(&pattern).map(|pos| pos as i32 + 1).unwrap_or(0),
                 ))
@@ -210,15 +223,17 @@ impl ScalarExpression {
                 trim_what_expr,
                 trim_where,
             } => {
-                if let Some(string) = expr
-                    .eval(tuple)?
+                if let Some(string) = arena
+                    .expression(*expr)
+                    .eval(arena, tuple)?
                     .cast(&LogicalType::Varchar(None, CharLengthUnits::Characters))?
                     .utf8()
                 {
                     let mut trim_what = String::from(" ");
                     if let Some(trim_what_expr) = trim_what_expr {
-                        trim_what = trim_what_expr
-                            .eval(tuple)?
+                        trim_what = arena
+                            .expression(*trim_what_expr)
+                            .eval(arena, tuple)?
                             .cast(&LogicalType::Varchar(None, CharLengthUnits::Characters))?
                             .utf8()
                             .map(String::from)
@@ -239,14 +254,14 @@ impl ScalarExpression {
                 let mut values = Vec::with_capacity(exprs.len());
 
                 for expr in exprs {
-                    values.push(expr.eval(tuple)?);
+                    values.push(arena.expression(*expr).eval(arena, tuple)?);
                 }
                 Ok(DataValue::Tuple(values, false))
             }
             ScalarExpression::ScalaFunction(ScalarFunction { inner, args, .. }) => {
                 let value = match tuple {
-                    Some(tuple) => inner.eval(args, Some(&tuple as &dyn TupleLike))?,
-                    None => inner.eval(args, None)?,
+                    Some(tuple) => inner.eval(args, arena, Some(&tuple as &dyn TupleLike))?,
+                    None => inner.eval(args, arena, None)?,
                 };
                 value.cast(inner.return_type())
             }
@@ -257,10 +272,10 @@ impl ScalarExpression {
                 right_expr,
                 ty,
             } => {
-                if condition.eval(tuple)?.is_true()? {
-                    left_expr.eval(tuple)?.cast(ty)
+                if arena.expression(*condition).eval(arena, tuple)?.is_true()? {
+                    arena.expression(*left_expr).eval(arena, tuple)?.cast(ty)
                 } else {
-                    right_expr.eval(tuple)?.cast(ty)
+                    arena.expression(*right_expr).eval(arena, tuple)?.cast(ty)
                 }
             }
             ScalarExpression::IfNull {
@@ -268,10 +283,10 @@ impl ScalarExpression {
                 right_expr,
                 ty,
             } => {
-                let mut value = left_expr.eval(tuple)?;
+                let mut value = arena.expression(*left_expr).eval(arena, tuple)?;
 
                 if value.is_null() {
-                    value = right_expr.eval(tuple)?;
+                    value = arena.expression(*right_expr).eval(arena, tuple)?;
                 }
                 value.cast(ty)
             }
@@ -280,9 +295,9 @@ impl ScalarExpression {
                 right_expr,
                 ty,
             } => {
-                let mut value = left_expr.eval(tuple)?;
+                let mut value = arena.expression(*left_expr).eval(arena, tuple)?;
 
-                if right_expr.eval(tuple)? == value {
+                if arena.expression(*right_expr).eval(arena, tuple)? == value {
                     value = DataValue::Null;
                 }
                 value.cast(ty)
@@ -291,7 +306,7 @@ impl ScalarExpression {
                 let mut value = None;
 
                 for expr in exprs {
-                    let temp = expr.eval(tuple)?;
+                    let temp = arena.expression(*expr).eval(arena, tuple)?;
 
                     if !temp.is_null() {
                         value = Some(temp);
@@ -310,10 +325,10 @@ impl ScalarExpression {
                 let mut result = None;
 
                 if let Some(expr) = operand_expr {
-                    operand_value = Some(expr.eval(tuple)?);
+                    operand_value = Some(arena.expression(*expr).eval(arena, tuple)?);
                 }
                 for (when_expr, result_expr) in expr_pairs {
-                    let mut when_value = when_expr.eval(tuple)?;
+                    let mut when_value = arena.expression(*when_expr).eval(arena, tuple)?;
                     let is_true = if let Some(operand_value) = &operand_value {
                         let ty = operand_value.logical_type();
                         when_value = when_value.cast(&ty)?;
@@ -325,13 +340,13 @@ impl ScalarExpression {
                         when_value.is_true()?
                     };
                     if is_true {
-                        result = Some(result_expr.eval(tuple)?);
+                        result = Some(arena.expression(*result_expr).eval(arena, tuple)?);
                         break;
                     }
                 }
                 if result.is_none() {
                     if let Some(expr) = else_expr {
-                        result = Some(expr.eval(tuple)?);
+                        result = Some(arena.expression(*expr).eval(arena, tuple)?);
                     }
                 }
                 result.unwrap_or(DataValue::Null).cast(ty)
@@ -373,47 +388,75 @@ fn trim_string(value: &str, trim_what: &str, trim_where: Option<TrimWhereField>)
 mod tests {
     use super::*;
 
-    fn const_in(expr: DataValue, args: Vec<DataValue>, negated: bool) -> ScalarExpression {
-        ScalarExpression::In {
+    fn const_in(
+        arena: &mut PlanArena,
+        expr: DataValue,
+        args: Vec<DataValue>,
+        negated: bool,
+    ) -> ExprRef {
+        let expr = arena.alloc_expression(ScalarExpression::Constant(expr));
+        let args = args
+            .into_iter()
+            .map(|value| arena.alloc_expression(ScalarExpression::Constant(value)))
+            .collect();
+        arena.alloc_expression(ScalarExpression::In {
             negated,
-            expr: Box::new(ScalarExpression::Constant(expr)),
-            args: args.into_iter().map(ScalarExpression::Constant).collect(),
-        }
+            expr,
+            args,
+        })
     }
 
     #[test]
     fn in_eval_matches_even_if_null_appears_first() -> Result<(), DatabaseError> {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
         let expr = const_in(
+            &mut arena,
             DataValue::Int32(1),
             vec![DataValue::Null, DataValue::Int32(1)],
             false,
         );
 
-        assert_eq!(expr.eval::<&[DataValue]>(None)?, DataValue::Boolean(true));
+        assert_eq!(
+            arena.expression(expr).eval::<&[DataValue]>(&arena, None)?,
+            DataValue::Boolean(true)
+        );
         Ok(())
     }
 
     #[test]
     fn in_eval_returns_null_when_only_null_blocks_non_match() -> Result<(), DatabaseError> {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
         let expr = const_in(
+            &mut arena,
             DataValue::Int32(2),
             vec![DataValue::Null, DataValue::Int32(1)],
             false,
         );
 
-        assert_eq!(expr.eval::<&[DataValue]>(None)?, DataValue::Null);
+        assert_eq!(
+            arena.expression(expr).eval::<&[DataValue]>(&arena, None)?,
+            DataValue::Null
+        );
         Ok(())
     }
 
     #[test]
     fn not_in_eval_matches_even_if_null_appears_first() -> Result<(), DatabaseError> {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
         let expr = const_in(
+            &mut arena,
             DataValue::Int32(1),
             vec![DataValue::Null, DataValue::Int32(1)],
             true,
         );
 
-        assert_eq!(expr.eval::<&[DataValue]>(None)?, DataValue::Boolean(false));
+        assert_eq!(
+            arena.expression(expr).eval::<&[DataValue]>(&arena, None)?,
+            DataValue::Boolean(false)
+        );
         Ok(())
     }
 

@@ -18,12 +18,10 @@ use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::iter_ext::Itertools;
 use crate::planner::operator::sort::SortField;
-use crate::planner::{Childrens, LogicalPlan, PlanArena};
+use crate::planner::{fmt_explain_list, Childrens, Explain, LogicalPlan, PlanArena};
 use crate::storage::Bounds;
 use crate::types::index::IndexInfo;
 use kite_sql_serde_macros::ReferenceSerialization;
-use std::fmt;
-use std::fmt::Formatter;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct TableScanOperator {
@@ -43,21 +41,22 @@ impl TableScanOperator {
         table_name: TableName,
         table_catalog: &TableCatalog,
         with_pk: bool,
-        arena: &PlanArena,
+        arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         // Fill all Columns in TableCatalog by default
         let columns = table_catalog.columns().copied().collect_vec();
         let mut index_infos = Vec::with_capacity(table_catalog.indexes.len());
 
         for index_ref in table_catalog.indexes.iter().copied() {
-            let index_meta = arena.index(index_ref);
-            let mut sort_fields = Vec::with_capacity(index_meta.column_ids.len());
-            for col_id in &index_meta.column_ids {
+            let column_ids = arena.index(index_ref).column_ids.clone();
+            let mut sort_fields = Vec::with_capacity(column_ids.len());
+            for (position, col_id) in column_ids.iter().enumerate() {
                 let column_ref = table_catalog.get_column_by_id(col_id).ok_or_else(|| {
                     DatabaseError::column_not_found(format!("index column id: {col_id} not found"))
                 })?;
                 sort_fields.push(SortField {
-                    expr: ScalarExpression::column_expr(column_ref, sort_fields.len()),
+                    expr: arena
+                        .alloc_expression(ScalarExpression::column_expr(column_ref, position)),
                     asc: true,
                     nulls_first: false,
                 })
@@ -91,23 +90,18 @@ impl TableScanOperator {
     }
 }
 
-impl fmt::Display for TableScanOperator {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let projection_columns = self.columns.iter().join(", ");
+impl Explain for TableScanOperator {
+    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TableScan {} -> [", self.table_name)?;
+        fmt_explain_list(&self.columns, ", ", arena, f)?;
+        f.write_str("]")?;
         let (offset, limit) = self.limit;
-
-        write!(
-            f,
-            "TableScan {} -> [{}]",
-            self.table_name, projection_columns
-        )?;
         if let Some(limit) = limit {
             write!(f, ", Limit: {limit}")?;
         }
         if let Some(offset) = offset {
             write!(f, ", Offset: {offset}")?;
         }
-
         Ok(())
     }
 }

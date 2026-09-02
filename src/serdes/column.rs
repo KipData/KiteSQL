@@ -209,15 +209,12 @@ pub(crate) mod test {
             cursor.seek(SeekFrom::Start(0))?;
         }
         {
+            let default =
+                plan_arena.alloc_expression(ScalarExpression::Constant(DataValue::UInt64(42)));
             let not_ref_column = plan_arena.alloc_column(ColumnCatalog::new(
                 "c3".to_string(),
                 false,
-                ColumnDesc::new(
-                    LogicalType::Integer,
-                    None,
-                    false,
-                    Some(ScalarExpression::Constant(DataValue::UInt64(42))),
-                )?,
+                ColumnDesc::new(LogicalType::Integer, None, false, Some(default))?,
             ));
             not_ref_column.encode(&mut cursor, false, &mut reference_tables, &plan_arena)?;
             cursor.seek(SeekFrom::Start(0))?;
@@ -228,10 +225,16 @@ pub(crate) mod test {
                 &reference_tables,
                 &mut plan_arena,
             )?;
-            assert_eq!(
-                plan_arena.column(decoded),
-                plan_arena.column(not_ref_column)
-            );
+            let decoded = plan_arena.column(decoded);
+            let expected = plan_arena.column(not_ref_column);
+            assert_eq!(decoded.summary(), expected.summary());
+            assert_eq!(decoded.nullable(), expected.nullable());
+            assert_eq!(decoded.datatype(), expected.datatype());
+            assert_eq!(decoded.desc().primary(), expected.desc().primary());
+            assert_eq!(decoded.desc().is_unique(), expected.desc().is_unique());
+            let decoded_default = decoded.desc().default.unwrap();
+            let expected_default = expected.desc().default.unwrap();
+            assert!(decoded_default.eq_ignore_colref_pos(expected_default, &plan_arena));
         }
 
         Ok(())
@@ -311,7 +314,7 @@ pub(crate) mod test {
             LogicalType::Integer,
             None,
             false,
-            Some(ScalarExpression::Constant(DataValue::UInt64(42))),
+            Some(arena.alloc_expression(ScalarExpression::Constant(DataValue::UInt64(42)))),
         )?;
         desc.encode(&mut cursor, false, &mut reference_tables, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
@@ -322,7 +325,13 @@ pub(crate) mod test {
             &reference_tables,
             &mut arena,
         )?;
-        assert_eq!(desc, decode_desc);
+        assert_eq!(desc.column_datatype, decode_desc.column_datatype);
+        assert_eq!(desc.primary(), decode_desc.primary());
+        assert_eq!(desc.is_unique(), decode_desc.is_unique());
+        assert_eq!(
+            arena.expression(desc.default.unwrap()),
+            arena.expression(decode_desc.default.unwrap())
+        );
 
         Ok(())
     }

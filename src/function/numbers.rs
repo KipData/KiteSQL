@@ -17,8 +17,7 @@ use crate::catalog::ColumnDesc;
 use crate::errors::DatabaseError;
 use crate::expression::function::table::TableFunctionImpl;
 use crate::expression::function::FunctionSummary;
-use crate::expression::ScalarExpression;
-use crate::planner::TableArena;
+use crate::planner::{ExprRef, TableArena};
 use crate::types::tuple::Schema;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
@@ -47,9 +46,10 @@ impl TableFunctionImpl for Numbers {
     #[allow(unused_variables, clippy::redundant_closure_call)]
     fn eval(
         &self,
-        args: &[ScalarExpression],
+        args: &[ExprRef],
+        arena: &crate::planner::PlanArena<'_>,
     ) -> Result<Box<dyn Iterator<Item = Result<Tuple, DatabaseError>>>, DatabaseError> {
-        let mut value = args[0].eval::<&Tuple>(None)?;
+        let mut value = arena.expression(args[0]).eval::<&Tuple>(arena, None)?;
 
         value = value.cast(&LogicalType::Integer)?;
         let num = value

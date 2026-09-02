@@ -13,16 +13,14 @@
 // limitations under the License.
 
 use crate::catalog::TableName;
-use crate::expression::ScalarExpression;
+use crate::planner::{Explain, ExprRef, PlanArena};
 use crate::types::LogicalType;
 use kite_sql_serde_macros::ReferenceSerialization;
-use std::fmt;
-use std::fmt::Formatter;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub enum DefaultChange {
     NoChange,
-    Set(ScalarExpression),
+    Set(ExprRef),
     Drop,
 }
 
@@ -43,17 +41,18 @@ pub struct ChangeColumnOperator {
     pub not_null_change: NotNullChange,
 }
 
-impl fmt::Display for ChangeColumnOperator {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+impl Explain for ChangeColumnOperator {
+    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Change {} -> {}.{} ({}, {:?}, {:?})",
-            self.old_column_name,
-            self.table_name,
-            self.new_column_name,
-            self.data_type,
-            self.default_change,
-            self.not_null_change
-        )
+            "Change {} -> {}.{} ({}, ",
+            self.old_column_name, self.table_name, self.new_column_name, self.data_type
+        )?;
+        match &self.default_change {
+            DefaultChange::NoChange => f.write_str("NoChange")?,
+            DefaultChange::Set(expr) => write!(f, "Set({})", expr.explain(arena))?,
+            DefaultChange::Drop => f.write_str("Drop")?,
+        }
+        write!(f, ", {:?})", self.not_null_change)
     }
 }

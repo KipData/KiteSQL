@@ -13,12 +13,9 @@
 // limitations under the License.
 
 use super::Operator;
-use crate::iter_ext::Itertools;
 use crate::planner::operator::sort::SortField;
-use crate::planner::{Childrens, LogicalPlan};
+use crate::planner::{fmt_explain_list, Childrens, Explain, LogicalPlan, PlanArena};
 use kite_sql_serde_macros::ReferenceSerialization;
-use std::fmt;
-use std::fmt::Formatter;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct TopKOperator {
@@ -45,21 +42,13 @@ impl TopKOperator {
     }
 }
 
-impl fmt::Display for TopKOperator {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+impl Explain for TopKOperator {
+    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Top {}, ", self.limit)?;
-
         if let Some(offset) = self.offset {
             write!(f, "Offset {offset}, ")?;
         }
-
-        let sort_fields = self
-            .sort_fields
-            .iter()
-            .map(|sort_field| format!("{sort_field}"))
-            .join(", ");
-        write!(f, "Sort By {sort_fields}")?;
-
-        Ok(())
+        f.write_str("Sort By ")?;
+        fmt_explain_list(&self.sort_fields, ", ", arena, f)
     }
 }

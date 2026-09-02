@@ -14,11 +14,10 @@
 
 use crate::catalog::ColumnRef;
 use crate::expression::window::WindowFunction;
-use crate::iter_ext::Itertools;
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::SortOption;
+use crate::planner::{fmt_explain_list, Explain, PlanArena};
 use kite_sql_serde_macros::ReferenceSerialization;
-use std::fmt;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct WindowOperator {
@@ -41,36 +40,36 @@ impl WindowOperator {
     }
 }
 
-impl fmt::Display for WindowOperator {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Explain for WindowOperator {
+    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (partition_by, order_by) = self.sort_fields.split_at(self.partition_by_len);
-        write!(
-            f,
-            "Window [{}]",
-            self.functions
-                .iter()
-                .map(|expr| format!("{expr:?}"))
-                .join(", ")
-        )?;
+        f.write_str("Window [")?;
+        for (index, function) in self.functions.iter().enumerate() {
+            if index > 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "WindowFunction {{ kind: {:?}, args: [", function.kind)?;
+            fmt_explain_list(&function.args, ", ", arena, f)?;
+            write!(f, "], ty: {:?} }}", function.ty)?;
+        }
+        f.write_str("]")?;
         if !self.sort_fields.is_empty() {
-            write!(f, " ->")?;
+            f.write_str(" ->")?;
         }
         if !partition_by.is_empty() {
-            write!(
-                f,
-                " Partition By [{}]",
-                partition_by
-                    .iter()
-                    .map(|field| field.expr.to_string())
-                    .join(", ")
-            )?;
+            f.write_str(" Partition By [")?;
+            for (index, field) in partition_by.iter().enumerate() {
+                if index > 0 {
+                    f.write_str(", ")?;
+                }
+                field.expr.fmt(arena, f)?;
+            }
+            f.write_str("]")?;
         }
         if !order_by.is_empty() {
-            write!(
-                f,
-                " Order By [{}]",
-                order_by.iter().map(ToString::to_string).join(", ")
-            )?;
+            f.write_str(" Order By [")?;
+            fmt_explain_list(order_by, ", ", arena, f)?;
+            f.write_str("]")?;
         }
         Ok(())
     }
@@ -82,13 +81,13 @@ mod tests {
     use super::*;
     use crate::expression::window::WindowFunctionKind;
     use crate::expression::ScalarExpression;
-    use crate::planner::TableArena;
+    use crate::planner::{ExprRef, PlanArena, TableArena, TableArenaCell};
     use crate::serdes::{ReferenceSerialization, ReferenceTables};
     use crate::storage::rocksdb::RocksTransaction;
     use crate::types::LogicalType;
     use std::io::{Cursor, Seek, SeekFrom};
 
-    fn operator(partition_by: Vec<ScalarExpression>, order_by: Vec<SortField>) -> WindowOperator {
+    fn operator(partition_by: Vec<ExprRef>, order_by: Vec<SortField>) -> WindowOperator {
         let partition_by_len = partition_by.len();
         WindowOperator {
             sort_fields: partition_by
@@ -107,32 +106,40 @@ mod tests {
     }
 
     #[test]
-    fn display_window_spec() {
+    fn explain_window_spec() {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let one = arena.alloc_expression(ScalarExpression::from(1));
+        let two = arena.alloc_expression(ScalarExpression::from(2));
         let function = "Window [WindowFunction { kind: RowNumber, args: [], ty: Bigint }]";
-        assert_eq!(operator(Vec::new(), Vec::new()).to_string(), function);
         assert_eq!(
-            operator(vec![1.into()], Vec::new()).to_string(),
-            format!("{function} -> Partition By [1]")
+            operator(Vec::new(), Vec::new()).explain(&arena).to_string(),
+            function
         );
         assert_eq!(
-            operator(Vec::new(), vec![ScalarExpression::from(2).desc()]).to_string(),
-            format!("{function} -> Order By [2 Desc Nulls Last]")
+            operator(vec![one], Vec::new()).explain(&arena).to_string(),
+            function.to_owned() + " -> Partition By [1]"
         );
         assert_eq!(
-            operator(vec![1.into()], vec![ScalarExpression::from(2).desc()]).to_string(),
-            format!("{function} -> Partition By [1] Order By [2 Desc Nulls Last]")
+            operator(Vec::new(), vec![SortField::from(two).desc()])
+                .explain(&arena)
+                .to_string(),
+            function.to_owned() + " -> Order By [2 Desc Nulls Last]"
+        );
+        assert_eq!(
+            operator(vec![one], vec![SortField::from(two).desc()])
+                .explain(&arena)
+                .to_string(),
+            function.to_owned() + " -> Partition By [1] Order By [2 Desc Nulls Last]"
         );
         assert_eq!(
             operator(Vec::new(), Vec::new()).sort_option(),
             SortOption::Follow
         );
         assert_eq!(
-            operator(vec![1.into()], vec![ScalarExpression::from(2).desc()]).sort_option(),
+            operator(vec![one], vec![SortField::from(two).desc()]).sort_option(),
             SortOption::OrderBy {
-                fields: vec![
-                    ScalarExpression::from(1).asc(),
-                    ScalarExpression::from(2).desc(),
-                ],
+                fields: vec![SortField::from(one).asc(), SortField::from(two).desc()],
                 ignore_prefix_len: 0,
             }
         );
@@ -140,10 +147,13 @@ mod tests {
 
     #[test]
     fn serialization_roundtrip() -> Result<(), crate::errors::DatabaseError> {
-        let source = operator(vec![1.into()], vec![ScalarExpression::from(2).desc()]);
+        let mut arena = TableArena::default();
+        let source = operator(
+            vec![arena.alloc_expression(ScalarExpression::from(1))],
+            vec![SortField::from(arena.alloc_expression(ScalarExpression::from(2))).desc()],
+        );
         let mut cursor = Cursor::new(Vec::new());
         let mut reference_tables = ReferenceTables::new();
-        let arena = TableArena::default();
         source.encode(&mut cursor, false, &mut reference_tables, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
 

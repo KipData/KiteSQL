@@ -412,32 +412,34 @@ mod tests {
             Operator::RecursiveScan(RecursiveScanOperator { schema_ref }),
             Childrens::None,
         );
-        let filter = FilterOperator::build(
-            ScalarExpression::Binary {
-                op: BinaryOperator::Lt,
-                left_expr: Box::new(ScalarExpression::column_expr(column, 0)),
-                right_expr: Box::new(DataValue::Int32(3).into()),
-                evaluator: Some(binary_create(
-                    Cow::Owned(LogicalType::Integer),
-                    BinaryOperator::Lt,
-                )?),
-                ty: LogicalType::Boolean,
-            },
-            scan,
-            false,
-        );
+        let filter_left = plan_arena.alloc_expression(ScalarExpression::column_expr(column, 0));
+        let filter_right = plan_arena.alloc_expression(DataValue::Int32(3).into());
+        let filter_expr = plan_arena.alloc_expression(ScalarExpression::Binary {
+            op: BinaryOperator::Lt,
+            left_expr: filter_left,
+            right_expr: filter_right,
+            evaluator: Some(binary_create(
+                Cow::Owned(LogicalType::Integer),
+                BinaryOperator::Lt,
+            )?),
+            ty: LogicalType::Boolean,
+        });
+        let filter = FilterOperator::build(filter_expr, scan, false);
+        let project_left = plan_arena.alloc_expression(ScalarExpression::column_expr(column, 0));
+        let project_right = plan_arena.alloc_expression(DataValue::Int32(1).into());
+        let project_expr = plan_arena.alloc_expression(ScalarExpression::Binary {
+            op: BinaryOperator::Plus,
+            left_expr: project_left,
+            right_expr: project_right,
+            evaluator: Some(binary_create(
+                Cow::Owned(LogicalType::Integer),
+                BinaryOperator::Plus,
+            )?),
+            ty: LogicalType::Integer,
+        });
         let recursive = LogicalPlan::new(
             Operator::Project(ProjectOperator {
-                exprs: vec![ScalarExpression::Binary {
-                    op: BinaryOperator::Plus,
-                    left_expr: Box::new(ScalarExpression::column_expr(column, 0)),
-                    right_expr: Box::new(DataValue::Int32(1).into()),
-                    evaluator: Some(binary_create(
-                        Cow::Owned(LogicalType::Integer),
-                        BinaryOperator::Plus,
-                    )?),
-                    ty: LogicalType::Integer,
-                }],
+                exprs: vec![project_expr],
             }),
             Childrens::Only(Box::new(filter)),
         );

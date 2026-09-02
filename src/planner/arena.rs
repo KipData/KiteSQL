@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
+use crate::expression::ScalarExpression;
 use crate::planner::LogicalPlan;
 use crate::types::index::{IndexMeta, IndexMetaRef};
 use crate::types::tuple::Schema;
@@ -24,6 +25,7 @@ pub struct TableArena {
     dummy_columns: [ColumnCatalog; DUMMY_COLUMN_COUNT],
     columns: Vec<TableArenaColumn>,
     indexes: Vec<TableArenaIndex>,
+    expressions: Vec<TableArenaExpression>,
     version: usize,
 }
 
@@ -34,6 +36,11 @@ struct TableArenaColumn {
 
 struct TableArenaIndex {
     meta: IndexMeta,
+    live: bool,
+}
+
+struct TableArenaExpression {
+    expression: ScalarExpression,
     live: bool,
 }
 
@@ -55,7 +62,13 @@ pub struct PlanArena<'a> {
     temp_table_id: usize,
     columns: Vec<ColumnCatalog>,
     indexes: Vec<IndexMeta>,
+    expressions: Vec<ScalarExpression>,
     plans: Vec<LogicalPlan>,
+}
+
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
+pub struct ExprRef {
+    pos: usize,
 }
 
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
@@ -63,10 +76,28 @@ pub(crate) struct PlanRef {
     pos: usize,
 }
 
+impl ExprRef {
+    pub(crate) fn new(pos: usize) -> Self {
+        Self { pos }
+    }
+
+    pub(crate) fn pos(self) -> usize {
+        self.pos
+    }
+}
+
+impl fmt::Display for ExprRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "#expr{}", self.pos)
+    }
+}
+
 pub trait MetaArena {
     fn alloc_column(&mut self, column: ColumnCatalog) -> ColumnRef;
 
     fn alloc_index(&mut self, index: IndexMeta) -> IndexMetaRef;
+
+    fn alloc_expression(&mut self, expression: ScalarExpression) -> ExprRef;
 
     fn alloc_columns<I>(&mut self, columns: I) -> Schema
     where
@@ -82,6 +113,8 @@ pub trait MetaArena {
     fn column(&self, column: ColumnRef) -> &ColumnCatalog;
 
     fn index(&self, index: IndexMetaRef) -> &IndexMeta;
+
+    fn expression(&self, expression: ExprRef) -> &ScalarExpression;
 
     fn find_column(&self, column: &ColumnCatalog) -> Option<ColumnRef>;
 
@@ -150,6 +183,7 @@ impl Default for TableArena {
             }),
             columns: Vec::new(),
             indexes: Vec::new(),
+            expressions: Vec::new(),
             version: 0,
         }
     }
@@ -178,12 +212,20 @@ impl TableArena {
         <Self as MetaArena>::alloc_index(self, index)
     }
 
+    pub fn alloc_expression(&mut self, expression: ScalarExpression) -> ExprRef {
+        <Self as MetaArena>::alloc_expression(self, expression)
+    }
+
     pub(crate) fn column(&self, column: ColumnRef) -> &ColumnCatalog {
         <Self as MetaArena>::column(self, column)
     }
 
     pub(crate) fn index(&self, index: IndexMetaRef) -> &IndexMeta {
         <Self as MetaArena>::index(self, index)
+    }
+
+    pub(crate) fn expression(&self, expression: ExprRef) -> &ScalarExpression {
+        <Self as MetaArena>::expression(self, expression)
     }
 
     fn dummy_column(&self, column: ColumnRef) -> Option<&ColumnCatalog> {
@@ -301,6 +343,29 @@ impl MetaArena for TableArena {
         IndexMetaRef::new(pos)
     }
 
+    fn alloc_expression(&mut self, expression: ScalarExpression) -> ExprRef {
+        if let Some((pos, slot)) = self
+            .expressions
+            .iter_mut()
+            .enumerate()
+            .find(|(_, expression)| !expression.live)
+        {
+            *slot = TableArenaExpression {
+                expression,
+                live: true,
+            };
+            self.increment_version();
+            return ExprRef::new(pos);
+        }
+        let pos = self.expressions.len();
+        self.expressions.push(TableArenaExpression {
+            expression,
+            live: true,
+        });
+        self.increment_version();
+        ExprRef::new(pos)
+    }
+
     fn column(&self, column: ColumnRef) -> &ColumnCatalog {
         if let Some(column) = self.dummy_column(column) {
             return column;
@@ -318,6 +383,12 @@ impl MetaArena for TableArena {
             panic!("accessing recycled TableArena index");
         }
         &index.meta
+    }
+
+    fn expression(&self, expression: ExprRef) -> &ScalarExpression {
+        let expression = &self.expressions[expression.pos()];
+        assert!(expression.live, "accessing recycled TableArena expression");
+        &expression.expression
     }
 
     fn find_column(&self, column: &ColumnCatalog) -> Option<ColumnRef> {
@@ -347,6 +418,7 @@ impl<'a> PlanArena<'a> {
             temp_table_id: 0,
             columns: Vec::new(),
             indexes: Vec::new(),
+            expressions: Vec::new(),
             plans: Vec::new(),
         }
     }
@@ -379,7 +451,13 @@ impl<'a> PlanArena<'a> {
                 live: true,
             });
         }
-        if !self.columns.is_empty() || !self.indexes.is_empty() {
+        for expression in &self.expressions {
+            table_arena.expressions.push(TableArenaExpression {
+                expression: expression.clone(),
+                live: true,
+            });
+        }
+        if !self.columns.is_empty() || !self.indexes.is_empty() || !self.expressions.is_empty() {
             table_arena.increment_version();
         }
     }
@@ -454,6 +532,24 @@ impl<'a> PlanArena<'a> {
         &self.plans[plan_ref.pos]
     }
 
+    pub(crate) fn alloc_expression(&mut self, expression: ScalarExpression) -> ExprRef {
+        <Self as MetaArena>::alloc_expression(self, expression)
+    }
+
+    pub(crate) fn expression(&self, expression_ref: ExprRef) -> &ScalarExpression {
+        <Self as MetaArena>::expression(self, expression_ref)
+    }
+
+    pub(crate) fn expression_mut(&mut self, expression_ref: ExprRef) -> &mut ScalarExpression {
+        self.assert_table_arena_unchanged();
+        let persistent_len = self.table_arena.borrow().expressions.len();
+        assert!(
+            expression_ref.pos() >= persistent_len,
+            "persistent expressions are immutable"
+        );
+        &mut self.expressions[expression_ref.pos() - persistent_len]
+    }
+
     pub fn column(&self, column: ColumnRef) -> &ColumnCatalog {
         <Self as MetaArena>::column(self, column)
     }
@@ -490,6 +586,13 @@ impl MetaArena for PlanArena<'_> {
         IndexMetaRef::new(pos)
     }
 
+    fn alloc_expression(&mut self, expression: ScalarExpression) -> ExprRef {
+        self.assert_table_arena_unchanged();
+        let pos = self.table_arena.borrow().expressions.len() + self.expressions.len();
+        self.expressions.push(expression);
+        ExprRef::new(pos)
+    }
+
     fn column(&self, column: ColumnRef) -> &ColumnCatalog {
         self.assert_table_arena_unchanged();
         let table_arena = self.table_arena.borrow();
@@ -512,6 +615,16 @@ impl MetaArena for PlanArena<'_> {
             table_arena.index(index)
         } else {
             &self.indexes[index.pos() - table_indexes_len]
+        }
+    }
+    fn expression(&self, expression: ExprRef) -> &ScalarExpression {
+        self.assert_table_arena_unchanged();
+        let table_arena = self.table_arena.borrow();
+        let persistent_len = table_arena.expressions.len();
+        if expression.pos() < persistent_len {
+            table_arena.expression(expression)
+        } else {
+            &self.expressions[expression.pos() - persistent_len]
         }
     }
 

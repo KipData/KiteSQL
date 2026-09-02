@@ -19,7 +19,7 @@ use crate::optimizer::core::rule::NormalizationRule;
 use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyQuantifier};
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
-use crate::planner::{Childrens, LogicalPlan};
+use crate::planner::{Childrens, ExprRef, LogicalPlan};
 use crate::types::index::{IndexLookup, IndexType};
 use crate::types::tuple::Schema;
 
@@ -48,7 +48,7 @@ impl NormalizationRule for ParameterizeMarkApply {
             _ => return Ok(false),
         };
 
-        let changed = op.parameterized_probe().cloned() != new_probe;
+        let changed = op.parameterized_probe().copied() != new_probe;
         op.set_parameterized_probe(new_probe);
         Ok(changed)
     }
@@ -56,16 +56,16 @@ impl NormalizationRule for ParameterizeMarkApply {
 
 fn find_parameterized_probe(
     kind: MarkApplyKind,
-    predicates: &[ScalarExpression],
+    predicates: &[ExprRef],
     left_schema: &Schema,
     right_schema: &Schema,
     arena: &crate::planner::PlanArena,
-) -> Result<Option<(ColumnRef, ScalarExpression)>, DatabaseError> {
+) -> Result<Option<(ColumnRef, ExprRef)>, DatabaseError> {
     match kind {
         MarkApplyKind::Exists => {
             for predicate in predicates {
                 if let Some(probe) =
-                    extract_parameterized_probe(predicate, left_schema, right_schema, arena)?
+                    extract_parameterized_probe(*predicate, left_schema, right_schema, arena)?
                 {
                     return Ok(Some(probe));
                 }
@@ -74,7 +74,7 @@ fn find_parameterized_probe(
         }
         MarkApplyKind::Quantified(MarkApplyQuantifier::Any) => {
             if let Some(predicate) = predicates.first() {
-                extract_parameterized_probe(predicate, left_schema, right_schema, arena)
+                extract_parameterized_probe(*predicate, left_schema, right_schema, arena)
             } else {
                 Ok(None)
             }
@@ -84,12 +84,12 @@ fn find_parameterized_probe(
 }
 
 fn extract_parameterized_probe(
-    predicate: &ScalarExpression,
+    predicate: ExprRef,
     left_schema: &Schema,
     right_schema: &Schema,
     arena: &crate::planner::PlanArena,
-) -> Result<Option<(ColumnRef, ScalarExpression)>, DatabaseError> {
-    match predicate.unpack_alias_ref() {
+) -> Result<Option<(ColumnRef, ExprRef)>, DatabaseError> {
+    match predicate.unpack_alias_ref(arena) {
         ScalarExpression::Binary {
             op: BinaryOperator::Eq,
             left_expr,
@@ -97,8 +97,8 @@ fn extract_parameterized_probe(
             ..
         } => {
             if let Some(probe) = extract_parameterized_probe_side(
-                left_expr,
-                right_expr,
+                *left_expr,
+                *right_expr,
                 left_schema,
                 right_schema,
                 arena,
@@ -106,8 +106,8 @@ fn extract_parameterized_probe(
                 return Ok(Some(probe));
             }
             extract_parameterized_probe_side(
-                right_expr,
-                left_expr,
+                *right_expr,
+                *left_expr,
                 left_schema,
                 right_schema,
                 arena,
@@ -118,13 +118,16 @@ fn extract_parameterized_probe(
 }
 
 fn extract_parameterized_probe_side(
-    right_expr: &ScalarExpression,
-    left_expr: &ScalarExpression,
+    right_expr: ExprRef,
+    left_expr: ExprRef,
     left_schema: &Schema,
     right_schema: &Schema,
     arena: &crate::planner::PlanArena,
-) -> Result<Option<(ColumnRef, ScalarExpression)>, DatabaseError> {
-    let Some((right_column, _)) = right_expr.unpack_alias_ref().unpack_bound_col(false) else {
+) -> Result<Option<(ColumnRef, ExprRef)>, DatabaseError> {
+    let Some((right_column, _)) = right_expr
+        .unpack_alias(arena)
+        .unpack_bound_col(arena, false)
+    else {
         return Ok(None);
     };
 
@@ -142,7 +145,7 @@ fn extract_parameterized_probe_side(
         return Ok(None);
     }
 
-    Ok(Some((right_column, left_expr.clone())))
+    Ok(Some((right_column, left_expr)))
 }
 
 fn parameterize_right_subtree(
@@ -253,14 +256,18 @@ mod tests {
         ))
     }
 
-    fn eq(left: ScalarExpression, right: ScalarExpression) -> ScalarExpression {
-        ScalarExpression::Binary {
+    fn expr(arena: &mut PlanArena, column: ColumnRef) -> ExprRef {
+        arena.alloc_expression(ScalarExpression::column_expr(column, 0))
+    }
+
+    fn eq(arena: &mut PlanArena, left: ExprRef, right: ExprRef) -> ExprRef {
+        arena.alloc_expression(ScalarExpression::Binary {
             op: BinaryOperator::Eq,
-            left_expr: Box::new(left),
-            right_expr: Box::new(right),
+            left_expr: left,
+            right_expr: right,
             evaluator: None,
             ty: LogicalType::Boolean,
-        }
+        })
     }
 
     #[test]
@@ -274,6 +281,9 @@ mod tests {
         let right_schema = vec![right];
         let overlapping_schema = vec![left, right];
 
+        let all_right = expr(&mut arena, right);
+        let all_left = expr(&mut arena, left);
+        let all_predicate = eq(&mut arena, all_right, all_left);
         assert!(find_parameterized_probe(
             MarkApplyKind::Quantified(MarkApplyQuantifier::Any),
             &[],
@@ -284,22 +294,19 @@ mod tests {
         .is_none());
         assert!(find_parameterized_probe(
             MarkApplyKind::Quantified(MarkApplyQuantifier::All),
-            &[eq(
-                ScalarExpression::column_expr(right, 0),
-                ScalarExpression::column_expr(left, 0),
-            )],
+            &[all_predicate],
             &left_schema,
             &right_schema,
             &arena,
         )?
         .is_none());
 
+        let exists_right = expr(&mut arena, right);
+        let exists_left = expr(&mut arena, left);
+        let exists_predicate = eq(&mut arena, exists_right, exists_left);
         let predicates = vec![
-            ScalarExpression::from(true),
-            eq(
-                ScalarExpression::column_expr(right, 0),
-                ScalarExpression::column_expr(left, 0),
-            ),
+            arena.alloc_expression(ScalarExpression::from(true)),
+            exists_predicate,
         ];
         let probe = find_parameterized_probe(
             MarkApplyKind::Exists,
@@ -311,28 +318,28 @@ mod tests {
         .expect("right = left should be parameterizable");
         assert_eq!(probe.0, right);
 
+        let outside_right = expr(&mut arena, right);
+        let outside_expr = expr(&mut arena, outside);
+        let outside_predicate = eq(&mut arena, outside_right, outside_expr);
         assert!(extract_parameterized_probe(
-            &eq(
-                ScalarExpression::column_expr(right, 0),
-                ScalarExpression::column_expr(outside, 0),
-            ),
+            outside_predicate,
             &left_schema,
             &right_schema,
             &arena,
         )?
         .is_none());
+        let overlap_left = expr(&mut arena, right);
+        let overlap_right = expr(&mut arena, right);
+        let overlap_predicate = eq(&mut arena, overlap_left, overlap_right);
         assert!(extract_parameterized_probe(
-            &eq(
-                ScalarExpression::column_expr(right, 0),
-                ScalarExpression::column_expr(right, 0),
-            ),
+            overlap_predicate,
             &overlapping_schema,
             &right_schema,
             &arena,
         )?
         .is_none());
         assert!(extract_parameterized_probe(
-            &ScalarExpression::from(false),
+            arena.alloc_expression(ScalarExpression::from(false)),
             &left_schema,
             &right_schema,
             &arena,
@@ -355,7 +362,7 @@ mod tests {
 
         let mut filter = LogicalPlan::new(
             Operator::Filter(FilterOperator {
-                predicate: ScalarExpression::from(true),
+                predicate: arena.alloc_expression(ScalarExpression::from(true)),
                 is_optimized: false,
                 having: false,
             }),

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut};
+use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::expression::{AliasType, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::rule::normalization::column_pruning::ColumnPruning;
@@ -33,7 +33,8 @@ use crate::optimizer::rule::normalization::pushdown_predicates::{
 use crate::optimizer::rule::normalization::simplification::ConstantCalculation;
 use crate::optimizer::rule::normalization::simplification::SimplifyFilter;
 use crate::optimizer::rule::normalization::top_k::TopK;
-use crate::planner::LogicalPlan;
+use crate::planner::{ExprRef, LogicalPlan};
+use std::collections::HashSet;
 mod column_pruning;
 mod combine_operators;
 mod compilation_in_advance;
@@ -220,16 +221,16 @@ impl NormalizationRule for NormalizationRuleImpl {
     }
 }
 
-pub(crate) fn strip_alias(expr: &ScalarExpression) -> &ScalarExpression {
-    match expr {
+pub(crate) fn strip_alias(expr: ExprRef, arena: &crate::planner::PlanArena<'_>) -> ExprRef {
+    match arena.expression(expr) {
         ScalarExpression::Alias {
             expr,
             alias: AliasType::Name(_),
-        } => strip_alias(expr),
+        } => strip_alias(*expr, arena),
         ScalarExpression::Alias {
             alias: AliasType::Expr(alias_expr),
             ..
-        } => strip_alias(alias_expr),
+        } => strip_alias(*alias_expr, arena),
         _ => expr,
     }
 }
@@ -248,40 +249,74 @@ pub(crate) fn remap_position(position: &mut usize, removed_positions: &[usize]) 
     }
 }
 
-struct PositionRemapper<'a> {
-    removed_positions: &'a [usize],
+struct PositionRemapper<'positions, 'visited> {
+    removed_positions: &'positions [usize],
+    visited: &'visited mut HashSet<ExprRef>,
 }
 
-impl<'a> ExprVisitorMut<'a> for PositionRemapper<'_> {
-    fn visit(&mut self, expr: &'a mut ScalarExpression) -> Result<(), DatabaseError> {
-        match expr {
-            ScalarExpression::ColumnRef { position, .. } => {
-                remap_position(position, self.removed_positions);
-                Ok(())
-            }
-            ScalarExpression::Alias { expr, alias } => match alias {
-                AliasType::Expr(alias_expr) => self.visit(alias_expr),
-                AliasType::Name(_) => self.visit(expr),
-            },
-            _ => walk_mut_expr(self, expr),
+impl<'positions, 'visited> PositionRemapper<'positions, 'visited> {
+    pub(super) fn new(
+        removed_positions: &'positions [usize],
+        visited: &'visited mut HashSet<ExprRef>,
+    ) -> Self {
+        visited.clear();
+        Self {
+            removed_positions,
+            visited,
+        }
+    }
+}
+
+impl ExprVisitorMut for PositionRemapper<'_, '_> {
+    fn visit_expression_ref(
+        &mut self,
+        expr: &mut ExprRef,
+        _arena: &mut crate::planner::PlanArena<'_>,
+    ) -> Result<bool, DatabaseError> {
+        Ok(self.visited.insert(*expr))
+    }
+
+    fn visit_column_ref(
+        &mut self,
+        _column: &mut crate::catalog::ColumnRef,
+        position: &mut usize,
+        _arena: &mut crate::planner::PlanArena<'_>,
+    ) -> Result<(), DatabaseError> {
+        remap_position(position, self.removed_positions);
+        Ok(())
+    }
+
+    fn visit_alias(
+        &mut self,
+        expr: &mut ExprRef,
+        alias: &mut AliasType,
+        arena: &mut crate::planner::PlanArena<'_>,
+    ) -> Result<(), DatabaseError> {
+        match alias {
+            AliasType::Expr(alias_expr) => self.visit(alias_expr, arena),
+            AliasType::Name(_) => self.visit(expr, arena),
         }
     }
 }
 
 pub(crate) fn remap_expr_positions(
-    expr: &mut ScalarExpression,
+    mut expr: ExprRef,
     removed_positions: &[usize],
+    visited: &mut HashSet<ExprRef>,
+    arena: &mut crate::planner::PlanArena<'_>,
 ) -> Result<(), DatabaseError> {
-    PositionRemapper { removed_positions }.visit(expr)
+    PositionRemapper::new(removed_positions, visited).visit(&mut expr, arena)
 }
 
 pub(crate) fn remap_exprs_positions<'a>(
-    exprs: impl IntoIterator<Item = &'a mut ScalarExpression>,
+    exprs: impl IntoIterator<Item = &'a mut ExprRef>,
     removed_positions: &[usize],
+    visited: &mut HashSet<ExprRef>,
+    arena: &mut crate::planner::PlanArena<'_>,
 ) -> Result<(), DatabaseError> {
-    let mut remapper = PositionRemapper { removed_positions };
+    let mut remapper = PositionRemapper::new(removed_positions, visited);
     for expr in exprs {
-        remapper.visit(expr)?;
+        remapper.visit(expr, arena)?;
     }
     Ok(())
 }

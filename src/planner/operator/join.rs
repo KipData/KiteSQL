@@ -13,9 +13,7 @@
 // limitations under the License.
 
 use super::{Operator, PlanImpl};
-use crate::expression::ScalarExpression;
-use crate::iter_ext::Itertools;
-use crate::planner::{Childrens, LogicalPlan};
+use crate::planner::{Childrens, Explain, ExprRef, LogicalPlan, PlanArena};
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::fmt::Formatter;
@@ -39,9 +37,9 @@ impl JoinType {
 pub enum JoinCondition {
     On {
         /// Equijoin clause expressed as pairs of (left, right) join columns
-        on: Vec<(ScalarExpression, ScalarExpression)>,
+        on: Vec<(ExprRef, ExprRef)>,
         /// Filters applied during join (non-equi conditions)
-        filter: Option<ScalarExpression>,
+        filter: Option<ExprRef>,
     },
     None,
 }
@@ -83,6 +81,35 @@ impl JoinOperator {
     }
 }
 
+impl Explain for JoinOperator {
+    fn fmt(&self, arena: &PlanArena<'_>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} Join{}", self.join_type, self.on.explain(arena))
+    }
+}
+
+impl Explain for JoinCondition {
+    fn fmt(&self, arena: &PlanArena<'_>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            JoinCondition::On { on, filter } => {
+                if !on.is_empty() {
+                    f.write_str(" On ")?;
+                    for (index, (left, right)) in on.iter().enumerate() {
+                        if index > 0 {
+                            f.write_str(" AND ")?;
+                        }
+                        write!(f, "{} = {}", left.explain(arena), right.explain(arena))?;
+                    }
+                }
+                if let Some(filter) = filter {
+                    write!(f, " Where {}", filter.explain(arena))?;
+                }
+                Ok(())
+            }
+            JoinCondition::None => f.write_str(" Nothing"),
+        }
+    }
+}
+
 impl fmt::Display for JoinType {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
@@ -97,48 +124,20 @@ impl fmt::Display for JoinType {
     }
 }
 
-impl fmt::Display for JoinOperator {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "{} Join{}", self.join_type, self.on)?;
-
-        Ok(())
-    }
-}
-
-impl fmt::Display for JoinCondition {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        match self {
-            JoinCondition::On { on, filter } => {
-                if !on.is_empty() {
-                    let on = on
-                        .iter()
-                        .map(|(v1, v2)| format!("{v1} = {v2}"))
-                        .join(" AND ");
-
-                    write!(f, " On {on}")?;
-                }
-                if let Some(filter) = filter {
-                    write!(f, " Where {filter}")?;
-                }
-            }
-            JoinCondition::None => {
-                write!(f, " Nothing")?;
-            }
-        }
-
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn forced_nested_loop_overrides_equi_join() {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = crate::planner::PlanArena::new(&table_arena);
         let mut operator = JoinOperator {
             on: JoinCondition::On {
-                on: vec![(1_i32.into(), 2_i32.into())],
+                on: vec![(
+                    arena.alloc_expression(crate::expression::ScalarExpression::from(1_i32)),
+                    arena.alloc_expression(crate::expression::ScalarExpression::from(2_i32)),
+                )],
                 filter: None,
             },
             join_type: JoinType::Inner,

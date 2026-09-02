@@ -14,11 +14,9 @@
 
 use crate::binder::copy::ExtSource;
 use crate::catalog::TableName;
-use crate::iter_ext::Itertools;
+use crate::planner::{fmt_explain_list, Explain, PlanArena};
 use crate::types::tuple::Schema;
 use kite_sql_serde_macros::ReferenceSerialization;
-use std::fmt;
-use std::fmt::Formatter;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct CopyFromFileOperator {
@@ -27,17 +25,10 @@ pub struct CopyFromFileOperator {
     pub schema_ref: Schema,
 }
 
-impl fmt::Display for CopyFromFileOperator {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let columns = self.schema_ref.iter().join(", ");
-        write!(
-            f,
-            "Copy {} -> {} [{}]",
-            self.source.path.display(),
-            self.table,
-            columns
-        )?;
-
-        Ok(())
+impl Explain for CopyFromFileOperator {
+    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Copy {} -> {} [", self.source.path.display(), self.table)?;
+        fmt_explain_list(&self.schema_ref, ", ", arena, f)?;
+        f.write_str("]")
     }
 }

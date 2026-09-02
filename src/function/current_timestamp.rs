@@ -16,7 +16,7 @@ use crate::errors::DatabaseError;
 use crate::expression::function::scala::FuncMonotonicity;
 use crate::expression::function::scala::ScalarFunctionImpl;
 use crate::expression::function::FunctionSummary;
-use crate::expression::ScalarExpression;
+use crate::planner::ExprRef;
 use crate::types::tuple::TupleLike;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
@@ -45,7 +45,8 @@ impl ScalarFunctionImpl for CurrentTimeStamp {
     #[allow(unused_variables, clippy::redundant_closure_call)]
     fn eval(
         &self,
-        _: &[ScalarExpression],
+        _: &[ExprRef],
+        _: &crate::planner::PlanArena<'_>,
         _: Option<&dyn TupleLike>,
     ) -> Result<DataValue, DatabaseError> {
         Ok(DataValue::Time64(Utc::now().timestamp(), 0, false))

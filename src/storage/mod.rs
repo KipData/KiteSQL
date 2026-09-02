@@ -24,7 +24,7 @@ use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog, TableMeta, TableNam
 use crate::db::{ScalaFunctions, TableFunctions};
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::Range;
-use crate::expression::ScalarExpression;
+use crate::expression::TypeCast;
 use crate::iter_ext::Itertools;
 use crate::optimizer::core::cm_sketch::{
     CountMinSketch, CountMinSketchPage, COUNT_MIN_SKETCH_STORAGE_PAGE_LEN,
@@ -473,24 +473,22 @@ pub trait Transaction: Sized {
             return Err(DatabaseError::DuplicateColumn(new_column_name.to_string()));
         }
 
-        for column in table.columns().map(|column| plan_arena.column(*column)) {
-            let mut new_column = ColumnCatalog::clone(column);
-            if column.name() == old_column_name {
+        for column_ref in table.columns() {
+            let mut new_column = plan_arena.column(*column_ref).clone();
+            if new_column.name() == old_column_name {
                 found = true;
                 new_column.set_name(new_column_name.to_string());
                 new_column.desc_mut().column_datatype = new_data_type.clone();
                 match default_change {
                     DefaultChange::NoChange => {
-                        if let Some(default_expr) = new_column.desc().default.clone() {
-                            new_column.desc_mut().default = Some(ScalarExpression::type_cast(
-                                default_expr,
-                                Cow::Borrowed(new_data_type),
-                                plan_arena,
-                            )?);
+                        if let Some(default_expr) = new_column.desc().default {
+                            new_column.desc_mut().default = Some(
+                                default_expr.type_cast(Cow::Borrowed(new_data_type), plan_arena)?,
+                            );
                         }
                     }
                     DefaultChange::Set(default_expr) => {
-                        new_column.desc_mut().default = Some(default_expr.clone());
+                        new_column.desc_mut().default = Some(*default_expr);
                     }
                     DefaultChange::Drop => {
                         new_column.desc_mut().default = None;
@@ -558,7 +556,7 @@ pub trait Transaction: Sized {
         let mut table = self
             .load_table(table_codec, plan_arena, table_name.clone())?
             .ok_or(DatabaseError::TableNotFound)?;
-        if !column.nullable() && column.default_value()?.is_none() {
+        if !column.nullable() && column.default_value(plan_arena)?.is_none() {
             return Err(DatabaseError::NeedNullAbleOrDefault);
         }
 
@@ -2890,7 +2888,7 @@ mod test {
         let mut transaction = table_state.storage.transaction()?;
         let mut view_cache = table_state.view_cache.clone();
         let mut table_codec = TableCodec::default();
-        let view = transaction.create_view(&mut table_codec, &plan_arena, view.clone(), true)?;
+        let view = transaction.create_view(&mut table_codec, &plan_arena, view, true)?;
         view_cache.insert(view.name.clone(), view.clone());
 
         assert_eq!(

@@ -19,7 +19,7 @@ use crate::errors::DatabaseError;
 use crate::expression::{AliasType, ScalarExpression};
 use crate::planner::operator::create_view::CreateViewOperator;
 use crate::planner::operator::Operator;
-use crate::planner::{Childrens, LogicalPlan};
+use crate::planner::{Childrens, ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
 
@@ -38,7 +38,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             mapping_schema: &[ColumnRef],
             arena: &mut crate::planner::PlanArena,
             mut column_name: impl FnMut(usize, ColumnRef, &crate::planner::PlanArena) -> String,
-        ) -> Vec<ScalarExpression> {
+        ) -> Vec<ExprRef> {
             let mapping_schema_len = mapping_schema.len();
             let mut exprs = Vec::with_capacity(mapping_schema_len);
             for (i, mapping_column) in mapping_schema.iter().copied().enumerate() {
@@ -54,13 +54,12 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 column.set_ref_table(view_name.clone(), 0, true);
                 let output_column = arena.alloc_column(column);
 
-                exprs.push(ScalarExpression::Alias {
-                    expr: Box::new(ScalarExpression::column_expr(mapping_column, i)),
-                    alias: AliasType::Expr(Box::new(ScalarExpression::column_expr(
-                        output_column,
-                        i,
-                    ))),
-                });
+                let expr = arena.alloc_expression(ScalarExpression::column_expr(mapping_column, i));
+                let alias = arena.alloc_expression(ScalarExpression::column_expr(output_column, i));
+                exprs.push(arena.alloc_expression(ScalarExpression::Alias {
+                    expr,
+                    alias: AliasType::Expr(alias),
+                }));
             }
             exprs
         }
@@ -75,7 +74,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             )));
         }
 
-        let exprs: Vec<ScalarExpression> = if column_names.is_empty() {
+        let exprs = if column_names.is_empty() {
             projection_exprs(&view_name, mapping_schema, arena, |i, column, arena| {
                 output_aliases
                     .get(i)

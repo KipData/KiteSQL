@@ -21,41 +21,38 @@ use crate::optimizer::plan_utils::{replace_with_only_child, wrap_child_with};
 use crate::planner::operator::filter::FilterOperator;
 use crate::planner::operator::join::{JoinCondition, JoinType};
 use crate::planner::operator::{Operator, SortOption};
-use crate::planner::{Childrens, LogicalPlan};
+use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::types::index::{IndexInfo, IndexLookup, IndexMetaRef, IndexType};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use std::ops::Bound;
-use std::{borrow::Cow, mem, slice};
+use std::{mem, slice};
 
 const EMPTY_SCHEMA: [crate::catalog::ColumnRef; 0] = [];
-type ClassifiedJoinFilters = (
-    Option<ScalarExpression>,
-    Option<ScalarExpression>,
-    Option<ScalarExpression>,
-    usize,
-);
+type ClassifiedJoinFilters = (Option<ExprRef>, Option<ExprRef>, Option<ExprRef>, usize);
 
 fn split_conjunctive_predicates(
-    expr: &ScalarExpression,
-    f: &mut impl FnMut(ScalarExpression) -> Result<(), DatabaseError>,
+    expr: ExprRef,
+    arena: &mut PlanArena<'_>,
+    f: &mut impl FnMut(ExprRef, &mut PlanArena<'_>) -> Result<(), DatabaseError>,
 ) -> Result<(), DatabaseError> {
-    match expr {
+    match arena.expression(expr) {
         ScalarExpression::Binary {
             op: BinaryOperator::And,
             left_expr,
             right_expr,
             ..
         } => {
-            split_conjunctive_predicates(left_expr, f)?;
-            split_conjunctive_predicates(right_expr, f)
+            let (left_expr, right_expr) = (*left_expr, *right_expr);
+            split_conjunctive_predicates(left_expr, arena, f)?;
+            split_conjunctive_predicates(right_expr, arena, f)
         }
-        _ => f(expr.clone()),
+        _ => f(expr, arena),
     }
 }
 
 fn classify_join_filters(
-    predicate: &ScalarExpression,
+    predicate: ExprRef,
     childrens: &mut Childrens,
     arena: &mut crate::planner::PlanArena,
 ) -> Result<ClassifiedJoinFilters, DatabaseError> {
@@ -68,28 +65,28 @@ fn classify_join_filters(
         Childrens::None => (&EMPTY_SCHEMA, &EMPTY_SCHEMA),
     };
     let left_len = left_columns.len();
-    let append_filter = |slot: &mut Option<ScalarExpression>, expr| {
+    let append_filter = |slot: &mut Option<ExprRef>, expr, arena: &mut PlanArena<'_>| {
         *slot = Some(match slot.take() {
-            Some(current) => ScalarExpression::Binary {
+            Some(current) => arena.alloc_expression(ScalarExpression::Binary {
                 op: BinaryOperator::And,
-                left_expr: Box::new(current),
-                right_expr: Box::new(expr),
+                left_expr: current,
+                right_expr: expr,
                 evaluator: None,
                 ty: LogicalType::Boolean,
-            },
+            }),
             None => expr,
         });
     };
     let mut left_filter = None;
     let mut right_filter = None;
     let mut common_filter = None;
-    split_conjunctive_predicates(predicate, &mut |expr| {
+    split_conjunctive_predicates(predicate, arena, &mut |expr, arena| {
         if expr.all_referenced_columns(arena, |_, column| left_columns.contains(column))? {
-            append_filter(&mut left_filter, expr);
+            append_filter(&mut left_filter, expr, arena);
         } else if expr.all_referenced_columns(arena, |_, column| right_columns.contains(column))? {
-            append_filter(&mut right_filter, expr);
+            append_filter(&mut right_filter, expr, arena);
         } else {
-            append_filter(&mut common_filter, expr);
+            append_filter(&mut common_filter, expr, arena);
         }
         Ok(())
     })?;
@@ -99,17 +96,20 @@ fn classify_join_filters(
 /// reduce filters into a filter, and then build a new LogicalFilter node with input child.
 /// if filters is empty, return the input child.
 fn reduce_filters(
-    filters: impl IntoIterator<Item = ScalarExpression>,
+    filters: impl IntoIterator<Item = ExprRef>,
     having: bool,
+    arena: &mut PlanArena<'_>,
 ) -> Option<FilterOperator> {
     filters
         .into_iter()
-        .reduce(|a, b| ScalarExpression::Binary {
-            op: BinaryOperator::And,
-            left_expr: Box::new(a),
-            right_expr: Box::new(b),
-            evaluator: None,
-            ty: LogicalType::Boolean,
+        .reduce(|a, b| {
+            arena.alloc_expression(ScalarExpression::Binary {
+                op: BinaryOperator::And,
+                left_expr: a,
+                right_expr: b,
+                evaluator: None,
+                ty: LogicalType::Boolean,
+            })
         })
         .map(|f| FilterOperator {
             predicate: f,
@@ -165,12 +165,14 @@ impl NormalizationRule for PushPredicateThroughJoin {
             }
 
             let (left_filter, mut right_filter, common_filter, left_len) =
-                classify_join_filters(&filter_op.predicate, join_plan.childrens.as_mut(), arena)?;
+                classify_join_filters(filter_op.predicate, join_plan.childrens.as_mut(), arena)?;
 
             let mut new_ops = (None, None, None);
             match join_type {
                 JoinType::Inner => {
-                    if let Some(left_filter_op) = reduce_filters(left_filter, filter_op.having) {
+                    if let Some(left_filter_op) =
+                        reduce_filters(left_filter, filter_op.having, arena)
+                    {
                         new_ops.0 = Some(Operator::Filter(left_filter_op));
                     }
 
@@ -178,21 +180,26 @@ impl NormalizationRule for PushPredicateThroughJoin {
                         PositionShift {
                             delta: -(left_len as isize),
                         }
-                        .visit(expr)?;
+                        .visit(expr, arena)?;
                     }
-                    if let Some(right_filter_op) = reduce_filters(right_filter, filter_op.having) {
+                    if let Some(right_filter_op) =
+                        reduce_filters(right_filter, filter_op.having, arena)
+                    {
                         new_ops.1 = Some(Operator::Filter(right_filter_op));
                     }
-                    new_ops.2 =
-                        reduce_filters(common_filter, filter_op.having).map(Operator::Filter);
+                    new_ops.2 = reduce_filters(common_filter, filter_op.having, arena)
+                        .map(Operator::Filter);
                 }
                 JoinType::LeftOuter => {
-                    if let Some(left_filter_op) = reduce_filters(left_filter, filter_op.having) {
+                    if let Some(left_filter_op) =
+                        reduce_filters(left_filter, filter_op.having, arena)
+                    {
                         new_ops.0 = Some(Operator::Filter(left_filter_op));
                     }
                     new_ops.2 = reduce_filters(
                         common_filter.into_iter().chain(right_filter),
                         filter_op.having,
+                        arena,
                     )
                     .map(Operator::Filter);
                 }
@@ -201,14 +208,17 @@ impl NormalizationRule for PushPredicateThroughJoin {
                         PositionShift {
                             delta: -(left_len as isize),
                         }
-                        .visit(expr)?;
+                        .visit(expr, arena)?;
                     }
-                    if let Some(right_filter_op) = reduce_filters(right_filter, filter_op.having) {
+                    if let Some(right_filter_op) =
+                        reduce_filters(right_filter, filter_op.having, arena)
+                    {
                         new_ops.1 = Some(Operator::Filter(right_filter_op));
                     }
                     new_ops.2 = reduce_filters(
                         common_filter.into_iter().chain(left_filter),
                         filter_op.having,
+                        arena,
                     )
                     .map(Operator::Filter);
                 }
@@ -287,16 +297,13 @@ impl NormalizationRule for PushPredicateIntoScan {
             else {
                 return Err(DatabaseError::InvalidIndex);
             };
-            let index_meta = arena.index(*meta);
-            let detached = match index_meta.ty {
+            let index_type = arena.index(*meta).ty;
+            let detached = match index_type {
                 IndexType::PrimaryKey { is_multiple: false }
                 | IndexType::Unique
-                | IndexType::Normal => RangeDetacher::new(
-                    index_meta.table_name.as_ref(),
-                    &index_meta.column_ids[0],
-                    arena,
-                )
-                .detach(&filter_op.predicate)?,
+                | IndexType::Normal => {
+                    RangeDetacher::for_index(*meta, 0, arena).detach(filter_op.predicate)?
+                }
                 IndexType::PrimaryKey { is_multiple: true } | IndexType::Composite => {
                     Self::composite_range(filter_op, *meta, ignore_prefix_len, arena)?
                 }
@@ -358,25 +365,25 @@ impl PushPredicateIntoScan {
         op: &FilterOperator,
         meta: IndexMetaRef,
         ignore_prefix_len: &mut usize,
-        arena: &crate::planner::PlanArena,
+        arena: &mut crate::planner::PlanArena,
     ) -> Result<Option<DetachedPredicate>, DatabaseError> {
-        let meta = arena.index(meta);
+        let column_count = arena.index(meta).column_ids.len();
         let mut res = None;
-        let mut eq_ranges = Vec::with_capacity(meta.column_ids.len());
+        let mut eq_ranges = Vec::with_capacity(column_count);
         let mut apply_column_count = 0;
-        let mut residual = Some(Cow::Borrowed(&op.predicate));
+        let mut residual = Some(op.predicate);
 
-        for column_id in meta.column_ids.iter() {
+        for position in 0..column_count {
             let Some(predicate) = residual.take() else {
                 break;
             };
-            let Some(detached) = RangeDetacher::new(meta.table_name.as_ref(), column_id, arena)
-                .detach(predicate.as_ref())?
+            let Some(detached) =
+                RangeDetacher::for_index(meta, position, arena).detach(predicate)?
             else {
                 residual = Some(predicate);
                 break;
             };
-            residual = detached.residual.map(Cow::Owned);
+            residual = detached.residual;
 
             let range = detached.range;
             apply_column_count += 1;
@@ -396,7 +403,7 @@ impl PushPredicateIntoScan {
             }
         }
         let range = res.map(|range| {
-            if range.only_eq() && apply_column_count != meta.column_ids.len() {
+            if range.only_eq() && apply_column_count != column_count {
                 fn eq_to_scope(range: Range) -> Range {
                     match range {
                         Range::Eq(DataValue::Tuple(values, _)) => {
@@ -419,10 +426,7 @@ impl PushPredicateIntoScan {
             }
             range
         });
-        Ok(range.map(|range| DetachedPredicate {
-            range,
-            residual: residual.map(|predicate| predicate.into_owned()),
-        }))
+        Ok(range.map(|range| DetachedPredicate { range, residual }))
     }
 }
 
@@ -454,7 +458,7 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
         };
 
         let (left_filter, mut right_filter, common_filter, left_len) =
-            classify_join_filters(&filter_expr, plan.childrens.as_mut(), arena)?;
+            classify_join_filters(filter_expr, plan.childrens.as_mut(), arena)?;
 
         let (push_left, push_right) = match join_type {
             JoinType::Inner => (true, true),
@@ -465,7 +469,7 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
 
         let mut new_ops = (None, None);
         let left_remain = if push_left {
-            if let Some(filter_op) = reduce_filters(left_filter, false) {
+            if let Some(filter_op) = reduce_filters(left_filter, false, arena) {
                 new_ops.0 = Some(Operator::Filter(filter_op));
             }
             None
@@ -478,9 +482,9 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
                 PositionShift {
                     delta: -(left_len as isize),
                 }
-                .visit(expr)?;
+                .visit(expr, arena)?;
             }
-            if let Some(filter_op) = reduce_filters(right_filter, false) {
+            if let Some(filter_op) = reduce_filters(right_filter, false, arena) {
                 new_ops.1 = Some(Operator::Filter(filter_op));
             }
             None
@@ -502,6 +506,7 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
                 .chain(left_remain)
                 .chain(right_remain),
             false,
+            arena,
         )
         .map(|op| op.predicate);
         let filter_changed = match &join_filter {
@@ -543,7 +548,7 @@ mod tests {
     use crate::planner::operator::join::{JoinCondition, JoinType};
     use crate::planner::operator::table_scan::TableScanOperator;
     use crate::planner::operator::{Operator, SortOption};
-    use crate::planner::{Childrens, LogicalPlan, PlanArena};
+    use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
     use crate::types::index::{IndexInfo, IndexLookup, IndexMeta, IndexType};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -573,28 +578,32 @@ mod tests {
     }
 
     fn cmp_predicate(
+        arena: &mut PlanArena,
         op: BinaryOperator,
         column: crate::catalog::ColumnRef,
         position: usize,
         value: i32,
-    ) -> ScalarExpression {
-        ScalarExpression::Binary {
+    ) -> ExprRef {
+        let left_expr = arena.alloc_expression(ScalarExpression::column_expr(column, position));
+        let right_expr =
+            arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(value)));
+        arena.alloc_expression(ScalarExpression::Binary {
             op,
-            left_expr: Box::new(ScalarExpression::column_expr(column, position)),
-            right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(value))),
+            left_expr,
+            right_expr,
             evaluator: None,
             ty: LogicalType::Boolean,
-        }
+        })
     }
 
-    fn and_predicate(left: ScalarExpression, right: ScalarExpression) -> ScalarExpression {
-        ScalarExpression::Binary {
+    fn and_predicate(arena: &mut PlanArena, left: ExprRef, right: ExprRef) -> ExprRef {
+        arena.alloc_expression(ScalarExpression::Binary {
             op: BinaryOperator::And,
-            left_expr: Box::new(left),
-            right_expr: Box::new(right),
+            left_expr: left,
+            right_expr: right,
             evaluator: None,
             ty: LogicalType::Boolean,
-        }
+        })
     }
 
     #[test]
@@ -661,16 +670,13 @@ mod tests {
             name: "idx_c1_c2_c3".to_string(),
             ty: IndexType::Composite,
         });
-        let predicate = and_predicate(
-            and_predicate(
-                cmp_predicate(BinaryOperator::Eq, c1, 0, 1),
-                cmp_predicate(BinaryOperator::Eq, c2, 1, 2),
-            ),
-            and_predicate(
-                cmp_predicate(BinaryOperator::Eq, c3, 2, 3),
-                cmp_predicate(BinaryOperator::Eq, c4, 3, 4),
-            ),
-        );
+        let c1_eq = cmp_predicate(&mut arena, BinaryOperator::Eq, c1, 0, 1);
+        let c2_eq = cmp_predicate(&mut arena, BinaryOperator::Eq, c2, 1, 2);
+        let c3_eq = cmp_predicate(&mut arena, BinaryOperator::Eq, c3, 2, 3);
+        let c4_eq = cmp_predicate(&mut arena, BinaryOperator::Eq, c4, 3, 4);
+        let left = and_predicate(&mut arena, c1_eq, c2_eq);
+        let right = and_predicate(&mut arena, c3_eq, c4_eq);
+        let predicate = and_predicate(&mut arena, left, right);
         let filter = FilterOperator {
             predicate,
             is_optimized: false,
@@ -682,7 +688,7 @@ mod tests {
             &filter,
             index_meta,
             &mut ignore_prefix_len,
-            &arena,
+            &mut arena,
         )?
         .expect("composite prefix should be consumed");
 
@@ -699,8 +705,8 @@ mod tests {
             ))
         );
         let residual = detached.residual.expect("c4 predicate should remain");
-        let residual_detached = RangeDetacher::new(table_name.as_ref(), &4, &arena)
-            .detach(&residual)?
+        let residual_detached = RangeDetacher::new(table_name.as_ref(), &4, &mut arena)
+            .detach(residual)?
             .expect("residual should be the c4 predicate");
         assert_eq!(residual_detached.range, Range::Eq(DataValue::Int32(4)));
         assert_eq!(residual_detached.residual, None);
@@ -730,13 +736,11 @@ mod tests {
             name: "idx_c1_c2_c3".to_string(),
             ty: IndexType::Composite,
         });
-        let predicate = and_predicate(
-            and_predicate(
-                cmp_predicate(BinaryOperator::Eq, c1, 0, 1),
-                cmp_predicate(BinaryOperator::Gt, c2, 1, 2),
-            ),
-            cmp_predicate(BinaryOperator::Eq, c3, 2, 3),
-        );
+        let c1_eq = cmp_predicate(&mut arena, BinaryOperator::Eq, c1, 0, 1);
+        let c2_gt = cmp_predicate(&mut arena, BinaryOperator::Gt, c2, 1, 2);
+        let c3_eq = cmp_predicate(&mut arena, BinaryOperator::Eq, c3, 2, 3);
+        let prefix = and_predicate(&mut arena, c1_eq, c2_gt);
+        let predicate = and_predicate(&mut arena, prefix, c3_eq);
         let filter = FilterOperator {
             predicate,
             is_optimized: false,
@@ -748,7 +752,7 @@ mod tests {
             &filter,
             index_meta,
             &mut ignore_prefix_len,
-            &arena,
+            &mut arena,
         )?
         .expect("composite prefix should be consumed");
 
@@ -764,8 +768,8 @@ mod tests {
             }
         );
         let residual = detached.residual.expect("c3 predicate should remain");
-        let residual_detached = RangeDetacher::new(table_name.as_ref(), &3, &arena)
-            .detach(&residual)?
+        let residual_detached = RangeDetacher::new(table_name.as_ref(), &3, &mut arena)
+            .detach(residual)?
             .expect("residual should be the c3 predicate");
         assert_eq!(residual_detached.range, Range::Eq(DataValue::Int32(3)));
         assert_eq!(residual_detached.residual, None);
@@ -832,7 +836,7 @@ mod tests {
 
         let scan_plan = LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
-                table_name: table_name.clone(),
+                table_name,
                 columns,
                 limit: (None, None),
                 index_infos: vec![
@@ -868,27 +872,9 @@ mod tests {
             Childrens::None,
         );
 
-        let c1_gt = ScalarExpression::Binary {
-            op: BinaryOperator::Gt,
-            left_expr: Box::new(ScalarExpression::column_expr(c1_ref, 0)),
-            right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(0))),
-            evaluator: None,
-            ty: LogicalType::Boolean,
-        };
-        let c2_gt = ScalarExpression::Binary {
-            op: BinaryOperator::Gt,
-            left_expr: Box::new(ScalarExpression::column_expr(c2_ref, 1)),
-            right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(0))),
-            evaluator: None,
-            ty: LogicalType::Boolean,
-        };
-        let predicate = ScalarExpression::Binary {
-            op: BinaryOperator::And,
-            left_expr: Box::new(c1_gt),
-            right_expr: Box::new(c2_gt),
-            evaluator: None,
-            ty: LogicalType::Boolean,
-        };
+        let c1_gt = cmp_predicate(&mut arena, BinaryOperator::Gt, c1_ref, 0, 0);
+        let c2_gt = cmp_predicate(&mut arena, BinaryOperator::Gt, c2_ref, 1, 0);
+        let predicate = and_predicate(&mut arena, c1_gt, c2_gt);
 
         let filter_plan = LogicalPlan::new(
             Operator::Filter(FilterOperator {
@@ -974,7 +960,7 @@ mod tests {
 
         let filter_op = best_plan.childrens.pop_only();
         if let Operator::Filter(op) = &filter_op.operator {
-            match op.predicate {
+            match arena.expression(op.predicate) {
                 ScalarExpression::Binary {
                     op: BinaryOperator::Lt,
                     ty: LogicalType::Boolean,
@@ -988,7 +974,7 @@ mod tests {
 
         let filter_op = filter_op.childrens.pop_only().childrens.pop_twins().0;
         if let Operator::Filter(op) = &filter_op.operator {
-            match op.predicate {
+            match arena.expression(op.predicate) {
                 ScalarExpression::Binary {
                     op: BinaryOperator::Gt,
                     ty: LogicalType::Boolean,
@@ -1024,7 +1010,7 @@ mod tests {
 
         let filter_op = best_plan.childrens.pop_only();
         if let Operator::Filter(op) = &filter_op.operator {
-            match op.predicate {
+            match arena.expression(op.predicate) {
                 ScalarExpression::Binary {
                     op: BinaryOperator::Gt,
                     ty: LogicalType::Boolean,
@@ -1038,7 +1024,7 @@ mod tests {
 
         let filter_op = filter_op.childrens.pop_only().childrens.pop_twins().1;
         if let Operator::Filter(op) = &filter_op.operator {
-            match op.predicate {
+            match arena.expression(op.predicate) {
                 ScalarExpression::Binary {
                     op: BinaryOperator::Lt,
                     ty: LogicalType::Boolean,
@@ -1080,7 +1066,7 @@ mod tests {
 
         let (left_filter_op, right_filter_op) = join_op.childrens.pop_twins();
         if let Operator::Filter(op) = &left_filter_op.operator {
-            match op.predicate {
+            match arena.expression(op.predicate) {
                 ScalarExpression::Binary {
                     op: BinaryOperator::Gt,
                     ty: LogicalType::Boolean,
@@ -1093,7 +1079,7 @@ mod tests {
         }
 
         if let Operator::Filter(op) = &right_filter_op.operator {
-            match op.predicate {
+            match arena.expression(op.predicate) {
                 ScalarExpression::Binary {
                     op: BinaryOperator::Lt,
                     ty: LogicalType::Boolean,
@@ -1148,7 +1134,7 @@ mod tests {
         let (left_child, right_child) = join_plan.childrens.pop_twins();
 
         if let Operator::Filter(left_filter) = &left_child.operator {
-            match left_filter.predicate {
+            match arena.expression(left_filter.predicate) {
                 ScalarExpression::Binary {
                     op: BinaryOperator::Gt,
                     ty: LogicalType::Boolean,
@@ -1165,7 +1151,7 @@ mod tests {
         }
 
         if let Operator::Filter(right_filter) = &right_child.operator {
-            match right_filter.predicate {
+            match arena.expression(right_filter.predicate) {
                 ScalarExpression::Binary {
                     op: BinaryOperator::Lt,
                     ty: LogicalType::Boolean,
@@ -1276,7 +1262,7 @@ mod tests {
             Operator::Filter(ref op) => op,
             _ => unreachable!("right child should be a filter"),
         };
-        match filter_op.predicate {
+        match arena.expression(filter_op.predicate) {
             ScalarExpression::Binary {
                 op: BinaryOperator::Lt,
                 ty: LogicalType::Boolean,

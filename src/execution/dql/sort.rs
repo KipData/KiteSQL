@@ -81,6 +81,7 @@ impl<T> DerefMut for NullableVec<'_, T> {
 pub(crate) fn sort_tuples(
     sort_fields: &[SortField],
     tuples: &mut NullableVec<'_, (usize, Tuple)>,
+    plan_arena: &crate::planner::PlanArena<'_>,
 ) -> Result<(), DatabaseError> {
     // Extract the results of calculating SortFields to avoid double calculation
     // of data during comparison.
@@ -88,7 +89,7 @@ pub(crate) fn sort_tuples(
 
     for (x, SortField { expr, .. }) in sort_fields.iter().enumerate() {
         for (_, tuple) in tuples.iter() {
-            eval_values[x].push(expr.eval(Some(tuple))?);
+            eval_values[x].push(plan_arena.expression(*expr).eval(plan_arena, Some(tuple))?);
         }
     }
 
@@ -193,7 +194,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort {
                 arena.finish();
                 return Ok(());
             }
-            sort_tuples(&self.sort_fields, &mut self.rows)?;
+            sort_tuples(&self.sort_fields, &mut self.rows, plan_arena)?;
             self.rows.reverse();
         }
     }
@@ -235,8 +236,9 @@ mod test {
     fn sorted_rows<'a>(
         sort_fields: &[SortField],
         mut tuples: NullableVec<'a, (usize, Tuple)>,
+        plan_arena: &crate::planner::PlanArena<'_>,
     ) -> Result<impl Iterator<Item = Tuple> + 'a, DatabaseError> {
-        sort_tuples(sort_fields, &mut tuples)?;
+        sort_tuples(sort_fields, &mut tuples, plan_arena)?;
         let mut rows = Vec::with_capacity(tuples.len());
         while let Some((_, tuple)) = tuples.pop() {
             rows.push(tuple);
@@ -254,12 +256,13 @@ mod test {
             false,
             ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
         ));
+        let sort_expr = plan_arena.alloc_expression(ScalarExpression::ColumnRef {
+            column: sort_column,
+            position: 0,
+        });
         let fn_sort_fields = |asc: bool, nulls_first: bool| {
             vec![SortField {
-                expr: ScalarExpression::ColumnRef {
-                    column: sort_column,
-                    position: 0,
-                },
+                expr: sort_expr,
                 asc,
                 nulls_first,
             }]
@@ -351,18 +354,22 @@ mod test {
         fn_asc_and_nulls_first_eq(Box::new(sorted_rows(
             &fn_sort_fields(true, true),
             fn_tuples(),
+            &plan_arena,
         )?));
         fn_asc_and_nulls_last_eq(Box::new(sorted_rows(
             &fn_sort_fields(true, false),
             fn_tuples(),
+            &plan_arena,
         )?));
         fn_desc_and_nulls_first_eq(Box::new(sorted_rows(
             &fn_sort_fields(false, true),
             fn_tuples(),
+            &plan_arena,
         )?));
         fn_desc_and_nulls_last_eq(Box::new(sorted_rows(
             &fn_sort_fields(false, false),
             fn_tuples(),
+            &plan_arena,
         )?));
 
         Ok(())
@@ -382,22 +389,24 @@ mod test {
             false,
             ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
         ));
+        let sort_expr_1 = plan_arena.alloc_expression(ScalarExpression::ColumnRef {
+            column: sort_column_1,
+            position: 0,
+        });
+        let sort_expr_2 = plan_arena.alloc_expression(ScalarExpression::ColumnRef {
+            column: sort_column_2,
+            position: 1,
+        });
         let fn_sort_fields =
             |asc_1: bool, nulls_first_1: bool, asc_2: bool, nulls_first_2: bool| {
                 vec![
                     SortField {
-                        expr: ScalarExpression::ColumnRef {
-                            column: sort_column_1,
-                            position: 0,
-                        },
+                        expr: sort_expr_1,
                         asc: asc_1,
                         nulls_first: nulls_first_1,
                     },
                     SortField {
-                        expr: ScalarExpression::ColumnRef {
-                            column: sort_column_2,
-                            position: 1,
-                        },
+                        expr: sort_expr_2,
                         asc: asc_2,
                         nulls_first: nulls_first_2,
                     },
@@ -581,18 +590,22 @@ mod test {
         fn_asc_1_and_nulls_first_1_and_asc_2_and_nulls_first_2_eq(Box::new(sorted_rows(
             &fn_sort_fields(true, true, true, true),
             fn_tuples(),
+            &plan_arena,
         )?));
         fn_asc_1_and_nulls_last_1_and_asc_2_and_nulls_first_2_eq(Box::new(sorted_rows(
             &fn_sort_fields(true, false, true, true),
             fn_tuples(),
+            &plan_arena,
         )?));
         fn_desc_1_and_nulls_first_1_and_asc_2_and_nulls_first_2_eq(Box::new(sorted_rows(
             &fn_sort_fields(false, true, true, true),
             fn_tuples(),
+            &plan_arena,
         )?));
         fn_desc_1_and_nulls_last_1_and_asc_2_and_nulls_first_2_eq(Box::new(sorted_rows(
             &fn_sort_fields(false, false, true, true),
             fn_tuples(),
+            &plan_arena,
         )?));
 
         Ok(())

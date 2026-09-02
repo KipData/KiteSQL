@@ -18,10 +18,9 @@ use crate::execution::{
     build_read, with_projection_tmp_value, ExecArena, ExecId, ExecNode, ExecutionContext,
     ExecutorNode, WriteExecutor,
 };
-use crate::expression::ScalarExpression;
 use crate::iter_ext::Itertools;
 use crate::planner::operator::update::UpdateOperator;
-use crate::planner::LogicalPlan;
+use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::index::{Index, IndexMeta, IndexType};
 use crate::types::tuple::{Schema, Tuple};
@@ -34,7 +33,7 @@ use std::{
 
 pub struct Update {
     table_name: TableName,
-    value_exprs: Vec<(ColumnRef, ScalarExpression)>,
+    value_exprs: Vec<(ColumnRef, ExprRef)>,
     input_schema: Schema,
     input_plan: LogicalPlan,
     input: Option<ExecId>,
@@ -167,7 +166,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update {
                         continue;
                     }
 
-                    with_projection_tmp_value(arena, None, exprs, |_, value| {
+                    with_projection_tmp_value(arena, plan_arena, None, exprs, |_, value| {
                         old_index_values.push((index_offset, value));
                         Ok(())
                     })?;
@@ -177,7 +176,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update {
                         continue;
                     };
                     if let Some(expr) = exprs_map.get(&column_id) {
-                        let value = expr.eval(Some(arena.result_tuple()))?;
+                        let value = plan_arena
+                            .expression(*expr)
+                            .eval(plan_arena, Some(arena.result_tuple()))?;
                         arena.result_tuple_mut().values[i] = value;
                     }
                 }
@@ -201,7 +202,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update {
                     let index_meta = plan_arena.index(*index_meta);
                     let index_id = index_meta.id;
                     let index_ty = index_meta.ty;
-                    with_projection_tmp_value(arena, None, exprs, |arena, value| {
+                    with_projection_tmp_value(arena, plan_arena, None, exprs, |arena, value| {
                         if !primary_key_changed && old_value == value {
                             return Ok(());
                         }

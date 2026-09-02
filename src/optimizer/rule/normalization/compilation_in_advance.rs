@@ -24,14 +24,14 @@ pub struct EvaluatorBind;
 
 pub(crate) fn evaluator_bind_current(
     plan: &mut LogicalPlan,
-    arena: &PlanArena,
+    arena: &mut PlanArena,
 ) -> Result<(), DatabaseError> {
-    let mut evaluator = BindEvaluator { arena };
-    OperatorExprVisitorMut::new(&mut evaluator).visit_operator(&mut plan.operator)
+    let mut evaluator = BindEvaluator;
+    OperatorExprVisitorMut::new(&mut evaluator, arena).visit_operator(&mut plan.operator)
 }
 
 impl EvaluatorBind {
-    fn _apply(plan: &mut LogicalPlan, arena: &PlanArena) -> Result<(), DatabaseError> {
+    fn _apply(plan: &mut LogicalPlan, arena: &mut PlanArena) -> Result<(), DatabaseError> {
         match plan.childrens.as_mut() {
             Childrens::Only(child) => Self::_apply(child, arena)?,
             Childrens::Twins { left, right } => {
@@ -86,23 +86,25 @@ mod tests {
     use crate::planner::operator::union::UnionOperator;
     use crate::planner::operator::update::UpdateOperator;
     use crate::planner::operator::Operator;
-    use crate::planner::TableArenaCell;
+    use crate::planner::{ExprRef, TableArenaCell};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
 
-    fn unbound_binary(left: ScalarExpression, right: ScalarExpression) -> ScalarExpression {
-        ScalarExpression::Binary {
+    fn unbound_binary(arena: &mut PlanArena, column: crate::catalog::ColumnRef) -> ExprRef {
+        let left_expr = arena.alloc_expression(ScalarExpression::column_expr(column, 0));
+        let right_expr = arena.alloc_expression(DataValue::Int32(1).into());
+        arena.alloc_expression(ScalarExpression::Binary {
             op: BinaryOperator::Plus,
-            left_expr: Box::new(left),
-            right_expr: Box::new(right),
+            left_expr,
+            right_expr,
             evaluator: None,
             ty: LogicalType::Integer,
-        }
+        })
     }
 
-    fn is_bound(expr: &ScalarExpression) -> bool {
+    fn is_bound(expr: ExprRef, arena: &PlanArena) -> bool {
         matches!(
-            expr,
+            arena.expression(expr),
             ScalarExpression::Binary {
                 evaluator: Some(_),
                 ..
@@ -122,37 +124,37 @@ mod tests {
             false,
             ColumnDesc::new(LogicalType::Integer, None, false, None)?,
         ));
-        let expr = || {
-            unbound_binary(
-                ScalarExpression::column_expr(column, 0),
-                DataValue::Int32(1).into(),
-            )
-        };
+        let filter_expr = unbound_binary(&mut arena, column);
+        let sort_expr = unbound_binary(&mut arena, column);
+        let top_k_expr = unbound_binary(&mut arena, column);
+        let mark_expr = unbound_binary(&mut arena, column);
+        let update_expr = unbound_binary(&mut arena, column);
+        let function_expr = unbound_binary(&mut arena, column);
 
         let mut operators = vec![
             Operator::Filter(FilterOperator {
-                predicate: expr(),
+                predicate: filter_expr,
                 is_optimized: false,
                 having: false,
             }),
             Operator::Sort(SortOperator {
-                sort_fields: vec![SortField::from(expr())],
+                sort_fields: vec![SortField::from(sort_expr)],
             }),
             Operator::TopK(TopKOperator {
-                sort_fields: vec![SortField::from(expr())],
+                sort_fields: vec![SortField::from(top_k_expr)],
                 limit: 1,
                 offset: None,
             }),
-            Operator::MarkApply(MarkApplyOperator::new_exists(column, vec![expr()])),
+            Operator::MarkApply(MarkApplyOperator::new_exists(column, vec![mark_expr])),
             Operator::Update(UpdateOperator {
                 table_name: "t1".into(),
-                value_exprs: vec![(column, expr())],
+                value_exprs: vec![(column, update_expr)],
             }),
         ];
 
         operators.push(Operator::FunctionScan(FunctionScanOperator {
             table_function: TableFunction {
-                args: vec![expr()],
+                args: vec![function_expr],
                 catalog: TableFunctionCatalog {
                     schema,
                     inner: ArcTableFunctionImpl(numbers),
@@ -162,14 +164,14 @@ mod tests {
 
         for operator in &mut operators {
             let mut plan = LogicalPlan::new(operator.clone(), Childrens::None);
-            evaluator_bind_current(&mut plan, &arena)?;
+            evaluator_bind_current(&mut plan, &mut arena)?;
             match &plan.operator {
-                Operator::Filter(op) => assert!(is_bound(&op.predicate)),
-                Operator::Sort(op) => assert!(is_bound(&op.sort_fields[0].expr)),
-                Operator::TopK(op) => assert!(is_bound(&op.sort_fields[0].expr)),
-                Operator::MarkApply(op) => assert!(is_bound(&op.predicates()[0])),
-                Operator::Update(op) => assert!(is_bound(&op.value_exprs[0].1)),
-                Operator::FunctionScan(op) => assert!(is_bound(&op.table_function.args[0])),
+                Operator::Filter(op) => assert!(is_bound(op.predicate, &arena)),
+                Operator::Sort(op) => assert!(is_bound(op.sort_fields[0].expr, &arena)),
+                Operator::TopK(op) => assert!(is_bound(op.sort_fields[0].expr, &arena)),
+                Operator::MarkApply(op) => assert!(is_bound(op.predicates()[0], &arena)),
+                Operator::Update(op) => assert!(is_bound(op.value_exprs[0].1, &arena)),
+                Operator::FunctionScan(op) => assert!(is_bound(op.table_function.args[0], &arena)),
                 _ => unreachable!(),
             }
         }
@@ -186,35 +188,36 @@ mod tests {
             false,
             ColumnDesc::new(LogicalType::Integer, None, false, None)?,
         ));
-        let expr = || {
-            unbound_binary(
-                ScalarExpression::column_expr(column, 0),
-                DataValue::Int32(1).into(),
-            )
-        };
-        let filter = || {
+        fn filter(arena: &mut PlanArena, column: crate::catalog::ColumnRef) -> LogicalPlan {
+            let predicate = unbound_binary(arena, column);
             LogicalPlan::new(
                 Operator::Filter(FilterOperator {
-                    predicate: expr(),
+                    predicate,
                     is_optimized: false,
                     having: false,
                 }),
                 Childrens::None,
             )
-        };
+        }
+
+        let join_left = unbound_binary(&mut arena, column);
+        let join_right = unbound_binary(&mut arena, column);
+        let join_filter = unbound_binary(&mut arena, column);
+        let left_filter = filter(&mut arena, column);
+        let right_filter = filter(&mut arena, column);
 
         let mut join = LogicalPlan::new(
             Operator::Join(JoinOperator {
                 join_type: JoinType::Inner,
                 force_nested_loop: false,
                 on: JoinCondition::On {
-                    on: vec![(expr(), expr())],
-                    filter: Some(expr()),
+                    on: vec![(join_left, join_right)],
+                    filter: Some(join_filter),
                 },
             }),
             Childrens::Twins {
-                left: Box::new(filter()),
-                right: Box::new(filter()),
+                left: Box::new(left_filter),
+                right: Box::new(right_filter),
             },
         );
         assert!(EvaluatorBind.apply(&mut join, &mut arena)?);
@@ -228,17 +231,19 @@ mod tests {
         else {
             unreachable!()
         };
-        assert!(is_bound(&on[0].0));
-        assert!(is_bound(&on[0].1));
-        assert!(is_bound(join_filter.as_ref().unwrap()));
+        assert!(is_bound(on[0].0, &arena));
+        assert!(is_bound(on[0].1, &arena));
+        assert!(is_bound(*join_filter.as_ref().unwrap(), &arena));
         assert!(join.childrens.iter().all(|child| {
-            matches!(&child.operator, Operator::Filter(op) if is_bound(&op.predicate))
+            matches!(&child.operator, Operator::Filter(op) if is_bound(op.predicate, &arena))
         }));
 
-        let mut union = UnionOperator::build(vec![column], vec![column], filter(), filter());
+        let union_left = filter(&mut arena, column);
+        let union_right = filter(&mut arena, column);
+        let mut union = UnionOperator::build(vec![column], vec![column], union_left, union_right);
         EvaluatorBind.apply(&mut union, &mut arena)?;
         assert!(union.childrens.iter().all(|child| {
-            matches!(&child.operator, Operator::Filter(op) if is_bound(&op.predicate))
+            matches!(&child.operator, Operator::Filter(op) if is_bound(op.predicate, &arena))
         }));
 
         Ok(())

@@ -16,13 +16,12 @@ use crate::errors::DatabaseError;
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
-use crate::expression::ScalarExpression;
 use crate::planner::operator::project::ProjectOperator;
-use crate::planner::LogicalPlan;
+use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 
 pub struct Projection {
-    exprs: Vec<ScalarExpression>,
+    exprs: Vec<ExprRef>,
     input: ExecId,
 }
 
@@ -56,7 +55,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection {
             let tuple = arena.result_tuple();
             projection_tmp.reserve(self.exprs.len());
             for expr in self.exprs.iter() {
-                projection_tmp.push(expr.eval(Some(tuple))?);
+                projection_tmp.push(plan_arena.expression(*expr).eval(plan_arena, Some(tuple))?);
             }
             std::mem::swap(&mut arena.result_tuple_mut().values, projection_tmp);
             Ok::<_, DatabaseError>(())

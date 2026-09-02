@@ -137,7 +137,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateIndex {
             let Some(tuple_pk) = arena.result_tuple().pk.clone() else {
                 continue;
             };
-            with_projection_tmp_value(arena, None, &column_exprs, |arena, value| {
+            with_projection_tmp_value(arena, plan_arena, None, &column_exprs, |arena, value| {
                 let mut state = arena.local_state(plan_arena);
                 let (transaction, table_codec) = state.transaction_codec_mut();
                 let index = Index::new(index_id, &value, ty);

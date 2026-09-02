@@ -654,7 +654,7 @@ mod tests {
             .unwrap();
         let mut plan_arena = crate::planner::PlanArena::new(database.state.table_arena());
         let sort_fields = vec![SortField::new(
-            ScalarExpression::column_expr(c1_column, 0),
+            plan_arena.alloc_expression(ScalarExpression::column_expr(c1_column, 0)),
             true,
             false,
         )];
@@ -724,13 +724,23 @@ mod tests {
                 }
             ])))
         );
-        assert_eq!(
-            physical_option.sort_option(),
-            &SortOption::OrderBy {
-                fields: sort_fields,
-                ignore_prefix_len: 0,
-            }
-        );
+        let SortOption::OrderBy {
+            fields,
+            ignore_prefix_len,
+        } = physical_option.sort_option()
+        else {
+            panic!("index scan should preserve the requested order")
+        };
+        assert_eq!(*ignore_prefix_len, 0);
+        assert_eq!(fields.len(), sort_fields.len());
+        for (actual, expected) in fields.iter().zip(&sort_fields) {
+            assert_eq!(actual.asc, expected.asc);
+            assert_eq!(actual.nulls_first, expected.nulls_first);
+            assert_eq!(
+                plan_arena.expression(actual.expr),
+                plan_arena.expression(expected.expr)
+            );
+        }
 
         Ok(())
     }

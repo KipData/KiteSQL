@@ -29,6 +29,7 @@ use crate::execution::dql::aggregate::sum::{DistinctSumAccumulator, SumAccumulat
 use crate::expression::agg::AggKind;
 use crate::expression::ScalarExpression;
 use crate::iter_ext::Itertools;
+use crate::planner::{ExprRef, PlanArena};
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use std::borrow::Cow;
@@ -68,14 +69,15 @@ pub(crate) fn create_accumulator(
 
 #[inline]
 pub(crate) fn create_accumulators(
-    exprs: &[ScalarExpression],
+    exprs: &[ExprRef],
+    arena: &PlanArena<'_>,
 ) -> Result<Vec<Box<dyn Accumulator>>, DatabaseError> {
     exprs
         .iter()
         .map(|expr| {
             let ScalarExpression::AggCall {
                 kind, ty, distinct, ..
-            } = expr
+            } = arena.expression(*expr)
             else {
                 unreachable!("create_accumulators called with non-aggregate expression {expr}")
             };
@@ -86,11 +88,12 @@ pub(crate) fn create_accumulators(
 
 pub(crate) fn update_accumulators(
     accs: &mut [Box<dyn Accumulator>],
-    agg_calls: &[ScalarExpression],
+    agg_calls: &[ExprRef],
     tuple: &Tuple,
+    arena: &PlanArena<'_>,
 ) -> Result<(), DatabaseError> {
     for (acc, expr) in accs.iter_mut().zip(agg_calls.iter()) {
-        let ScalarExpression::AggCall { args, .. } = expr else {
+        let ScalarExpression::AggCall { args, .. } = arena.expression(*expr) else {
             unreachable!()
         };
         if args.len() > 1 {
@@ -99,7 +102,7 @@ pub(crate) fn update_accumulators(
                     .to_string(),
             ));
         }
-        let value = args[0].eval(Some(tuple))?;
+        let value = arena.expression(args[0]).eval(arena, Some(tuple))?;
         acc.update_value(&value)?;
     }
     Ok(())

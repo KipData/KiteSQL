@@ -25,16 +25,16 @@ pub struct ConstantCalculation;
 
 pub(crate) fn constant_calculation_current(
     plan: &mut LogicalPlan,
-    arena: &crate::planner::PlanArena,
+    arena: &mut crate::planner::PlanArena,
 ) -> Result<(), DatabaseError> {
     let mut calculator = ConstantCalculator::new(arena);
-    OperatorExprVisitorMut::new(&mut calculator).visit_operator(&mut plan.operator)
+    OperatorExprVisitorMut::new(&mut calculator, arena).visit_operator(&mut plan.operator)
 }
 
 impl ConstantCalculation {
     fn _apply(
         plan: &mut LogicalPlan,
-        arena: &crate::planner::PlanArena,
+        arena: &mut crate::planner::PlanArena,
     ) -> Result<(), DatabaseError> {
         constant_calculation_current(plan, arena)?;
         match plan.childrens.as_mut() {
@@ -93,8 +93,8 @@ impl NormalizationRule for SimplifyFilter {
                     return Ok(false);
                 }
             }
-            ConstantCalculator::new(arena).visit(&mut filter_op.predicate)?;
-            Simplify::default().visit(&mut filter_op.predicate)?;
+            ConstantCalculator::new(arena).visit(&mut filter_op.predicate, arena)?;
+            Simplify::default().visit(&mut filter_op.predicate, arena)?;
             filter_op.is_optimized = true;
             return Ok(true);
         }
@@ -157,19 +157,21 @@ mod test {
             .find_best(None, &mut arena)?;
         if let Operator::Project(project_op) = best_plan.clone().operator {
             let constant_expr = ScalarExpression::Constant(DataValue::Int32(3));
-            if let ScalarExpression::Binary { right_expr, .. } = &project_op.exprs[0] {
-                assert_eq!(right_expr.as_ref(), &constant_expr);
+            if let ScalarExpression::Binary { right_expr, .. } =
+                arena.expression(project_op.exprs[0])
+            {
+                assert_eq!(arena.expression(*right_expr), &constant_expr);
             } else {
                 unreachable!();
             }
-            assert_eq!(&project_op.exprs[1], &constant_expr);
+            assert_eq!(arena.expression(project_op.exprs[1]), &constant_expr);
         } else {
             unreachable!();
         }
         let filter_op = best_plan.childrens.pop_only();
         if let Operator::Filter(filter_op) = filter_op.operator {
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &arena)
-                .detach(&filter_op.predicate)?
+            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &mut arena)
+                .detach(filter_op.predicate)?
                 .map(|detached| detached.range)
                 .unwrap();
             assert_eq!(
@@ -205,12 +207,12 @@ mod test {
 
         if let Operator::Project(project_op) = best_plan.operator {
             assert_eq!(
-                project_op.exprs[0],
-                ScalarExpression::Constant(DataValue::Int32(1))
+                arena.expression(project_op.exprs[0]),
+                &ScalarExpression::Constant(DataValue::Int32(1))
             );
             assert_eq!(
-                project_op.exprs[1],
-                ScalarExpression::Constant(DataValue::Int32(3))
+                arena.expression(project_op.exprs[1]),
+                &ScalarExpression::Constant(DataValue::Int32(3))
             );
         } else {
             unreachable!();
@@ -219,11 +221,45 @@ mod test {
         let filter_op = best_plan.childrens.pop_only();
         if let Operator::Filter(filter_op) = filter_op.operator {
             assert_eq!(
-                filter_op.predicate,
-                ScalarExpression::Constant(DataValue::Boolean(true))
+                arena.expression(filter_op.predicate),
+                &ScalarExpression::Constant(DataValue::Boolean(true))
             );
         } else {
             unreachable!();
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_constant_is_null_elimination() -> Result<(), DatabaseError> {
+        use crate::expression::simplify::Simplify;
+        use crate::expression::visitor_mut::ExprVisitorMut;
+        use crate::planner::TableArenaCell;
+
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        for (value, negated, expected) in [
+            (DataValue::Null, false, true),
+            (DataValue::Null, true, false),
+            (DataValue::Int32(1), false, false),
+            (DataValue::Int32(1), true, true),
+        ] {
+            let value = arena.alloc_expression(ScalarExpression::Constant(value));
+            let mut expression = arena.alloc_expression(ScalarExpression::IsNull {
+                negated,
+                expr: value,
+            });
+
+            assert_eq!(
+                expression.unpack_val(&arena),
+                Some(DataValue::Boolean(expected))
+            );
+            Simplify::default().visit(&mut expression, &mut arena)?;
+            assert_eq!(
+                arena.expression(expression),
+                &ScalarExpression::Constant(DataValue::Boolean(expected))
+            );
         }
 
         Ok(())
@@ -275,8 +311,8 @@ mod test {
             let filter_op = best_plan.childrens.pop_only();
             if let Operator::Filter(filter_op) = filter_op.operator {
                 Ok(
-                    RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &arena)
-                        .detach(&filter_op.predicate)?
+                    RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &mut arena)
+                        .detach(filter_op.predicate)?
                         .map(|detached| detached.range),
                 )
             } else {
@@ -350,27 +386,32 @@ mod test {
             let c2_ref = table_state.table.get_column_by_name("c2").unwrap();
 
             // -(c1 + 1) > c2 => c1 < -c2 - 1
-            assert_eq!(
-                filter_op.predicate,
-                ScalarExpression::Binary {
+            let c1 = arena.alloc_expression(ScalarExpression::column_expr(c1_ref, 0));
+            let one = arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(1)));
+            let plus = arena.alloc_expression(ScalarExpression::Binary {
+                op: BinaryOperator::Plus,
+                left_expr: c1,
+                right_expr: one,
+                evaluator: None,
+                ty: LogicalType::Integer,
+            });
+            let minus = arena.alloc_expression(ScalarExpression::Unary {
+                op: UnaryOperator::Minus,
+                expr: plus,
+                evaluator: None,
+                ty: LogicalType::Integer,
+            });
+            let c2 = arena.alloc_expression(ScalarExpression::column_expr(c2_ref, 1));
+            assert!(filter_op.predicate.eq_ignore_colref_pos(
+                arena.alloc_expression(ScalarExpression::Binary {
                     op: BinaryOperator::Gt,
-                    left_expr: Box::new(ScalarExpression::Unary {
-                        op: UnaryOperator::Minus,
-                        expr: Box::new(ScalarExpression::Binary {
-                            op: BinaryOperator::Plus,
-                            left_expr: Box::new(ScalarExpression::column_expr(c1_ref, 0)),
-                            right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(1))),
-                            evaluator: None,
-                            ty: LogicalType::Integer,
-                        }),
-                        evaluator: None,
-                        ty: LogicalType::Integer,
-                    }),
-                    right_expr: Box::new(ScalarExpression::column_expr(c2_ref, 1)),
+                    left_expr: minus,
+                    right_expr: c2,
                     evaluator: None,
                     ty: LogicalType::Boolean,
-                }
-            )
+                }),
+                &arena,
+            ));
         } else {
             unreachable!()
         }
@@ -394,7 +435,7 @@ mod test {
         let filter_op = best_plan.childrens.pop_only();
         if let Operator::Filter(filter_op) = filter_op.operator {
             Ok(RangeDetacher::new("t1", column_id, arena)
-                .detach(&filter_op.predicate)?
+                .detach(filter_op.predicate)?
                 .map(|detached| detached.range))
         } else {
             Ok(None)

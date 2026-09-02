@@ -140,7 +140,7 @@ impl<S: Storage> Database<S> {
     /// when the underlying DDL supports them. Primary-key changes and unique
     /// constraint changes still return an error so you can handle them manually.
     pub fn migrate<M: Model>(&mut self) -> Result<(), DatabaseError> {
-        let columns = M::columns();
+        let columns = M::columns(self.state.table_arena().borrow_mut());
         if columns.is_empty() {
             return Err(DatabaseError::UnsupportedStmt(
                 "ORM migration requires Model::columns(); #[derive(Model)] provides it automatically"
@@ -173,7 +173,11 @@ impl<S: Storage> Database<S> {
             .find(|column| column.desc().is_primary())
             .ok_or(DatabaseError::PrimaryKeyNotFound)?;
         if table_primary_key.name() != model_primary_key.name()
-            || !model_column_matches_catalog(model_primary_key, &table_primary_key)?
+            || !model_column_matches_catalog(
+                model_primary_key,
+                &table_primary_key,
+                &PlanArena::new(self.state.table_arena()),
+            )?
         {
             return Err(DatabaseError::InvalidValue(::std::format!(
                 "ORM migration does not support changing the primary key for table `{}`",
@@ -187,7 +191,7 @@ impl<S: Storage> Database<S> {
         let mut handled_current = BTreeMap::new();
         let mut handled_model = BTreeMap::new();
 
-        for column in columns {
+        for column in &columns {
             let Some(current_column) = current_columns.get(column.name()) else {
                 continue;
             };
@@ -207,7 +211,11 @@ impl<S: Storage> Database<S> {
                     M::table_name(),
                 )));
             }
-            if model_column_matches_catalog(column, current_column)? {
+            if model_column_matches_catalog(
+                column,
+                current_column,
+                &PlanArena::new(self.state.table_arena()),
+            )? {
                 continue;
             }
 
@@ -223,14 +231,17 @@ impl<S: Storage> Database<S> {
                 )?;
             }
 
-            if model_column_default(column)? != catalog_column_default(current_column)? {
+            let arena = PlanArena::new(self.state.table_arena());
+            if model_column_default(column, &arena)?
+                != catalog_column_default(current_column, &arena)?
+            {
                 execute_change_column(
                     self,
                     M::table_name(),
                     column.name(),
                     column.name(),
                     column.datatype().clone(),
-                    match column.desc().default.clone() {
+                    match column.desc().default {
                         Some(expr) => DefaultChange::Set(expr),
                         None => DefaultChange::Drop,
                     },
@@ -275,7 +286,11 @@ impl<S: Storage> Database<S> {
                 .iter()
                 .filter(|column| !column.desc().is_primary())
             {
-                if model_column_rename_compatible(model_column, column)? {
+                if model_column_rename_compatible(
+                    model_column,
+                    column,
+                    &PlanArena::new(self.state.table_arena()),
+                )? {
                     candidates.push(column);
                 }
             }
@@ -288,7 +303,11 @@ impl<S: Storage> Database<S> {
                 .iter()
                 .filter(|other| !other.desc().is_primary())
             {
-                if model_column_rename_compatible(other, current_column)? {
+                if model_column_rename_compatible(
+                    other,
+                    current_column,
+                    &PlanArena::new(self.state.table_arena()),
+                )? {
                     reverse_candidates.push(other);
                 }
             }
@@ -332,7 +351,7 @@ impl<S: Storage> Database<S> {
             execute_drop_column(self, M::table_name(), column.name())?;
         }
 
-        for column in columns {
+        for column in &columns {
             if handled_model.contains_key(column.name())
                 || current_columns.contains_key(column.name())
             {
@@ -409,7 +428,7 @@ fn execute_create_table<S: Storage, M: Model>(
     database: &mut Database<S>,
     if_not_exists: bool,
 ) -> Result<(), DatabaseError> {
-    let columns = M::columns().to_vec();
+    let columns = M::columns(database.state.table_arena().borrow_mut());
     database.execute_mut("ORM CREATE TABLE", &[], move |binder, _| {
         binder.bind_create_table(M::table_name().into(), columns, if_not_exists)
     })

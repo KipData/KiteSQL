@@ -16,12 +16,11 @@ use crate::errors::DatabaseError;
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
-use crate::expression::ScalarExpression;
 use crate::planner::operator::filter::FilterOperator;
-use crate::planner::LogicalPlan;
+use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 pub struct Filter {
-    predicate: ScalarExpression,
+    predicate: ExprRef,
     input: ExecId,
 }
 
@@ -52,7 +51,11 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Filter {
                 return Ok(());
             };
             let tuple = arena.result_tuple();
-            if self.predicate.eval(Some(tuple))?.is_true()? {
+            if plan_arena
+                .expression(self.predicate)
+                .eval(plan_arena, Some(tuple))?
+                .is_true()?
+            {
                 arena.resume();
                 return Ok(());
             }

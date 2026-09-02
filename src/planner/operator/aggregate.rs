@@ -12,17 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::iter_ext::Itertools;
-use crate::planner::{Childrens, LogicalPlan};
-use crate::{expression::ScalarExpression, planner::operator::Operator};
+use crate::planner::operator::Operator;
+use crate::planner::{fmt_explain_list, Childrens, Explain, ExprRef, LogicalPlan, PlanArena};
 use kite_sql_serde_macros::ReferenceSerialization;
-use std::fmt;
-use std::fmt::Formatter;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct AggregateOperator {
-    pub groupby_exprs: Vec<ScalarExpression>,
-    pub agg_calls: Vec<ScalarExpression>,
+    pub groupby_exprs: Vec<ExprRef>,
+    pub agg_calls: Vec<ExprRef>,
     pub is_distinct: bool,
     pub force_spill: bool,
 }
@@ -30,8 +27,8 @@ pub struct AggregateOperator {
 impl AggregateOperator {
     pub fn build(
         children: LogicalPlan,
-        agg_calls: Vec<ScalarExpression>,
-        groupby_exprs: Vec<ScalarExpression>,
+        agg_calls: Vec<ExprRef>,
+        groupby_exprs: Vec<ExprRef>,
         is_distinct: bool,
         force_spill: bool,
     ) -> LogicalPlan {
@@ -47,24 +44,16 @@ impl AggregateOperator {
     }
 }
 
-impl fmt::Display for AggregateOperator {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let calls = self
-            .agg_calls
-            .iter()
-            .map(|call| format!("{call}"))
-            .join(", ");
-        write!(f, "Aggregate [{calls}]")?;
-
+impl Explain for AggregateOperator {
+    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Aggregate [")?;
+        fmt_explain_list(&self.agg_calls, ", ", arena, f)?;
+        f.write_str("]")?;
         if !self.groupby_exprs.is_empty() {
-            let groupbys = self
-                .groupby_exprs
-                .iter()
-                .map(|groupby| format!("{groupby}"))
-                .join(", ");
-            write!(f, " -> Group By [{groupbys}]")?;
+            f.write_str(" -> Group By [")?;
+            fmt_explain_list(&self.groupby_exprs, ", ", arena, f)?;
+            f.write_str("]")?;
         }
-
         Ok(())
     }
 }

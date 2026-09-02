@@ -11,12 +11,12 @@ use crate::db::{
 use crate::errors::DatabaseError;
 pub use crate::expression::agg::AggKind;
 use crate::expression::window::WindowFunctionKind;
-use crate::expression::{self, AliasType, ScalarExpression};
+use crate::expression::{self, AliasType, ScalarExpression, TypeCast};
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
 use crate::planner::operator::join::JoinType;
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
 use crate::planner::operator::sort::SortField;
-use crate::planner::{LogicalPlan, PlanArena};
+use crate::planner::{ExprRef, LogicalPlan, PlanArena};
 use crate::storage::{Storage, Transaction};
 use crate::types::tuple::{SchemaView, Tuple};
 use crate::types::value::DataValue;
@@ -106,7 +106,7 @@ pub struct FieldSort<M, T> {
 /// Partitioning and ordering for an ORM window expression.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WindowSpec {
-    partition_by: Vec<ScalarExpression>,
+    partition_by: Vec<ExprRef>,
     order_by: Vec<SortField>,
 }
 
@@ -204,7 +204,7 @@ where
     fn bind_scalar(
         self,
         scope: &mut ExprBindScope<'_, 'bind, 'parent, 'arena, T, A>,
-    ) -> Result<ScalarExpression, DatabaseError>;
+    ) -> Result<ExprRef, DatabaseError>;
 }
 
 impl<'bind, 'parent, 'arena, T, A, M, V> BindOrmScalar<'bind, 'parent, 'arena, T, A> for Field<M, V>
@@ -215,7 +215,7 @@ where
     fn bind_scalar(
         self,
         scope: &mut ExprBindScope<'_, 'bind, 'parent, 'arena, T, A>,
-    ) -> Result<ScalarExpression, DatabaseError> {
+    ) -> Result<ExprRef, DatabaseError> {
         scope.column(self).map(CtxExpression::into_scalar)
     }
 }
@@ -228,8 +228,8 @@ where
     fn bind_scalar(
         self,
         _scope: &mut ExprBindScope<'_, 'bind, 'parent, 'arena, T, A>,
-    ) -> Result<ScalarExpression, DatabaseError> {
-        Ok(self)
+    ) -> Result<ExprRef, DatabaseError> {
+        Ok(_scope.arena.alloc_expression(self))
     }
 }
 
@@ -242,7 +242,7 @@ where
     fn bind_scalar(
         self,
         _scope: &mut ExprBindScope<'_, 'bind, 'parent, 'arena, T, A>,
-    ) -> Result<ScalarExpression, DatabaseError> {
+    ) -> Result<ExprRef, DatabaseError> {
         Ok(self.into_scalar())
     }
 }
@@ -296,9 +296,9 @@ where
 {
     fn bind_sort<'scope>(
         self,
-        _scope: &'scope mut ExprBindScope<'scope, 'bind, 'parent, 'arena, T, A>,
+        scope: &'scope mut ExprBindScope<'scope, 'bind, 'parent, 'arena, T, A>,
     ) -> Result<SortField, DatabaseError> {
-        Ok(self.into())
+        Ok(SortField::from(scope.arena.alloc_expression(self)))
     }
 }
 
@@ -330,8 +330,14 @@ where
 }
 
 #[doc(hidden)]
-pub trait IntoOrmScalarExpression {
-    fn into_orm_scalar(self) -> ScalarExpression;
+pub enum OrmExpression {
+    Bound(ExprRef),
+    Unbound(ScalarExpression),
+}
+
+#[doc(hidden)]
+pub trait IntoOrmExpression {
+    fn into_orm_expression(self) -> OrmExpression;
 }
 
 impl WindowSpec {
@@ -339,8 +345,8 @@ impl WindowSpec {
         Self::default()
     }
 
-    pub fn partition_by(mut self, expr: impl IntoOrmScalarExpression) -> Self {
-        self.partition_by.push(expr.into_orm_scalar());
+    pub fn partition_by(mut self, expr: impl Into<ExprRef>) -> Self {
+        self.partition_by.push(expr.into());
         self
     }
 
@@ -350,12 +356,40 @@ impl WindowSpec {
     }
 }
 
-impl<E> IntoOrmScalarExpression for E
+impl<'bind, 'parent, 'arena, T, A> From<CtxExpression<'bind, 'parent, 'arena, T, A>> for ExprRef
+where
+    T: Transaction,
+    A: AsRef<[(&'static str, DataValue)]>,
+{
+    fn from(expr: CtxExpression<'bind, 'parent, 'arena, T, A>) -> Self {
+        expr.into_scalar()
+    }
+}
+
+impl From<ExprRef> for OrmExpression {
+    fn from(expr: ExprRef) -> Self {
+        Self::Bound(expr)
+    }
+}
+
+impl From<ScalarExpression> for OrmExpression {
+    fn from(expr: ScalarExpression) -> Self {
+        Self::Unbound(expr)
+    }
+}
+
+impl IntoOrmExpression for ExprRef {
+    fn into_orm_expression(self) -> OrmExpression {
+        OrmExpression::Bound(self)
+    }
+}
+
+impl<E> IntoOrmExpression for E
 where
     E: Into<ScalarExpression>,
 {
-    fn into_orm_scalar(self) -> ScalarExpression {
-        self.into()
+    fn into_orm_expression(self) -> OrmExpression {
+        OrmExpression::Unbound(self.into())
     }
 }
 
@@ -368,7 +402,7 @@ where
     fn bind_scalar_list(
         self,
         scope: &mut ExprBindScope<'_, 'bind, 'parent, 'arena, T, A>,
-    ) -> Result<Vec<ScalarExpression>, DatabaseError>;
+    ) -> Result<Vec<ExprRef>, DatabaseError>;
 }
 
 macro_rules! impl_bind_orm_scalar_list {
@@ -385,7 +419,7 @@ macro_rules! impl_bind_orm_scalar_list {
                 fn bind_scalar_list(
                     self,
                     scope: &mut ExprBindScope<'_, 'bind, 'parent, 'arena, Tx, Args>,
-                ) -> Result<Vec<ScalarExpression>, DatabaseError> {
+                ) -> Result<Vec<ExprRef>, DatabaseError> {
                     let ($($name,)+) = self;
                     Ok(vec![
                         $($name.bind_scalar(scope)?,)+
@@ -467,8 +501,22 @@ where
         }
     }
 
-    fn wrap(self, expr: ScalarExpression) -> CtxExpression<'bind, 'parent, 'arena, T, A> {
-        CtxExpression { expr, scope: self }
+    fn wrap(self, expr: impl Into<OrmExpression>) -> CtxExpression<'bind, 'parent, 'arena, T, A> {
+        CtxExpression {
+            expr: self.bind(expr),
+            scope: self,
+        }
+    }
+
+    fn alloc(self, expr: ScalarExpression) -> CtxExpression<'bind, 'parent, 'arena, T, A> {
+        self.wrap(expr)
+    }
+
+    fn bind(self, expr: impl Into<OrmExpression>) -> ExprRef {
+        match expr.into() {
+            OrmExpression::Bound(expr) => expr,
+            OrmExpression::Unbound(expr) => self.arena().alloc_expression(expr),
+        }
     }
 
     #[allow(clippy::mut_from_ref)]
@@ -490,54 +538,54 @@ where
 
     fn binary(
         self,
-        left: ScalarExpression,
+        left: ExprRef,
         op: expression::BinaryOperator,
-        right: ScalarExpression,
+        right: ExprRef,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binder()
             .bind_binary_op_expr(left, right, op, self.arena())
-            .map(|expr| self.wrap(expr))
+            .map(|expr| self.alloc(expr))
     }
 
     fn unary(
         self,
         op: expression::UnaryOperator,
-        expr: ScalarExpression,
+        expr: ExprRef,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binder()
             .bind_unary_op_expr(expr, op, self.arena())
-            .map(|expr| self.wrap(expr))
+            .map(|expr| self.alloc(expr))
     }
 
     fn function(
         self,
         name: impl Into<String>,
-        args: Vec<ScalarExpression>,
+        args: Vec<ExprRef>,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binder()
             .bind_function_call(name.into(), args, self.arena())
-            .map(|expr| self.wrap(expr))
+            .map(|expr| self.alloc(expr))
     }
 
     fn aggregate(
         self,
         kind: AggKind,
-        args: Vec<ScalarExpression>,
+        args: Vec<ExprRef>,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binder()
             .bind_aggregate_function(kind, args, false, self.arena())
-            .map(|expr| self.wrap(expr))
+            .map(|expr| self.alloc(expr))
     }
 
     fn window(
         self,
         kind: WindowFunctionKind,
-        args: Vec<ScalarExpression>,
+        args: Vec<ExprRef>,
         spec: WindowSpec,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binder()
             .bind_window_function(kind, args, spec.partition_by, spec.order_by, self.arena())
-            .map(|expr| self.wrap(expr))
+            .map(|expr| self.alloc(expr))
     }
 
     fn scalar_subquery<F>(
@@ -555,7 +603,7 @@ where
                 let mut context = OrmContext { binder, arena };
                 build(&mut context)
             })
-            .map(|expr| self.wrap(expr))
+            .map(|expr| self.alloc(expr))
     }
 
     fn exists_subquery<F>(
@@ -574,14 +622,14 @@ where
                 let mut context = OrmContext { binder, arena };
                 build(&mut context)
             })
-            .map(|expr| self.wrap(expr))
+            .map(|expr| self.alloc(expr))
     }
 
     fn quantified_subquery<F>(
         self,
         quantifier: MarkApplyQuantifier,
         negated: bool,
-        left_expr: ScalarExpression,
+        left_expr: ExprRef,
         compare_op: expression::BinaryOperator,
         build: F,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError>
@@ -603,7 +651,7 @@ where
                     build(&mut context)
                 },
             )
-            .map(|expr| self.wrap(expr))
+            .map(|expr| self.alloc(expr))
     }
 }
 
@@ -611,8 +659,9 @@ where
 ///
 /// `CtxExpression` is a scope-bound ORM expression handle, not a reusable core
 /// expression value. It exists so ORM code can use natural chained binding such
-/// as `e.column(User::age())?.gte(18)?`. Convert it to a core
-/// [`ScalarExpression`] only at ORM binder boundaries with [`Self::into_scalar`].
+/// as `e.column(User::age())?.gte(18)?`. It retains the arena-backed [`ExprRef`]
+/// when passed through ORM expression APIs, avoiding cloning and reallocating an
+/// already-bound [`ScalarExpression`].
 ///
 /// This type intentionally cannot be sent or shared across threads, and its
 /// internal scope handle is private.
@@ -621,7 +670,7 @@ where
     T: Transaction,
     A: AsRef<[(&'static str, DataValue)]>,
 {
-    expr: ScalarExpression,
+    expr: ExprRef,
     scope: ExprBindScopeHandle<'bind, 'parent, 'arena, T, A>,
 }
 
@@ -630,7 +679,7 @@ where
     T: Transaction,
     A: AsRef<[(&'static str, DataValue)]>,
 {
-    pub fn into_scalar(self) -> ScalarExpression {
+    pub fn into_scalar(self) -> ExprRef {
         self.expr
     }
 
@@ -654,83 +703,83 @@ where
         self.into_sort().nulls_last()
     }
 
-    pub fn eq<R: IntoOrmScalarExpression>(self, right: R) -> Result<Self, DatabaseError> {
+    pub fn eq<R: IntoOrmExpression>(self, right: R) -> Result<Self, DatabaseError> {
         self.scope.binary(
             self.expr,
             expression::BinaryOperator::Eq,
-            right.into_orm_scalar(),
+            self.scope.bind(right.into_orm_expression()),
         )
     }
 
-    pub fn ne<R: IntoOrmScalarExpression>(self, right: R) -> Result<Self, DatabaseError> {
+    pub fn ne<R: IntoOrmExpression>(self, right: R) -> Result<Self, DatabaseError> {
         self.scope.binary(
             self.expr,
             expression::BinaryOperator::NotEq,
-            right.into_orm_scalar(),
+            self.scope.bind(right.into_orm_expression()),
         )
     }
 
-    pub fn gt<R: IntoOrmScalarExpression>(self, right: R) -> Result<Self, DatabaseError> {
+    pub fn gt<R: IntoOrmExpression>(self, right: R) -> Result<Self, DatabaseError> {
         self.scope.binary(
             self.expr,
             expression::BinaryOperator::Gt,
-            right.into_orm_scalar(),
+            self.scope.bind(right.into_orm_expression()),
         )
     }
 
-    pub fn gte<R: IntoOrmScalarExpression>(self, right: R) -> Result<Self, DatabaseError> {
+    pub fn gte<R: IntoOrmExpression>(self, right: R) -> Result<Self, DatabaseError> {
         self.scope.binary(
             self.expr,
             expression::BinaryOperator::GtEq,
-            right.into_orm_scalar(),
+            self.scope.bind(right.into_orm_expression()),
         )
     }
 
-    pub fn lt<R: IntoOrmScalarExpression>(self, right: R) -> Result<Self, DatabaseError> {
+    pub fn lt<R: IntoOrmExpression>(self, right: R) -> Result<Self, DatabaseError> {
         self.scope.binary(
             self.expr,
             expression::BinaryOperator::Lt,
-            right.into_orm_scalar(),
+            self.scope.bind(right.into_orm_expression()),
         )
     }
 
-    pub fn lte<R: IntoOrmScalarExpression>(self, right: R) -> Result<Self, DatabaseError> {
+    pub fn lte<R: IntoOrmExpression>(self, right: R) -> Result<Self, DatabaseError> {
         self.scope.binary(
             self.expr,
             expression::BinaryOperator::LtEq,
-            right.into_orm_scalar(),
+            self.scope.bind(right.into_orm_expression()),
         )
     }
 
-    pub fn like<R: IntoOrmScalarExpression>(self, right: R) -> Result<Self, DatabaseError> {
+    pub fn like<R: IntoOrmExpression>(self, right: R) -> Result<Self, DatabaseError> {
         self.scope.binary(
             self.expr,
             expression::BinaryOperator::Like(None),
-            right.into_orm_scalar(),
+            self.scope.bind(right.into_orm_expression()),
         )
     }
 
-    pub fn not_like<R: IntoOrmScalarExpression>(self, right: R) -> Result<Self, DatabaseError> {
+    pub fn not_like<R: IntoOrmExpression>(self, right: R) -> Result<Self, DatabaseError> {
         self.scope.binary(
             self.expr,
             expression::BinaryOperator::NotLike(None),
-            right.into_orm_scalar(),
+            self.scope.bind(right.into_orm_expression()),
         )
     }
 
-    pub fn and<R: IntoOrmScalarExpression>(self, right: R) -> Result<Self, DatabaseError> {
+    pub fn and<R: IntoOrmExpression>(self, right: R) -> Result<Self, DatabaseError> {
         self.scope.binary(
             self.expr,
             expression::BinaryOperator::And,
-            right.into_orm_scalar(),
+            self.scope.bind(right.into_orm_expression()),
         )
     }
 
-    pub fn or<R: IntoOrmScalarExpression>(self, right: R) -> Result<Self, DatabaseError> {
+    pub fn or<R: IntoOrmExpression>(self, right: R) -> Result<Self, DatabaseError> {
         self.scope.binary(
             self.expr,
             expression::BinaryOperator::Or,
-            right.into_orm_scalar(),
+            self.scope.bind(right.into_orm_expression()),
         )
     }
 
@@ -743,82 +792,82 @@ where
         let scope = self.scope;
         let expr = ScalarExpression::IsNull {
             negated: false,
-            expr: Box::new(self.expr),
+            expr: self.expr,
         };
-        scope.wrap(expr)
+        scope.alloc(expr)
     }
 
     pub fn is_not_null(self) -> Self {
         let scope = self.scope;
         let expr = ScalarExpression::IsNull {
             negated: true,
-            expr: Box::new(self.expr),
+            expr: self.expr,
         };
-        scope.wrap(expr)
+        scope.alloc(expr)
     }
 
     pub fn in_list<I, E>(self, values: I) -> Result<Self, DatabaseError>
     where
         I: IntoIterator<Item = E>,
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
         let scope = self.scope;
         let expr = ScalarExpression::In {
             negated: false,
-            expr: Box::new(self.expr),
+            expr: self.expr,
             args: values
                 .into_iter()
-                .map(IntoOrmScalarExpression::into_orm_scalar)
+                .map(|expr| scope.bind(expr.into_orm_expression()))
                 .collect(),
         };
-        Ok(scope.wrap(expr))
+        Ok(scope.alloc(expr))
     }
 
     pub fn not_in_list<I, E>(self, values: I) -> Result<Self, DatabaseError>
     where
         I: IntoIterator<Item = E>,
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
         let scope = self.scope;
         let expr = ScalarExpression::In {
             negated: true,
-            expr: Box::new(self.expr),
+            expr: self.expr,
             args: values
                 .into_iter()
-                .map(IntoOrmScalarExpression::into_orm_scalar)
+                .map(|expr| scope.bind(expr.into_orm_expression()))
                 .collect(),
         };
-        Ok(scope.wrap(expr))
+        Ok(scope.alloc(expr))
     }
 
     pub fn between<L, H>(self, low: L, high: H) -> Result<Self, DatabaseError>
     where
-        L: IntoOrmScalarExpression,
-        H: IntoOrmScalarExpression,
+        L: IntoOrmExpression,
+        H: IntoOrmExpression,
     {
         let scope = self.scope;
         let expr = ScalarExpression::Between {
             negated: false,
-            expr: Box::new(self.expr),
-            left_expr: Box::new(low.into_orm_scalar()),
-            right_expr: Box::new(high.into_orm_scalar()),
+            expr: self.expr,
+            left_expr: scope.bind(low.into_orm_expression()),
+            right_expr: scope.bind(high.into_orm_expression()),
         };
-        Ok(scope.wrap(expr))
+        Ok(scope.alloc(expr))
     }
 
     pub fn not_between<L, H>(self, low: L, high: H) -> Result<Self, DatabaseError>
     where
-        L: IntoOrmScalarExpression,
-        H: IntoOrmScalarExpression,
+        L: IntoOrmExpression,
+        H: IntoOrmExpression,
     {
         let scope = self.scope;
         let expr = ScalarExpression::Between {
             negated: true,
-            expr: Box::new(self.expr),
-            left_expr: Box::new(low.into_orm_scalar()),
-            right_expr: Box::new(high.into_orm_scalar()),
+            expr: self.expr,
+            left_expr: scope.bind(low.into_orm_expression()),
+            right_expr: scope.bind(high.into_orm_expression()),
         };
-        Ok(scope.wrap(expr))
+        Ok(scope.alloc(expr))
     }
 
     pub fn alias(self, alias: impl Into<String>) -> Self {
@@ -827,18 +876,17 @@ where
         scope
             .binder()
             .context
-            .add_alias(None, alias.clone(), self.expr.clone());
+            .add_alias(None, alias.clone(), self.expr);
         let expr = ScalarExpression::Alias {
-            expr: Box::new(self.expr),
+            expr: self.expr,
             alias: AliasType::Name(alias),
         };
-        scope.wrap(expr)
+        scope.alloc(expr)
     }
 
     pub fn cast(self, ty: LogicalType) -> Result<Self, DatabaseError> {
         let scope = self.scope;
-        ScalarExpression::type_cast(self.expr, Cow::Owned(ty), scope.arena())
-            .map(|expr| scope.wrap(expr))
+        Ok(scope.wrap(self.expr.type_cast(Cow::Owned(ty), scope.arena())?))
     }
 
     pub fn function<E>(
@@ -847,14 +895,15 @@ where
         args: impl IntoIterator<Item = E>,
     ) -> Result<Self, DatabaseError>
     where
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
+        let scope = self.scope;
         let mut args = args
             .into_iter()
-            .map(IntoOrmScalarExpression::into_orm_scalar)
+            .map(|expr| scope.bind(expr.into_orm_expression()))
             .collect::<Vec<_>>();
         args.insert(0, self.expr);
-        self.scope.function(name, args)
+        scope.function(name, args)
     }
 
     fn quantified_subquery<F>(
@@ -907,7 +956,7 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            expr: self.expr.clone(),
+            expr: self.expr,
             scope: self.scope,
         }
     }
@@ -940,14 +989,13 @@ where
     }
 }
 
-impl<'bind, 'parent, 'arena, T, A> IntoOrmScalarExpression
-    for CtxExpression<'bind, 'parent, 'arena, T, A>
+impl<'bind, 'parent, 'arena, T, A> IntoOrmExpression for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
     A: AsRef<[(&'static str, DataValue)]>,
 {
-    fn into_orm_scalar(self) -> ScalarExpression {
-        self.into_scalar()
+    fn into_orm_expression(self) -> OrmExpression {
+        OrmExpression::Bound(self.expr)
     }
 }
 
@@ -1025,7 +1073,7 @@ where
     binder: &'ctx mut Binder<'bind, 'parent, T, A>,
     arena: &'ctx mut PlanArena<'arena>,
     source_name: String,
-    value_exprs: Vec<(ColumnRef, ScalarExpression)>,
+    value_exprs: Vec<(ColumnRef, ExprRef)>,
 }
 
 impl<'ctx, 'bind, 'parent, 'arena, T, A> OrmContext<'ctx, 'bind, 'parent, 'arena, T, A>
@@ -1068,7 +1116,7 @@ where
         if mutation_source {
             self.binder.with_pk(source.table_name.as_str().into());
         }
-        let plan = bind_orm_source(self.binder, source.clone(), None, self.arena);
+        let plan = bind_orm_source(self.binder, source, None, self.arena);
         if mutation_source {
             self.binder.clear_with_pk();
         }
@@ -1258,7 +1306,7 @@ where
         ExprBindScopeHandle::new(self)
     }
 
-    fn wrap(&self, expr: ScalarExpression) -> CtxExpression<'bind, 'parent, 'arena, T, A> {
+    fn wrap(&self, expr: impl Into<OrmExpression>) -> CtxExpression<'bind, 'parent, 'arena, T, A> {
         self.handle().wrap(expr)
     }
 
@@ -1273,7 +1321,7 @@ where
             None,
             scope.arena(),
         )?;
-        Ok(scope.wrap(expr))
+        Ok(scope.alloc(expr))
     }
 
     pub fn qualified_column<M, V>(
@@ -1288,7 +1336,7 @@ where
             None,
             scope.arena(),
         )?;
-        Ok(scope.wrap(expr))
+        Ok(scope.alloc(expr))
     }
 
     #[doc(hidden)]
@@ -1302,7 +1350,7 @@ where
             scope
                 .binder()
                 .bind_column_ref_by_name(Some(relation), column, None, scope.arena())?;
-        Ok(scope.wrap(expr))
+        Ok(scope.alloc(expr))
     }
 
     pub fn value<V: ToDataValue>(&self, value: V) -> CtxExpression<'bind, 'parent, 'arena, T, A> {
@@ -1315,134 +1363,142 @@ where
 
     pub fn alias(
         &self,
-        expr: impl IntoOrmScalarExpression,
+        expr: impl IntoOrmExpression,
         alias: impl Into<String>,
     ) -> CtxExpression<'bind, 'parent, 'arena, T, A> {
-        self.wrap(expr.into_orm_scalar()).alias(alias)
+        self.wrap(expr.into_orm_expression()).alias(alias)
     }
 
     pub fn cast(
         &self,
-        expr: impl IntoOrmScalarExpression,
+        expr: impl IntoOrmExpression,
         ty: LogicalType,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         let scope = self.handle();
-        let expr =
-            ScalarExpression::type_cast(expr.into_orm_scalar(), Cow::Owned(ty), scope.arena())?;
-        Ok(scope.wrap(expr))
+        Ok(scope.wrap(
+            scope
+                .bind(expr.into_orm_expression())
+                .type_cast(Cow::Owned(ty), scope.arena())?,
+        ))
     }
 
     pub fn unary(
         &self,
         op: expression::UnaryOperator,
-        expr: impl IntoOrmScalarExpression,
+        expr: impl IntoOrmExpression,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
-        self.handle().unary(op, expr.into_orm_scalar())
+        let scope = self.handle();
+        scope.unary(op, scope.bind(expr.into_orm_expression()))
     }
 
     pub fn binary(
         &self,
-        left: impl IntoOrmScalarExpression,
+        left: impl IntoOrmExpression,
         op: expression::BinaryOperator,
-        right: impl IntoOrmScalarExpression,
+        right: impl IntoOrmExpression,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
-        self.handle()
-            .binary(left.into_orm_scalar(), op, right.into_orm_scalar())
+        let scope = self.handle();
+        scope.binary(
+            scope.bind(left.into_orm_expression()),
+            op,
+            scope.bind(right.into_orm_expression()),
+        )
     }
 
     pub fn eq(
         &self,
-        left: impl IntoOrmScalarExpression,
-        right: impl IntoOrmScalarExpression,
+        left: impl IntoOrmExpression,
+        right: impl IntoOrmExpression,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binary(left, expression::BinaryOperator::Eq, right)
     }
 
     pub fn ne(
         &self,
-        left: impl IntoOrmScalarExpression,
-        right: impl IntoOrmScalarExpression,
+        left: impl IntoOrmExpression,
+        right: impl IntoOrmExpression,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binary(left, expression::BinaryOperator::NotEq, right)
     }
 
     pub fn gt(
         &self,
-        left: impl IntoOrmScalarExpression,
-        right: impl IntoOrmScalarExpression,
+        left: impl IntoOrmExpression,
+        right: impl IntoOrmExpression,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binary(left, expression::BinaryOperator::Gt, right)
     }
 
     pub fn gte(
         &self,
-        left: impl IntoOrmScalarExpression,
-        right: impl IntoOrmScalarExpression,
+        left: impl IntoOrmExpression,
+        right: impl IntoOrmExpression,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binary(left, expression::BinaryOperator::GtEq, right)
     }
 
     pub fn lt(
         &self,
-        left: impl IntoOrmScalarExpression,
-        right: impl IntoOrmScalarExpression,
+        left: impl IntoOrmExpression,
+        right: impl IntoOrmExpression,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binary(left, expression::BinaryOperator::Lt, right)
     }
 
     pub fn lte(
         &self,
-        left: impl IntoOrmScalarExpression,
-        right: impl IntoOrmScalarExpression,
+        left: impl IntoOrmExpression,
+        right: impl IntoOrmExpression,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binary(left, expression::BinaryOperator::LtEq, right)
     }
 
     pub fn and(
         &self,
-        left: impl IntoOrmScalarExpression,
-        right: impl IntoOrmScalarExpression,
+        left: impl IntoOrmExpression,
+        right: impl IntoOrmExpression,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binary(left, expression::BinaryOperator::And, right)
     }
 
     pub fn or(
         &self,
-        left: impl IntoOrmScalarExpression,
-        right: impl IntoOrmScalarExpression,
+        left: impl IntoOrmExpression,
+        right: impl IntoOrmExpression,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binary(left, expression::BinaryOperator::Or, right)
     }
 
     pub fn is_null(
         &self,
-        expr: impl IntoOrmScalarExpression,
+        expr: impl IntoOrmExpression,
     ) -> CtxExpression<'bind, 'parent, 'arena, T, A> {
-        self.wrap(expr.into_orm_scalar()).is_null()
+        self.wrap(expr.into_orm_expression()).is_null()
     }
 
     pub fn is_not_null(
         &self,
-        expr: impl IntoOrmScalarExpression,
+        expr: impl IntoOrmExpression,
     ) -> CtxExpression<'bind, 'parent, 'arena, T, A> {
-        self.wrap(expr.into_orm_scalar()).is_not_null()
+        self.wrap(expr.into_orm_expression()).is_not_null()
     }
 
     pub fn in_list<I, E>(
         &self,
-        expr: impl IntoOrmScalarExpression,
+        expr: impl IntoOrmExpression,
         args: I,
     ) -> CtxExpression<'bind, 'parent, 'arena, T, A>
     where
         I: IntoIterator<Item = E>,
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
+        let scope = self.handle();
         let expr = ScalarExpression::In {
             negated: false,
-            expr: Box::new(expr.into_orm_scalar()),
+            expr: scope.bind(expr.into_orm_expression()),
             args: args
                 .into_iter()
-                .map(IntoOrmScalarExpression::into_orm_scalar)
+                .map(|expr| scope.bind(expr.into_orm_expression()))
                 .collect(),
         };
         self.wrap(expr)
@@ -1450,19 +1506,20 @@ where
 
     pub fn not_in_list<I, E>(
         &self,
-        expr: impl IntoOrmScalarExpression,
+        expr: impl IntoOrmExpression,
         args: I,
     ) -> CtxExpression<'bind, 'parent, 'arena, T, A>
     where
         I: IntoIterator<Item = E>,
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
+        let scope = self.handle();
         let expr = ScalarExpression::In {
             negated: true,
-            expr: Box::new(expr.into_orm_scalar()),
+            expr: scope.bind(expr.into_orm_expression()),
             args: args
                 .into_iter()
-                .map(IntoOrmScalarExpression::into_orm_scalar)
+                .map(|expr| scope.bind(expr.into_orm_expression()))
                 .collect(),
         };
         self.wrap(expr)
@@ -1470,37 +1527,39 @@ where
 
     pub fn between(
         &self,
-        expr: impl IntoOrmScalarExpression,
-        low: impl IntoOrmScalarExpression,
-        high: impl IntoOrmScalarExpression,
+        expr: impl IntoOrmExpression,
+        low: impl IntoOrmExpression,
+        high: impl IntoOrmExpression,
     ) -> CtxExpression<'bind, 'parent, 'arena, T, A> {
+        let scope = self.handle();
         let expr = ScalarExpression::Between {
             negated: false,
-            expr: Box::new(expr.into_orm_scalar()),
-            left_expr: Box::new(low.into_orm_scalar()),
-            right_expr: Box::new(high.into_orm_scalar()),
+            expr: scope.bind(expr.into_orm_expression()),
+            left_expr: scope.bind(low.into_orm_expression()),
+            right_expr: scope.bind(high.into_orm_expression()),
         };
         self.wrap(expr)
     }
 
     pub fn not_between(
         &self,
-        expr: impl IntoOrmScalarExpression,
-        low: impl IntoOrmScalarExpression,
-        high: impl IntoOrmScalarExpression,
+        expr: impl IntoOrmExpression,
+        low: impl IntoOrmExpression,
+        high: impl IntoOrmExpression,
     ) -> CtxExpression<'bind, 'parent, 'arena, T, A> {
+        let scope = self.handle();
         let expr = ScalarExpression::Between {
             negated: true,
-            expr: Box::new(expr.into_orm_scalar()),
-            left_expr: Box::new(low.into_orm_scalar()),
-            right_expr: Box::new(high.into_orm_scalar()),
+            expr: scope.bind(expr.into_orm_expression()),
+            left_expr: scope.bind(low.into_orm_expression()),
+            right_expr: scope.bind(high.into_orm_expression()),
         };
         self.wrap(expr)
     }
 
     pub fn not(
         &self,
-        expr: impl IntoOrmScalarExpression,
+        expr: impl IntoOrmExpression,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.unary(expression::UnaryOperator::Not, expr)
     }
@@ -1511,13 +1570,15 @@ where
         args: impl IntoIterator<Item = E>,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError>
     where
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
-        let args = args
-            .into_iter()
-            .map(IntoOrmScalarExpression::into_orm_scalar)
-            .collect();
-        self.handle().function(name, args)
+        let scope = self.handle();
+        scope.function(
+            name,
+            args.into_iter()
+                .map(|expr| scope.bind(expr.into_orm_expression()))
+                .collect(),
+        )
     }
 
     pub fn aggregate<E>(
@@ -1526,24 +1587,27 @@ where
         args: impl IntoIterator<Item = E>,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError>
     where
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
-        let args = args
-            .into_iter()
-            .map(IntoOrmScalarExpression::into_orm_scalar)
-            .collect();
-        self.handle().aggregate(kind, args)
+        let scope = self.handle();
+        scope.aggregate(
+            kind,
+            args.into_iter()
+                .map(|expr| scope.bind(expr.into_orm_expression()))
+                .collect(),
+        )
     }
 
     fn aggregate_window(
         &self,
         kind: AggKind,
-        expr: impl IntoOrmScalarExpression,
+        expr: impl IntoOrmExpression,
         spec: WindowSpec,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
-        self.handle().window(
+        let scope = self.handle();
+        scope.window(
             WindowFunctionKind::Aggregate(kind),
-            vec![expr.into_orm_scalar()],
+            vec![scope.bind(expr.into_orm_expression())],
             spec,
         )
     }
@@ -1574,7 +1638,7 @@ where
 
     pub fn count_over(
         &self,
-        expr: impl IntoOrmScalarExpression,
+        expr: impl IntoOrmExpression,
         spec: WindowSpec,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.aggregate_window(AggKind::Count, expr, spec)
@@ -1582,7 +1646,7 @@ where
 
     pub fn sum_over(
         &self,
-        expr: impl IntoOrmScalarExpression,
+        expr: impl IntoOrmExpression,
         spec: WindowSpec,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.aggregate_window(AggKind::Sum, expr, spec)
@@ -1590,7 +1654,7 @@ where
 
     pub fn avg_over(
         &self,
-        expr: impl IntoOrmScalarExpression,
+        expr: impl IntoOrmExpression,
         spec: WindowSpec,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.aggregate_window(AggKind::Avg, expr, spec)
@@ -1598,7 +1662,7 @@ where
 
     pub fn min_over(
         &self,
-        expr: impl IntoOrmScalarExpression,
+        expr: impl IntoOrmExpression,
         spec: WindowSpec,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.aggregate_window(AggKind::Min, expr, spec)
@@ -1606,7 +1670,7 @@ where
 
     pub fn max_over(
         &self,
-        expr: impl IntoOrmScalarExpression,
+        expr: impl IntoOrmExpression,
         spec: WindowSpec,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.aggregate_window(AggKind::Max, expr, spec)
@@ -1616,17 +1680,19 @@ where
         &self,
         spec: WindowSpec,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
-        self.handle().window(
+        let scope = self.handle();
+        scope.window(
             WindowFunctionKind::Aggregate(AggKind::Count),
-            vec![Binder::<'bind, 'parent, T, A>::wildcard_expr()],
+            vec![scope.bind(Binder::<'bind, 'parent, T, A>::wildcard_expr())],
             spec,
         )
     }
 
     pub fn count_all(&self) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
-        self.aggregate(
+        let scope = self.handle();
+        scope.aggregate(
             AggKind::Count,
-            vec![Binder::<'bind, 'parent, T, A>::wildcard_expr()],
+            vec![scope.bind(Binder::<'bind, 'parent, T, A>::wildcard_expr())],
         )
     }
 
@@ -1636,15 +1702,21 @@ where
         else_expr: Option<E>,
     ) -> CtxExpression<'bind, 'parent, 'arena, T, A>
     where
-        C: IntoOrmScalarExpression,
-        V: IntoOrmScalarExpression,
-        E: IntoOrmScalarExpression,
+        C: IntoOrmExpression,
+        V: IntoOrmExpression,
+        E: IntoOrmExpression,
     {
+        let scope = self.handle();
         let expr_pairs = expr_pairs
             .into_iter()
-            .map(|(condition, value)| (condition.into_orm_scalar(), value.into_orm_scalar()))
+            .map(|(condition, value)| {
+                (
+                    scope.bind(condition.into_orm_expression()),
+                    scope.bind(value.into_orm_expression()),
+                )
+            })
             .collect::<Vec<_>>();
-        let else_expr = else_expr.map(IntoOrmScalarExpression::into_orm_scalar);
+        let else_expr = else_expr.map(|expr| scope.bind(expr.into_orm_expression()));
         let ty = expr_pairs
             .first()
             .map(|(_, value)| value.return_type(self.arena).into_owned())
@@ -1657,27 +1729,34 @@ where
         self.wrap(ScalarExpression::CaseWhen {
             operand_expr: None,
             expr_pairs,
-            else_expr: else_expr.map(Box::new),
+            else_expr,
             ty,
         })
     }
 
     pub fn case_value<K, V, E>(
         &self,
-        operand_expr: impl IntoOrmScalarExpression,
+        operand_expr: impl IntoOrmExpression,
         expr_pairs: impl IntoIterator<Item = (K, V)>,
         else_expr: Option<E>,
     ) -> CtxExpression<'bind, 'parent, 'arena, T, A>
     where
-        K: IntoOrmScalarExpression,
-        V: IntoOrmScalarExpression,
-        E: IntoOrmScalarExpression,
+        K: IntoOrmExpression,
+        V: IntoOrmExpression,
+        E: IntoOrmExpression,
     {
+        let scope = self.handle();
+        let operand_expr = scope.bind(operand_expr.into_orm_expression());
         let expr_pairs = expr_pairs
             .into_iter()
-            .map(|(key, value)| (key.into_orm_scalar(), value.into_orm_scalar()))
+            .map(|(key, value)| {
+                (
+                    scope.bind(key.into_orm_expression()),
+                    scope.bind(value.into_orm_expression()),
+                )
+            })
             .collect::<Vec<_>>();
-        let else_expr = else_expr.map(IntoOrmScalarExpression::into_orm_scalar);
+        let else_expr = else_expr.map(|expr| scope.bind(expr.into_orm_expression()));
         let ty = expr_pairs
             .first()
             .map(|(_, value)| value.return_type(self.arena).into_owned())
@@ -1688,9 +1767,9 @@ where
             })
             .unwrap_or(LogicalType::SqlNull);
         self.wrap(ScalarExpression::CaseWhen {
-            operand_expr: Some(Box::new(operand_expr.into_orm_scalar())),
+            operand_expr: Some(operand_expr),
             expr_pairs,
-            else_expr: else_expr.map(Box::new),
+            else_expr,
             ty,
         })
     }
@@ -1732,7 +1811,9 @@ where
     where
         D: ToDataValue,
     {
-        let expr = ScalarExpression::Constant(value.to_data_value());
+        let expr = self
+            .arena
+            .alloc_expression(ScalarExpression::Constant(value.to_data_value()));
         self.push_assignment(field.column, expr)
     }
 
@@ -1766,14 +1847,15 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<(), DatabaseError>
     where
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
         let expr = with_query_bind_step!(self.binder, QueryBindStep::Project, {
             let mut scope = ExprBindScope {
                 binder: self.binder,
                 arena: self.arena,
             };
-            build(&mut scope)?.into_orm_scalar()
+            let handle = scope.handle();
+            handle.bind(build(&mut scope)?.into_orm_expression())
         });
         self.push_assignment(field.column, expr?)
     }
@@ -1781,21 +1863,21 @@ where
     fn push_assignment(
         &mut self,
         column_name: &str,
-        mut expr: ScalarExpression,
+        mut expr: ExprRef,
     ) -> Result<(), DatabaseError> {
         let column =
             bind_orm_target_column(self.binder, &self.source_name, column_name, self.arena)?;
-        if matches!(expr, ScalarExpression::Empty) {
+        if matches!(self.arena.expression(expr), ScalarExpression::Empty) {
             let column_catalog = self.arena.column(column);
             let default_value = column_catalog
-                .default_value()?
+                .default_value(self.arena)?
                 .ok_or(DatabaseError::DefaultNotExist)?;
-            expr = ScalarExpression::Constant(default_value);
+            expr = self
+                .arena
+                .alloc_expression(ScalarExpression::Constant(default_value));
         }
-        let column_catalog = self.arena.column(column);
-        expr = ScalarExpression::type_cast(
-            expr,
-            Cow::Borrowed(column_catalog.datatype()),
+        expr = expr.type_cast(
+            Cow::Owned(self.arena.column(column).datatype().clone()),
             self.arena,
         )?;
         self.value_exprs.push((column, expr));
@@ -1869,11 +1951,12 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
         let predicate = with_query_bind_step!(self.binder, QueryBindStep::Where, {
             let mut scope = self.expr_scope();
-            build(&mut scope)?.into_orm_scalar()
+            let handle = scope.handle();
+            handle.bind(build(&mut scope)?.into_orm_expression())
         });
         let predicate = predicate?;
         self.filter_expr(predicate)
@@ -1911,7 +1994,7 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
         let source = match alias {
             Some(alias) => QuerySource::model::<N>().with_alias(alias),
@@ -1930,7 +2013,8 @@ where
         self.binder.extend(right_context);
         let on = with_query_bind_step!(self.binder, QueryBindStep::From, {
             let mut scope = self.expr_scope();
-            build(&mut scope)?.into_orm_scalar()
+            let handle = scope.handle();
+            handle.bind(build(&mut scope)?.into_orm_expression())
         });
         self.plan = self.binder.bind_join_plans(
             self.plan,
@@ -1949,7 +2033,7 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
         self.join_on::<N, E>(JoinType::Inner, None, build)
     }
@@ -1962,7 +2046,7 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
         self.join_on::<N, E>(JoinType::Inner, Some(alias.into()), build)
     }
@@ -1974,7 +2058,7 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
         self.join_on::<N, E>(JoinType::LeftOuter, None, build)
     }
@@ -1987,7 +2071,7 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
         self.join_on::<N, E>(JoinType::LeftOuter, Some(alias.into()), build)
     }
@@ -1999,7 +2083,7 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
         self.join_on::<N, E>(JoinType::RightOuter, None, build)
     }
@@ -2011,7 +2095,7 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
         self.join_on::<N, E>(JoinType::Full, None, build)
     }
@@ -2075,7 +2159,7 @@ where
                             &relation,
                             Field::<M, ()>::new(M::table_name(), field.column),
                         )?
-                        .into_orm_scalar(),
+                        .into_scalar(),
                 );
             }
         })?;
@@ -2101,11 +2185,12 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<BindPlanSelectList<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>, DatabaseError>
     where
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
         let expr = with_query_bind_step!(self.binder, QueryBindStep::Project, {
             let mut scope = self.expr_scope();
-            build(&mut scope)?.into_orm_scalar()
+            let handle = scope.handle();
+            handle.bind(build(&mut scope)?.into_orm_expression())
         });
         Ok(self.select_list(vec![expr?]))
     }
@@ -2117,18 +2202,17 @@ where
         ) -> Result<Vec<E>, DatabaseError>,
     ) -> Result<BindPlanSelectList<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>, DatabaseError>
     where
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
         let exprs = with_query_bind_step!(self.binder, QueryBindStep::Project, {
             let mut scope = self.expr_scope();
+            let handle = scope.handle();
             build(&mut scope)?
-        });
-        Ok(self.select_list(
-            exprs?
                 .into_iter()
-                .map(IntoOrmScalarExpression::into_orm_scalar)
-                .collect(),
-        ))
+                .map(|expr| handle.bind(expr.into_orm_expression()))
+                .collect::<Vec<_>>()
+        });
+        Ok(self.select_list(exprs?))
     }
 
     pub fn project_scalar(
@@ -2162,7 +2246,7 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<BindPlanSelectList<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>, DatabaseError>
     where
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
         self.project_model()?.group_by(build)
     }
@@ -2174,7 +2258,7 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<BindPlanSelectList<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>, DatabaseError>
     where
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
         self.project_model()?.having(build)
     }
@@ -2217,7 +2301,7 @@ where
         let count = with_query_bind_step!(self.binder, QueryBindStep::Project, {
             let scope = self.expr_scope();
             let count = scope.count_all()?;
-            scope.alias(count, "count").into_orm_scalar()
+            scope.alias(count, "count").into_scalar()
         });
         self.select_list(vec![count?]).count()
     }
@@ -2287,11 +2371,12 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
         let expr = with_query_bind_step!(self.binder, QueryBindStep::Project, {
             let mut scope = self.expr_scope();
-            build(&mut scope)?.into_orm_scalar()
+            let handle = scope.handle();
+            handle.bind(build(&mut scope)?.into_orm_expression())
         });
         Ok(self.set_select_list(vec![expr?]))
     }
@@ -2303,18 +2388,17 @@ where
         ) -> Result<Vec<E>, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
         let exprs = with_query_bind_step!(self.binder, QueryBindStep::Project, {
             let mut scope = self.expr_scope();
+            let handle = scope.handle();
             build(&mut scope)?
-        });
-        Ok(self.set_select_list(
-            exprs?
                 .into_iter()
-                .map(IntoOrmScalarExpression::into_orm_scalar)
-                .collect(),
-        ))
+                .map(|expr| handle.bind(expr.into_orm_expression()))
+                .collect::<Vec<_>>()
+        });
+        Ok(self.set_select_list(exprs?))
     }
 
     pub fn project_scalar(
@@ -2346,11 +2430,12 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
         let expr = with_query_bind_step!(self.binder, QueryBindStep::Agg, {
             let mut scope = self.expr_scope();
-            build(&mut scope)?.into_orm_scalar()
+            let handle = scope.handle();
+            handle.bind(build(&mut scope)?.into_orm_expression())
         });
         self.group_by_expr(expr?)
     }
@@ -2362,11 +2447,12 @@ where
         ) -> Result<E, DatabaseError>,
     ) -> Result<Self, DatabaseError>
     where
-        E: IntoOrmScalarExpression,
+        E: IntoOrmExpression,
     {
         let expr = with_query_bind_step!(self.binder, QueryBindStep::Having, {
             let mut scope = self.expr_scope();
-            build(&mut scope)?.into_orm_scalar()
+            let handle = scope.handle();
+            handle.bind(build(&mut scope)?.into_orm_expression())
         });
         self.having_expr(expr?)
     }
@@ -2421,7 +2507,7 @@ where
         let count = with_query_bind_step!(self.binder, QueryBindStep::Project, {
             let scope = self.expr_scope();
             let count = scope.count_all()?;
-            scope.alias(count, "count").into_orm_scalar()
+            scope.alias(count, "count").into_scalar()
         });
         self.set_select_list(vec![count?])
             .aggregate_without_group()?
@@ -2434,7 +2520,7 @@ pub trait Projection: FromQueryRow {
     fn bind_projection<'ctx, 'bind, 'parent, 'arena, T, A>(
         scope: &mut ExprBindScope<'ctx, 'bind, 'parent, 'arena, T, A>,
         relation: &str,
-    ) -> Result<Vec<ScalarExpression>, DatabaseError>
+    ) -> Result<Vec<ExprRef>, DatabaseError>
     where
         T: Transaction,
         A: AsRef<[(&'static str, DataValue)]>;
@@ -2511,12 +2597,15 @@ where
                 .iter()
                 .copied()
                 .enumerate()
-                .map(|(position, target_column)| ScalarExpression::Alias {
-                    expr: Box::new(ScalarExpression::column_expr(
+                .map(|(position, target_column)| {
+                    let expr = arena.alloc_expression(ScalarExpression::column_expr(
                         input_schema[position],
                         position,
-                    )),
-                    alias: AliasType::Name(arena.column(target_column).name().to_string()),
+                    ));
+                    arena.alloc_expression(ScalarExpression::Alias {
+                        expr,
+                        alias: AliasType::Name(arena.column(target_column).name().to_string()),
+                    })
                 })
                 .collect::<Vec<_>>()
         } else {
@@ -2528,13 +2617,14 @@ where
                 let column = source
                     .column(&column_name, arena)
                     .ok_or_else(|| DatabaseError::column_not_found(column_name.clone()))?;
-                projection.push(ScalarExpression::Alias {
-                    expr: Box::new(ScalarExpression::column_expr(
-                        input_schema[position],
-                        position,
-                    )),
+                let expr = arena.alloc_expression(ScalarExpression::column_expr(
+                    input_schema[position],
+                    position,
+                ));
+                projection.push(arena.alloc_expression(ScalarExpression::Alias {
+                    expr,
                     alias: AliasType::Name(arena.column(column).name().to_string()),
-                });
+                }));
             }
             projection
         }
@@ -2618,8 +2708,8 @@ pub trait Model: Sized + FromQueryRow {
     ///
     /// `#[derive(Model)]` generates this automatically. Manual implementations
     /// can override it to opt into [`Database::migrate`](crate::orm::Database::migrate).
-    fn columns() -> &'static [ColumnCatalog] {
-        &[]
+    fn columns(_arena: &mut crate::planner::TableArena) -> Vec<ColumnCatalog> {
+        Vec::new()
     }
 
     /// Returns secondary indexes declared by the model.
@@ -3120,12 +3210,18 @@ impl_from_query_tuple!(
     (A, B, C, D, E, F, G, H),
 );
 
-fn model_column_default(model: &ColumnCatalog) -> Result<Option<DataValue>, DatabaseError> {
-    model.default_value()
+fn model_column_default(
+    model: &ColumnCatalog,
+    arena: &PlanArena<'_>,
+) -> Result<Option<DataValue>, DatabaseError> {
+    model.default_value(arena)
 }
 
-fn catalog_column_default(column: &ColumnCatalog) -> Result<Option<DataValue>, DatabaseError> {
-    column.default_value()
+fn catalog_column_default(
+    column: &ColumnCatalog,
+    arena: &PlanArena<'_>,
+) -> Result<Option<DataValue>, DatabaseError> {
+    column.default_value(arena)
 }
 
 fn model_column_type_matches_catalog(model: &ColumnCatalog, column: &ColumnCatalog) -> bool {
@@ -3135,23 +3231,25 @@ fn model_column_type_matches_catalog(model: &ColumnCatalog, column: &ColumnCatal
 fn model_column_matches_catalog(
     model: &ColumnCatalog,
     column: &ColumnCatalog,
+    arena: &PlanArena<'_>,
 ) -> Result<bool, DatabaseError> {
     Ok(model.desc().is_primary() == column.desc().is_primary()
         && model.desc().is_unique() == column.desc().is_unique()
         && model.nullable() == column.nullable()
         && model_column_type_matches_catalog(model, column)
-        && model_column_default(model)? == catalog_column_default(column)?)
+        && model_column_default(model, arena)? == catalog_column_default(column, arena)?)
 }
 
 fn model_column_rename_compatible(
     model: &ColumnCatalog,
     column: &ColumnCatalog,
+    arena: &PlanArena<'_>,
 ) -> Result<bool, DatabaseError> {
     Ok(model.desc().is_primary() == column.desc().is_primary()
         && model.desc().is_unique() == column.desc().is_unique()
         && model.nullable() == column.nullable()
         && model_column_type_matches_catalog(model, column)
-        && model_column_default(model)? == catalog_column_default(column)?)
+        && model_column_default(model, arena)? == catalog_column_default(column, arena)?)
 }
 
 fn extract_optional_model<I, M>(iter: I) -> Result<Option<M>, DatabaseError>
@@ -3763,9 +3861,9 @@ mod tests {
         assert_eq!(
             plan,
             concat!(
-                "Projection [#2] [Project => (Sort Option: Follow)] ",
-                "Filter (#1 >= 4), Is Having: false [Filter => (Sort Option: Follow)] ",
-                "TableScan orm_unit_users -> [#1, #2] [SeqScan => (Sort Option: None)]"
+                "Projection [orm_unit_users.name] [Project => (Sort Option: Follow)] ",
+                "Filter (orm_unit_users.id >= 4), Is Having: false [Filter => (Sort Option: Follow)] ",
+                "TableScan orm_unit_users -> [orm_unit_users.id, orm_unit_users.name] [SeqScan => (Sort Option: None)]"
             ),
             "{plan}"
         );
@@ -3801,9 +3899,9 @@ mod tests {
             expression_plan,
             concat!(
                 "Projection [upper_name] [Project => (Sort Option: Follow)] ",
-                "Sort By #3 Desc Nulls Last [Sort => (Sort Option: OrderBy: (#3 Desc Nulls Last) ignore_prefix_len: 0)] ",
-                "Filter ((#3 is not null && ((#3 >= 18) && (#3 <= 25))) && (!(#2 != Bob) && (#2 = Missing))), Is Having: false ",
-                "[Filter => (Sort Option: Follow)] TableScan orm_unit_users -> [#2, #3] [SeqScan => (Sort Option: None)]"
+                "Sort By orm_unit_users.age Desc Nulls Last [Sort => (Sort Option: OrderBy: (orm_unit_users.age Desc Nulls Last) ignore_prefix_len: 0)] ",
+                "Filter ((orm_unit_users.age is not null && ((orm_unit_users.age >= 18) && (orm_unit_users.age <= 25))) && (!(orm_unit_users.name != Bob) && (orm_unit_users.name = Missing))), Is Having: false ",
+                "[Filter => (Sort Option: Follow)] TableScan orm_unit_users -> [orm_unit_users.name, orm_unit_users.age] [SeqScan => (Sort Option: None)]"
             ),
             "{expression_plan}"
         );
@@ -3817,16 +3915,16 @@ mod tests {
                     in_list.and(not_in_list)
                 })?
                 .project_scalar(OrmUnitUser::id())?
-                .order_by(SortField::from(ScalarExpression::from(1_i32)).asc())?
+                .order_by_expr(|e| Ok(e.value(1_i32).asc()))?
                 .finish()
         })?;
         assert_eq!(
             list_plan,
             concat!(
-                "Projection [#1] [Project => (Sort Option: Follow)] ",
+                "Projection [orm_unit_users.id] [Project => (Sort Option: Follow)] ",
                 "Sort By 1 Asc Nulls Last [Sort => (Sort Option: OrderBy: (1 Asc Nulls Last) ignore_prefix_len: 0)] ",
-                "Filter (((#1 = 3) || ((#1 = 2) || (#1 = 1))) && (#1 != 3)), Is Having: false ",
-                "[Filter => (Sort Option: Follow)] TableScan orm_unit_users -> [#1] [SeqScan => (Sort Option: None)]"
+                "Filter (((orm_unit_users.id = 3) || ((orm_unit_users.id = 2) || (orm_unit_users.id = 1))) && (orm_unit_users.id != 3)), Is Having: false ",
+                "[Filter => (Sort Option: Follow)] TableScan orm_unit_users -> [orm_unit_users.id] [SeqScan => (Sort Option: None)]"
             ),
             "{list_plan}"
         );
@@ -3845,9 +3943,9 @@ mod tests {
         assert_eq!(
             nullable_plan,
             concat!(
-                "Projection [#1] [Project => (Sort Option: Follow)] ",
-                "Filter (((#3 < 10) || (#3 > 30)) || #3 is null), Is Having: false ",
-                "[Filter => (Sort Option: Follow)] TableScan orm_unit_users -> [#1, #3] [SeqScan => (Sort Option: None)]"
+                "Projection [orm_unit_users.id] [Project => (Sort Option: Follow)] ",
+                "Filter (((orm_unit_users.age < 10) || (orm_unit_users.age > 30)) || orm_unit_users.age is null), Is Having: false ",
+                "[Filter => (Sort Option: Follow)] TableScan orm_unit_users -> [orm_unit_users.id, orm_unit_users.age] [SeqScan => (Sort Option: None)]"
             ),
             "{nullable_plan}"
         );
@@ -3878,11 +3976,11 @@ mod tests {
         assert_eq!(
             grouped_plan,
             concat!(
-                "Projection [#5, #7] [Project => (Sort Option: Follow)] ",
-                "Sort By #5 Asc Nulls Last [Sort => (Sort Option: OrderBy: (#5 Asc Nulls Last) ignore_prefix_len: 0)] ",
-                "Filter (Sum(#6) >= 200), Is Having: true [Filter => (Sort Option: Follow)] ",
-                "Aggregate [Sum(#6)] -> Group By [#5] [HashAggregate => (Sort Option: None)] ",
-                "TableScan orm_unit_orders -> [#5, #6] [SeqScan => (Sort Option: None)]"
+                "Projection [orm_unit_orders.user_id, Sum(orm_unit_orders.amount)] [Project => (Sort Option: Follow)] ",
+                "Sort By orm_unit_orders.user_id Asc Nulls Last [Sort => (Sort Option: OrderBy: (orm_unit_orders.user_id Asc Nulls Last) ignore_prefix_len: 0)] ",
+                "Filter (Sum(orm_unit_orders.amount) >= 200), Is Having: true [Filter => (Sort Option: Follow)] ",
+                "Aggregate [Sum(orm_unit_orders.amount)] -> Group By [orm_unit_orders.user_id] [HashAggregate => (Sort Option: None)] ",
+                "TableScan orm_unit_orders -> [orm_unit_orders.user_id, orm_unit_orders.amount] [SeqScan => (Sort Option: None)]"
             ),
             "{grouped_plan}"
         );
@@ -3899,10 +3997,10 @@ mod tests {
         assert_eq!(
             right_join_plan,
             concat!(
-                "Projection [#1] [Project => (Sort Option: Follow)] ",
-                "RightOuter Join On #1 = #5 [HashJoin => (Sort Option: None)] ",
-                "TableScan orm_unit_users -> [#1] [SeqScan => (Sort Option: None)] ",
-                "TableScan orm_unit_orders -> [#5] [SeqScan => (Sort Option: None)]"
+                "Projection [orm_unit_users.id] [Project => (Sort Option: Follow)] ",
+                "RightOuter Join On orm_unit_users.id = orm_unit_orders.user_id [HashJoin => (Sort Option: None)] ",
+                "TableScan orm_unit_users -> [orm_unit_users.id] [SeqScan => (Sort Option: None)] ",
+                "TableScan orm_unit_orders -> [orm_unit_orders.user_id] [SeqScan => (Sort Option: None)]"
             ),
             "{right_join_plan}"
         );
@@ -3919,10 +4017,10 @@ mod tests {
         assert_eq!(
             full_join_plan,
             concat!(
-                "Projection [#1] [Project => (Sort Option: Follow)] ",
-                "Full Join On #1 = #5 [HashJoin => (Sort Option: None)] ",
-                "TableScan orm_unit_users -> [#1] [SeqScan => (Sort Option: None)] ",
-                "TableScan orm_unit_orders -> [#5] [SeqScan => (Sort Option: None)]"
+                "Projection [orm_unit_users.id] [Project => (Sort Option: Follow)] ",
+                "Full Join On orm_unit_users.id = orm_unit_orders.user_id [HashJoin => (Sort Option: None)] ",
+                "TableScan orm_unit_users -> [orm_unit_users.id] [SeqScan => (Sort Option: None)] ",
+                "TableScan orm_unit_orders -> [orm_unit_orders.user_id] [SeqScan => (Sort Option: None)]"
             ),
             "{full_join_plan}"
         );
@@ -3936,10 +4034,10 @@ mod tests {
         assert_eq!(
             cross_join_plan,
             concat!(
-                "Projection [#1, #4] [Project => (Sort Option: Follow)] ",
+                "Projection [orm_unit_users.id, orm_unit_orders.id] [Project => (Sort Option: Follow)] ",
                 "Cross Join Nothing [NestLoopJoin => (Sort Option: None)] ",
-                "TableScan orm_unit_users -> [#1] [SeqScan => (Sort Option: None)] ",
-                "TableScan orm_unit_orders -> [#4] [SeqScan => (Sort Option: None)]"
+                "TableScan orm_unit_users -> [orm_unit_users.id] [SeqScan => (Sort Option: None)] ",
+                "TableScan orm_unit_orders -> [orm_unit_orders.id] [SeqScan => (Sort Option: None)]"
             ),
             "{cross_join_plan}"
         );
@@ -3953,10 +4051,10 @@ mod tests {
         assert_eq!(
             inner_using_plan,
             concat!(
-                "Projection [#1] [Project => (Sort Option: Follow)] ",
-                "Inner Join On #1 = #4 [HashJoin => (Sort Option: None)] ",
-                "TableScan orm_unit_users -> [#1] [SeqScan => (Sort Option: None)] ",
-                "TableScan orm_unit_orders -> [#4] [SeqScan => (Sort Option: None)]"
+                "Projection [orm_unit_users.id] [Project => (Sort Option: Follow)] ",
+                "Inner Join On orm_unit_users.id = orm_unit_orders.id [HashJoin => (Sort Option: None)] ",
+                "TableScan orm_unit_users -> [orm_unit_users.id] [SeqScan => (Sort Option: None)] ",
+                "TableScan orm_unit_orders -> [orm_unit_orders.id] [SeqScan => (Sort Option: None)]"
             ),
             "{inner_using_plan}"
         );
@@ -3970,10 +4068,10 @@ mod tests {
         assert_eq!(
             left_using_plan,
             concat!(
-                "Projection [#1] [Project => (Sort Option: Follow)] ",
-                "LeftOuter Join On #1 = #4 [HashJoin => (Sort Option: None)] ",
-                "TableScan orm_unit_users -> [#1] [SeqScan => (Sort Option: None)] ",
-                "TableScan orm_unit_orders -> [#4] [SeqScan => (Sort Option: None)]"
+                "Projection [orm_unit_users.id] [Project => (Sort Option: Follow)] ",
+                "LeftOuter Join On orm_unit_users.id = orm_unit_orders.id [HashJoin => (Sort Option: None)] ",
+                "TableScan orm_unit_users -> [orm_unit_users.id] [SeqScan => (Sort Option: None)] ",
+                "TableScan orm_unit_orders -> [orm_unit_orders.id] [SeqScan => (Sort Option: None)]"
             ),
             "{left_using_plan}"
         );
@@ -3987,10 +4085,10 @@ mod tests {
         assert_eq!(
             right_using_plan,
             concat!(
-                "Projection [#1] [Project => (Sort Option: Follow)] ",
-                "RightOuter Join On #1 = #4 [HashJoin => (Sort Option: None)] ",
-                "TableScan orm_unit_users -> [#1] [SeqScan => (Sort Option: None)] ",
-                "TableScan orm_unit_orders -> [#4] [SeqScan => (Sort Option: None)]"
+                "Projection [orm_unit_users.id] [Project => (Sort Option: Follow)] ",
+                "RightOuter Join On orm_unit_users.id = orm_unit_orders.id [HashJoin => (Sort Option: None)] ",
+                "TableScan orm_unit_users -> [orm_unit_users.id] [SeqScan => (Sort Option: None)] ",
+                "TableScan orm_unit_orders -> [orm_unit_orders.id] [SeqScan => (Sort Option: None)]"
             ),
             "{right_using_plan}"
         );
@@ -4004,10 +4102,10 @@ mod tests {
         assert_eq!(
             full_using_plan,
             concat!(
-                "Projection [#1] [Project => (Sort Option: Follow)] ",
-                "Full Join On #1 = #4 [HashJoin => (Sort Option: None)] ",
-                "TableScan orm_unit_users -> [#1] [SeqScan => (Sort Option: None)] ",
-                "TableScan orm_unit_orders -> [#4] [SeqScan => (Sort Option: None)]"
+                "Projection [orm_unit_users.id] [Project => (Sort Option: Follow)] ",
+                "Full Join On orm_unit_users.id = orm_unit_orders.id [HashJoin => (Sort Option: None)] ",
+                "TableScan orm_unit_users -> [orm_unit_users.id] [SeqScan => (Sort Option: None)] ",
+                "TableScan orm_unit_orders -> [orm_unit_orders.id] [SeqScan => (Sort Option: None)]"
             ),
             "{full_using_plan}"
         );
@@ -4032,10 +4130,10 @@ mod tests {
         assert_eq!(
             plan,
             concat!(
-                "Projection [#1] [Project => (Sort Option: Follow)] ",
-                "Inner Join On #1 = #5 [NestLoopJoin => (Sort Option: None)] ",
-                "TableScan orm_unit_users -> [#1] [SeqScan => (Sort Option: None)] ",
-                "TableScan orm_unit_orders -> [#5] [SeqScan => (Sort Option: None)]"
+                "Projection [orm_unit_users.id] [Project => (Sort Option: Follow)] ",
+                "Inner Join On orm_unit_users.id = orm_unit_orders.user_id [NestLoopJoin => (Sort Option: None)] ",
+                "TableScan orm_unit_users -> [orm_unit_users.id] [SeqScan => (Sort Option: None)] ",
+                "TableScan orm_unit_orders -> [orm_unit_orders.user_id] [SeqScan => (Sort Option: None)]"
             ),
             "{plan}"
         );
@@ -4064,10 +4162,10 @@ mod tests {
         assert_eq!(
             plan,
             concat!(
-                "Projection [#5, #7] [Project => (Sort Option: Follow)] ",
-                "Aggregate [Sum(#6)] -> Group By [#5] [StreamAggregate => (Sort Option: Follow)] ",
-                "Sort By #5 Asc Nulls Last [Sort => (Sort Option: OrderBy: (#5 Asc Nulls Last) ignore_prefix_len: 0)] ",
-                "TableScan orm_unit_orders -> [#5, #6] [SeqScan => (Sort Option: None)]"
+                "Projection [orm_unit_orders.user_id, Sum(orm_unit_orders.amount)] [Project => (Sort Option: Follow)] ",
+                "Aggregate [Sum(orm_unit_orders.amount)] -> Group By [orm_unit_orders.user_id] [StreamAggregate => (Sort Option: Follow)] ",
+                "Sort By orm_unit_orders.user_id Asc Nulls Last [Sort => (Sort Option: OrderBy: (orm_unit_orders.user_id Asc Nulls Last) ignore_prefix_len: 0)] ",
+                "TableScan orm_unit_orders -> [orm_unit_orders.user_id, orm_unit_orders.amount] [SeqScan => (Sort Option: None)]"
             ),
             "{plan}"
         );
@@ -4082,10 +4180,10 @@ mod tests {
         assert_eq!(
             distinct_plan,
             concat!(
-                "Projection [#5] [Project => (Sort Option: Follow)] ",
-                "Aggregate [] -> Group By [#5] [StreamDistinct => (Sort Option: Follow)] ",
-                "Sort By #5 Asc Nulls Last [Sort => (Sort Option: OrderBy: (#5 Asc Nulls Last) ignore_prefix_len: 0)] ",
-                "TableScan orm_unit_orders -> [#5] [SeqScan => (Sort Option: None)]"
+                "Projection [orm_unit_orders.user_id] [Project => (Sort Option: Follow)] ",
+                "Aggregate [] -> Group By [orm_unit_orders.user_id] [StreamDistinct => (Sort Option: Follow)] ",
+                "Sort By orm_unit_orders.user_id Asc Nulls Last [Sort => (Sort Option: OrderBy: (orm_unit_orders.user_id Asc Nulls Last) ignore_prefix_len: 0)] ",
+                "TableScan orm_unit_orders -> [orm_unit_orders.user_id] [SeqScan => (Sort Option: None)]"
             ),
             "{distinct_plan}"
         );

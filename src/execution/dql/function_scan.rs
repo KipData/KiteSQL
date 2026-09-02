@@ -52,11 +52,11 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for FunctionScan {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        _: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
         if self.iter.is_none() {
             let TableFunction { args, catalog } = &self.table_function;
-            self.iter = Some(catalog.inner.eval(args)?);
+            self.iter = Some(catalog.inner.eval(args, plan_arena)?);
         }
 
         let tuple = self.iter.as_mut().and_then(Iterator::next).transpose()?;

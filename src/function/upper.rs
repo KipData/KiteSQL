@@ -16,7 +16,7 @@ use crate::errors::DatabaseError;
 use crate::expression::function::scala::FuncMonotonicity;
 use crate::expression::function::scala::ScalarFunctionImpl;
 use crate::expression::function::FunctionSummary;
-use crate::expression::ScalarExpression;
+use crate::planner::ExprRef;
 use crate::types::tuple::TupleLike;
 use crate::types::value::DataValue;
 use crate::types::CharLengthUnits;
@@ -45,10 +45,11 @@ impl ScalarFunctionImpl for Upper {
     #[allow(unused_variables, clippy::redundant_closure_call)]
     fn eval(
         &self,
-        exprs: &[ScalarExpression],
+        exprs: &[ExprRef],
+        arena: &crate::planner::PlanArena<'_>,
         tuples: Option<&dyn TupleLike>,
     ) -> Result<DataValue, DatabaseError> {
-        let mut value = exprs[0].eval(tuples)?;
+        let mut value = arena.expression(exprs[0]).eval(arena, tuples)?;
         if !matches!(value.logical_type(), LogicalType::Varchar(_, _)) {
             value = value.cast(&LogicalType::Varchar(None, CharLengthUnits::Characters))?;
         }

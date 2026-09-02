@@ -314,6 +314,7 @@ mod tests {
     use crate::expression::function::table::{
         ArcTableFunctionImpl, TableFunction, TableFunctionCatalog, TableFunctionImpl,
     };
+    use crate::expression::ScalarExpression;
     use crate::function::numbers::Numbers;
     use crate::optimizer::core::rule::{ImplementationRule, MatchPattern};
     use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
@@ -521,35 +522,31 @@ mod tests {
                     } if fields.len() == 1
                 ));
 
-                let function_operator = function_scan_operator();
-                let function_option = best_option(
-                    ImplementationRuleImpl::FunctionScan,
-                    &function_operator,
-                    arena,
-                )?;
-                assert_eq!(function_option.plan, PlanImpl::FunctionScan);
-
                 Ok(())
             },
         )?;
-
-        Ok(())
-    }
-
-    fn function_scan_operator() -> Operator {
         let table_arena = TableArenaCell::default();
         let numbers = Numbers::new();
         let mut schema = Vec::new();
         numbers.output_schema_into(table_arena.borrow_mut(), &mut schema);
-        let table_function = TableFunction {
-            args: vec![DataValue::Int32(3).into()],
-            catalog: TableFunctionCatalog {
-                schema,
-                inner: ArcTableFunctionImpl(numbers),
+        let mut arena = PlanArena::new(&table_arena);
+        let function_operator = Operator::FunctionScan(FunctionScanOperator {
+            table_function: TableFunction {
+                args: vec![arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(3)))],
+                catalog: TableFunctionCatalog {
+                    schema,
+                    inner: ArcTableFunctionImpl(numbers),
+                },
             },
-        };
+        });
+        let function_option = best_option(
+            ImplementationRuleImpl::FunctionScan,
+            &function_operator,
+            &arena,
+        )?;
+        assert_eq!(function_option.plan, PlanImpl::FunctionScan);
 
-        Operator::FunctionScan(FunctionScanOperator { table_function })
+        Ok(())
     }
 
     #[test]

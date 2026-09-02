@@ -16,16 +16,15 @@ use crate::errors::DatabaseError;
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
-use crate::expression::ScalarExpression;
 use crate::iter_ext::Itertools;
 use crate::planner::operator::aggregate::AggregateOperator;
-use crate::planner::LogicalPlan;
+use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 
 pub struct StreamDistinctExecutor {
-    groupby_exprs: Vec<ScalarExpression>,
+    groupby_exprs: Vec<ExprRef>,
     input: ExecId,
     last_keys: Option<Vec<DataValue>>,
     scratch: Tuple,
@@ -67,7 +66,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor {
             let group_keys = self
                 .groupby_exprs
                 .iter()
-                .map(|expr| expr.eval(Some(tuple)))
+                .map(|expr| plan_arena.expression(*expr).eval(plan_arena, Some(tuple)))
                 .try_collect()?;
 
             if self.last_keys.as_ref() != Some(&group_keys) {
@@ -161,7 +160,9 @@ mod tests {
             Childrens::None,
         );
         let agg = AggregateOperator {
-            groupby_exprs: vec![ScalarExpression::column_expr(schema_ref[0], 0)],
+            groupby_exprs: vec![
+                plan_arena.alloc_expression(ScalarExpression::column_expr(schema_ref[0], 0))
+            ],
             agg_calls: vec![],
             is_distinct: true,
             force_spill: false,
@@ -216,8 +217,8 @@ mod tests {
         );
         let agg = AggregateOperator {
             groupby_exprs: vec![
-                ScalarExpression::column_expr(schema_ref[0], 0),
-                ScalarExpression::column_expr(schema_ref[1], 1),
+                plan_arena.alloc_expression(ScalarExpression::column_expr(schema_ref[0], 0)),
+                plan_arena.alloc_expression(ScalarExpression::column_expr(schema_ref[1], 1)),
             ],
             agg_calls: vec![],
             is_distinct: true,

@@ -17,7 +17,8 @@ use crate::errors::DatabaseError;
 use crate::expression::range_detacher::Range;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::SortOption;
-use crate::planner::PlanArena;
+use crate::planner::Explain;
+use crate::planner::{ExprRef, PlanArena};
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::value::DataValue;
 use crate::types::{ColumnId, LogicalType};
@@ -73,7 +74,7 @@ pub struct IndexInfo {
     pub(crate) meta: IndexMetaRef,
     pub(crate) sort_option: SortOption,
     pub(crate) lookup: Option<IndexLookup>,
-    pub(crate) residual_predicate: Option<ScalarExpression>,
+    pub(crate) residual_predicate: Option<ExprRef>,
     pub(crate) covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
     pub(crate) cover_mapping: Option<Vec<usize>>,
     pub(crate) sort_elimination_hint: Option<IndexOrderHint>,
@@ -147,23 +148,17 @@ impl<'a> Index<'a> {
     }
 }
 
-impl fmt::Display for IndexInfo {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "{}", self.meta)?;
-        write!(f, " => ")?;
-
-        if let Some(lookup) = &self.lookup {
-            match lookup {
-                IndexLookup::Static(range) => write!(f, "{range}")?,
-                IndexLookup::Probe => write!(f, "Probe ?")?,
-            }
-        } else {
-            write!(f, "EMPTY")?;
+impl Explain for IndexInfo {
+    fn fmt(&self, arena: &PlanArena<'_>, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{} => ", self.meta.explain(arena))?;
+        match &self.lookup {
+            Some(IndexLookup::Static(range)) => write!(f, "{range}")?,
+            Some(IndexLookup::Probe) => f.write_str("Probe ?")?,
+            None => f.write_str("EMPTY")?,
         }
         if self.covered_deserializers.is_some() {
-            write!(f, " Covered")?;
+            f.write_str(" Covered")?;
         }
-
         Ok(())
     }
 }
@@ -234,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn test_index_helpers_and_display() {
+    fn test_index_helpers_and_explain() {
         let meta_ref = IndexMetaRef::new(3);
         assert_eq!(meta_ref.pos(), 3);
         assert_eq!(meta_ref.to_string(), "#3");
@@ -249,14 +244,22 @@ mod tests {
         let meta = index_meta();
         assert_eq!(meta.to_string(), "idx_t");
 
-        assert_eq!(index_info(None).to_string(), "#7 => EMPTY");
-        assert_eq!(
-            index_info(Some(IndexLookup::Probe)).to_string(),
-            "#7 => Probe ?"
-        );
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let index_ref = arena.alloc_index(index_meta());
+
+        let mut empty = index_info(None);
+        empty.meta = index_ref;
+        assert_eq!(empty.explain(&arena).to_string(), "idx_t => EMPTY");
+
+        let mut probe = index_info(Some(IndexLookup::Probe));
+        probe.meta = index_ref;
+        assert_eq!(probe.explain(&arena).to_string(), "idx_t => Probe ?");
+
         let mut info = index_info(Some(IndexLookup::Static(Range::Eq(DataValue::Int32(1)))));
+        info.meta = index_ref;
         info.covered_deserializers = Some(vec![LogicalType::Integer.serializable()]);
-        assert_eq!(info.to_string(), "#7 => 1 Covered");
+        assert_eq!(info.explain(&arena).to_string(), "idx_t => 1 Covered");
 
         let value = DataValue::Int32(1);
         let index = Index::new(9, &value, IndexType::Unique);

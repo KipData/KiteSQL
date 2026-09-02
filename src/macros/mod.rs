@@ -102,11 +102,11 @@ macro_rules! scala_function {
             }
         }        impl ::kite_sql::expression::function::scala::ScalarFunctionImpl for $struct_name {
             #[allow(unused_variables, clippy::redundant_closure_call)]
-            fn eval(&self, args: &[::kite_sql::expression::ScalarExpression], tuple: Option<&dyn ::kite_sql::types::tuple::TupleLike>) -> Result<::kite_sql::types::value::DataValue, ::kite_sql::errors::DatabaseError> {
+            fn eval(&self, args: &[::kite_sql::planner::ExprRef], arena: &::kite_sql::planner::PlanArena<'_>, tuple: Option<&dyn ::kite_sql::types::tuple::TupleLike>) -> Result<::kite_sql::types::value::DataValue, ::kite_sql::errors::DatabaseError> {
                 let mut _index = 0;
 
                 $closure($({
-                    let mut value = args[_index].eval(tuple)?;
+                    let mut value = arena.expression(args[_index]).eval(arena, tuple)?;
                     _index += 1;
 
                     value = value.cast(&$arg_ty)?;
@@ -175,11 +175,11 @@ macro_rules! table_function {
 
         impl ::kite_sql::expression::function::table::TableFunctionImpl for $struct_name {
             #[allow(unused_variables, clippy::redundant_closure_call)]
-            fn eval(&self, args: &[::kite_sql::expression::ScalarExpression]) -> Result<Box<dyn Iterator<Item=Result<::kite_sql::types::tuple::Tuple, ::kite_sql::errors::DatabaseError>>>, ::kite_sql::errors::DatabaseError> {
+            fn eval(&self, args: &[::kite_sql::planner::ExprRef], arena: &::kite_sql::planner::PlanArena<'_>) -> Result<Box<dyn Iterator<Item=Result<::kite_sql::types::tuple::Tuple, ::kite_sql::errors::DatabaseError>>>, ::kite_sql::errors::DatabaseError> {
                 let mut _index = 0;
 
                 $closure($({
-                    let mut value = args[_index].eval::<&::kite_sql::types::tuple::Tuple>(None)?;
+                    let mut value = arena.expression(args[_index]).eval::<&::kite_sql::types::tuple::Tuple>(arena, None)?;
                     _index += 1;
 
                     value = value.cast(&$arg_ty)?;

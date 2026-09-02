@@ -19,17 +19,16 @@ use crate::execution::dql::aggregate::{
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
-use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
-use crate::planner::LogicalPlan;
+use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
 use std::mem;
 
 // The optimizer selects this executor only when equal group keys are contiguous in the input.
 pub struct StreamAggExecutor {
-    agg_calls: Vec<ScalarExpression>,
-    groupby_exprs: Vec<ScalarExpression>,
+    agg_calls: Vec<ExprRef>,
+    groupby_exprs: Vec<ExprRef>,
     group_keys: Option<Vec<DataValue>>,
     accs: Vec<Box<dyn Accumulator>>,
     input: ExecId,
@@ -87,21 +86,21 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor {
             let tuple = arena.result_tuple();
             let mut group_keys = Vec::with_capacity(self.groupby_exprs.len());
             for expr in &self.groupby_exprs {
-                group_keys.push(expr.eval(Some(tuple))?);
+                group_keys.push(plan_arena.expression(*expr).eval(plan_arena, Some(tuple))?);
             }
 
             match &mut self.group_keys {
                 None => {
-                    self.accs = create_accumulators(&self.agg_calls)?;
-                    update_accumulators(&mut self.accs, &self.agg_calls, tuple)?;
+                    self.accs = create_accumulators(&self.agg_calls, plan_arena)?;
+                    update_accumulators(&mut self.accs, &self.agg_calls, tuple, plan_arena)?;
                     self.group_keys = Some(group_keys);
                 }
                 Some(current_keys) if current_keys == &group_keys => {
-                    update_accumulators(&mut self.accs, &self.agg_calls, tuple)?;
+                    update_accumulators(&mut self.accs, &self.agg_calls, tuple, plan_arena)?;
                 }
                 Some(current_keys) => {
-                    let mut next_accs = create_accumulators(&self.agg_calls)?;
-                    update_accumulators(&mut next_accs, &self.agg_calls, tuple)?;
+                    let mut next_accs = create_accumulators(&self.agg_calls, plan_arena)?;
+                    update_accumulators(&mut next_accs, &self.agg_calls, tuple, plan_arena)?;
                     mem::swap(current_keys, &mut group_keys);
                     let current_accs = mem::replace(&mut self.accs, next_accs);
                     write_aggregate_output(arena.result_tuple_mut(), current_accs, group_keys)?;
@@ -153,23 +152,23 @@ mod tests {
             }),
             Childrens::None,
         );
-        let value = ScalarExpression::column_expr(columns[1], 1);
+        let group = plan_arena.alloc_expression(ScalarExpression::column_expr(columns[0], 0));
+        let value = plan_arena.alloc_expression(ScalarExpression::column_expr(columns[1], 1));
+        let sum = plan_arena.alloc_expression(ScalarExpression::AggCall {
+            distinct: false,
+            kind: AggKind::Sum,
+            args: vec![value],
+            ty: LogicalType::Integer,
+        });
+        let count = plan_arena.alloc_expression(ScalarExpression::AggCall {
+            distinct: false,
+            kind: AggKind::Count,
+            args: vec![value],
+            ty: LogicalType::Integer,
+        });
         let operator = AggregateOperator {
-            groupby_exprs: vec![ScalarExpression::column_expr(columns[0], 0)],
-            agg_calls: vec![
-                ScalarExpression::AggCall {
-                    distinct: false,
-                    kind: AggKind::Sum,
-                    args: vec![value.clone()],
-                    ty: LogicalType::Integer,
-                },
-                ScalarExpression::AggCall {
-                    distinct: false,
-                    kind: AggKind::Count,
-                    args: vec![value],
-                    ty: LogicalType::Integer,
-                },
-            ],
+            groupby_exprs: vec![group],
+            agg_calls: vec![sum, count],
             is_distinct: false,
             force_spill: false,
         };
@@ -213,7 +212,9 @@ mod tests {
             Childrens::None,
         );
         let operator = AggregateOperator {
-            groupby_exprs: vec![ScalarExpression::column_expr(column, 0)],
+            groupby_exprs: vec![
+                plan_arena.alloc_expression(ScalarExpression::column_expr(column, 0))
+            ],
             agg_calls: Vec::new(),
             is_distinct: false,
             force_spill: false,

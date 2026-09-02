@@ -441,17 +441,18 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
 }
 
 pub(crate) fn with_projection_tmp_value<'a, T: Transaction + 'a>(
-    arena: &mut ExecArena<'a, T>,
+    exec_arena: &mut ExecArena<'a, T>,
+    plan_arena: &crate::planner::PlanArena<'_>,
     tuple: Option<&dyn TupleLike>,
     exprs: &[ScalarExpression],
     f: impl FnOnce(&mut ExecArena<'a, T>, DataValue) -> Result<(), DatabaseError>,
 ) -> Result<(), DatabaseError> {
-    arena.with_projection_tmp(|arena, projection_tmp| {
+    exec_arena.with_projection_tmp(|exec_arena, projection_tmp| {
         {
-            let tuple = tuple.unwrap_or_else(|| arena.result_tuple() as &dyn TupleLike);
+            let tuple = tuple.unwrap_or_else(|| exec_arena.result_tuple() as &dyn TupleLike);
             projection_tmp.reserve(exprs.len());
             for expr in exprs.iter() {
-                projection_tmp.push(expr.eval(Some(tuple))?);
+                projection_tmp.push(expr.eval(plan_arena, Some(tuple))?);
             }
         }
 
@@ -459,11 +460,11 @@ pub(crate) fn with_projection_tmp_value<'a, T: Transaction + 'a>(
             0 => {}
             1 => {
                 let value = projection_tmp.pop().expect("projection has one value");
-                f(arena, value)?;
+                f(exec_arena, value)?;
             }
             _ => {
                 let value = DataValue::Tuple(std::mem::take(projection_tmp), false);
-                f(arena, value)?;
+                f(exec_arena, value)?;
             }
         }
         Ok(())

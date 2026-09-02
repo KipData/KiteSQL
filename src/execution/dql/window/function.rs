@@ -16,7 +16,7 @@ use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::{create_accumulator, Accumulator};
 use crate::expression::agg::AggKind;
 use crate::expression::window::WindowFunctionKind;
-use crate::expression::ScalarExpression;
+use crate::planner::{ExprRef, PlanArena};
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
@@ -34,6 +34,7 @@ pub(super) trait WindowFunction {
         peer_start: usize,
         peer_index: usize,
         output_position: usize,
+        arena: &PlanArena<'_>,
     ) -> Result<(), DatabaseError>;
 }
 
@@ -47,6 +48,7 @@ impl WindowFunction for RowNumber {
         _peer_start: usize,
         _peer_index: usize,
         output_position: usize,
+        _arena: &PlanArena<'_>,
     ) -> Result<(), DatabaseError> {
         for (row_index, row) in &mut rows[peer] {
             row.values[output_position] = DataValue::Int64((*row_index + 1) as i64);
@@ -67,6 +69,7 @@ impl WindowFunction for Rank {
         peer_start: usize,
         peer_index: usize,
         output_position: usize,
+        _arena: &PlanArena<'_>,
     ) -> Result<(), DatabaseError> {
         let rank = if self.dense {
             peer_index + 1
@@ -83,7 +86,7 @@ impl WindowFunction for Rank {
 struct Aggregate {
     kind: AggKind,
     ty: LogicalType,
-    arg: ScalarExpression,
+    arg: ExprRef,
     accumulator: Option<Box<dyn Accumulator>>,
 }
 
@@ -100,12 +103,13 @@ impl WindowFunction for Aggregate {
         _peer_start: usize,
         _peer_index: usize,
         output_position: usize,
+        arena: &PlanArena<'_>,
     ) -> Result<(), DatabaseError> {
         let Some(accumulator) = self.accumulator.as_mut() else {
             unreachable!()
         };
         for (_, row) in &rows[peer.clone()] {
-            accumulator.update_value(&self.arg.eval(Some(row))?)?;
+            accumulator.update_value(&arena.expression(self.arg).eval(arena, Some(row))?)?;
         }
         accumulator.evaluate()?;
         let result = accumulator.result();
@@ -118,7 +122,7 @@ impl WindowFunction for Aggregate {
 
 pub(super) fn new(
     kind: WindowFunctionKind,
-    args: Vec<ScalarExpression>,
+    args: Vec<ExprRef>,
     ty: LogicalType,
 ) -> Box<dyn WindowFunction> {
     match kind {

@@ -15,10 +15,9 @@
 use crate::binder::Binder;
 use crate::catalog::{ColumnRef, TableName};
 use crate::errors::DatabaseError;
-use crate::expression::ScalarExpression;
 use crate::planner::operator::update::UpdateOperator;
 use crate::planner::operator::Operator;
-use crate::planner::{Childrens, LogicalPlan};
+use crate::planner::{Childrens, ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
 
@@ -26,7 +25,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
     pub(crate) fn bind_update(
         &mut self,
         table_name: TableName,
-        value_exprs: Vec<(ColumnRef, ScalarExpression)>,
+        value_exprs: Vec<(ColumnRef, ExprRef)>,
         input: LogicalPlan,
     ) -> Result<LogicalPlan, DatabaseError> {
         Ok(LogicalPlan::new(

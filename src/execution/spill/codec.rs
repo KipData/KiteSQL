@@ -15,6 +15,7 @@
 use super::SpillCodec;
 use crate::errors::DatabaseError;
 use crate::planner::operator::sort::SortField;
+use crate::planner::PlanArena;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use std::io::{Read, Write};
@@ -26,10 +27,14 @@ pub(crate) struct SortRow {
 }
 
 impl SortRow {
-    pub(crate) fn new(sort_fields: &[SortField], tuple: Tuple) -> Result<Self, DatabaseError> {
+    pub(crate) fn new(
+        sort_fields: &[SortField],
+        tuple: Tuple,
+        arena: &PlanArena<'_>,
+    ) -> Result<Self, DatabaseError> {
         let sort_values = sort_fields
             .iter()
-            .map(|field| field.expr.eval(Some(&tuple)))
+            .map(|field| arena.expression(field.expr).eval(arena, Some(&tuple)))
             .collect::<Result<_, _>>()?;
         Ok(Self { sort_values, tuple })
     }

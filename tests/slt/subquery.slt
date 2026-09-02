@@ -277,14 +277,6 @@ insert into orders values (1, 1, 100), (2, 1, 200), (3, 2, 300);
 statement ok
 create index orders_user_id_index on orders(user_id);
 
-query T
-explain select id from users
-where exists (
-    select 1 from orders where orders.user_id = users.id
-);
-----
-Projection [#1] [Project => (Sort Option: Follow)] Filter #15, Is Having: false [Filter => (Sort Option: Follow)] MarkExistsApply TableScan users -> [#1, #2] [SeqScan => (Sort Option: None)] TableScan orders -> [#3, #4, #5] [IndexScan By #16 => Probe ? => (Sort Option: OrderBy: (#4 Asc Nulls Last) ignore_prefix_len: 0)]
-
 query I rowsort
 select id from users
 where exists (

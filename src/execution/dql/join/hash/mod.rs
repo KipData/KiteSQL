@@ -24,7 +24,7 @@ use crate::execution::dql::join::hash::left_join::LeftJoinState;
 use crate::execution::dql::join::hash::right_join::RightJoinState;
 use crate::execution::dql::join::hash_join::BuildState;
 use crate::execution::dql::sort::BumpVec;
-use crate::expression::ScalarExpression;
+use crate::planner::{ExprRef, PlanArena};
 use crate::types::tuple::{Tuple, TupleLike};
 use crate::types::value::DataValue;
 use std::collections::hash_map::IntoIter as HashMapIntoIter;
@@ -54,13 +54,15 @@ pub(crate) trait JoinProbeState {
         &mut self,
         probe_state: &mut ProbeState,
         build_state: Option<&mut BuildState>,
-        filter_expr: Option<&ScalarExpression>,
+        filter_expr: Option<&ExprRef>,
+        plan_arena: &PlanArena<'_>,
     ) -> Result<Option<Tuple>, DatabaseError>;
 
     fn left_drop_next(
         &mut self,
         _left_drop_state: &mut LeftDropState,
-        _filter_expr: Option<&ScalarExpression>,
+        _filter_expr: Option<&ExprRef>,
+        _plan_arena: &PlanArena<'_>,
     ) -> Result<Option<Tuple>, DatabaseError> {
         Ok(None)
     }
@@ -78,20 +80,21 @@ impl JoinProbeState for JoinProbeStateImpl {
         &mut self,
         probe_state: &mut ProbeState,
         build_state: Option<&mut BuildState>,
-        filter_expr: Option<&ScalarExpression>,
+        filter_expr: Option<&ExprRef>,
+        plan_arena: &PlanArena<'_>,
     ) -> Result<Option<Tuple>, DatabaseError> {
         match self {
             JoinProbeStateImpl::Inner(state) => {
-                state.probe_next(probe_state, build_state, filter_expr)
+                state.probe_next(probe_state, build_state, filter_expr, plan_arena)
             }
             JoinProbeStateImpl::Left(state) => {
-                state.probe_next(probe_state, build_state, filter_expr)
+                state.probe_next(probe_state, build_state, filter_expr, plan_arena)
             }
             JoinProbeStateImpl::Right(state) => {
-                state.probe_next(probe_state, build_state, filter_expr)
+                state.probe_next(probe_state, build_state, filter_expr, plan_arena)
             }
             JoinProbeStateImpl::Full(state) => {
-                state.probe_next(probe_state, build_state, filter_expr)
+                state.probe_next(probe_state, build_state, filter_expr, plan_arena)
             }
         }
     }
@@ -99,22 +102,35 @@ impl JoinProbeState for JoinProbeStateImpl {
     fn left_drop_next(
         &mut self,
         left_drop_state: &mut LeftDropState,
-        filter_expr: Option<&ScalarExpression>,
+        filter_expr: Option<&ExprRef>,
+        plan_arena: &PlanArena<'_>,
     ) -> Result<Option<Tuple>, DatabaseError> {
         match self {
-            JoinProbeStateImpl::Inner(state) => state.left_drop_next(left_drop_state, filter_expr),
-            JoinProbeStateImpl::Left(state) => state.left_drop_next(left_drop_state, filter_expr),
-            JoinProbeStateImpl::Right(state) => state.left_drop_next(left_drop_state, filter_expr),
-            JoinProbeStateImpl::Full(state) => state.left_drop_next(left_drop_state, filter_expr),
+            JoinProbeStateImpl::Inner(state) => {
+                state.left_drop_next(left_drop_state, filter_expr, plan_arena)
+            }
+            JoinProbeStateImpl::Left(state) => {
+                state.left_drop_next(left_drop_state, filter_expr, plan_arena)
+            }
+            JoinProbeStateImpl::Right(state) => {
+                state.left_drop_next(left_drop_state, filter_expr, plan_arena)
+            }
+            JoinProbeStateImpl::Full(state) => {
+                state.left_drop_next(left_drop_state, filter_expr, plan_arena)
+            }
         }
     }
 }
 
 pub(crate) fn filter<T: TupleLike>(
     values: &T,
-    filter_expr: &ScalarExpression,
+    filter_expr: &ExprRef,
+    plan_arena: &PlanArena<'_>,
 ) -> Result<bool, DatabaseError> {
-    match &filter_expr.eval(Some(values as &dyn TupleLike))? {
+    match &plan_arena
+        .expression(*filter_expr)
+        .eval(plan_arena, Some(values as &dyn TupleLike))?
+    {
         DataValue::Boolean(false) | DataValue::Null => Ok(false),
         DataValue::Boolean(true) => Ok(true),
         _ => Err(DatabaseError::InvalidType),

@@ -22,42 +22,46 @@ use crate::planner::operator::sort::SortField;
 use crate::planner::operator::sort::SortOperator;
 use crate::planner::operator::window::WindowOperator;
 use crate::planner::operator::Operator;
-use crate::planner::{Childrens, LogicalPlan, PlanArena};
+use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 
-struct WindowCollector<'a, 'p> {
-    arena: &'a mut PlanArena<'p>,
+struct WindowCollector {
     windows: Vec<(WindowCall, ColumnRef)>,
 }
 
-impl ExprVisitorMut<'_> for WindowCollector<'_, '_> {
-    fn visit(&mut self, expr: &mut ScalarExpression) -> Result<(), DatabaseError> {
-        let ScalarExpression::WindowCall(window) = expr else {
-            return walk_mut_expr(self, expr);
+impl ExprVisitorMut for WindowCollector {
+    fn visit(
+        &mut self,
+        expr: &mut ExprRef,
+        arena: &mut PlanArena<'_>,
+    ) -> Result<(), DatabaseError> {
+        let ScalarExpression::WindowCall(window) = arena.expression(*expr) else {
+            return walk_mut_expr(self, expr, arena);
         };
         if let Some((_, output_column)) = self
             .windows
             .iter()
             .find(|(candidate, _)| candidate == window)
         {
-            *expr = ScalarExpression::column_expr(*output_column, 0);
+            *arena.expression_mut(*expr) = ScalarExpression::column_expr(*output_column, 0);
             return Ok(());
         }
 
-        let output_name = expr.output_name(self.arena);
-        let ScalarExpression::WindowCall(window) = std::mem::replace(expr, ScalarExpression::Empty)
+        let output_name = expr.output_name(arena);
+        let ScalarExpression::WindowCall(window) =
+            std::mem::replace(arena.expression_mut(*expr), ScalarExpression::Empty)
         else {
             unreachable!()
         };
-        let output_column = self.arena.alloc_column(ColumnCatalog::new(
+        let output_column = arena.alloc_column(ColumnCatalog::new(
             output_name,
             true,
             ColumnDesc::new(window.function.ty.clone(), None, false, None)?,
         ));
         self.windows.push((window, output_column));
-        *expr = ScalarExpression::column_expr(output_column, 0);
+        *arena.expression_mut(*expr) = ScalarExpression::column_expr(output_column, 0);
         Ok(())
     }
 }
@@ -67,11 +71,12 @@ struct WindowOutputBinder<'a> {
     base_position: usize,
 }
 
-impl ExprVisitorMut<'_> for WindowOutputBinder<'_> {
+impl ExprVisitorMut for WindowOutputBinder<'_> {
     fn visit_column_ref(
         &mut self,
         column: &mut ColumnRef,
         position: &mut usize,
+        _arena: &mut PlanArena<'_>,
     ) -> Result<(), DatabaseError> {
         if let Some(output_position) = self
             .groups
@@ -86,7 +91,7 @@ impl ExprVisitorMut<'_> for WindowOutputBinder<'_> {
 }
 
 struct WindowGroup {
-    partition_by: Vec<ScalarExpression>,
+    partition_by: Vec<ExprRef>,
     order_by: Vec<SortField>,
     functions: Vec<WindowFunction>,
     output_columns: Vec<ColumnRef>,
@@ -96,8 +101,8 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
     pub(crate) fn bind_window_function(
         &mut self,
         kind: WindowFunctionKind,
-        args: Vec<ScalarExpression>,
-        partition_by: Vec<ScalarExpression>,
+        args: Vec<ExprRef>,
+        partition_by: Vec<ExprRef>,
         order_by: Vec<SortField>,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
@@ -114,7 +119,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             .chain(&partition_by)
             .chain(order_by.iter().map(|field| &field.expr))
         {
-            if expr.has_window_call()? {
+            if expr.has_window_call(arena)? {
                 return Err(DatabaseError::UnsupportedStmt(
                     "window functions cannot be nested".to_string(),
                 ));
@@ -155,20 +160,19 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
     pub(crate) fn bind_window(
         &mut self,
         mut children: LogicalPlan,
-        select_list: &mut [ScalarExpression],
+        select_list: &mut [ExprRef],
         order_by: &mut Option<Vec<SortField>>,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let mut collector = WindowCollector {
-            arena,
             windows: Vec::new(),
         };
         for expr in select_list.iter_mut() {
-            collector.visit(expr)?;
+            collector.visit(expr, arena)?;
         }
         if let Some(order_by) = order_by.as_mut() {
             for field in order_by {
-                collector.visit(&mut field.expr)?;
+                collector.visit(&mut field.expr, arena)?;
             }
         }
         if collector.windows.is_empty() {
@@ -205,7 +209,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             .iter_mut()
             .chain(order_by.iter_mut().flatten().map(|field| &mut field.expr))
         {
-            output_binder.visit(expr)?;
+            output_binder.visit(expr, arena)?;
         }
 
         for group in groups {
