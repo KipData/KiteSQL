@@ -25,9 +25,8 @@ use crate::execution::dql::sort::BumpVec;
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
-use crate::expression::ScalarExpression;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
-use crate::planner::LogicalPlan;
+use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
@@ -38,9 +37,9 @@ use std::mem::{self, transmute};
 pub struct HashJoin {
     state: HashJoinState,
     ty: JoinType,
-    on_left_keys: Vec<ScalarExpression>,
-    on_right_keys: Vec<ScalarExpression>,
-    filter: Option<ScalarExpression>,
+    on_left_keys: Vec<ExprRef>,
+    on_right_keys: Vec<ExprRef>,
+    filter: Option<ExprRef>,
     left_schema_len: usize,
     right_schema_len: usize,
     left_input_plan: LogicalPlan,
@@ -128,13 +127,14 @@ impl HashJoin {
     }
 
     fn eval_keys(
-        on_keys: &[ScalarExpression],
+        on_keys: &[ExprRef],
         tuple: &Tuple,
         build_buf: &mut BumpVec<'_, DataValue>,
+        plan_arena: &crate::planner::PlanArena<'_>,
     ) -> Result<(), DatabaseError> {
         build_buf.clear();
         for expr in on_keys {
-            build_buf.push(expr.eval(Some(tuple))?);
+            build_buf.push(plan_arena.expression(*expr).eval(plan_arena, Some(tuple))?);
         }
         Ok(())
     }
@@ -158,7 +158,7 @@ impl HashJoin {
 
         while arena.next_tuple(self.left_input, plan_arena)? {
             let tuple = mem::take(arena.result_tuple_mut());
-            Self::eval_keys(&self.on_left_keys, &tuple, &mut build_buf)?;
+            Self::eval_keys(&self.on_left_keys, &tuple, &mut build_buf, plan_arena)?;
 
             match build_map.get_mut(&build_buf) {
                 None => {
@@ -284,7 +284,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashJoin {
                                 break true;
                             }
                             let tuple = mem::take(arena.result_tuple_mut());
-                            Self::eval_keys(&self.on_right_keys, &tuple, &mut probe_buf)?;
+                            Self::eval_keys(
+                                &self.on_right_keys,
+                                &tuple,
+                                &mut probe_buf,
+                                plan_arena,
+                            )?;
                             probe_state = Some(ProbeState {
                                 is_keys_has_null: probe_buf.iter().any(DataValue::is_null),
                                 probe_tuple: tuple,
@@ -305,9 +310,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashJoin {
                             build_map.get_mut(&probe_buf)
                         };
 
-                        if let Some(tuple) =
-                            join_impl.probe_next(probe, build_state, self.filter.as_ref())?
-                        {
+                        if let Some(tuple) = join_impl.probe_next(
+                            probe,
+                            build_state,
+                            self.filter.as_ref(),
+                            plan_arena,
+                        )? {
                             if probe.finished {
                                 probe_state = None;
                             }
@@ -339,9 +347,11 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashJoin {
                     mut join_impl,
                     mut left_drop,
                 } => {
-                    if let Some(tuple) =
-                        join_impl.left_drop_next(&mut left_drop, self.filter.as_ref())?
-                    {
+                    if let Some(tuple) = join_impl.left_drop_next(
+                        &mut left_drop,
+                        self.filter.as_ref(),
+                        plan_arena,
+                    )? {
                         self.state = HashJoinState::LeftDrop {
                             join_impl,
                             left_drop,
@@ -375,7 +385,7 @@ mod test {
     use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
-    use crate::planner::{Childrens, LogicalPlan};
+    use crate::planner::{Childrens, ExprRef, LogicalPlan};
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::Storage;
     use crate::types::value::DataValue;
@@ -399,11 +409,7 @@ mod test {
 
     fn build_join_values(
         arena: &mut crate::planner::PlanArena,
-    ) -> (
-        Vec<(ScalarExpression, ScalarExpression)>,
-        LogicalPlan,
-        LogicalPlan,
-    ) {
+    ) -> (Vec<(ExprRef, ExprRef)>, LogicalPlan, LogicalPlan) {
         let desc = ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap();
 
         let t1_columns = vec![
@@ -418,10 +424,9 @@ mod test {
             arena.alloc_column(ColumnCatalog::new("c6".to_string(), true, desc.clone())),
         ];
 
-        let on_keys = vec![(
-            ScalarExpression::column_expr(t1_columns[0], 0),
-            ScalarExpression::column_expr(t2_columns[0], 0),
-        )];
+        let left_key = arena.alloc_expression(ScalarExpression::column_expr(t1_columns[0], 0));
+        let right_key = arena.alloc_expression(ScalarExpression::column_expr(t2_columns[0], 0));
+        let on_keys = vec![(left_key, right_key)];
 
         let values_t1 = LogicalPlan::new(
             Operator::Values(ValuesOperator {
@@ -682,17 +687,22 @@ mod test {
         let right_columns =
             vec![plan_arena.alloc_column(ColumnCatalog::new("rk".to_string(), true, desc.clone()))];
 
-        let on_keys = vec![(
-            ScalarExpression::column_expr(left_columns[0], 0),
-            ScalarExpression::column_expr(right_columns[0], 0),
-        )];
-        let filter_expr = ScalarExpression::Binary {
+        let left_key =
+            plan_arena.alloc_expression(ScalarExpression::column_expr(left_columns[0], 0));
+        let right_key =
+            plan_arena.alloc_expression(ScalarExpression::column_expr(right_columns[0], 0));
+        let on_keys = vec![(left_key, right_key)];
+        let filter_left =
+            plan_arena.alloc_expression(ScalarExpression::column_expr(left_columns[1], 1));
+        let filter_right =
+            plan_arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(1)));
+        let filter_expr = plan_arena.alloc_expression(ScalarExpression::Binary {
             op: BinaryOperator::Gt,
-            left_expr: Box::new(ScalarExpression::column_expr(left_columns[1], 1)),
-            right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(1))),
+            left_expr: filter_left,
+            right_expr: filter_right,
             evaluator: None,
             ty: LogicalType::Boolean,
-        };
+        });
 
         let left = LogicalPlan::new(
             Operator::Values(ValuesOperator {

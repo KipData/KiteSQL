@@ -22,18 +22,17 @@ use crate::execution::dql::join::RowBitmap;
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
-use crate::expression::ScalarExpression;
 use crate::iter_ext::Itertools;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
-use crate::planner::LogicalPlan;
+use crate::planner::{ExprRef, LogicalPlan, PlanArena};
 use crate::storage::Transaction;
 use crate::types::tuple::{SplitTupleRef, Tuple};
 use crate::types::value::DataValue;
 
 /// Equivalent condition
 struct EqualCondition {
-    on_left_keys: Vec<ScalarExpression>,
-    on_right_keys: Vec<ScalarExpression>,
+    on_left_keys: Vec<ExprRef>,
+    on_right_keys: Vec<ExprRef>,
     left_len: usize,
     right_len: usize,
 }
@@ -42,13 +41,22 @@ impl EqualCondition {
     /// Compare left tuple and right tuple on equivalent condition
     /// `left_tuple` must be from the [`NestedLoopJoin::left_input`]
     /// `right_tuple` must be from the [`NestedLoopJoin::right_input`]
-    fn equals(&self, left_tuple: &Tuple, right_tuple: &Tuple) -> Result<bool, DatabaseError> {
+    fn equals(
+        &self,
+        left_tuple: &Tuple,
+        right_tuple: &Tuple,
+        arena: &PlanArena<'_>,
+    ) -> Result<bool, DatabaseError> {
         if self.on_left_keys.is_empty() {
             return Ok(true);
         }
 
         for (left_expr, right_expr) in self.on_left_keys.iter().zip(self.on_right_keys.iter()) {
-            if left_expr.eval(Some(left_tuple))? != right_expr.eval(Some(right_tuple))? {
+            if arena.expression(*left_expr).eval(arena, Some(left_tuple))?
+                != arena
+                    .expression(*right_expr)
+                    .eval(arena, Some(right_tuple))?
+            {
                 return Ok(false);
             }
         }
@@ -70,7 +78,7 @@ pub struct NestedLoopJoin {
     left_input_plan: LogicalPlan,
     right_input_plan: LogicalPlan,
     ty: JoinType,
-    filter: Option<ScalarExpression>,
+    filter: Option<ExprRef>,
     eq_cond: EqualCondition,
     left_input: ExecId,
     state: NestedLoopJoinState,
@@ -213,7 +221,11 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
 
                         let tuple = match (
                             self.filter.as_ref(),
-                            self.eq_cond.equals(&active_left.left_tuple, &right_tuple)?,
+                            self.eq_cond.equals(
+                                &active_left.left_tuple,
+                                &right_tuple,
+                                plan_arena,
+                            )?,
                         ) {
                             (None, true) if matches!(self.ty, JoinType::RightOuter) => {
                                 active_left.has_matched = true;
@@ -239,7 +251,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
                                 } else {
                                     SplitTupleRef::new(&active_left.left_tuple, &right_tuple)
                                 };
-                                let value = filter.eval(Some(values))?;
+                                let value = plan_arena
+                                    .expression(*filter)
+                                    .eval(plan_arena, Some(values))?;
                                 match &value {
                                     DataValue::Boolean(true) => {
                                         let tuple = match self.ty {
@@ -488,12 +502,7 @@ mod test {
     fn build_join_values(
         arena: &mut crate::planner::PlanArena,
         eq: bool,
-    ) -> (
-        Vec<(ScalarExpression, ScalarExpression)>,
-        LogicalPlan,
-        LogicalPlan,
-        ScalarExpression,
-    ) {
+    ) -> (Vec<(ExprRef, ExprRef)>, LogicalPlan, LogicalPlan, ExprRef) {
         let desc = ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap();
 
         let t1_columns = vec![
@@ -510,8 +519,14 @@ mod test {
 
         let on_keys = if eq {
             vec![(
-                ScalarExpression::column_expr(t1_columns[1], 1),
-                ScalarExpression::column_expr(t2_columns[1], 1),
+                arena.alloc_expression(crate::expression::ScalarExpression::column_expr(
+                    t1_columns[1],
+                    1,
+                )),
+                arena.alloc_expression(crate::expression::ScalarExpression::column_expr(
+                    t2_columns[1],
+                    1,
+                )),
             )]
         } else {
             vec![]
@@ -575,21 +590,27 @@ mod test {
             Childrens::None,
         );
 
-        let filter = ScalarExpression::Binary {
+        let left_column =
+            arena.alloc_column(ColumnCatalog::new("c1".to_owned(), true, desc.clone()));
+        let right_column =
+            arena.alloc_column(ColumnCatalog::new("c4".to_owned(), true, desc.clone()));
+        let left_expr = arena.alloc_expression(crate::expression::ScalarExpression::column_expr(
+            left_column,
+            0,
+        ));
+        let right_expr = arena.alloc_expression(crate::expression::ScalarExpression::column_expr(
+            right_column,
+            3,
+        ));
+        let filter = arena.alloc_expression(crate::expression::ScalarExpression::Binary {
             op: crate::expression::BinaryOperator::Gt,
-            left_expr: Box::new(ScalarExpression::column_expr(
-                arena.alloc_column(ColumnCatalog::new("c1".to_owned(), true, desc.clone())),
-                0,
-            )),
-            right_expr: Box::new(ScalarExpression::column_expr(
-                arena.alloc_column(ColumnCatalog::new("c4".to_owned(), true, desc.clone())),
-                3,
-            )),
+            left_expr,
+            right_expr,
             evaluator: Some(
                 binary_create(Cow::Owned(LogicalType::Integer), BinaryOperator::Gt).unwrap(),
             ),
             ty: LogicalType::Boolean,
-        };
+        });
 
         (on_keys, values_t1, values_t2, filter)
     }
@@ -1116,17 +1137,27 @@ mod test {
         let right_columns =
             vec![plan_arena.alloc_column(ColumnCatalog::new("rk".to_string(), true, desc.clone()))];
 
-        let on_keys = vec![(
-            ScalarExpression::column_expr(left_columns[0], 0),
-            ScalarExpression::column_expr(right_columns[0], 0),
-        )];
-        let filter_expr = ScalarExpression::Binary {
-            op: crate::expression::BinaryOperator::Gt,
-            left_expr: Box::new(ScalarExpression::column_expr(left_columns[1], 1)),
-            right_expr: Box::new(ScalarExpression::Constant(DataValue::Int32(1))),
-            evaluator: None,
-            ty: LogicalType::Boolean,
-        };
+        let left_key = plan_arena.alloc_expression(
+            crate::expression::ScalarExpression::column_expr(left_columns[0], 0),
+        );
+        let right_key = plan_arena.alloc_expression(
+            crate::expression::ScalarExpression::column_expr(right_columns[0], 0),
+        );
+        let on_keys = vec![(left_key, right_key)];
+        let filter_left = plan_arena.alloc_expression(
+            crate::expression::ScalarExpression::column_expr(left_columns[1], 1),
+        );
+        let filter_right = plan_arena.alloc_expression(
+            crate::expression::ScalarExpression::Constant(DataValue::Int32(1)),
+        );
+        let filter_expr =
+            plan_arena.alloc_expression(crate::expression::ScalarExpression::Binary {
+                op: crate::expression::BinaryOperator::Gt,
+                left_expr: filter_left,
+                right_expr: filter_right,
+                evaluator: None,
+                ty: LogicalType::Boolean,
+            });
 
         let left = LogicalPlan::new(
             Operator::Values(ValuesOperator {

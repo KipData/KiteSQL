@@ -162,7 +162,7 @@ mod tests {
         db.run("insert into t1 values (2, 2.0, 'fooo')")?.done()?;
         db.run("insert into t1 values (3, 2.1, 'Kite')")?.done()?;
 
-        let plan_arena = crate::planner::PlanArena::new(db.state.table_arena());
+        let mut plan_arena = crate::planner::PlanArena::new(db.state.table_arena());
         let transaction = db.storage.transaction()?;
         let table = transaction
             .table(db.state.table_cache(), "t1".to_string().into())?
@@ -174,7 +174,7 @@ mod tests {
                 "t1".to_string().into(),
                 table,
                 true,
-                &plan_arena,
+                &mut plan_arena,
             )?,
             column_names: Default::default(),
             input: None,

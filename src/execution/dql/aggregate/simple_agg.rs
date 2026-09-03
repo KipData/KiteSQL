@@ -19,10 +19,10 @@ use crate::execution::{
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
-use crate::planner::LogicalPlan;
+use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 pub struct SimpleAggExecutor {
-    agg_calls: Vec<ScalarExpression>,
+    agg_calls: Vec<ExprRef>,
     input: ExecId,
     returned: bool,
 }
@@ -57,12 +57,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor {
             return Ok(());
         }
 
-        let mut accs = create_accumulators(&self.agg_calls)?;
+        let mut accs = create_accumulators(&self.agg_calls, plan_arena)?;
 
         while arena.next_tuple(self.input, plan_arena)? {
             let tuple = arena.result_tuple();
             for (acc, expr) in accs.iter_mut().zip(self.agg_calls.iter()) {
-                let ScalarExpression::AggCall { args, .. } = expr else {
+                let ScalarExpression::AggCall { args, .. } = plan_arena.expression(*expr) else {
                     unreachable!()
                 };
                 if args.len() > 1 {
@@ -72,7 +72,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor {
                     ));
                 }
 
-                let value = args[0].eval(Some(tuple))?;
+                let value = plan_arena
+                    .expression(args[0])
+                    .eval(plan_arena, Some(tuple))?;
                 acc.update_value(&value)?;
             }
         }

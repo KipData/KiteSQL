@@ -105,13 +105,13 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             fn bind_projection<'ctx, 'bind, 'parent, 'arena, T, A>(
                 scope: &mut ::kite_sql::orm::ExprBindScope<'ctx, 'bind, 'parent, 'arena, T, A>,
                 relation: &str,
-            ) -> ::std::result::Result<::std::vec::Vec<::kite_sql::expression::ScalarExpression>, ::kite_sql::errors::DatabaseError>
+            ) -> ::std::result::Result<::std::vec::Vec<::kite_sql::planner::ExprRef>, ::kite_sql::errors::DatabaseError>
             where
                 T: ::kite_sql::storage::Transaction,
                 A: AsRef<[(&'static str, ::kite_sql::types::value::DataValue)]>,
             {
                 Ok(::std::vec![
-                    #(::kite_sql::orm::IntoOrmScalarExpression::into_orm_scalar(#projection_exprs)),*
+                    #(#projection_exprs.into_scalar()),*
                 ])
             }
         }

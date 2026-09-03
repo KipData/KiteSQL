@@ -149,7 +149,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert {
                             tuple_map.remove(&Self::column_key(column, self.is_mapping_by_name));
 
                         if value.is_none() {
-                            value = column.default_value()?;
+                            value = column.default_value(plan_arena)?;
                         }
                         value.unwrap_or(DataValue::Null)
                     };
@@ -168,12 +168,18 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert {
                 for (index_meta, exprs) in table_snapshot.index_metas.iter() {
                     let index_meta = plan_arena.index(*index_meta);
                     let tuple_id = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
-                    with_projection_tmp_value(arena, Some(&tuple), exprs, |arena, value| {
-                        let mut state = arena.local_state(plan_arena);
-                        let (transaction, table_codec) = state.transaction_codec_mut();
-                        let index = Index::new(index_meta.id, &value, index_meta.ty);
-                        transaction.add_index(table_codec, &self.table_name, index, tuple_id)
-                    })?;
+                    with_projection_tmp_value(
+                        arena,
+                        plan_arena,
+                        Some(&tuple),
+                        exprs,
+                        |arena, value| {
+                            let mut state = arena.local_state(plan_arena);
+                            let (transaction, table_codec) = state.transaction_codec_mut();
+                            let index = Index::new(index_meta.id, &value, index_meta.ty);
+                            transaction.add_index(table_codec, &self.table_name, index, tuple_id)
+                        },
+                    )?;
                 }
                 let mut state = arena.local_state(plan_arena);
                 let (transaction, table_codec) = state.transaction_codec_mut();

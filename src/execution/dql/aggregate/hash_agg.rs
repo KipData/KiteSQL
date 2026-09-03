@@ -19,9 +19,8 @@ use crate::execution::dql::aggregate::{
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
-use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
-use crate::planner::LogicalPlan;
+use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
 use std::collections::hash_map::IntoIter as HashMapIntoIter;
@@ -30,8 +29,8 @@ use std::collections::HashMap;
 type HashAggOutput = HashMapIntoIter<Vec<DataValue>, Vec<Box<dyn Accumulator>>>;
 
 pub struct HashAggExecutor {
-    agg_calls: Vec<ScalarExpression>,
-    groupby_exprs: Vec<ScalarExpression>,
+    agg_calls: Vec<ExprRef>,
+    groupby_exprs: Vec<ExprRef>,
     input: ExecId,
     output: Option<HashAggOutput>,
 }
@@ -78,14 +77,14 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
                 let tuple = arena.result_tuple();
                 group_keys.clear();
                 for expr in &self.groupby_exprs {
-                    group_keys.push(expr.eval(Some(tuple))?);
+                    group_keys.push(plan_arena.expression(*expr).eval(plan_arena, Some(tuple))?);
                 }
 
                 if let Some(accs) = group_hash_accs.get_mut(group_keys.as_slice()) {
-                    update_accumulators(accs, &self.agg_calls, tuple)?;
+                    update_accumulators(accs, &self.agg_calls, tuple, plan_arena)?;
                 } else {
-                    let mut accs = create_accumulators(&self.agg_calls)?;
-                    update_accumulators(&mut accs, &self.agg_calls, tuple)?;
+                    let mut accs = create_accumulators(&self.agg_calls, plan_arena)?;
+                    update_accumulators(&mut accs, &self.agg_calls, tuple, plan_arena)?;
                     group_hash_accs.insert(group_keys.clone(), accs);
                 }
             }
@@ -174,15 +173,19 @@ mod test {
             }),
             Childrens::None,
         );
+        let groupby_expr =
+            plan_arena.alloc_expression(ScalarExpression::column_expr(t1_schema[0], 0));
+        let agg_arg = plan_arena.alloc_expression(ScalarExpression::column_expr(t1_schema[1], 1));
+        let agg_call = plan_arena.alloc_expression(ScalarExpression::AggCall {
+            distinct: false,
+            kind: AggKind::Sum,
+            args: vec![agg_arg],
+            ty: LogicalType::Integer,
+        });
         let plan = LogicalPlan::new(
             Operator::Aggregate(AggregateOperator {
-                groupby_exprs: vec![ScalarExpression::column_expr(t1_schema[0], 0)],
-                agg_calls: vec![ScalarExpression::AggCall {
-                    distinct: false,
-                    kind: AggKind::Sum,
-                    args: vec![ScalarExpression::column_expr(t1_schema[1], 1)],
-                    ty: LogicalType::Integer,
-                }],
+                groupby_exprs: vec![groupby_expr],
+                agg_calls: vec![agg_call],
                 is_distinct: false,
                 force_spill: false,
             }),

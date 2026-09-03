@@ -42,7 +42,6 @@ use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
 use paste::paste;
-use std::borrow::Cow;
 
 pub(crate) fn cast_fail(from: LogicalType, to: LogicalType) -> DatabaseError {
     DatabaseError::CastFail {
@@ -530,11 +529,9 @@ macro_rules! build_integer_cast {
 }
 
 pub fn cast_create(
-    from: Cow<'_, LogicalType>,
-    to: Cow<'_, LogicalType>,
+    from: &LogicalType,
+    to: &LogicalType,
 ) -> Result<CastEvaluatorRef, DatabaseError> {
-    let from = from.as_ref();
-    let to = to.as_ref();
     if from == to {
         return Ok(CastEvaluatorRef::new(
             cast_pos(from, to),
@@ -803,7 +800,7 @@ pub fn cast_create(
             let evaluators = from_types
                 .iter()
                 .zip(to_types.iter())
-                .map(|(from, to)| cast_create(Cow::Borrowed(from), Cow::Borrowed(to)))
+                .map(|(from, to)| cast_create(from, to))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(CastEvaluatorRef::new(
                 cast_pos(from, to),
@@ -1160,11 +1157,10 @@ mod test {
     use ordered_float::OrderedFloat;
     #[cfg(feature = "decimal")]
     use rust_decimal::Decimal;
-    use std::borrow::Cow;
     use std::io::{Cursor, Seek, SeekFrom};
 
     fn create(from: LogicalType, to: LogicalType) -> Result<CastEvaluatorRef, DatabaseError> {
-        cast_create(Cow::Owned(from), Cow::Owned(to))
+        cast_create(&from, &to)
     }
 
     fn utf8(value: &str) -> DataValue {

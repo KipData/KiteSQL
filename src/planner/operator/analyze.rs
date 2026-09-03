@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::catalog::TableName;
+use crate::planner::{fmt_explain_list, Explain, PlanArena};
 use crate::types::index::IndexMetaRef;
 use kite_sql_serde_macros::ReferenceSerialization;
 
@@ -21,4 +22,12 @@ pub struct AnalyzeOperator {
     pub table_name: TableName,
     pub index_metas: Vec<IndexMetaRef>,
     pub histogram_buckets: Option<usize>,
+}
+
+impl Explain for AnalyzeOperator {
+    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Analyze {} -> [", self.table_name)?;
+        fmt_explain_list(&self.index_metas, ", ", arena, f)?;
+        f.write_str("]")
+    }
 }

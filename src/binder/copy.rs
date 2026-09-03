@@ -81,7 +81,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
         table_name: TableName,
         to: bool,
         ext_source: ExtSource,
-        arena: &crate::planner::PlanArena,
+        arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         if let Some(table) = self.context.table(table_name.clone())?.cloned() {
             if to {

@@ -28,7 +28,7 @@ impl NormalizationRule for MinMaxToTopK {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        _: &mut crate::planner::PlanArena,
+        arena: &mut crate::planner::PlanArena,
     ) -> Result<bool, DatabaseError> {
         let Operator::Aggregate(op) = &plan.operator else {
             return Ok(false);
@@ -37,7 +37,7 @@ impl NormalizationRule for MinMaxToTopK {
             return Ok(false);
         }
 
-        let ScalarExpression::AggCall { kind, args, .. } = &op.agg_calls[0] else {
+        let ScalarExpression::AggCall { kind, args, .. } = arena.expression(op.agg_calls[0]) else {
             return Ok(false);
         };
         if args.len() != 1 {
@@ -50,7 +50,7 @@ impl NormalizationRule for MinMaxToTopK {
             _ => return Ok(false),
         };
 
-        let sort_field = SortField::new(args[0].clone(), asc, false);
+        let sort_field = SortField::new(args[0], asc, false);
         let already_topk = match only_child(plan) {
             Some(child) => match &child.operator {
                 Operator::TopK(topk) => {
@@ -140,7 +140,7 @@ mod tests {
         assert_eq!(topk.sort_fields.len(), 1);
         assert!(topk.sort_fields[0].asc);
         assert!(!topk.sort_fields[0].nulls_first);
-        let args = match &op.agg_calls[0] {
+        let args = match arena.expression(op.agg_calls[0]) {
             crate::expression::ScalarExpression::AggCall { args, .. } => args,
             _ => unreachable!("Aggregate should use AggCall"),
         };

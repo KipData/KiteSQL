@@ -13,14 +13,13 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::expression::ScalarExpression;
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child, wrap_child_with};
 use crate::planner::operator::limit::LimitOperator;
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
-use crate::planner::{Childrens, LogicalPlan};
+use crate::planner::{Childrens, ExprRef, LogicalPlan};
 use crate::types::index::{IndexLookup, IndexOrderHint};
 
 pub struct EliminateRedundantSort;
@@ -90,7 +89,7 @@ impl NormalizationRule for EliminateIndexFilter {
             if !matches!(index_info.lookup, Some(IndexLookup::Static(_))) {
                 return Ok(false);
             }
-            index_info.residual_predicate.clone()
+            index_info.residual_predicate
         };
 
         if let Some(residual) = residual {
@@ -122,7 +121,7 @@ pub(crate) enum OrderHintKind {
 #[derive(Copy, Clone)]
 pub(crate) enum ScanOrderHint<'a> {
     SortFields(&'a [SortField]),
-    GroupBy(&'a [ScalarExpression]),
+    GroupBy(&'a [ExprRef]),
 }
 
 impl<'a> ScanOrderHint<'a> {
@@ -130,7 +129,7 @@ impl<'a> ScanOrderHint<'a> {
         Self::SortFields(fields)
     }
 
-    pub(crate) fn groupby(groupby_exprs: &'a [ScalarExpression]) -> Self {
+    pub(crate) fn groupby(groupby_exprs: &'a [ExprRef]) -> Self {
         Self::GroupBy(groupby_exprs)
     }
 }
@@ -172,8 +171,8 @@ pub(crate) fn apply_scan_order_hint(
     let mut required_from_table = true;
     for index in 0..hint_len(required) {
         let expr = match required {
-            ScanOrderHint::SortFields(fields) => &fields[index].expr,
-            ScanOrderHint::GroupBy(groupby_exprs) => &groupby_exprs[index],
+            ScanOrderHint::SortFields(fields) => fields[index].expr,
+            ScanOrderHint::GroupBy(groupby_exprs) => groupby_exprs[index],
         };
         if !expr.all_referenced_columns(arena, |arena, column| {
             scan_op
@@ -229,15 +228,15 @@ fn hint_covers(
             sort_field_matches(required, provided, arena)
         }),
         ScanOrderHint::GroupBy(groupby_exprs) => covers(groupby_exprs, provided, |expr, field| {
-            field.asc && !field.nulls_first && expr.eq_ignore_colref_pos(&field.expr, arena)
+            field.asc && !field.nulls_first && expr.eq_ignore_colref_pos(field.expr, arena)
         }),
     }
 }
 
-pub(crate) fn groupby_sort_fields(groupby_exprs: &[ScalarExpression]) -> Vec<SortField> {
+pub(crate) fn groupby_sort_fields(groupby_exprs: &[ExprRef]) -> Vec<SortField> {
     groupby_exprs
         .iter()
-        .cloned()
+        .copied()
         .map(|expr| SortField::new(expr, true, false))
         .collect()
 }
@@ -401,7 +400,7 @@ fn sort_field_matches(
 ) -> bool {
     required.asc == provided.asc
         && required.nulls_first == provided.nulls_first
-        && required.expr.eq_ignore_colref_pos(&provided.expr, arena)
+        && required.expr.eq_ignore_colref_pos(provided.expr, arena)
 }
 
 pub(crate) fn covers<T>(
@@ -457,7 +456,7 @@ mod tests {
     use crate::planner::operator::table_scan::TableScanOperator;
     use crate::planner::operator::top_k::TopKOperator;
     use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
-    use crate::planner::{Childrens, LogicalPlan};
+    use crate::planner::{Childrens, ExprRef, LogicalPlan};
     use crate::types::index::{IndexInfo, IndexLookup, IndexMeta, IndexType};
     use crate::types::value::DataValue;
     use crate::types::ColumnId;
@@ -473,7 +472,11 @@ mod tests {
         position: usize,
     ) -> SortField {
         let column = arena.alloc_column(ColumnCatalog::new_dummy(name.to_string()));
-        SortField::new(ScalarExpression::column_expr(column, position), true, false)
+        SortField::new(
+            arena.alloc_expression(ScalarExpression::column_expr(column, position)),
+            true,
+            false,
+        )
     }
 
     fn build_plan(
@@ -491,9 +494,11 @@ mod tests {
             index_sort_option,
         ));
 
+        let predicate =
+            arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(true)));
         let mut filter = LogicalPlan::new(
             Operator::Filter(FilterOperator {
-                predicate: ScalarExpression::Constant(DataValue::Boolean(true)),
+                predicate,
                 is_optimized: false,
                 having: false,
             }),
@@ -546,11 +551,15 @@ mod tests {
 
     fn build_filter_with_selected_index(
         arena: &mut crate::planner::PlanArena,
-        predicate: ScalarExpression,
-        residual: Option<ScalarExpression>,
+        predicate: ExprRef,
+        residual: Option<ExprRef>,
     ) -> LogicalPlan {
         let column = arena.alloc_column(ColumnCatalog::new_dummy("c1".to_string()));
-        let sort_field = SortField::new(ScalarExpression::column_expr(column, 0), true, false);
+        let sort_field = SortField::new(
+            arena.alloc_expression(ScalarExpression::column_expr(column, 0)),
+            true,
+            false,
+        );
         let (mut index_info, sort_option) = build_index_info(arena, vec![sort_field], 0);
         index_info.lookup = Some(IndexLookup::Static(Range::Scope {
             min: Bound::Unbounded,
@@ -593,13 +602,10 @@ mod tests {
         let c1_id = 1;
         let columns = vec![c1];
 
-        let sort_fields = vec![SortField::new(
-            ScalarExpression::column_expr(c1, 0),
-            true,
-            false,
-        )];
+        let group_expr = arena.alloc_expression(ScalarExpression::column_expr(c1, 0));
+        let sort_fields = vec![SortField::new(group_expr, true, false)];
         let sort_option = SortOption::OrderBy {
-            fields: sort_fields.clone(),
+            fields: sort_fields,
             ignore_prefix_len: 0,
         };
         let index_info = IndexInfo {
@@ -634,7 +640,7 @@ mod tests {
 
         let plan = LogicalPlan::new(
             Operator::Aggregate(AggregateOperator {
-                groupby_exprs: vec![ScalarExpression::column_expr(c1, 0)],
+                groupby_exprs: vec![group_expr],
                 agg_calls: vec![],
                 is_distinct: true,
                 force_spill: false,
@@ -649,7 +655,8 @@ mod tests {
     fn exact_index_filter_is_removed_after_physical_selection() -> Result<(), DatabaseError> {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut arena = crate::planner::PlanArena::new(&table_arena);
-        let predicate = ScalarExpression::Constant(DataValue::Boolean(true));
+        let predicate =
+            arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(true)));
         let mut plan = build_filter_with_selected_index(&mut arena, predicate, None);
 
         let rule = EliminateIndexFilter;
@@ -662,10 +669,11 @@ mod tests {
     fn partial_index_filter_keeps_residual_after_physical_selection() -> Result<(), DatabaseError> {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut arena = crate::planner::PlanArena::new(&table_arena);
-        let predicate = ScalarExpression::Constant(DataValue::Boolean(true));
-        let residual = ScalarExpression::Constant(DataValue::Boolean(false));
-        let mut plan =
-            build_filter_with_selected_index(&mut arena, predicate, Some(residual.clone()));
+        let predicate =
+            arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(true)));
+        let residual =
+            arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(false)));
+        let mut plan = build_filter_with_selected_index(&mut arena, predicate, Some(residual));
 
         let rule = EliminateIndexFilter;
         assert!(rule.apply(&mut plan, &mut arena)?);
@@ -680,7 +688,8 @@ mod tests {
     fn probe_index_filter_is_not_removed_after_physical_selection() -> Result<(), DatabaseError> {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut arena = crate::planner::PlanArena::new(&table_arena);
-        let predicate = ScalarExpression::Constant(DataValue::Boolean(true));
+        let predicate =
+            arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(true)));
         let mut plan = build_filter_with_selected_index(&mut arena, predicate, None);
         let Childrens::Only(child) = plan.childrens.as_mut() else {
             unreachable!("filter should have a scan child");
@@ -792,14 +801,18 @@ mod tests {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut arena = crate::planner::PlanArena::new(&table_arena);
         let column = arena.alloc_column(ColumnCatalog::new_dummy("c1".to_string()));
-        let sort_field = SortField::new(ScalarExpression::column_expr(column, 0), true, false);
+        let sort_field = SortField::new(
+            arena.alloc_expression(ScalarExpression::column_expr(column, 0)),
+            true,
+            false,
+        );
         let (index_info, _) = build_index_info(&mut arena, vec![sort_field.clone()], 0);
 
         let columns = vec![column];
         let table_name: TableName = ::std::sync::Arc::from("t");
         let table_scan = LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
-                table_name: table_name.clone(),
+                table_name,
                 columns,
                 limit: (None, None),
                 index_infos: vec![index_info],
@@ -878,7 +891,7 @@ mod tests {
                 let index_info = scan_op.index_infos[0].clone();
                 child.physical_option = Some(PhysicalOption::new(
                     PlanImpl::IndexScan(Box::new(index_info)),
-                    sort_option.clone(),
+                    sort_option,
                 ));
             }
         }
@@ -1012,12 +1025,7 @@ mod tests {
         let mut arena = crate::planner::PlanArena::new(&table_arena);
         let c1 = make_sort_field(&mut arena, "c1");
         let c2 = make_sort_field(&mut arena, "c2");
-        let mut plan = build_plan(
-            &mut arena,
-            vec![c2.clone()],
-            vec![c1.clone(), c2.clone()],
-            0,
-        );
+        let mut plan = build_plan(&mut arena, vec![c2.clone()], vec![c1, c2.clone()], 0);
         super::mark_sort_preserving_indexes(&mut plan, &[c2], &arena)?;
         let rule = EliminateRedundantSort;
 
@@ -1031,7 +1039,11 @@ mod tests {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut arena = crate::planner::PlanArena::new(&table_arena);
         let column = arena.alloc_column(ColumnCatalog::new_dummy("c_first".to_string()));
-        let sort_field = SortField::new(ScalarExpression::column_expr(column, 0), true, false);
+        let sort_field = SortField::new(
+            arena.alloc_expression(ScalarExpression::column_expr(column, 0)),
+            true,
+            false,
+        );
         let (mut index_info, _) = build_index_info(&mut arena, vec![sort_field.clone()], 0);
         index_info.lookup = Some(IndexLookup::Static(Range::Scope {
             min: Bound::Unbounded,
@@ -1054,13 +1066,14 @@ mod tests {
             let index_info = scan_op.index_infos[0].clone();
             scan_plan.physical_option = Some(PhysicalOption::new(
                 PlanImpl::IndexScan(Box::new(index_info.clone())),
-                index_info.sort_option.clone(),
+                index_info.sort_option,
             ));
         }
 
         let mut filter = LogicalPlan::new(
             Operator::Filter(FilterOperator {
-                predicate: ScalarExpression::Constant(DataValue::Boolean(true)),
+                predicate: arena
+                    .alloc_expression(ScalarExpression::Constant(DataValue::Boolean(true))),
                 is_optimized: false,
                 having: false,
             }),

@@ -14,7 +14,7 @@
 
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
-use crate::expression::ScalarExpression;
+use crate::planner::{ExprRef, PlanArena};
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use crate::types::CharLengthUnits;
@@ -172,11 +172,14 @@ impl ColumnCatalog {
         &self.desc.column_datatype
     }
 
-    pub(crate) fn default_value(&self) -> Result<Option<DataValue>, DatabaseError> {
+    pub(crate) fn default_value(
+        &self,
+        arena: &PlanArena<'_>,
+    ) -> Result<Option<DataValue>, DatabaseError> {
         self.desc
             .default
             .as_ref()
-            .map(|expr| expr.eval::<&Tuple>(None))
+            .map(|expr| arena.expression(*expr).eval::<&Tuple>(arena, None))
             .transpose()
     }
 
@@ -231,7 +234,7 @@ pub struct ColumnDesc {
     pub(crate) column_datatype: LogicalType,
     primary: Option<usize>,
     is_unique: bool,
-    pub(crate) default: Option<ScalarExpression>,
+    pub(crate) default: Option<ExprRef>,
 }
 
 impl ColumnDesc {
@@ -239,16 +242,8 @@ impl ColumnDesc {
         column_datatype: LogicalType,
         primary: Option<usize>,
         is_unique: bool,
-        default: Option<ScalarExpression>,
+        default: Option<ExprRef>,
     ) -> Result<ColumnDesc, DatabaseError> {
-        if let Some(expr) = &default {
-            let table_arena = crate::planner::TableArenaCell::default();
-            let plan_arena = crate::planner::PlanArena::new(&table_arena);
-            if expr.has_table_ref_column(&plan_arena)? {
-                return Err(DatabaseError::DefaultNotColumnRef);
-            }
-        }
-
         Ok(ColumnDesc {
             column_datatype,
             primary,

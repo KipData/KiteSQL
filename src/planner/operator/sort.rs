@@ -12,21 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::expression::ScalarExpression;
-use crate::iter_ext::Itertools;
+use crate::planner::{fmt_explain_list, Explain, ExprRef, PlanArena};
 use kite_sql_serde_macros::ReferenceSerialization;
-use std::fmt;
-use std::fmt::Formatter;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct SortField {
-    pub expr: ScalarExpression,
+    pub expr: ExprRef,
     pub asc: bool,
     pub nulls_first: bool,
 }
 
 impl SortField {
-    pub fn new(expr: ScalarExpression, asc: bool, nulls_first: bool) -> Self {
+    pub fn new(expr: ExprRef, asc: bool, nulls_first: bool) -> Self {
         SortField {
             expr,
             asc,
@@ -55,8 +52,8 @@ impl SortField {
     }
 }
 
-impl From<ScalarExpression> for SortField {
-    fn from(expr: ScalarExpression) -> Self {
+impl From<ExprRef> for SortField {
+    fn from(expr: ExprRef) -> Self {
         SortField::new(expr, true, false)
     }
 }
@@ -66,31 +63,21 @@ pub struct SortOperator {
     pub sort_fields: Vec<SortField>,
 }
 
-impl fmt::Display for SortOperator {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let sort_fields = self
-            .sort_fields
-            .iter()
-            .map(|sort_field| format!("{sort_field}"))
-            .join(", ");
-        write!(f, "Sort By {sort_fields}")
+impl Explain for SortOperator {
+    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Sort By ")?;
+        fmt_explain_list(&self.sort_fields, ", ", arena, f)
     }
 }
 
-impl fmt::Display for SortField {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "{}", self.expr)?;
-        if self.asc {
-            write!(f, " Asc")?;
+impl Explain for SortField {
+    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let direction = if self.asc { "Asc" } else { "Desc" };
+        let nulls = if self.nulls_first {
+            "Nulls First"
         } else {
-            write!(f, " Desc")?;
-        }
-        if self.nulls_first {
-            write!(f, " Nulls First")?;
-        } else {
-            write!(f, " Nulls Last")?;
-        }
-
-        Ok(())
+            "Nulls Last"
+        };
+        write!(f, "{} {direction} {nulls}", self.expr.explain(arena))
     }
 }

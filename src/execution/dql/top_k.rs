@@ -53,6 +53,7 @@ fn top_sort<'a>(
     heap: &mut BTreeSet<CmpItem<'a>>,
     tuple: Tuple,
     keep_count: usize,
+    plan_arena: &crate::planner::PlanArena<'_>,
 ) -> Result<(), DatabaseError> {
     let mut full_key = BumpBytes::new_in(arena);
     for SortField {
@@ -62,7 +63,9 @@ fn top_sort<'a>(
     } in sort_fields
     {
         let mut key = BumpBytes::new_in(arena);
-        expr.eval(Some(&tuple))?
+        plan_arena
+            .expression(*expr)
+            .eval(plan_arena, Some(&tuple))?
             .memcomparable_encode_with_null_order(&mut key, *nulls_first)?;
         if !asc && key.len() > 1 {
             for byte in key.iter_mut().skip(1) {
@@ -145,6 +148,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for TopK {
                     &mut set,
                     mem::take(arena.result_tuple_mut()),
                     keep_count,
+                    plan_arena,
                 )?;
             }
 
@@ -192,12 +196,13 @@ mod test {
             false,
             ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
         ));
+        let sort_expr = plan_arena.alloc_expression(ScalarExpression::ColumnRef {
+            column: sort_column,
+            position: 0,
+        });
         let fn_sort_fields = |asc: bool, nulls_first: bool| {
             vec![SortField {
-                expr: ScalarExpression::ColumnRef {
-                    column: sort_column,
-                    position: 0,
-                },
+                expr: sort_expr,
                 asc,
                 nulls_first,
             }]
@@ -261,6 +266,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Null]),
             2,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -268,6 +274,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0)]),
             2,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -275,6 +282,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1)]),
             2,
+            &plan_arena,
         )?;
         fn_asc_and_nulls_first_eq(indices);
 
@@ -286,6 +294,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Null]),
             2,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -293,6 +302,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0)]),
             2,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -300,6 +310,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1)]),
             2,
+            &plan_arena,
         )?;
         fn_asc_and_nulls_last_eq(indices);
 
@@ -311,6 +322,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Null]),
             2,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -318,6 +330,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0)]),
             2,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -325,6 +338,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1)]),
             2,
+            &plan_arena,
         )?;
         fn_desc_and_nulls_first_eq(indices);
 
@@ -336,6 +350,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Null]),
             2,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -343,6 +358,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0)]),
             2,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -350,6 +366,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1)]),
             2,
+            &plan_arena,
         )?;
         fn_desc_and_nulls_last_eq(indices);
 
@@ -370,22 +387,24 @@ mod test {
             false,
             ColumnDesc::new(LogicalType::Integer, Some(0), false, None).unwrap(),
         ));
+        let sort_expr_1 = plan_arena.alloc_expression(ScalarExpression::ColumnRef {
+            column: sort_column_1,
+            position: 0,
+        });
+        let sort_expr_2 = plan_arena.alloc_expression(ScalarExpression::ColumnRef {
+            column: sort_column_2,
+            position: 1,
+        });
         let fn_sort_fields =
             |asc_1: bool, nulls_first_1: bool, asc_2: bool, nulls_first_2: bool| {
                 vec![
                     SortField {
-                        expr: ScalarExpression::ColumnRef {
-                            column: sort_column_1,
-                            position: 0,
-                        },
+                        expr: sort_expr_1,
                         asc: asc_1,
                         nulls_first: nulls_first_1,
                     },
                     SortField {
-                        expr: ScalarExpression::ColumnRef {
-                            column: sort_column_2,
-                            position: 1,
-                        },
+                        expr: sort_expr_2,
                         asc: asc_2,
                         nulls_first: nulls_first_2,
                     },
@@ -536,6 +555,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Null, DataValue::Null]),
             4,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -543,6 +563,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0), DataValue::Null]),
             4,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -550,6 +571,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1), DataValue::Null]),
             4,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -557,6 +579,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Null, DataValue::Int32(0)]),
             4,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -564,6 +587,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)]),
             4,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -571,6 +595,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(0)]),
             4,
+            &plan_arena,
         )?;
         fn_asc_1_and_nulls_first_1_and_asc_2_and_nulls_first_2_eq(indices);
 
@@ -582,6 +607,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Null, DataValue::Null]),
             4,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -589,6 +615,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0), DataValue::Null]),
             4,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -596,6 +623,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1), DataValue::Null]),
             4,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -603,6 +631,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Null, DataValue::Int32(0)]),
             4,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -610,6 +639,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)]),
             4,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -617,6 +647,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(0)]),
             4,
+            &plan_arena,
         )?;
         fn_asc_1_and_nulls_last_1_and_asc_2_and_nulls_first_2_eq(indices);
 
@@ -628,6 +659,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Null, DataValue::Null]),
             4,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -635,6 +667,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0), DataValue::Null]),
             4,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -642,6 +675,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1), DataValue::Null]),
             4,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -649,6 +683,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Null, DataValue::Int32(0)]),
             4,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -656,6 +691,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)]),
             4,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -663,6 +699,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(0)]),
             4,
+            &plan_arena,
         )?;
         fn_desc_1_and_nulls_first_1_and_asc_2_and_nulls_first_2_eq(indices);
 
@@ -674,6 +711,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Null, DataValue::Null]),
             4,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -681,6 +719,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0), DataValue::Null]),
             4,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -688,6 +727,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1), DataValue::Null]),
             4,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -695,6 +735,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Null, DataValue::Int32(0)]),
             4,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -702,6 +743,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)]),
             4,
+            &plan_arena,
         )?;
         top_sort(
             &arena,
@@ -709,6 +751,7 @@ mod test {
             &mut indices,
             Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(0)]),
             4,
+            &plan_arena,
         )?;
         fn_desc_1_and_nulls_last_1_and_asc_2_and_nulls_first_2_eq(indices);
 

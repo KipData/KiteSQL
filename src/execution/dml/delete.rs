@@ -98,7 +98,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Delete {
             };
 
             for (index_id, index_ty, exprs) in index_templates.iter() {
-                with_projection_tmp_value(arena, None, exprs, |arena, value| {
+                with_projection_tmp_value(arena, plan_arena, None, exprs, |arena, value| {
                     let mut state = arena.local_state(plan_arena);
                     let (transaction, table_codec) = state.transaction_codec_mut();
                     transaction.del_index(

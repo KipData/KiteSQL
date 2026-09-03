@@ -25,10 +25,11 @@ use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::visitor::{OperatorExprVisitor, OperatorVisitor};
 use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
 use crate::planner::operator::Operator;
-use crate::planner::{Childrens, LogicalPlan};
+use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
+use std::collections::HashSet;
 
 #[derive(Clone)]
 pub struct ColumnPruning;
@@ -36,6 +37,7 @@ pub struct ColumnPruning;
 struct ApplyOutcome {
     changed: bool,
     removed_positions: Vec<usize>,
+    remapped_exprs: HashSet<ExprRef>,
 }
 
 #[derive(Clone, Default)]
@@ -88,7 +90,7 @@ struct ReferencedColumnCollector<'a, 'p> {
     arena: &'a crate::planner::PlanArena<'p>,
 }
 
-impl ExprVisitor<'_> for ReferencedColumnCollector<'_, '_> {
+impl ExprVisitor<PlanArena<'_>> for ReferencedColumnCollector<'_, '_> {
     fn visit_column_ref(
         &mut self,
         column: &crate::catalog::ColumnRef,
@@ -99,10 +101,11 @@ impl ExprVisitor<'_> for ReferencedColumnCollector<'_, '_> {
 
     fn visit_alias(
         &mut self,
-        expr: &ScalarExpression,
+        expr: ExprRef,
         _ty: &AliasType,
+        arena: &PlanArena<'_>,
     ) -> Result<(), DatabaseError> {
-        self.visit(expr)
+        self.visit(expr, arena)
     }
 }
 
@@ -111,6 +114,7 @@ impl ApplyOutcome {
         Self {
             changed: false,
             removed_positions: Vec::with_capacity(arena.allocated_columns_len()),
+            remapped_exprs: HashSet::new(),
         }
     }
 }
@@ -125,7 +129,7 @@ impl ColumnPruning {
             referenced_columns,
             arena,
         };
-        OperatorExprVisitor::new(&mut collector).visit_operator(operator)?;
+        OperatorExprVisitor::new(&mut collector, arena).visit_operator(operator)?;
 
         struct ReferencedOperatorColumnCollector<'a, 'p> {
             referenced_columns: &'a mut ReferencedColumns,
@@ -206,7 +210,7 @@ impl ColumnPruning {
     }
 
     fn extend_expr_referenced_columns<'a>(
-        exprs: impl IntoIterator<Item = &'a ScalarExpression>,
+        exprs: impl IntoIterator<Item = &'a ExprRef>,
         referenced_columns: &mut ReferencedColumns,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<(), DatabaseError> {
@@ -215,13 +219,13 @@ impl ColumnPruning {
             arena,
         };
         for expr in exprs {
-            collector.visit(expr)?;
+            collector.visit(*expr, collector.arena)?;
         }
         Ok(())
     }
 
     fn output_column_is_required(
-        expr: &ScalarExpression,
+        expr: ExprRef,
         column_references: &ReferencedColumns,
         arena: &mut crate::planner::PlanArena,
     ) -> bool {
@@ -231,7 +235,7 @@ impl ColumnPruning {
 
     fn clear_exprs(
         column_references: &ReferencedColumns,
-        exprs: &mut Vec<ScalarExpression>,
+        exprs: &mut Vec<ExprRef>,
         removed_positions: &mut Vec<usize>,
         output_start: usize,
         arena: &mut crate::planner::PlanArena,
@@ -240,7 +244,7 @@ impl ColumnPruning {
         removed_positions.reserve(exprs.len());
         let mut position = 0;
         exprs.retain(|expr| {
-            let keep = Self::output_column_is_required(expr, column_references, arena);
+            let keep = Self::output_column_is_required(*expr, column_references, arena);
             if !keep {
                 removed_positions.push(position);
             }
@@ -252,19 +256,26 @@ impl ColumnPruning {
     fn remap_operator_after_child_change(
         operator: &mut Operator,
         removed_positions: &[usize],
+        remapped_exprs: &mut HashSet<ExprRef>,
+        arena: &mut PlanArena<'_>,
     ) -> Result<(), DatabaseError> {
-        OperatorExprVisitorMut::new(&mut PositionRemapper { removed_positions })
-            .visit_operator(operator)
+        OperatorExprVisitorMut::new(
+            &mut PositionRemapper::new(removed_positions, remapped_exprs),
+            arena,
+        )
+        .visit_operator(operator)
     }
 
     fn remap_exprs_after_child_change<'a>(
-        exprs: impl IntoIterator<Item = &'a mut ScalarExpression>,
+        exprs: impl IntoIterator<Item = &'a mut ExprRef>,
         removed_positions: &[usize],
+        remapped_exprs: &mut HashSet<ExprRef>,
+        arena: &mut PlanArena<'_>,
     ) -> Result<(), DatabaseError> {
         if removed_positions.is_empty() {
             return Ok(());
         }
-        remap_exprs_positions(exprs, removed_positions)
+        remap_exprs_positions(exprs, removed_positions, remapped_exprs, arena)
     }
 
     fn apply_only_child(
@@ -379,12 +390,14 @@ impl ColumnPruning {
                         };
                         // only single COUNT(*) is not depend on any column
                         // removed all expressions from the aggregate: push a COUNT(*)
-                        op.agg_calls.push(ScalarExpression::AggCall {
-                            distinct: false,
-                            kind: AggKind::Count,
-                            args: vec![ScalarExpression::Constant(value)],
-                            ty: LogicalType::Integer,
-                        });
+                        let arg = arena.alloc_expression(ScalarExpression::Constant(value));
+                        op.agg_calls
+                            .push(arena.alloc_expression(ScalarExpression::AggCall {
+                                distinct: false,
+                                kind: AggKind::Count,
+                                args: vec![arg],
+                                ty: LogicalType::Integer,
+                            }));
                         changed = true;
                     }
                 } else {
@@ -415,6 +428,8 @@ impl ColumnPruning {
                     Self::remap_operator_after_child_change(
                         operator,
                         &outcome.removed_positions[child_start..],
+                        &mut outcome.remapped_exprs,
+                        arena,
                     )?;
                     changed = true;
                 }
@@ -423,7 +438,7 @@ impl ColumnPruning {
             Operator::Project(op) => {
                 let mut has_count_star = HasCountStar::default();
                 for expr in &op.exprs {
-                    has_count_star.visit(expr)?;
+                    has_count_star.visit(*expr, arena)?;
                 }
                 if !has_count_star.value {
                     if !all_referenced {
@@ -463,6 +478,8 @@ impl ColumnPruning {
                         Self::remap_operator_after_child_change(
                             operator,
                             &outcome.removed_positions[child_start..],
+                            &mut outcome.remapped_exprs,
+                            arena,
                         )?;
                         changed = true;
                     }
@@ -568,16 +585,18 @@ impl ColumnPruning {
                                             outcome.removed_positions
                                                 [left_removed_start..right_removed_end]
                                                 .split_at(left_removed_len);
-                                        for (left_expr, right_expr) in on {
-                                            remap_expr_positions(
-                                                left_expr,
-                                                left_removed_positions,
-                                            )?;
-                                            remap_expr_positions(
-                                                right_expr,
-                                                right_removed_positions,
-                                            )?;
-                                        }
+                                        remap_exprs_positions(
+                                            on.iter_mut().map(|(left_expr, _)| left_expr),
+                                            left_removed_positions,
+                                            &mut outcome.remapped_exprs,
+                                            arena,
+                                        )?;
+                                        remap_exprs_positions(
+                                            on.iter_mut().map(|(_, right_expr)| right_expr),
+                                            right_removed_positions,
+                                            &mut outcome.remapped_exprs,
+                                            arena,
+                                        )?;
                                     }
                                     Self::offset_removed_positions(
                                         &mut outcome.removed_positions
@@ -588,7 +607,12 @@ impl ColumnPruning {
                                         let removed_positions = &outcome.removed_positions
                                             [left_removed_start..right_removed_end];
                                         if !removed_positions.is_empty() {
-                                            remap_expr_positions(filter, removed_positions)?;
+                                            remap_expr_positions(
+                                                *filter,
+                                                removed_positions,
+                                                &mut outcome.remapped_exprs,
+                                                arena,
+                                            )?;
                                         }
                                     }
                                 }
@@ -611,6 +635,8 @@ impl ColumnPruning {
                             Self::remap_exprs_after_child_change(
                                 op.predicates_mut().iter_mut(),
                                 removed_positions,
+                                &mut outcome.remapped_exprs,
+                                arena,
                             )?;
                             outcome.removed_positions.truncate(right_removed_start);
                         } else {
@@ -657,6 +683,8 @@ impl ColumnPruning {
                         Self::remap_operator_after_child_change(
                             operator,
                             &outcome.removed_positions[child_start..],
+                            &mut outcome.remapped_exprs,
+                            arena,
                         )?;
                         changed = true;
                     }
@@ -694,6 +722,8 @@ impl ColumnPruning {
                     Self::remap_operator_after_child_change(
                         operator,
                         &outcome.removed_positions[child_start..],
+                        &mut outcome.remapped_exprs,
+                        arena,
                     )?;
                     changed = true;
                 }
@@ -726,6 +756,8 @@ impl ColumnPruning {
                     Self::remap_operator_after_child_change(
                         operator,
                         &outcome.removed_positions[child_start..],
+                        &mut outcome.remapped_exprs,
+                        arena,
                     )?;
                     changed = true;
                 }

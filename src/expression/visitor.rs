@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,89 +18,107 @@ use crate::expression::agg::AggKind;
 use crate::expression::function::scala::ScalarFunction;
 use crate::expression::function::table::TableFunction;
 use crate::expression::window::WindowCall;
-use crate::expression::TrimWhereField;
-use crate::expression::{AliasType, BinaryOperator, ScalarExpression, UnaryOperator};
+use crate::expression::{
+    AliasType, BinaryOperator, ScalarExpression, TrimWhereField, UnaryOperator,
+};
+use crate::planner::{ExprRef, MetaArena};
 use crate::types::evaluator::{BinaryEvaluatorRef, CastEvaluatorRef, UnaryEvaluatorRef};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 
-pub trait ExprVisitor<'a>: Sized {
-    fn visit(&mut self, expr: &'a ScalarExpression) -> Result<(), DatabaseError> {
-        walk_expr(self, expr)
-    }
-
-    fn visit_constant(&mut self, _value: &'a DataValue) -> Result<(), DatabaseError> {
+pub trait ExprVisitor<A: MetaArena>: Sized {
+    fn visit(&mut self, expr: ExprRef, arena: &A) -> Result<(), DatabaseError> {
+        if !self.visit_expression_ref(expr, arena)? {
+            return Ok(());
+        }
+        if self.visit_expression(arena.expression(expr), arena)? {
+            walk_expr(self, expr, arena)?;
+        }
         Ok(())
     }
 
-    fn visit_column_ref(&mut self, _column: &'a ColumnRef) -> Result<(), DatabaseError> {
-        Ok(())
+    fn visit_expression_ref(&mut self, _expr: ExprRef, _arena: &A) -> Result<bool, DatabaseError> {
+        Ok(true)
     }
 
+    fn visit_expression(
+        &mut self,
+        _expr: &ScalarExpression,
+        _arena: &A,
+    ) -> Result<bool, DatabaseError> {
+        Ok(true)
+    }
+
+    fn visit_constant(&mut self, _value: &DataValue) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+    fn visit_column_ref(&mut self, _column: &ColumnRef) -> Result<(), DatabaseError> {
+        Ok(())
+    }
     fn visit_alias(
         &mut self,
-        expr: &'a ScalarExpression,
-        ty: &'a AliasType,
+        expr: ExprRef,
+        alias: &AliasType,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        if let AliasType::Expr(alias_expr) = ty {
-            self.visit(alias_expr)?;
+        if let AliasType::Expr(alias_expr) = alias {
+            self.visit(*alias_expr, arena)?;
         }
-        self.visit(expr)
+        self.visit(expr, arena)
     }
-
     fn visit_type_cast(
         &mut self,
-        expr: &'a ScalarExpression,
-        _ty: &'a LogicalType,
-        _evaluator: Option<&'a CastEvaluatorRef>,
+        expr: ExprRef,
+        _ty: &LogicalType,
+        _evaluator: Option<&CastEvaluatorRef>,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.visit(expr)
+        self.visit(expr, arena)
     }
-
     fn visit_is_null(
         &mut self,
         _negated: bool,
-        expr: &'a ScalarExpression,
+        expr: ExprRef,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.visit(expr)
+        self.visit(expr, arena)
     }
-
     fn visit_unary(
         &mut self,
-        _op: &'a UnaryOperator,
-        expr: &'a ScalarExpression,
-        _evaluator: Option<&'a UnaryEvaluatorRef>,
-        _ty: &'a LogicalType,
+        _op: &UnaryOperator,
+        expr: ExprRef,
+        _evaluator: Option<&UnaryEvaluatorRef>,
+        _ty: &LogicalType,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.visit(expr)
+        self.visit(expr, arena)
     }
-
     fn visit_binary(
         &mut self,
-        _op: &'a BinaryOperator,
-        left_expr: &'a ScalarExpression,
-        right_expr: &'a ScalarExpression,
-        _evaluator: Option<&'a BinaryEvaluatorRef>,
-        _ty: &'a LogicalType,
+        _op: &BinaryOperator,
+        left: ExprRef,
+        right: ExprRef,
+        _evaluator: Option<&BinaryEvaluatorRef>,
+        _ty: &LogicalType,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.visit(left_expr)?;
-        self.visit(right_expr)
+        self.visit(left, arena)?;
+        self.visit(right, arena)
     }
-
     fn visit_agg(
         &mut self,
         _distinct: bool,
-        _kind: &'a AggKind,
-        args: &'a [ScalarExpression],
-        _ty: &'a LogicalType,
+        _kind: &AggKind,
+        args: &[ExprRef],
+        _ty: &LogicalType,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
         for arg in args {
-            self.visit(arg)?;
+            self.visit(*arg, arena)?;
         }
         Ok(())
     }
-
-    fn visit_window(&mut self, window: &'a WindowCall) -> Result<(), DatabaseError> {
+    fn visit_window(&mut self, window: &WindowCall, arena: &A) -> Result<(), DatabaseError> {
         for expr in window
             .function
             .args
@@ -108,268 +126,252 @@ pub trait ExprVisitor<'a>: Sized {
             .chain(&window.spec.partition_by)
             .chain(window.spec.order_by.iter().map(|field| &field.expr))
         {
-            self.visit(expr)?;
+            self.visit(*expr, arena)?;
         }
         Ok(())
     }
-
     fn visit_in(
         &mut self,
         _negated: bool,
-        expr: &'a ScalarExpression,
-        args: &'a [ScalarExpression],
+        expr: ExprRef,
+        args: &[ExprRef],
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.visit(expr)?;
+        self.visit(expr, arena)?;
         for arg in args {
-            self.visit(arg)?;
+            self.visit(*arg, arena)?;
         }
         Ok(())
     }
-
     fn visit_between(
         &mut self,
         _negated: bool,
-        expr: &'a ScalarExpression,
-        left_expr: &'a ScalarExpression,
-        right_expr: &'a ScalarExpression,
+        expr: ExprRef,
+        left: ExprRef,
+        right: ExprRef,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.visit(expr)?;
-        self.visit(left_expr)?;
-        self.visit(right_expr)
+        self.visit(expr, arena)?;
+        self.visit(left, arena)?;
+        self.visit(right, arena)
     }
-
     fn visit_substring(
         &mut self,
-        expr: &'a ScalarExpression,
-        for_expr: Option<&'a ScalarExpression>,
-        from_expr: Option<&'a ScalarExpression>,
+        expr: ExprRef,
+        for_expr: Option<ExprRef>,
+        from_expr: Option<ExprRef>,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.visit(expr)?;
-        if let Some(for_expr) = for_expr {
-            self.visit(for_expr)?;
+        self.visit(expr, arena)?;
+        if let Some(expr) = for_expr {
+            self.visit(expr, arena)?;
         }
-        if let Some(from_expr) = from_expr {
-            self.visit(from_expr)?;
+        if let Some(expr) = from_expr {
+            self.visit(expr, arena)?;
         }
         Ok(())
     }
-
     fn visit_position(
         &mut self,
-        expr: &'a ScalarExpression,
-        in_expr: &'a ScalarExpression,
+        expr: ExprRef,
+        in_expr: ExprRef,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.visit(expr)?;
-        self.visit(in_expr)
+        self.visit(expr, arena)?;
+        self.visit(in_expr, arena)
     }
-
     fn visit_trim(
         &mut self,
-        expr: &'a ScalarExpression,
-        trim_what_expr: Option<&'a ScalarExpression>,
-        _trim_where: Option<&'a TrimWhereField>,
+        expr: ExprRef,
+        trim_what: Option<ExprRef>,
+        _trim_where: Option<&TrimWhereField>,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.visit(expr)?;
-        if let Some(trim_what_expr) = trim_what_expr {
-            self.visit(trim_what_expr)?;
+        self.visit(expr, arena)?;
+        if let Some(expr) = trim_what {
+            self.visit(expr, arena)?;
         }
         Ok(())
     }
-
     fn visit_empty(&mut self) -> Result<(), DatabaseError> {
         Ok(())
     }
-
-    fn visit_reference(
-        &mut self,
-        expr: &'a ScalarExpression,
-        _pos: usize,
-    ) -> Result<(), DatabaseError> {
-        self.visit(expr)
-    }
-
-    fn visit_tuple(&mut self, exprs: &'a [ScalarExpression]) -> Result<(), DatabaseError> {
+    fn visit_tuple(&mut self, exprs: &[ExprRef], arena: &A) -> Result<(), DatabaseError> {
         for expr in exprs {
-            self.visit(expr)?;
+            self.visit(*expr, arena)?;
         }
         Ok(())
     }
-
     fn visit_scala_function(
         &mut self,
-        scalar_function: &'a ScalarFunction,
+        function: &ScalarFunction,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        for arg in &scalar_function.args {
-            self.visit(arg)?;
+        for arg in &function.args {
+            self.visit(*arg, arena)?;
         }
         Ok(())
     }
-
     fn visit_table_function(
         &mut self,
-        table_function: &'a TableFunction,
+        function: &TableFunction,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        for arg in &table_function.args {
-            self.visit(arg)?;
+        for arg in &function.args {
+            self.visit(*arg, arena)?;
         }
         Ok(())
     }
-
     fn visit_if(
         &mut self,
-        condition: &'a ScalarExpression,
-        left_expr: &'a ScalarExpression,
-        right_expr: &'a ScalarExpression,
-        _ty: &'a LogicalType,
+        condition: ExprRef,
+        left: ExprRef,
+        right: ExprRef,
+        _ty: &LogicalType,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.visit(condition)?;
-        self.visit(left_expr)?;
-        self.visit(right_expr)
+        self.visit(condition, arena)?;
+        self.visit(left, arena)?;
+        self.visit(right, arena)
     }
-
     fn visit_if_null(
         &mut self,
-        left_expr: &'a ScalarExpression,
-        right_expr: &'a ScalarExpression,
-        _ty: &'a LogicalType,
+        left: ExprRef,
+        right: ExprRef,
+        _ty: &LogicalType,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.visit(left_expr)?;
-        self.visit(right_expr)
+        self.visit(left, arena)?;
+        self.visit(right, arena)
     }
-
     fn visit_null_if(
         &mut self,
-        left_expr: &'a ScalarExpression,
-        right_expr: &'a ScalarExpression,
-        _ty: &'a LogicalType,
+        left: ExprRef,
+        right: ExprRef,
+        _ty: &LogicalType,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.visit(left_expr)?;
-        self.visit(right_expr)
+        self.visit(left, arena)?;
+        self.visit(right, arena)
     }
-
     fn visit_coalesce(
         &mut self,
-        exprs: &'a [ScalarExpression],
-        _ty: &'a LogicalType,
+        exprs: &[ExprRef],
+        _ty: &LogicalType,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
         for expr in exprs {
-            self.visit(expr)?;
+            self.visit(*expr, arena)?;
         }
         Ok(())
     }
-
     fn visit_case_when(
         &mut self,
-        operand_expr: Option<&'a ScalarExpression>,
-        expr_pairs: &'a [(ScalarExpression, ScalarExpression)],
-        else_expr: Option<&'a ScalarExpression>,
-        _ty: &'a LogicalType,
+        operand: Option<ExprRef>,
+        pairs: &[(ExprRef, ExprRef)],
+        else_expr: Option<ExprRef>,
+        _ty: &LogicalType,
+        arena: &A,
     ) -> Result<(), DatabaseError> {
-        if let Some(operand_expr) = operand_expr {
-            self.visit(operand_expr)?;
+        if let Some(expr) = operand {
+            self.visit(expr, arena)?;
         }
-        for (left_expr, right_expr) in expr_pairs {
-            self.visit(left_expr)?;
-            self.visit(right_expr)?;
+        for (left, right) in pairs {
+            self.visit(*left, arena)?;
+            self.visit(*right, arena)?;
         }
-        if let Some(else_expr) = else_expr {
-            self.visit(else_expr)?;
+        if let Some(expr) = else_expr {
+            self.visit(expr, arena)?;
         }
         Ok(())
     }
 }
 
-pub fn walk_expr<'a, V: ExprVisitor<'a>>(
+pub fn walk_expr<A: MetaArena, V: ExprVisitor<A>>(
     visitor: &mut V,
-    expr: &'a ScalarExpression,
+    expr: ExprRef,
+    arena: &A,
 ) -> Result<(), DatabaseError> {
-    match expr {
+    match arena.expression(expr) {
         ScalarExpression::Constant(value) => visitor.visit_constant(value),
         ScalarExpression::ColumnRef { column, .. } => visitor.visit_column_ref(column),
-        ScalarExpression::Alias { expr, alias } => visitor.visit_alias(expr, alias),
+        ScalarExpression::Alias { expr, alias } => visitor.visit_alias(*expr, alias, arena),
         ScalarExpression::TypeCast {
             expr,
             ty,
             evaluator,
-        } => visitor.visit_type_cast(expr, ty, evaluator.as_ref()),
-        ScalarExpression::IsNull { negated, expr } => visitor.visit_is_null(*negated, expr),
+        } => visitor.visit_type_cast(*expr, ty, evaluator.as_ref(), arena),
+        ScalarExpression::IsNull { negated, expr } => visitor.visit_is_null(*negated, *expr, arena),
         ScalarExpression::Unary {
             op,
             expr,
             evaluator,
             ty,
-        } => visitor.visit_unary(op, expr, evaluator.as_ref(), ty),
+        } => visitor.visit_unary(op, *expr, evaluator.as_ref(), ty, arena),
         ScalarExpression::Binary {
             op,
             left_expr,
             right_expr,
             evaluator,
             ty,
-        } => visitor.visit_binary(op, left_expr, right_expr, evaluator.as_ref(), ty),
+        } => visitor.visit_binary(op, *left_expr, *right_expr, evaluator.as_ref(), ty, arena),
         ScalarExpression::AggCall {
             distinct,
             kind,
             args,
             ty,
-        } => visitor.visit_agg(*distinct, kind, args, ty),
+        } => visitor.visit_agg(*distinct, kind, args, ty, arena),
         ScalarExpression::In {
             negated,
             expr,
             args,
-        } => visitor.visit_in(*negated, expr, args),
+        } => visitor.visit_in(*negated, *expr, args, arena),
         ScalarExpression::Between {
             negated,
             expr,
             left_expr,
             right_expr,
-        } => visitor.visit_between(*negated, expr, left_expr, right_expr),
+        } => visitor.visit_between(*negated, *expr, *left_expr, *right_expr, arena),
         ScalarExpression::SubString {
             expr,
             for_expr,
             from_expr,
-        } => visitor.visit_substring(expr, for_expr.as_deref(), from_expr.as_deref()),
-        ScalarExpression::Position { expr, in_expr } => visitor.visit_position(expr, in_expr),
+        } => visitor.visit_substring(*expr, *for_expr, *from_expr, arena),
+        ScalarExpression::Position { expr, in_expr } => {
+            visitor.visit_position(*expr, *in_expr, arena)
+        }
         ScalarExpression::Trim {
             expr,
             trim_what_expr,
             trim_where,
-        } => visitor.visit_trim(expr, trim_what_expr.as_deref(), trim_where.as_ref()),
+        } => visitor.visit_trim(*expr, *trim_what_expr, trim_where.as_ref(), arena),
         ScalarExpression::Empty => visitor.visit_empty(),
-        ScalarExpression::Tuple(exprs) => visitor.visit_tuple(exprs),
-        ScalarExpression::ScalaFunction(scalar_function) => {
-            visitor.visit_scala_function(scalar_function)
-        }
-        ScalarExpression::TableFunction(table_function) => {
-            visitor.visit_table_function(table_function)
-        }
+        ScalarExpression::Tuple(exprs) => visitor.visit_tuple(exprs, arena),
+        ScalarExpression::ScalaFunction(function) => visitor.visit_scala_function(function, arena),
+        ScalarExpression::TableFunction(function) => visitor.visit_table_function(function, arena),
         ScalarExpression::If {
             condition,
             left_expr,
             right_expr,
             ty,
-        } => visitor.visit_if(condition, left_expr, right_expr, ty),
+        } => visitor.visit_if(*condition, *left_expr, *right_expr, ty, arena),
         ScalarExpression::IfNull {
             left_expr,
             right_expr,
             ty,
-        } => visitor.visit_if_null(left_expr, right_expr, ty),
+        } => visitor.visit_if_null(*left_expr, *right_expr, ty, arena),
         ScalarExpression::NullIf {
             left_expr,
             right_expr,
             ty,
-        } => visitor.visit_null_if(left_expr, right_expr, ty),
-        ScalarExpression::Coalesce { exprs, ty } => visitor.visit_coalesce(exprs, ty),
+        } => visitor.visit_null_if(*left_expr, *right_expr, ty, arena),
+        ScalarExpression::Coalesce { exprs, ty } => visitor.visit_coalesce(exprs, ty, arena),
         ScalarExpression::CaseWhen {
             operand_expr,
             expr_pairs,
             else_expr,
             ty,
-        } => visitor.visit_case_when(
-            operand_expr.as_deref(),
-            expr_pairs,
-            else_expr.as_deref(),
-            ty,
-        ),
-        ScalarExpression::WindowCall(window) => visitor.visit_window(window),
+        } => visitor.visit_case_when(*operand_expr, expr_pairs, *else_expr, ty, arena),
+        ScalarExpression::WindowCall(window) => visitor.visit_window(window, arena),
     }
 }

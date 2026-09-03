@@ -20,6 +20,7 @@ mod char_length_units;
 mod column;
 mod data_value;
 mod evaluator;
+mod expression;
 mod function;
 mod hasher;
 mod index;

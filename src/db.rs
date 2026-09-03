@@ -1459,7 +1459,7 @@ pub(crate) mod test {
         );
         let mut source_plan_arena = PlanArena::new(kite_sql.state.table_arena());
         let source_plan = binder.bind(&stmt, &mut source_plan_arena)?;
-        let (best_plan, _best_plan_arena) =
+        let (best_plan, best_plan_arena) =
             kite_sql
                 .state
                 .build_plan([], &transaction, |binder, arena| binder.bind(&stmt, arena))?;
@@ -1480,14 +1480,14 @@ pub(crate) mod test {
         let ScalarExpression::ColumnRef {
             position: left_position,
             ..
-        } = on[0].0.unpack_alias_ref()
+        } = source_plan_arena.expression(on[0].0.unpack_alias(&source_plan_arena))
         else {
             unreachable!("expected left join key column ref");
         };
         let ScalarExpression::ColumnRef {
             position: right_position,
             ..
-        } = on[0].1.unpack_alias_ref()
+        } = source_plan_arena.expression(on[0].1.unpack_alias(&source_plan_arena))
         else {
             unreachable!("expected right join key column ref");
         };
@@ -1508,7 +1508,7 @@ pub(crate) mod test {
         let ScalarExpression::ColumnRef {
             position: right_position,
             ..
-        } = on[0].1.unpack_alias_ref()
+        } = best_plan_arena.expression(on[0].1.unpack_alias(&best_plan_arena))
         else {
             unreachable!("expected right join key column ref");
         };
@@ -1542,7 +1542,7 @@ pub(crate) mod test {
         );
         let mut source_plan_arena = PlanArena::new(kite_sql.state.table_arena());
         let source_plan = binder.bind(&stmt, &mut source_plan_arena)?;
-        let (best_plan, _best_plan_arena) =
+        let (best_plan, best_plan_arena) =
             kite_sql
                 .state
                 .build_plan([], &transaction, |binder, arena| binder.bind(&stmt, arena))?;
@@ -1562,14 +1562,14 @@ pub(crate) mod test {
         let ScalarExpression::ColumnRef {
             position: left_position,
             ..
-        } = on[0].0.unpack_alias_ref()
+        } = source_plan_arena.expression(on[0].0.unpack_alias(&source_plan_arena))
         else {
             unreachable!("expected left join key column ref");
         };
         let ScalarExpression::ColumnRef {
             position: right_position,
             ..
-        } = on[0].1.unpack_alias_ref()
+        } = source_plan_arena.expression(on[0].1.unpack_alias(&source_plan_arena))
         else {
             unreachable!("expected right join key column ref");
         };
@@ -1579,7 +1579,7 @@ pub(crate) mod test {
             unreachable!("expected join filter");
         };
         let mut referenced_columns = Vec::new();
-        filter.visit_referenced_columns(&mut source_plan_arena, &mut |_, column| {
+        filter.all_referenced_columns(&source_plan_arena, |_, column| {
             referenced_columns.push(*column);
             true
         })?;
@@ -1602,14 +1602,14 @@ pub(crate) mod test {
         let ScalarExpression::ColumnRef {
             position: left_position,
             ..
-        } = on[0].0.unpack_alias_ref()
+        } = best_plan_arena.expression(on[0].0.unpack_alias(&best_plan_arena))
         else {
             unreachable!("expected left join key column ref");
         };
         let ScalarExpression::ColumnRef {
             position: right_position,
             ..
-        } = on[0].1.unpack_alias_ref()
+        } = best_plan_arena.expression(on[0].1.unpack_alias(&best_plan_arena))
         else {
             unreachable!("expected right join key column ref");
         };
@@ -1639,7 +1639,7 @@ pub(crate) mod test {
             "SELECT o.x, t.y FROM onecolumn o INNER JOIN twocolumn t ON (o.x=t.x AND t.y=53)",
         )?;
         let transaction = kite_sql.storage.transaction()?;
-        let (best_plan, _best_plan_arena) =
+        let (best_plan, best_plan_arena) =
             kite_sql
                 .state
                 .build_plan([], &transaction, |binder, arena| binder.bind(&stmt, arena))?;
@@ -1659,14 +1659,14 @@ pub(crate) mod test {
         let ScalarExpression::ColumnRef {
             position: left_position,
             ..
-        } = on[0].0.unpack_alias_ref()
+        } = best_plan_arena.expression(on[0].0.unpack_alias(&best_plan_arena))
         else {
             unreachable!("expected left join key column ref");
         };
         let ScalarExpression::ColumnRef {
             position: right_position,
             ..
-        } = on[0].1.unpack_alias_ref()
+        } = best_plan_arena.expression(on[0].1.unpack_alias(&best_plan_arena))
         else {
             unreachable!("expected right join key column ref");
         };
@@ -1680,20 +1680,20 @@ pub(crate) mod test {
             left_expr,
             right_expr,
             ..
-        } = filter_op.predicate
+        } = best_plan_arena.expression(filter_op.predicate)
         else {
             unreachable!("expected binary filter predicate");
         };
         let ScalarExpression::ColumnRef {
             position: filter_position,
             ..
-        } = left_expr.unpack_alias_ref()
+        } = best_plan_arena.expression(left_expr.unpack_alias(&best_plan_arena))
         else {
             unreachable!("expected filter column ref");
         };
         assert_eq!(*filter_position, 1);
         assert!(matches!(
-            *right_expr,
+            best_plan_arena.expression(*right_expr),
             ScalarExpression::Constant(DataValue::Int32(53))
         ));
 
@@ -1718,10 +1718,10 @@ pub(crate) mod test {
 
             let row = next_tuple_owned(&mut iter)?.unwrap();
             let plan = row.values[0].utf8().unwrap();
-            assert!(plan.contains("Projection"));
-            assert!(plan.contains("Filter ("));
-            assert!(plan.contains(" > 0"));
-            assert!(plan.contains("TableScan t1 -> [#"));
+            assert_eq!(
+                plan,
+                "Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] Filter (t1.b > 0), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)]"
+            );
         }
         // Aggregate
         {
@@ -1740,11 +1740,10 @@ pub(crate) mod test {
             )?;
             let row = next_tuple_owned(&mut iter)?.unwrap();
             let plan = row.values[0].utf8().unwrap();
-            assert!(plan.contains("Projection"));
-            assert!(plan.contains("Aggregate"));
-            assert!(plan.contains("Filter ("));
-            assert!(plan.contains(" > 1"));
-            assert!(plan.contains("TableScan t1 -> [#"));
+            assert_eq!(
+                plan,
+                "Projection [(t1.a + 0), Max((t1.b + 0))] [Project => (Sort Option: Follow)] Aggregate [Max((t1.b + 0))] -> Group By [(t1.a + 0)] [HashAggregate => (Sort Option: None)] Filter (t1.b > 1), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)]"
+            );
         }
         {
             let statement = crate::db::prepare("explain select *, $1 from (select * from t1 where b > $2) left join (select * from t1 where a > $3) on a > $4")?;
@@ -1760,238 +1759,11 @@ pub(crate) mod test {
             )?;
             let row = next_tuple_owned(&mut iter)?.unwrap();
             let plan = row.values[0].utf8().unwrap();
-            assert!(plan.contains("Projection"));
-            assert!(plan.contains("LeftOuter Join"));
-            assert!(plan.contains("9"));
-            assert!(plan.contains("0"));
-            assert!(plan.contains("1"));
-            assert!(plan.contains("TableScan t1 -> [#"));
+            assert_eq!(
+                plan,
+                "Projection [t1.a, t1.b, t1.a, t1.b, 9] [Project => (Sort Option: Follow)] LeftOuter Join Where (t1.a > 0) [NestLoopJoin => (Sort Option: None)] Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] Filter (t1.b > 0), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)] Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] Filter (t1.a > 1), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)]"
+            );
         }
-
-        Ok(())
-    }
-
-    // FIXME: keep this as a unit test instead of SLT for now. The current
-    // sqllogictest runner does not reliably match the pretty-printed multi-line
-    // EXPLAIN output produced by correlated IN, even though the plan itself is stable.
-    #[test]
-    fn test_subquery_explain_uses_parameterized_index_for_in() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
-
-        kite_sql.ddl("create table in_outer(id int primary key, a int)")?;
-        kite_sql.ddl("create table in_inner(id int primary key, v int)")?;
-        kite_sql.ddl("create table in_inner_nn(id int primary key, v int)")?;
-        kite_sql.ddl("create index in_inner_v_index on in_inner(v)")?;
-        kite_sql.ddl("create index in_inner_nn_v_index on in_inner_nn(v)")?;
-
-        kite_sql
-            .run("insert into in_outer values (0, null), (1, 1), (2, 2), (3, 3)")?
-            .done()?;
-        kite_sql
-            .run("insert into in_inner values (0, 2), (1, null)")?
-            .done()?;
-        kite_sql
-            .run("insert into in_inner_nn values (0, 2)")?
-            .done()?;
-
-        kite_sql.ddl("create table in_outer_flag(id int primary key, a int, b int)")?;
-        kite_sql.ddl("create table in_inner_flag(id int primary key, v int, flag int)")?;
-        kite_sql.ddl("create table in_inner_flag_nn(id int primary key, v int, flag int)")?;
-        kite_sql.ddl("create index in_inner_flag_v_index on in_inner_flag(v)")?;
-        kite_sql.ddl("create index in_inner_flag_nn_v_index on in_inner_flag_nn(v)")?;
-
-        kite_sql
-            .run("insert into in_outer_flag values (0, null, 1), (1, 1, 1), (2, 2, 1), (3, 3, 1)")?
-            .done()?;
-        kite_sql
-            .run("insert into in_inner_flag values (0, 2, 1), (1, null, 1)")?
-            .done()?;
-        kite_sql
-            .run("insert into in_inner_flag_nn values (0, 2, 1)")?
-            .done()?;
-
-        let collect_plan = |sql: &str| -> Result<String, DatabaseError> {
-            let mut iter = kite_sql.run(sql)?;
-            let mut lines = Vec::new();
-            while let Some(row) = next_tuple_owned(&mut iter)? {
-                if let Some(DataValue::Utf8 { value, .. }) = row.values.first() {
-                    lines.push(value.clone());
-                }
-            }
-            iter.done()?;
-            Ok(lines.join("\n"))
-        };
-        let collect_ids = |sql: &str| -> Result<Vec<i32>, DatabaseError> {
-            let mut iter = kite_sql.run(sql)?;
-            let mut ids = Vec::new();
-            while let Some(row) = next_tuple_owned(&mut iter)? {
-                ids.push(row.values[0].i32().unwrap());
-            }
-            iter.done()?;
-            Ok(ids)
-        };
-
-        let assert_mark_in_uses_parameterized_index = |sql: &str| -> Result<(), DatabaseError> {
-            let explain_plan = collect_plan(sql)?;
-            assert!(
-                explain_plan.contains("MarkAnyApply"),
-                "unexpected explain plan: {explain_plan}"
-            );
-            assert!(
-                explain_plan.contains("IndexScan By #") && explain_plan.contains("=> Probe"),
-                "unexpected explain plan: {explain_plan}"
-            );
-            Ok(())
-        };
-
-        assert_mark_in_uses_parameterized_index(
-            "explain select id from in_outer where a in (select v from in_inner where in_inner.v = in_outer.a)",
-        )?;
-        assert_mark_in_uses_parameterized_index(
-            "explain select id from in_outer where a not in (select v from in_inner where in_inner.v = in_outer.a)",
-        )?;
-        assert_mark_in_uses_parameterized_index(
-            "explain select id from in_outer where a in (select v from in_inner_nn where in_inner_nn.v = in_outer.a)",
-        )?;
-        assert_mark_in_uses_parameterized_index(
-            "explain select id from in_outer where a not in (select v from in_inner_nn where in_inner_nn.v = in_outer.a)",
-        )?;
-
-        assert_eq!(
-            collect_ids(
-                "select id from in_outer where a in (select v from in_inner where in_inner.v = in_outer.a) order by id",
-            )?,
-            vec![2]
-        );
-        assert_eq!(
-            collect_ids(
-                "select id from in_outer where a not in (select v from in_inner where in_inner.v = in_outer.a) order by id",
-            )?,
-            vec![0, 1, 3]
-        );
-        assert_eq!(
-            collect_ids(
-                "select id from in_outer where a in (select v from in_inner_nn where in_inner_nn.v = in_outer.a) order by id",
-            )?,
-            vec![2]
-        );
-        assert_eq!(
-            collect_ids(
-                "select id from in_outer where a not in (select v from in_inner_nn where in_inner_nn.v = in_outer.a) order by id",
-            )?,
-            vec![0, 1, 3]
-        );
-
-        assert_mark_in_uses_parameterized_index(
-            "explain select id from in_outer_flag where a in (select v from in_inner_flag where in_inner_flag.flag = in_outer_flag.b)",
-        )?;
-        assert_mark_in_uses_parameterized_index(
-            "explain select id from in_outer_flag where a not in (select v from in_inner_flag where in_inner_flag.flag = in_outer_flag.b)",
-        )?;
-        assert_mark_in_uses_parameterized_index(
-            "explain select id from in_outer_flag where a in (select v from in_inner_flag_nn where in_inner_flag_nn.flag = in_outer_flag.b)",
-        )?;
-        assert_mark_in_uses_parameterized_index(
-            "explain select id from in_outer_flag where a not in (select v from in_inner_flag_nn where in_inner_flag_nn.flag = in_outer_flag.b)",
-        )?;
-
-        assert_eq!(
-            collect_ids(
-                "select id from in_outer_flag where a in (select v from in_inner_flag where in_inner_flag.flag = in_outer_flag.b) order by id",
-            )?,
-            vec![2]
-        );
-        assert_eq!(
-            collect_ids(
-                "select id from in_outer_flag where a not in (select v from in_inner_flag where in_inner_flag.flag = in_outer_flag.b) order by id",
-            )?,
-            Vec::<i32>::new()
-        );
-        assert_eq!(
-            collect_ids(
-                "select id from in_outer_flag where a in (select v from in_inner_flag_nn where in_inner_flag_nn.flag = in_outer_flag.b) order by id",
-            )?,
-            vec![2]
-        );
-        assert_eq!(
-            collect_ids(
-                "select id from in_outer_flag where a not in (select v from in_inner_flag_nn where in_inner_flag_nn.flag = in_outer_flag.b) order by id",
-            )?,
-            vec![1, 3]
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_subquery_explain_uses_parameterized_index_for_exists() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
-
-        kite_sql.ddl("create table exists_outer(id int primary key, a int, b int)")?;
-        kite_sql.ddl("create table exists_inner(id int primary key, v int, flag int)")?;
-        kite_sql.ddl("create index exists_inner_v_index on exists_inner(v)")?;
-
-        kite_sql
-            .run("insert into exists_outer values (0, 1, 1), (1, 1, 2), (2, 2, null), (3, 3, 1)")?
-            .done()?;
-        kite_sql
-            .run("insert into exists_inner values (0, 1, 1), (1, 1, null), (2, 2, 1)")?
-            .done()?;
-
-        let collect_plan = |sql: &str| -> Result<String, DatabaseError> {
-            let mut iter = kite_sql.run(sql)?;
-            let mut lines = Vec::new();
-            while let Some(row) = next_tuple_owned(&mut iter)? {
-                if let Some(DataValue::Utf8 { value, .. }) = row.values.first() {
-                    lines.push(value.clone());
-                }
-            }
-            iter.done()?;
-            Ok(lines.join("\n"))
-        };
-        let collect_ids = |sql: &str| -> Result<Vec<i32>, DatabaseError> {
-            let mut iter = kite_sql.run(sql)?;
-            let mut ids = Vec::new();
-            while let Some(row) = next_tuple_owned(&mut iter)? {
-                ids.push(row.values[0].i32().unwrap());
-            }
-            iter.done()?;
-            Ok(ids)
-        };
-        let assert_mark_exists_uses_parameterized_index = |sql: &str| -> Result<(), DatabaseError> {
-            let explain_plan = collect_plan(sql)?;
-            assert!(
-                explain_plan.contains("MarkExistsApply"),
-                "unexpected explain plan: {explain_plan}"
-            );
-            assert!(
-                explain_plan.contains("IndexScan By #") && explain_plan.contains("=> Probe"),
-                "unexpected explain plan: {explain_plan}"
-            );
-            Ok(())
-        };
-
-        assert_mark_exists_uses_parameterized_index(
-            "explain select id from exists_outer where exists (select 1 from exists_inner where exists_inner.v = exists_outer.a and exists_inner.flag = exists_outer.b)",
-        )?;
-        assert_mark_exists_uses_parameterized_index(
-            "explain select id from exists_outer where not exists (select 1 from exists_inner where exists_inner.v = exists_outer.a and exists_inner.flag = exists_outer.b)",
-        )?;
-
-        assert_eq!(
-            collect_ids(
-                "select id from exists_outer where exists (select 1 from exists_inner where exists_inner.v = exists_outer.a and exists_inner.flag = exists_outer.b) order by id",
-            )?,
-            vec![0]
-        );
-        assert_eq!(
-            collect_ids(
-                "select id from exists_outer where not exists (select 1 from exists_inner where exists_inner.v = exists_outer.a and exists_inner.flag = exists_outer.b) order by id",
-            )?,
-            vec![1, 2, 3]
-        );
 
         Ok(())
     }

@@ -22,10 +22,10 @@ use super::{Binder, BinderContext, QueryBindStep, SubQueryType};
 use crate::expression::function::scala::{ArcScalarFunctionImpl, ScalarFunction};
 use crate::expression::function::table::TableFunction;
 use crate::expression::function::FunctionSummary;
-use crate::expression::{AliasType, ScalarExpression};
+use crate::expression::{AliasType, ScalarExpression, TypeCast};
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
 use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
-use crate::planner::{LogicalPlan, PlanArena};
+use crate::planner::{ExprRef, LogicalPlan, PlanArena};
 use crate::storage::Transaction;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, LogicalType};
@@ -53,7 +53,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
 
     fn find_column_in_scope(
         context: &BinderContext<'a, T>,
-        arena: &mut PlanArena,
+        arena: &PlanArena,
         column_name: &str,
     ) -> Option<ScalarExpression> {
         let mut position_offset = 0;
@@ -83,18 +83,24 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
     ) -> Result<(ScalarExpression, LogicalPlan), DatabaseError> {
         let (exprs, is_tuple) = match expr {
             ScalarExpression::Tuple(exprs) => (exprs, true),
-            expr => (vec![expr], false),
+            expr => (vec![arena.alloc_expression(expr)], false),
         };
         let mut alias_exprs = Vec::with_capacity(exprs.len());
         let mut alias_refs = Vec::with_capacity(exprs.len());
 
         for (position, expr) in exprs.into_iter().enumerate() {
             let (alias_expr, alias_ref) = self.bind_temp_table_alias(expr, position, arena);
+            let predicate_alias = arena.alloc_expression(alias_expr);
+            // The projection evaluates against the subquery-local tuple, while the
+            // predicate evaluates against the combined left/right tuple. Clone the
+            // complete expression graph so position rewrites in either context do
+            // not mutate the other one through shared ExprRefs.
+            let projection_alias = predicate_alias.clone_expression(arena)?;
             if !is_tuple {
-                let alias_plan = Self::build_project_plan(sub_query, vec![alias_expr.clone()]);
-                return Ok((alias_expr, alias_plan));
+                let alias_plan = Self::build_project_plan(sub_query, vec![projection_alias]);
+                return Ok((arena.expression(predicate_alias).clone(), alias_plan));
             }
-            alias_exprs.push(alias_expr);
+            alias_exprs.push(projection_alias);
             alias_refs.push(alias_ref);
         }
 
@@ -104,20 +110,21 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
 
     pub(crate) fn bind_temp_table_alias(
         &mut self,
-        expr: ScalarExpression,
+        expr: ExprRef,
         position: usize,
         arena: &mut PlanArena,
-    ) -> (ScalarExpression, ScalarExpression) {
+    ) -> (ScalarExpression, ExprRef) {
         let output_column = expr.output_column_ref(arena);
         let mut alias_column = arena.clone_column(output_column);
         alias_column.set_ref_table(arena.temp_table(), 0, true);
 
         let alias_column = arena.alloc_column(alias_column);
-        let alias_ref = ScalarExpression::column_expr(alias_column, position);
+        let alias_ref =
+            arena.alloc_expression(ScalarExpression::column_expr(alias_column, position));
         (
             ScalarExpression::Alias {
-                expr: Box::new(expr),
-                alias: AliasType::Expr(Box::new(alias_ref.clone())),
+                expr,
+                alias: AliasType::Expr(alias_ref),
             },
             alias_ref,
         )
@@ -171,7 +178,9 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
             let columns = sub_query_schema
                 .iter()
                 .enumerate()
-                .map(|(position, column)| ScalarExpression::column_expr(*column, position))
+                .map(|(position, column)| {
+                    arena.alloc_expression(ScalarExpression::column_expr(*column, position))
+                })
                 .collect::<Vec<_>>();
             ScalarExpression::Tuple(columns)
         } else {
@@ -231,11 +240,8 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         }
 
         let (sub_query, correlated) = self.bind_subquery_plan(arena, build)?;
-        let (_, marker_ref) = self.bind_temp_table_alias(
-            ScalarExpression::Constant(DataValue::Boolean(true)),
-            0,
-            arena,
-        );
+        let marker = arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(true)));
+        let (_, marker_ref) = self.bind_temp_table_alias(marker, 0, arena);
         let output_column = marker_ref.output_column_ref(arena);
         self.context.sub_query(SubQueryType::ExistsSubQuery {
             plan: sub_query,
@@ -245,12 +251,12 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         if negated {
             Ok(ScalarExpression::Unary {
                 op: expression::UnaryOperator::Not,
-                expr: Box::new(marker_ref),
+                expr: marker_ref,
                 evaluator: None,
                 ty: LogicalType::Boolean,
             })
         } else {
-            Ok(marker_ref)
+            Ok(ScalarExpression::column_expr(output_column, 0))
         }
     }
 
@@ -258,7 +264,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         &mut self,
         quantifier: MarkApplyQuantifier,
         negated: bool,
-        left_expr: ScalarExpression,
+        left_expr: ExprRef,
         compare_op: expression::BinaryOperator,
         arena: &mut PlanArena<'arena>,
         build: F,
@@ -280,18 +286,16 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         }
 
         let (alias_expr, sub_query) = self.bind_temp_table(column, sub_query, arena)?;
+        let alias_expr = arena.alloc_expression(alias_expr);
         let predicate = ScalarExpression::Binary {
             op: compare_op,
-            left_expr: Box::new(left_expr),
-            right_expr: Box::new(alias_expr),
+            left_expr,
+            right_expr: alias_expr,
             evaluator: None,
             ty: LogicalType::Boolean,
         };
-        let (_, marker_ref) = self.bind_temp_table_alias(
-            ScalarExpression::Constant(DataValue::Boolean(true)),
-            0,
-            arena,
-        );
+        let marker = arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(true)));
+        let (_, marker_ref) = self.bind_temp_table_alias(marker, 0, arena);
         let output_column = marker_ref.output_column_ref(arena);
         self.context.sub_query(SubQueryType::QuantifiedSubQuery {
             quantifier,
@@ -305,12 +309,12 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
         if negated {
             Ok(ScalarExpression::Unary {
                 op: expression::UnaryOperator::Not,
-                expr: Box::new(marker_ref),
+                expr: marker_ref,
                 evaluator: None,
                 ty: LogicalType::Boolean,
             })
         } else {
-            Ok(marker_ref)
+            Ok(ScalarExpression::column_expr(output_column, 0))
         }
     }
 
@@ -328,8 +332,11 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                 .iter()
                 .find(|((table, column), _)| table.is_none() && column == column_name)
             {
+                // ORDER BY evaluates the alias against projection output, while
+                // the select expression is rewritten against projection input.
+                // Keep their position-sensitive expression graphs independent.
                 return Ok(ScalarExpression::Alias {
-                    expr: Box::new(expr.clone()),
+                    expr: expr.clone_expression(arena)?,
                     alias: AliasType::Name(column_name.to_string()),
                 });
             }
@@ -367,9 +374,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                         .get(column_name)
                         .map(|using_column| using_column.visible_expr(arena))
                         .transpose()?
-                        .or_else(|| {
-                            Self::find_column_in_scope(context, arena, column_name)
-                        }))
+                        .or_else(|| Self::find_column_in_scope(context, arena, column_name)))
                 };
             let mut got_column = find_visible_column(&self.context)?;
             if got_column.is_none() {
@@ -387,13 +392,11 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
 
     pub(crate) fn bind_binary_op_expr(
         &mut self,
-        left_expr: ScalarExpression,
-        right_expr: ScalarExpression,
+        left_expr: ExprRef,
+        right_expr: ExprRef,
         op: expression::BinaryOperator,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
-        let left_expr = Box::new(left_expr);
-        let right_expr = Box::new(right_expr);
         let left_ty = left_expr.return_type(arena);
         let right_ty = right_expr.return_type(arena);
         let ty = match &op {
@@ -439,11 +442,10 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
 
     pub(crate) fn bind_unary_op_expr(
         &mut self,
-        expr: ScalarExpression,
+        expr: ExprRef,
         op: expression::UnaryOperator,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
-        let expr = Box::new(expr);
         let ty = if let expression::UnaryOperator::Not = op {
             LogicalType::Boolean
         } else {
@@ -461,7 +463,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
     pub(crate) fn bind_aggregate_function(
         &mut self,
         kind: AggKind,
-        args: Vec<ScalarExpression>,
+        args: Vec<ExprRef>,
         is_distinct: bool,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
@@ -508,7 +510,7 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
     pub(crate) fn bind_function_call(
         &mut self,
         function_name: String,
-        mut args: Vec<ScalarExpression>,
+        mut args: Vec<ExprRef>,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
         match function_name.as_str() {
@@ -517,9 +519,9 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                     return Err(DatabaseError::MisMatch("number of if() parameters", "3"));
                 }
                 let ty = Self::return_type(&args[1], &args[2], arena)?;
-                let right_expr = Box::new(args.pop().unwrap());
-                let left_expr = Box::new(args.pop().unwrap());
-                let condition = Box::new(args.pop().unwrap());
+                let right_expr = args.pop().unwrap();
+                let left_expr = args.pop().unwrap();
+                let condition = args.pop().unwrap();
 
                 return Ok(ScalarExpression::If {
                     condition,
@@ -536,8 +538,8 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                     ));
                 }
                 let ty = Self::return_type(&args[0], &args[1], arena)?;
-                let right_expr = Box::new(args.pop().unwrap());
-                let left_expr = Box::new(args.pop().unwrap());
+                let right_expr = args.pop().unwrap();
+                let left_expr = args.pop().unwrap();
 
                 return Ok(ScalarExpression::NullIf {
                     left_expr,
@@ -553,8 +555,8 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
                     ));
                 }
                 let ty = Self::return_type(&args[0], &args[1], arena)?;
-                let right_expr = Box::new(args.pop().unwrap());
-                let left_expr = Box::new(args.pop().unwrap());
+                let right_expr = args.pop().unwrap();
+                let left_expr = args.pop().unwrap();
 
                 return Ok(ScalarExpression::IfNull {
                     left_expr,
@@ -615,8 +617,8 @@ impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T
     }
 
     pub(crate) fn return_type(
-        expr_1: &ScalarExpression,
-        expr_2: &ScalarExpression,
+        expr_1: &ExprRef,
+        expr_2: &ExprRef,
         arena: &PlanArena,
     ) -> Result<LogicalType, DatabaseError> {
         let temp_ty_1 = expr_1.return_type(arena);

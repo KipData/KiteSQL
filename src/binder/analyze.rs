@@ -26,7 +26,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
     pub(crate) fn bind_analyze(
         &mut self,
         table_name: TableName,
-        arena: &crate::planner::PlanArena,
+        arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let table = self
             .context

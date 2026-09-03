@@ -13,11 +13,9 @@
 // limitations under the License.
 
 use crate::catalog::{ColumnRef, TableName};
-use crate::iter_ext::Itertools;
+use crate::planner::{fmt_explain_list, Explain, PlanArena};
 use crate::types::index::IndexType;
 use kite_sql_serde_macros::ReferenceSerialization;
-use std::fmt;
-use std::fmt::Formatter;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct CreateIndexOperator {
@@ -29,15 +27,10 @@ pub struct CreateIndexOperator {
     pub ty: IndexType,
 }
 
-impl fmt::Display for CreateIndexOperator {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let columns = self.columns.iter().join(", ");
-        write!(
-            f,
-            "Create Index On {} -> [{}], If Not Exists: {}",
-            self.table_name, columns, self.if_not_exists
-        )?;
-
-        Ok(())
+impl Explain for CreateIndexOperator {
+    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Create Index On {} -> [", self.table_name)?;
+        fmt_explain_list(&self.columns, ", ", arena, f)?;
+        write!(f, "], If Not Exists: {}", self.if_not_exists)
     }
 }

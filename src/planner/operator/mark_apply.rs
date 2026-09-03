@@ -14,8 +14,7 @@
 
 use super::Operator;
 use crate::catalog::ColumnRef;
-use crate::expression::ScalarExpression;
-use crate::planner::{Childrens, LogicalPlan};
+use crate::planner::{Childrens, ExprRef, LogicalPlan};
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::fmt::Formatter;
@@ -35,13 +34,13 @@ pub enum MarkApplyKind {
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct MarkApplyOperator {
     pub kind: MarkApplyKind,
-    pub predicates: Vec<ScalarExpression>,
+    pub predicates: Vec<ExprRef>,
     output_column: ColumnRef,
-    pub parameterized_probe: Option<ScalarExpression>,
+    pub parameterized_probe: Option<ExprRef>,
 }
 
 impl MarkApplyOperator {
-    pub fn new_exists(output_column: ColumnRef, predicates: Vec<ScalarExpression>) -> Self {
+    pub fn new_exists(output_column: ColumnRef, predicates: Vec<ExprRef>) -> Self {
         Self {
             kind: MarkApplyKind::Exists,
             predicates,
@@ -54,7 +53,7 @@ impl MarkApplyOperator {
         left: LogicalPlan,
         right: LogicalPlan,
         output_column: ColumnRef,
-        predicates: Vec<ScalarExpression>,
+        predicates: Vec<ExprRef>,
     ) -> LogicalPlan {
         LogicalPlan::new(
             Operator::MarkApply(MarkApplyOperator::new_exists(output_column, predicates)),
@@ -65,14 +64,14 @@ impl MarkApplyOperator {
         )
     }
 
-    pub fn new_in(output_column: ColumnRef, predicates: Vec<ScalarExpression>) -> Self {
+    pub fn new_in(output_column: ColumnRef, predicates: Vec<ExprRef>) -> Self {
         Self::new_quantified(MarkApplyQuantifier::Any, output_column, predicates)
     }
 
     pub fn new_quantified(
         quantifier: MarkApplyQuantifier,
         output_column: ColumnRef,
-        predicates: Vec<ScalarExpression>,
+        predicates: Vec<ExprRef>,
     ) -> Self {
         Self {
             kind: MarkApplyKind::Quantified(quantifier),
@@ -86,7 +85,7 @@ impl MarkApplyOperator {
         left: LogicalPlan,
         right: LogicalPlan,
         output_column: ColumnRef,
-        predicates: Vec<ScalarExpression>,
+        predicates: Vec<ExprRef>,
     ) -> LogicalPlan {
         Self::build_quantified(
             left,
@@ -102,7 +101,7 @@ impl MarkApplyOperator {
         right: LogicalPlan,
         quantifier: MarkApplyQuantifier,
         output_column: ColumnRef,
-        predicates: Vec<ScalarExpression>,
+        predicates: Vec<ExprRef>,
     ) -> LogicalPlan {
         LogicalPlan::new(
             Operator::MarkApply(MarkApplyOperator::new_quantified(
@@ -117,11 +116,11 @@ impl MarkApplyOperator {
         )
     }
 
-    pub fn predicates(&self) -> &[ScalarExpression] {
+    pub fn predicates(&self) -> &[ExprRef] {
         &self.predicates
     }
 
-    pub fn predicates_mut(&mut self) -> &mut Vec<ScalarExpression> {
+    pub fn predicates_mut(&mut self) -> &mut Vec<ExprRef> {
         &mut self.predicates
     }
 
@@ -129,11 +128,11 @@ impl MarkApplyOperator {
         &self.output_column
     }
 
-    pub fn parameterized_probe(&self) -> Option<&ScalarExpression> {
+    pub fn parameterized_probe(&self) -> Option<&ExprRef> {
         self.parameterized_probe.as_ref()
     }
 
-    pub fn set_parameterized_probe(&mut self, probe: Option<ScalarExpression>) {
+    pub fn set_parameterized_probe(&mut self, probe: Option<ExprRef>) {
         self.parameterized_probe = probe;
     }
 }

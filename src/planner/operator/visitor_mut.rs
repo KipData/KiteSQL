@@ -16,6 +16,7 @@ use super::alter_table::change_column::DefaultChange;
 use super::*;
 use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::ExprVisitorMut;
+use crate::planner::PlanArena;
 
 pub trait OperatorVisitorMut<'a>: Sized {
     fn visit_operator(&mut self, operator: &'a mut Operator) -> Result<(), DatabaseError> {
@@ -211,46 +212,47 @@ pub trait OperatorVisitorMut<'a>: Sized {
     }
 }
 
-pub struct OperatorExprVisitorMut<'a, V> {
+pub struct OperatorExprVisitorMut<'a, 'arena, V> {
     visitor: &'a mut V,
+    arena: &'a mut PlanArena<'arena>,
 }
 
-impl<'a, V> OperatorExprVisitorMut<'a, V> {
-    pub fn new(visitor: &'a mut V) -> Self {
-        Self { visitor }
+impl<'a, 'arena, V> OperatorExprVisitorMut<'a, 'arena, V> {
+    pub fn new(visitor: &'a mut V, arena: &'a mut PlanArena<'arena>) -> Self {
+        Self { visitor, arena }
     }
 }
 
-impl<'a, V: ExprVisitorMut<'a>> OperatorVisitorMut<'a> for OperatorExprVisitorMut<'_, V> {
+impl<'a, V: ExprVisitorMut> OperatorVisitorMut<'a> for OperatorExprVisitorMut<'_, '_, V> {
     fn visit_aggregate(&mut self, op: &'a mut AggregateOperator) -> Result<(), DatabaseError> {
         for expr in op.agg_calls.iter_mut().chain(&mut op.groupby_exprs) {
-            ExprVisitorMut::visit(self.visitor, expr)?;
+            ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
         }
         Ok(())
     }
 
     fn visit_mark_apply(&mut self, op: &'a mut MarkApplyOperator) -> Result<(), DatabaseError> {
         for expr in &mut op.predicates {
-            ExprVisitorMut::visit(self.visitor, expr)?;
+            ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
         }
         if let Some(expr) = &mut op.parameterized_probe {
-            ExprVisitorMut::visit(self.visitor, expr)?;
+            ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
         }
         Ok(())
     }
 
     fn visit_filter(&mut self, op: &'a mut FilterOperator) -> Result<(), DatabaseError> {
-        ExprVisitorMut::visit(self.visitor, &mut op.predicate)
+        ExprVisitorMut::visit(self.visitor, &mut op.predicate, self.arena)
     }
 
     fn visit_join(&mut self, op: &'a mut JoinOperator) -> Result<(), DatabaseError> {
         if let JoinCondition::On { on, filter } = &mut op.on {
             for (left_expr, right_expr) in on {
-                ExprVisitorMut::visit(self.visitor, left_expr)?;
-                ExprVisitorMut::visit(self.visitor, right_expr)?;
+                ExprVisitorMut::visit(self.visitor, left_expr, self.arena)?;
+                ExprVisitorMut::visit(self.visitor, right_expr, self.arena)?;
             }
             if let Some(expr) = filter {
-                ExprVisitorMut::visit(self.visitor, expr)?;
+                ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
             }
         }
         Ok(())
@@ -258,7 +260,7 @@ impl<'a, V: ExprVisitorMut<'a>> OperatorVisitorMut<'a> for OperatorExprVisitorMu
 
     fn visit_project(&mut self, op: &'a mut ProjectOperator) -> Result<(), DatabaseError> {
         for expr in &mut op.exprs {
-            ExprVisitorMut::visit(self.visitor, expr)?;
+            ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
         }
         Ok(())
     }
@@ -267,11 +269,11 @@ impl<'a, V: ExprVisitorMut<'a>> OperatorVisitorMut<'a> for OperatorExprVisitorMu
         for index_info in &mut op.index_infos {
             if let SortOption::OrderBy { fields, .. } = &mut index_info.sort_option {
                 for field in fields {
-                    ExprVisitorMut::visit(self.visitor, &mut field.expr)?;
+                    ExprVisitorMut::visit(self.visitor, &mut field.expr, self.arena)?;
                 }
             }
             if let Some(expr) = &mut index_info.residual_predicate {
-                ExprVisitorMut::visit(self.visitor, expr)?;
+                ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
             }
         }
         Ok(())
@@ -282,14 +284,14 @@ impl<'a, V: ExprVisitorMut<'a>> OperatorVisitorMut<'a> for OperatorExprVisitorMu
         op: &'a mut FunctionScanOperator,
     ) -> Result<(), DatabaseError> {
         for expr in &mut op.table_function.args {
-            ExprVisitorMut::visit(self.visitor, expr)?;
+            ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
         }
         Ok(())
     }
 
     fn visit_sort(&mut self, op: &'a mut SortOperator) -> Result<(), DatabaseError> {
         for field in &mut op.sort_fields {
-            ExprVisitorMut::visit(self.visitor, &mut field.expr)?;
+            ExprVisitorMut::visit(self.visitor, &mut field.expr, self.arena)?;
         }
         Ok(())
     }
@@ -305,28 +307,28 @@ impl<'a, V: ExprVisitorMut<'a>> OperatorVisitorMut<'a> for OperatorExprVisitorMu
                     .flat_map(|function| &mut function.args),
             )
         {
-            ExprVisitorMut::visit(self.visitor, expr)?;
+            ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
         }
         Ok(())
     }
 
     fn visit_top_k(&mut self, op: &'a mut TopKOperator) -> Result<(), DatabaseError> {
         for field in &mut op.sort_fields {
-            ExprVisitorMut::visit(self.visitor, &mut field.expr)?;
+            ExprVisitorMut::visit(self.visitor, &mut field.expr, self.arena)?;
         }
         Ok(())
     }
 
     fn visit_update(&mut self, op: &'a mut UpdateOperator) -> Result<(), DatabaseError> {
         for (_, expr) in &mut op.value_exprs {
-            ExprVisitorMut::visit(self.visitor, expr)?;
+            ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
         }
         Ok(())
     }
 
     fn visit_add_column(&mut self, op: &'a mut AddColumnOperator) -> Result<(), DatabaseError> {
         if let Some(expr) = &mut op.column.desc_mut().default {
-            ExprVisitorMut::visit(self.visitor, expr)?;
+            ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
         }
         Ok(())
     }
@@ -336,7 +338,7 @@ impl<'a, V: ExprVisitorMut<'a>> OperatorVisitorMut<'a> for OperatorExprVisitorMu
         op: &'a mut ChangeColumnOperator,
     ) -> Result<(), DatabaseError> {
         if let DefaultChange::Set(expr) = &mut op.default_change {
-            ExprVisitorMut::visit(self.visitor, expr)?;
+            ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
         }
         Ok(())
     }
@@ -344,7 +346,7 @@ impl<'a, V: ExprVisitorMut<'a>> OperatorVisitorMut<'a> for OperatorExprVisitorMu
     fn visit_create_table(&mut self, op: &'a mut CreateTableOperator) -> Result<(), DatabaseError> {
         for column in &mut op.columns {
             if let Some(expr) = &mut column.desc_mut().default {
-                ExprVisitorMut::visit(self.visitor, expr)?;
+                ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
             }
         }
         Ok(())
@@ -408,8 +410,12 @@ mod tests {
 
     struct IncrementConstants(usize);
 
-    impl ExprVisitorMut<'_> for IncrementConstants {
-        fn visit_constant(&mut self, value: &mut DataValue) -> Result<(), DatabaseError> {
+    impl ExprVisitorMut for IncrementConstants {
+        fn visit_constant(
+            &mut self,
+            value: &mut DataValue,
+            _arena: &mut PlanArena<'_>,
+        ) -> Result<(), DatabaseError> {
             if let DataValue::Int32(value) = value {
                 *value += 1;
             }
@@ -423,14 +429,16 @@ mod tests {
         struct NoopVisitor;
         impl OperatorVisitorMut<'_> for NoopVisitor {}
 
-        let mut operators = all_operators()?;
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let mut operators = all_operators(&mut arena)?;
         for operator in &mut operators {
             NoopVisitor.visit_operator(operator)?;
         }
 
         let mut counter = IncrementConstants(0);
         {
-            let mut visitor = OperatorExprVisitorMut::new(&mut counter);
+            let mut visitor = OperatorExprVisitorMut::new(&mut counter, &mut arena);
             for operator in &mut operators {
                 visitor.visit_operator(operator)?;
             }

@@ -26,7 +26,6 @@ use chrono::{
 use ordered_float::OrderedFloat;
 #[cfg(feature = "decimal")]
 use rust_decimal::Decimal;
-use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::fmt::Formatter;
 use std::hash::Hash;
@@ -1310,7 +1309,7 @@ impl DataValue {
                 to_varchar(value, *len, *unit)
             }
             (value, _) => {
-                let evaluator = cast_create(Cow::Owned(from), Cow::Borrowed(to))?;
+                let evaluator = cast_create(&from, to)?;
                 evaluator.eval(&value)
             }
         }

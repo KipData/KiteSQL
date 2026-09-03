@@ -71,18 +71,14 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
     let mut field_index_resolvers = Vec::new();
     let mut params = Vec::new();
     let mut orm_fields = Vec::new();
-    let mut orm_columns = Vec::new();
     let mut field_getters = Vec::new();
     let mut column_names = Vec::new();
-    let mut placeholder_names = Vec::new();
     let mut orm_indexes = Vec::new();
     let mut persisted_columns = Vec::new();
     let mut index_names = BTreeSet::new();
     index_names.insert("pk_index".to_string());
     let mut primary_key_type = None;
     let mut primary_key_value = None;
-    let mut primary_key_column = None;
-    let mut primary_key_placeholder = None;
     let mut primary_key_count = 0usize;
 
     for field in data_struct.fields {
@@ -165,23 +161,18 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             .map(|value| LitStr::new(&value, Span::call_site()));
         let field_name_string = field_name.to_string();
         let column_name = field.rename.unwrap_or_else(|| field_name_string.clone());
-        let placeholder_name = format!(":{column_name}");
         let column_name_lit = LitStr::new(&column_name, Span::call_site());
-        let placeholder_lit = LitStr::new(&placeholder_name, Span::call_site());
         let is_primary_key = field.primary_key;
         let is_unique = field.unique;
         let is_index = field.index;
-        let column_index = orm_columns.len();
+        let column_index = orm_fields.len();
         let field_index_ident = format_ident!("__kite_orm_{field_name}_index");
 
         persisted_columns.push((field_name_string, column_name.clone()));
         column_names.push(column_name.clone());
-        placeholder_names.push(placeholder_name.clone());
 
         if is_primary_key {
             primary_key_count += 1;
-            primary_key_column = Some(column_name.clone());
-            primary_key_placeholder = Some(placeholder_name.clone());
             primary_key_type = Some(quote! { #field_ty });
             primary_key_value = Some(quote! {
                 &self.#field_name
@@ -250,15 +241,31 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             )?
         });
         params.push(quote! {
-            (#placeholder_lit, ::kite_sql::orm::ToDataValue::to_data_value(&self.#field_name))
+            (#column_name_lit, ::kite_sql::orm::ToDataValue::to_data_value(&self.#field_name))
         });
         orm_fields.push(quote! {
-            ::kite_sql::orm::OrmField {
-                column: #column_name_lit,
-                column_index: #column_index,
-                placeholder: #placeholder_lit,
-                primary_key: #is_primary_key,
-                unique: #is_unique,
+            {
+                let data_type = #data_type;
+                let default = #default_tokens.map(|value| {
+                    ::kite_sql::expression::ScalarExpression::Constant(
+                        value
+                            .cast(&data_type)
+                            .expect("failed to cast ORM default value to column type"),
+                    )
+                });
+                ::kite_sql::orm::OrmField {
+                    column: #column_name_lit,
+                    column_index: #column_index,
+                    data_type,
+                    nullable: if #is_primary_key {
+                        false
+                    } else {
+                        <#field_ty as ::kite_sql::orm::ModelColumnType>::nullable()
+                    },
+                    default,
+                    primary_key: #is_primary_key,
+                    unique: #is_unique,
+                }
             }
         });
         let getter_name = format_ident!("{}", field_name);
@@ -267,35 +274,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                 ::kite_sql::orm::Field::new(#table_name_lit, #column_name_lit)
             }
         });
-        orm_columns.push(quote! {
-            {
-                let data_type = #data_type;
-                let default = #default_tokens
-                    .map(|value| {
-                        ::kite_sql::expression::ScalarExpression::Constant(
-                            value
-                                .cast(&data_type)
-                                .expect("failed to cast ORM default value to column type"),
-                        )
-                    });
-                let desc = ::kite_sql::catalog::column::ColumnDesc::new(
-                    data_type,
-                    #is_primary_key.then_some(#column_index),
-                    #is_unique,
-                    default,
-                )
-                    .expect("failed to build ORM column descriptor");
-                ::kite_sql::catalog::column::ColumnCatalog::new(
-                    #column_name_lit.to_string(),
-                    if #is_primary_key {
-                        false
-                    } else {
-                        <#field_ty as ::kite_sql::orm::ModelColumnType>::nullable()
-                    },
-                    desc,
-                )
-            }
-        });
+
         if is_unique {
             let unique_index_name_value = format!("uk_{column_name}_index");
             if !index_names.insert(unique_index_name_value.clone()) {
@@ -398,8 +377,6 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 
     let primary_key_type = primary_key_type.expect("primary key checked above");
     let primary_key_value = primary_key_value.expect("primary key checked above");
-    let _primary_key_column = primary_key_column.expect("primary key checked above");
-    let _primary_key_placeholder = primary_key_placeholder.expect("primary key checked above");
     let field_count = field_index_declarations.len();
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
@@ -444,18 +421,12 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             }
 
             fn fields() -> &'static [::kite_sql::orm::OrmField] {
-                &[
-                    #(#orm_fields),*
-                ]
-            }
-
-            fn columns() -> &'static [::kite_sql::catalog::column::ColumnCatalog] {
-                static ORM_COLUMNS: ::std::sync::LazyLock<::std::vec::Vec<::kite_sql::catalog::column::ColumnCatalog>> = ::std::sync::LazyLock::new(|| {
+                static ORM_FIELDS: ::std::sync::LazyLock<::std::vec::Vec<::kite_sql::orm::OrmField>> = ::std::sync::LazyLock::new(|| {
                     vec![
-                        #(#orm_columns),*
+                        #(#orm_fields),*
                     ]
                 });
-                ORM_COLUMNS.as_slice()
+                ORM_FIELDS.as_slice()
             }
 
             fn indexes() -> &'static [(&'static str, &'static [&'static str], bool)] {

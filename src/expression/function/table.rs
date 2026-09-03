@@ -14,8 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::expression::function::FunctionSummary;
-use crate::expression::ScalarExpression;
-use crate::planner::TableArena;
+use crate::planner::{ExprRef, PlanArena, TableArena};
 use crate::types::tuple::{Schema, Tuple};
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt::Debug;
@@ -36,7 +35,7 @@ impl Deref for ArcTableFunctionImpl {
 
 #[derive(Debug, Clone, ReferenceSerialization)]
 pub struct TableFunction {
-    pub(crate) args: Vec<ScalarExpression>,
+    pub(crate) args: Vec<ExprRef>,
     pub(crate) catalog: TableFunctionCatalog,
 }
 
@@ -62,7 +61,8 @@ impl Hash for TableFunction {
 pub trait TableFunctionImpl: Debug + Send + Sync {
     fn eval(
         &self,
-        args: &[ScalarExpression],
+        args: &[ExprRef],
+        arena: &PlanArena<'_>,
     ) -> Result<Box<dyn Iterator<Item = Result<Tuple, DatabaseError>>>, DatabaseError>;
 
     fn summary(&self) -> &FunctionSummary;

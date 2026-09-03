@@ -81,7 +81,7 @@ analyze table t_update_idx
 query T
 explain select id, b, c from t_update_idx where b = 10
 ----
-Projection [#1, #2, #3] [Project => (Sort Option: Follow)] TableScan t_update_idx -> [#1, #2, #3] [IndexScan By #2 => 10 => (Sort Option: OrderBy: (#2 Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [t_update_idx.id, t_update_idx.b, t_update_idx.c] [Project => (Sort Option: Follow)] TableScan t_update_idx -> [t_update_idx.id, t_update_idx.b, t_update_idx.c] [IndexScan By idx_t_update_idx_b => 10 => (Sort Option: OrderBy: (t_update_idx.b Asc Nulls Last) ignore_prefix_len: 0)]
 
 statement ok
 update t_update_idx set c = 111 where id = 9

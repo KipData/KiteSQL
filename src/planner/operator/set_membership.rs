@@ -12,13 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::iter_ext::Itertools;
 use crate::planner::operator::Operator;
-use crate::planner::{Childrens, LogicalPlan};
+use crate::planner::{fmt_explain_list, Childrens, Explain, LogicalPlan, PlanArena};
 use crate::types::tuple::Schema;
 use kite_sql_serde_macros::ReferenceSerialization;
-use std::fmt;
-use std::fmt::Formatter;
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone, Hash, ReferenceSerialization)]
 pub enum SetMembershipKind {
@@ -65,12 +62,10 @@ impl SetMembershipOperator {
     }
 }
 
-impl fmt::Display for SetMembershipOperator {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let schema = self.left_schema_ref.iter().join(", ");
-
-        write!(f, "{}: [{schema}]", self.kind.name())?;
-
-        Ok(())
+impl Explain for SetMembershipOperator {
+    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: [", self.kind.name())?;
+        fmt_explain_list(&self.left_schema_ref, ", ", arena, f)?;
+        f.write_str("]")
     }
 }

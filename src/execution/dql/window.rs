@@ -120,10 +120,16 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Window {
 }
 
 impl Window {
-    fn update_keys(&mut self, tuple: &Tuple) -> Result<Option<Boundary>, DatabaseError> {
+    fn update_keys(
+        &mut self,
+        tuple: &Tuple,
+        plan_arena: &crate::planner::PlanArena<'_>,
+    ) -> Result<Option<Boundary>, DatabaseError> {
         let mut boundary = (!self.state.started).then_some(Boundary::Partition);
         for (index, field) in self.sort_fields.iter().enumerate() {
-            let value = field.expr.eval(Some(tuple))?;
+            let value = plan_arena
+                .expression(field.expr)
+                .eval(plan_arena, Some(tuple))?;
             if self.state.started && self.state.sort_values[index] != value {
                 if index < self.partition_by_len {
                     boundary = Some(Boundary::Partition);
@@ -146,7 +152,10 @@ impl Window {
         Ok(())
     }
 
-    fn eval_functions(&mut self) -> Result<(), DatabaseError> {
+    fn eval_functions(
+        &mut self,
+        plan_arena: &crate::planner::PlanArena<'_>,
+    ) -> Result<(), DatabaseError> {
         if self.state.buffered.is_empty() {
             return Ok(());
         }
@@ -163,23 +172,29 @@ impl Window {
                 self.state.peer_start,
                 self.state.peer_index,
                 output_offset + slot,
+                plan_arena,
             )?;
         }
         self.state.buffered.reverse();
         Ok(())
     }
 
-    fn eval(&mut self, tuple: Tuple, boundary: Option<Boundary>) -> Result<bool, DatabaseError> {
+    fn eval(
+        &mut self,
+        tuple: Tuple,
+        boundary: Option<Boundary>,
+        plan_arena: &crate::planner::PlanArena<'_>,
+    ) -> Result<bool, DatabaseError> {
         let boundary = match boundary {
             Some(boundary) => Some(boundary),
-            None => self.update_keys(&tuple)?,
+            None => self.update_keys(&tuple, plan_arena)?,
         };
         if let Some(boundary) = boundary {
             let reached_boundary = boundary == Boundary::Partition
                 || boundary == Boundary::Peer && self.retention == Retention::Peer;
             if reached_boundary && !self.state.buffered.is_empty() {
                 self.state.pending = Some((tuple, boundary));
-                self.eval_functions()?;
+                self.eval_functions(plan_arena)?;
                 return Ok(true);
             }
         }
@@ -197,7 +212,7 @@ impl Window {
         self.state.partition_rows += 1;
         self.state.buffered.push((row_index, tuple));
         if self.retention == Retention::Row {
-            self.eval_functions()?;
+            self.eval_functions(plan_arena)?;
             return Ok(true);
         }
         Ok(false)
@@ -228,13 +243,13 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Window {
             } else if arena.next_tuple(self.input, plan_arena)? {
                 (mem::take(arena.result_tuple_mut()), None)
             } else {
-                self.eval_functions()?;
+                self.eval_functions(plan_arena)?;
                 self.input_exhausted = true;
                 output_ready = true;
                 continue;
             };
 
-            output_ready = self.eval(tuple, boundary)?;
+            output_ready = self.eval(tuple, boundary, plan_arena)?;
         }
     }
 }
@@ -246,10 +261,14 @@ mod tests {
     use crate::catalog::ColumnRef;
     use crate::expression::agg::AggKind;
     use crate::expression::ScalarExpression;
+    use crate::planner::ExprRef;
     use crate::types::LogicalType;
 
-    fn column(position: usize) -> ScalarExpression {
-        ScalarExpression::column_expr(ColumnRef::new(position + 1), position)
+    fn column(arena: &mut crate::planner::PlanArena, position: usize) -> ExprRef {
+        arena.alloc_expression(ScalarExpression::column_expr(
+            ColumnRef::new(position + 1),
+            position,
+        ))
     }
 
     fn window(
@@ -275,9 +294,16 @@ mod tests {
 
     #[test]
     fn row_materialization_streams_rows() -> Result<(), DatabaseError> {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let partition = column(&mut plan_arena, 0);
+        let order = column(&mut plan_arena, 1);
         let mut window = window(
             Retention::Row,
-            vec![column(0).asc(), column(1).asc()],
+            vec![
+                SortField::from(partition).asc(),
+                SortField::from(order).asc(),
+            ],
             1,
             vec![
                 function::new(
@@ -289,7 +315,7 @@ mod tests {
             ],
         );
         for (value, expected) in [(10, [1_i64, 1]), (10, [2, 1]), (20, [3, 3])] {
-            window.eval(tuple(&[1, value]), None)?;
+            window.eval(tuple(&[1, value]), None, &plan_arena)?;
             let row = window.state.buffered.pop().unwrap().1;
             assert_eq!(row.values[2..], expected.map(DataValue::from));
         }
@@ -298,19 +324,26 @@ mod tests {
 
     #[test]
     fn peer_materialization_waits_for_peer_boundary() -> Result<(), DatabaseError> {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let partition = column(&mut plan_arena, 0);
+        let value = column(&mut plan_arena, 1);
         let mut window = window(
             Retention::Peer,
-            vec![column(0).asc(), column(1).asc()],
+            vec![
+                SortField::from(partition).asc(),
+                SortField::from(value).asc(),
+            ],
             1,
             vec![function::new(
                 WindowFunctionKind::Aggregate(AggKind::Sum),
-                vec![column(1)],
+                vec![value],
                 LogicalType::Integer,
             )],
         );
-        window.eval(tuple(&[1, 10]), None)?;
-        window.eval(tuple(&[1, 10]), None)?;
-        window.eval(tuple(&[1, 20]), None)?;
+        window.eval(tuple(&[1, 10]), None, &plan_arena)?;
+        window.eval(tuple(&[1, 10]), None, &plan_arena)?;
+        window.eval(tuple(&[1, 20]), None, &plan_arena)?;
         assert_eq!(window.state.buffered.len(), 2);
         assert!(window.state.pending.is_some());
         Ok(())
@@ -318,19 +351,23 @@ mod tests {
 
     #[test]
     fn partition_materialization_waits_for_partition_boundary() -> Result<(), DatabaseError> {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let partition = column(&mut plan_arena, 0);
+        let value = column(&mut plan_arena, 1);
         let mut window = window(
             Retention::Partition,
-            vec![column(0).asc()],
+            vec![SortField::from(partition).asc()],
             1,
             vec![function::new(
                 WindowFunctionKind::Aggregate(AggKind::Sum),
-                vec![column(1)],
+                vec![value],
                 LogicalType::Integer,
             )],
         );
-        window.eval(tuple(&[1, 3]), None)?;
-        window.eval(tuple(&[1, 7]), None)?;
-        window.eval(tuple(&[2, 5]), None)?;
+        window.eval(tuple(&[1, 3]), None, &plan_arena)?;
+        window.eval(tuple(&[1, 7]), None, &plan_arena)?;
+        window.eval(tuple(&[2, 5]), None, &plan_arena)?;
         assert_eq!(window.state.buffered.len(), 2);
         assert!(window.state.pending.is_some());
         Ok(())

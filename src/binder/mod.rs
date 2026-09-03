@@ -63,10 +63,10 @@ use crate::catalog::view::View;
 use crate::catalog::{ColumnRef, TableCatalog, TableName};
 use crate::db::{ScalaFunctions, TableFunctions};
 use crate::errors::DatabaseError;
-use crate::expression::ScalarExpression;
+use crate::expression::{ScalarExpression, TypeCast};
 use crate::planner::operator::join::JoinType;
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
-use crate::planner::{LogicalPlan, PlanArena, PlanRef};
+use crate::planner::{ExprRef, LogicalPlan, PlanArena, PlanRef};
 use crate::storage::{TableCache, Transaction, ViewCache};
 use crate::types::tuple::Schema;
 use crate::types::value::DataValue;
@@ -206,13 +206,13 @@ impl UsingColumn {
 
     pub(crate) fn visible_expr(
         &self,
-        arena: &PlanArena,
+        arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
         match self.join_type {
             JoinType::RightOuter => Ok(self.right_expr()),
             JoinType::Full => {
-                let left_expr = self.left_expr();
-                let right_expr = self.right_expr();
+                let left_expr = arena.alloc_expression(self.left_expr());
+                let right_expr = arena.alloc_expression(self.right_expr());
                 let left_ty = left_expr.return_type(arena);
                 let right_ty = right_expr.return_type(arena);
                 let ty = LogicalType::max_logical_type(&left_ty, &right_ty)?.into_owned();
@@ -248,11 +248,11 @@ pub struct BinderContext<'a, T: Transaction> {
     ctes: Vec<CteBinding>,
     pub(crate) cte_depth: usize,
     // alias
-    expr_aliases: BTreeMap<(Option<String>, String), ScalarExpression>,
+    expr_aliases: BTreeMap<(Option<String>, String), ExprRef>,
     table_aliases: HashMap<TableName, TableName>,
     // agg
-    group_by_exprs: Vec<ScalarExpression>,
-    pub(crate) agg_calls: Vec<ScalarExpression>,
+    group_by_exprs: Vec<ExprRef>,
+    pub(crate) agg_calls: Vec<ExprRef>,
     // join
     using: HashMap<String, UsingColumn>,
 
@@ -599,12 +599,7 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
         Ok(())
     }
 
-    pub fn add_alias(
-        &mut self,
-        alias_table: Option<String>,
-        alias_column: String,
-        expr: ScalarExpression,
-    ) {
+    pub fn add_alias(&mut self, alias_table: Option<String>, alias_column: String, expr: ExprRef) {
         self.expr_aliases.insert((alias_table, alias_column), expr);
     }
 
@@ -612,7 +607,7 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
         self.table_aliases.insert(alias.clone(), table.clone());
     }
 
-    pub fn has_agg_call(&self, expr: &ScalarExpression) -> bool {
+    pub fn has_agg_call(&self, expr: &ExprRef) -> bool {
         self.group_by_exprs.contains(expr)
     }
 }

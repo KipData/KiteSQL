@@ -17,16 +17,56 @@ pub mod operator;
 
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
+use crate::expression::visitor_mut::ExprCloner;
 use crate::planner::operator::recursive_cte::{RecursiveCteOperator, RecursiveScanOperator};
 use crate::planner::operator::set_membership::SetMembershipOperator;
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::values::ValuesOperator;
+use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
 use crate::planner::operator::{Operator, PhysicalOption};
 use kite_sql_serde_macros::ReferenceSerialization;
+use std::fmt;
 use std::hash::{Hash, Hasher};
 
 pub(crate) use arena::PlanRef;
-pub use arena::{MetaArena, PlanArena, TableArena, TableArenaCell};
+pub use arena::{ExprRef, MetaArena, PlanArena, TableArena, TableArenaCell};
+
+pub(crate) trait Explain {
+    fn fmt(&self, arena: &PlanArena<'_>, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+
+    fn explain<'a, 'p>(&'a self, arena: &'a PlanArena<'p>) -> ExplainDisplay<'a, 'p, Self>
+    where
+        Self: Sized,
+    {
+        ExplainDisplay { value: self, arena }
+    }
+}
+
+pub(crate) struct ExplainDisplay<'a, 'p, T: ?Sized> {
+    value: &'a T,
+    arena: &'a PlanArena<'p>,
+}
+
+impl<T: Explain + ?Sized> fmt::Display for ExplainDisplay<'_, '_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.value.fmt(self.arena, f)
+    }
+}
+
+pub(crate) fn fmt_explain_list<T: Explain>(
+    values: &[T],
+    separator: &str,
+    arena: &PlanArena<'_>,
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            f.write_str(separator)?;
+        }
+        value.fmt(arena, f)?;
+    }
+    Ok(())
+}
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub enum Childrens {
@@ -110,6 +150,32 @@ impl LogicalPlan {
             physical_option: None,
             output_schema: None,
         }
+    }
+
+    pub(crate) fn clone_plan(
+        &self,
+        arena: &mut PlanArena<'_>,
+    ) -> Result<LogicalPlan, DatabaseError> {
+        fn clone_expressions(
+            plan: &mut LogicalPlan,
+            cloner: &mut ExprCloner,
+            arena: &mut PlanArena<'_>,
+        ) -> Result<(), DatabaseError> {
+            OperatorExprVisitorMut::new(cloner, arena).visit_operator(&mut plan.operator)?;
+            match plan.childrens.as_mut() {
+                Childrens::Only(child) => clone_expressions(child, cloner, arena)?,
+                Childrens::Twins { left, right } => {
+                    clone_expressions(left, cloner, arena)?;
+                    clone_expressions(right, cloner, arena)?;
+                }
+                Childrens::None => {}
+            }
+            Ok(())
+        }
+
+        let mut plan = self.clone();
+        clone_expressions(&mut plan, &mut ExprCloner, arena)?;
+        Ok(plan)
     }
 
     pub(crate) fn take(&mut self) -> Self {
@@ -306,21 +372,29 @@ impl LogicalPlan {
         }
     }
 
-    #[allow(clippy::only_used_in_recursion)]
     pub fn explain(&self, arena: &mut PlanArena, indentation: usize) -> String {
-        let mut result = format!("{:indent$}{}", "", self.operator, indent = indentation);
+        format!(
+            "{:indent$}{}",
+            "",
+            Explain::explain(self, arena),
+            indent = indentation
+        )
+    }
+}
+
+impl Explain for LogicalPlan {
+    fn fmt(&self, arena: &PlanArena<'_>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.operator.fmt(arena, f)?;
 
         if let Some(physical_option) = &self.physical_option {
-            result.push_str(&format!(" [{physical_option}]"));
+            write!(f, " [{}]", physical_option.explain(arena))?;
         }
 
         for child in self.childrens.iter() {
-            let child = child.explain(arena, indentation + 2);
-            result.push(' ');
-            result.push_str(child.trim_start());
+            write!(f, " {}", Explain::explain(child, arena))?;
         }
 
-        result
+        Ok(())
     }
 }
 
@@ -475,11 +549,16 @@ mod tests {
             left: Box::new(left),
             right: Box::new(right),
         };
-        let operators = twins
-            .iter()
-            .map(|plan| format!("{}", plan.operator))
-            .collect::<Vec<_>>();
-        assert_eq!(operators, vec!["Show Tables", "Show Views"]);
+        let mut children = twins.iter();
+        assert!(matches!(
+            children.next().map(|plan| &plan.operator),
+            Some(Operator::ShowTable)
+        ));
+        assert!(matches!(
+            children.next().map(|plan| &plan.operator),
+            Some(Operator::ShowView)
+        ));
+        assert!(children.next().is_none());
 
         let (left, right) = twins.pop_twins();
         assert!(matches!(left.operator, Operator::ShowTable));
@@ -503,7 +582,7 @@ mod tests {
         assert_eq!(tables, vec!["users"]);
         assert_eq!(
             plan.explain(&mut arena, 0),
-            "Limit 5, Offset 2 [Limit => (Sort Option: Follow)] TableScan users -> [#0]"
+            "Limit 5, Offset 2 [Limit => (Sort Option: Follow)] TableScan users -> [id]"
         );
 
         let _ = plan.output_schema(&mut arena);

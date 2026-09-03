@@ -12,13 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
-
 use super::{Binder, QueryBindStep};
 use crate::errors::DatabaseError;
 use crate::expression::visitor::{walk_expr, ExprVisitor};
 use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut};
-use crate::planner::LogicalPlan;
+use crate::planner::{ExprRef, LogicalPlan, PlanArena};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
 use crate::{
@@ -27,16 +25,16 @@ use crate::{
 };
 
 struct AggregateCallCollector<'a> {
-    agg_calls: &'a mut Vec<ScalarExpression>,
+    agg_calls: &'a mut Vec<ExprRef>,
 }
 
-impl<'expr> ExprVisitor<'expr> for AggregateCallCollector<'_> {
-    fn visit(&mut self, expr: &'expr ScalarExpression) -> Result<(), DatabaseError> {
-        match expr {
-            ScalarExpression::AggCall { .. } => self.agg_calls.push(expr.clone()),
-            ScalarExpression::Alias { expr, .. } => self.visit(expr)?,
+impl ExprVisitor<PlanArena<'_>> for AggregateCallCollector<'_> {
+    fn visit(&mut self, expr: ExprRef, arena: &PlanArena<'_>) -> Result<(), DatabaseError> {
+        match arena.expression(expr) {
+            ScalarExpression::AggCall { .. } => self.agg_calls.push(expr),
+            ScalarExpression::Alias { expr, .. } => self.visit(*expr, arena)?,
             ScalarExpression::Empty | ScalarExpression::TableFunction(_) => unreachable!(),
-            _ => walk_expr(self, expr)?,
+            _ => walk_expr(self, expr, arena)?,
         }
         Ok(())
     }
@@ -46,8 +44,8 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
     pub fn bind_aggregate(
         &mut self,
         children: LogicalPlan,
-        agg_calls: Vec<ScalarExpression>,
-        groupby_exprs: Vec<ScalarExpression>,
+        agg_calls: Vec<ExprRef>,
+        groupby_exprs: Vec<ExprRef>,
     ) -> Result<LogicalPlan, DatabaseError> {
         self.context.step(QueryBindStep::Agg);
         Ok(AggregateOperator::build(
@@ -61,46 +59,49 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
 
     pub fn extract_select_aggregate(
         &mut self,
-        select_items: &mut [ScalarExpression],
+        select_items: &mut [ExprRef],
+        arena: &PlanArena<'_>,
     ) -> Result<(), DatabaseError> {
         for column in select_items {
-            self.collect_aggregate_calls(column)?;
+            self.collect_aggregate_calls(*column, arena)?;
         }
         Ok(())
     }
 
     pub fn extract_group_by_aggregate_exprs(
         &mut self,
-        select_list: &mut [ScalarExpression],
-        mut group_by_exprs: Vec<ScalarExpression>,
+        select_list: &mut [ExprRef],
+        mut group_by_exprs: Vec<ExprRef>,
+        arena: &mut PlanArena<'_>,
     ) -> Result<(), DatabaseError> {
-        self.validate_groupby_illegal_column(select_list, &group_by_exprs)?;
+        self.validate_groupby_illegal_column(select_list, &group_by_exprs, arena)?;
 
         for expr in group_by_exprs.iter_mut() {
-            self.visit_group_by_expr(select_list, expr);
+            self.visit_group_by_expr(select_list, *expr, arena)?;
         }
         Ok(())
     }
 
-    pub fn extract_having_orderby_aggregate_exprs<I, F>(
+    pub fn extract_having_orderby_aggregate_exprs<'arena, I, F>(
         &mut self,
-        mut having: Option<ScalarExpression>,
+        mut having: Option<ExprRef>,
         orderby: Option<I>,
         mut bind_sort_field: F,
-    ) -> Result<(Option<ScalarExpression>, Option<Vec<SortField>>), DatabaseError>
+        arena: &mut PlanArena<'arena>,
+    ) -> Result<(Option<ExprRef>, Option<Vec<SortField>>), DatabaseError>
     where
         I: IntoIterator,
-        F: FnMut(&mut Self, I::Item) -> Result<SortField, DatabaseError>,
+        F: FnMut(&mut Self, I::Item, &mut PlanArena<'arena>) -> Result<SortField, DatabaseError>,
     {
         if let Some(having) = having.as_mut() {
-            self.collect_aggregate_calls(having)?;
+            self.collect_aggregate_calls(*having, arena)?;
         }
         let mut return_orderby = None;
         if let Some(orderby) = orderby {
             let mut fields = Vec::new();
             for orderby in orderby {
-                let field = bind_sort_field(self, orderby)?;
-                self.collect_aggregate_calls(&field.expr)?;
+                let field = bind_sort_field(self, orderby, arena)?;
+                self.collect_aggregate_calls(field.expr, arena)?;
                 fields.push(field);
             }
             return_orderby = Some(fields);
@@ -110,7 +111,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
 
     pub fn bind_aggregate_output_exprs<'c>(
         &mut self,
-        exprs: impl IntoIterator<Item = &'c mut ScalarExpression>,
+        exprs: impl IntoIterator<Item = &'c mut ExprRef>,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<(), DatabaseError> {
         self.bind_aggregate_output_exprs_with_outputs(
@@ -123,23 +124,27 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
 
     pub(crate) fn bind_aggregate_output_exprs_with_outputs<'c>(
         &self,
-        agg_calls: &[ScalarExpression],
-        group_by_exprs: &[ScalarExpression],
-        exprs: impl IntoIterator<Item = &'c mut ScalarExpression>,
+        agg_calls: &[ExprRef],
+        group_by_exprs: &[ExprRef],
+        exprs: impl IntoIterator<Item = &'c mut ExprRef>,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<(), DatabaseError> {
-        let mut binder = AggregateOutputBinder::new(agg_calls, group_by_exprs, arena);
+        let mut binder = AggregateOutputBinder::new(agg_calls, group_by_exprs);
         for expr in exprs {
-            binder.visit(expr)?;
+            binder.visit(expr, arena)?;
         }
         Ok(())
     }
 
-    fn collect_aggregate_calls(&mut self, expr: &ScalarExpression) -> Result<(), DatabaseError> {
+    pub(crate) fn collect_aggregate_calls(
+        &mut self,
+        expr: ExprRef,
+        arena: &PlanArena<'_>,
+    ) -> Result<(), DatabaseError> {
         AggregateCallCollector {
             agg_calls: &mut self.context.agg_calls,
         }
-        .visit(expr)
+        .visit(expr, arena)
     }
 
     /// Validate select exprs must appear in the GROUP BY clause or be used in
@@ -149,16 +154,17 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
     ///      SELECT a,count(b) FROM t GROUP BY b. it's error.
     fn validate_groupby_illegal_column(
         &mut self,
-        select_items: &[ScalarExpression],
-        groupby: &[ScalarExpression],
+        select_items: &[ExprRef],
+        groupby: &[ExprRef],
+        arena: &PlanArena<'_>,
     ) -> Result<(), DatabaseError> {
-        let mut group_raw_exprs = vec![];
+        let mut unmatched_group_exprs = Vec::with_capacity(groupby.len());
         for expr in groupby {
-            if let ScalarExpression::Alias { alias, .. } = expr {
+            if let ScalarExpression::Alias { alias, .. } = arena.expression(*expr) {
                 let alias_expr = select_items.iter().find(|column| {
                     if let ScalarExpression::Alias {
                         alias: inner_alias, ..
-                    } = &column
+                    } = arena.expression(**column)
                     {
                         alias == inner_alias
                     } else {
@@ -167,33 +173,35 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
                 });
 
                 if let Some(inner_expr) = alias_expr {
-                    group_raw_exprs.push(inner_expr);
+                    unmatched_group_exprs.push(*inner_expr);
                 }
             } else {
-                group_raw_exprs.push(expr);
+                unmatched_group_exprs.push(*expr);
             }
         }
-        let mut group_raw_set: HashSet<&ScalarExpression> =
-            HashSet::from_iter(group_raw_exprs.iter().copied());
 
         for expr in select_items {
-            if expr.has_window_call()? {
-                HavingOrderByValidator::new(groupby, &self.context.agg_calls).visit(expr)?;
+            if expr.has_window_call(arena)? {
+                HavingOrderByValidator::new(groupby, &self.context.agg_calls)
+                    .visit(*expr, arena)?;
                 continue;
             }
-            if expr.has_agg_call()? {
+            if expr.has_agg_call(arena)? {
                 continue;
             }
-            group_raw_set.remove(expr);
-
-            if !group_raw_exprs.contains(&expr) {
+            let Some(position) = unmatched_group_exprs
+                .iter()
+                .position(|group_expr| expr.eq_ignore_colref_pos(*group_expr, arena))
+            else {
                 return Err(DatabaseError::AggMiss(format!(
-                    "`{expr}` must appear in the GROUP BY clause or be used in an aggregate function"
+                    "`{}` must appear in the GROUP BY clause or be used in an aggregate function",
+                    expr.output_name(arena)
                 )));
-            }
+            };
+            unmatched_group_exprs.remove(position);
         }
 
-        if !group_raw_set.is_empty() {
+        if !unmatched_group_exprs.is_empty() {
             return Err(DatabaseError::AggMiss(
                 "in the GROUP BY clause the field must be in the select clause".to_string(),
             ));
@@ -204,120 +212,139 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
 
     fn visit_group_by_expr(
         &mut self,
-        select_list: &mut [ScalarExpression],
-        expr: &mut ScalarExpression,
-    ) {
-        if let ScalarExpression::Alias { alias, .. } = expr {
+        select_list: &mut [ExprRef],
+        expr: ExprRef,
+        arena: &mut PlanArena<'_>,
+    ) -> Result<(), DatabaseError> {
+        if let ScalarExpression::Alias { alias, .. } = arena.expression(expr) {
             if let Some(i) = select_list.iter().position(|inner_expr| {
                 if let ScalarExpression::Alias {
                     alias: inner_alias, ..
-                } = &inner_expr
+                } = arena.expression(*inner_expr)
                 {
                     alias == inner_alias
                 } else {
                     false
                 }
             }) {
-                self.context.group_by_exprs.push(select_list[i].clone());
-                return;
+                // GROUP BY evaluates against the aggregate input, while the select
+                // expression is later rewritten against aggregate output.
+                self.context
+                    .group_by_exprs
+                    .push(select_list[i].clone_expression(arena)?);
+                return Ok(());
             }
         }
 
-        if let Some(i) = select_list.iter().position(|column| column == expr) {
-            self.context.group_by_exprs.push(select_list[i].clone())
+        if let Some(i) = select_list
+            .iter()
+            .position(|column| column.eq_ignore_colref_pos(expr, arena))
+        {
+            self.context
+                .group_by_exprs
+                .push(select_list[i].clone_expression(arena)?);
         }
+        Ok(())
     }
 
     /// Validate having or orderby clause is valid, if SQL has group by clause.
-    pub fn validate_having_orderby(&self, expr: &ScalarExpression) -> Result<(), DatabaseError> {
+    pub fn validate_having_orderby(
+        &self,
+        expr: ExprRef,
+        arena: &PlanArena<'_>,
+    ) -> Result<(), DatabaseError> {
         if self.context.group_by_exprs.is_empty() {
             return Ok(());
         }
 
         HavingOrderByValidator::new(&self.context.group_by_exprs, &self.context.agg_calls)
-            .visit(expr)
+            .visit(expr, arena)
     }
 }
 
 struct HavingOrderByValidator<'a> {
-    group_by_exprs: &'a [ScalarExpression],
-    agg_calls: &'a [ScalarExpression],
+    group_by_exprs: &'a [ExprRef],
+    agg_calls: &'a [ExprRef],
 }
 
 impl<'a> HavingOrderByValidator<'a> {
-    fn new(group_by_exprs: &'a [ScalarExpression], agg_calls: &'a [ScalarExpression]) -> Self {
+    fn new(group_by_exprs: &'a [ExprRef], agg_calls: &'a [ExprRef]) -> Self {
         Self {
             group_by_exprs,
             agg_calls,
         }
     }
 
-    fn agg_miss(expr: &ScalarExpression) -> DatabaseError {
+    fn agg_miss(expr: ExprRef, arena: &PlanArena<'_>) -> DatabaseError {
         DatabaseError::AggMiss(format!(
-            "expression '{expr}' must appear in the GROUP BY clause or be used in an aggregate function"
+            "expression '{}' must appear in the GROUP BY clause or be used in an aggregate function",
+            expr.output_name(arena)
         ))
     }
 }
 
-impl<'expr> ExprVisitor<'expr> for HavingOrderByValidator<'_> {
-    fn visit(&mut self, expr: &'expr ScalarExpression) -> Result<(), DatabaseError> {
-        match expr {
+impl ExprVisitor<PlanArena<'_>> for HavingOrderByValidator<'_> {
+    fn visit(&mut self, expr: ExprRef, arena: &PlanArena<'_>) -> Result<(), DatabaseError> {
+        let contains = |expressions: &[ExprRef]| {
+            expressions
+                .iter()
+                .any(|candidate| candidate.eq_ignore_colref_pos(expr, arena))
+        };
+        match arena.expression(expr) {
             ScalarExpression::AggCall { .. } => {
-                if self.group_by_exprs.contains(expr) || self.agg_calls.contains(expr) {
+                if contains(self.group_by_exprs) || contains(self.agg_calls) {
                     Ok(())
                 } else {
-                    Err(Self::agg_miss(expr))
+                    Err(Self::agg_miss(expr, arena))
                 }
             }
             ScalarExpression::ColumnRef { .. } => {
-                if self.group_by_exprs.contains(expr) {
+                if contains(self.group_by_exprs) {
                     Ok(())
                 } else {
-                    Err(Self::agg_miss(expr))
+                    Err(Self::agg_miss(expr, arena))
                 }
             }
             ScalarExpression::Alias { .. } => {
-                if self.group_by_exprs.contains(expr) {
+                if contains(self.group_by_exprs) {
                     Ok(())
                 } else {
-                    self.visit(expr.unpack_alias_ref())
+                    self.visit(expr.unpack_alias(arena), arena)
                 }
             }
             ScalarExpression::Empty | ScalarExpression::TableFunction(_) => unreachable!(),
-            _ => walk_expr(self, expr),
+            _ => walk_expr(self, expr, arena),
         }
     }
 }
 
-struct AggregateOutputBinder<'a, 'p> {
-    agg_calls: &'a [ScalarExpression],
-    group_by_exprs: &'a [ScalarExpression],
-    arena: &'a mut crate::planner::PlanArena<'p>,
+struct AggregateOutputBinder<'a> {
+    agg_calls: &'a [ExprRef],
+    group_by_exprs: &'a [ExprRef],
 }
 
-impl<'a, 'p> AggregateOutputBinder<'a, 'p> {
-    fn new(
-        agg_calls: &'a [ScalarExpression],
-        group_by_exprs: &'a [ScalarExpression],
-        arena: &'a mut crate::planner::PlanArena<'p>,
-    ) -> Self {
+impl<'a> AggregateOutputBinder<'a> {
+    fn new(agg_calls: &'a [ExprRef], group_by_exprs: &'a [ExprRef]) -> Self {
         Self {
             agg_calls,
             group_by_exprs,
-            arena,
         }
     }
 
     fn output_ref(
         &mut self,
-        expr: &ScalarExpression,
+        expr: ExprRef,
+        arena: &mut PlanArena<'_>,
     ) -> Result<Option<ScalarExpression>, DatabaseError> {
         let output_count = self.agg_calls.len() + self.group_by_exprs.len();
         self.agg_calls
             .iter()
             .chain(self.group_by_exprs.iter())
             .position(|candidate| {
-                candidate == expr || candidate.unpack_alias_ref() == expr.unpack_alias_ref()
+                candidate.eq_ignore_colref_pos(expr, arena)
+                    || candidate
+                        .unpack_alias(arena)
+                        .eq_ignore_colref_pos(expr.unpack_alias(arena), arena)
             })
             .map(|position| {
                 let output_expr = self
@@ -331,7 +358,7 @@ impl<'a, 'p> AggregateOutputBinder<'a, 'p> {
                         ))
                     })?;
                 Ok(ScalarExpression::column_expr(
-                    output_expr.output_column_ref(self.arena),
+                    output_expr.output_column_ref(arena),
                     position,
                 ))
             })
@@ -339,21 +366,26 @@ impl<'a, 'p> AggregateOutputBinder<'a, 'p> {
     }
 }
 
-impl<'a> ExprVisitorMut<'a> for AggregateOutputBinder<'_, '_> {
-    fn visit(&mut self, expr: &'a mut ScalarExpression) -> Result<(), DatabaseError> {
+impl ExprVisitorMut for AggregateOutputBinder<'_> {
+    fn visit(
+        &mut self,
+        expr: &mut ExprRef,
+        arena: &mut PlanArena<'_>,
+    ) -> Result<(), DatabaseError> {
         if let ScalarExpression::Alias {
-            expr: inner_expr,
             alias: crate::expression::AliasType::Name(_),
-        } = expr
+            ..
+        } = arena.expression(*expr)
         {
-            return self.visit(inner_expr);
+            return walk_mut_expr(self, expr, arena);
         }
 
-        if let Some(output_ref) = self.output_ref(expr)? {
-            *expr = output_ref;
+        if let Some(output) = self.output_ref(*expr, arena)? {
+            *expr = arena.alloc_expression(output);
             return Ok(());
         }
-        walk_mut_expr(self, expr)
+
+        walk_mut_expr(self, expr, arena)
     }
 }
 
@@ -367,7 +399,7 @@ mod tests {
     use crate::expression::agg::AggKind;
     use crate::expression::visitor_mut::ExprVisitorMut;
     use crate::expression::{AliasType, BinaryOperator, ScalarExpression};
-    use crate::planner::PlanArena;
+    use crate::planner::{ExprRef, PlanArena};
     use crate::storage::Storage;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -380,13 +412,13 @@ mod tests {
         ))
     }
 
-    fn test_count(expr: ScalarExpression) -> ScalarExpression {
-        ScalarExpression::AggCall {
+    fn test_count(arena: &mut PlanArena, expr: ExprRef) -> ExprRef {
+        arena.alloc_expression(ScalarExpression::AggCall {
             distinct: false,
             kind: AggKind::Count,
             args: vec![expr],
             ty: LogicalType::Bigint,
-        }
+        })
     }
 
     #[test]
@@ -396,44 +428,44 @@ mod tests {
         let group_column = test_column(&mut arena, "c1", LogicalType::Integer);
         let agg_column = test_column(&mut arena, "c2", LogicalType::Integer);
 
-        let group_expr = ScalarExpression::column_expr(group_column, 0);
-        let agg_expr = test_count(ScalarExpression::column_expr(agg_column, 1));
+        let group_expr = arena.alloc_expression(ScalarExpression::column_expr(group_column, 0));
+        let agg_arg = arena.alloc_expression(ScalarExpression::column_expr(agg_column, 1));
+        let agg_expr = test_count(&mut arena, agg_arg);
 
-        let agg_output = ScalarExpression::Alias {
-            expr: Box::new(agg_expr.clone()),
+        let agg_output = arena.alloc_expression(ScalarExpression::Alias {
+            expr: agg_expr,
             alias: AliasType::Name("cnt".to_string()),
-        };
-        let group_output = ScalarExpression::Alias {
-            expr: Box::new(group_expr.clone()),
+        });
+        let group_output = arena.alloc_expression(ScalarExpression::Alias {
+            expr: group_expr,
             alias: AliasType::Name("g".to_string()),
-        };
+        });
 
-        let mut order_by_agg = ScalarExpression::Alias {
-            expr: Box::new(agg_expr),
+        let mut order_by_agg = arena.alloc_expression(ScalarExpression::Alias {
+            expr: agg_expr,
             alias: AliasType::Name("cnt".to_string()),
-        };
+        });
         let mut order_by_group = group_expr;
         {
             let mut binder = AggregateOutputBinder::new(
                 std::slice::from_ref(&agg_output),
                 std::slice::from_ref(&group_output),
-                &mut arena,
             );
-            binder.visit(&mut order_by_agg)?;
-            binder.visit(&mut order_by_group)?;
+            binder.visit(&mut order_by_agg, &mut arena)?;
+            binder.visit(&mut order_by_group, &mut arena)?;
         }
-        let expected_agg = ScalarExpression::Alias {
-            expr: Box::new(ScalarExpression::column_expr(
-                agg_output.output_column_ref(&mut arena),
-                0,
-            )),
+        let agg_column = agg_output.output_column_ref(&mut arena);
+        let expected_agg_inner =
+            arena.alloc_expression(ScalarExpression::column_expr(agg_column, 0));
+        let expected_agg = arena.alloc_expression(ScalarExpression::Alias {
+            expr: expected_agg_inner,
             alias: AliasType::Name("cnt".to_string()),
-        };
-        assert!(order_by_agg.eq_ignore_colref_pos(&expected_agg, &arena));
+        });
+        assert!(order_by_agg.eq_ignore_colref_pos(expected_agg, &arena));
 
-        let expected_group =
-            ScalarExpression::column_expr(group_output.output_column_ref(&mut arena), 1);
-        assert!(order_by_group.eq_ignore_colref_pos(&expected_group, &arena));
+        let group_column = group_output.output_column_ref(&mut arena);
+        let expected_group = arena.alloc_expression(ScalarExpression::column_expr(group_column, 1));
+        assert!(order_by_group.eq_ignore_colref_pos(expected_group, &arena));
 
         Ok(())
     }
@@ -443,24 +475,25 @@ mod tests {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let group_column = test_column(&mut arena, "c1", LogicalType::Integer);
-        let group_expr = ScalarExpression::column_expr(group_column, 0);
-        let group_output = ScalarExpression::Alias {
-            expr: Box::new(group_expr.clone()),
+        let group_expr = arena.alloc_expression(ScalarExpression::column_expr(group_column, 0));
+        let group_output = arena.alloc_expression(ScalarExpression::Alias {
+            expr: group_expr,
             alias: AliasType::Name("g".to_string()),
-        };
+        });
 
-        let mut target = ScalarExpression::Alias {
-            expr: Box::new(ScalarExpression::Constant(1_i32.into())),
-            alias: AliasType::Expr(Box::new(group_expr)),
-        };
+        let constant = arena.alloc_expression(ScalarExpression::Constant(1_i32.into()));
+        let mut target = arena.alloc_expression(ScalarExpression::Alias {
+            expr: constant,
+            alias: AliasType::Expr(group_expr),
+        });
 
         {
-            let mut binder =
-                AggregateOutputBinder::new(&[], std::slice::from_ref(&group_output), &mut arena);
-            binder.visit(&mut target)?;
+            let mut binder = AggregateOutputBinder::new(&[], std::slice::from_ref(&group_output));
+            binder.visit(&mut target, &mut arena)?;
         }
-        let expected = ScalarExpression::column_expr(group_output.output_column_ref(&mut arena), 0);
-        assert!(target.eq_ignore_colref_pos(&expected, &arena));
+        let output_column = group_output.output_column_ref(&mut arena);
+        let expected = arena.alloc_expression(ScalarExpression::column_expr(output_column, 0));
+        assert!(target.eq_ignore_colref_pos(expected, &arena));
 
         Ok(())
     }
@@ -487,39 +520,41 @@ mod tests {
         let mut arena = PlanArena::new(&table_arena);
         let group_column = test_column(&mut arena, "c1", LogicalType::Integer);
         let missing_column = test_column(&mut arena, "c2", LogicalType::Integer);
-        let group_expr = ScalarExpression::column_expr(group_column, 0);
-        let missing_expr = ScalarExpression::column_expr(missing_column, 1);
-        binder.context.group_by_exprs.push(group_expr.clone());
+        let group_expr = arena.alloc_expression(ScalarExpression::column_expr(group_column, 0));
+        let missing_expr = arena.alloc_expression(ScalarExpression::column_expr(missing_column, 1));
+        binder.context.group_by_exprs.push(group_expr);
 
-        binder.validate_having_orderby(&group_expr)?;
-        let group_alias = ScalarExpression::Alias {
-            expr: Box::new(group_expr.clone()),
+        binder.validate_having_orderby(group_expr, &arena)?;
+        let group_alias = arena.alloc_expression(ScalarExpression::Alias {
+            expr: group_expr,
             alias: AliasType::Name("group_alias".to_string()),
-        };
-        binder.validate_having_orderby(&group_alias)?;
+        });
+        binder.validate_having_orderby(group_alias, &arena)?;
 
         assert!(matches!(
-            binder.validate_having_orderby(&missing_expr),
+            binder.validate_having_orderby(missing_expr, &arena),
             Err(DatabaseError::AggMiss(_))
         ));
 
-        let registered_agg = test_count(missing_expr.clone());
-        binder.context.agg_calls.push(registered_agg.clone());
-        binder.validate_having_orderby(&registered_agg)?;
+        let registered_agg = test_count(&mut arena, missing_expr);
+        binder.context.agg_calls.push(registered_agg);
+        binder.validate_having_orderby(registered_agg, &arena)?;
+        let constant = arena.alloc_expression(ScalarExpression::Constant(1_i32.into()));
+        let unregistered_agg = test_count(&mut arena, constant);
         assert!(matches!(
-            binder.validate_having_orderby(&test_count(ScalarExpression::Constant(1_i32.into()))),
+            binder.validate_having_orderby(unregistered_agg, &arena),
             Err(DatabaseError::AggMiss(_))
         ));
 
-        let invalid_binary = ScalarExpression::Binary {
+        let invalid_binary = arena.alloc_expression(ScalarExpression::Binary {
             op: BinaryOperator::Eq,
-            left_expr: Box::new(group_expr),
-            right_expr: Box::new(missing_expr),
+            left_expr: group_expr,
+            right_expr: missing_expr,
             evaluator: None,
             ty: LogicalType::Boolean,
-        };
+        });
         assert!(matches!(
-            binder.validate_having_orderby(&invalid_binary),
+            binder.validate_having_orderby(invalid_binary, &arena),
             Err(DatabaseError::AggMiss(_))
         ));
 

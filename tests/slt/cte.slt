@@ -99,7 +99,7 @@ EXPLAIN WITH RECURSIVE recursive_cte(value) AS (
 )
 SELECT value FROM recursive_cte
 ----
-Projection [#4] [Project => (Sort Option: Follow)] Recursive CTE: [#4] Projection [(#3) as (#4)] [Project => (Sort Option: Follow)] Projection [1] [Project => (Sort Option: Follow)] Dummy [Dummy => (Sort Option: None)] Projection [(#4 + 1)] [Project => (Sort Option: Follow)] Filter (#4 < 3), Is Having: false [Filter => (Sort Option: Follow)] Recursive Scan: [#4]
+Projection [recursive_cte.value] [Project => (Sort Option: Follow)] Recursive CTE: [recursive_cte.value] Projection [(1) as (recursive_cte.value)] [Project => (Sort Option: Follow)] Projection [1] [Project => (Sort Option: Follow)] Dummy [Dummy => (Sort Option: None)] Projection [(recursive_cte.value + 1)] [Project => (Sort Option: Follow)] Filter (recursive_cte.value < 3), Is Having: false [Filter => (Sort Option: Follow)] Recursive Scan: [recursive_cte.value]
 
 query I
 WITH RECURSIVE recursive_cte(value) AS (

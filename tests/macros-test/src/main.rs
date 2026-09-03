@@ -2534,9 +2534,9 @@ mod test {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(
-            explain_plan.contains("IndexScan By #") && explain_plan.contains("Covered"),
-            "unexpected explain plan: {explain_plan}"
+        assert_eq!(
+            explain_plan,
+            "Projection [users.age] [Project => (Sort Option: Follow)] TableScan users -> [users.age] [IndexScan By users_age_index => 1050 Covered => (Sort Option: OrderBy: (users.age Asc Nulls Last) ignore_prefix_len: 0)]"
         );
 
         database
@@ -2946,10 +2946,10 @@ mod test {
                 .project_scalar(User::name())?
                 .finish()
         })?;
-        assert!(plan.contains("Projection"));
-        assert!(plan.contains("Filter ("));
-        assert!(plan.contains(" = 1"));
-        assert!(plan.contains("TableScan users -> [#"));
+        assert_eq!(
+            plan,
+            "Projection [users.user_name] [Project => (Sort Option: Follow)] Filter (users.id = 1), Is Having: false [Filter => (Sort Option: Follow)] TableScan users -> [users.id, users.user_name] [SeqScan => (Sort Option: None)]"
+        );
 
         let set_plan = database.explain(|ctx| {
             ctx.union(
@@ -2958,10 +2958,10 @@ mod test {
                 |ctx| ctx.from::<Wallet>()?.project_scalar(Wallet::id())?.finish(),
             )
         })?;
-        assert!(set_plan.contains("Aggregate"));
-        assert!(set_plan.contains("Union: [#"));
-        assert!(set_plan.contains("TableScan users -> [#"));
-        assert!(set_plan.contains("TableScan wallets -> [#"));
+        assert_eq!(
+            set_plan,
+            "Aggregate [] -> Group By [users.id] [HashAggregate => (Sort Option: None)] Union: [users.id] Projection [users.id] [Project => (Sort Option: Follow)] TableScan users -> [users.id] [SeqScan => (Sort Option: None)] Projection [wallets.id] [Project => (Sort Option: Follow)] TableScan wallets -> [wallets.id] [SeqScan => (Sort Option: None)]"
+        );
 
         let mut tx = database.new_transaction()?;
         let tx_tables = tx.show_tables()?.collect::<Result<Vec<_>, _>>()?;
@@ -3047,15 +3047,18 @@ mod test {
     #[test]
     fn test_scala_function() -> Result<(), DatabaseError> {
         let function = MyScalaFunction::new();
+        let table_arena = kite_sql::planner::TableArenaCell::default();
+        let mut arena = kite_sql::planner::PlanArena::new(&table_arena);
         let sum = function.eval(
             &[
-                ScalarExpression::Constant(DataValue::Int8(1)),
-                ScalarExpression::Constant(DataValue::Utf8 {
+                arena.alloc_expression(ScalarExpression::Constant(DataValue::Int8(1))),
+                arena.alloc_expression(ScalarExpression::Constant(DataValue::Utf8 {
                     value: "1".to_string(),
                     ty: Utf8Type::Variable(None),
                     unit: CharLengthUnits::Characters,
-                }),
+                })),
             ],
+            &arena,
             None,
         )?;
 
@@ -3075,7 +3078,12 @@ mod test {
     #[test]
     fn test_table_function() -> Result<(), DatabaseError> {
         let function = MyTableFunction::new();
-        let mut numbers = function.eval(&[ScalarExpression::Constant(DataValue::Int8(2))])?;
+        let table_arena = kite_sql::planner::TableArenaCell::default();
+        let mut arena = kite_sql::planner::PlanArena::new(&table_arena);
+        let mut numbers = function.eval(
+            &[arena.alloc_expression(ScalarExpression::Constant(DataValue::Int8(2)))],
+            &arena,
+        )?;
 
         println!("{:?}", function);
 

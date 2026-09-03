@@ -1145,7 +1145,7 @@ mod tests {
             root.histogram_meta().buckets_len()
         );
 
-        let (sketch_meta, mut sketch_pages) = sketch.clone().into_storage_parts(1);
+        let (sketch_meta, mut sketch_pages) = sketch.into_storage_parts(1);
         let sketch_meta_bytes = table_codec.with_statistics_sketch_meta(
             "t1",
             0,
@@ -1323,6 +1323,9 @@ mod tests {
                 } else if bytes[i] == b'#' {
                     normalized.push_str("#_");
                     i += 1;
+                    if bytes[i..].starts_with(b"expr") {
+                        i += b"expr".len();
+                    }
                     while i < bytes.len() && bytes[i].is_ascii_digit() {
                         i += 1;
                     }

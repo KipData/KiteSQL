@@ -27,7 +27,7 @@ use crate::expression::agg::AggKind;
 use crate::expression::simplify::ConstantCalculator;
 use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::expression::window::WindowFunctionKind;
-use crate::expression::{AliasType, ScalarExpression};
+use crate::expression::{AliasType, ScalarExpression, TypeCast};
 use crate::iter_ext::Itertools;
 use crate::parser::parse_sql;
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
@@ -37,7 +37,7 @@ use crate::planner::operator::project::ProjectOperator;
 use crate::planner::operator::recursive_cte::{RecursiveCteOperator, RecursiveScanOperator};
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::Operator;
-use crate::planner::{Childrens, LogicalPlan, PlanArena};
+use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::storage::{Storage, Transaction};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, ColumnId, LogicalType};
@@ -336,22 +336,22 @@ struct BindStatementComplete {
     plan: LogicalPlan,
 }
 
-struct UpdateExprTargetRemapper<'a, 'p> {
+struct UpdateExprTargetRemapper<'a> {
     target_schema: &'a [ColumnRef],
-    arena: &'a PlanArena<'p>,
 }
 
-impl ExprVisitorMut<'_> for UpdateExprTargetRemapper<'_, '_> {
+impl ExprVisitorMut for UpdateExprTargetRemapper<'_> {
     fn visit_column_ref(
         &mut self,
         column: &mut ColumnRef,
         position: &mut usize,
+        arena: &mut PlanArena<'_>,
     ) -> Result<(), DatabaseError> {
         let Some(target_position) = self
             .target_schema
             .iter()
             .copied()
-            .position(|target_column| self.arena.same_column(target_column, *column))
+            .position(|target_column| arena.same_column(target_column, *column))
         else {
             return Err(DatabaseError::UnsupportedStmt(
                 "joined UPDATE SET expressions can only reference target table columns".to_string(),
@@ -669,15 +669,18 @@ where
         &mut self,
         expr: Expr,
         ty: &LogicalType,
-    ) -> Result<ScalarExpression, DatabaseError> {
-        let mut expr = self.binder.bind_expr(&expr, self.arena)?;
+    ) -> Result<ExprRef, DatabaseError> {
+        let mut expr = self
+            .binder
+            .bind_expr(&expr, self.arena)
+            .map(|expr| self.arena.alloc_expression(expr))?;
 
         if expr.any_referenced_column(self.arena, |_, _| true)? {
             return Err(DatabaseError::UnsupportedStmt(
                 "column is not allowed to exist in default".to_string(),
             ));
         }
-        expr = ScalarExpression::type_cast(expr, Cow::Borrowed(ty), self.arena)?;
+        expr = expr.type_cast(Cow::Borrowed(ty), self.arena)?;
 
         Ok(expr)
     }
@@ -784,18 +787,18 @@ where
                 }
                 ColumnOption::Unique(_) => column_desc.set_unique(),
                 ColumnOption::Default(expr) => {
-                    let mut expr = self.binder.bind_expr(&expr, self.arena)?;
+                    let mut expr = self
+                        .binder
+                        .bind_expr(&expr, self.arena)
+                        .map(|expr| self.arena.alloc_expression(expr))?;
 
                     if expr.any_referenced_column(self.arena, |_, _| true)? {
                         return Err(DatabaseError::UnsupportedStmt(
                             "column is not allowed to exist in `default`".to_string(),
                         ));
                     }
-                    expr = ScalarExpression::type_cast(
-                        expr,
-                        Cow::Borrowed(&column_desc.column_datatype),
-                        self.arena,
-                    )?;
+                    expr =
+                        expr.type_cast(Cow::Borrowed(&column_desc.column_datatype), self.arena)?;
                     column_desc.default = Some(expr);
                 }
                 option => {
@@ -848,14 +851,14 @@ where
         let mut columns = Vec::with_capacity(create.columns.len());
 
         for index_column in create.columns {
-            match self
+            let expr = self
                 .binder
-                .bind_expr(&index_column.column.expr, self.arena)?
-            {
-                ScalarExpression::ColumnRef { column, .. } => columns.push(column),
-                expr => {
+                .bind_expr(&index_column.column.expr, self.arena)?;
+            match &expr {
+                ScalarExpression::ColumnRef { column, .. } => columns.push(*column),
+                _ => {
                     return Err(DatabaseError::UnsupportedStmt(format!(
-                        "'CREATE INDEX' by {expr}"
+                        "'CREATE INDEX' by {expr:?}"
                     )))
                 }
             }
@@ -1008,11 +1011,12 @@ where
         } else {
             let mut columns = Vec::with_capacity(idents.len());
             for ident in idents {
-                match self.binder.bind_column_ref_from_identifiers(
+                let expr = self.binder.bind_column_ref_from_identifiers(
                     slice::from_ref(ident),
                     Some(table_name.as_ref()),
                     self.arena,
-                )? {
+                )?;
+                match expr {
                     ScalarExpression::ColumnRef { column, .. } => columns.push(column),
                     _ => return Err(DatabaseError::UnsupportedStmt(ident.to_string())),
                 }
@@ -1032,9 +1036,14 @@ where
 
             for (i, expr) in expr_row.iter().enumerate() {
                 let span = expr.span();
-                let mut expression = self.binder.bind_expr(expr, self.arena)?;
+                let mut expr_ref = self
+                    .binder
+                    .bind_expr(expr, self.arena)
+                    .map(|expr| self.arena.alloc_expression(expr))?;
 
-                ConstantCalculator::new(self.arena).visit(&mut expression)?;
+                ConstantCalculator::new(self.arena).visit(&mut expr_ref, self.arena)?;
+                let expression =
+                    std::mem::replace(self.arena.expression_mut(expr_ref), ScalarExpression::Empty);
                 match expression {
                     ScalarExpression::Constant(mut value) => {
                         let column = self.arena.column(schema_ref[i]);
@@ -1054,7 +1063,7 @@ where
                     ScalarExpression::Empty => {
                         let column = self.arena.column(schema_ref[i]);
                         let default_value = column
-                            .default_value()?
+                            .default_value(self.arena)?
                             .ok_or(DatabaseError::DefaultNotExist)?;
                         if default_value.is_null() && !column.nullable() {
                             return Err(attach_span_if_absent(
@@ -1117,12 +1126,17 @@ where
                     .iter()
                     .copied()
                     .enumerate()
-                    .map(|(position, target_column)| ScalarExpression::Alias {
-                        expr: Box::new(ScalarExpression::column_expr(
+                    .map(|(position, target_column)| {
+                        let expr = self.arena.alloc_expression(ScalarExpression::column_expr(
                             input_schema[position],
                             position,
-                        )),
-                        alias: AliasType::Name(self.arena.column(target_column).name().to_string()),
+                        ));
+                        self.arena.alloc_expression(ScalarExpression::Alias {
+                            expr,
+                            alias: AliasType::Name(
+                                self.arena.column(target_column).name().to_string(),
+                            ),
+                        })
                     })
                     .collect::<Vec<_>>()
             } else {
@@ -1138,13 +1152,14 @@ where
                             ident.span,
                         )
                     })?;
-                    projection.push(ScalarExpression::Alias {
-                        expr: Box::new(ScalarExpression::column_expr(
-                            input_schema[position],
-                            position,
-                        )),
+                    let expr = self.arena.alloc_expression(ScalarExpression::column_expr(
+                        input_schema[position],
+                        position,
+                    ));
+                    projection.push(self.arena.alloc_expression(ScalarExpression::Alias {
+                        expr,
                         alias: AliasType::Name(self.arena.column(column).name().to_string()),
-                    });
+                    }));
                 }
                 projection
             }
@@ -1183,17 +1198,20 @@ where
             }
             for Assignment { target, value } in &update.assignments {
                 let expression = self.binder.bind_expr(value, self.arena)?;
-                let mut bind_assignment = |name: &ObjectName,
+                let mut bind_assignment = |binder: &mut Binder<'_, '_, T, A>,
+                                           arena: &mut PlanArena,
+                                           name: &ObjectName,
                                            expression: ScalarExpression|
                  -> Result<(), DatabaseError> {
                     let ident = single_ident_from_object_name(name)?;
 
                     let column = {
-                        match self.binder.bind_column_ref_from_identifiers(
+                        let expr = binder.bind_column_ref_from_identifiers(
                             slice::from_ref(&ident),
                             Some(table_name.as_ref()),
-                            self.arena,
-                        )? {
+                            arena,
+                        )?;
+                        match expr {
                             ScalarExpression::ColumnRef { column, .. } => column,
                             _ => {
                                 return Err(attach_span_if_absent(
@@ -1204,34 +1222,32 @@ where
                         }
                     };
 
-                    let mut expr = if matches!(expression, ScalarExpression::Empty) {
-                        let column_catalog = self.arena.column(column);
-                        let default_value = column_catalog
-                            .default_value()?
-                            .ok_or(DatabaseError::DefaultNotExist)?;
-                        ScalarExpression::Constant(default_value)
-                    } else {
-                        expression
+                    let mut expr = match expression {
+                        ScalarExpression::Empty => {
+                            let column_catalog = arena.column(column);
+                            let default_value = column_catalog
+                                .default_value(arena)?
+                                .ok_or(DatabaseError::DefaultNotExist)?;
+                            arena.alloc_expression(ScalarExpression::Constant(default_value))
+                        }
+                        expression => arena.alloc_expression(expression),
                     };
-                    let column_catalog = self.arena.column(column);
-                    expr = ScalarExpression::type_cast(
-                        expr,
-                        Cow::Borrowed(column_catalog.datatype()),
-                        self.arena,
-                    )?;
+                    let datatype = arena.column(column).datatype().clone();
+                    expr = expr.type_cast(Cow::Owned(datatype), arena)?;
                     if is_joined_update {
                         UpdateExprTargetRemapper {
                             target_schema: &target_schema,
-                            arena: self.arena,
                         }
-                        .visit(&mut expr)?;
+                        .visit(&mut expr, arena)?;
                     }
                     value_exprs.push((column, expr));
                     Ok(())
                 };
 
                 match target {
-                    AssignmentTarget::ColumnName(name) => bind_assignment(name, expression)?,
+                    AssignmentTarget::ColumnName(name) => {
+                        bind_assignment(self.binder, self.arena, name, expression)?
+                    }
                     AssignmentTarget::Tuple(names) => {
                         let expected = names.len();
                         let ScalarExpression::Tuple(exprs) = expression else {
@@ -1244,7 +1260,11 @@ where
                         loop {
                             match (names.next(), exprs.next()) {
                                 (Some(name), Some(expression)) => {
-                                    bind_assignment(name, expression)?
+                                    let expression = std::mem::replace(
+                                        self.arena.expression_mut(expression),
+                                        ScalarExpression::Empty,
+                                    );
+                                    bind_assignment(self.binder, self.arena, name, expression)?
                                 }
                                 (None, None) => break,
                                 _ => return Err(DatabaseError::ValuesLenMismatch(expected, got)),
@@ -1260,7 +1280,10 @@ where
                     .copied()
                     .enumerate()
                     .map(|(index, column)| {
-                        ScalarExpression::column_expr(column, target_offset + index)
+                        self.arena.alloc_expression(ScalarExpression::column_expr(
+                            column,
+                            target_offset + index,
+                        ))
                     })
                     .collect();
                 plan = LogicalPlan::new(
@@ -1406,7 +1429,8 @@ where
     ) -> Result<BindPlanFiltered<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
         let predicate = if let Some(predicate) = selection {
             Some(with_query_bind_step!(self.binder, QueryBindStep::Where, {
-                self.binder.bind_expr(predicate, self.arena)?
+                let predicate = self.binder.bind_expr(predicate, self.arena)?;
+                self.arena.alloc_expression(predicate)
             })?)
         } else {
             None
@@ -1437,7 +1461,11 @@ where
                     }
                     group_by_exprs
                         .iter()
-                        .map(|expr| self.binder.bind_expr(expr, self.arena))
+                        .map(|expr| {
+                            self.binder
+                                .bind_expr(expr, self.arena)
+                                .map(|expr| self.arena.alloc_expression(expr))
+                        })
                         .collect::<Result<Vec<_>, DatabaseError>>()?
                 }
                 GroupByExpr::All(_) => {
@@ -1450,15 +1478,17 @@ where
         let having = having
             .map(|having| {
                 with_query_bind_step!(self.binder, QueryBindStep::Having, {
-                    self.binder.bind_expr(having, self.arena)?
+                    let having = self.binder.bind_expr(having, self.arena)?;
+                    self.arena.alloc_expression(having)
                 })
             })
             .transpose()?;
         self.aggregate(group_by, having, orderby, |binder, arena, orderby| {
             let OrderByExpr { expr, options, .. } = orderby;
             with_query_bind_step!(binder, QueryBindStep::Sort, {
+                let expr = binder.bind_expr(expr, arena)?;
                 SortField::new(
-                    binder.bind_expr(expr, arena)?,
+                    arena.alloc_expression(expr),
                     options.asc.is_none_or(|asc| asc),
                     options.nulls_first.unwrap_or(false),
                 )
@@ -2028,7 +2058,10 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
         arena: &mut PlanArena,
     ) -> Result<JoinConstraintInput, DatabaseError> {
         match constraint {
-            JoinConstraint::On(expr) => Ok(JoinConstraintInput::On(self.bind_expr(expr, arena)?)),
+            JoinConstraint::On(expr) => {
+                let expr = self.bind_expr(expr, arena)?;
+                Ok(JoinConstraintInput::On(arena.alloc_expression(expr)))
+            }
             JoinConstraint::Using(names) => Ok(JoinConstraintInput::Using(
                 names
                     .iter()
@@ -2077,8 +2110,12 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 self.bind_column_ref_from_identifiers(idents, None, arena)
             }
             Expr::BinaryOp { left, right, op } => {
-                let left_expr = self.bind_expr(left, arena)?;
-                let right_expr = self.bind_expr(right, arena)?;
+                let left_expr = self
+                    .bind_expr(left, arena)
+                    .map(|expr| arena.alloc_expression(expr))?;
+                let right_expr = self
+                    .bind_expr(right, arena)
+                    .map(|expr| arena.alloc_expression(expr))?;
                 self.bind_binary_op_expr(left_expr, right_expr, op.clone().try_into()?, arena)
             }
             Expr::Value(v) => {
@@ -2103,7 +2140,9 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
             Expr::Function(func) => self.bind_function_sql(func, arena),
             Expr::Nested(expr) => self.bind_expr(expr, arena),
             Expr::UnaryOp { expr, op } => {
-                let expr = self.bind_expr(expr, arena)?;
+                let expr = self
+                    .bind_expr(expr, arena)
+                    .map(|expr| arena.alloc_expression(expr))?;
                 self.bind_unary_op_expr(expr, (*op).try_into()?, arena)
             }
             Expr::Like {
@@ -2113,8 +2152,12 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 escape_char,
                 any: _,
             } => {
-                let left_expr = Box::new(self.bind_expr(expr, arena)?);
-                let right_expr = Box::new(self.bind_expr(pattern, arena)?);
+                let left_expr = self
+                    .bind_expr(expr, arena)
+                    .map(|expr| arena.alloc_expression(expr))?;
+                let right_expr = self
+                    .bind_expr(pattern, arena)
+                    .map(|expr| arena.alloc_expression(expr))?;
                 let escape_char = Self::parse_like_escape_char(escape_char)?;
                 let op = if *negated {
                     expression::BinaryOperator::NotLike(escape_char)
@@ -2129,14 +2172,24 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                     ty: LogicalType::Boolean,
                 })
             }
-            Expr::IsNull(expr) => Ok(ScalarExpression::IsNull {
-                negated: false,
-                expr: Box::new(self.bind_expr(expr, arena)?),
-            }),
-            Expr::IsNotNull(expr) => Ok(ScalarExpression::IsNull {
-                negated: true,
-                expr: Box::new(self.bind_expr(expr, arena)?),
-            }),
+            Expr::IsNull(expr) => {
+                let expr = self
+                    .bind_expr(expr, arena)
+                    .map(|expr| arena.alloc_expression(expr))?;
+                Ok(ScalarExpression::IsNull {
+                    negated: false,
+                    expr,
+                })
+            }
+            Expr::IsNotNull(expr) => {
+                let expr = self
+                    .bind_expr(expr, arena)
+                    .map(|expr| arena.alloc_expression(expr))?;
+                Ok(ScalarExpression::IsNull {
+                    negated: true,
+                    expr,
+                })
+            }
             Expr::InList {
                 expr,
                 list,
@@ -2144,21 +2197,25 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
             } => {
                 let args = list
                     .iter()
-                    .map(|expr| self.bind_expr(expr, arena))
+                    .map(|expr| {
+                        self.bind_expr(expr, arena)
+                            .map(|expr| arena.alloc_expression(expr))
+                    })
                     .try_collect()?;
+                let expr = self
+                    .bind_expr(expr, arena)
+                    .map(|expr| arena.alloc_expression(expr))?;
                 Ok(ScalarExpression::In {
                     negated: *negated,
-                    expr: Box::new(self.bind_expr(expr, arena)?),
+                    expr,
                     args,
                 })
             }
             Expr::Cast {
                 expr, data_type, ..
-            } => ScalarExpression::type_cast(
-                self.bind_expr(expr, arena)?,
-                Cow::Owned(LogicalType::try_from(data_type.clone())?),
-                arena,
-            ),
+            } => self
+                .bind_expr(expr, arena)?
+                .type_cast(Cow::Owned(LogicalType::try_from(data_type.clone())?), arena),
             Expr::TypedString(TypedString {
                 data_type, value, ..
             }) => {
@@ -2181,12 +2238,23 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 negated,
                 low,
                 high,
-            } => Ok(ScalarExpression::Between {
-                negated: *negated,
-                expr: Box::new(self.bind_expr(expr, arena)?),
-                left_expr: Box::new(self.bind_expr(low, arena)?),
-                right_expr: Box::new(self.bind_expr(high, arena)?),
-            }),
+            } => {
+                let expr = self
+                    .bind_expr(expr, arena)
+                    .map(|expr| arena.alloc_expression(expr))?;
+                let left_expr = self
+                    .bind_expr(low, arena)
+                    .map(|expr| arena.alloc_expression(expr))?;
+                let right_expr = self
+                    .bind_expr(high, arena)
+                    .map(|expr| arena.alloc_expression(expr))?;
+                Ok(ScalarExpression::Between {
+                    negated: *negated,
+                    expr,
+                    left_expr,
+                    right_expr,
+                })
+            }
             Expr::Substring {
                 expr,
                 substring_for,
@@ -2197,22 +2265,32 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 let mut from_expr = None;
 
                 if let Some(expr) = substring_for {
-                    for_expr = Some(Box::new(self.bind_expr(expr, arena)?))
+                    let expr = self.bind_expr(expr, arena)?;
+                    for_expr = Some(arena.alloc_expression(expr))
                 }
                 if let Some(expr) = substring_from {
-                    from_expr = Some(Box::new(self.bind_expr(expr, arena)?))
+                    let expr = self.bind_expr(expr, arena)?;
+                    from_expr = Some(arena.alloc_expression(expr))
                 }
 
+                let expr = self
+                    .bind_expr(expr, arena)
+                    .map(|expr| arena.alloc_expression(expr))?;
                 Ok(ScalarExpression::SubString {
-                    expr: Box::new(self.bind_expr(expr, arena)?),
+                    expr,
                     for_expr,
                     from_expr,
                 })
             }
-            Expr::Position { expr, r#in } => Ok(ScalarExpression::Position {
-                expr: Box::new(self.bind_expr(expr, arena)?),
-                in_expr: Box::new(self.bind_expr(r#in, arena)?),
-            }),
+            Expr::Position { expr, r#in } => {
+                let expr = self
+                    .bind_expr(expr, arena)
+                    .map(|expr| arena.alloc_expression(expr))?;
+                let in_expr = self
+                    .bind_expr(r#in, arena)
+                    .map(|expr| arena.alloc_expression(expr))?;
+                Ok(ScalarExpression::Position { expr, in_expr })
+            }
             Expr::Trim {
                 expr,
                 trim_what,
@@ -2221,10 +2299,14 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
             } => {
                 let mut trim_what_expr = None;
                 if let Some(trim_what) = trim_what {
-                    trim_what_expr = Some(Box::new(self.bind_expr(trim_what, arena)?))
+                    let trim_what = self.bind_expr(trim_what, arena)?;
+                    trim_what_expr = Some(arena.alloc_expression(trim_what))
                 }
+                let expr = self
+                    .bind_expr(expr, arena)
+                    .map(|expr| arena.alloc_expression(expr))?;
                 Ok(ScalarExpression::Trim {
-                    expr: Box::new(self.bind_expr(expr, arena)?),
+                    expr,
                     trim_what_expr,
                     trim_where: (*trim_where).map(Into::into),
                 })
@@ -2253,7 +2335,8 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 let mut bound_exprs = Vec::with_capacity(exprs.len());
 
                 for expr in exprs {
-                    bound_exprs.push(self.bind_expr(expr, arena)?);
+                    let expr = self.bind_expr(expr, arena)?;
+                    bound_exprs.push(arena.alloc_expression(expr));
                 }
                 Ok(ScalarExpression::Tuple(bound_exprs))
             }
@@ -2277,20 +2360,28 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 let mut operand_expr = None;
                 let mut ty = LogicalType::SqlNull;
                 if let Some(expr) = operand {
-                    operand_expr = Some(Box::new(self.bind_expr(expr, arena)?));
+                    let expr = self.bind_expr(expr, arena)?;
+                    operand_expr = Some(arena.alloc_expression(expr));
                 }
                 let mut expr_pairs = Vec::with_capacity(conditions.len());
                 for when in conditions {
-                    let result = self.bind_expr(&when.result, arena)?;
+                    let result = self
+                        .bind_expr(&when.result, arena)
+                        .map(|expr| arena.alloc_expression(expr))?;
                     let result_ty = result.return_type(arena).into_owned();
 
                     fn_check_ty(&mut ty, result_ty)?;
-                    expr_pairs.push((self.bind_expr(&when.condition, arena)?, result))
+                    let condition = self
+                        .bind_expr(&when.condition, arena)
+                        .map(|expr| arena.alloc_expression(expr))?;
+                    expr_pairs.push((condition, result))
                 }
 
                 let mut else_expr = None;
                 if let Some(expr) = else_result {
-                    let temp_expr = Box::new(self.bind_expr(expr, arena)?);
+                    let temp_expr = self
+                        .bind_expr(expr, arena)
+                        .map(|expr| arena.alloc_expression(expr))?;
                     let else_ty = temp_expr.return_type(arena).into_owned();
 
                     fn_check_ty(&mut ty, else_ty)?;
@@ -2345,7 +2436,9 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
         subquery: &Query,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
-        let left_expr = self.bind_expr(expr, arena)?;
+        let left_expr = self
+            .bind_expr(expr, arena)
+            .map(|expr| arena.alloc_expression(expr))?;
         self.bind_quantified_subquery_plan(
             quantifier,
             negated,
@@ -2426,8 +2519,13 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 FunctionArg::Unnamed(arg) => arg,
             };
             match arg_expr {
-                FunctionArgExpr::Expr(expr) => args.push(self.bind_expr(expr, arena)?),
-                FunctionArgExpr::Wildcard => args.push(Self::wildcard_expr()),
+                FunctionArgExpr::Expr(expr) => {
+                    let expr = self.bind_expr(expr, arena)?;
+                    args.push(arena.alloc_expression(expr))
+                }
+                FunctionArgExpr::Wildcard => {
+                    args.push(arena.alloc_expression(Self::wildcard_expr()))
+                }
                 expr => {
                     return Err(DatabaseError::UnsupportedStmt(format!(
                         "function arg: {expr:#?}"
@@ -2468,7 +2566,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
     fn bind_window_call(
         &mut self,
         kind: WindowFunctionKind,
-        args: Vec<ScalarExpression>,
+        args: Vec<ExprRef>,
         is_distinct: bool,
         over: &WindowType,
         arena: &mut PlanArena,
@@ -2505,14 +2603,18 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
         let partition_by = spec
             .partition_by
             .iter()
-            .map(|expr| self.bind_expr(expr, arena))
+            .map(|expr| {
+                self.bind_expr(expr, arena)
+                    .map(|expr| arena.alloc_expression(expr))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let order_by = spec
             .order_by
             .iter()
             .map(|OrderByExpr { expr, options, .. }| {
+                let expr = self.bind_expr(expr, arena)?;
                 Ok(SortField::new(
-                    self.bind_expr(expr, arena)?,
+                    arena.alloc_expression(expr),
                     options.asc.unwrap_or(true),
                     options.nulls_first.unwrap_or(false),
                 ))
@@ -2673,9 +2775,13 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
             let mut row = Vec::with_capacity(values_len);
 
             for (col_index, expr) in expr_row.iter().enumerate() {
-                let mut expression = self.bind_expr(expr, arena)?;
-                ConstantCalculator::new(arena).visit(&mut expression)?;
+                let mut expression = self
+                    .bind_expr(expr, arena)
+                    .map(|expr| arena.alloc_expression(expr))?;
+                ConstantCalculator::new(arena).visit(&mut expression, arena)?;
 
+                let expression =
+                    std::mem::replace(arena.expression_mut(expression), ScalarExpression::Empty);
                 if let ScalarExpression::Constant(value) = expression {
                     let value_type = value.logical_type();
 
@@ -2726,19 +2832,25 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
             self.context.add_alias(
                 None,
                 arena.column(*column).name().to_string(),
-                ScalarExpression::column_expr(*column, position),
+                arena.alloc_expression(ScalarExpression::column_expr(*column, position)),
             );
         }
 
         let sort_fields = self
-            .extract_having_orderby_aggregate_exprs(None, Some(orderbys), |binder, orderby| {
-                let OrderByExpr { expr, options, .. } = orderby;
-                Ok(SortField::new(
-                    binder.bind_expr(expr, arena)?,
-                    options.asc.is_none_or(|asc| asc),
-                    options.nulls_first.unwrap_or(false),
-                ))
-            })?
+            .extract_having_orderby_aggregate_exprs(
+                None,
+                Some(orderbys),
+                |binder, orderby, arena| {
+                    let OrderByExpr { expr, options, .. } = orderby;
+                    let expr = binder.bind_expr(expr, arena)?;
+                    Ok(SortField::new(
+                        arena.alloc_expression(expr),
+                        options.asc.is_none_or(|asc| asc),
+                        options.nulls_first.unwrap_or(false),
+                    ))
+                },
+                arena,
+            )?
             .1;
         self.context.expr_aliases = saved_aliases;
 
@@ -2755,7 +2867,8 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let predicate = with_query_bind_step!(self, QueryBindStep::Where, {
-            self.bind_expr(predicate, arena)?
+            let predicate = self.bind_expr(predicate, arena)?;
+            arena.alloc_expression(predicate)
         })?;
 
         self.bind_where_expr(children, predicate, arena)
@@ -2765,23 +2878,27 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
         &mut self,
         items: &[SelectItem],
         arena: &mut PlanArena,
-    ) -> Result<Vec<ScalarExpression>, DatabaseError> {
+    ) -> Result<Vec<ExprRef>, DatabaseError> {
         let mut select_items = vec![];
 
         for item in items {
             match item {
-                SelectItem::UnnamedExpr(expr) => select_items.push(self.bind_expr(expr, arena)?),
-                SelectItem::ExprWithAlias { expr, alias } => {
+                SelectItem::UnnamedExpr(expr) => {
                     let expr = self.bind_expr(expr, arena)?;
+                    select_items.push(arena.alloc_expression(expr));
+                }
+                SelectItem::ExprWithAlias { expr, alias } => {
+                    let expr = self
+                        .bind_expr(expr, arena)
+                        .map(|expr| arena.alloc_expression(expr))?;
                     let alias_name = lower_ident(alias).into_owned();
 
-                    self.context
-                        .add_alias(None, alias_name.clone(), expr.clone());
+                    self.context.add_alias(None, alias_name.clone(), expr);
 
-                    select_items.push(ScalarExpression::Alias {
-                        expr: Box::new(expr),
+                    select_items.push(arena.alloc_expression(ScalarExpression::Alias {
+                        expr,
                         alias: AliasType::Name(alias_name),
-                    });
+                    }));
                 }
                 SelectItem::Wildcard(_) => {
                     let visible_names = self
@@ -3052,8 +3169,8 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
     ) -> Result<usize, DatabaseError> {
         let span = expr.span();
         let bound_expr = self.bind_expr(expr, arena)?;
-        match bound_expr {
-            ScalarExpression::Constant(dv) => match &dv {
+        match &bound_expr {
+            ScalarExpression::Constant(dv) => match dv {
                 DataValue::Int32(v) if *v >= 0 => Ok(*v as usize),
                 DataValue::Int64(v) if *v >= 0 => Ok(*v as usize),
                 _ => Err(DatabaseError::InvalidType),

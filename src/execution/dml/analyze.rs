@@ -114,7 +114,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Analyze {
 
         while arena.next_tuple(input, plan_arena)? {
             for State { exprs, builder, .. } in builders.iter_mut() {
-                with_projection_tmp_value(arena, None, exprs, |_, value| builder.append(value))?;
+                with_projection_tmp_value(arena, plan_arena, None, exprs, |_, value| {
+                    builder.append(value)
+                })?;
             }
         }
         let mut state = arena.local_state(plan_arena);

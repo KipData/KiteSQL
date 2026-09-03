@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::expression::function::FunctionSummary;
-use crate::expression::ScalarExpression;
+use crate::planner::{ExprRef, PlanArena};
 use crate::types::tuple::TupleLike;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
@@ -43,7 +43,7 @@ impl Deref for ArcScalarFunctionImpl {
 
 #[derive(Debug, Clone, ReferenceSerialization)]
 pub struct ScalarFunction {
-    pub(crate) args: Vec<ScalarExpression>,
+    pub(crate) args: Vec<ExprRef>,
     pub(crate) inner: ArcScalarFunctionImpl,
 }
 
@@ -63,7 +63,8 @@ impl Hash for ScalarFunction {
 pub trait ScalarFunctionImpl: Debug + Send + Sync {
     fn eval(
         &self,
-        args: &[ScalarExpression],
+        args: &[ExprRef],
+        arena: &PlanArena<'_>,
         tuple: Option<&dyn TupleLike>,
     ) -> Result<DataValue, DatabaseError>;
 

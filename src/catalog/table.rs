@@ -321,6 +321,7 @@ impl TableCatalog {
             .map(|index| source_arena.index(*index).clone())
             .collect_vec();
 
+        source_arena.materialize_expressions_into_table_arena();
         Self::reload(
             self.name.clone(),
             column_catalogs.into_iter(),
