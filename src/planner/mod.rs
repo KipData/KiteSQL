@@ -272,6 +272,16 @@ impl LogicalPlan {
                 }
                 _ => unreachable!(),
             },
+            Operator::MarkApply(op)
+                if matches!(op.kind, operator::mark_apply::MarkApplyKind::InnerJoin) =>
+            {
+                let Childrens::Twins { left, right } = childrens else {
+                    unreachable!("inner apply requires two inputs")
+                };
+                let mut schema = left.output_schema(arena).clone();
+                schema.extend_from_slice(right.output_schema(arena));
+                schema
+            }
             Operator::MarkApply(op) => {
                 let mut schema = match childrens {
                     Childrens::Only(left) => left.output_schema(arena).clone(),

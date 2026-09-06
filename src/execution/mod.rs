@@ -195,7 +195,7 @@ pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
     IndexScan(IndexScan<'a, T>),
     Insert(Insert),
     Limit(Limit),
-    MarkApply(MarkApply),
+    MarkApply(MarkApply<'a, T>),
     NestedLoopJoin(NestedLoopJoin),
     Projection(Projection),
     RecursiveCte(RecursiveCte<'a, T>),
@@ -310,7 +310,7 @@ impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
                 <Limit as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
             ExecNode::MarkApply(exec) => {
-                <MarkApply as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <MarkApply<'a, T> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
             ExecNode::NestedLoopJoin(exec) => {
                 <NestedLoopJoin as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
@@ -746,7 +746,7 @@ where
         }
         Operator::MarkApply(op) => {
             let (left, right) = childrens.pop_twins();
-            <MarkApply as ReadExecutor<'a, T>>::into_executor(
+            <MarkApply<'a, T> as ReadExecutor<'a, T>>::into_executor(
                 (op, left, right),
                 arena,
                 plan_arena,

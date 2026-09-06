@@ -762,7 +762,7 @@ mod tests {
             Range::Scope {
                 min: Bound::Excluded(DataValue::Tuple(
                     vec![DataValue::Int32(1), DataValue::Int32(2)],
-                    false,
+                    true,
                 )),
                 max: Bound::Excluded(DataValue::Tuple(vec![DataValue::Int32(1)], true)),
             }

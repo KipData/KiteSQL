@@ -205,3 +205,123 @@ select * from a as aliased(only_one)
 # Every USING column must exist on both sides.
 statement error
 select * from a join b using (missing)
+
+
+# Parameterized inner join
+statement ok
+create table lookup_outer(id int primary key, k int);
+
+statement ok
+create table lookup_inner(id int primary key, k int, v int);
+
+statement ok
+create index lookup_inner_k on lookup_inner(k);
+
+statement ok
+insert into lookup_outer values (1,10),(2,20),(3,null),(4,99),(5,10);
+
+statement ok
+insert into lookup_inner values (1,10,7),(2,10,9),(3,20,3),(4,null,8);
+
+# A plain SeqScan outer input is eligible; no size/limit heuristic is required.
+query T
+explain select lookup_outer.id,lookup_inner.id from lookup_outer join lookup_inner on lookup_outer.k=lookup_inner.k;
+----
+Projection [lookup_outer.id, lookup_inner.id] [Project => (Sort Option: Follow)] InnerJoinApply TableScan lookup_outer -> [lookup_outer.id, lookup_outer.k] [SeqScan => (Sort Option: None)] TableScan lookup_inner -> [lookup_inner.id, lookup_inner.k] [IndexScan By lookup_inner_k => Probe ? => (Sort Option: OrderBy: (lookup_inner.k Asc Nulls Last) ignore_prefix_len: 0)]
+
+# Resume the same non-unique probe across calls, then rebuild after NULL and
+# missing keys. In particular, NULL = NULL must not produce the inner NULL row.
+query II
+select lookup_outer.id,lookup_inner.id from lookup_outer
+join lookup_inner on lookup_outer.k=lookup_inner.k
+order by lookup_outer.id,lookup_inner.id;
+----
+1 1
+1 2
+2 3
+5 1
+5 2
+
+# All matches are emitted, the non-key filter remains, and NULL never matches.
+query III
+select o.id,i.id,i.v from (select * from lookup_outer limit 5) o
+join lookup_inner i on o.k=i.k where i.v>5 order by o.id,i.id;
+----
+1 1 7
+1 2 9
+5 1 7
+5 2 9
+
+query III
+select o.id,i.id,i.v from (select * from lookup_outer limit 5) o
+join lookup_inner i on o.k=i.k and o.id<i.id order by o.id,i.id;
+----
+1 2 9
+2 3 3
+
+# Reverse the SQL sides; output column positions must remain unchanged.
+query III
+select i.id,i.v,o.id from lookup_inner i
+join (select * from lookup_outer limit 5) o on i.k=o.k and i.id>o.id order by i.id,o.id;
+----
+2 9 1
+3 3 2
+
+query III
+select o.id,i.id,i.v from (select * from lookup_outer limit 5) o
+join lookup_inner i on o.k=i.k where i.v>5 limit 1;
+----
+1 1 7
+
+statement ok
+create table lookup_composite(w int, item int, qty int, primary key(w,item));
+
+statement ok
+insert into lookup_composite values (1,10,7),(1,20,9),(2,10,1);
+
+# A composite probe containing NULL also fails the retained join equality.
+query II
+select lookup_outer.id,lookup_composite.item from lookup_outer
+join lookup_composite on lookup_outer.k=lookup_composite.item
+where lookup_composite.w=1 and lookup_composite.qty<8 order by lookup_outer.id;
+----
+1 10
+5 10
+
+# Constant leading key + outer item key forms one composite point probe.
+query III
+select c.w,c.item,o.id from lookup_composite c
+join (select * from lookup_outer limit 5) o on c.item=o.k
+where c.w=1 and c.qty<8 order by o.id;
+----
+1 10 1
+1 10 5
+
+# Inner LIMIT is a semantic boundary and must not be moved inside the probe.
+query II
+select o.id,i.id from (select * from lookup_outer limit 5) o
+join (select * from lookup_inner order by id limit 1) i on o.k=i.k order by o.id;
+----
+1 1
+5 1
+
+query II
+select o.id,i.id from (select * from lookup_outer limit 5) o
+left join lookup_inner i on o.k=i.k order by o.id,i.id;
+----
+1 1
+1 2
+2 3
+3 null
+4 null
+5 1
+5 2
+
+statement ok
+drop table lookup_composite;
+
+statement ok
+drop table lookup_inner;
+
+statement ok
+drop table lookup_outer;

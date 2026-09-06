@@ -174,13 +174,20 @@ impl Range {
             ) -> Bound<DataValue> {
                 match bound {
                     Bound::Included(v) => Bound::Included(merge_value(tuple, is_upper, v)),
-                    Bound::Excluded(v) => Bound::Excluded(merge_value(tuple, is_upper, v)),
+                    Bound::Excluded(v) => Bound::Excluded(merge_value(tuple, !is_upper, v)),
                     Bound::Unbounded => {
                         if tuple.is_empty() {
                             return Bound::Unbounded;
                         }
                         let values = tuple.iter().map(|v| (*v).clone()).collect_vec();
-                        Bound::Excluded(DataValue::Tuple(values, is_upper))
+                        // Excluding a lower equality prefix skips its entire key
+                        // range when storage encodes the exclusive bound. Start at
+                        // the prefix itself; the upper sentinel stays exclusive.
+                        if is_upper {
+                            Bound::Excluded(DataValue::Tuple(values, true))
+                        } else {
+                            Bound::Included(DataValue::Tuple(values, false))
+                        }
                     }
                 }
             }
@@ -2258,7 +2265,7 @@ mod test {
             range,
             Some(Range::SortedRanges(vec![
                 Range::Scope {
-                    min: Bound::Excluded(DataValue::Tuple(
+                    min: Bound::Included(DataValue::Tuple(
                         vec![DataValue::Int32(1), DataValue::Null, DataValue::Int32(1),],
                         false
                     )),
@@ -2273,7 +2280,7 @@ mod test {
                     )),
                 },
                 Range::Scope {
-                    min: Bound::Excluded(DataValue::Tuple(
+                    min: Bound::Included(DataValue::Tuple(
                         vec![DataValue::Int32(1), DataValue::Null, DataValue::Int32(2),],
                         false
                     )),
@@ -2288,7 +2295,7 @@ mod test {
                     )),
                 },
                 Range::Scope {
-                    min: Bound::Excluded(DataValue::Tuple(
+                    min: Bound::Included(DataValue::Tuple(
                         vec![
                             DataValue::Int32(1),
                             DataValue::Int32(1),
@@ -2307,7 +2314,7 @@ mod test {
                     )),
                 },
                 Range::Scope {
-                    min: Bound::Excluded(DataValue::Tuple(
+                    min: Bound::Included(DataValue::Tuple(
                         vec![
                             DataValue::Int32(1),
                             DataValue::Int32(1),
@@ -2326,7 +2333,7 @@ mod test {
                     )),
                 },
                 Range::Scope {
-                    min: Bound::Excluded(DataValue::Tuple(
+                    min: Bound::Included(DataValue::Tuple(
                         vec![
                             DataValue::Int32(1),
                             DataValue::Int32(2),
@@ -2345,7 +2352,7 @@ mod test {
                     )),
                 },
                 Range::Scope {
-                    min: Bound::Excluded(DataValue::Tuple(
+                    min: Bound::Included(DataValue::Tuple(
                         vec![
                             DataValue::Int32(1),
                             DataValue::Int32(2),

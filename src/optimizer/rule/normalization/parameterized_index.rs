@@ -14,14 +14,19 @@
 
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
-use crate::expression::{BinaryOperator, ScalarExpression};
+use crate::expression::visitor_mut::{ExprVisitorMut, PositionShift};
+use crate::expression::{BinaryOperator, ScalarExpression, TypeCast};
 use crate::optimizer::core::rule::NormalizationRule;
-use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyQuantifier};
+use crate::planner::operator::filter::FilterOperator;
+use crate::planner::operator::join::{JoinCondition, JoinType};
+use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyOperator, MarkApplyQuantifier};
+use crate::planner::operator::project::ProjectOperator;
 use crate::planner::operator::table_scan::TableScanOperator;
-use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
-use crate::planner::{Childrens, ExprRef, LogicalPlan};
+use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
+use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::types::index::{IndexLookup, IndexType};
 use crate::types::tuple::Schema;
+use crate::types::LogicalType;
 
 pub(crate) struct ParameterizeMarkApply;
 
@@ -32,7 +37,9 @@ impl NormalizationRule for ParameterizeMarkApply {
         arena: &mut crate::planner::PlanArena,
     ) -> Result<bool, DatabaseError> {
         let (op, new_probe) = match (&mut plan.operator, plan.childrens.as_mut()) {
-            (Operator::MarkApply(op), Childrens::Twins { left, right }) => {
+            (Operator::MarkApply(op), Childrens::Twins { left, right })
+                if !matches!(op.kind, MarkApplyKind::InnerJoin) =>
+            {
                 let probe = find_parameterized_probe(
                     op.kind,
                     op.predicates(),
@@ -79,7 +86,7 @@ fn find_parameterized_probe(
                 Ok(None)
             }
         }
-        MarkApplyKind::Quantified(MarkApplyQuantifier::All) => Ok(None),
+        MarkApplyKind::InnerJoin | MarkApplyKind::Quantified(MarkApplyQuantifier::All) => Ok(None),
     }
 }
 
@@ -238,6 +245,192 @@ fn schema_contains_column(
         .any(|candidate| arena.same_column(*candidate, *column))
 }
 
+pub(crate) struct ParameterizeInnerJoin;
+
+// Collect constant equalities without consuming the filter: it must still check
+// all conditions after a static index range is replaced by a runtime probe.
+fn constant_keys(expr: ExprRef, keys: &mut Vec<(ExprRef, ExprRef)>, arena: &PlanArena<'_>) {
+    if let ScalarExpression::Binary {
+        op,
+        left_expr,
+        right_expr,
+        ..
+    } = arena.expression(expr)
+    {
+        match op {
+            BinaryOperator::And => {
+                constant_keys(*left_expr, keys, arena);
+                constant_keys(*right_expr, keys, arena);
+            }
+            BinaryOperator::Eq => {
+                if matches!(arena.expression(*right_expr), ScalarExpression::Constant(_)) {
+                    keys.push((*right_expr, *left_expr));
+                } else if matches!(arena.expression(*left_expr), ScalarExpression::Constant(_)) {
+                    keys.push((*left_expr, *right_expr));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn parameterize(
+    plan: &mut LogicalPlan,
+    mut keys: Vec<(ExprRef, ExprRef)>,
+    arena: &PlanArena<'_>,
+) -> Option<Vec<ExprRef>> {
+    match (&mut plan.operator, plan.childrens.as_mut()) {
+        (Operator::Filter(filter), Childrens::Only(child)) => {
+            constant_keys(filter.predicate, &mut keys, arena);
+            parameterize(child, keys, arena)
+        }
+        (Operator::TableScan(scan), _) if scan.limit == (None, None) => {
+            'indexes: for info in &mut scan.index_infos {
+                let meta = arena.index(info.meta);
+                let mut probe = Vec::with_capacity(meta.column_ids.len());
+                'columns: for id in &meta.column_ids {
+                    let Some(candidate) = scan
+                        .columns
+                        .iter()
+                        .find(|column| arena.column(**column).id() == Some(*id))
+                    else {
+                        continue 'indexes;
+                    };
+                    for &(value, column) in &keys {
+                        let ScalarExpression::ColumnRef { column, .. } =
+                            arena.expression(column.unpack_alias(arena))
+                        else {
+                            continue;
+                        };
+                        if arena.same_column(*candidate, *column)
+                            && value.return_type(arena).as_ref()
+                                == arena.column(*candidate).datatype()
+                        {
+                            probe.push(value);
+                            continue 'columns;
+                        }
+                    }
+                    continue 'indexes;
+                }
+                info.lookup = Some(IndexLookup::Probe);
+                info.residual_predicate = None;
+                plan.physical_option = Some(PhysicalOption::new(
+                    PlanImpl::IndexScan(Box::new(info.clone())),
+                    info.sort_option.clone(),
+                ));
+                return Some(probe);
+            }
+            None
+        }
+        // LIMIT/aggregation/projection are not row-local filters. Moving a probe
+        // below them could change which rows the original inner input produces.
+        _ => None,
+    }
+}
+
+impl NormalizationRule for ParameterizeInnerJoin {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        arena: &mut PlanArena<'_>,
+    ) -> Result<bool, DatabaseError> {
+        let (Operator::Join(join), Childrens::Twins { left, right }) =
+            (&mut plan.operator, plan.childrens.as_mut())
+        else {
+            return Ok(false);
+        };
+        if join.join_type != JoinType::Inner || join.force_nested_loop {
+            return Ok(false);
+        }
+        let JoinCondition::On { on, filter } = &mut join.on else {
+            return Ok(false);
+        };
+        if on.is_empty() {
+            return Ok(false);
+        }
+        let mut keys = on.clone();
+        let (project, probe_keys) = if let Some(probe) = parameterize(right, keys.clone(), arena) {
+            (None, probe)
+        } else {
+            for (l, r) in &mut keys {
+                std::mem::swap(l, r);
+            }
+            let Some(probe) = parameterize(left, keys.clone(), arena) else {
+                return Ok(false);
+            };
+            let left_schema = left.output_schema(arena);
+            let right_schema = right.output_schema(arena);
+            let old_left_len = left_schema.len();
+            let left_len = right_schema.len();
+            // Preserve the original output slots after changing the driving side.
+            let exprs = left_schema
+                .iter()
+                .chain(right_schema.iter())
+                .copied()
+                .enumerate()
+                .map(|(i, column)| {
+                    let position = if i < old_left_len {
+                        left_len + i
+                    } else {
+                        i - old_left_len
+                    };
+                    arena.alloc_expression(ScalarExpression::column_expr(column, position))
+                })
+                .collect();
+            std::mem::swap(left, right);
+            let mut project = LogicalPlan::new(
+                Operator::Project(ProjectOperator { exprs }),
+                Childrens::None,
+            );
+            project.physical_option =
+                Some(PhysicalOption::new(PlanImpl::Project, SortOption::Follow));
+            (Some(project), probe)
+        };
+
+        let filter = filter.take();
+        let (mut left, right) = plan.take().childrens.pop_twins();
+        let left_len = left.output_schema(arena).len();
+        let probe = if probe_keys.len() == 1 {
+            probe_keys[0]
+        } else {
+            arena.alloc_expression(ScalarExpression::Tuple(probe_keys))
+        };
+        let mut predicates = Vec::with_capacity(keys.len());
+        for (left_expr, mut right_expr) in keys {
+            PositionShift {
+                delta: left_len as isize,
+            }
+            .visit(&mut right_expr, arena)?;
+            predicates.push(arena.alloc_expression(ScalarExpression::Binary {
+                op: BinaryOperator::Eq,
+                left_expr,
+                right_expr,
+                evaluator: None,
+                ty: LogicalType::Boolean,
+            }));
+        }
+        let apply = LogicalPlan::new(
+            Operator::MarkApply(MarkApplyOperator::new_inner_join(predicates, probe)),
+            Childrens::Twins {
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        );
+        *plan = if let Some(mut project) = project {
+            project.childrens = Box::new(Childrens::Only(Box::new(apply)));
+            project
+        } else {
+            apply
+        };
+        if let Some(filter) = filter {
+            // The original join filter uses the original left/right output slots.
+            *plan = FilterOperator::build(filter, plan.take(), false);
+            plan.physical_option = Some(PhysicalOption::new(PlanImpl::Filter, SortOption::Follow));
+        }
+        Ok(true)
+    }
+}
+
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
@@ -382,3 +575,315 @@ mod tests {
     }
 }
 // GRCOV_EXCL_STOP
+
+#[cfg(test)]
+mod inner_join_tests {
+    use super::*;
+    use crate::catalog::{ColumnCatalog, ColumnDesc};
+    use crate::expression::range_detacher::Range;
+    use crate::planner::operator::join::JoinOperator;
+    use crate::planner::operator::mark_apply::MarkApplyKind;
+    use crate::planner::operator::table_scan::TableScanOperator;
+    use crate::planner::TableArenaCell;
+    use crate::types::index::{IndexInfo, IndexMeta, IndexType};
+    use crate::types::value::DataValue;
+
+    fn scan(
+        arena: &mut PlanArena<'_>,
+        name: &str,
+        types: &[LogicalType],
+        indexes: &[&[usize]],
+    ) -> LogicalPlan {
+        let columns: Vec<_> = types
+            .iter()
+            .enumerate()
+            .map(|(id, ty)| {
+                let mut column = ColumnCatalog::new(
+                    format!("c{id}"),
+                    true,
+                    ColumnDesc::new(ty.clone(), None, false, None).unwrap(),
+                );
+                column.set_ref_table(name.into(), id as _, true);
+                arena.alloc_column(column)
+            })
+            .collect();
+        let index_infos = indexes
+            .iter()
+            .enumerate()
+            .map(|(id, keys)| IndexInfo {
+                meta: arena.alloc_index(IndexMeta {
+                    id: id as _,
+                    column_ids: keys.iter().map(|id| *id as _).collect(),
+                    table_name: name.into(),
+                    pk_ty: LogicalType::Integer,
+                    value_ty: if keys.len() == 1 {
+                        types[keys[0]].clone()
+                    } else {
+                        LogicalType::Tuple(keys.iter().map(|id| types[*id].clone()).collect())
+                    },
+                    name: format!("idx{id}"),
+                    ty: if keys.len() == 1 {
+                        IndexType::Normal
+                    } else {
+                        IndexType::Composite
+                    },
+                }),
+                lookup: None,
+                residual_predicate: None,
+                sort_option: SortOption::None,
+                covered_deserializers: None,
+                cover_mapping: None,
+                sort_elimination_hint: None,
+                stream_aggregate_hint: None,
+            })
+            .collect();
+        LogicalPlan::new(
+            Operator::TableScan(TableScanOperator {
+                table_name: name.into(),
+                columns,
+                limit: (None, None),
+                index_infos,
+                with_pk: false,
+            }),
+            Childrens::None,
+        )
+    }
+
+    fn column(plan: &LogicalPlan, position: usize, arena: &mut PlanArena<'_>) -> ExprRef {
+        let Operator::TableScan(scan) = &plan.operator else {
+            panic!("expected scan")
+        };
+        arena.alloc_expression(ScalarExpression::column_expr(
+            scan.columns[position],
+            position,
+        ))
+    }
+
+    fn binary(
+        arena: &mut PlanArena<'_>,
+        op: BinaryOperator,
+        left_expr: ExprRef,
+        right_expr: ExprRef,
+    ) -> ExprRef {
+        arena.alloc_expression(ScalarExpression::Binary {
+            op,
+            left_expr,
+            right_expr,
+            evaluator: None,
+            ty: LogicalType::Boolean,
+        })
+    }
+
+    fn position(expr: ExprRef, arena: &PlanArena<'_>) -> usize {
+        let ScalarExpression::ColumnRef { position, .. } = arena.expression(expr) else {
+            panic!("expected column")
+        };
+        *position
+    }
+
+    fn join(
+        left: LogicalPlan,
+        right: LogicalPlan,
+        on: Vec<(ExprRef, ExprRef)>,
+        filter: Option<ExprRef>,
+    ) -> LogicalPlan {
+        JoinOperator::build(
+            left,
+            right,
+            JoinCondition::On { on, filter },
+            JoinType::Inner,
+            false,
+        )
+    }
+
+    #[test]
+    fn composite_probe_uses_index_order_and_preserves_static_filter() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let left = scan(
+            &mut arena,
+            "outer",
+            &[const { LogicalType::Integer }; 2],
+            &[],
+        );
+        // First index cannot be probed. Second requires constant + two join keys.
+        let mut right = scan(
+            &mut arena,
+            "inner",
+            &[const { LogicalType::Integer }; 4],
+            &[&[3], &[0, 2, 1]],
+        );
+        let l0 = column(&left, 0, &mut arena);
+        let l1 = column(&left, 1, &mut arena);
+        let r0 = column(&right, 0, &mut arena);
+        let r1 = column(&right, 1, &mut arena);
+        let r2 = column(&right, 2, &mut arena);
+        let r3 = column(&right, 3, &mut arena);
+        let constant = arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(7)));
+        let equality = binary(&mut arena, BinaryOperator::Eq, constant, r0);
+        let residual = binary(&mut arena, BinaryOperator::Gt, r3, constant);
+        let predicate = binary(&mut arena, BinaryOperator::And, equality, residual);
+        let Operator::TableScan(scan) = &mut right.operator else {
+            unreachable!()
+        };
+        let info = &mut scan.index_infos[1];
+        info.lookup = Some(IndexLookup::Static(Range::Eq(DataValue::Int32(7))));
+        info.residual_predicate = Some(residual);
+        let index = info.meta;
+        right.physical_option = Some(PhysicalOption::new(
+            PlanImpl::IndexScan(Box::new(info.clone())),
+            SortOption::None,
+        ));
+        let right = FilterOperator::build(predicate, right, false);
+        let mut plan = join(left, right, vec![(l0, r1), (l1, r2)], None);
+
+        assert!(ParameterizeInnerJoin.apply(&mut plan, &mut arena)?);
+        let Operator::MarkApply(apply) = &plan.operator else {
+            panic!("expected apply without projection")
+        };
+        assert_eq!(apply.kind, MarkApplyKind::InnerJoin);
+        assert_eq!(
+            arena.expression(*apply.parameterized_probe().unwrap()),
+            &ScalarExpression::Tuple(vec![constant, l1, l0])
+        );
+        assert_eq!((position(l0, &arena), position(l1, &arena)), (0, 1));
+        assert_eq!((position(r1, &arena), position(r2, &arena)), (3, 4));
+        let Childrens::Twins { right, .. } = plan.childrens.as_ref() else {
+            unreachable!()
+        };
+        let Operator::Filter(filter) = &right.operator else {
+            panic!("full filter must survive")
+        };
+        assert_eq!(filter.predicate, predicate);
+        let Childrens::Only(scan) = right.childrens.as_ref() else {
+            unreachable!()
+        };
+        let PlanImpl::IndexScan(info) = &scan.physical_option.as_ref().unwrap().plan else {
+            panic!("expected index scan")
+        };
+        assert_eq!(info.meta, index);
+        assert_eq!(info.lookup, Some(IndexLookup::Probe));
+        assert_eq!(info.residual_predicate, None);
+        assert_eq!(position(r0, &arena), 0);
+        assert_eq!(position(r3, &arena), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn swapped_join_restores_unequal_widths_and_filter_positions() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let mut left = scan(
+            &mut arena,
+            "left",
+            &[const { LogicalType::Integer }; 3],
+            &[&[1]],
+        );
+        let mut right = scan(&mut arena, "right", &[LogicalType::Integer], &[]);
+        let mut schema = left.output_schema(&mut arena).clone();
+        schema.extend_from_slice(right.output_schema(&mut arena));
+        let l = column(&left, 1, &mut arena);
+        let r = column(&right, 0, &mut arena);
+        let filter_left = arena.alloc_expression(ScalarExpression::column_expr(schema[2], 2));
+        let filter_right = arena.alloc_expression(ScalarExpression::column_expr(schema[3], 3));
+        let predicate = binary(&mut arena, BinaryOperator::Gt, filter_left, filter_right);
+        let mut plan = join(left, right, vec![(l, r)], Some(predicate));
+
+        assert!(ParameterizeInnerJoin.apply(&mut plan, &mut arena)?);
+        assert_eq!(plan.output_schema(&mut arena), &schema);
+        let Operator::Filter(filter) = &plan.operator else {
+            panic!("join filter must remain above projection")
+        };
+        assert_eq!(filter.predicate, predicate);
+        assert_eq!(
+            (
+                position(filter_left, &arena),
+                position(filter_right, &arena)
+            ),
+            (2, 3)
+        );
+        let Childrens::Only(project) = plan.childrens.as_ref() else {
+            unreachable!()
+        };
+        let Operator::Project(project_op) = &project.operator else {
+            panic!("expected reorder projection")
+        };
+        assert_eq!(
+            project_op
+                .exprs
+                .iter()
+                .map(|expr| position(*expr, &arena))
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 0]
+        );
+        let Childrens::Only(apply_plan) = project.childrens.as_ref() else {
+            unreachable!()
+        };
+        let Operator::MarkApply(apply) = &apply_plan.operator else {
+            panic!("expected apply")
+        };
+        assert_eq!(apply.parameterized_probe(), Some(&r));
+        assert_eq!((position(r, &arena), position(l, &arena)), (0, 2));
+        let ScalarExpression::Binary {
+            left_expr,
+            right_expr,
+            ..
+        } = arena.expression(apply.predicates()[0])
+        else {
+            unreachable!()
+        };
+        assert_eq!((*left_expr, *right_expr), (r, l));
+        let Childrens::Twins { left, right } = apply_plan.childrens.as_ref() else {
+            unreachable!()
+        };
+        let Operator::TableScan(outer) = &left.operator else {
+            unreachable!()
+        };
+        let Operator::TableScan(inner) = &right.operator else {
+            unreachable!()
+        };
+        assert_eq!(outer.table_name.as_ref(), "right");
+        assert_eq!(inner.table_name.as_ref(), "left");
+        Ok(())
+    }
+
+    #[test]
+    fn rejected_probe_leaves_join_and_expression_positions_unchanged() -> Result<(), DatabaseError>
+    {
+        for case in ["missing_key", "type_mismatch", "inner_limit", "outer_join"] {
+            let tables = TableArenaCell::default();
+            let mut arena = PlanArena::new(&tables);
+            let left = scan(&mut arena, "left", &[LogicalType::Integer], &[]);
+            let ty = if case == "type_mismatch" {
+                LogicalType::Bigint
+            } else {
+                LogicalType::Integer
+            };
+            let index: &[usize] = if case == "missing_key" { &[0, 1] } else { &[0] };
+            let mut right = scan(&mut arena, "right", &[ty, LogicalType::Integer], &[index]);
+            if case == "inner_limit" {
+                let Operator::TableScan(scan) = &mut right.operator else {
+                    unreachable!()
+                };
+                scan.limit = (None, Some(1));
+            }
+            let l = column(&left, 0, &mut arena);
+            let r = column(&right, 0, &mut arena);
+            let mut plan = join(left, right, vec![(l, r)], None);
+            if case == "outer_join" {
+                let Operator::Join(join) = &mut plan.operator else {
+                    unreachable!()
+                };
+                join.join_type = JoinType::LeftOuter;
+            }
+            let before = plan.clone();
+            assert!(
+                !ParameterizeInnerJoin.apply(&mut plan, &mut arena)?,
+                "{case}"
+            );
+            assert_eq!(plan, before, "{case}");
+            assert_eq!((position(l, &arena), position(r, &arena)), (0, 0), "{case}");
+        }
+        Ok(())
+    }
+}

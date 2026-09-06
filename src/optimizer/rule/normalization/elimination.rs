@@ -339,9 +339,6 @@ pub(crate) fn apply_annotated_post_rules(
     if EliminateRedundantSort.apply(plan, arena)? {
         changed = true;
     }
-    if EliminateIndexFilter.apply(plan, arena)? {
-        changed = true;
-    }
     if UseStreamAggregate.apply(plan, arena)? {
         changed = true;
     }
@@ -690,7 +687,17 @@ mod tests {
         let mut arena = crate::planner::PlanArena::new(&table_arena);
         let predicate =
             arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(true)));
-        let mut plan = build_filter_with_selected_index(&mut arena, predicate, None);
+        let stale_residual =
+            arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(false)));
+        let mut plan =
+            build_filter_with_selected_index(&mut arena, predicate, Some(stale_residual));
+        // Physical annotation must leave the full predicate available for a later
+        // parameterization rule, even when a static index initially won.
+        super::apply_annotated_post_rules(&mut plan, &mut arena)?;
+        let Operator::Filter(filter) = &plan.operator else {
+            panic!("filter removed before parameterization")
+        };
+        assert_eq!(filter.predicate, predicate);
         let Childrens::Only(child) = plan.childrens.as_mut() else {
             unreachable!("filter should have a scan child");
         };
@@ -708,7 +715,10 @@ mod tests {
 
         let rule = EliminateIndexFilter;
         assert!(!rule.apply(&mut plan, &mut arena)?);
-        assert!(matches!(plan.operator, Operator::Filter(_)));
+        let Operator::Filter(filter) = &plan.operator else {
+            panic!("probe cannot discharge the static filter")
+        };
+        assert_eq!(filter.predicate, predicate);
         Ok(())
     }
 

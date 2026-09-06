@@ -691,6 +691,11 @@ mod tests {
                     NormalizationRuleImpl::PushPredicateIntoScan,
                 ],
             )
+            .after_batch(
+                "Eliminate Index Filter".to_string(),
+                HepBatchStrategy::once_topdown(),
+                vec![NormalizationRuleImpl::EliminateIndexFilter],
+            )
             .implementations(vec![
                 ImplementationRuleImpl::Projection,
                 ImplementationRuleImpl::Filter,

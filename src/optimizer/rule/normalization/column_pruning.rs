@@ -141,8 +141,13 @@ impl ColumnPruning {
                 &mut self,
                 op: &'a crate::planner::operator::mark_apply::MarkApplyOperator,
             ) -> Result<(), DatabaseError> {
-                self.referenced_columns
-                    .insert(*op.output_column(), self.arena);
+                if !matches!(
+                    op.kind,
+                    crate::planner::operator::mark_apply::MarkApplyKind::InnerJoin
+                ) {
+                    self.referenced_columns
+                        .insert(*op.output_column(), self.arena);
+                }
                 Ok(())
             }
 

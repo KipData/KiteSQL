@@ -362,7 +362,17 @@ fn default_optimizer_pipeline() -> HepOptimizerPipeline {
         .after_batch(
             "Parameterize Mark Apply".to_string(),
             HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::ParameterizeMarkApply],
+            vec![
+                NormalizationRuleImpl::ParameterizeMarkApply,
+                NormalizationRuleImpl::ParameterizeInnerJoin,
+            ],
+        )
+        // Only discard predicates after parameterization has chosen the final
+        // lookup. A Probe must not inherit residuals from a replaced static range.
+        .after_batch(
+            "Eliminate Index Filter".to_string(),
+            HepBatchStrategy::once_topdown(),
+            vec![NormalizationRuleImpl::EliminateIndexFilter],
         )
         .after_batch(
             "Expression Remapper".to_string(),

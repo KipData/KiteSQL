@@ -47,9 +47,10 @@ mod simplification;
 mod top_k;
 pub(crate) use compilation_in_advance::evaluator_bind_current;
 pub(crate) use elimination::{
-    apply_annotated_post_rules, apply_scan_order_hint, OrderHintKind, ScanOrderHint,
+    apply_annotated_post_rules, apply_scan_order_hint, EliminateIndexFilter, OrderHintKind,
+    ScanOrderHint,
 };
-pub(crate) use parameterized_index::ParameterizeMarkApply;
+pub(crate) use parameterized_index::{ParameterizeInnerJoin, ParameterizeMarkApply};
 pub(crate) use simplification::constant_calculation_current;
 
 #[derive(Debug, Copy, Clone)]
@@ -76,6 +77,8 @@ pub enum NormalizationRuleImpl {
     MinMaxToTopK,
     TopK,
     ParameterizeMarkApply,
+    ParameterizeInnerJoin,
+    EliminateIndexFilter,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -179,6 +182,8 @@ impl NormalizationRuleImpl {
             NormalizationRuleImpl::ConstantCalculation => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::EvaluatorBind => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::MinMaxToTopK => NormalizationRuleRootTag::Aggregate,
+            NormalizationRuleImpl::EliminateIndexFilter => NormalizationRuleRootTag::Filter,
+            NormalizationRuleImpl::ParameterizeInnerJoin => NormalizationRuleRootTag::Join,
             NormalizationRuleImpl::ParameterizeMarkApply => NormalizationRuleRootTag::MarkApply,
         }
     }
@@ -214,6 +219,10 @@ impl NormalizationRule for NormalizationRuleImpl {
             NormalizationRuleImpl::EvaluatorBind => EvaluatorBind.apply(plan, arena),
             NormalizationRuleImpl::MinMaxToTopK => MinMaxToTopK.apply(plan, arena),
             NormalizationRuleImpl::TopK => TopK.apply(plan, arena),
+            NormalizationRuleImpl::EliminateIndexFilter => EliminateIndexFilter.apply(plan, arena),
+            NormalizationRuleImpl::ParameterizeInnerJoin => {
+                ParameterizeInnerJoin.apply(plan, arena)
+            }
             NormalizationRuleImpl::ParameterizeMarkApply => {
                 ParameterizeMarkApply.apply(plan, arena)
             }
