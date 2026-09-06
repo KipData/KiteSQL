@@ -203,14 +203,14 @@ Run `make tpcc-dual` to mirror every TPCC statement to an in-memory SQLite datab
 
 Recent stable-run 720-second local comparison on the machine above:
 
-| Backend | TpmC | New-Order p90 | Payment p90 | Order-Status p90 | Delivery p90 | Stock-Level p90 |
+| Backend | TpmC | New-Order p90 (µs) | Payment p90 (µs) | Order-Status p90 (µs) | Delivery p90 (µs) | Stock-Level p90 (µs) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| KiteSQL LMDB | 82871 | 0.001s | 0.001s | 0.001s | 0.002s | 0.001s |
-| KiteSQL RocksDB | 40960 | 0.001s | 0.001s | 0.001s | 0.011s | 0.001s |
-| SQLite balanced | 51637 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
-| SQLite practical | 61424 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
+| KiteSQL LMDB | 83999 | 552 | 191 | 597 | 1041 | 112 |
+| KiteSQL RocksDB | 39035 | 734 | 388 | 1033 | 10199 | 201 |
+| SQLite balanced | 48550 | 299 | 72 | 51 | 349 | 20 |
+| SQLite practical | 42774 | 362 | 73 | 42 | 457 | 20 |
 
-These rows are from the stable runs on `2026-07-11`; the detailed raw outputs are recorded in [tpcc/README.md](tpcc/README.md).
+These rows are from the stable run on `2026-09-06`; latencies are in microseconds and include transaction commit.
 
 #### 👉[check more](tpcc/README.md)
 

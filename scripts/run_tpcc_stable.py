@@ -311,7 +311,7 @@ def extract_tpmc(log_text: str) -> str:
 
 
 def extract_p90(log_text: str, label: str) -> str:
-    marker = "<90th Percentile RT in us (MaxRT)>"
+    marker = "<Latency Percentile RT in us (MaxRT)>"
     if marker not in log_text:
         return "-"
     block = log_text.split(marker, 1)[1]

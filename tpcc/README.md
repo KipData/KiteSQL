@@ -44,17 +44,19 @@ The benchmark stores `history.h_date` as `timestamp(6)`, so high-throughput `Pay
 ## 720s comparison
 Local stable-run 720-second comparison on the machine above:
 
-| Backend | TpmC | New-Order p90 | Payment p90 | Order-Status p90 | Delivery p90 | Stock-Level p90 |
+| Backend | TpmC | New-Order p90 (µs) | Payment p90 (µs) | Order-Status p90 (µs) | Delivery p90 (µs) | Stock-Level p90 (µs) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| KiteSQL LMDB | 82871 | 0.001s | 0.001s | 0.001s | 0.002s | 0.001s |
-| KiteSQL RocksDB | 40960 | 0.001s | 0.001s | 0.001s | 0.011s | 0.001s |
-| SQLite balanced | 51637 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
-| SQLite practical | 61424 | 0.001s | 0.001s | 0.001s | 0.001s | 0.001s |
+| KiteSQL LMDB | 83999 | 552 | 191 | 597 | 1041 | 112 |
+| KiteSQL RocksDB | 39035 | 734 | 388 | 1033 | 10199 | 201 |
+| SQLite balanced | 48550 | 299 | 72 | 51 | 349 | 20 |
+| SQLite practical | 42774 | 362 | 73 | 42 | 457 | 20 |
 
-- The KiteSQL rows are from `2026-07-11_17-20-24`; the SQLite rows are from `2026-07-11_20-25-01`.
+- All rows are from `2026-09-06_08-53-13`; latency is measured in microseconds and includes commit.
 - The stable-run gates were `temp<=65.0C`, `cpu<=20.0%`, `min_cooldown=300s`, `stable_samples=3`, and `sample_interval=10.0s`.
 - All rows use `--num-ware 1`, `--max-retry 5`, and TPCC's default 720-second measure time.
 - SQLite rows use the `balanced` and `practical` profiles respectively.
+
+## Historical raw outputs — 2026-07-11
 
 ### KiteSQL LMDB
 ```shell
