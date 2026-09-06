@@ -205,12 +205,12 @@ Recent stable-run 720-second local comparison on the machine above:
 
 | Backend | TpmC | New-Order p90 (µs) | Payment p90 (µs) | Order-Status p90 (µs) | Delivery p90 (µs) | Stock-Level p90 (µs) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| KiteSQL LMDB | 83999 | 552 | 191 | 597 | 1041 | 112 |
-| KiteSQL RocksDB | 39035 | 734 | 388 | 1033 | 10199 | 201 |
-| SQLite balanced | 48550 | 299 | 72 | 51 | 349 | 20 |
-| SQLite practical | 42774 | 362 | 73 | 42 | 457 | 20 |
+| KiteSQL LMDB | 70315 | 561 | 196 | 208 | 1089 | 1693 |
+| KiteSQL RocksDB | 35556 | 747 | 394 | 365 | 10175 | 2125 |
+| SQLite balanced | 54797 | 303 | 72 | 52 | 363 | 508 |
+| SQLite practical | 44847 | 527 | 146 | 61 | 1248 | 486 |
 
-These rows are from the stable run on `2026-09-06`; latencies are in microseconds and include transaction commit.
+These rows are from the local run on `2026-09-06–2026-09-07`; latencies are in microseconds and include transaction commit.
 
 #### 👉[check more](tpcc/README.md)
 
