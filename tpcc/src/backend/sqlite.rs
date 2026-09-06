@@ -171,6 +171,19 @@ impl<'a> BackendTransaction for SqliteTransaction<'a> {
         visitor(&tuple)
     }
 
+    fn with_query_all(
+        &mut self,
+        statement: &mut Self::PreparedStatement,
+        params: &[DbParam],
+        visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+    ) -> Result<(), TpccError> {
+        let iter = self.execute_raw(statement, params)?;
+        for row in iter {
+            visitor(&row?)?;
+        }
+        Ok(())
+    }
+
     fn with_query_nth(
         &mut self,
         statement: &mut Self::PreparedStatement,

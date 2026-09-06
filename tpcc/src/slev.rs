@@ -57,8 +57,8 @@ impl TpccTransaction for Slev {
             },
         )?;
         // "SELECT DISTINCT ol_i_id FROM order_line WHERE ol_w_id = ? AND ol_d_id = ? AND ol_o_id < ? AND ol_o_id >= (? - 20)"
-        let mut ol_i_id = 0;
-        tx.with_query_one(
+        let mut item_ids = Vec::new();
+        tx.with_query_all(
             &mut statements[1],
             &[
                 ("$1", DataValue::Int16(args.w_id as i16)),
@@ -67,22 +67,26 @@ impl TpccTransaction for Slev {
                 ("$4", DataValue::Int32(d_next_o_id)),
             ],
             &mut |tuple| {
-                ol_i_id = tuple.values[0].i32().unwrap();
+                item_ids.push(tuple.values[0].i32().unwrap());
                 Ok(())
             },
         )?;
         // "SELECT count(*) FROM stock WHERE s_w_id = ? AND s_i_id = ? AND s_quantity < ?"
-        tx.with_query_one(
-            &mut statements[2],
-            &[
-                ("$1", DataValue::Int16(args.w_id as i16)),
-                ("$2", DataValue::Int8(ol_i_id as i8)),
-                ("$3", DataValue::Int16(args.level as i16)),
-            ],
-            &mut |_| Ok(()),
-        )?;
-        // let i_count = tuple.values[0].i32().unwrap();
-
+        let mut _low_stock = 0;
+        for item_id in item_ids {
+            tx.with_query_one(
+                &mut statements[2],
+                &[
+                    ("$1", DataValue::Int16(args.w_id as i16)),
+                    ("$2", DataValue::Int32(item_id)),
+                    ("$3", DataValue::Int16(args.level as i16)),
+                ],
+                &mut |tuple| {
+                    _low_stock += tuple.values[0].i32().unwrap();
+                    Ok(())
+                },
+            )?;
+        }
         Ok(())
     }
 }
@@ -97,7 +101,7 @@ impl TpccTest for SlevTest {
         statements: &mut [T::PreparedStatement],
     ) -> Result<(), TpccError> {
         let w_id = rng.gen_range(0..num_ware) + 1;
-        let d_id = rng.gen_range(1..DIST_PER_WARE);
+        let d_id = rng.gen_range(1..=DIST_PER_WARE);
         let level = rng.gen_range(10..20);
 
         let args = SlevArgs::new(w_id, d_id, level);

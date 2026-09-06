@@ -66,8 +66,6 @@ const TX_NAMES: [&str; 5] = [
     "Delivery",
     "Stock-Level",
 ];
-pub(crate) const STOCK_LEVEL_DISTINCT_SQL: &str = "SELECT DISTINCT ol_i_id FROM order_line WHERE ol_w_id = $1 AND ol_d_id = $2 AND ol_o_id < $3 AND ol_o_id >= ($4 - 20)";
-pub(crate) const STOCK_LEVEL_DISTINCT_SQLITE: &str = "SELECT DISTINCT ol_i_id FROM (SELECT ol_i_id FROM order_line WHERE ol_w_id = $1 AND ol_d_id = $2 AND ol_o_id < $3 AND ol_o_id >= ($4 - 20) ORDER BY ol_w_id, ol_d_id, ol_o_id)";
 
 pub(crate) trait TpccTransaction {
     type Args;
@@ -587,8 +585,10 @@ fn statement_specs() -> Vec<Vec<StatementSpec>> {
                 "SELECT d_next_o_id FROM district WHERE d_id = $1 AND d_w_id = $2",
                 &[ColumnType::Int32],
             ),
-            stmt(STOCK_LEVEL_DISTINCT_SQL, &[ColumnType::Int32]),
-            // "SELECT count(*) FROM stock WHERE s_w_id = $1 AND s_i_id = $2 AND s_quantity < $3"
+            stmt(
+                "SELECT DISTINCT ol_i_id FROM order_line WHERE ol_w_id = $1 AND ol_d_id = $2 AND ol_o_id < $3 AND ol_o_id >= ($4 - 20)",
+                &[ColumnType::Int32],
+            ),
             stmt(
                 "SELECT count(*) FROM stock WHERE s_w_id = $1 AND s_i_id = $2 AND s_quantity < $3",
                 &[ColumnType::Int32],

@@ -64,6 +64,13 @@ pub trait BackendTransaction {
         visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
     ) -> Result<(), TpccError>;
 
+    fn with_query_all(
+        &mut self,
+        statement: &mut Self::PreparedStatement,
+        params: &[DbParam],
+        visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+    ) -> Result<(), TpccError>;
+
     fn with_query_nth(
         &mut self,
         statement: &mut Self::PreparedStatement,
