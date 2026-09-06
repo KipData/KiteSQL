@@ -66,8 +66,6 @@ const TX_NAMES: [&str; 5] = [
     "Delivery",
     "Stock-Level",
 ];
-pub(crate) const STOCK_LEVEL_DISTINCT_SQL: &str = "SELECT DISTINCT ol_i_id FROM order_line WHERE ol_w_id = $1 AND ol_d_id = $2 AND ol_o_id < $3 AND ol_o_id >= ($4 - 20)";
-pub(crate) const STOCK_LEVEL_DISTINCT_SQLITE: &str = "SELECT DISTINCT ol_i_id FROM (SELECT ol_i_id FROM order_line WHERE ol_w_id = $1 AND ol_d_id = $2 AND ol_o_id < $3 AND ol_o_id >= ($4 - 20) ORDER BY ol_w_id, ol_d_id, ol_o_id)";
 
 pub(crate) trait TpccTransaction {
     type Args;
@@ -231,6 +229,7 @@ fn run_tpcc<B: BackendControl>(
                 failure[i] += 1;
                 last_error = Some(err);
             } else {
+                tx.commit()?;
                 let rt = transaction_start.elapsed();
                 rt_hist.hist_inc(i, rt);
                 is_succeed = true;
@@ -240,7 +239,6 @@ fn run_tpcc<B: BackendControl>(
                 } else {
                     late[i] += 1;
                 }
-                tx.commit()?;
                 break;
             }
         }
@@ -294,7 +292,6 @@ fn run_tpcc<B: BackendControl>(
     print_constraint_checks(&success, &late);
     print_response_checks(&success, &late);
     println!();
-    rt_hist.finalize();
     rt_hist.hist_report();
     println!("<TpmC>");
     let tpmc = ((success[0] + late[0]) as f64 / (actual_tpcc_time.as_secs_f64() / 60.0)).round();
@@ -588,8 +585,10 @@ fn statement_specs() -> Vec<Vec<StatementSpec>> {
                 "SELECT d_next_o_id FROM district WHERE d_id = $1 AND d_w_id = $2",
                 &[ColumnType::Int32],
             ),
-            stmt(STOCK_LEVEL_DISTINCT_SQL, &[ColumnType::Int32]),
-            // "SELECT count(*) FROM stock WHERE s_w_id = $1 AND s_i_id = $2 AND s_quantity < $3"
+            stmt(
+                "SELECT DISTINCT ol_i_id FROM order_line WHERE ol_w_id = $1 AND ol_d_id = $2 AND ol_o_id < $3 AND ol_o_id >= ($4 - 20)",
+                &[ColumnType::Int32],
+            ),
             stmt(
                 "SELECT count(*) FROM stock WHERE s_w_id = $1 AND s_i_id = $2 AND s_quantity < $3",
                 &[ColumnType::Int32],
@@ -705,7 +704,7 @@ fn print_checkpoint(
     checkpoint_idx: usize,
     round: usize,
     test_name: &str,
-    p90: f64,
+    p90_us: u64,
     success: &[usize],
     late: &[usize],
     failure: &[usize],
@@ -721,7 +720,7 @@ fn print_checkpoint(
     };
 
     progress.println(format!(
-        "[CP {checkpoint_idx:>3} | round {round:>6} | {test_name} p90={p90:.3}s | \
+        "[CP {checkpoint_idx:>3} | round {round:>6} | {test_name} p90={p90_us}us | \
 est TpmC {:>6.0} | total fail {:>6}]",
         est_tpmc, total_failure
     ));

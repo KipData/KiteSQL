@@ -130,6 +130,17 @@ impl<'a> BackendTransaction for KiteSqlLmdbTransactionWrapper<'a> {
             .ok_or(TpccError::EmptyTuples)
     }
 
+    fn with_query_all(
+        &mut self,
+        statement: &mut Self::PreparedStatement,
+        params: &[DbParam],
+        visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+    ) -> Result<(), TpccError> {
+        let mut iter = self.execute_raw(statement, params)?;
+        while iter.with_next_tuple(|tuple| visitor(tuple))?.is_some() {}
+        Ok(())
+    }
+
     fn with_query_nth(
         &mut self,
         statement: &mut Self::PreparedStatement,
