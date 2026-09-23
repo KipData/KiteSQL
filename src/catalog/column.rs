@@ -14,7 +14,8 @@
 
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
-use crate::planner::{ExprRef, PlanArena};
+use crate::planner::ExprRef;
+use crate::planner::MetaArena;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use crate::types::CharLengthUnits;
@@ -174,7 +175,7 @@ impl ColumnCatalog {
 
     pub(crate) fn default_value(
         &self,
-        arena: &PlanArena<'_>,
+        arena: &(dyn MetaArena + '_),
     ) -> Result<Option<DataValue>, DatabaseError> {
         self.desc
             .default

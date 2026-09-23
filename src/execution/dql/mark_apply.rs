@@ -18,6 +18,7 @@ use crate::execution::{
 };
 use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyOperator, MarkApplyQuantifier};
 use crate::planner::LogicalPlan;
+use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::index::RuntimeIndexProbe;
 use crate::types::tuple::{SplitTupleRef, Tuple};
@@ -45,7 +46,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for MarkApply<'a, T> {
     fn into_executor(
         (op, left_input, right_input): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -63,7 +64,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply<'a, T> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         if matches!(self.op.kind, MarkApplyKind::InnerJoin) {
             return self.next_join_tuple(arena, plan_arena);
@@ -86,7 +87,7 @@ impl<'a, T: Transaction + 'a> MarkApply<'a, T> {
     fn next_join_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         loop {
             if let Some((inner, root, left)) = &mut self.join_input {
@@ -142,7 +143,7 @@ impl<'a, T: Transaction + 'a> MarkApply<'a, T> {
     fn build_right_input(
         &self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         param_value: Option<DataValue>,
     ) -> ExecId {
         if let Some(probe) = self.runtime_probe_for(param_value) {
@@ -160,11 +161,11 @@ impl<'a, T: Transaction + 'a> MarkApply<'a, T> {
     fn with_right_input<R>(
         &self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         param_value: Option<DataValue>,
         f: impl FnOnce(
             &mut ExecArena<'a, T>,
-            &mut crate::planner::PlanArena<'a>,
+            &mut (dyn MetaArena + 'a),
             ExecId,
         ) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
@@ -187,7 +188,7 @@ impl<'a, T: Transaction + 'a> MarkApply<'a, T> {
     fn parameterized_probe_value(
         &self,
         left_tuple: &Tuple,
-        plan_arena: &crate::planner::PlanArena<'_>,
+        plan_arena: &(dyn MetaArena + '_),
     ) -> Result<Option<DataValue>, DatabaseError> {
         self.op
             .parameterized_probe()
@@ -202,15 +203,16 @@ impl<'a, T: Transaction + 'a> MarkApply<'a, T> {
     fn mark_value(
         &self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         left_tuple: &Tuple,
     ) -> Result<DataValue, DatabaseError> {
+        let probe = self.parameterized_probe_value(left_tuple, plan_arena)?;
         match self.op.kind {
             MarkApplyKind::InnerJoin => unreachable!("inner join streams tuples"),
             MarkApplyKind::Exists => self.with_right_input(
                 arena,
                 plan_arena,
-                self.parameterized_probe_value(left_tuple, plan_arena)?,
+                probe,
                 |arena, plan_arena, right_input| {
                     while arena.next_tuple(right_input, plan_arena)? {
                         let right_tuple = arena.result_tuple();
@@ -307,7 +309,7 @@ impl<'a, T: Transaction + 'a> MarkApply<'a, T> {
     fn scan_quantified_right_input(
         &self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         right_input: ExecId,
         quantifier: MarkApplyQuantifier,
         left_tuple: &Tuple,
@@ -346,7 +348,7 @@ impl<'a, T: Transaction + 'a> MarkApply<'a, T> {
         predicates: &[crate::planner::ExprRef],
         left_tuple: &Tuple,
         right_tuple: &Tuple,
-        plan_arena: &crate::planner::PlanArena<'_>,
+        plan_arena: &(dyn MetaArena + '_),
     ) -> Result<bool, DatabaseError> {
         let values = SplitTupleRef::new(left_tuple, right_tuple);
 
@@ -368,7 +370,7 @@ impl<'a, T: Transaction + 'a> MarkApply<'a, T> {
         &self,
         left_tuple: &Tuple,
         right_tuple: &Tuple,
-        plan_arena: &crate::planner::PlanArena<'_>,
+        plan_arena: &(dyn MetaArena + '_),
     ) -> Result<QuantifiedPredicateOutcome, DatabaseError> {
         match self.eval_predicates(left_tuple, right_tuple, plan_arena)? {
             Some(DataValue::Boolean(true)) => Ok(QuantifiedPredicateOutcome::True),
@@ -383,7 +385,7 @@ impl<'a, T: Transaction + 'a> MarkApply<'a, T> {
         &self,
         left_tuple: &Tuple,
         right_tuple: &Tuple,
-        plan_arena: &crate::planner::PlanArena<'_>,
+        plan_arena: &(dyn MetaArena + '_),
     ) -> Result<Option<DataValue>, DatabaseError> {
         let values = SplitTupleRef::new(left_tuple, right_tuple);
         // probe_predicate is in predicate, always first

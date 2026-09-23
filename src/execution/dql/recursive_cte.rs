@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::planner::PlanArena;
 // Copyright 2024 KipData/KiteSQL
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,7 +21,8 @@ use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::recursive_cte::RecursiveScanOperator;
-use crate::planner::{LogicalPlan, PlanArena};
+use crate::planner::LogicalPlan;
+use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use std::mem;
@@ -198,7 +201,10 @@ impl<'a, T: Transaction + 'a> RecursiveCte<'a, T> {
         }
     }
 
-    fn start_recursive(&mut self, plan_arena: &mut PlanArena<'a>) -> Result<bool, DatabaseError> {
+    fn start_recursive(
+        &mut self,
+        plan_arena: &mut (dyn MetaArena + 'a),
+    ) -> Result<bool, DatabaseError> {
         let Some(input) = mem::take(&mut self.working).into_input()? else {
             return Ok(false);
         };
@@ -224,7 +230,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for RecursiveCte<'a, T> {
     fn into_executor(
         (anchor_plan, recursive_plan): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -243,7 +249,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for RecursiveCte<'a, T> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         loop {
             match self.phase {
@@ -292,7 +298,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for RecursiveScan {
     fn into_executor(
         _input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut PlanArena<'a>,
+        _plan_arena: &mut (dyn MetaArena + 'a),
         _cache: ExecutionContext<'_>,
         _transaction: &T,
     ) -> ExecId {
@@ -305,7 +311,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for RecursiveScan {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut PlanArena<'a>,
+        _plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         match self.input.next().transpose()? {
             Some(tuple) => arena.produce_tuple(tuple),

@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::planner::PlanArena;
 // Copyright 2024 KipData/KiteSQL
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,7 +17,8 @@
 use crate::errors::DatabaseError;
 use crate::expression::function::scala::ScalarFunction;
 use crate::expression::{AliasType, BinaryOperator, ScalarExpression, TrimWhereField};
-use crate::planner::{ExprRef, PlanArena};
+use crate::planner::ExprRef;
+use crate::planner::MetaArena;
 use crate::types::evaluator::binary_create;
 use crate::types::tuple::TupleLike;
 use crate::types::value::{DataValue, Utf8Type};
@@ -42,7 +45,7 @@ macro_rules! eval_to_num {
 impl ScalarExpression {
     pub fn eval<T: TupleLike + Copy>(
         &self,
-        arena: &PlanArena<'_>,
+        arena: &(dyn MetaArena + '_),
         tuple: Option<T>,
     ) -> Result<DataValue, DatabaseError> {
         match self {
@@ -395,7 +398,7 @@ mod tests {
     use crate::planner::test::PlanArenaTestExt;
 
     fn const_in(
-        arena: &mut PlanArena,
+        arena: &mut PlanArena<'_>,
         expr: DataValue,
         args: Vec<DataValue>,
         negated: bool,

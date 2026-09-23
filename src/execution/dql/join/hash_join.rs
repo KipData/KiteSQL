@@ -26,6 +26,7 @@ use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
+use crate::planner::MetaArena;
 use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
@@ -130,7 +131,7 @@ impl HashJoin {
         on_keys: &[ExprRef],
         tuple: &Tuple,
         build_buf: &mut BumpVec<'_, DataValue>,
-        plan_arena: &crate::planner::PlanArena<'_>,
+        plan_arena: &(dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         build_buf.clear();
         for expr in on_keys {
@@ -142,7 +143,7 @@ impl HashJoin {
     fn initialize_build<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         if !matches!(self.state, HashJoinState::Build) {
             return Ok(());
@@ -229,7 +230,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -260,7 +261,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashJoin {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         if let Some(err) = self.init_error.take() {
             return Err(err);

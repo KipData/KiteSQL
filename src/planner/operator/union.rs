@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use crate::planner::operator::Operator;
-use crate::planner::{fmt_explain_list, Childrens, Explain, LogicalPlan, PlanArena};
+use crate::planner::MetaArena;
+use crate::planner::{fmt_explain_list, Childrens, Explain, LogicalPlan};
 use crate::types::tuple::Schema;
 use kite_sql_serde_macros::ReferenceSerialization;
 
@@ -45,7 +46,11 @@ impl UnionOperator {
 }
 
 impl Explain for UnionOperator {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        arena: &(dyn MetaArena + '_),
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         f.write_str("Union: [")?;
         fmt_explain_list(&self.left_schema_ref, ", ", arena, f)?;
         f.write_str("]")

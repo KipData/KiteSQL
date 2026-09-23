@@ -18,7 +18,8 @@ use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::iter_ext::Itertools;
 use crate::planner::operator::sort::SortField;
-use crate::planner::{fmt_explain_list, Childrens, Explain, LogicalPlan, PlanArena};
+use crate::planner::MetaArena;
+use crate::planner::{fmt_explain_list, Childrens, Explain, LogicalPlan};
 use crate::storage::Bounds;
 use crate::types::index::IndexInfo;
 use kite_sql_serde_macros::ReferenceSerialization;
@@ -41,7 +42,7 @@ impl TableScanOperator {
         table_name: TableName,
         table_catalog: &TableCatalog,
         with_pk: bool,
-        arena: &mut PlanArena,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<LogicalPlan, DatabaseError> {
         // Fill all Columns in TableCatalog by default
         let columns = table_catalog.columns().copied().collect_vec();
@@ -91,7 +92,11 @@ impl TableScanOperator {
 }
 
 impl Explain for TableScanOperator {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        arena: &(dyn MetaArena + '_),
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         write!(f, "TableScan {} -> [", self.table_name)?;
         fmt_explain_list(&self.columns, ", ", arena, f)?;
         f.write_str("]")?;

@@ -15,6 +15,7 @@
 use super::SpillCodec;
 use crate::errors::DatabaseError;
 use crate::planner::operator::sort::SortField;
+use crate::planner::MetaArena;
 use crate::planner::PlanArena;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
@@ -30,7 +31,7 @@ impl SortRow {
     pub(crate) fn new(
         sort_fields: &[SortField],
         tuple: Tuple,
-        arena: &PlanArena<'_>,
+        arena: &(dyn MetaArena + '_),
     ) -> Result<Self, DatabaseError> {
         let sort_values = sort_fields
             .iter()

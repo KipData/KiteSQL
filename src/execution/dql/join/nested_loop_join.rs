@@ -15,6 +15,7 @@
 //! Defines the nested loop join executor, it supports [`JoinType::Inner`], [`JoinType::LeftOuter`],
 //! [`JoinType::RightOuter`], [`JoinType::Cross`], [`JoinType::Full`].
 
+use crate::planner::MetaArena;
 use std::mem;
 
 use crate::errors::DatabaseError;
@@ -24,7 +25,7 @@ use crate::execution::{
 };
 use crate::iter_ext::Itertools;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
-use crate::planner::{ExprRef, LogicalPlan, PlanArena};
+use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::tuple::{SplitTupleRef, Tuple};
 use crate::types::value::DataValue;
@@ -45,7 +46,7 @@ impl EqualCondition {
         &self,
         left_tuple: &Tuple,
         right_tuple: &Tuple,
-        arena: &PlanArena<'_>,
+        arena: &(dyn MetaArena + '_),
     ) -> Result<bool, DatabaseError> {
         if self.on_left_keys.is_empty() {
             return Ok(true);
@@ -153,7 +154,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -177,7 +178,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         let mut state = std::mem::replace(&mut self.state, NestedLoopJoinState::End);
 
@@ -390,7 +391,7 @@ impl NestedLoopJoin {
     fn build_right_input<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> ExecId {
         let cache = arena.context();
         let transaction = arena.transaction();

@@ -20,6 +20,7 @@ use crate::execution::{
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::top_k::TopKOperator;
 use crate::planner::LogicalPlan;
+use crate::planner::MetaArena;
 use crate::storage::table_codec::BumpBytes;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
@@ -53,7 +54,7 @@ fn top_sort<'a>(
     heap: &mut BTreeSet<CmpItem<'a>>,
     tuple: Tuple,
     keep_count: usize,
-    plan_arena: &crate::planner::PlanArena<'_>,
+    plan_arena: &(dyn MetaArena + '_),
 ) -> Result<(), DatabaseError> {
     let mut full_key = BumpBytes::new_in(arena);
     for SortField {
@@ -114,7 +115,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for TopK {
             input,
         ): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -134,7 +135,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for TopK {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         if self.output.is_none() {
             let keep_count = self.offset.unwrap_or(0) + self.limit;

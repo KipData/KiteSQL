@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::planner::{fmt_explain_list, Explain, ExprRef, PlanArena};
+use crate::planner::MetaArena;
+use crate::planner::{fmt_explain_list, Explain, ExprRef};
 use crate::types::tuple::Schema;
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt::{self, Formatter};
@@ -24,7 +25,7 @@ pub struct ValuesOperator {
 }
 
 impl Explain for ValuesOperator {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut Formatter) -> fmt::Result {
+    fn fmt(&self, arena: &(dyn MetaArena + '_), f: &mut Formatter) -> fmt::Result {
         f.write_str("Values ")?;
         for (i, row) in self.rows.iter().enumerate() {
             if i != 0 {

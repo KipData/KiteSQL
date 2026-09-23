@@ -25,6 +25,7 @@ use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::visitor::{OperatorExprVisitor, OperatorVisitor};
 use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
 use crate::planner::operator::Operator;
+use crate::planner::MetaArena;
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
@@ -90,7 +91,7 @@ struct ReferencedColumnCollector<'a, 'p> {
     arena: &'a crate::planner::PlanArena<'p>,
 }
 
-impl ExprVisitor<PlanArena<'_>> for ReferencedColumnCollector<'_, '_> {
+impl ExprVisitor<dyn MetaArena + '_> for ReferencedColumnCollector<'_, '_> {
     fn visit_column_ref(
         &mut self,
         column: &crate::catalog::ColumnRef,
@@ -103,7 +104,7 @@ impl ExprVisitor<PlanArena<'_>> for ReferencedColumnCollector<'_, '_> {
         &mut self,
         expr: ExprRef,
         _ty: &AliasType,
-        arena: &PlanArena<'_>,
+        arena: &(dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         self.visit(expr, arena)
     }
@@ -129,7 +130,8 @@ impl ColumnPruning {
             referenced_columns,
             arena,
         };
-        OperatorExprVisitor::new(&mut collector, arena).visit_operator(operator)?;
+        OperatorExprVisitor::new(&mut collector, arena as &dyn MetaArena)
+            .visit_operator(operator)?;
 
         struct ReferencedOperatorColumnCollector<'a, 'p> {
             referenced_columns: &'a mut ReferencedColumns,

@@ -15,7 +15,7 @@
 use crate::catalog::{ColumnCatalog, ColumnRef};
 use crate::errors::DatabaseError;
 use crate::iter_ext::Itertools;
-use crate::planner::PlanArena;
+use crate::planner::MetaArena;
 use crate::types::serialize::{TupleValueSerializable, TupleValueSerializableImpl};
 use crate::types::value::DataValue;
 use std::borrow::Borrow;
@@ -28,12 +28,12 @@ pub type Schema = Vec<ColumnRef>;
 
 pub struct SchemaView<'a, 'p> {
     schema: &'a Schema,
-    arena: &'a PlanArena<'p>,
+    arena: &'a (dyn MetaArena + 'p),
 }
 
 pub struct SchemaColumnIter<'a, 'p, 's> {
     columns: std::slice::Iter<'s, ColumnRef>,
-    arena: &'a PlanArena<'p>,
+    arena: &'a (dyn MetaArena + 'p),
 }
 
 impl<'a> Iterator for SchemaColumnIter<'a, '_, '_> {
@@ -45,7 +45,7 @@ impl<'a> Iterator for SchemaColumnIter<'a, '_, '_> {
 }
 
 impl<'a, 'p> SchemaView<'a, 'p> {
-    pub fn new(schema: &'a Schema, arena: &'a PlanArena<'p>) -> Self {
+    pub fn new(schema: &'a Schema, arena: &'a (dyn MetaArena + 'p)) -> Self {
         Self { schema, arena }
     }
 

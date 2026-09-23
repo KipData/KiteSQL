@@ -16,7 +16,8 @@ use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::expression::{BinaryOperator, ScalarExpression, TypeCast, UnaryOperator};
-use crate::planner::{ExprRef, PlanArena};
+use crate::planner::ExprRef;
+use crate::planner::MetaArena;
 use crate::types::evaluator::{binary_create, unary_create};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
@@ -47,7 +48,7 @@ struct ReplaceUnary {
 pub struct ConstantCalculator;
 
 impl ConstantCalculator {
-    pub fn new(_arena: &PlanArena<'_>) -> Self {
+    pub fn new(_arena: &(dyn MetaArena + '_)) -> Self {
         Self
     }
 }
@@ -56,7 +57,7 @@ impl ExprVisitorMut for ConstantCalculator {
     fn visit_expression(
         &mut self,
         expr: &mut ScalarExpression,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<bool, DatabaseError> {
         match expr {
             ScalarExpression::Unary {
@@ -137,7 +138,7 @@ impl ExprVisitorMut for Simplify {
     fn visit_expression(
         &mut self,
         expr: &mut ScalarExpression,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<bool, DatabaseError> {
         match expr {
             ScalarExpression::Unary {
@@ -370,7 +371,10 @@ impl Simplify {
         }
     }
 
-    fn take_range_comparison(expr: ExprRef, arena: &PlanArena<'_>) -> Option<ScalarExpression> {
+    fn take_range_comparison(
+        expr: ExprRef,
+        arena: &(dyn MetaArena + '_),
+    ) -> Option<ScalarExpression> {
         match arena.expression(expr) {
             expression @ ScalarExpression::Binary { op, .. }
                 if Self::negate_range_comparison(*op).is_some() =>
@@ -383,7 +387,7 @@ impl Simplify {
 
     fn take_negated_range_comparison(
         expr: ExprRef,
-        arena: &PlanArena<'_>,
+        arena: &(dyn MetaArena + '_),
     ) -> Option<ScalarExpression> {
         let mut expression = arena.expression(expr).clone();
         match &mut expression {
@@ -395,7 +399,7 @@ impl Simplify {
         }
     }
 
-    fn boolean_constant(expr: ExprRef, arena: &PlanArena<'_>) -> Option<bool> {
+    fn boolean_constant(expr: ExprRef, arena: &(dyn MetaArena + '_)) -> Option<bool> {
         match arena.expression(expr) {
             ScalarExpression::Constant(DataValue::Boolean(value)) => Some(*value),
             _ => None,
@@ -405,7 +409,7 @@ impl Simplify {
     fn take_range_comparison_with_polarity(
         expr: ExprRef,
         positive: bool,
-        arena: &PlanArena<'_>,
+        arena: &(dyn MetaArena + '_),
     ) -> Option<ScalarExpression> {
         if positive {
             Self::take_range_comparison(expr, arena)
@@ -418,7 +422,7 @@ impl Simplify {
         op: BinaryOperator,
         left_expr: ExprRef,
         right_expr: ExprRef,
-        arena: &PlanArena<'_>,
+        arena: &(dyn MetaArena + '_),
     ) -> Option<ScalarExpression> {
         let is_eq = matches!(op, BinaryOperator::Eq);
         if !matches!(op, BinaryOperator::Eq | BinaryOperator::NotEq) {
@@ -448,7 +452,7 @@ impl Simplify {
         left_expr: &mut ExprRef,
         right_expr: &mut ExprRef,
         op: &mut BinaryOperator,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         self.visit(left_expr, arena)?;
 
@@ -475,7 +479,7 @@ impl Simplify {
         col_expr: &mut ExprRef,
         val_expr: &mut ExprRef,
         op: &mut BinaryOperator,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) {
         let ReplaceUnary {
             child_expr,
@@ -518,7 +522,7 @@ impl Simplify {
         left_expr: &mut ExprRef,
         right_expr: &mut ExprRef,
         op: &mut BinaryOperator,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) {
         let ReplaceBinary {
             column_expr,
@@ -562,7 +566,7 @@ impl Simplify {
 }
 
 impl ExprRef {
-    pub(crate) fn unpack_val(self, arena: &PlanArena<'_>) -> Option<DataValue> {
+    pub(crate) fn unpack_val(self, arena: &(dyn MetaArena + '_)) -> Option<DataValue> {
         match arena.expression(self) {
             ScalarExpression::Constant(val) => Some(val.clone()),
             ScalarExpression::Alias { expr, .. } => expr.unpack_val(arena),
@@ -618,7 +622,7 @@ impl ExprRef {
 
     pub(crate) fn unpack_bound_col(
         self,
-        arena: &PlanArena<'_>,
+        arena: &(dyn MetaArena + '_),
         is_deep: bool,
     ) -> Option<(ColumnRef, usize)> {
         match arena.expression(self) {

@@ -42,7 +42,7 @@ use crate::optimizer::rule::normalization::NormalizationRuleImpl;
 #[cfg(feature = "orm")]
 use crate::orm::FromQueryRow;
 use crate::planner::operator::Operator;
-use crate::planner::{LogicalPlan, PlanArena, TableArenaCell};
+use crate::planner::{LogicalPlan, MetaArena, PlanArena, TableArenaCell};
 #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
 use crate::storage::lmdb::{LmdbConfig, LmdbStorage};
 use crate::storage::memory::MemoryStorage;
@@ -81,12 +81,12 @@ pub(crate) trait BindSource<'a> {
 
     type Storage: Storage;
 
-    fn execute<F>(self, build: F) -> Result<Self::Iter, DatabaseError>
+    fn execute<A: MetaArena + 'a, F>(self, build: F) -> Result<Self::Iter, DatabaseError>
     where
         F: FnOnce(
             &'a State<Self::Storage>,
             &Self::Transaction,
-        ) -> Result<(LogicalPlan, PlanArena<'a>), DatabaseError>;
+        ) -> Result<(LogicalPlan, A), DatabaseError>;
 
     #[cfg(feature = "orm")]
     fn explain<A, F>(self, params: A, build: F) -> Result<String, DatabaseError>
@@ -555,19 +555,12 @@ impl<S: Storage> State<S> {
         Ok((plan, arena))
     }
 
-    pub(crate) fn execute<'a, 'txn>(
+    pub(crate) fn execute<'a, 'txn, A: MetaArena + 'a>(
         &'a self,
         transaction: &'a mut S::TransactionType<'txn>,
         mut plan: LogicalPlan,
-        mut plan_arena: PlanArena<'a>,
-    ) -> Result<
-        (
-            Schema,
-            PlanArena<'a>,
-            Executor<'a, S::TransactionType<'txn>>,
-        ),
-        DatabaseError,
-    >
+        mut plan_arena: A,
+    ) -> Result<(Schema, A, Executor<'a, S::TransactionType<'txn>>), DatabaseError>
     where
         S: 'txn,
     {
@@ -878,12 +871,9 @@ impl<'a, S: Storage> BindSource<'a> for &'a Database<S> {
 
     type Storage = S;
 
-    fn execute<F>(self, build: F) -> Result<Self::Iter, DatabaseError>
+    fn execute<A: MetaArena + 'a, F>(self, build: F) -> Result<Self::Iter, DatabaseError>
     where
-        F: FnOnce(
-            &'a State<S>,
-            &Self::Transaction,
-        ) -> Result<(LogicalPlan, PlanArena<'a>), DatabaseError>,
+        F: FnOnce(&'a State<S>, &Self::Transaction) -> Result<(LogicalPlan, A), DatabaseError>,
     {
         let transaction = Box::into_raw(Box::new(
             self.storage
@@ -904,7 +894,7 @@ impl<'a, S: Storage> BindSource<'a> for &'a Database<S> {
         };
         let inner = Box::into_raw(Box::new(TransactionIter::new(
             schema,
-            arena,
+            Box::new(arena) as Box<dyn MetaArena + 'a>,
             executor,
             transaction,
         )));
@@ -1099,12 +1089,9 @@ impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut DBTransaction<'txn, S> {
 
     type Storage = S;
 
-    fn execute<F>(self, build: F) -> Result<Self::Iter, DatabaseError>
+    fn execute<A: MetaArena + 'a, F>(self, build: F) -> Result<Self::Iter, DatabaseError>
     where
-        F: FnOnce(
-            &'a State<S>,
-            &Self::Transaction,
-        ) -> Result<(LogicalPlan, PlanArena<'a>), DatabaseError>,
+        F: FnOnce(&'a State<S>, &Self::Transaction) -> Result<(LogicalPlan, A), DatabaseError>,
     {
         self.inner.begin_statement_scope()?;
         let (plan, arena) = build(self.state, &self.inner)?;
@@ -1112,7 +1099,12 @@ impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut DBTransaction<'txn, S> {
         let (schema, arena, executor) =
             self.state
                 .execute(unsafe { &mut *transaction }, plan, arena)?;
-        Ok(TransactionIter::new(schema, arena, executor, transaction))
+        Ok(TransactionIter::new(
+            schema,
+            Box::new(arena) as Box<dyn MetaArena + 'a>,
+            executor,
+            transaction,
+        ))
     }
 
     #[cfg(feature = "orm")]
@@ -1131,19 +1123,19 @@ impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut DBTransaction<'txn, S> {
 }
 
 /// Raw result iterator returned by transaction execution APIs.
-pub struct TransactionIter<'a, T: Transaction + 'a> {
+pub struct TransactionIter<'a, T: Transaction + 'a, A: MetaArena + 'a = Box<dyn MetaArena + 'a>> {
     executor: Option<Executor<'a, T>>,
-    plan_arena: Option<PlanArena<'a>>,
+    plan_arena: Option<A>,
     schema: Schema,
     transaction: *mut T,
     statement_scope_active: bool,
     ddl_apply: Vec<DDLApply>,
 }
 
-impl<'a, T: Transaction + 'a> TransactionIter<'a, T> {
+impl<'a, T: Transaction + 'a, A: MetaArena + 'a> TransactionIter<'a, T, A> {
     pub(crate) fn new(
         schema: Schema,
-        plan_arena: PlanArena<'a>,
+        plan_arena: A,
         executor: Executor<'a, T>,
         transaction: *mut T,
     ) -> Self {
@@ -1214,7 +1206,9 @@ impl<'a, T: Transaction + 'a> TransactionIter<'a, T> {
         while self.next_tuple(|_, _| ())?.is_some() {}
         Ok(())
     }
+}
 
+impl<'a, T: Transaction + 'a> TransactionIter<'a, T, PlanArena<'a>> {
     fn done_with_ddl_apply(mut self) -> Result<(PlanArena<'a>, Vec<DDLApply>), DatabaseError> {
         while self.next_tuple(|_, _| ())?.is_some() {}
         Ok((
@@ -1226,13 +1220,13 @@ impl<'a, T: Transaction + 'a> TransactionIter<'a, T> {
     }
 }
 
-impl<T: Transaction> Drop for TransactionIter<'_, T> {
+impl<T: Transaction, A: MetaArena> Drop for TransactionIter<'_, T, A> {
     fn drop(&mut self) {
         let _ = self.finish_statement_scope();
     }
 }
 
-impl<T: Transaction> ResultIter for TransactionIter<'_, T> {
+impl<T: Transaction, A: MetaArena> ResultIter for TransactionIter<'_, T, A> {
     fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
         TransactionIter::schema(self, f)
     }

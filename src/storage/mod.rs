@@ -31,7 +31,7 @@ use crate::optimizer::core::cm_sketch::{
 };
 use crate::optimizer::core::statistics_meta::StatisticsMeta;
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
-use crate::planner::{MetaArena, PlanArena, TableArenaCell};
+use crate::planner::{MetaArena, TableArenaCell};
 use crate::serdes::ReferenceTables;
 use crate::storage::table_codec::{Bytes, StatisticsCodecType, TableCodec, BOUND_MAX_TAG};
 use crate::types::index::{Index, IndexId, IndexMeta, IndexMetaRef, IndexType};
@@ -76,7 +76,7 @@ impl Display for TransactionIsolationLevel {
 
 pub(crate) fn index_value_type(
     table: &TableCatalog,
-    arena: &impl MetaArena,
+    arena: &(impl MetaArena + ?Sized),
     column_ids: &[ColumnId],
 ) -> Result<LogicalType, DatabaseError> {
     let mut value_types = Vec::with_capacity(column_ids.len());
@@ -177,7 +177,7 @@ pub trait Transaction: Sized {
     fn read<'a>(
         &'a self,
         table_codec: &mut TableCodec,
-        arena: &PlanArena,
+        arena: &(dyn MetaArena + '_),
         table_cache: &TableCache,
         table_name: TableName,
         bounds: Bounds,
@@ -208,7 +208,7 @@ pub trait Transaction: Sized {
     fn read_by_index<'a, R>(
         &'a self,
         table_cache: &TableCache,
-        arena: &PlanArena<'a>,
+        arena: &(dyn MetaArena + 'a),
         table_name: TableName,
         (offset_option, limit_option): Bounds,
         columns: Vec<ColumnRef>,
@@ -277,7 +277,7 @@ pub trait Transaction: Sized {
     fn create_deserializers(
         columns: &[ColumnRef],
         table: &TableCatalog,
-        arena: &PlanArena,
+        arena: &(dyn MetaArena + '_),
         with_pk: bool,
     ) -> Vec<TupleValueSerializableImpl> {
         let mut pk_len = if with_pk {
@@ -319,7 +319,7 @@ pub trait Transaction: Sized {
     fn add_index_meta(
         &mut self,
         table_codec: &mut TableCodec,
-        plan_arena: &mut PlanArena,
+        plan_arena: &mut (dyn MetaArena + '_),
         table_name: &TableName,
         index_name: String,
         column_ids: Vec<ColumnId>,
@@ -422,7 +422,7 @@ pub trait Transaction: Sized {
     fn rewrite_table_metadata(
         &mut self,
         table_codec: &mut TableCodec,
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
         table: &TableCatalog,
     ) -> Result<(), DatabaseError> {
         let table_name = table.name().clone();
@@ -454,7 +454,7 @@ pub trait Transaction: Sized {
     fn change_column(
         &mut self,
         table_codec: &mut TableCodec,
-        plan_arena: &mut PlanArena,
+        plan_arena: &mut (dyn MetaArena + '_),
         table_name: &TableName,
         old_column_name: &str,
         new_column_name: &str,
@@ -548,7 +548,7 @@ pub trait Transaction: Sized {
     fn add_column(
         &mut self,
         table_codec: &mut TableCodec,
-        plan_arena: &mut PlanArena,
+        plan_arena: &mut (dyn MetaArena + '_),
         table_name: &TableName,
         column: &ColumnCatalog,
         if_not_exists: bool,
@@ -597,7 +597,7 @@ pub trait Transaction: Sized {
     fn drop_column(
         &mut self,
         table_codec: &mut TableCodec,
-        plan_arena: &mut PlanArena,
+        plan_arena: &mut (dyn MetaArena + '_),
         table_name: &TableName,
         column_name: &str,
     ) -> Result<TableCatalog, DatabaseError> {
@@ -637,7 +637,7 @@ pub trait Transaction: Sized {
     fn create_view(
         &mut self,
         table_codec: &mut TableCodec,
-        arena: &PlanArena,
+        arena: &(dyn MetaArena + '_),
         view: View,
         or_replace: bool,
     ) -> Result<View, DatabaseError> {
@@ -656,7 +656,7 @@ pub trait Transaction: Sized {
     fn create_table(
         &mut self,
         table_codec: &mut TableCodec,
-        plan_arena: &mut PlanArena,
+        plan_arena: &mut (dyn MetaArena + '_),
         table_name: TableName,
         columns: Vec<ColumnCatalog>,
         if_not_exists: bool,
@@ -740,7 +740,7 @@ pub trait Transaction: Sized {
     fn drop_index(
         &mut self,
         table_codec: &mut TableCodec,
-        plan_arena: &mut PlanArena,
+        plan_arena: &mut (dyn MetaArena + '_),
         table_name: TableName,
         index_name: &str,
         if_exists: bool,
@@ -790,7 +790,7 @@ pub trait Transaction: Sized {
     fn drop_table(
         &mut self,
         table_codec: &mut TableCodec,
-        plan_arena: &mut PlanArena,
+        plan_arena: &mut (dyn MetaArena + '_),
         table_name: TableName,
         if_exists: bool,
     ) -> Result<bool, DatabaseError> {
@@ -908,7 +908,7 @@ pub trait Transaction: Sized {
     fn load_table(
         &self,
         table_codec: &mut TableCodec,
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
         table_name: TableName,
     ) -> Result<Option<TableCatalog>, DatabaseError> {
         self.table_collect(table_codec, &table_name, arena)?
@@ -934,7 +934,7 @@ pub trait Transaction: Sized {
         table_codec: &mut TableCodec,
         table_name: &TableName,
         statistics_meta: StatisticsMeta,
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
         let index_id = statistics_meta.index_id();
         let (root, buckets, cm_sketch, top_n) = statistics_meta.into_parts();
@@ -991,7 +991,7 @@ pub trait Transaction: Sized {
         table_codec: &mut TableCodec,
         table_name: &str,
         index_id: IndexId,
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<Option<StatisticsMeta>, DatabaseError> {
         table_codec.with_statistics_index_bound(table_name, index_id, |min, max| {
             let mut iter = self.range(Bound::Included(min), Bound::Included(max))?;
@@ -1060,7 +1060,7 @@ pub trait Transaction: Sized {
         &self,
         table_codec: &mut TableCodec,
         table_name: &TableName,
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<Option<(Vec<ColumnCatalog>, Vec<IndexMeta>)>, DatabaseError> {
         table_codec.with_table_bound(table_name, |table_min, table_max| {
             let mut column_iter =
@@ -1092,7 +1092,7 @@ pub trait Transaction: Sized {
     fn create_index_meta_from_column(
         &mut self,
         table_codec: &mut TableCodec,
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
         table: &mut TableCatalog,
     ) -> Result<(), DatabaseError> {
         let table_name = table.name.clone();
@@ -2063,7 +2063,7 @@ pub struct TableIter<'a, T: Transaction + 'a> {
 impl<T: Transaction> TableIter<'_, T> {
     pub fn try_next(
         &mut self,
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<Option<TableMeta>, DatabaseError> {
         let Some((_, value)) = self.iter.try_next()? else {
             return Ok(None);

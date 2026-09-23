@@ -3,6 +3,8 @@ use crate::expression::range_detacher::RangeDetacher;
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::visitor_mut::OperatorVisitorMut;
 use crate::planner::operator::{PhysicalOption, PlanImpl, SortOption};
+use crate::planner::MetaArena;
+use crate::planner::ParamArena;
 use crate::types::index::IndexLookup;
 use crate::types::LogicalType;
 
@@ -45,7 +47,7 @@ impl<'plan> OperatorVisitorMut<'plan> for ParameterBinder<'_> {
 
 /// Extend the selected static index range using its bound residual predicate.
 struct SpecializeIndexRange<'a, 'p> {
-    arena: &'a mut PlanArena<'p>,
+    arena: &'a mut (dyn MetaArena + 'p),
 }
 
 impl<'plan> OperatorVisitorMut<'plan> for SpecializeIndexRange<'_, '_> {
@@ -103,16 +105,14 @@ pub struct PreparedPlan<'db> {
 
 impl<'db> PreparedPlan<'db> {
     pub(crate) fn bind_parameters(
-        mut self,
+        &self,
         params: &[(usize, DataValue)],
-    ) -> Result<Self, DatabaseError> {
-        self.arena.fill_parameters(params)?;
-        ParameterBinder { params }.visit_plan(&mut self.plan)?;
-        SpecializeIndexRange {
-            arena: &mut self.arena,
-        }
-        .visit_plan(&mut self.plan)?;
-        Ok(self)
+    ) -> Result<(LogicalPlan, ParamArena<'_>), DatabaseError> {
+        let mut arena = ParamArena::new(&self.arena, params)?;
+        let mut plan = self.plan.clone();
+        ParameterBinder { params }.visit_plan(&mut plan)?;
+        SpecializeIndexRange { arena: &mut arena }.visit_plan(&mut plan)?;
+        Ok((plan, arena))
     }
 }
 
@@ -161,9 +161,10 @@ impl<S: Storage> State<S> {
                 "DDL and ANALYZE require ddl/analyze".into(),
             ));
         }
-        let (plan, arena) = self.build_plan(params, transaction, |binder, arena| {
+        let (mut plan, mut arena) = self.build_plan(params, transaction, |binder, arena| {
             binder.bind(statement, arena)
         })?;
+        plan.output_schema(&mut arena);
         Ok(PreparedPlan { plan, arena })
     }
 }
@@ -182,6 +183,40 @@ mod tests {
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::ops::Bound;
+
+    #[test]
+    fn prepare_caches_scalar_output_schema() -> Result<(), DatabaseError> {
+        let db = DataBaseBuilder::path(".").build_in_memory()?;
+        let plan = db.prepare(
+            "select (($1 * 3 + 7) % 97) + ($1 / 2)",
+            &[(1, LogicalType::Bigint)],
+        )?;
+        for (value, expected) in [(7, 31.5), (23, 87.5)] {
+            let mut iter = db.execute(&plan, [(1, DataValue::Int64(value))])?;
+            iter.schema(|schema| {
+                assert_eq!(schema.len(), 1);
+                assert_eq!(
+                    schema.iter().next().unwrap().datatype(),
+                    &LogicalType::Double
+                );
+            });
+            assert_eq!(
+                iter.next_tuple(|_, row| row.values.clone())?,
+                Some(vec![DataValue::Float64(expected.into())])
+            );
+            assert!(iter.next_tuple(|_, _| ())?.is_none());
+            iter.done()?;
+        }
+        let mut tx = db.new_transaction()?;
+        let mut iter = tx.execute(&plan, [(1, DataValue::Int64(7))])?;
+        assert_eq!(
+            iter.next_tuple(|_, row| row.values.clone())?,
+            Some(vec![DataValue::Float64(31.5.into())])
+        );
+        iter.done()?;
+        tx.commit()?;
+        Ok(())
+    }
 
     #[test]
     fn specialize_selected_index_and_preserve_plan_metadata() -> Result<(), DatabaseError> {

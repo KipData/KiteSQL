@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use crate::planner::operator::Operator;
-use crate::planner::{fmt_explain_list, Childrens, Explain, LogicalPlan, PlanArena};
+use crate::planner::MetaArena;
+use crate::planner::{fmt_explain_list, Childrens, Explain, LogicalPlan};
 use crate::types::tuple::Schema;
 use kite_sql_serde_macros::ReferenceSerialization;
 
@@ -35,7 +36,11 @@ impl RecursiveCteOperator {
 }
 
 impl Explain for RecursiveCteOperator {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        arena: &(dyn MetaArena + '_),
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         f.write_str("Recursive CTE: [")?;
         fmt_explain_list(&self.schema_ref, ", ", arena, f)?;
         f.write_str("]")
@@ -48,7 +53,11 @@ pub struct RecursiveScanOperator {
 }
 
 impl Explain for RecursiveScanOperator {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        arena: &(dyn MetaArena + '_),
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         f.write_str("Recursive Scan: [")?;
         fmt_explain_list(&self.schema_ref, ", ", arena, f)?;
         f.write_str("]")

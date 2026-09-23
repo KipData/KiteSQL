@@ -21,6 +21,7 @@ use crate::optimizer::rule::normalization::strip_alias;
 use crate::planner::operator::filter::FilterOperator;
 use crate::planner::operator::project::ProjectOperator;
 use crate::planner::operator::Operator;
+use crate::planner::MetaArena;
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::types::LogicalType;
 use std::mem;
@@ -59,7 +60,7 @@ fn rewrite_column_position(
             &mut self,
             _column: &mut crate::catalog::ColumnRef,
             position: &mut usize,
-            _arena: &mut PlanArena<'_>,
+            _arena: &mut (dyn MetaArena + '_),
         ) -> Result<(), DatabaseError> {
             *position = self.0;
             Ok(())
@@ -194,7 +195,7 @@ impl ExprVisitorMut for ProjectionSubstitution<'_> {
     fn visit(
         &mut self,
         expr: &mut ExprRef,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         if let ScalarExpression::ColumnRef { position, .. } = arena.expression(*expr) {
             let Some(source) = self.0.get(*position) else {
@@ -212,7 +213,7 @@ impl ExprVisitorMut for ProjectionSubstitution<'_> {
         &mut self,
         expr: &mut ExprRef,
         _: &mut crate::expression::AliasType,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         self.visit(expr, arena)
     }

@@ -96,7 +96,7 @@ pub struct KiteSqlLmdbTransactionWrapper<'a> {
 impl<'a> KiteSqlLmdbTransactionWrapper<'a> {
     pub(crate) fn execute_raw<'b>(
         &'b mut self,
-        statement: &mut KiteSqlPreparedStatement<'a>,
+        statement: &'b mut KiteSqlPreparedStatement<'a>,
         params: &[DbParam],
     ) -> Result<KiteSqlTxnResult<'b, KiteSqlLmdbTransaction<'a>>, TpccError> {
         Ok(KiteSqlTxnResult::new(

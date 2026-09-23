@@ -20,6 +20,7 @@ use crate::execution::{
 };
 use crate::planner::operator::delete::DeleteOperator;
 use crate::planner::LogicalPlan;
+use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::index::Index;
 use crate::types::tuple_builder::TupleBuilder;
@@ -46,7 +47,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Delete {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -66,7 +67,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Delete {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         let Some(input) = self.input.take() else {
             arena.finish();

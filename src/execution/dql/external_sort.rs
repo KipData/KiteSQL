@@ -20,6 +20,7 @@ use crate::execution::{
 };
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::LogicalPlan;
+use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use std::fs::File;
 use std::io::BufReader;
@@ -54,7 +55,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ExternalSort {
     fn into_executor(
         (SortOperator { sort_fields }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -71,7 +72,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ExternalSort {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         loop {
             if let Some(rows) = &mut self.rows {

@@ -167,7 +167,7 @@ pub struct KiteSqlRocksTransaction<'a, S: Storage> {
 impl<'a, S: Storage> KiteSqlRocksTransaction<'a, S> {
     pub(crate) fn execute_raw<'b>(
         &'b mut self,
-        statement: &mut KiteSqlPreparedStatement<'a>,
+        statement: &'b mut KiteSqlPreparedStatement<'a>,
         params: &[DbParam],
     ) -> Result<KiteSqlTxnResult<'b, S::TransactionType<'a>>, TpccError> {
         Ok(KiteSqlTxnResult::new(

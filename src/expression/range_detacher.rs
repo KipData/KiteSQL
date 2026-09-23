@@ -16,7 +16,8 @@ use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::{BinaryOperator, ScalarExpression};
 use crate::iter_ext::Itertools;
-use crate::planner::{ExprRef, PlanArena};
+use crate::planner::ExprRef;
+use crate::planner::MetaArena;
 use crate::types::index::IndexMetaRef;
 use crate::types::value::DataValue;
 use crate::types::{ColumnId, LogicalType};
@@ -58,7 +59,7 @@ impl DetachedPredicate {
     fn combine_residuals(
         left: Option<ExprRef>,
         right: Option<ExprRef>,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Option<ExprRef> {
         match (left, right) {
             (Some(left), Some(right)) => Some(arena.alloc_expression(ScalarExpression::Binary {
@@ -260,7 +261,7 @@ impl Range {
 }
 
 pub trait RangeColumnMatcher {
-    fn matches(&self, table_name: &str, column_id: ColumnId, arena: &PlanArena<'_>) -> bool;
+    fn matches(&self, table_name: &str, column_id: ColumnId, arena: &(dyn MetaArena + '_)) -> bool;
 }
 
 pub struct IndexRangeColumn {
@@ -269,7 +270,7 @@ pub struct IndexRangeColumn {
 }
 
 impl RangeColumnMatcher for IndexRangeColumn {
-    fn matches(&self, table_name: &str, column_id: ColumnId, arena: &PlanArena<'_>) -> bool {
+    fn matches(&self, table_name: &str, column_id: ColumnId, arena: &(dyn MetaArena + '_)) -> bool {
         let index = arena.index(self.meta);
         table_name == index.table_name.as_ref()
             && index.column_ids.get(self.position) == Some(&column_id)
@@ -278,7 +279,7 @@ impl RangeColumnMatcher for IndexRangeColumn {
 
 pub struct RangeDetacher<'a, 'p, M: RangeColumnMatcher = IndexRangeColumn> {
     column: M,
-    arena: &'a mut PlanArena<'p>,
+    arena: &'a mut (dyn MetaArena + 'p),
 }
 
 impl<'a, 'p> RangeDetacher<'a, 'p, IndexRangeColumn> {
@@ -287,7 +288,7 @@ impl<'a, 'p> RangeDetacher<'a, 'p, IndexRangeColumn> {
         original: &Range,
         predicate: ExprRef,
         prefix_len: usize,
-        arena: &'a mut PlanArena<'p>,
+        arena: &'a mut (dyn MetaArena + 'p),
     ) -> Result<Option<Range>, DatabaseError> {
         let index = arena.index(meta);
         if prefix_len >= index.column_ids.len() {
@@ -352,7 +353,7 @@ impl<'a, 'p> RangeDetacher<'a, 'p, IndexRangeColumn> {
     pub(crate) fn for_index(
         meta: IndexMetaRef,
         position: usize,
-        arena: &'a mut PlanArena<'p>,
+        arena: &'a mut (dyn MetaArena + 'p),
     ) -> Self {
         Self {
             column: IndexRangeColumn { meta, position },
@@ -1145,7 +1146,12 @@ pub(crate) mod test_support {
     }
 
     impl RangeColumnMatcher for DirectRangeColumn<'_> {
-        fn matches(&self, table_name: &str, column_id: ColumnId, _arena: &PlanArena<'_>) -> bool {
+        fn matches(
+            &self,
+            table_name: &str,
+            column_id: ColumnId,
+            _arena: &(dyn MetaArena + '_),
+        ) -> bool {
             table_name == self.table_name && column_id == *self.column_id
         }
     }
@@ -1154,7 +1160,7 @@ pub(crate) mod test_support {
         pub(crate) fn new(
             table_name: &'a str,
             column_id: &'a ColumnId,
-            arena: &'a mut PlanArena<'p>,
+            arena: &'a mut (dyn MetaArena + 'p),
         ) -> Self {
             Self {
                 column: DirectRangeColumn {
@@ -1180,7 +1186,7 @@ mod test {
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::filter::FilterOperator;
     use crate::planner::operator::Operator;
-    use crate::planner::{ExprRef, LogicalPlan};
+    use crate::planner::{ExprRef, LogicalPlan, MetaArena, PlanArena};
     use crate::types::evaluator::binary_create;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -1188,7 +1194,7 @@ mod test {
 
     fn plan_filter(
         plan: LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena<'_>,
     ) -> Result<Option<FilterOperator>, DatabaseError> {
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
@@ -1206,7 +1212,7 @@ mod test {
     }
 
     fn test_column(
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut (dyn MetaArena + '_),
         table_name: &TableName,
         column_id: crate::types::ColumnId,
         name: &str,
@@ -1222,7 +1228,7 @@ mod test {
     }
 
     fn cmp_predicate(
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut (dyn MetaArena + '_),
         column: ColumnRef,
         op: BinaryOperator,
         value: i32,
@@ -1239,11 +1245,7 @@ mod test {
         })
     }
 
-    fn and_predicate(
-        arena: &mut crate::planner::PlanArena,
-        left: ExprRef,
-        right: ExprRef,
-    ) -> ExprRef {
+    fn and_predicate(arena: &mut (dyn MetaArena + '_), left: ExprRef, right: ExprRef) -> ExprRef {
         arena.alloc_expression(ScalarExpression::Binary {
             op: BinaryOperator::And,
             left_expr: left,

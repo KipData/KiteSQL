@@ -16,6 +16,7 @@ use crate::errors::DatabaseError;
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::ExprRef;
+use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::tuple::Schema;
 
@@ -39,7 +40,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Values {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut crate::planner::PlanArena<'a>,
+        _plan_arena: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
@@ -52,7 +53,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         let Some(expressions) = self.rows.next() else {
             arena.finish();

@@ -18,7 +18,8 @@ use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::operator::sort::SortField;
-use crate::planner::{ExprRef, LogicalPlan, PlanArena};
+use crate::planner::MetaArena;
+use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::LogicalType;
 
@@ -83,7 +84,7 @@ impl<'a> DistinctOutputBinder<'a> {
         Self { select_list }
     }
 
-    fn output_ref(&mut self, expr: ExprRef, arena: &mut PlanArena<'_>) -> Option<ScalarExpression> {
+    fn output_ref(&mut self, expr: ExprRef, arena: &mut dyn MetaArena) -> Option<ScalarExpression> {
         self.select_list
             .iter()
             .position(|candidate| {
@@ -103,7 +104,7 @@ impl ExprVisitorMut for DistinctOutputBinder<'_> {
     fn visit(
         &mut self,
         expr: &mut ExprRef,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         if let ScalarExpression::Alias {
             alias: crate::expression::AliasType::Name(_),

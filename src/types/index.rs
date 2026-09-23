@@ -18,7 +18,8 @@ use crate::expression::range_detacher::Range;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::SortOption;
 use crate::planner::Explain;
-use crate::planner::{ExprRef, PlanArena};
+use crate::planner::ExprRef;
+use crate::planner::MetaArena;
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::value::DataValue;
 use crate::types::{ColumnId, LogicalType};
@@ -127,7 +128,7 @@ impl IndexMeta {
     pub(crate) fn column_exprs(
         &self,
         table: &TableCatalog,
-        arena: &PlanArena,
+        arena: &(dyn MetaArena + '_),
     ) -> Result<Vec<ScalarExpression>, DatabaseError> {
         let mut exprs = Vec::with_capacity(self.column_ids.len());
 
@@ -161,7 +162,7 @@ impl<'a> Index<'a> {
 }
 
 impl Explain for IndexInfo {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, arena: &dyn MetaArena, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{} => ", self.meta.explain(arena))?;
         match &self.lookup {
             Some(IndexLookup::Static(range)) => write!(f, "{range}")?,

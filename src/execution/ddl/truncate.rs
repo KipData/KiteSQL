@@ -17,6 +17,7 @@ use crate::execution::{
     ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
 };
 use crate::planner::operator::truncate::TruncateOperator;
+use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
 
@@ -36,7 +37,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Truncate {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut crate::planner::PlanArena<'a>,
+        _plan_arena: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
@@ -49,7 +50,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Truncate {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         let Some(TruncateOperator { table_name }) = self.op.take() else {
             arena.finish();

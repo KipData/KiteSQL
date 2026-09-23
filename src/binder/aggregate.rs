@@ -16,6 +16,7 @@ use super::{Binder, QueryBindStep};
 use crate::errors::DatabaseError;
 use crate::expression::visitor::{walk_expr, ExprVisitor};
 use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut};
+use crate::planner::MetaArena;
 use crate::planner::{ExprRef, LogicalPlan, PlanArena};
 use crate::storage::Transaction;
 use crate::types::LogicalType;
@@ -28,8 +29,8 @@ struct AggregateCallCollector<'a> {
     agg_calls: &'a mut Vec<ExprRef>,
 }
 
-impl ExprVisitor<PlanArena<'_>> for AggregateCallCollector<'_> {
-    fn visit(&mut self, expr: ExprRef, arena: &PlanArena<'_>) -> Result<(), DatabaseError> {
+impl ExprVisitor<dyn MetaArena + '_> for AggregateCallCollector<'_> {
+    fn visit(&mut self, expr: ExprRef, arena: &(dyn MetaArena + '_)) -> Result<(), DatabaseError> {
         match arena.expression(expr) {
             ScalarExpression::AggCall { .. } => self.agg_calls.push(expr),
             ScalarExpression::Alias { expr, .. } => self.visit(*expr, arena)?,
@@ -214,7 +215,7 @@ impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
         &mut self,
         select_list: &mut [ExprRef],
         expr: ExprRef,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         if let ScalarExpression::Alias { alias, .. } = arena.expression(expr) {
             if let Some(i) = select_list.iter().position(|inner_expr| {
@@ -275,7 +276,7 @@ impl<'a> HavingOrderByValidator<'a> {
         }
     }
 
-    fn agg_miss(expr: ExprRef, arena: &PlanArena<'_>) -> DatabaseError {
+    fn agg_miss(expr: ExprRef, arena: &dyn MetaArena) -> DatabaseError {
         DatabaseError::AggMiss(format!(
             "expression '{}' must appear in the GROUP BY clause or be used in an aggregate function",
             expr.output_name(arena)
@@ -283,8 +284,8 @@ impl<'a> HavingOrderByValidator<'a> {
     }
 }
 
-impl ExprVisitor<PlanArena<'_>> for HavingOrderByValidator<'_> {
-    fn visit(&mut self, expr: ExprRef, arena: &PlanArena<'_>) -> Result<(), DatabaseError> {
+impl ExprVisitor<dyn MetaArena + '_> for HavingOrderByValidator<'_> {
+    fn visit(&mut self, expr: ExprRef, arena: &(dyn MetaArena + '_)) -> Result<(), DatabaseError> {
         let contains = |expressions: &[ExprRef]| {
             expressions
                 .iter()
@@ -334,7 +335,7 @@ impl<'a> AggregateOutputBinder<'a> {
     fn output_ref(
         &mut self,
         expr: ExprRef,
-        arena: &mut PlanArena<'_>,
+        arena: &mut dyn MetaArena,
     ) -> Result<Option<ScalarExpression>, DatabaseError> {
         let output_count = self.agg_calls.len() + self.group_by_exprs.len();
         self.agg_calls
@@ -370,7 +371,7 @@ impl ExprVisitorMut for AggregateOutputBinder<'_> {
     fn visit(
         &mut self,
         expr: &mut ExprRef,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         if let ScalarExpression::Alias {
             alias: crate::expression::AliasType::Name(_),

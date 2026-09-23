@@ -36,6 +36,7 @@ use crate::planner::operator::project::ProjectOperator;
 use crate::planner::operator::recursive_cte::{RecursiveCteOperator, RecursiveScanOperator};
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::Operator;
+use crate::planner::MetaArena;
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::storage::{Storage, Transaction};
 use crate::types::value::{DataValue, Utf8Type};
@@ -162,7 +163,7 @@ impl<S: Storage> Database<S> {
     /// Bind parameters in a cloned arena and execute an already prepared plan.
     pub fn execute<'a>(
         &'a self,
-        prepared: &crate::db::PreparedPlan<'a>,
+        prepared: &'a crate::db::PreparedPlan<'_>,
         params: impl AsRef<[(usize, DataValue)]>,
     ) -> Result<DatabaseIter<'a, S>, DatabaseError> {
         if !std::ptr::eq(prepared.arena.table_arena_cell(), self.state.table_arena()) {
@@ -170,8 +171,7 @@ impl<S: Storage> Database<S> {
                 "plan belongs to another database".into(),
             ));
         }
-        let crate::db::PreparedPlan { plan, arena } =
-            prepared.clone().bind_parameters(params.as_ref())?;
+        let (plan, arena) = prepared.bind_parameters(params.as_ref())?;
         BindSource::execute(self, |_, _| Ok((plan, arena)))
     }
 
@@ -260,7 +260,7 @@ impl<S: Storage> Database<S> {
             } else {
                 let inner = Box::into_raw(Box::new(TransactionIter::new(
                     schema,
-                    plan_arena,
+                    Box::new(plan_arena) as Box<dyn crate::planner::MetaArena>,
                     executor,
                     transaction,
                 )));
@@ -277,7 +277,7 @@ impl<'txn, S: Storage> DBTransaction<'txn, S> {
     /// Bind parameters in a cloned arena and execute an already prepared plan.
     pub fn execute<'a>(
         &'a mut self,
-        prepared: &crate::db::PreparedPlan<'txn>,
+        prepared: &'a crate::db::PreparedPlan<'txn>,
         params: impl AsRef<[(usize, DataValue)]>,
     ) -> Result<TransactionIter<'a, S::TransactionType<'txn>>, DatabaseError> {
         if !std::ptr::eq(prepared.arena.table_arena_cell(), self.state.table_arena()) {
@@ -285,8 +285,7 @@ impl<'txn, S: Storage> DBTransaction<'txn, S> {
                 "plan belongs to another database".into(),
             ));
         }
-        let crate::db::PreparedPlan { plan, arena } =
-            prepared.clone().bind_parameters(params.as_ref())?;
+        let (plan, arena) = prepared.bind_parameters(params.as_ref())?;
         BindSource::execute(self, |_, _| Ok((plan, arena)))
     }
 
@@ -347,7 +346,7 @@ impl ExprVisitorMut for UpdateExprTargetRemapper<'_> {
         &mut self,
         column: &mut ColumnRef,
         position: &mut usize,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         let Some(target_position) = self
             .target_schema

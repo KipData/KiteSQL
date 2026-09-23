@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::planner::MetaArena;
 use crate::{
     expression::ScalarExpression,
     planner::{
@@ -54,7 +55,7 @@ impl ExprVisitorMut for RightSidePositionGlobalizer<'_> {
         &mut self,
         column: &mut ColumnRef,
         position: &mut usize,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         if self
             .right_schema
@@ -83,7 +84,7 @@ impl ExprVisitorMut for SplitScopePositionRebinder<'_> {
         &mut self,
         column: &mut ColumnRef,
         position: &mut usize,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         if let Some(left_position) = self
             .left_schema
@@ -112,7 +113,7 @@ impl ExprVisitorMut for MarkerPositionGlobalizer<'_> {
         &mut self,
         column: &mut ColumnRef,
         position: &mut usize,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         if arena.same_column(*column, *self.output_column) {
             *position = self.left_len;
@@ -130,7 +131,7 @@ impl<'a> ProjectionOutputBinder<'a> {
         Self { project_exprs }
     }
 
-    fn output_ref(&mut self, expr: ExprRef, arena: &mut PlanArena<'_>) -> Option<ScalarExpression> {
+    fn output_ref(&mut self, expr: ExprRef, arena: &mut dyn MetaArena) -> Option<ScalarExpression> {
         self.project_exprs
             .iter()
             .position(|candidate| {
@@ -150,7 +151,7 @@ impl ExprVisitorMut for ProjectionOutputBinder<'_> {
     fn visit(
         &mut self,
         expr: &mut ExprRef,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         if let Some(output_ref) = self.output_ref(*expr, arena) {
             *expr = arena.alloc_expression(output_ref);
@@ -840,7 +841,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                 &mut self,
                 column: &mut ColumnRef,
                 position: &mut usize,
-                arena: &mut PlanArena<'_>,
+                arena: &mut (dyn MetaArena + '_),
             ) -> Result<(), DatabaseError> {
                 if let Some(output) = self.appended_outputs.iter().find(|output| {
                     *position == output.child_position && arena.same_column(*column, output.column)

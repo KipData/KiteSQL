@@ -13,13 +13,14 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+use crate::planner::MetaArena;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use crate::storage::Transaction;
 use std::path::PathBuf;
 use std::str::FromStr;
 
 impl ReferenceSerialization for PathBuf {
-    fn encode<W: std::io::Write, A: crate::planner::MetaArena>(
+    fn encode<W: std::io::Write, A: MetaArena + ?Sized>(
         &self,
         writer: &mut W,
         is_direct: bool,
@@ -32,7 +33,7 @@ impl ReferenceSerialization for PathBuf {
             .encode(writer, is_direct, reference_tables, arena)
     }
 
-    fn decode<T: Transaction, R: std::io::Read, A: crate::planner::MetaArena>(
+    fn decode<T: Transaction, R: std::io::Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,

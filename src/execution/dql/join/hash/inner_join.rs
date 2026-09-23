@@ -15,7 +15,8 @@
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::hash::{filter, JoinProbeState, ProbeState};
 use crate::execution::dql::join::hash_join::BuildState;
-use crate::planner::{ExprRef, PlanArena};
+use crate::planner::ExprRef;
+use crate::planner::MetaArena;
 use crate::types::tuple::{SplitTupleRef, Tuple};
 
 pub(crate) struct InnerJoinState;
@@ -26,7 +27,7 @@ impl JoinProbeState for InnerJoinState {
         probe_state: &mut ProbeState,
         build_state: Option<&mut BuildState>,
         filter_expr: Option<&ExprRef>,
-        plan_arena: &PlanArena<'_>,
+        plan_arena: &(dyn MetaArena + '_),
     ) -> Result<Option<Tuple>, DatabaseError> {
         if probe_state.is_keys_has_null {
             probe_state.finished = true;

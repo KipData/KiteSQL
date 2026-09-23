@@ -127,7 +127,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 
             quote! {
                 impl crate::serdes::ReferenceSerialization for #struct_name {
-                    fn encode<W: std::io::Write, A: crate::planner::MetaArena>(
+                    fn encode<W: std::io::Write, A: crate::planner::MetaArena + ?Sized>(
                         &self,
                         writer: &mut W,
                         is_direct: bool,
@@ -141,7 +141,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                         Ok(())
                     }
 
-                    fn decode<T: crate::storage::Transaction, R: std::io::Read, A: crate::planner::MetaArena>(
+                    fn decode<T: crate::storage::Transaction, R: std::io::Read, A: crate::planner::MetaArena + ?Sized>(
                         reader: &mut R,
                         drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
                         reference_tables: &crate::serdes::ReferenceTables,
@@ -208,7 +208,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 
             quote! {
                 impl crate::serdes::ReferenceSerialization for #struct_name {
-                    fn encode<W: std::io::Write, A: crate::planner::MetaArena>(
+                    fn encode<W: std::io::Write, A: crate::planner::MetaArena + ?Sized>(
                         &self,
                         writer: &mut W,
                         is_direct: bool,
@@ -222,7 +222,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                         Ok(())
                     }
 
-                    fn decode<T: crate::storage::Transaction, R: std::io::Read, A: crate::planner::MetaArena>(
+                    fn decode<T: crate::storage::Transaction, R: std::io::Read, A: crate::planner::MetaArena + ?Sized>(
                         reader: &mut R,
                         drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
                         reference_tables: &crate::serdes::ReferenceTables,

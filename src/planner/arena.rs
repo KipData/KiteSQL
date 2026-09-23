@@ -13,12 +13,14 @@
 // limitations under the License.
 
 use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
+use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::planner::LogicalPlan;
 use crate::types::index::{IndexMeta, IndexMetaRef};
 use crate::types::tuple::Schema;
+use crate::types::value::DataValue;
 use std::cell::UnsafeCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 pub struct TableArena {
@@ -93,6 +95,29 @@ impl fmt::Display for ExprRef {
 }
 
 pub trait MetaArena {
+    fn table_arena_cell<'a>(&self) -> &'a TableArenaCell
+    where
+        Self: 'a,
+    {
+        panic!("arena is not associated with a table catalog")
+    }
+
+    fn expression_mut(&mut self, _expr: ExprRef) -> &mut ScalarExpression {
+        panic!("parent expressions are immutable")
+    }
+
+    fn alloc_dummy(&mut self, name: &str) -> ColumnRef {
+        self.table_arena_cell().borrow().alloc_dummy(name)
+    }
+
+    fn same_column(&self, left: ColumnRef, right: ColumnRef) -> bool {
+        self.column(left).summary() == self.column(right).summary()
+    }
+
+    fn clone_column(&self, column: ColumnRef) -> ColumnCatalog {
+        self.column(column).clone()
+    }
+
     fn alloc_column(&mut self, column: ColumnCatalog) -> ColumnRef;
 
     fn alloc_index(&mut self, index: IndexMeta) -> IndexMetaRef;
@@ -119,6 +144,42 @@ pub trait MetaArena {
     fn find_column(&self, column: &ColumnCatalog) -> Option<ColumnRef>;
 
     fn find_index(&self, index: &IndexMeta) -> Option<IndexMetaRef>;
+}
+
+impl<A: MetaArena + ?Sized> MetaArena for Box<A> {
+    fn table_arena_cell<'a>(&self) -> &'a TableArenaCell
+    where
+        Self: 'a,
+    {
+        (**self).table_arena_cell()
+    }
+    fn alloc_column(&mut self, column: ColumnCatalog) -> ColumnRef {
+        (**self).alloc_column(column)
+    }
+    fn alloc_index(&mut self, index: IndexMeta) -> IndexMetaRef {
+        (**self).alloc_index(index)
+    }
+    fn alloc_expression(&mut self, expr: ScalarExpression) -> ExprRef {
+        (**self).alloc_expression(expr)
+    }
+    fn expression_mut(&mut self, expr: ExprRef) -> &mut ScalarExpression {
+        (**self).expression_mut(expr)
+    }
+    fn column(&self, column: ColumnRef) -> &ColumnCatalog {
+        (**self).column(column)
+    }
+    fn index(&self, index: IndexMetaRef) -> &IndexMeta {
+        (**self).index(index)
+    }
+    fn expression(&self, expr: ExprRef) -> &ScalarExpression {
+        (**self).expression(expr)
+    }
+    fn find_column(&self, column: &ColumnCatalog) -> Option<ColumnRef> {
+        (**self).find_column(column)
+    }
+    fn find_index(&self, index: &IndexMeta) -> Option<IndexMetaRef> {
+        (**self).find_index(index)
+    }
 }
 
 const DUMMY_COLUMN_NAMES: [&str; DUMMY_COLUMN_COUNT] = [
@@ -423,6 +484,25 @@ impl<'a> PlanArena<'a> {
         }
     }
 
+    pub(crate) fn expression_end(&self) -> usize {
+        self.table_arena.borrow().expressions.len() + self.expressions.len()
+    }
+
+    pub(crate) fn parameter_expressions(
+        &self,
+    ) -> impl Iterator<Item = (ExprRef, &crate::types::value::DataValue)> {
+        let base = self.table_arena.borrow().expressions.len();
+        self.expressions
+            .iter()
+            .enumerate()
+            .filter_map(move |(i, expr)| match expr {
+                ScalarExpression::Constant(value) if value.has_parameter() => {
+                    Some((ExprRef::new(base + i), value))
+                }
+                _ => None,
+            })
+    }
+
     pub(crate) fn fill_parameters(
         &mut self,
         params: &[(usize, crate::types::value::DataValue)],
@@ -588,6 +668,16 @@ impl<'a> PlanArena<'a> {
 }
 
 impl MetaArena for PlanArena<'_> {
+    fn table_arena_cell<'a>(&self) -> &'a TableArenaCell
+    where
+        Self: 'a,
+    {
+        self.table_arena
+    }
+    fn expression_mut(&mut self, expr: ExprRef) -> &mut ScalarExpression {
+        PlanArena::expression_mut(self, expr)
+    }
+
     fn alloc_column(&mut self, column: ColumnCatalog) -> ColumnRef {
         self.assert_table_arena_unchanged();
         self.allocated_columns_len += 1;
@@ -684,6 +774,75 @@ impl MetaArena for PlanArena<'_> {
     }
 }
 
+/// Execution-local parameter values and temporary expressions over an immutable plan arena.
+pub(crate) struct ParamArena<'a> {
+    parent: &'a PlanArena<'a>,
+    expressions: HashMap<ExprRef, ScalarExpression>,
+    next_expression: usize,
+}
+
+impl<'a> ParamArena<'a> {
+    pub(crate) fn new(
+        parent: &'a PlanArena<'a>,
+        params: &[(usize, DataValue)],
+    ) -> Result<Self, DatabaseError> {
+        let mut expressions = HashMap::new();
+        for (id, value) in parent.parameter_expressions() {
+            let mut value = value.clone();
+            value.bind_parameters(params)?;
+            expressions.insert(id, ScalarExpression::Constant(value));
+        }
+        Ok(Self {
+            parent,
+            expressions,
+            next_expression: parent.expression_end(),
+        })
+    }
+}
+
+impl MetaArena for ParamArena<'_> {
+    fn table_arena_cell<'a>(&self) -> &'a TableArenaCell
+    where
+        Self: 'a,
+    {
+        self.parent.table_arena_cell()
+    }
+    fn column(&self, column: ColumnRef) -> &ColumnCatalog {
+        self.parent.column(column)
+    }
+    fn index(&self, index: IndexMetaRef) -> &IndexMeta {
+        self.parent.index(index)
+    }
+    fn find_column(&self, column: &ColumnCatalog) -> Option<ColumnRef> {
+        self.parent.find_column(column)
+    }
+    fn find_index(&self, index: &IndexMeta) -> Option<IndexMetaRef> {
+        self.parent.find_index(index)
+    }
+    fn expression(&self, expr: ExprRef) -> &ScalarExpression {
+        self.expressions
+            .get(&expr)
+            .unwrap_or_else(|| self.parent.expression(expr))
+    }
+    fn expression_mut(&mut self, expr: ExprRef) -> &mut ScalarExpression {
+        self.expressions
+            .entry(expr)
+            .or_insert_with(|| self.parent.expression(expr).clone())
+    }
+    fn alloc_expression(&mut self, expression: ScalarExpression) -> ExprRef {
+        let id = ExprRef::new(self.next_expression);
+        self.next_expression += 1;
+        self.expressions.insert(id, expression);
+        id
+    }
+    fn alloc_column(&mut self, _: ColumnCatalog) -> ColumnRef {
+        unreachable!("ParamArena cannot allocate catalog columns")
+    }
+    fn alloc_index(&mut self, _: IndexMeta) -> IndexMetaRef {
+        unreachable!("ParamArena cannot allocate catalog indexes")
+    }
+}
+
 // GRCOV_EXCL_START
 #[cfg(test)]
 mod tests {
@@ -717,6 +876,58 @@ mod tests {
             name: name.to_string(),
             ty: IndexType::Normal,
         }
+    }
+
+    #[test]
+    fn param_arena_keeps_allocations_local() -> Result<(), DatabaseError> {
+        let root = TableArenaCell::default();
+        let mut parent = PlanArena::new(&root);
+        let parameter = parent.alloc_expression(ScalarExpression::Constant(DataValue::Parameter {
+            id: 1,
+            ty: LogicalType::Integer,
+        }));
+        let constant = parent.alloc_expression(ScalarExpression::Constant(DataValue::Int32(20)));
+        let parent_column = parent.alloc_column(column("parent"));
+        let parent_index = parent.alloc_index(index_meta("parent"));
+        let mut first = ParamArena::new(&parent, &[(1, DataValue::Int32(3))])?;
+        let second = ParamArena::new(&parent, &[(1, DataValue::Int32(8))])?;
+        assert!(std::ptr::eq(
+            first.expression(constant),
+            parent.expression(constant)
+        ));
+        assert_eq!(
+            first.expression(parameter),
+            &ScalarExpression::Constant(DataValue::Int32(3))
+        );
+        assert_eq!(
+            second.expression(parameter),
+            &ScalarExpression::Constant(DataValue::Int32(8))
+        );
+        *first.expression_mut(constant) = ScalarExpression::Constant(DataValue::Int32(99));
+        assert_eq!(
+            parent.expression(constant),
+            &ScalarExpression::Constant(DataValue::Int32(20))
+        );
+        assert_eq!(second.expression(constant), parent.expression(constant));
+        let added = first.alloc_expression(ScalarExpression::Constant(DataValue::Int32(42)));
+        assert!(added.pos() >= parent.expression_end());
+        assert_eq!(
+            first.expression(added),
+            &ScalarExpression::Constant(DataValue::Int32(42))
+        );
+        assert!(std::ptr::eq(
+            first.column(parent_column),
+            parent.column(parent_column)
+        ));
+        assert!(std::ptr::eq(
+            first.index(parent_index),
+            parent.index(parent_index)
+        ));
+        assert_eq!(first.find_column(&column("parent")), Some(parent_column));
+        assert_eq!(first.find_index(&index_meta("parent")), Some(parent_index));
+        assert!(first.find_column(&column("local")).is_none());
+        assert!(first.find_index(&index_meta("local")).is_none());
+        Ok(())
     }
 
     #[test]

@@ -33,7 +33,7 @@ impl View {
         f: &mut F,
     ) -> Result<(), crate::errors::DatabaseError>
     where
-        A: MetaArena,
+        A: MetaArena + ?Sized,
         F: FnMut(&ColumnRef) + ?Sized,
     {
         for column in &self.schema {

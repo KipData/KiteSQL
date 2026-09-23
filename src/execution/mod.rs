@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::planner::PlanArena;
 // Copyright 2024 KipData/KiteSQL
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -73,7 +75,8 @@ use crate::execution::dql::window::Window;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
-use crate::planner::{LogicalPlan, PlanArena};
+use crate::planner::LogicalPlan;
+use crate::planner::MetaArena;
 use crate::storage::table_codec::TableCodec;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::types::index::RuntimeIndexProbe;
@@ -153,7 +156,7 @@ impl<'a, T: Transaction + 'a> Executor<'a, T> {
 
     pub(crate) fn next_tuple(
         &mut self,
-        plan_arena: &mut PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<Option<&mut Tuple>, DatabaseError> {
         if !self.arena.next_tuple(self.root, plan_arena)? {
             return Ok(None);
@@ -223,7 +226,7 @@ pub(crate) trait ExecutorNode<'a, T: Transaction + 'a>: Sized {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError>;
 }
 
@@ -231,7 +234,7 @@ impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         match self {
             ExecNode::AddColumn(exec) => {
@@ -394,7 +397,7 @@ pub(crate) struct ExecArenaLocalState<'b, 'a, T: Transaction + 'a> {
     pub(crate) table_codec: &'b mut TableCodec,
     pub(crate) context: ExecutionContext<'a>,
     pub(crate) result: &'b mut ExecResult,
-    pub(crate) plan_arena: &'b PlanArena<'a>,
+    pub(crate) plan_arena: &'b (dyn MetaArena + 'a),
     ddl_apply: &'b mut Vec<DDLApply>,
 }
 
@@ -442,7 +445,7 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
 
 pub(crate) fn with_projection_tmp_value<'a, T: Transaction + 'a>(
     exec_arena: &mut ExecArena<'a, T>,
-    plan_arena: &crate::planner::PlanArena<'_>,
+    plan_arena: &(dyn MetaArena + '_),
     tuple: Option<&dyn TupleLike>,
     exprs: &[ScalarExpression],
     f: impl FnOnce(&mut ExecArena<'a, T>, DataValue) -> Result<(), DatabaseError>,
@@ -520,7 +523,7 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
 
     pub(crate) fn local_state<'b>(
         &'b mut self,
-        plan_arena: &'b PlanArena<'a>,
+        plan_arena: &'b (dyn MetaArena + 'a),
     ) -> ExecArenaLocalState<'b, 'a, T> {
         let context = *self
             .context
@@ -611,7 +614,7 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
     pub(crate) fn next_tuple(
         &mut self,
         id: ExecId,
-        plan_arena: &mut PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<bool, DatabaseError> {
         self.result.status = None;
         let mut node = std::mem::replace(&mut self.nodes[id], ExecNode::Empty);
@@ -632,7 +635,7 @@ pub(crate) trait ReadExecutor<'a, T: Transaction + 'a>: Sized {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId;
@@ -644,7 +647,7 @@ pub(crate) trait WriteExecutor<'a, T: Transaction + 'a>: Sized {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId;
@@ -652,7 +655,7 @@ pub(crate) trait WriteExecutor<'a, T: Transaction + 'a>: Sized {
 
 pub(crate) fn build_read<'a, T>(
     arena: &mut ExecArena<'a, T>,
-    plan_arena: &mut PlanArena<'a>,
+    plan_arena: &mut (dyn MetaArena + 'a),
     plan: LogicalPlan,
     cache: ExecutionContext<'_>,
     transaction: &T,
@@ -952,7 +955,7 @@ where
 
 pub(crate) fn build_write<'a, T>(
     arena: &mut ExecArena<'a, T>,
-    plan_arena: &mut PlanArena<'a>,
+    plan_arena: &mut (dyn MetaArena + 'a),
     plan: LogicalPlan,
     cache: ExecutionContext<'a>,
     transaction: &'a mut T,

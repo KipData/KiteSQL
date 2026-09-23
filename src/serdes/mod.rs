@@ -45,7 +45,7 @@ use std::io;
 use std::io::{Read, Write};
 
 pub trait ReferenceSerialization {
-    fn encode<W: Write, A: MetaArena>(
+    fn encode<W: Write, A: MetaArena + ?Sized>(
         &self,
         writer: &mut W,
         is_direct: bool,
@@ -53,7 +53,7 @@ pub trait ReferenceSerialization {
         arena: &A,
     ) -> Result<(), DatabaseError>;
 
-    fn decode<T: Transaction, R: Read, A: MetaArena>(
+    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         context: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,

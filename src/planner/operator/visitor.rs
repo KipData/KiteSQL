@@ -191,18 +191,20 @@ pub trait OperatorVisitor<'a>: Sized {
     }
 }
 
-pub struct OperatorExprVisitor<'a, V, A> {
+pub struct OperatorExprVisitor<'a, V, A: ?Sized> {
     visitor: &'a mut V,
     arena: &'a A,
 }
 
-impl<'a, V, A> OperatorExprVisitor<'a, V, A> {
+impl<'a, V, A: ?Sized> OperatorExprVisitor<'a, V, A> {
     pub fn new(visitor: &'a mut V, arena: &'a A) -> Self {
         Self { visitor, arena }
     }
 }
 
-impl<'a, V: ExprVisitor<A>, A: MetaArena> OperatorVisitor<'a> for OperatorExprVisitor<'_, V, A> {
+impl<'a, V: ExprVisitor<A>, A: MetaArena + ?Sized> OperatorVisitor<'a>
+    for OperatorExprVisitor<'_, V, A>
+{
     fn visit_values(&mut self, op: &'a ValuesOperator) -> Result<(), DatabaseError> {
         for expr in op.rows.iter().flatten() {
             ExprVisitor::visit(self.visitor, *expr, self.arena)?;

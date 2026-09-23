@@ -17,6 +17,7 @@ use crate::expression::function::scala::FuncMonotonicity;
 use crate::expression::function::scala::ScalarFunctionImpl;
 use crate::expression::function::FunctionSummary;
 use crate::planner::ExprRef;
+use crate::planner::MetaArena;
 use crate::types::tuple::TupleLike;
 use crate::types::value::DataValue;
 use crate::types::CharLengthUnits;
@@ -46,7 +47,7 @@ impl ScalarFunctionImpl for Upper {
     fn eval(
         &self,
         exprs: &[ExprRef],
-        arena: &crate::planner::PlanArena<'_>,
+        arena: &(dyn MetaArena + '_),
         tuples: Option<&dyn TupleLike>,
     ) -> Result<DataValue, DatabaseError> {
         let mut value = arena.expression(exprs[0]).eval(arena, tuples)?;

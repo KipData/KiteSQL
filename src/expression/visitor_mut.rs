@@ -21,7 +21,8 @@ use crate::expression::window::WindowCall;
 use crate::expression::{
     AliasType, BinaryOperator, ScalarExpression, TrimWhereField, UnaryOperator,
 };
-use crate::planner::{ExprRef, PlanArena};
+use crate::planner::ExprRef;
+use crate::planner::MetaArena;
 use crate::types::evaluator::{BinaryEvaluatorRef, CastEvaluatorRef, UnaryEvaluatorRef};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
@@ -32,7 +33,7 @@ impl ExprVisitorMut for ExprCloner {
     fn visit(
         &mut self,
         expr: &mut ExprRef,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         *expr = arena.alloc_expression(arena.expression(*expr).clone());
         walk_mut_expr(self, expr, arena)
@@ -48,7 +49,7 @@ impl ExprVisitorMut for PositionShift {
         &mut self,
         _column: &mut ColumnRef,
         position: &mut usize,
-        _arena: &mut PlanArena<'_>,
+        _arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         if self.delta.is_negative() {
             *position = position.saturating_sub(self.delta.unsigned_abs());
@@ -63,7 +64,7 @@ pub trait ExprVisitorMut: Sized {
     fn visit(
         &mut self,
         expr: &mut ExprRef,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         if !self.visit_expression_ref(expr, arena)? {
             return Ok(());
@@ -82,7 +83,7 @@ pub trait ExprVisitorMut: Sized {
     fn visit_expression_ref(
         &mut self,
         _expr: &mut ExprRef,
-        _arena: &mut PlanArena<'_>,
+        _arena: &mut (dyn MetaArena + '_),
     ) -> Result<bool, DatabaseError> {
         Ok(true)
     }
@@ -90,7 +91,7 @@ pub trait ExprVisitorMut: Sized {
     fn visit_expression(
         &mut self,
         _expr: &mut ScalarExpression,
-        _arena: &mut PlanArena<'_>,
+        _arena: &mut (dyn MetaArena + '_),
     ) -> Result<bool, DatabaseError> {
         Ok(true)
     }
@@ -98,7 +99,7 @@ pub trait ExprVisitorMut: Sized {
     fn visit_constant(
         &mut self,
         _value: &mut DataValue,
-        _arena: &mut PlanArena<'_>,
+        _arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         Ok(())
     }
@@ -107,7 +108,7 @@ pub trait ExprVisitorMut: Sized {
         &mut self,
         _column: &mut ColumnRef,
         _position: &mut usize,
-        _arena: &mut PlanArena<'_>,
+        _arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         Ok(())
     }
@@ -116,7 +117,7 @@ pub trait ExprVisitorMut: Sized {
         &mut self,
         expr: &mut ExprRef,
         alias: &mut AliasType,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         if let AliasType::Expr(alias_expr) = alias {
             self.visit(alias_expr, arena)?;
@@ -129,7 +130,7 @@ pub trait ExprVisitorMut: Sized {
         expr: &mut ExprRef,
         _ty: &mut LogicalType,
         _evaluator: &mut Option<CastEvaluatorRef>,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         self.visit(expr, arena)
     }
@@ -138,7 +139,7 @@ pub trait ExprVisitorMut: Sized {
         &mut self,
         _negated: bool,
         expr: &mut ExprRef,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         self.visit(expr, arena)
     }
@@ -149,7 +150,7 @@ pub trait ExprVisitorMut: Sized {
         expr: &mut ExprRef,
         _evaluator: &mut Option<UnaryEvaluatorRef>,
         _ty: &mut LogicalType,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         self.visit(expr, arena)
     }
@@ -161,7 +162,7 @@ pub trait ExprVisitorMut: Sized {
         right_expr: &mut ExprRef,
         _evaluator: &mut Option<BinaryEvaluatorRef>,
         _ty: &mut LogicalType,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         self.visit(left_expr, arena)?;
         self.visit(right_expr, arena)
@@ -173,7 +174,7 @@ pub trait ExprVisitorMut: Sized {
         _kind: &mut AggKind,
         args: &mut [ExprRef],
         _ty: &mut LogicalType,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         for arg in args {
             self.visit(arg, arena)?;
@@ -184,7 +185,7 @@ pub trait ExprVisitorMut: Sized {
     fn visit_window(
         &mut self,
         window: &mut WindowCall,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         for expr in window
             .function
@@ -203,7 +204,7 @@ pub trait ExprVisitorMut: Sized {
         _negated: bool,
         expr: &mut ExprRef,
         args: &mut [ExprRef],
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         self.visit(expr, arena)?;
         for arg in args {
@@ -218,7 +219,7 @@ pub trait ExprVisitorMut: Sized {
         expr: &mut ExprRef,
         left_expr: &mut ExprRef,
         right_expr: &mut ExprRef,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         self.visit(expr, arena)?;
         self.visit(left_expr, arena)?;
@@ -230,7 +231,7 @@ pub trait ExprVisitorMut: Sized {
         expr: &mut ExprRef,
         for_expr: &mut Option<ExprRef>,
         from_expr: &mut Option<ExprRef>,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         self.visit(expr, arena)?;
         if let Some(for_expr) = for_expr {
@@ -246,7 +247,7 @@ pub trait ExprVisitorMut: Sized {
         &mut self,
         expr: &mut ExprRef,
         in_expr: &mut ExprRef,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         self.visit(expr, arena)?;
         self.visit(in_expr, arena)
@@ -257,7 +258,7 @@ pub trait ExprVisitorMut: Sized {
         expr: &mut ExprRef,
         trim_what_expr: &mut Option<ExprRef>,
         _trim_where: &mut Option<TrimWhereField>,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         self.visit(expr, arena)?;
         if let Some(trim_what_expr) = trim_what_expr {
@@ -274,7 +275,7 @@ pub trait ExprVisitorMut: Sized {
         &mut self,
         expr: &mut ExprRef,
         _pos: usize,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         self.visit(expr, arena)
     }
@@ -282,7 +283,7 @@ pub trait ExprVisitorMut: Sized {
     fn visit_tuple(
         &mut self,
         exprs: &mut [ExprRef],
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         for expr in exprs {
             self.visit(expr, arena)?;
@@ -293,7 +294,7 @@ pub trait ExprVisitorMut: Sized {
     fn visit_scala_function(
         &mut self,
         function: &mut ScalarFunction,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         for arg in &mut function.args {
             self.visit(arg, arena)?;
@@ -304,7 +305,7 @@ pub trait ExprVisitorMut: Sized {
     fn visit_table_function(
         &mut self,
         function: &mut TableFunction,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         for arg in &mut function.args {
             self.visit(arg, arena)?;
@@ -318,7 +319,7 @@ pub trait ExprVisitorMut: Sized {
         left_expr: &mut ExprRef,
         right_expr: &mut ExprRef,
         _ty: &mut LogicalType,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         self.visit(condition, arena)?;
         self.visit(left_expr, arena)?;
@@ -330,7 +331,7 @@ pub trait ExprVisitorMut: Sized {
         left_expr: &mut ExprRef,
         right_expr: &mut ExprRef,
         _ty: &mut LogicalType,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         self.visit(left_expr, arena)?;
         self.visit(right_expr, arena)
@@ -341,7 +342,7 @@ pub trait ExprVisitorMut: Sized {
         left_expr: &mut ExprRef,
         right_expr: &mut ExprRef,
         _ty: &mut LogicalType,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         self.visit(left_expr, arena)?;
         self.visit(right_expr, arena)
@@ -351,7 +352,7 @@ pub trait ExprVisitorMut: Sized {
         &mut self,
         exprs: &mut [ExprRef],
         _ty: &mut LogicalType,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         for expr in exprs {
             self.visit(expr, arena)?;
@@ -365,7 +366,7 @@ pub trait ExprVisitorMut: Sized {
         expr_pairs: &mut [(ExprRef, ExprRef)],
         else_expr: &mut Option<ExprRef>,
         _ty: &mut LogicalType,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         if let Some(expr) = operand_expr {
             self.visit(expr, arena)?;
@@ -384,7 +385,7 @@ pub trait ExprVisitorMut: Sized {
 pub fn walk_mut_expr<V: ExprVisitorMut>(
     visitor: &mut V,
     expr: &mut ExprRef,
-    arena: &mut PlanArena<'_>,
+    arena: &mut (dyn MetaArena + '_),
 ) -> Result<(), DatabaseError> {
     let mut expression = std::mem::replace(arena.expression_mut(*expr), ScalarExpression::Empty);
     let result = match &mut expression {

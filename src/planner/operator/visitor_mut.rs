@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::planner::PlanArena;
 // Copyright 2024 KipData/KiteSQL
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,7 +18,8 @@ use super::alter_table::change_column::DefaultChange;
 use super::*;
 use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::ExprVisitorMut;
-use crate::planner::{Childrens, LogicalPlan, PlanArena};
+use crate::planner::MetaArena;
+use crate::planner::{Childrens, LogicalPlan};
 
 pub trait OperatorVisitorMut<'a>: Sized {
     fn visit_plan(&mut self, plan: &'a mut LogicalPlan) -> Result<(), DatabaseError> {
@@ -247,11 +250,11 @@ pub trait OperatorVisitorMut<'a>: Sized {
 
 pub struct OperatorExprVisitorMut<'a, 'arena, V> {
     visitor: &'a mut V,
-    arena: &'a mut PlanArena<'arena>,
+    arena: &'a mut (dyn MetaArena + 'arena),
 }
 
 impl<'a, 'arena, V> OperatorExprVisitorMut<'a, 'arena, V> {
-    pub fn new(visitor: &'a mut V, arena: &'a mut PlanArena<'arena>) -> Self {
+    pub fn new(visitor: &'a mut V, arena: &'a mut (dyn MetaArena + 'arena)) -> Self {
         Self { visitor, arena }
     }
 }
@@ -454,7 +457,7 @@ mod tests {
         fn visit_constant(
             &mut self,
             value: &mut DataValue,
-            _arena: &mut PlanArena<'_>,
+            _arena: &mut (dyn MetaArena + '_),
         ) -> Result<(), DatabaseError> {
             if let DataValue::Int32(value) = value {
                 *value += 1;
