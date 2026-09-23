@@ -18,17 +18,25 @@ use crate::planner::operator::values::ValuesOperator;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
 use crate::storage::Transaction;
-use crate::types::tuple::Schema;
+use crate::types::tuple::{Schema, Tuple};
 
 pub struct Values {
-    rows: std::vec::IntoIter<Vec<ExprRef>>,
+    rows: std::vec::IntoIter<ExprRef>,
+    remaining_rows: usize,
     schema_ref: Schema,
 }
 
 impl From<ValuesOperator> for Values {
-    fn from(ValuesOperator { rows, schema_ref }: ValuesOperator) -> Self {
+    fn from(
+        ValuesOperator {
+            rows,
+            row_count,
+            schema_ref,
+        }: ValuesOperator,
+    ) -> Self {
         Values {
             rows: rows.into_iter(),
+            remaining_rows: row_count,
             schema_ref,
         }
     }
@@ -55,26 +63,25 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values {
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
-        let Some(expressions) = self.rows.next() else {
+        if self.remaining_rows == 0 {
             arena.finish();
             return Ok(());
-        };
+        }
+        self.remaining_rows -= 1;
+        let width = self.schema_ref.len();
 
-        let mut values = Vec::with_capacity(expressions.len());
-        for (i, expr) in expressions.into_iter().enumerate() {
+        let mut output = Tuple::new(None, Vec::with_capacity(width));
+        for (i, expr) in self.rows.by_ref().take(width).enumerate() {
             let ty = plan_arena.column(self.schema_ref[i]).datatype();
-            values.push(
+            output.values.push(
                 plan_arena
                     .expression(expr)
-                    .eval::<&crate::types::tuple::Tuple>(plan_arena, None)?
+                    .eval::<&Tuple>(plan_arena, None)?
                     .cast(ty)?,
             );
         }
 
-        let output = arena.result_tuple_mut();
-        output.pk = None;
-        output.values = values;
-        arena.resume();
+        arena.produce_tuple(output);
         Ok(())
     }
 }

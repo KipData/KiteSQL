@@ -74,7 +74,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateTable {
             arena.push_ddl_apply(DDLApply::upsert_table(table, false));
         }
 
-        TupleBuilder::build_result_into(arena.result_tuple_mut(), format!("{table_name}"));
+        arena.produce_tuple(TupleBuilder::build_result(format!("{table_name}")));
         arena.resume();
         Ok(())
     }

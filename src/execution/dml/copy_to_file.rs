@@ -106,7 +106,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyToFile {
 
         let mut writer = self.create_writer()?;
         while arena.next_tuple(input, plan_arena)? {
-            let tuple = arena.result_tuple();
+            let tuple = arena.materialize_tuple();
             writer.write_record(
                 tuple
                     .values
@@ -122,7 +122,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyToFile {
         } else {
             format!("{} [{}]", self.op, self.column_names.iter().join(", "))
         };
-        TupleBuilder::build_result_into(arena.result_tuple_mut(), message);
+        arena.produce_tuple(TupleBuilder::build_result(message));
         arena.resume();
         Ok(())
     }
@@ -136,6 +136,7 @@ mod tests {
     use crate::errors::DatabaseError;
     use crate::planner::operator::table_scan::TableScanOperator;
     use crate::storage::Storage;
+    use crate::types::tuple::TupleLike;
     use tempfile::TempDir;
 
     #[test]
@@ -207,7 +208,7 @@ mod tests {
         let record3 = records.next().unwrap()?;
         assert_eq!(record3, vec!["3", "2.1", "Kite"]);
 
-        assert_eq!(tuple.values[0].to_string(), format!("{op} [a, b, c]"));
+        assert_eq!(tuple.value_at(0).to_string(), format!("{op} [a, b, c]"));
         Ok(())
     }
 }

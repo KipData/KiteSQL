@@ -72,10 +72,9 @@ fn data_value_to_js(value: &DataValue) -> Result<JsValue, JsValue> {
         }
         #[cfg(feature = "decimal")]
         DataValue::Decimal(value) => Ok(JsValue::from_str(&value.to_string())),
-        DataValue::Tuple(values, is_upper) => {
+        DataValue::Tuple(values) => {
             let object = Object::new();
             set_prop(&object, "values", data_values_to_js(values)?)?;
-            set_prop(&object, "isUpper", JsValue::from_bool(*is_upper))?;
             Ok(object.into())
         }
     }

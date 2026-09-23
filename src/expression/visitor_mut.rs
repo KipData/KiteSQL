@@ -71,7 +71,7 @@ pub trait ExprVisitorMut: Sized {
         }
 
         let mut expression =
-            std::mem::replace(arena.expression_mut(*expr), ScalarExpression::Empty);
+            std::mem::replace(&mut *arena.expression_mut(*expr), ScalarExpression::Empty);
         let result = self.visit_expression(&mut expression, arena);
         *arena.expression_mut(*expr) = expression;
         if result? {
@@ -387,7 +387,8 @@ pub fn walk_mut_expr<V: ExprVisitorMut>(
     expr: &mut ExprRef,
     arena: &mut (dyn MetaArena + '_),
 ) -> Result<(), DatabaseError> {
-    let mut expression = std::mem::replace(arena.expression_mut(*expr), ScalarExpression::Empty);
+    let mut expression =
+        std::mem::replace(&mut *arena.expression_mut(*expr), ScalarExpression::Empty);
     let result = match &mut expression {
         ScalarExpression::Constant(value) => visitor.visit_constant(value, arena),
         ScalarExpression::ColumnRef { column, position } => {

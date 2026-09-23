@@ -57,7 +57,7 @@ fn data_value_to_py(py: Python<'_>, value: &DataValue) -> PyResult<PyObject> {
         | DataValue::Time32(_, _)
         | DataValue::Time64(_, _, _)
         | DataValue::Decimal(_) => value.to_string().into_py(py),
-        DataValue::Tuple(values, _is_upper) => {
+        DataValue::Tuple(values) => {
             let py_values = values
                 .iter()
                 .map(|value| data_value_to_py(py, value))

@@ -24,7 +24,7 @@ use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use bumpalo::Bump;
 use std::cmp::Ordering;
-use std::mem::{self, transmute, MaybeUninit};
+use std::mem::{transmute, MaybeUninit};
 use std::ops::{Deref, DerefMut};
 
 pub(crate) type BumpVec<'bump, T> = bumpalo::collections::Vec<'bump, T>;
@@ -189,7 +189,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort {
             }
             while arena.next_tuple(self.input, plan_arena)? {
                 let offset = self.rows.len();
-                self.rows.put((offset, mem::take(arena.result_tuple_mut())));
+                self.rows.put((offset, arena.materialize_tuple()));
             }
             if self.rows.is_empty() {
                 arena.finish();

@@ -15,7 +15,7 @@
 use super::LogicalType;
 use crate::errors::DatabaseError;
 use crate::iter_ext::Itertools;
-use crate::storage::table_codec::{BumpBytes, BOUND_MAX_TAG, NOTNULL_TAG, NULL_TAG};
+use crate::storage::table_codec::{BumpBytes, NOTNULL_TAG, NULL_TAG};
 use crate::types::evaluator::cast::{cast_create, to_char, to_varchar};
 use crate::types::CharLengthUnits;
 #[cfg(feature = "time")]
@@ -162,8 +162,28 @@ pub enum DataValue {
     Time64(i64, u64, bool),
     #[cfg(feature = "decimal")]
     Decimal(Decimal),
-    /// (values, is_upper)
-    Tuple(Vec<DataValue>, bool),
+    Tuple(Vec<DataValue>),
+}
+
+pub trait IndexKeyMapping {
+    fn target_len(&self, fields_len: usize) -> usize;
+
+    fn scan_index(&self, index_pos: usize) -> Option<usize>;
+}
+
+#[derive(Clone, Copy)]
+pub struct OrderedMapping;
+
+impl IndexKeyMapping for OrderedMapping {
+    #[inline]
+    fn target_len(&self, fields_len: usize) -> usize {
+        fields_len
+    }
+
+    #[inline]
+    fn scan_index(&self, index_pos: usize) -> Option<usize> {
+        Some(index_pos)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -197,42 +217,15 @@ impl<'a> TupleMappingRef<'a> {
     }
 }
 
-enum TupleCollector<'a> {
-    Mapped {
-        mapping: TupleMappingRef<'a>,
-        values: Vec<DataValue>,
-    },
-    Ordered(Vec<DataValue>),
-}
-
-impl<'a> TupleCollector<'a> {
-    fn new(mapping: Option<TupleMappingRef<'a>>, tuple_len: usize) -> Self {
-        if let Some(mapping) = mapping {
-            TupleCollector::Mapped {
-                values: vec![DataValue::Null; mapping.target_len()],
-                mapping,
-            }
-        } else {
-            TupleCollector::Ordered(Vec::with_capacity(tuple_len))
-        }
+impl IndexKeyMapping for TupleMappingRef<'_> {
+    #[inline]
+    fn target_len(&self, _: usize) -> usize {
+        self.target_len
     }
 
-    fn push(&mut self, index_pos: usize, value: DataValue) {
-        match self {
-            TupleCollector::Mapped { mapping, values } => {
-                if let Some(target_pos) = mapping.scan_index(index_pos) {
-                    values[target_pos] = value;
-                }
-            }
-            TupleCollector::Ordered(values) => values.push(value),
-        }
-    }
-
-    fn finish(self) -> Vec<DataValue> {
-        match self {
-            TupleCollector::Mapped { values, .. } => values,
-            TupleCollector::Ordered(values) => values,
-        }
+    #[inline]
+    fn scan_index(&self, index_pos: usize) -> Option<usize> {
+        TupleMappingRef::scan_index(self, index_pos)
     }
 }
 
@@ -333,18 +326,13 @@ impl PartialEq for DataValue {
             (Decimal(v1), Decimal(v2)) => v1.eq(v2),
             #[cfg(feature = "decimal")]
             (Decimal(_), _) => false,
-            (Tuple(values_1, is_upper_1), Tuple(values_2, is_upper_2)) => {
-                values_1.eq(values_2) && is_upper_1.eq(is_upper_2)
-            }
+            (Tuple(values_1), Tuple(values_2)) => values_1.eq(values_2),
             (Tuple(..), _) => false,
         }
     }
 }
 
-fn tuple_partial_cmp(
-    (left, left_is_upper): (&[DataValue], bool),
-    (right, right_is_upper): (&[DataValue], bool),
-) -> Option<Ordering> {
+fn tuple_partial_cmp(left: &[DataValue], right: &[DataValue]) -> Option<Ordering> {
     let mut left_iter = left.iter();
     let mut right_iter = right.iter();
 
@@ -356,20 +344,8 @@ fn tuple_partial_cmp(
                     return Some(ordering);
                 }
             }
-            (Some(_), None) => {
-                return Some(if right_is_upper {
-                    Ordering::Less
-                } else {
-                    Ordering::Greater
-                });
-            }
-            (None, Some(_)) => {
-                return Some(if left_is_upper {
-                    Ordering::Greater
-                } else {
-                    Ordering::Less
-                });
-            }
+            (Some(_), None) => return Some(Ordering::Greater),
+            (None, Some(_)) => return Some(Ordering::Less),
             (None, None) => return Some(Ordering::Equal),
         }
     }
@@ -380,9 +356,7 @@ fn tuple_element_partial_cmp(left: &DataValue, right: &DataValue) -> Option<Orde
         (DataValue::Null, DataValue::Null) => Some(Ordering::Equal),
         (DataValue::Null, _) => Some(Ordering::Greater),
         (_, DataValue::Null) => Some(Ordering::Less),
-        (DataValue::Tuple(left, left_is_upper), DataValue::Tuple(right, right_is_upper)) => {
-            tuple_partial_cmp((left, *left_is_upper), (right, *right_is_upper))
-        }
+        (DataValue::Tuple(left), DataValue::Tuple(right)) => tuple_partial_cmp(left, right),
         _ => left.partial_cmp(right),
     }
 }
@@ -430,9 +404,7 @@ impl PartialOrd for DataValue {
             (Decimal(v1), Decimal(v2)) => v1.partial_cmp(v2),
             #[cfg(feature = "decimal")]
             (Decimal(_), _) => None,
-            (Tuple(v1, is_upper1), Tuple(v2, is_upper2)) => {
-                tuple_partial_cmp((v1, *is_upper1), (v2, *is_upper2))
-            }
+            (Tuple(v1), Tuple(v2)) => tuple_partial_cmp(v1, v2),
             (Tuple(..), _) => None,
         }
     }
@@ -533,10 +505,9 @@ impl Hash for DataValue {
                 17u8.hash(state);
                 v.hash(state);
             }
-            Tuple(values, is_upper) => {
+            Tuple(values) => {
                 18u8.hash(state);
                 values.hash(state);
-                is_upper.hash(state);
             }
         }
     }
@@ -553,14 +524,13 @@ impl DataValue {
 
         match (min, max, key_type) {
             (
-                Bound::Included(Self::Tuple(lower, lower_upper))
-                | Bound::Excluded(Self::Tuple(lower, lower_upper)),
-                Bound::Included(Self::Tuple(upper, upper_upper))
-                | Bound::Excluded(Self::Tuple(upper, upper_upper)),
+                Bound::Included(Self::Tuple(lower)) | Bound::Excluded(Self::Tuple(lower)),
+                Bound::Included(Self::Tuple(upper)) | Bound::Excluded(Self::Tuple(upper)),
                 LogicalType::Tuple(fields),
             ) if !fields.is_empty() => {
                 if lower == upper
-                    && lower_upper == upper_upper
+                    && lower.len() == fields.len()
+                    && upper.len() == fields.len()
                     && (matches!(min, Bound::Excluded(_)) || matches!(max, Bound::Excluded(_)))
                 {
                     return 0.0;
@@ -624,7 +594,7 @@ impl DataValue {
                     return Err(DatabaseError::parameter_not_found(format!("${id}")));
                 }
             }
-            DataValue::Tuple(values, _) => {
+            DataValue::Tuple(values) => {
                 for value in values {
                     value.bind_parameters(params)?;
                 }
@@ -637,7 +607,7 @@ impl DataValue {
     pub(crate) fn has_parameter(&self) -> bool {
         match self {
             DataValue::Parameter { .. } => true,
-            DataValue::Tuple(values, _) => values.iter().any(Self::has_parameter),
+            DataValue::Tuple(values) => values.iter().any(Self::has_parameter),
             _ => false,
         }
     }
@@ -668,7 +638,7 @@ impl DataValue {
             },
             #[cfg(feature = "decimal")]
             DataValue::Decimal(_) => 16,
-            DataValue::Tuple(values, _) => values.iter().map(DataValue::serialized_len_hint).sum(),
+            DataValue::Tuple(values) => values.iter().map(DataValue::serialized_len_hint).sum(),
         }
     }
 
@@ -897,7 +867,7 @@ impl DataValue {
             LogicalType::Tuple(types) => {
                 let values = types.iter().map(DataValue::init).collect_vec();
 
-                DataValue::Tuple(values, false)
+                DataValue::Tuple(values)
             }
         }
     }
@@ -934,7 +904,7 @@ impl DataValue {
             DataValue::Time64(..) => LogicalType::TimeStamp(None, false),
             #[cfg(feature = "decimal")]
             DataValue::Decimal(_) => LogicalType::Decimal(None, None),
-            DataValue::Tuple(values, ..) => {
+            DataValue::Tuple(values) => {
                 let types = values.iter().map(|v| v.logical_type()).collect_vec();
                 LogicalType::Tuple(types)
             }
@@ -1090,14 +1060,9 @@ impl DataValue {
             }
             #[cfg(feature = "decimal")]
             DataValue::Decimal(v) => Self::serialize_decimal(*v, b)?,
-            DataValue::Tuple(values, is_upper) => {
-                let last = values.len() - 1;
-
-                for (i, v) in values.iter().enumerate() {
+            DataValue::Tuple(values) => {
+                for v in values {
                     v.memcomparable_encode(b)?;
-                    if i == last && *is_upper {
-                        b.push_byte(BOUND_MAX_TAG);
-                    }
                 }
             }
         }
@@ -1116,16 +1081,6 @@ impl DataValue {
     pub fn memcomparable_decode<R: Read>(
         reader: &mut R,
         ty: &LogicalType,
-    ) -> Result<DataValue, DatabaseError> {
-        Self::memcomparable_decode_mapping(reader, ty, None)
-    }
-
-    #[inline]
-    pub fn memcomparable_decode_mapping<R: Read>(
-        reader: &mut R,
-        ty: &LogicalType,
-        // for index cover mapping reduce one layer of conversion
-        tuple_mapping: Option<TupleMappingRef<'_>>,
     ) -> Result<DataValue, DatabaseError> {
         if reader.read_u8()? == NULL_TAG {
             return Ok(DataValue::Null);
@@ -1217,13 +1172,11 @@ impl DataValue {
                 "DECIMAL requires the `decimal` feature".to_string(),
             )),
             LogicalType::Tuple(tys) => {
-                let mut collector = TupleCollector::new(tuple_mapping, tys.len());
-
-                for (index_pos, ty) in tys.iter().enumerate() {
-                    let value = Self::memcomparable_decode_mapping(reader, ty, None)?;
-                    collector.push(index_pos, value);
+                let mut values = Vec::with_capacity(tys.len());
+                for ty in tys {
+                    values.push(Self::memcomparable_decode(reader, ty)?);
                 }
-                Ok(DataValue::Tuple(collector.finish(), false))
+                Ok(DataValue::Tuple(values))
             }
         }
     }
@@ -1804,7 +1757,7 @@ impl fmt::Display for DataValue {
             }
             #[cfg(feature = "decimal")]
             DataValue::Decimal(e) => write!(f, "{}", DataValue::decimal_format(e))?,
-            DataValue::Tuple(values, ..) => {
+            DataValue::Tuple(values) => {
                 write!(f, "(")?;
                 let len = values.len();
 
@@ -1844,13 +1797,7 @@ impl fmt::Debug for DataValue {
             DataValue::Time64(..) => write!(f, "Time64({self})"),
             #[cfg(feature = "decimal")]
             DataValue::Decimal(_) => write!(f, "Decimal({self})"),
-            DataValue::Tuple(..) => {
-                write!(f, "Tuple({self}")?;
-                if matches!(self, DataValue::Tuple(_, true)) {
-                    write!(f, " [is upper]")?;
-                }
-                write!(f, ")")
-            }
+            DataValue::Tuple(..) => write!(f, "Tuple({self})"),
         }
     }
 }
@@ -1860,7 +1807,7 @@ impl fmt::Debug for DataValue {
 mod test {
     use crate::errors::DatabaseError;
     use crate::storage::table_codec::{BumpBytes, NOTNULL_TAG, NULL_TAG};
-    use crate::types::value::{DataValue, TupleMappingRef, Utf8Type};
+    use crate::types::value::{DataValue, Utf8Type};
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
     use bumpalo::Bump;
@@ -1954,8 +1901,7 @@ mod test {
         assert_eq!(DataValue::Int32(1).serialized_len_hint(), 4);
         assert_eq!(DataValue::Int64(1).serialized_len_hint(), 8);
         assert_eq!(
-            DataValue::Tuple(vec![DataValue::Int8(1), DataValue::Int32(2)], false)
-                .serialized_len_hint(),
+            DataValue::Tuple(vec![DataValue::Int8(1), DataValue::Int32(2)]).serialized_len_hint(),
             5
         );
         #[cfg(feature = "decimal")]
@@ -2045,7 +1991,7 @@ mod test {
 
         assert_eq!(
             DataValue::init(&LogicalType::Tuple(vec![LogicalType::Integer])),
-            DataValue::Tuple(vec![DataValue::Int32(0)], false)
+            DataValue::Tuple(vec![DataValue::Int32(0)])
         );
         assert_eq!(
             DataValue::init(&LogicalType::Date).logical_type(),
@@ -2117,7 +2063,7 @@ mod test {
                 LogicalType::Decimal(None, None),
             ),
             (
-                DataValue::Tuple(vec![DataValue::Int32(1)], false),
+                DataValue::Tuple(vec![DataValue::Int32(1)]),
                 LogicalType::Tuple(vec![LogicalType::Integer]),
             ),
         ];
@@ -2315,9 +2261,9 @@ mod test {
                 "Decimal(1.23)",
             ),
             (
-                DataValue::Tuple(vec![DataValue::Int32(1), utf8("a")], true),
+                DataValue::Tuple(vec![DataValue::Int32(1), utf8("a")]),
                 "(1, a)",
-                "Tuple((1, a) [is upper])",
+                "Tuple((1, a))",
             ),
             (
                 DataValue::Time64(0, 0, false),
@@ -2365,14 +2311,9 @@ mod test {
     #[test]
     fn test_data_value_nested_tuple_ordering() {
         assert_eq!(
-            DataValue::Tuple(
-                vec![DataValue::Tuple(vec![DataValue::Int32(1)], false)],
-                false
-            )
-            .partial_cmp(&DataValue::Tuple(
-                vec![DataValue::Tuple(vec![DataValue::Int32(2)], false)],
-                false,
-            )),
+            DataValue::Tuple(vec![DataValue::Tuple(vec![DataValue::Int32(1)])]).partial_cmp(
+                &DataValue::Tuple(vec![DataValue::Tuple(vec![DataValue::Int32(2)])],)
+            ),
             Some(Ordering::Less)
         );
     }
@@ -2534,18 +2475,18 @@ mod test {
 
     #[test]
     fn test_tuple_partial_cmp() {
-        let tuple_1 = DataValue::Tuple(vec![DataValue::Int32(1), DataValue::Int32(2)], false);
-        let tuple_2 = DataValue::Tuple(vec![DataValue::Int32(1), DataValue::Int32(3)], false);
-        let tuple_with_null = DataValue::Tuple(vec![DataValue::Int32(1), DataValue::Null], false);
-        let lower_prefix = DataValue::Tuple(vec![DataValue::Int32(1)], false);
-        let upper_prefix = DataValue::Tuple(vec![DataValue::Int32(1)], true);
+        let tuple_1 = DataValue::Tuple(vec![DataValue::Int32(1), DataValue::Int32(2)]);
+        let tuple_2 = DataValue::Tuple(vec![DataValue::Int32(1), DataValue::Int32(3)]);
+        let tuple_with_null = DataValue::Tuple(vec![DataValue::Int32(1), DataValue::Null]);
+        let lower_prefix = DataValue::Tuple(vec![DataValue::Int32(1)]);
+        let upper_prefix = DataValue::Tuple(vec![DataValue::Int32(1)]);
 
         assert_eq!(tuple_1.partial_cmp(&tuple_2), Some(Ordering::Less));
         assert_eq!(tuple_2.partial_cmp(&tuple_with_null), Some(Ordering::Less));
         assert_eq!(lower_prefix.partial_cmp(&tuple_1), Some(Ordering::Less));
-        assert_eq!(upper_prefix.partial_cmp(&tuple_1), Some(Ordering::Greater));
+        assert_eq!(upper_prefix.partial_cmp(&tuple_1), Some(Ordering::Less));
         assert_eq!(tuple_1.partial_cmp(&lower_prefix), Some(Ordering::Greater));
-        assert_eq!(tuple_1.partial_cmp(&upper_prefix), Some(Ordering::Less));
+        assert_eq!(tuple_1.partial_cmp(&upper_prefix), Some(Ordering::Greater));
         assert_eq!(DataValue::Null.partial_cmp(&DataValue::Int32(1)), None);
     }
 
@@ -2583,8 +2524,8 @@ mod test {
                 DataValue::Decimal(Decimal::new(2, 0)),
             ),
             (
-                DataValue::Tuple(vec![DataValue::Int32(1)], false),
-                DataValue::Tuple(vec![DataValue::Int32(2)], false),
+                DataValue::Tuple(vec![DataValue::Int32(1)]),
+                DataValue::Tuple(vec![DataValue::Int32(2)]),
             ),
         ];
 
@@ -2625,10 +2566,7 @@ mod test {
             (DataValue::Time64(1, 0, false), DataValue::Null),
             #[cfg(feature = "decimal")]
             (DataValue::Decimal(Decimal::new(1, 0)), DataValue::Null),
-            (
-                DataValue::Tuple(vec![DataValue::Int32(1)], false),
-                DataValue::Null,
-            ),
+            (DataValue::Tuple(vec![DataValue::Int32(1)]), DataValue::Null),
         ];
 
         for (left, right) in mismatch_cases {
@@ -3067,20 +3005,23 @@ mod test {
         let mut key_tuple_2 = BumpBytes::new_in(&arena);
         let mut key_tuple_3 = BumpBytes::new_in(&arena);
 
-        let v_tuple_1 = DataValue::Tuple(
-            vec![DataValue::Null, DataValue::Int8(0), DataValue::Int8(1)],
-            false,
-        );
+        let v_tuple_1 = DataValue::Tuple(vec![
+            DataValue::Null,
+            DataValue::Int8(0),
+            DataValue::Int8(1),
+        ]);
 
-        let v_tuple_2 = DataValue::Tuple(
-            vec![DataValue::Int8(0), DataValue::Int8(0), DataValue::Int8(1)],
-            false,
-        );
+        let v_tuple_2 = DataValue::Tuple(vec![
+            DataValue::Int8(0),
+            DataValue::Int8(0),
+            DataValue::Int8(1),
+        ]);
 
-        let v_tuple_3 = DataValue::Tuple(
-            vec![DataValue::Int8(0), DataValue::Int8(0), DataValue::Int8(2)],
-            false,
-        );
+        let v_tuple_3 = DataValue::Tuple(vec![
+            DataValue::Int8(0),
+            DataValue::Int8(0),
+            DataValue::Int8(2),
+        ]);
 
         v_tuple_1.memcomparable_encode(&mut key_tuple_1)?;
         v_tuple_2.memcomparable_encode(&mut key_tuple_2)?;
@@ -3135,7 +3076,7 @@ mod test {
 
         fn logical_eq(lhs: &DataValue, rhs: &DataValue) -> bool {
             match (lhs, rhs) {
-                (Tuple(lv, _), Tuple(rv, _)) => {
+                (Tuple(lv), Tuple(rv)) => {
                     lv.len() == rv.len() && lv.iter().zip(rv.iter()).all(|(l, r)| logical_eq(l, r))
                 }
                 _ => lhs == rhs,
@@ -3148,14 +3089,11 @@ mod test {
         let mut key_tuple_2 = BumpBytes::new_in(&arena);
         let mut key_tuple_3 = BumpBytes::new_in(&arena);
 
-        let v_tuple_1 = Tuple(
-            vec![Null, Int8(0), Int8(1)],
-            true, // upper bound
-        );
+        let v_tuple_1 = Tuple(vec![Null, Int8(0), Int8(1)]);
 
-        let v_tuple_2 = Tuple(vec![Int8(0), Int8(0), Int8(1)], true);
+        let v_tuple_2 = Tuple(vec![Int8(0), Int8(0), Int8(1)]);
 
-        let v_tuple_3 = Tuple(vec![Int8(0), Int8(0), Int8(2)], true);
+        let v_tuple_3 = Tuple(vec![Int8(0), Int8(0), Int8(2)]);
 
         v_tuple_1.memcomparable_encode(&mut key_tuple_1)?;
         v_tuple_2.memcomparable_encode(&mut key_tuple_2)?;
@@ -3177,42 +3115,6 @@ mod test {
         assert!(logical_eq(&v_tuple_1, &d1));
         assert!(logical_eq(&v_tuple_2, &d2));
         assert!(logical_eq(&v_tuple_3, &d3));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_memcomparable_decode_mapping_orders_values() -> Result<(), DatabaseError> {
-        let arena = Bump::new();
-        let mut key_tuple = BumpBytes::new_in(&arena);
-
-        let value = DataValue::Tuple(
-            vec![
-                DataValue::Int32(1),
-                DataValue::Int32(2),
-                DataValue::Int32(3),
-            ],
-            false,
-        );
-        value.memcomparable_encode(&mut key_tuple)?;
-
-        let ty = LogicalType::Tuple(vec![
-            LogicalType::Integer,
-            LogicalType::Integer,
-            LogicalType::Integer,
-        ]);
-        let index_to_scan = vec![1, usize::MAX, 0];
-        let mapping = TupleMappingRef::new(&index_to_scan, 2);
-        let decoded = DataValue::memcomparable_decode_mapping(
-            &mut Cursor::new(&key_tuple[..]),
-            &ty,
-            Some(mapping),
-        )?;
-
-        assert_eq!(
-            decoded,
-            DataValue::Tuple(vec![DataValue::Int32(3), DataValue::Int32(1)], false)
-        );
 
         Ok(())
     }

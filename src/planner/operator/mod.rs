@@ -831,10 +831,11 @@ mod tests {
         let mut arena = PlanArena::new(&table_arena);
         let left = column("left", &mut arena);
         let right = column("right", &mut arena);
-        let values = Operator::Values(ValuesOperator {
-            rows: arena.alloc_expression_rows(&[vec![DataValue::Int32(1), DataValue::Int32(2)]]),
-            schema_ref: vec![left, right],
-        });
+        let values = Operator::Values(ValuesOperator::new(
+            arena.alloc_expression_rows(&[vec![DataValue::Int32(1), DataValue::Int32(2)]]),
+            1,
+            vec![left, right],
+        ));
 
         assert!(values.any_referenced_column(&arena, |column| *column == right)?);
         assert!(
@@ -1235,14 +1236,15 @@ mod tests {
                 "Describe users",
             ),
             (
-                Operator::Values(ValuesOperator {
-                    rows: arena.alloc_expression_rows(&[
-                        vec![DataValue::Int32(1), DataValue::Int32(2)],
+                Operator::Values(ValuesOperator::new(
+                    arena.alloc_expression_rows(&[
+                        vec![DataValue::Int32(1)],
                         vec![DataValue::Int32(3)],
                     ]),
-                    schema_ref: vec![id],
-                }),
-                "Values [1, 2], [3], RowsLen: 2",
+                    2,
+                    vec![id],
+                )),
+                "Values [1], [3], RowsLen: 2",
             ),
             (
                 Operator::Analyze(AnalyzeOperator {

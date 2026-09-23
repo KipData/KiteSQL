@@ -175,13 +175,13 @@ impl DataValue {
                 writer.write_all(&value.serialize())?;
                 Ok(())
             }
-            DataValue::Tuple(values, is_upper) => {
+            DataValue::Tuple(values) => {
                 write_u8(writer, TAG_TUPLE)?;
                 write_len(writer, values.len())?;
                 for value in values {
                     value.encode_reference_value(writer)?;
                 }
-                write_bool(writer, *is_upper)
+                Ok(())
             }
         }
     }
@@ -233,7 +233,7 @@ impl DataValue {
                 for _ in 0..len {
                     values.push(DataValue::decode_reference_value(reader)?);
                 }
-                Ok(DataValue::Tuple(values, read_bool(reader)?))
+                Ok(DataValue::Tuple(values))
             }
             tag => Err(DatabaseError::InvalidValue(format!(
                 "invalid data value tag: {tag}"
@@ -452,7 +452,7 @@ pub(crate) mod test {
             DataValue::Time64(78, 6, true),
             #[cfg(feature = "decimal")]
             DataValue::Decimal(Decimal::new(12345, 2)),
-            DataValue::Tuple(vec![DataValue::Null, DataValue::Int32(42)], false),
+            DataValue::Tuple(vec![DataValue::Null, DataValue::Int32(42)]),
         ];
 
         let mut reference_tables = ReferenceTables::new();
@@ -519,9 +519,8 @@ pub(crate) mod test {
         assert_invalid_value(&time64, "invalid bool value");
 
         let mut tuple = vec![TAG_TUPLE];
-        tuple.extend(0u32.to_le_bytes());
-        tuple.push(2);
-        assert_invalid_value(&tuple, "invalid bool value");
+        tuple.extend(1u32.to_le_bytes());
+        assert_invalid_value(&tuple, "failed to fill whole buffer");
     }
 
     #[test]

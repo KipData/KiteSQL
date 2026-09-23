@@ -80,7 +80,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropIndex {
             });
         }
 
-        TupleBuilder::build_result_into(arena.result_tuple_mut(), index_name.to_string());
+        arena.produce_tuple(TupleBuilder::build_result(index_name.to_string()));
         arena.resume();
         Ok(())
     }

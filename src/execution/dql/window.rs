@@ -24,7 +24,6 @@ use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
-use std::mem;
 
 mod function;
 
@@ -239,7 +238,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Window {
             let (tuple, boundary) = if let Some((tuple, boundary)) = self.state.pending.take() {
                 (tuple, Some(boundary))
             } else if arena.next_tuple(self.input, plan_arena)? {
-                (mem::take(arena.result_tuple_mut()), None)
+                (arena.materialize_tuple(), None)
             } else {
                 self.eval_functions(plan_arena)?;
                 self.input_exhausted = true;

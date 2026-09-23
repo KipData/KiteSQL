@@ -125,7 +125,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropColumn {
                 arena.push_ddl_apply(DDLApply::upsert_table(table, true));
             }
 
-            TupleBuilder::build_result_into(arena.result_tuple_mut(), "1".to_string());
+            arena.produce_tuple(TupleBuilder::build_result("1".to_string()));
             arena.resume();
             Ok(())
         } else if !if_exists {

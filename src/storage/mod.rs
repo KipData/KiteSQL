@@ -37,7 +37,7 @@ use crate::storage::table_codec::{Bytes, StatisticsCodecType, TableCodec, BOUND_
 use crate::types::index::{Index, IndexId, IndexMeta, IndexMetaRef, IndexType};
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::{Tuple, TupleId};
-use crate::types::value::{DataValue, TupleMappingRef};
+use crate::types::value::{DataValue, OrderedMapping, TupleMappingRef};
 use crate::types::{ColumnId, LogicalType};
 use std::borrow::{Borrow, Cow};
 use std::collections::{Bound, HashMap};
@@ -1246,6 +1246,14 @@ fn encode_bound_key(buffer: &mut Bytes, key: &[u8], is_upper: bool) {
 }
 
 #[inline]
+fn index_values(value: &DataValue) -> &[DataValue] {
+    match value {
+        DataValue::Tuple(values) => values,
+        value => std::slice::from_ref(value),
+    }
+}
+
+#[inline]
 fn encode_bound<'a>(
     table_codec: &mut TableCodec,
     bound: &Bound<DataValue>,
@@ -1539,12 +1547,11 @@ impl<T: Transaction> IndexImpl<T> for PrimaryKeyIndexImpl {
         table_codec: &mut TableCodec,
         params: &IndexImplParams<T>,
         value: &DataValue,
-        _: bool,
+        is_upper: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
         table_codec.with_tuple_unchecked(params.table_name.as_ref(), value, None, |key, _| {
-            out.clear();
-            out.extend_from_slice(key);
+            encode_bound_key(out, key, is_upper);
             Ok(())
         })
     }
@@ -1586,7 +1593,11 @@ impl<T: Transaction> IndexImpl<T> for UniqueIndexImpl {
         _: &mut Bytes,
         _: &mut Bytes,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
-        let index = Index::new(params.index_meta().id, value, IndexType::Unique);
+        let index = Index::new(
+            params.index_meta().id,
+            index_values(value),
+            IndexType::Unique,
+        );
         let Some(bytes) =
             table_codec.with_index(params.table_name.as_ref(), &index, None, |key, _| {
                 params.tx.get_borrowed(key)
@@ -1610,7 +1621,11 @@ impl<T: Transaction> IndexImpl<T> for UniqueIndexImpl {
         _: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
-        let index = Index::new(params.index_meta().id, value, IndexType::Unique);
+        let index = Index::new(
+            params.index_meta().id,
+            index_values(value),
+            IndexType::Unique,
+        );
 
         table_codec.with_index(params.table_name.as_ref(), &index, None, |key, _| {
             out.clear();
@@ -1660,7 +1675,11 @@ impl<T: Transaction> IndexImpl<T> for NormalIndexImpl {
         is_upper: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
-        let index = Index::new(params.index_meta().id, value, IndexType::Normal);
+        let index = Index::new(
+            params.index_meta().id,
+            index_values(value),
+            IndexType::Normal,
+        );
         table_codec.with_index(params.table_name.as_ref(), &index, None, |key, _| {
             encode_bound_key(out, key, is_upper);
             Ok(())
@@ -1708,7 +1727,11 @@ impl<T: Transaction> IndexImpl<T> for CompositeIndexImpl {
         is_upper: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
-        let index = Index::new(params.index_meta().id, value, IndexType::Composite);
+        let index = Index::new(
+            params.index_meta().id,
+            index_values(value),
+            IndexType::Composite,
+        );
         table_codec.with_index(params.table_name.as_ref(), &index, None, |key, _| {
             encode_bound_key(out, key, is_upper);
             Ok(())
@@ -1725,11 +1748,12 @@ impl<T: Transaction> IndexImpl<T> for CoveredIndexImpl {
         value: &[u8],
         params: &IndexImplParams<T>,
     ) -> Result<(), DatabaseError> {
-        let mapping = params
-            .cover_mapping
-            .as_ref()
-            .map(|mapping| mapping.as_ref());
-        let key = TableCodec::decode_index_key(key, params.value_ty(), mapping)?;
+        let key = match &params.cover_mapping {
+            Some(mapping) => {
+                TableCodec::decode_index_key(key, params.value_ty(), &mapping.as_ref())?
+            }
+            None => TableCodec::decode_index_key(key, params.value_ty(), &OrderedMapping)?,
+        };
 
         let tuple_id = if params.with_pk {
             Some(TableCodec::decode_index(value)?)
@@ -1737,10 +1761,7 @@ impl<T: Transaction> IndexImpl<T> for CoveredIndexImpl {
             None
         };
         tuple.pk = tuple_id;
-        tuple.values = match key {
-            DataValue::Tuple(vals, _) => vals,
-            v => vec![v],
-        };
+        tuple.values = key;
         Ok(())
     }
 
@@ -1772,7 +1793,11 @@ impl<T: Transaction> IndexImpl<T> for CoveredIndexImpl {
         is_upper: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
-        let index = Index::new(params.index_meta().id, value, params.index_meta().ty);
+        let index = Index::new(
+            params.index_meta().id,
+            index_values(value),
+            params.index_meta().ty,
+        );
         table_codec.with_index(params.table_name.as_ref(), &index, None, |key, _| {
             encode_bound_key(out, key, is_upper);
             Ok(())
@@ -2577,15 +2602,27 @@ mod test {
         let indexes = [
             (
                 Arc::new(DataValue::Int32(0)),
-                Index::new(1, &tuples[0].values[2], IndexType::Normal),
+                Index::new(
+                    1,
+                    std::slice::from_ref(&tuples[0].values[2]),
+                    IndexType::Normal,
+                ),
             ),
             (
                 Arc::new(DataValue::Int32(1)),
-                Index::new(1, &tuples[1].values[2], IndexType::Normal),
+                Index::new(
+                    1,
+                    std::slice::from_ref(&tuples[1].values[2]),
+                    IndexType::Normal,
+                ),
             ),
             (
                 Arc::new(DataValue::Int32(2)),
-                Index::new(1, &tuples[2].values[2], IndexType::Normal),
+                Index::new(
+                    1,
+                    std::slice::from_ref(&tuples[2].values[2]),
+                    IndexType::Normal,
+                ),
             ),
         ];
         for (tuple_id, index) in indexes.iter().cloned() {
@@ -2711,7 +2748,11 @@ mod test {
             setup_tx.add_index(
                 &mut table_codec,
                 "t1",
-                Index::new(index_id, &initial_tuple.values[2], IndexType::Normal),
+                Index::new(
+                    index_id,
+                    std::slice::from_ref(&initial_tuple.values[2]),
+                    IndexType::Normal,
+                ),
                 initial_tuple.pk.as_ref().unwrap(),
             )?;
             setup_tx.append_tuple(&mut table_codec, "t1", &initial_tuple, &serializers, false)?;
@@ -2749,13 +2790,21 @@ mod test {
         writer_tx.del_index(
             &mut table_codec,
             "t1",
-            &Index::new(index_id, &initial_tuple.values[2], IndexType::Normal),
+            &Index::new(
+                index_id,
+                std::slice::from_ref(&initial_tuple.values[2]),
+                IndexType::Normal,
+            ),
             initial_tuple.pk.as_ref().unwrap(),
         )?;
         writer_tx.add_index(
             &mut table_codec,
             "t1",
-            Index::new(index_id, &updated_tuple.values[2], IndexType::Normal),
+            Index::new(
+                index_id,
+                std::slice::from_ref(&updated_tuple.values[2]),
+                IndexType::Normal,
+            ),
             updated_tuple.pk.as_ref().unwrap(),
         )?;
         writer_tx.append_tuple(&mut table_codec, "t1", &updated_tuple, &serializers, true)?;

@@ -51,7 +51,7 @@ impl ExprVisitorMut for WindowCollector {
 
         let output_name = expr.output_name(arena);
         let ScalarExpression::WindowCall(window) =
-            std::mem::replace(arena.expression_mut(*expr), ScalarExpression::Empty)
+            std::mem::replace(&mut *arena.expression_mut(*expr), ScalarExpression::Empty)
         else {
             unreachable!()
         };

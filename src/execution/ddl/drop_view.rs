@@ -68,7 +68,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropView {
             });
         }
 
-        TupleBuilder::build_result_into(arena.result_tuple_mut(), format!("{view_name}"));
+        arena.produce_tuple(TupleBuilder::build_result(format!("{view_name}")));
         arena.resume();
         Ok(())
     }

@@ -241,7 +241,7 @@ fn convert_value(value: &DataValue) -> Result<Value, TpccError> {
         DataValue::Time32(_, _) => Value::Null,
         DataValue::Time64(value, precision, _) => Value::String(format_time64(*value, *precision)?),
         DataValue::Decimal(v) => Value::String(v.to_string()),
-        DataValue::Tuple(_, _) => Value::Null,
+        DataValue::Tuple(_) => Value::Null,
     })
 }
 

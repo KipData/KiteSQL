@@ -1973,7 +1973,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
 
         for expr in select_items {
             let mut expression =
-                std::mem::replace(arena.expression_mut(*expr), ScalarExpression::Empty);
+                std::mem::replace(&mut *arena.expression_mut(*expr), ScalarExpression::Empty);
             if let ScalarExpression::ColumnRef { column, .. } = &mut expression {
                 let _ = table_force_nullable
                     .iter()

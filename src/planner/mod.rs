@@ -663,7 +663,7 @@ pub(crate) mod test {
             I: IntoIterator<Item = E>,
             E: Into<ScalarExpression>;
 
-        fn alloc_expression_rows<R, E>(&mut self, rows: &[R]) -> Vec<Vec<ExprRef>>
+        fn alloc_expression_rows<R, E>(&mut self, rows: &[R]) -> Vec<ExprRef>
         where
             R: AsRef<[E]>,
             E: Clone + Into<ScalarExpression>;
@@ -681,13 +681,14 @@ pub(crate) mod test {
                 .collect()
         }
 
-        fn alloc_expression_rows<R, E>(&mut self, rows: &[R]) -> Vec<Vec<ExprRef>>
+        fn alloc_expression_rows<R, E>(&mut self, rows: &[R]) -> Vec<ExprRef>
         where
             R: AsRef<[E]>,
             E: Clone + Into<ScalarExpression>,
         {
             rows.iter()
-                .map(|row| self.alloc_expressions(row.as_ref().iter().cloned()))
+                .flat_map(|row| row.as_ref().iter().cloned())
+                .map(|expression| self.alloc_expression(expression.into()))
                 .collect()
         }
     }

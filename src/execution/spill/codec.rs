@@ -188,7 +188,7 @@ impl SpillCodec for Tuple {
 fn estimated_dynamic_value_size(value: &DataValue) -> usize {
     match value {
         DataValue::Utf8 { value, .. } => value.capacity(),
-        DataValue::Tuple(values, _) => values
+        DataValue::Tuple(values) => values
             .capacity()
             .saturating_mul(size_of::<DataValue>())
             .saturating_add(

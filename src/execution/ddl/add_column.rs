@@ -80,7 +80,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for AddColumn {
         };
         if column_exists {
             if if_not_exists {
-                TupleBuilder::build_result_into(arena.result_tuple_mut(), "1".to_string());
+                arena.produce_tuple(TupleBuilder::build_result("1".to_string()));
                 arena.resume();
                 return Ok(());
             }
@@ -144,14 +144,18 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for AddColumn {
                     default_for_index.as_ref(),
                     tuple.pk.as_ref(),
                 ) {
-                    let index = Index::new(*unique_index_id, value, IndexType::Unique);
+                    let index = Index::new(
+                        *unique_index_id,
+                        std::slice::from_ref(value),
+                        IndexType::Unique,
+                    );
                     transaction.add_index(table_codec, &table_name, index, tuple_id)?;
                 }
                 Ok(())
             },
         )?;
 
-        TupleBuilder::build_result_into(arena.result_tuple_mut(), "1".to_string());
+        arena.produce_tuple(TupleBuilder::build_result("1".to_string()));
         arena.resume();
         Ok(())
     }

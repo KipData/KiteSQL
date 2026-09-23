@@ -62,7 +62,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor {
                 arena.finish();
                 return Ok(());
             }
-            std::mem::swap(&mut self.scratch, arena.result_tuple_mut());
+            self.scratch = arena.materialize_tuple();
             let tuple = &self.scratch;
             let group_keys = self
                 .groupby_exprs
@@ -72,10 +72,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor {
 
             if self.last_keys.as_ref() != Some(&group_keys) {
                 self.last_keys = Some(group_keys.clone());
-                let output = arena.result_tuple_mut();
-                output.pk.clone_from(&tuple.pk);
-                output.values = group_keys;
-                arena.resume();
+                arena.produce_tuple(Tuple::new(tuple.pk.clone(), group_keys));
                 return Ok(());
             }
         }
@@ -149,16 +146,17 @@ mod tests {
             vec![plan_arena.alloc_column(ColumnCatalog::new("c1".to_string(), true, desc))];
 
         let input = LogicalPlan::new(
-            Operator::Values(ValuesOperator {
-                rows: plan_arena.alloc_expression_rows(&[
+            Operator::Values(ValuesOperator::new(
+                plan_arena.alloc_expression_rows(&[
                     vec![DataValue::Int32(1)],
                     vec![DataValue::Int32(1)],
                     vec![DataValue::Int32(2)],
                     vec![DataValue::Int32(2)],
                     vec![DataValue::Int32(3)],
                 ]),
-                schema_ref: schema_ref.clone(),
-            }),
+                5,
+                schema_ref.clone(),
+            )),
             Childrens::None,
         );
         let agg = AggregateOperator {
@@ -205,16 +203,17 @@ mod tests {
         ];
 
         let input = LogicalPlan::new(
-            Operator::Values(ValuesOperator {
-                rows: plan_arena.alloc_expression_rows(&[
+            Operator::Values(ValuesOperator::new(
+                plan_arena.alloc_expression_rows(&[
                     vec![DataValue::Int32(1), DataValue::Int32(1)],
                     vec![DataValue::Int32(1), DataValue::Int32(1)],
                     vec![DataValue::Int32(1), DataValue::Int32(2)],
                     vec![DataValue::Int32(2), DataValue::Int32(1)],
                     vec![DataValue::Int32(2), DataValue::Int32(1)],
                 ]),
-                schema_ref: schema_ref.clone(),
-            }),
+                5,
+                schema_ref.clone(),
+            )),
             Childrens::None,
         );
         let agg = AggregateOperator {

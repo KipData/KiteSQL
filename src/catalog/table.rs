@@ -121,14 +121,17 @@ impl TableCatalog {
 
     pub(crate) fn dml_snapshot(
         &self,
-        arena: &mut (dyn MetaArena + '_),
+        arena: &(dyn MetaArena + '_),
     ) -> Result<DmlTableSnapshot<'_>, DatabaseError> {
         let index_metas = self
             .indexes()
             .map(|index_meta| {
                 Ok((
                     *index_meta,
-                    arena.index(*index_meta).column_exprs(self, arena)?,
+                    arena
+                        .index(*index_meta)
+                        .column_exprs(self)
+                        .collect::<Result<Vec<_>, _>>()?,
                 ))
             })
             .collect::<Result<Vec<_>, DatabaseError>>()?;

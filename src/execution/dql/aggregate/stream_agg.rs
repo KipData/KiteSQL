@@ -75,12 +75,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor {
                     arena.finish();
                     return Ok(());
                 };
-                write_aggregate_output(
-                    arena.result_tuple_mut(),
-                    mem::take(&mut self.accs),
-                    group_keys,
-                )?;
-                arena.resume();
+                let mut output = crate::types::tuple::Tuple::default();
+                write_aggregate_output(&mut output, mem::take(&mut self.accs), group_keys)?;
+                arena.produce_tuple(output);
                 return Ok(());
             }
 
@@ -104,8 +101,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor {
                     update_accumulators(&mut next_accs, &self.agg_calls, tuple, plan_arena)?;
                     mem::swap(current_keys, &mut group_keys);
                     let current_accs = mem::replace(&mut self.accs, next_accs);
-                    write_aggregate_output(arena.result_tuple_mut(), current_accs, group_keys)?;
-                    arena.resume();
+                    let mut output = crate::types::tuple::Tuple::default();
+                    write_aggregate_output(&mut output, current_accs, group_keys)?;
+                    arena.produce_tuple(output);
                     return Ok(());
                 }
             }
@@ -142,16 +140,17 @@ mod tests {
             })
             .to_vec();
         let input = LogicalPlan::new(
-            Operator::Values(ValuesOperator {
-                rows: plan_arena.alloc_expression_rows(&[
+            Operator::Values(ValuesOperator::new(
+                plan_arena.alloc_expression_rows(&[
                     vec![1.into(), 10.into()],
                     vec![1.into(), 20.into()],
                     vec![2.into(), 5.into()],
                     vec![2.into(), DataValue::Null],
                     vec![2.into(), 7.into()],
                 ]),
-                schema_ref: columns.clone(),
-            }),
+                5,
+                columns.clone(),
+            )),
             Childrens::None,
         );
         let group = plan_arena.alloc_expression(ScalarExpression::column_expr(columns[0], 0));
@@ -207,10 +206,7 @@ mod tests {
             ColumnDesc::new(LogicalType::Integer, None, false, None)?,
         ));
         let input = LogicalPlan::new(
-            Operator::Values(ValuesOperator {
-                rows: Vec::new(),
-                schema_ref: vec![column],
-            }),
+            Operator::Values(ValuesOperator::new(Vec::new(), 0, vec![column])),
             Childrens::None,
         );
         let operator = AggregateOperator {

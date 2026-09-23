@@ -22,7 +22,6 @@ use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use std::collections::HashMap;
-use std::mem;
 
 pub struct SetMembership {
     kind: SetMembershipKind,
@@ -89,7 +88,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SetMembership {
             while arena.next_tuple(self.right_input, plan_arena)? {
                 *self
                     .right_counts
-                    .entry(mem::take(arena.result_tuple_mut()))
+                    .entry(arena.materialize_tuple())
                     .or_insert(0) += 1;
             }
             self.built = true;
@@ -101,7 +100,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SetMembership {
                 return Ok(());
             }
 
-            let matched = self.consume_right_match(arena.result_tuple());
+            let tuple = arena.materialize_tuple();
+            let matched = self.consume_right_match(&tuple);
+            arena.produce_tuple(tuple);
             let should_emit = match self.kind {
                 SetMembershipKind::Except => !matched,
                 SetMembershipKind::Intersect => matched,

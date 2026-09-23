@@ -15,8 +15,7 @@
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, with_projection_tmp_value, ExecArena, ExecId, ExecNode, ExecutionContext,
-    ExecutorNode, WriteExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
 };
 use crate::iter_ext::Itertools;
 use crate::planner::operator::insert::InsertOperator;
@@ -137,7 +136,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert {
 
             while arena.next_tuple(input, plan_arena)? {
                 let mut tuple_map = HashMap::with_capacity(self.input_schema.len());
-                for (i, value) in arena.result_tuple_mut().values.drain(..).enumerate() {
+                for (i, value) in arena.materialize_tuple().values.into_iter().enumerate() {
                     let column = plan_arena.column(self.input_schema[i]);
                     tuple_map.insert(Self::column_key(column, self.is_mapping_by_name), value);
                 }
@@ -169,18 +168,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert {
                 for (index_meta, exprs) in table_snapshot.index_metas.iter() {
                     let index_meta = plan_arena.index(*index_meta);
                     let tuple_id = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
-                    with_projection_tmp_value(
-                        arena,
-                        plan_arena,
-                        Some(&tuple),
-                        exprs,
-                        |arena, value| {
-                            let mut state = arena.local_state(plan_arena);
-                            let (transaction, table_codec) = state.transaction_codec_mut();
-                            let index = Index::new(index_meta.id, &value, index_meta.ty);
-                            transaction.add_index(table_codec, &self.table_name, index, tuple_id)
-                        },
-                    )?;
+                    arena.rewrite(exprs, plan_arena, Some(&tuple))?;
+                    let mut state = arena.local_state(plan_arena);
+                    let (values, transaction, table_codec) =
+                        state.index_values_transaction_codec_mut();
+                    let index = Index::new(index_meta.id, values, index_meta.ty);
+                    transaction.add_index(table_codec, &self.table_name, index, tuple_id)?;
                 }
                 let mut state = arena.local_state(plan_arena);
                 let (transaction, table_codec) = state.transaction_codec_mut();
@@ -194,11 +187,11 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert {
                 inserted_count += 1;
             }
 
-            TupleBuilder::build_result_into(arena.result_tuple_mut(), inserted_count.to_string());
+            arena.produce_tuple(TupleBuilder::build_result(inserted_count.to_string()));
             arena.resume();
             Ok(())
         } else {
-            TupleBuilder::build_result_into(arena.result_tuple_mut(), "0".to_string());
+            arena.produce_tuple(TupleBuilder::build_result("0".to_string()));
             arena.resume();
             Ok(())
         }

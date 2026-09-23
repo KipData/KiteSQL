@@ -406,9 +406,9 @@ impl PushPredicateIntoScan {
             if range.only_eq() && apply_column_count != column_count {
                 fn eq_to_scope(range: Range) -> Range {
                     match range {
-                        Range::Eq(DataValue::Tuple(values, _)) => {
-                            let min = Bound::Included(DataValue::Tuple(values.clone(), false));
-                            let max = Bound::Included(DataValue::Tuple(values, true));
+                        Range::Eq(DataValue::Tuple(values)) => {
+                            let min = Bound::Included(DataValue::Tuple(values.clone()));
+                            let max = Bound::Included(DataValue::Tuple(values));
 
                             Range::Scope { min, max }
                         }
@@ -695,14 +695,11 @@ mod tests {
         assert_eq!(ignore_prefix_len, 3);
         assert_eq!(
             detached.range,
-            Range::Eq(DataValue::Tuple(
-                vec![
-                    DataValue::Int32(1),
-                    DataValue::Int32(2),
-                    DataValue::Int32(3),
-                ],
-                false,
-            ))
+            Range::Eq(DataValue::Tuple(vec![
+                DataValue::Int32(1),
+                DataValue::Int32(2),
+                DataValue::Int32(3),
+            ],))
         );
         let residual = detached.residual.expect("c4 predicate should remain");
         let residual_detached = RangeDetacher::new(table_name.as_ref(), &4, &mut arena)
@@ -760,11 +757,11 @@ mod tests {
         assert_eq!(
             detached.range,
             Range::Scope {
-                min: Bound::Excluded(DataValue::Tuple(
-                    vec![DataValue::Int32(1), DataValue::Int32(2)],
-                    true,
-                )),
-                max: Bound::Excluded(DataValue::Tuple(vec![DataValue::Int32(1)], true)),
+                min: Bound::Excluded(DataValue::Tuple(vec![
+                    DataValue::Int32(1),
+                    DataValue::Int32(2)
+                ],)),
+                max: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(1)])),
             }
         );
         let residual = detached.residual.expect("c3 predicate should remain");

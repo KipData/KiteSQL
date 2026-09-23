@@ -112,7 +112,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyFromFile {
             size += 1;
         }
 
-        TupleBuilder::build_result_into(arena.result_tuple_mut(), size.to_string());
+        arena.produce_tuple(TupleBuilder::build_result(size.to_string()));
         arena.resume();
         Ok(())
     }
@@ -126,6 +126,7 @@ mod tests {
     use crate::db::{CatalogKind, DataBaseBuilder};
     use crate::errors::DatabaseError;
     use crate::storage::Storage;
+    use crate::types::tuple::TupleLike;
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
     use std::io::Write;
@@ -197,7 +198,7 @@ mod tests {
         let result = executor
             .next_tuple()?
             .expect("copy from file should yield once");
-        assert_eq!(result.values[0].to_string(), "2");
+        assert_eq!(result.value_at(0).to_string(), "2");
 
         Ok(())
     }

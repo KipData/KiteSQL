@@ -75,8 +75,8 @@ use crate::execution::dql::window::Window;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
-use crate::planner::LogicalPlan;
 use crate::planner::MetaArena;
+use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::table_codec::TableCodec;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::types::index::RuntimeIndexProbe;
@@ -144,6 +144,23 @@ pub(crate) struct ExecResult {
     pub(crate) status: Option<ExecStatus>,
 }
 
+/// Resolves either an arena-backed expression or a direct scalar expression.
+pub(crate) trait RewriteExpression {
+    fn expression<'a>(&'a self, arena: &'a dyn MetaArena) -> &'a ScalarExpression;
+}
+
+impl RewriteExpression for ExprRef {
+    fn expression<'a>(&'a self, arena: &'a dyn MetaArena) -> &'a ScalarExpression {
+        arena.expression(*self)
+    }
+}
+
+impl RewriteExpression for ScalarExpression {
+    fn expression<'a>(&'a self, _arena: &'a dyn MetaArena) -> &'a ScalarExpression {
+        self
+    }
+}
+
 pub struct Executor<'a, T: Transaction + 'a> {
     arena: ExecArena<'a, T>,
     root: ExecId,
@@ -198,7 +215,7 @@ pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
     IndexScan(IndexScan<'a, T>),
     Insert(Insert),
     Limit(Limit),
-    MarkApply(MarkApply<'a, T>),
+    MarkApply(MarkApply),
     NestedLoopJoin(NestedLoopJoin),
     Projection(Projection),
     RecursiveCte(RecursiveCte<'a, T>),
@@ -219,7 +236,6 @@ pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
     Update(Update),
     Values(Values),
     Window(Window),
-    Empty,
 }
 
 pub(crate) trait ExecutorNode<'a, T: Transaction + 'a>: Sized {
@@ -313,7 +329,7 @@ impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
                 <Limit as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
             ExecNode::MarkApply(exec) => {
-                <MarkApply<'a, T> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <MarkApply as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
             ExecNode::NestedLoopJoin(exec) => {
                 <NestedLoopJoin as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
@@ -375,16 +391,49 @@ impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
             ExecNode::Window(exec) => {
                 <Window as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
-            ExecNode::Empty => unreachable!("executor node re-entered while active"),
         }
     }
 }
 
+struct ExecNodes<'a, T: Transaction + 'a> {
+    items: Vec<std::cell::RefCell<ExecNode<'a, T>>>,
+    pos: ExecId,
+    executing: usize,
+}
+
+impl<'a, T: Transaction + 'a> ExecNodes<'a, T> {
+    fn position(&self) -> ExecId {
+        self.pos
+    }
+
+    fn seek(&mut self, pos: ExecId) {
+        assert!(pos <= self.items.len(), "node position out of bounds");
+        self.pos = pos;
+    }
+
+    fn push(&mut self, node: ExecNode<'a, T>) -> ExecId {
+        let id = self.pos;
+        if id == self.items.len() {
+            assert_eq!(self.executing, 0, "cannot grow nodes during execution");
+            self.items.push(std::cell::RefCell::new(node));
+        } else {
+            *self.items[id].borrow_mut() = node;
+        }
+        self.pos += 1;
+        id
+    }
+
+    fn clear(&mut self) {
+        assert_eq!(self.executing, 0, "cannot clear nodes during execution");
+        self.items.clear();
+        self.pos = 0;
+    }
+}
+
 pub(crate) struct ExecArena<'a, T: Transaction + 'a> {
-    nodes: Vec<ExecNode<'a, T>>,
+    nodes: ExecNodes<'a, T>,
     result: ExecResult,
     table_codec: TableCodec,
-    projection_tmp: Vec<DataValue>,
     context: Option<ExecutionContext<'a>>,
     transaction: *mut T,
     runtime_probe_stack: Vec<RuntimeIndexProbe>,
@@ -410,6 +459,18 @@ impl<'b, 'a, T: Transaction + 'a> ExecArenaLocalState<'b, 'a, T> {
         unsafe { (&mut *self.transaction, &mut *self.table_codec) }
     }
 
+    pub(crate) fn index_values_transaction_codec_mut(
+        &mut self,
+    ) -> (&[DataValue], &mut T, &mut TableCodec) {
+        unsafe {
+            (
+                &self.result.tuple.values,
+                &mut *self.transaction,
+                &mut *self.table_codec,
+            )
+        }
+    }
+
     pub(crate) fn transaction_codec(&mut self) -> (&'a T, &mut TableCodec) {
         unsafe { (&*self.transaction, &mut *self.table_codec) }
     }
@@ -430,10 +491,13 @@ impl<'b, 'a, T: Transaction + 'a> ExecArenaLocalState<'b, 'a, T> {
 impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
     pub(crate) fn new() -> Self {
         Self {
-            nodes: Vec::new(),
+            nodes: ExecNodes {
+                items: Vec::new(),
+                pos: 0,
+                executing: 0,
+            },
             result: ExecResult::default(),
             table_codec: TableCodec::default(),
-            projection_tmp: Vec::new(),
             context: None,
             transaction: std::ptr::null_mut(),
             runtime_probe_stack: Vec::new(),
@@ -441,37 +505,6 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
             recursive_input: None,
         }
     }
-}
-
-pub(crate) fn with_projection_tmp_value<'a, T: Transaction + 'a>(
-    exec_arena: &mut ExecArena<'a, T>,
-    plan_arena: &(dyn MetaArena + '_),
-    tuple: Option<&dyn TupleLike>,
-    exprs: &[ScalarExpression],
-    f: impl FnOnce(&mut ExecArena<'a, T>, DataValue) -> Result<(), DatabaseError>,
-) -> Result<(), DatabaseError> {
-    exec_arena.with_projection_tmp(|exec_arena, projection_tmp| {
-        {
-            let tuple = tuple.unwrap_or_else(|| exec_arena.result_tuple() as &dyn TupleLike);
-            projection_tmp.reserve(exprs.len());
-            for expr in exprs.iter() {
-                projection_tmp.push(expr.eval(plan_arena, Some(tuple))?);
-            }
-        }
-
-        match projection_tmp.len() {
-            0 => {}
-            1 => {
-                let value = projection_tmp.pop().expect("projection has one value");
-                f(exec_arena, value)?;
-            }
-            _ => {
-                let value = DataValue::Tuple(std::mem::take(projection_tmp), false);
-                f(exec_arena, value)?;
-            }
-        }
-        Ok(())
-    })
 }
 
 impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
@@ -486,9 +519,7 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
     }
 
     pub(crate) fn push(&mut self, node: ExecNode<'a, T>) -> ExecId {
-        let id = self.nodes.len();
-        self.nodes.push(node);
-        id
+        self.nodes.push(node)
     }
 
     pub(crate) fn push_ddl_apply(&mut self, apply: DDLApply) {
@@ -568,6 +599,7 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
         debug_assert!(self.runtime_probe_stack.is_empty());
         debug_assert!(self.ddl_apply.is_empty());
         self.nodes.clear();
+        self.result.tuple = Tuple::default();
         self.result.status = None;
         self.recursive_input = None;
     }
@@ -582,17 +614,38 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
         &mut self.result.tuple
     }
 
-    #[inline]
-    pub(crate) fn with_projection_tmp<R>(
+    pub(crate) fn materialize_tuple(&mut self) -> Tuple {
+        std::mem::take(&mut self.result.tuple)
+    }
+
+    pub(crate) fn rewrite<E: RewriteExpression>(
         &mut self,
-        f: impl FnOnce(&mut Self, &mut Vec<DataValue>) -> Result<R, DatabaseError>,
-    ) -> Result<R, DatabaseError> {
-        let mut projection_tmp = std::mem::take(&mut self.projection_tmp);
-        projection_tmp.clear();
-        let ret = f(self, &mut projection_tmp);
-        projection_tmp.clear();
-        self.projection_tmp = projection_tmp;
-        ret
+        exprs: &[E],
+        arena: &dyn MetaArena,
+        input: Option<&dyn TupleLike>,
+    ) -> Result<(), DatabaseError> {
+        let values = &mut self.result.tuple.values;
+        let base = values.len();
+        values.reserve(exprs.len());
+
+        for expr in exprs {
+            let value = {
+                let input_values = &values[..base];
+                let current: &dyn TupleLike = input.unwrap_or(&input_values);
+                expr.expression(arena).eval(arena, Some(current))
+            };
+            match value {
+                Ok(value) => values.push(value),
+                Err(error) => {
+                    values.truncate(base);
+                    return Err(error);
+                }
+            }
+        }
+
+        values.rotate_left(base);
+        values.truncate(exprs.len());
+        Ok(())
     }
 
     #[inline]
@@ -617,9 +670,16 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
         plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<bool, DatabaseError> {
         self.result.status = None;
-        let mut node = std::mem::replace(&mut self.nodes[id], ExecNode::Empty);
-        let result = node.next_tuple(self, plan_arena);
-        self.nodes[id] = node;
+        let slot = &self.nodes.items[id] as *const std::cell::RefCell<ExecNode<'a, T>>;
+        self.nodes.executing += 1;
+        // SAFETY: push/clear cannot relocate or destroy slots while executing.
+        // Access to nodes always goes through RefCell: recursive calls and
+        // subtree rebuilds cannot borrow/overwrite an active node. The payload
+        // is behind UnsafeCell, separate from the arena's own mutable state.
+        // On unwind the borrow is released; executing remains nonzero, preventing
+        // relocation even if the caller catches the panic (the arena is poisoned).
+        let result = unsafe { (&*slot).borrow_mut().next_tuple(self, plan_arena) };
+        self.nodes.executing -= 1;
         result?;
 
         match self.result.status.unwrap_or(ExecStatus::End) {
@@ -749,7 +809,7 @@ where
         }
         Operator::MarkApply(op) => {
             let (left, right) = childrens.pop_twins();
-            <MarkApply<'a, T> as ReadExecutor<'a, T>>::into_executor(
+            <MarkApply as ReadExecutor<'a, T>>::into_executor(
                 (op, left, right),
                 arena,
                 plan_arena,
@@ -1272,3 +1332,40 @@ mod test_utils {
 pub(crate) use test_utils::{
     empty_context, execute, execute_input, execute_input_mut, execute_mut, try_collect,
 };
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::storage::memory::MemoryTransaction;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    #[test]
+    fn active_nodes_cannot_be_overwritten_or_relocated() {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let mut arena = ExecArena::<'_, MemoryTransaction>::new();
+        arena.push(ExecNode::Dummy(Dummy::default()));
+        let slot =
+            &arena.nodes.items[0] as *const std::cell::RefCell<ExecNode<'_, MemoryTransaction>>;
+        arena.nodes.executing = 1;
+        // Same access pattern as next_tuple; mutations must fail before changing storage.
+        let active = unsafe { (&*slot).borrow_mut() };
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            arena.push(ExecNode::Dummy(Dummy::default()));
+        }))
+        .is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| arena.nodes.clear())).is_err());
+        arena.nodes.seek(0);
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            arena.push(ExecNode::Dummy(Dummy::default()));
+        }))
+        .is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            arena.next_tuple(0, &mut plan_arena).unwrap();
+        }))
+        .is_err());
+        drop(active);
+        assert_eq!(arena.nodes.items.len(), 1);
+        assert_eq!(arena.nodes.items.as_ptr(), slot);
+    }
+}

@@ -59,7 +59,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowTables<'a, T> {
             return Ok(());
         };
 
-        let output = arena.result_tuple_mut();
+        let mut output = crate::types::tuple::Tuple::default();
         output.pk = None;
         output.values.clear();
         output.values.push(DataValue::Utf8 {
@@ -68,7 +68,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowTables<'a, T> {
             unit: CharLengthUnits::Characters,
         });
 
-        arena.resume();
+        arena.produce_tuple(output);
         Ok(())
     }
 }

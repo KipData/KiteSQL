@@ -1008,7 +1008,7 @@ where
                     values_len,
                 ));
             }
-            source.schema().to_vec()
+            source.schema()[..values_len].to_vec()
         } else {
             let mut columns = Vec::with_capacity(idents.len());
             for ident in idents {
@@ -1027,12 +1027,11 @@ where
             }
             columns
         };
-        let mut rows = Vec::with_capacity(expr_rows.len());
+        let mut rows = Vec::with_capacity(expr_rows.len() * values_len);
         for expr_row in expr_rows {
             if expr_row.len() != values_len {
                 return Err(DatabaseError::ValuesLenMismatch(expr_row.len(), values_len));
             }
-            let mut row = Vec::with_capacity(expr_row.len());
             for (i, expr) in expr_row.iter().enumerate() {
                 let expression = self.binder.bind_expr(expr, self.arena)?;
                 let expression = if matches!(expression, ScalarExpression::Empty) {
@@ -1045,9 +1044,8 @@ where
                 } else {
                     expression
                 };
-                row.push(self.arena.alloc_expression(expression));
+                rows.push(self.arena.alloc_expression(expression));
             }
-            rows.push(row);
         }
         self.binder.context.allow_default = false;
 
@@ -1055,6 +1053,7 @@ where
             table_name,
             schema_ref,
             rows,
+            expr_rows.len(),
             is_overwrite,
             is_mapping_by_name,
         )
@@ -1225,7 +1224,7 @@ where
                             match (names.next(), exprs.next()) {
                                 (Some(name), Some(expression)) => {
                                     let expression = std::mem::replace(
-                                        self.arena.expression_mut(expression),
+                                        &mut *self.arena.expression_mut(expression),
                                         ScalarExpression::Empty,
                                     );
                                     bind_assignment(self.binder, self.arena, name, expression)?
@@ -2739,14 +2738,12 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
         let values_len = expr_rows[0].len();
 
         let mut inferred_types: Vec<Option<LogicalType>> = vec![None; values_len];
-        let mut rows = Vec::with_capacity(expr_rows.len());
+        let mut rows = Vec::with_capacity(expr_rows.len() * values_len);
 
         for expr_row in expr_rows {
             if expr_row.len() != values_len {
                 return Err(DatabaseError::ValuesLenMismatch(expr_row.len(), values_len));
             }
-
-            let mut row = Vec::with_capacity(values_len);
 
             for (col_index, expr) in expr_row.iter().enumerate() {
                 let expression = self.bind_expr(expr, arena)?;
@@ -2757,10 +2754,8 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
                     }
                     None => Some(value_type),
                 };
-                row.push(arena.alloc_expression(expression));
+                rows.push(arena.alloc_expression(expression));
             }
-
-            rows.push(row);
         }
 
         let value_name = arena.temp_table();
@@ -2779,7 +2774,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
             })
             .collect::<Result<_, DatabaseError>>()?;
 
-        Ok(self.bind_values(rows, column_refs))
+        Ok(self.bind_values(rows, expr_rows.len(), column_refs))
     }
 
     fn bind_top_level_orderby(

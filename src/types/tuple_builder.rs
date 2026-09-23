@@ -106,10 +106,10 @@ mod tests {
         let tuple = builder.build_with_row(["7", "kite"]).unwrap();
         assert_eq!(
             tuple.pk,
-            Some(DataValue::Tuple(
-                vec![DataValue::Int32(7), DataValue::from("kite".to_string())],
-                false,
-            ))
+            Some(DataValue::Tuple(vec![
+                DataValue::Int32(7),
+                DataValue::from("kite".to_string())
+            ]))
         );
         assert_eq!(
             tuple.values,

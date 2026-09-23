@@ -27,7 +27,7 @@ use crate::storage::{TableCache, Transaction};
 use crate::types::index::{Index, IndexId, IndexMeta, IndexType, INDEX_ID_LEN};
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::{Tuple, TupleId};
-use crate::types::value::{DataValue, TupleMappingRef};
+use crate::types::value::{DataValue, IndexKeyMapping};
 use crate::types::LogicalType;
 use std::borrow::Borrow;
 use std::hash::{Hash, Hasher};
@@ -151,7 +151,7 @@ impl TableCodec {
             return Err(DatabaseError::not_null_column("primary key"));
         }
 
-        if let DataValue::Tuple(values, _) = &value {
+        if let DataValue::Tuple(values) = &value {
             for value in values {
                 Self::check_primary_key(value, indentation + 1)?
             }
@@ -401,7 +401,9 @@ impl TableCodec {
             lower.push(BOUND_MIN_TAG);
             lower.extend_from_slice(&index.id.to_le_bytes());
             lower.push(BOUND_MIN_TAG);
-            index.value.memcomparable_encode(lower)?;
+            for value in index.values {
+                value.memcomparable_encode(lower)?;
+            }
 
             if let Some(tuple_id) = tuple_id {
                 if matches!(index.ty, IndexType::Normal | IndexType::Composite) {
@@ -783,14 +785,26 @@ impl TableCodec {
         )
     }
 
-    pub fn decode_index_key(
+    pub fn decode_index_key<M: IndexKeyMapping>(
         bytes: &[u8],
         ty: &LogicalType,
-        mapping: Option<TupleMappingRef<'_>>,
-    ) -> Result<DataValue, DatabaseError> {
+        mapping: &M,
+    ) -> Result<Vec<DataValue>, DatabaseError> {
         // Hash + TypeTag + Bound Min + Index Id Len + Bound Min
         let start = TUPLE_KEY_PREFIX_LEN + INDEX_ID_LEN + KEY_BOUND_LEN;
-        DataValue::memcomparable_decode_mapping(&mut Cursor::new(&bytes[start..]), ty, mapping)
+        let mut reader = Cursor::new(&bytes[start..]);
+        let types = match ty {
+            LogicalType::Tuple(types) => types.as_slice(),
+            ty => std::slice::from_ref(ty),
+        };
+        let mut values = vec![DataValue::Null; mapping.target_len(types.len())];
+        for (index_pos, ty) in types.iter().enumerate() {
+            let value = DataValue::memcomparable_decode(&mut reader, ty)?;
+            if let Some(scan_pos) = mapping.scan_index(index_pos) {
+                values[scan_pos] = value;
+            }
+        }
+        Ok(values)
     }
 
     pub fn decode_index(bytes: &[u8]) -> Result<TupleId, DatabaseError> {
@@ -1586,7 +1600,7 @@ mod tests {
             let value = Arc::new(value);
             let index = Index::new(
                 index_id as u32,
-                &value,
+                std::slice::from_ref(&value),
                 IndexType::PrimaryKey { is_multiple: false },
             );
 
@@ -1639,7 +1653,7 @@ mod tests {
             let value = Arc::new(value);
             let index = Index::new(
                 index_id as u32,
-                &value,
+                std::slice::from_ref(&value),
                 IndexType::PrimaryKey { is_multiple: false },
             );
 

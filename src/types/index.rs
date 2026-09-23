@@ -125,39 +125,33 @@ pub struct IndexMeta {
 }
 
 impl IndexMeta {
-    pub(crate) fn column_exprs(
-        &self,
-        table: &TableCatalog,
-        arena: &(dyn MetaArena + '_),
-    ) -> Result<Vec<ScalarExpression>, DatabaseError> {
-        let mut exprs = Vec::with_capacity(self.column_ids.len());
-
-        for column_id in self.column_ids.iter() {
-            if let Some((position, column_ref)) = table
+    pub(crate) fn column_exprs<'a>(
+        &'a self,
+        table: &'a TableCatalog,
+    ) -> impl Iterator<Item = Result<ScalarExpression, DatabaseError>> + 'a {
+        self.column_ids.iter().copied().map(move |column_id| {
+            let column_ref = table
+                .get_column_by_id(&column_id)
+                .ok_or_else(|| DatabaseError::column_not_found(column_id.to_string()))?;
+            let position = table
                 .columns()
-                .copied()
-                .enumerate()
-                .find(|(_, column)| arena.column(*column).id() == Some(*column_id))
-            {
-                exprs.push(ScalarExpression::column_expr(column_ref, position));
-            } else {
-                return Err(DatabaseError::column_not_found(column_id.to_string()));
-            }
-        }
-        Ok(exprs)
+                .position(|column| *column == column_ref)
+                .ok_or_else(|| DatabaseError::column_not_found(column_id.to_string()))?;
+            Ok(ScalarExpression::column_expr(column_ref, position))
+        })
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Index<'a> {
     pub id: IndexId,
-    pub value: &'a DataValue,
+    pub values: &'a [DataValue],
     pub ty: IndexType,
 }
 
 impl<'a> Index<'a> {
-    pub fn new(id: IndexId, value: &'a DataValue, ty: IndexType) -> Self {
-        Index { id, value, ty }
+    pub fn new(id: IndexId, values: &'a [DataValue], ty: IndexType) -> Self {
+        Index { id, values, ty }
     }
 }
 
@@ -275,9 +269,9 @@ mod tests {
         assert_eq!(info.explain(&arena).to_string(), "idx_t => 1 Covered");
 
         let value = DataValue::Int32(1);
-        let index = Index::new(9, &value, IndexType::Unique);
+        let index = Index::new(9, std::slice::from_ref(&value), IndexType::Unique);
         assert_eq!(index.id, 9);
-        assert_eq!(index.value, &value);
+        assert_eq!(index.values, std::slice::from_ref(&value));
         assert_eq!(index.ty, IndexType::Unique);
     }
 
@@ -421,15 +415,20 @@ mod tests {
             ty: IndexType::Normal,
         };
 
-        assert_eq!(meta.column_exprs(&table, &arena)?.len(), 1);
+        assert_eq!(
+            meta.column_exprs(&table)
+                .collect::<Result<Vec<_>, _>>()?
+                .len(),
+            1
+        );
 
         let missing = IndexMeta {
             column_ids: vec![u64::MAX],
             ..meta
         };
         assert!(matches!(
-            missing.column_exprs(&table, &arena),
-            Err(DatabaseError::ColumnNotFound { .. })
+            missing.column_exprs(&table).next(),
+            Some(Err(DatabaseError::ColumnNotFound { .. }))
         ));
 
         Ok(())

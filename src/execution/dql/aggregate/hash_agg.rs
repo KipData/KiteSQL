@@ -98,8 +98,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
             return Ok(());
         };
 
-        write_aggregate_output(arena.result_tuple_mut(), accs, group_keys)?;
-        arena.resume();
+        let mut output = crate::types::tuple::Tuple::default();
+        write_aggregate_output(&mut output, accs, group_keys)?;
+        arena.produce_tuple(output);
         Ok(())
     }
 }
@@ -148,8 +149,8 @@ mod test {
         ];
 
         let input = LogicalPlan::new(
-            Operator::Values(ValuesOperator {
-                rows: plan_arena.alloc_expression_rows(&[
+            Operator::Values(ValuesOperator::new(
+                plan_arena.alloc_expression_rows(&[
                     vec![
                         DataValue::Int32(0),
                         DataValue::Int32(2),
@@ -171,8 +172,9 @@ mod test {
                         DataValue::Int32(3),
                     ],
                 ]),
-                schema_ref: t1_schema.clone(),
-            }),
+                4,
+                t1_schema.clone(),
+            )),
             Childrens::None,
         );
         let groupby_expr =

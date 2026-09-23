@@ -77,14 +77,15 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SeqScan<'a, T> {
             )?);
         }
 
+        let mut tuple = crate::types::tuple::Tuple::default();
         let state = arena.local_state(plan_arena);
         if self
             .iter
             .as_mut()
             .expect("seq scan iterator initialized")
-            .next_tuple_into(state.table_codec, &mut state.result.tuple)?
+            .next_tuple_into(state.table_codec, &mut tuple)?
         {
-            arena.resume();
+            arena.produce_tuple(tuple);
         } else {
             arena.finish();
         }

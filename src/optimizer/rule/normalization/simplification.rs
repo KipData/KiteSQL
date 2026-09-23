@@ -419,6 +419,50 @@ mod test {
         Ok(())
     }
 
+    #[test]
+    fn test_non_comparison_does_not_apply_pending_rearrangement() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table()?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let plan =
+            table_state.plan_with_arena("select * from t1 where (c1 + 1) % 2 = 0", &mut arena)?;
+
+        let best_plan = run_with_single_batch(
+            plan,
+            "test_non_comparison_does_not_apply_pending_rearrangement",
+            HepBatchStrategy::once_topdown(),
+            vec![NormalizationRuleImpl::SimplifyFilter],
+            &mut arena,
+        )?;
+        let filter = best_plan.childrens.pop_only();
+        let Operator::Filter(filter) = filter.operator else {
+            panic!("expected filter");
+        };
+        let ScalarExpression::Binary {
+            op: BinaryOperator::Eq,
+            left_expr,
+            ..
+        } = arena.expression(filter.predicate)
+        else {
+            panic!("expected equality");
+        };
+        let ScalarExpression::Binary {
+            op: BinaryOperator::Modulo,
+            left_expr,
+            ..
+        } = arena.expression(*left_expr)
+        else {
+            panic!("expected modulo");
+        };
+        assert!(matches!(
+            arena.expression(*left_expr),
+            ScalarExpression::Binary {
+                op: BinaryOperator::Plus,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
     fn plan_filter(
         plan: &LogicalPlan,
         column_id: &ColumnId,

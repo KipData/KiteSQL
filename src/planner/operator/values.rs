@@ -20,14 +20,32 @@ use std::fmt::{self, Formatter};
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct ValuesOperator {
-    pub rows: Vec<Vec<ExprRef>>,
+    pub(crate) rows: Vec<ExprRef>,
+    pub(crate) row_count: usize,
     pub schema_ref: Schema,
+}
+
+impl ValuesOperator {
+    pub fn new(rows: Vec<ExprRef>, row_count: usize, schema_ref: Schema) -> Self {
+        assert_eq!(
+            Some(rows.len()),
+            row_count.checked_mul(schema_ref.len()),
+            "VALUES row width must match its schema"
+        );
+        Self {
+            rows,
+            row_count,
+            schema_ref,
+        }
+    }
 }
 
 impl Explain for ValuesOperator {
     fn fmt(&self, arena: &(dyn MetaArena + '_), f: &mut Formatter) -> fmt::Result {
         f.write_str("Values ")?;
-        for (i, row) in self.rows.iter().enumerate() {
+        let width = self.schema_ref.len();
+        for i in 0..self.row_count {
+            let row = &self.rows[i * width..(i + 1) * width];
             if i != 0 {
                 f.write_str(", ")?;
             }
@@ -35,6 +53,6 @@ impl Explain for ValuesOperator {
             fmt_explain_list(row, ", ", arena, f)?;
             f.write_str("]")?;
         }
-        write!(f, ", RowsLen: {}", self.rows.len())
+        write!(f, ", RowsLen: {}", self.row_count)
     }
 }

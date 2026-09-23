@@ -255,7 +255,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for RecursiveCte<'a, T> {
             match self.phase {
                 RecursivePhase::Anchor => {
                     while arena.next_tuple(self.anchor_input, plan_arena)? {
-                        self.next.push(mem::take(arena.result_tuple_mut()))?;
+                        self.next.push(arena.materialize_tuple())?;
                     }
                     self.working = mem::take(&mut self.next).finish()?;
                     self.phase = RecursivePhase::Output;
@@ -276,8 +276,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for RecursiveCte<'a, T> {
                         .recursive_arena
                         .next_tuple(self.recursive_root, plan_arena)?
                     {
-                        self.next
-                            .push(mem::take(self.recursive_arena.result_tuple_mut()))?;
+                        self.next.push(self.recursive_arena.materialize_tuple())?;
                     }
                     self.recursive_arena.reset_for_rebuild();
                     self.working = mem::take(&mut self.next).finish()?;
@@ -409,10 +408,11 @@ mod tests {
         ));
         let schema_ref = vec![column];
         let anchor = LogicalPlan::new(
-            Operator::Values(ValuesOperator {
-                rows: plan_arena.alloc_expression_rows(&[vec![DataValue::Int32(1)]]),
-                schema_ref: schema_ref.clone(),
-            }),
+            Operator::Values(ValuesOperator::new(
+                plan_arena.alloc_expression_rows(&[vec![DataValue::Int32(1)]]),
+                1,
+                schema_ref.clone(),
+            )),
             Childrens::None,
         );
         let scan = LogicalPlan::new(

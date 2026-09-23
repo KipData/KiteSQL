@@ -60,7 +60,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Truncate {
         let (transaction, table_codec) = state.transaction_codec_mut();
         transaction.drop_data(table_codec, &table_name)?;
 
-        TupleBuilder::build_result_into(arena.result_tuple_mut(), format!("{table_name}"));
+        arena.produce_tuple(TupleBuilder::build_result(format!("{table_name}")));
         arena.resume();
         Ok(())
     }

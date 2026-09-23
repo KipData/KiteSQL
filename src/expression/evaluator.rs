@@ -264,7 +264,7 @@ impl ScalarExpression {
                 for expr in exprs {
                     values.push(arena.expression(*expr).eval(arena, tuple)?);
                 }
-                Ok(DataValue::Tuple(values, false))
+                Ok(DataValue::Tuple(values))
             }
             ScalarExpression::ScalaFunction(ScalarFunction { inner, args, .. }) => {
                 let value = match tuple {

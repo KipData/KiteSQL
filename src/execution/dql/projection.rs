@@ -52,15 +52,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection {
             return Ok(());
         }
 
-        arena.with_projection_tmp(|arena, projection_tmp| {
-            let tuple = arena.result_tuple();
-            projection_tmp.reserve(self.exprs.len());
-            for expr in self.exprs.iter() {
-                projection_tmp.push(plan_arena.expression(*expr).eval(plan_arena, Some(tuple))?);
-            }
-            std::mem::swap(&mut arena.result_tuple_mut().values, projection_tmp);
-            Ok::<_, DatabaseError>(())
-        })?;
+        arena.rewrite(&self.exprs, plan_arena, None)?;
         arena.resume();
         Ok(())
     }

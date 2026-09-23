@@ -28,11 +28,12 @@ impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
         &mut self,
         table_name: TableName,
         schema_ref: Schema,
-        rows: Vec<Vec<ExprRef>>,
+        rows: Vec<ExprRef>,
+        row_count: usize,
         is_overwrite: bool,
         is_mapping_by_name: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let values_plan = self.bind_values(rows, schema_ref);
+        let values_plan = self.bind_values(rows, row_count, schema_ref);
 
         Ok(LogicalPlan::new(
             Operator::Insert(InsertOperator {
@@ -62,11 +63,12 @@ impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
 
     pub(crate) fn bind_values(
         &mut self,
-        rows: Vec<Vec<ExprRef>>,
+        rows: Vec<ExprRef>,
+        row_count: usize,
         schema_ref: Schema,
     ) -> LogicalPlan {
         LogicalPlan::new(
-            Operator::Values(ValuesOperator { rows, schema_ref }),
+            Operator::Values(ValuesOperator::new(rows, row_count, schema_ref)),
             Childrens::None,
         )
     }

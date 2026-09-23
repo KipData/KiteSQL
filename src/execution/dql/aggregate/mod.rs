@@ -31,7 +31,7 @@ use crate::expression::ScalarExpression;
 use crate::iter_ext::Itertools;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
-use crate::types::tuple::Tuple;
+use crate::types::tuple::{Tuple, TupleLike};
 use crate::types::value::DataValue;
 use std::borrow::Cow;
 
@@ -90,7 +90,7 @@ pub(crate) fn create_accumulators(
 pub(crate) fn update_accumulators(
     accs: &mut [Box<dyn Accumulator>],
     agg_calls: &[ExprRef],
-    tuple: &Tuple,
+    tuple: &dyn TupleLike,
     arena: &(dyn MetaArena + '_),
 ) -> Result<(), DatabaseError> {
     for (acc, expr) in accs.iter_mut().zip(agg_calls.iter()) {

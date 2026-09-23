@@ -2696,7 +2696,7 @@ where
         row.push(arena.alloc_expression(ScalarExpression::Constant(value)));
     }
 
-    binder.bind_insert_values(table_name, schema_ref, vec![row], false, true)
+    binder.bind_insert_values(table_name, schema_ref, row, 1, false, true)
 }
 
 fn describe_text_value(value: Option<DataValue>) -> String {
@@ -3933,7 +3933,7 @@ mod tests {
             concat!(
                 "Projection [upper_name] [Project => (Sort Option: Follow)] ",
                 "Sort By orm_unit_users.age Desc Nulls Last [Sort => (Sort Option: OrderBy: (orm_unit_users.age Desc Nulls Last) ignore_prefix_len: 0)] ",
-                "Filter ((orm_unit_users.age is not null && ((orm_unit_users.age >= 18) && (orm_unit_users.age <= 25))) && (!(orm_unit_users.name != Bob) && (orm_unit_users.name = Missing))), Is Having: false ",
+                "Filter ((orm_unit_users.age is not null && ((orm_unit_users.age >= 18) && (orm_unit_users.age <= 25))) && ((orm_unit_users.name != Bob) && !(orm_unit_users.name = Missing))), Is Having: false ",
                 "[Filter => (Sort Option: Follow)] TableScan orm_unit_users -> [orm_unit_users.name, orm_unit_users.age] [SeqScan => (Sort Option: None)]"
             ),
             "{expression_plan}"

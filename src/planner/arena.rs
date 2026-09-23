@@ -42,7 +42,7 @@ struct TableArenaIndex {
 }
 
 struct TableArenaExpression {
-    expression: ScalarExpression,
+    expression: ArenaExpr,
     live: bool,
 }
 
@@ -64,7 +64,7 @@ pub struct PlanArena<'a> {
     temp_table_id: usize,
     columns: Vec<ColumnCatalog>,
     indexes: Vec<IndexMeta>,
-    expressions: Vec<ScalarExpression>,
+    expressions: Vec<ArenaExpr>,
     plans: Vec<LogicalPlan>,
 }
 
@@ -94,6 +94,50 @@ impl fmt::Display for ExprRef {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ArenaExpr {
+    expression: ScalarExpression,
+    param: bool,
+}
+
+impl ArenaExpr {
+    fn new(expression: ScalarExpression) -> Self {
+        let param = Self::has_parameter(&expression);
+        Self { expression, param }
+    }
+
+    fn has_parameter(expression: &ScalarExpression) -> bool {
+        matches!(expression, ScalarExpression::Constant(value) if value.has_parameter())
+    }
+}
+
+/// Mutable expression access that keeps the arena's parameter flag up to date.
+pub struct ArenaExprMut<'a> {
+    expr: &'a mut ArenaExpr,
+}
+
+impl std::ops::Deref for ArenaExprMut<'_> {
+    type Target = ScalarExpression;
+
+    fn deref(&self) -> &Self::Target {
+        &self.expr.expression
+    }
+}
+
+impl std::ops::DerefMut for ArenaExprMut<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // Stay conservative if the caller forgets the guard after modifying it.
+        self.expr.param = true;
+        &mut self.expr.expression
+    }
+}
+
+impl Drop for ArenaExprMut<'_> {
+    fn drop(&mut self) {
+        self.expr.param = ArenaExpr::has_parameter(&self.expr.expression);
+    }
+}
+
 pub trait MetaArena {
     fn table_arena_cell<'a>(&self) -> &'a TableArenaCell
     where
@@ -102,7 +146,7 @@ pub trait MetaArena {
         panic!("arena is not associated with a table catalog")
     }
 
-    fn expression_mut(&mut self, _expr: ExprRef) -> &mut ScalarExpression {
+    fn expression_mut(&mut self, _expr: ExprRef) -> ArenaExprMut<'_> {
         panic!("parent expressions are immutable")
     }
 
@@ -162,7 +206,7 @@ impl<A: MetaArena + ?Sized> MetaArena for Box<A> {
     fn alloc_expression(&mut self, expr: ScalarExpression) -> ExprRef {
         (**self).alloc_expression(expr)
     }
-    fn expression_mut(&mut self, expr: ExprRef) -> &mut ScalarExpression {
+    fn expression_mut(&mut self, expr: ExprRef) -> ArenaExprMut<'_> {
         (**self).expression_mut(expr)
     }
     fn column(&self, column: ColumnRef) -> &ColumnCatalog {
@@ -405,6 +449,7 @@ impl MetaArena for TableArena {
     }
 
     fn alloc_expression(&mut self, expression: ScalarExpression) -> ExprRef {
+        let expression = ArenaExpr::new(expression);
         if let Some((pos, slot)) = self
             .expressions
             .iter_mut()
@@ -449,7 +494,7 @@ impl MetaArena for TableArena {
     fn expression(&self, expression: ExprRef) -> &ScalarExpression {
         let expression = &self.expressions[expression.pos()];
         assert!(expression.live, "accessing recycled TableArena expression");
-        &expression.expression
+        &expression.expression.expression
     }
 
     fn find_column(&self, column: &ColumnCatalog) -> Option<ColumnRef> {
@@ -484,23 +529,21 @@ impl<'a> PlanArena<'a> {
         }
     }
 
-    pub(crate) fn expression_end(&self) -> usize {
-        self.table_arena.borrow().expressions.len() + self.expressions.len()
+    fn arena_expression(&self, expression: ExprRef) -> &ArenaExpr {
+        self.assert_table_arena_unchanged();
+        let table_arena = self.table_arena.borrow();
+        let persistent_len = table_arena.expressions.len();
+        if expression.pos() < persistent_len {
+            let slot = &table_arena.expressions[expression.pos()];
+            assert!(slot.live, "accessing recycled TableArena expression");
+            &slot.expression
+        } else {
+            &self.expressions[expression.pos() - persistent_len]
+        }
     }
 
-    pub(crate) fn parameter_expressions(
-        &self,
-    ) -> impl Iterator<Item = (ExprRef, &crate::types::value::DataValue)> {
-        let base = self.table_arena.borrow().expressions.len();
-        self.expressions
-            .iter()
-            .enumerate()
-            .filter_map(move |(i, expr)| match expr {
-                ScalarExpression::Constant(value) if value.has_parameter() => {
-                    Some((ExprRef::new(base + i), value))
-                }
-                _ => None,
-            })
+    pub(crate) fn expression_end(&self) -> usize {
+        self.table_arena.borrow().expressions.len() + self.expressions.len()
     }
 
     pub(crate) fn fill_parameters(
@@ -508,7 +551,7 @@ impl<'a> PlanArena<'a> {
         params: &[(usize, crate::types::value::DataValue)],
     ) -> Result<(), crate::errors::DatabaseError> {
         for expression in &mut self.expressions {
-            if let ScalarExpression::Constant(value) = expression {
+            if let ScalarExpression::Constant(value) = &mut *(ArenaExprMut { expr: expression }) {
                 value.bind_parameters(params)?;
             }
         }
@@ -647,14 +690,16 @@ impl<'a> PlanArena<'a> {
         <Self as MetaArena>::expression(self, expression_ref)
     }
 
-    pub(crate) fn expression_mut(&mut self, expression_ref: ExprRef) -> &mut ScalarExpression {
+    pub(crate) fn expression_mut(&mut self, expression_ref: ExprRef) -> ArenaExprMut<'_> {
         self.assert_table_arena_unchanged();
         let persistent_len = self.table_arena.borrow().expressions.len();
         assert!(
             expression_ref.pos() >= persistent_len,
             "persistent expressions are immutable"
         );
-        &mut self.expressions[expression_ref.pos() - persistent_len]
+        ArenaExprMut {
+            expr: &mut self.expressions[expression_ref.pos() - persistent_len],
+        }
     }
 
     pub fn column(&self, column: ColumnRef) -> &ColumnCatalog {
@@ -674,7 +719,7 @@ impl MetaArena for PlanArena<'_> {
     {
         self.table_arena
     }
-    fn expression_mut(&mut self, expr: ExprRef) -> &mut ScalarExpression {
+    fn expression_mut(&mut self, expr: ExprRef) -> ArenaExprMut<'_> {
         PlanArena::expression_mut(self, expr)
     }
 
@@ -706,7 +751,7 @@ impl MetaArena for PlanArena<'_> {
     fn alloc_expression(&mut self, expression: ScalarExpression) -> ExprRef {
         self.assert_table_arena_unchanged();
         let pos = self.table_arena.borrow().expressions.len() + self.expressions.len();
-        self.expressions.push(expression);
+        self.expressions.push(ArenaExpr::new(expression));
         ExprRef::new(pos)
     }
 
@@ -735,14 +780,7 @@ impl MetaArena for PlanArena<'_> {
         }
     }
     fn expression(&self, expression: ExprRef) -> &ScalarExpression {
-        self.assert_table_arena_unchanged();
-        let table_arena = self.table_arena.borrow();
-        let persistent_len = table_arena.expressions.len();
-        if expression.pos() < persistent_len {
-            table_arena.expression(expression)
-        } else {
-            &self.expressions[expression.pos() - persistent_len]
-        }
+        &self.arena_expression(expression).expression
     }
 
     fn find_column(&self, column: &ColumnCatalog) -> Option<ColumnRef> {
@@ -777,8 +815,9 @@ impl MetaArena for PlanArena<'_> {
 /// Execution-local parameter values and temporary expressions over an immutable plan arena.
 pub(crate) struct ParamArena<'a> {
     parent: &'a PlanArena<'a>,
-    expressions: HashMap<ExprRef, ScalarExpression>,
+    expressions: HashMap<ExprRef, ArenaExpr>,
     next_expression: usize,
+    parent_end: usize,
 }
 
 impl<'a> ParamArena<'a> {
@@ -787,15 +826,26 @@ impl<'a> ParamArena<'a> {
         params: &[(usize, DataValue)],
     ) -> Result<Self, DatabaseError> {
         let mut expressions = HashMap::new();
-        for (id, value) in parent.parameter_expressions() {
-            let mut value = value.clone();
-            value.bind_parameters(params)?;
-            expressions.insert(id, ScalarExpression::Constant(value));
+        let parent_end = parent.expression_end();
+        let base = parent_end - parent.expressions.len();
+        for (offset, expr) in parent.expressions.iter().enumerate() {
+            if !expr.param {
+                continue;
+            }
+            if let ScalarExpression::Constant(value) = &expr.expression {
+                let mut value = value.clone();
+                value.bind_parameters(params)?;
+                expressions.insert(
+                    ExprRef::new(base + offset),
+                    ArenaExpr::new(ScalarExpression::Constant(value)),
+                );
+            }
         }
         Ok(Self {
             parent,
             expressions,
-            next_expression: parent.expression_end(),
+            next_expression: parent_end,
+            parent_end,
         })
     }
 }
@@ -820,19 +870,26 @@ impl MetaArena for ParamArena<'_> {
         self.parent.find_index(index)
     }
     fn expression(&self, expr: ExprRef) -> &ScalarExpression {
-        self.expressions
-            .get(&expr)
-            .unwrap_or_else(|| self.parent.expression(expr))
+        if expr.pos() < self.parent_end {
+            let parent = self.parent.arena_expression(expr);
+            if !parent.param {
+                return &parent.expression;
+            }
+        }
+        &self.expressions[&expr].expression
     }
-    fn expression_mut(&mut self, expr: ExprRef) -> &mut ScalarExpression {
-        self.expressions
-            .entry(expr)
-            .or_insert_with(|| self.parent.expression(expr).clone())
+    fn expression_mut(&mut self, expr: ExprRef) -> ArenaExprMut<'_> {
+        ArenaExprMut {
+            expr: self
+                .expressions
+                .get_mut(&expr)
+                .expect("parent expressions are immutable"),
+        }
     }
     fn alloc_expression(&mut self, expression: ScalarExpression) -> ExprRef {
         let id = ExprRef::new(self.next_expression);
         self.next_expression += 1;
-        self.expressions.insert(id, expression);
+        self.expressions.insert(id, ArenaExpr::new(expression));
         id
     }
     fn alloc_column(&mut self, _: ColumnCatalog) -> ColumnRef {
@@ -879,6 +936,49 @@ mod tests {
     }
 
     #[test]
+    fn arena_expression_tracks_parameter_mutations() -> Result<(), DatabaseError> {
+        let root = TableArenaCell::default();
+        let mut parent = PlanArena::new(&root);
+        let id = parent.alloc_expression(ScalarExpression::Constant(DataValue::Int32(1)));
+        assert!(!parent.arena_expression(id).param);
+        *parent.expression_mut(id) =
+            ScalarExpression::Constant(DataValue::Tuple(vec![DataValue::Parameter {
+                id: 1,
+                ty: LogicalType::Integer,
+            }]));
+        assert!(parent.arena_expression(id).param);
+        {
+            let bound = ParamArena::new(&parent, &[(1, DataValue::Int32(7))])?;
+            assert_eq!(
+                bound.expression(id),
+                &ScalarExpression::Constant(DataValue::Tuple(vec![DataValue::Int32(7)]))
+            );
+        }
+        *parent.expression_mut(id) = ScalarExpression::Constant(DataValue::Int32(2));
+        assert!(!parent.arena_expression(id).param);
+        let bound = ParamArena::new(&parent, &[])?;
+        assert!(std::ptr::eq(bound.expression(id), parent.expression(id)));
+        Ok(())
+    }
+
+    #[test]
+    fn arena_expression_updates_flag_on_unwind() {
+        let mut expression = ArenaExpr::new(ScalarExpression::Constant(DataValue::Int32(1)));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let mut value = ArenaExprMut {
+                expr: &mut expression,
+            };
+            *value = ScalarExpression::Constant(DataValue::Parameter {
+                id: 1,
+                ty: LogicalType::Integer,
+            });
+            panic!("test mutation unwind");
+        }));
+        assert!(result.is_err());
+        assert!(expression.param);
+    }
+
+    #[test]
     fn param_arena_keeps_allocations_local() -> Result<(), DatabaseError> {
         let root = TableArenaCell::default();
         let mut parent = PlanArena::new(&root);
@@ -903,7 +1003,19 @@ mod tests {
             second.expression(parameter),
             &ScalarExpression::Constant(DataValue::Int32(8))
         );
-        *first.expression_mut(constant) = ScalarExpression::Constant(DataValue::Int32(99));
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            let _ = first.expression_mut(constant);
+        }))
+        .is_err());
+        *first.expression_mut(parameter) = ScalarExpression::Constant(DataValue::Int32(99));
+        assert_eq!(
+            first.expression(parameter),
+            &ScalarExpression::Constant(DataValue::Int32(99))
+        );
+        assert_eq!(
+            second.expression(parameter),
+            &ScalarExpression::Constant(DataValue::Int32(8))
+        );
         assert_eq!(
             parent.expression(constant),
             &ScalarExpression::Constant(DataValue::Int32(20))
@@ -914,6 +1026,11 @@ mod tests {
         assert_eq!(
             first.expression(added),
             &ScalarExpression::Constant(DataValue::Int32(42))
+        );
+        *first.expression_mut(added) = ScalarExpression::Constant(DataValue::Int32(43));
+        assert_eq!(
+            first.expression(added),
+            &ScalarExpression::Constant(DataValue::Int32(43))
         );
         assert!(std::ptr::eq(
             first.column(parent_column),

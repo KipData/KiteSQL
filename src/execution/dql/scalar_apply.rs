@@ -21,7 +21,6 @@ use crate::planner::LogicalPlan;
 use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
-use std::mem;
 
 pub struct ScalarApply {
     left_input: ExecId,
@@ -65,10 +64,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarApply {
             arena.finish();
             return Ok(());
         }
-        arena
-            .result_tuple_mut()
-            .values
-            .extend(right_tuple.values.iter().cloned());
+        let mut output = arena.materialize_tuple();
+        output.values.extend(right_tuple.values.iter().cloned());
+        arena.produce_tuple(output);
         arena.resume();
         Ok(())
     }
@@ -87,7 +85,7 @@ impl ScalarApply {
                     "scalar apply right input returned no rows".to_string(),
                 ));
             }
-            *cached_right = Some(mem::take(arena.result_tuple_mut()));
+            *cached_right = Some(arena.materialize_tuple());
         }
 
         Ok(())
@@ -119,10 +117,11 @@ mod tests {
         let schema_ref = vec![arena.alloc_column(ColumnCatalog::new(name.to_string(), true, desc))];
 
         LogicalPlan::new(
-            Operator::Values(ValuesOperator {
-                rows: arena.alloc_expression_rows(&rows),
+            Operator::Values(ValuesOperator::new(
+                arena.alloc_expression_rows(&rows),
+                rows.len(),
                 schema_ref,
-            }),
+            )),
             Childrens::None,
         )
     }

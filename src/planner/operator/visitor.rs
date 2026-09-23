@@ -206,7 +206,7 @@ impl<'a, V: ExprVisitor<A>, A: MetaArena + ?Sized> OperatorVisitor<'a>
     for OperatorExprVisitor<'_, V, A>
 {
     fn visit_values(&mut self, op: &'a ValuesOperator) -> Result<(), DatabaseError> {
-        for expr in op.rows.iter().flatten() {
+        for expr in op.rows.iter() {
             ExprVisitor::visit(self.visitor, *expr, self.arena)?;
         }
         Ok(())
@@ -487,10 +487,11 @@ pub(crate) mod tests {
                 limit: 1,
                 offset: None,
             }),
-            Operator::Values(ValuesOperator {
-                rows: arena.alloc_expression_rows(&[vec![DataValue::Int32(1)]]),
-                schema_ref: vec![column_ref],
-            }),
+            Operator::Values(ValuesOperator::new(
+                arena.alloc_expression_rows(&[vec![DataValue::Int32(1)]]),
+                1,
+                vec![column_ref],
+            )),
             Operator::Window(window::WindowOperator {
                 sort_fields: vec![SortField::from(expr(17)), SortField::from(expr(18))],
                 partition_by_len: 1,

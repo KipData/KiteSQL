@@ -261,7 +261,7 @@ impl<'a, 'arena, V> OperatorExprVisitorMut<'a, 'arena, V> {
 
 impl<'a, V: ExprVisitorMut> OperatorVisitorMut<'a> for OperatorExprVisitorMut<'_, '_, V> {
     fn visit_values(&mut self, op: &'a mut ValuesOperator) -> Result<(), DatabaseError> {
-        for expr in op.rows.iter_mut().flatten() {
+        for expr in op.rows.iter_mut() {
             self.visitor.visit(expr, self.arena)?;
         }
         Ok(())

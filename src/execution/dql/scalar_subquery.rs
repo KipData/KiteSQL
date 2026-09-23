@@ -62,13 +62,13 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarSubquery {
 
         let has_first = arena.next_tuple(self.input, plan_arena)?;
         if !has_first {
-            let output = arena.result_tuple_mut();
+            let mut output = crate::types::tuple::Tuple::default();
             output.pk = None;
             output.values.clear();
             output
                 .values
                 .extend((0..self.value_count).map(|_| DataValue::Null));
-            arena.resume();
+            arena.produce_tuple(output);
             return Ok(());
         }
 

@@ -61,7 +61,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateView {
         let view = transaction.create_view(table_codec, plan_arena, view, or_replace)?;
         arena.push_ddl_apply(DDLApply::upsert_view(view));
 
-        TupleBuilder::build_result_into(arena.result_tuple_mut(), view_name);
+        arena.produce_tuple(TupleBuilder::build_result(view_name));
         arena.resume();
         Ok(())
     }

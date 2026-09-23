@@ -196,47 +196,39 @@ impl Range {
         I::IntoIter: Clone,
         I::Item: Borrow<Range>,
     {
-        fn merge_value(tuple: &[DataValue], is_upper: bool, value: DataValue) -> DataValue {
+        fn merge_value(tuple: &[DataValue], value: DataValue) -> DataValue {
             let mut merge_tuple = Vec::with_capacity(tuple.len() + 1);
             for value in tuple {
                 merge_tuple.push((*value).clone());
             }
             merge_tuple.push(value);
 
-            DataValue::Tuple(merge_tuple, is_upper)
+            DataValue::Tuple(merge_tuple)
         }
         fn collect_tuple_range(result_ranges: &mut Vec<Range>, tuple: &[DataValue], range: Range) {
             fn merge_value_on_bound(
                 tuple: &[DataValue],
-                is_upper: bool,
                 bound: Bound<DataValue>,
             ) -> Bound<DataValue> {
                 match bound {
-                    Bound::Included(v) => Bound::Included(merge_value(tuple, is_upper, v)),
-                    Bound::Excluded(v) => Bound::Excluded(merge_value(tuple, !is_upper, v)),
+                    Bound::Included(v) => Bound::Included(merge_value(tuple, v)),
+                    Bound::Excluded(v) => Bound::Excluded(merge_value(tuple, v)),
                     Bound::Unbounded => {
                         if tuple.is_empty() {
                             return Bound::Unbounded;
                         }
                         let values = tuple.iter().map(|v| (*v).clone()).collect_vec();
-                        // Excluding a lower equality prefix skips its entire key
-                        // range when storage encodes the exclusive bound. Start at
-                        // the prefix itself; the upper sentinel stays exclusive.
-                        if is_upper {
-                            Bound::Excluded(DataValue::Tuple(values, true))
-                        } else {
-                            Bound::Included(DataValue::Tuple(values, false))
-                        }
+                        Bound::Included(DataValue::Tuple(values))
                     }
                 }
             }
 
             match range {
                 Range::Scope { min, max } => result_ranges.push(Range::Scope {
-                    min: merge_value_on_bound(tuple, false, min),
-                    max: merge_value_on_bound(tuple, true, max),
+                    min: merge_value_on_bound(tuple, min),
+                    max: merge_value_on_bound(tuple, max),
                 }),
-                Range::Eq(v) => result_ranges.push(Range::Eq(merge_value(tuple, false, v))),
+                Range::Eq(v) => result_ranges.push(Range::Eq(merge_value(tuple, v))),
                 Range::Dummy => result_ranges.push(Range::Dummy),
                 Range::SortedRanges(mut ranges) => {
                     for range in &mut ranges {
@@ -300,10 +292,8 @@ impl<'a, 'p> RangeDetacher<'a, 'p, IndexRangeColumn> {
         };
         let prefix: &[DataValue] = if composite && prefix_len > 0 {
             let (
-                Bound::Included(DataValue::Tuple(lower, lower_upper))
-                | Bound::Excluded(DataValue::Tuple(lower, lower_upper)),
-                Bound::Included(DataValue::Tuple(upper, upper_upper))
-                | Bound::Excluded(DataValue::Tuple(upper, upper_upper)),
+                Bound::Included(DataValue::Tuple(lower)) | Bound::Excluded(DataValue::Tuple(lower)),
+                Bound::Included(DataValue::Tuple(upper)) | Bound::Excluded(DataValue::Tuple(upper)),
             ) = (min, max)
             else {
                 return Ok(None);
@@ -314,8 +304,8 @@ impl<'a, 'p> RangeDetacher<'a, 'p, IndexRangeColumn> {
                 return Ok(None);
             };
             if lower_prefix != upper_prefix
-                || (lower.len() == prefix_len && *lower_upper)
-                || (upper.len() == prefix_len && !*upper_upper)
+                || (lower.len() == prefix_len && matches!(min, Bound::Excluded(_)))
+                || (upper.len() == prefix_len && matches!(max, Bound::Excluded(_)))
             {
                 return Ok(None);
             }
@@ -1187,7 +1177,6 @@ mod test {
     use crate::planner::operator::filter::FilterOperator;
     use crate::planner::operator::Operator;
     use crate::planner::{ExprRef, LogicalPlan, MetaArena, PlanArena};
-    use crate::types::evaluator::binary_create;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::ops::Bound;
@@ -2340,110 +2329,82 @@ mod test {
             range,
             Some(Range::SortedRanges(vec![
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Null,
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Excluded(DataValue::Tuple(
-                        vec![DataValue::Int32(1), DataValue::Null, DataValue::Int32(1),],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(1),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Null,
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Excluded(DataValue::Tuple(
-                        vec![DataValue::Int32(1), DataValue::Null, DataValue::Int32(2),],
-                        true
-                    ))
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(2),
+                    ]))
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Excluded(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Excluded(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Excluded(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Excluded(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(2),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(2),
+                    ])),
                 },
             ]))
         );
@@ -2458,110 +2419,82 @@ mod test {
             range,
             Some(Range::SortedRanges(vec![
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![DataValue::Int32(1), DataValue::Null, DataValue::Int32(1),],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Null,
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![DataValue::Int32(1), DataValue::Null, DataValue::Int32(2),],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Null,
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(2),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                        ],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(2),
-                        ],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(2),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                    ])),
                 },
             ]))
         );
@@ -2576,124 +2509,88 @@ mod test {
             range,
             Some(Range::SortedRanges(vec![
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Null,
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Null,
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Null,
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Null,
-                            DataValue::Int32(2),
-                            DataValue::Int32(2),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(2),
+                        DataValue::Int32(2),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(2),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(2),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(2),
-                            DataValue::Int32(2),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(2),
+                        DataValue::Int32(2),
+                    ])),
                 },
             ]))
         )
@@ -2712,34 +2609,16 @@ mod test {
         assert_eq!(
             range,
             Some(Range::Scope {
-                min: Bound::Included(DataValue::Tuple(
-                    vec![
-                        DataValue::Int32(7),
-                        DataValue::Int32(10),
-                        DataValue::Int32(2)
-                    ],
-                    false
-                )),
-                max: Bound::Excluded(DataValue::Tuple(
-                    vec![DataValue::Int32(7), DataValue::Int32(10)],
-                    true
-                )),
+                min: Bound::Included(DataValue::Tuple(vec![
+                    DataValue::Int32(7),
+                    DataValue::Int32(10),
+                    DataValue::Int32(2)
+                ])),
+                max: Bound::Included(DataValue::Tuple(vec![
+                    DataValue::Int32(7),
+                    DataValue::Int32(10)
+                ])),
             })
-        );
-        let Range::Scope {
-            min: Bound::Included(min),
-            max: Bound::Excluded(max),
-        } = range.unwrap()
-        else {
-            unreachable!()
-        };
-        assert_eq!(
-            binary_create(
-                std::borrow::Cow::Owned(LogicalType::Tuple(vec![])),
-                BinaryOperator::Lt
-            )?
-            .binary_eval(&min, &max)?,
-            DataValue::Boolean(true)
         );
         Ok(())
     }
@@ -2839,14 +2718,14 @@ mod test {
         assert_eq!(
             explicit_suffix,
             Some(Range::Scope {
-                min: Bound::Included(DataValue::Tuple(
-                    vec![DataValue::Int32(1), DataValue::Int32(10)],
-                    false,
-                )),
-                max: Bound::Excluded(DataValue::Tuple(
-                    vec![DataValue::Int32(1), DataValue::Int32(20)],
-                    false,
-                )),
+                min: Bound::Included(DataValue::Tuple(vec![
+                    DataValue::Int32(1),
+                    DataValue::Int32(10)
+                ],)),
+                max: Bound::Excluded(DataValue::Tuple(vec![
+                    DataValue::Int32(1),
+                    DataValue::Int32(20)
+                ],)),
             })
         );
 
@@ -2858,8 +2737,8 @@ mod test {
         assert_eq!(
             unbounded_suffix,
             Some(Range::Scope {
-                min: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(1)], false,)),
-                max: Bound::Excluded(DataValue::Tuple(vec![DataValue::Int32(1)], true,)),
+                min: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(1)])),
+                max: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(1)])),
             })
         );
 

@@ -93,7 +93,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ExternalSort {
             let mut rows = SpillVec::new().on_flush(move |rows| sort_segment(sort_fields, rows));
             let mut runs = Vec::new();
             while arena.next_tuple(self.input, plan_arena)? {
-                let tuple = mem::take(arena.result_tuple_mut());
+                let tuple = arena.materialize_tuple();
                 if let Some(segment) = rows.push(SortRow::new(sort_fields, tuple, plan_arena)?)? {
                     runs.push(Run::new(segment, 1));
                 }

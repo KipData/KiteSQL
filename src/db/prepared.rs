@@ -180,6 +180,7 @@ mod tests {
     use crate::planner::operator::table_scan::TableScanOperator;
     use crate::planner::{Childrens, LogicalPlan, TableArenaCell};
     use crate::types::index::{IndexInfo, IndexMeta, IndexType};
+    use crate::types::tuple::TupleLike;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::ops::Bound;
@@ -394,7 +395,7 @@ mod tests {
         )?;
         let mut rows = Vec::new();
         while iter
-            .next_tuple(|_, row| rows.push(row.values[0].clone()))?
+            .next_tuple(|_, row| rows.push(row.value_at(0).clone()))?
             .is_some()
         {}
         iter.done()?;
@@ -409,7 +410,7 @@ mod tests {
             [(1, DataValue::Int32(2)), (2, DataValue::Int32(2))],
         )?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.values[0].clone())?,
+            iter.next_tuple(|_, row| row.value_at(0).clone())?,
             Some(DataValue::Int32(2))
         );
         assert!(iter.next_tuple(|_, _| ())?.is_none());
@@ -437,11 +438,11 @@ mod tests {
         ] {
             let mut iter = db.execute(&plan, [(1, DataValue::Int32(10)), (2, value.clone())])?;
             assert_eq!(
-                iter.next_tuple(|_, row| row.values[0].clone())?,
+                iter.next_tuple(|_, row| row.value_at(0).clone())?,
                 Some(expected)
             );
             assert_eq!(
-                iter.next_tuple(|_, row| row.values[0].clone())?,
+                iter.next_tuple(|_, row| row.value_at(0).clone())?,
                 Some(value)
             );
             assert!(iter.next_tuple(|_, _| ())?.is_none());
@@ -454,7 +455,7 @@ mod tests {
         ));
         let mut iter = db.execute(&plan, [(1, DataValue::Int32(10)), (2, DataValue::Int32(4))])?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.values[0].clone())?,
+            iter.next_tuple(|_, row| row.value_at(0).clone())?,
             Some(DataValue::Int32(14))
         );
         iter.done()?;
@@ -497,7 +498,7 @@ mod tests {
         )?;
         let mut rows = Vec::new();
         while iter
-            .next_tuple(|_, row| rows.push(row.values[0].clone()))?
+            .next_tuple(|_, row| rows.push(row.value_at(0).clone()))?
             .is_some()
         {}
         iter.done()?;
@@ -511,7 +512,7 @@ mod tests {
             ],
         )?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.values[0].clone())?,
+            iter.next_tuple(|_, row| row.value_at(0).clone())?,
             Some(DataValue::Int32(1))
         );
         assert!(iter.next_tuple(|_, _| ())?.is_none());

@@ -361,6 +361,18 @@ impl Simplify {
         )
     }
 
+    fn is_rearrangeable_comparison(op: &BinaryOperator) -> bool {
+        matches!(
+            op,
+            BinaryOperator::Gt
+                | BinaryOperator::Lt
+                | BinaryOperator::GtEq
+                | BinaryOperator::LtEq
+                | BinaryOperator::Eq
+                | BinaryOperator::NotEq
+        )
+    }
+
     fn negate_range_comparison(op: BinaryOperator) -> Option<BinaryOperator> {
         match op {
             BinaryOperator::Gt => Some(BinaryOperator::LtEq),
@@ -457,6 +469,12 @@ impl Simplify {
         self.visit(left_expr, arena)?;
 
         if Self::is_arithmetic(op) {
+            return Ok(());
+        }
+        // Terms can only be moved across a comparison. Operators such as `%`
+        // are not invertible, so pending replaces must not be applied to them.
+        if !Self::is_rearrangeable_comparison(op) {
+            self.replaces.clear();
             return Ok(());
         }
         while let Some(replace) = self.replaces.pop() {

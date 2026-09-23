@@ -16,7 +16,6 @@
 //! [`JoinType::RightOuter`], [`JoinType::Cross`], [`JoinType::Full`].
 
 use crate::planner::MetaArena;
-use std::mem;
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::RowBitmap;
@@ -82,6 +81,7 @@ pub struct NestedLoopJoin {
     filter: Option<ExprRef>,
     eq_cond: EqualCondition,
     left_input: ExecId,
+    right_pos: ExecId,
     state: NestedLoopJoinState,
 }
 
@@ -143,6 +143,7 @@ impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for NestedLoopJoin {
             filter,
             eq_cond,
             left_input: 0,
+            right_pos: 0,
             state: NestedLoopJoinState::PullLeft { right_bitmap: None },
         }
     }
@@ -167,6 +168,14 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
             arena,
             plan_arena,
             executor.left_input_plan.take(),
+            cache,
+            transaction,
+        );
+        executor.right_pos = arena.nodes.position();
+        build_read(
+            arena,
+            plan_arena,
+            executor.right_input_plan.clone(),
             cache,
             transaction,
         );
@@ -198,7 +207,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
                         arena.finish();
                         return Ok(());
                     }
-                    let left_tuple = mem::take(arena.result_tuple_mut());
+                    let left_tuple = arena.materialize_tuple();
 
                     state = NestedLoopJoinState::ScanRight {
                         active_left: ActiveLeftState {
@@ -216,7 +225,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
                     mut right_bitmap,
                 } => {
                     while arena.next_tuple(active_left.right_input, plan_arena)? {
-                        let right_tuple = mem::take(arena.result_tuple_mut());
+                        let right_tuple = arena.materialize_tuple();
                         let idx = active_left.right_index;
                         active_left.right_index += 1;
 
@@ -351,7 +360,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
                     mut right_emit_index,
                 } => {
                     while arena.next_tuple(right_input, plan_arena)? {
-                        let mut right_tuple = mem::take(arena.result_tuple_mut());
+                        let mut right_tuple = arena.materialize_tuple();
                         let idx = right_emit_index;
                         right_emit_index += 1;
 
@@ -395,7 +404,8 @@ impl NestedLoopJoin {
     ) -> ExecId {
         let cache = arena.context();
         let transaction = arena.transaction();
-        // Fixme: Executor reset
+        // The same right-hand plan rebuilds the same slots, including nested joins.
+        arena.nodes.seek(self.right_pos);
         build_read(
             arena,
             plan_arena,
@@ -535,8 +545,8 @@ mod test {
         };
 
         let values_t1 = LogicalPlan::new(
-            Operator::Values(ValuesOperator {
-                rows: arena.alloc_expression_rows(&[
+            Operator::Values(ValuesOperator::new(
+                arena.alloc_expression_rows(&[
                     vec![
                         DataValue::Int32(0),
                         DataValue::Int32(2),
@@ -558,14 +568,15 @@ mod test {
                         DataValue::Int32(7),
                     ],
                 ]),
-                schema_ref: t1_columns,
-            }),
+                4,
+                t1_columns,
+            )),
             Childrens::None,
         );
 
         let values_t2 = LogicalPlan::new(
-            Operator::Values(ValuesOperator {
-                rows: arena.alloc_expression_rows(&[
+            Operator::Values(ValuesOperator::new(
+                arena.alloc_expression_rows(&[
                     vec![
                         DataValue::Int32(0),
                         DataValue::Int32(2),
@@ -587,8 +598,9 @@ mod test {
                         DataValue::Int32(1),
                     ],
                 ]),
-                schema_ref: t2_columns,
-            }),
+                4,
+                t2_columns,
+            )),
             Childrens::None,
         );
 
@@ -636,6 +648,50 @@ mod test {
         }
 
         assert!(expected.is_empty());
+    }
+
+    #[test]
+    fn nested_right_subtrees_reuse_slots() -> Result<(), DatabaseError> {
+        let storage = crate::storage::memory::MemoryStorage::new();
+        let transaction = storage.transaction()?;
+        let meta_cache = crate::storage::StatisticsMetaCache::default();
+        let view_cache = crate::storage::ViewCache::default();
+        let table_cache = crate::storage::TableCache::default();
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+        let (_, left, right, _) = build_join_values(&mut plan_arena, false);
+        let cross = |left, right| {
+            LogicalPlan::new(
+                Operator::Join(JoinOperator {
+                    on: JoinCondition::None,
+                    join_type: JoinType::Cross,
+                    force_nested_loop: true,
+                }),
+                Childrens::Twins {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            )
+        };
+        let plan = cross(left.clone(), cross(left, right));
+        let context = crate::execution::empty_context(&table_cache, &view_cache, &meta_cache);
+        let mut arena = ExecArena::new();
+        arena.init_context(context, &transaction);
+        let root = build_read(&mut arena, &mut plan_arena, plan, context, &transaction);
+        let count = arena.nodes.items.len();
+        let address = arena.nodes.items.as_ptr();
+        assert_eq!(count, 5);
+        let mut rows = 0;
+        while arena.next_tuple(root, &mut plan_arena)? {
+            rows += 1;
+            assert_eq!(arena.result_tuple().values.len(), 9);
+            assert_eq!(arena.nodes.items.len(), count);
+            assert_eq!(arena.nodes.items.as_ptr(), address);
+        }
+        assert_eq!(rows, 64);
+        assert_eq!(arena.nodes.items.len(), count);
+        assert!(!arena.next_tuple(root, &mut plan_arena)?);
+        Ok(())
     }
 
     #[test]
@@ -1162,20 +1218,22 @@ mod test {
             });
 
         let left = LogicalPlan::new(
-            Operator::Values(ValuesOperator {
-                rows: plan_arena.alloc_expression_rows(&[
+            Operator::Values(ValuesOperator::new(
+                plan_arena.alloc_expression_rows(&[
                     vec![DataValue::Int32(2), DataValue::Int32(0)],
                     vec![DataValue::Int32(2), DataValue::Int32(5)],
                 ]),
-                schema_ref: left_columns,
-            }),
+                2,
+                left_columns,
+            )),
             Childrens::None,
         );
         let right = LogicalPlan::new(
-            Operator::Values(ValuesOperator {
-                rows: plan_arena.alloc_expression_rows(&[vec![DataValue::Int32(2)]]),
-                schema_ref: right_columns,
-            }),
+            Operator::Values(ValuesOperator::new(
+                plan_arena.alloc_expression_rows(&[vec![DataValue::Int32(2)]]),
+                1,
+                right_columns,
+            )),
             Childrens::None,
         );
 
