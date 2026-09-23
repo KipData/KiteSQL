@@ -38,7 +38,7 @@ macro_rules! try_default {
     };
 }
 
-impl<'a, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, '_, T, A> {
+impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> {
     fn find_column_in_schema<'schema>(
         schema_ref: impl IntoIterator<Item = &'schema ColumnRef>,
         arena: &PlanArena,

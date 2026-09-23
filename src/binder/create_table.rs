@@ -19,10 +19,10 @@ use crate::planner::operator::create_table::CreateTableOperator;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::Transaction;
-use crate::types::value::DataValue;
+use crate::types::LogicalType;
 use std::collections::HashSet;
 
-impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
+impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     // TODO: TableConstraint
     pub(crate) fn bind_create_table(
         &mut self,

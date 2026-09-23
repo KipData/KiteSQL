@@ -19,9 +19,9 @@ use crate::planner::operator::update::UpdateOperator;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, ExprRef, LogicalPlan};
 use crate::storage::Transaction;
-use crate::types::value::DataValue;
+use crate::types::LogicalType;
 
-impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
+impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_update(
         &mut self,
         table_name: TableName,

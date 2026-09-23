@@ -156,25 +156,8 @@ impl LogicalPlan {
         &self,
         arena: &mut PlanArena<'_>,
     ) -> Result<LogicalPlan, DatabaseError> {
-        fn clone_expressions(
-            plan: &mut LogicalPlan,
-            cloner: &mut ExprCloner,
-            arena: &mut PlanArena<'_>,
-        ) -> Result<(), DatabaseError> {
-            OperatorExprVisitorMut::new(cloner, arena).visit_operator(&mut plan.operator)?;
-            match plan.childrens.as_mut() {
-                Childrens::Only(child) => clone_expressions(child, cloner, arena)?,
-                Childrens::Twins { left, right } => {
-                    clone_expressions(left, cloner, arena)?;
-                    clone_expressions(right, cloner, arena)?;
-                }
-                Childrens::None => {}
-            }
-            Ok(())
-        }
-
         let mut plan = self.clone();
-        clone_expressions(&mut plan, &mut ExprCloner, arena)?;
+        OperatorExprVisitorMut::new(&mut ExprCloner, arena).visit_plan(&mut plan)?;
         Ok(plan)
     }
 
@@ -668,3 +651,44 @@ mod tests {
     }
 }
 // GRCOV_EXCL_STOP
+
+#[cfg(test)]
+pub(crate) mod test {
+    use crate::expression::ScalarExpression;
+    use crate::planner::{ExprRef, PlanArena};
+
+    pub(crate) trait PlanArenaTestExt {
+        fn alloc_expressions<I, E>(&mut self, expressions: I) -> Vec<ExprRef>
+        where
+            I: IntoIterator<Item = E>,
+            E: Into<ScalarExpression>;
+
+        fn alloc_expression_rows<R, E>(&mut self, rows: &[R]) -> Vec<Vec<ExprRef>>
+        where
+            R: AsRef<[E]>,
+            E: Clone + Into<ScalarExpression>;
+    }
+
+    impl PlanArenaTestExt for PlanArena<'_> {
+        fn alloc_expressions<I, E>(&mut self, expressions: I) -> Vec<ExprRef>
+        where
+            I: IntoIterator<Item = E>,
+            E: Into<ScalarExpression>,
+        {
+            expressions
+                .into_iter()
+                .map(|expression| self.alloc_expression(expression.into()))
+                .collect()
+        }
+
+        fn alloc_expression_rows<R, E>(&mut self, rows: &[R]) -> Vec<Vec<ExprRef>>
+        where
+            R: AsRef<[E]>,
+            E: Clone + Into<ScalarExpression>,
+        {
+            rows.iter()
+                .map(|row| self.alloc_expressions(row.as_ref().iter().cloned()))
+                .collect()
+        }
+    }
+}

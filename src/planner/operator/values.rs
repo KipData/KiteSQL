@@ -12,32 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::iter_ext::Itertools;
+use crate::planner::{fmt_explain_list, Explain, ExprRef, PlanArena};
 use crate::types::tuple::Schema;
-use crate::types::value::DataValue;
 use kite_sql_serde_macros::ReferenceSerialization;
-use std::fmt;
-use std::fmt::Formatter;
+use std::fmt::{self, Formatter};
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct ValuesOperator {
-    pub rows: Vec<Vec<DataValue>>,
+    pub rows: Vec<Vec<ExprRef>>,
     pub schema_ref: Schema,
 }
 
-impl fmt::Display for ValuesOperator {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let columns = self
-            .rows
-            .iter()
-            .map(|row| {
-                let row_string = row.iter().map(|value| format!("{value}")).join(", ");
-                format!("[{row_string}]")
-            })
-            .join(", ");
-
-        write!(f, "Values {}, RowsLen: {}", columns, self.rows.len())?;
-
-        Ok(())
+impl Explain for ValuesOperator {
+    fn fmt(&self, arena: &PlanArena<'_>, f: &mut Formatter) -> fmt::Result {
+        f.write_str("Values ")?;
+        for (i, row) in self.rows.iter().enumerate() {
+            if i != 0 {
+                f.write_str(", ")?;
+            }
+            f.write_str("[")?;
+            fmt_explain_list(row, ", ", arena, f)?;
+            f.write_str("]")?;
+        }
+        write!(f, ", RowsLen: {}", self.rows.len())
     }
 }

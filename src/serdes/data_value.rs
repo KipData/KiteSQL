@@ -95,6 +95,9 @@ impl DataValue {
         writer: &mut W,
     ) -> Result<(), DatabaseError> {
         match self {
+            DataValue::Parameter { .. } => Err(DatabaseError::InvalidValue(
+                "unbound parameter cannot be serialized".to_string(),
+            )),
             DataValue::Null => write_u8(writer, TAG_NULL),
             DataValue::Boolean(value) => {
                 write_u8(writer, TAG_BOOLEAN)?;
@@ -473,6 +476,18 @@ pub(crate) mod test {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn unbound_parameter_cannot_be_serialized() {
+        let parameter = DataValue::Parameter {
+            id: 1,
+            ty: crate::types::LogicalType::Integer,
+        };
+        let err = parameter
+            .encode_reference_value(&mut Vec::new())
+            .unwrap_err();
+        assert!(err.to_string().contains("unbound parameter"));
     }
 
     #[test]

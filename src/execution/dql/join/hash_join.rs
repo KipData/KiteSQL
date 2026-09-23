@@ -385,6 +385,7 @@ mod test {
     use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
+    use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, ExprRef, LogicalPlan};
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::Storage;
@@ -430,7 +431,7 @@ mod test {
 
         let values_t1 = LogicalPlan::new(
             Operator::Values(ValuesOperator {
-                rows: vec![
+                rows: arena.alloc_expression_rows(&[
                     vec![
                         DataValue::Int32(0),
                         DataValue::Int32(2),
@@ -446,7 +447,7 @@ mod test {
                         DataValue::Int32(5),
                         DataValue::Int32(7),
                     ],
-                ],
+                ]),
                 schema_ref: t1_columns,
             }),
             Childrens::None,
@@ -454,7 +455,7 @@ mod test {
 
         let values_t2 = LogicalPlan::new(
             Operator::Values(ValuesOperator {
-                rows: vec![
+                rows: arena.alloc_expression_rows(&[
                     vec![
                         DataValue::Int32(0),
                         DataValue::Int32(2),
@@ -475,7 +476,7 @@ mod test {
                         DataValue::Int32(1),
                         DataValue::Int32(1),
                     ],
-                ],
+                ]),
                 schema_ref: t2_columns,
             }),
             Childrens::None,
@@ -706,17 +707,17 @@ mod test {
 
         let left = LogicalPlan::new(
             Operator::Values(ValuesOperator {
-                rows: vec![
+                rows: plan_arena.alloc_expression_rows(&[
                     vec![DataValue::Int32(2), DataValue::Int32(0)],
                     vec![DataValue::Int32(2), DataValue::Int32(5)],
-                ],
+                ]),
                 schema_ref: left_columns,
             }),
             Childrens::None,
         );
         let right = LogicalPlan::new(
             Operator::Values(ValuesOperator {
-                rows: vec![vec![DataValue::Int32(2)]],
+                rows: plan_arena.alloc_expression_rows(&[vec![DataValue::Int32(2)]]),
                 schema_ref: right_columns,
             }),
             Childrens::None,

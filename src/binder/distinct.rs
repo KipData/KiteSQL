@@ -20,9 +20,9 @@ use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::operator::sort::SortField;
 use crate::planner::{ExprRef, LogicalPlan, PlanArena};
 use crate::storage::Transaction;
-use crate::types::value::DataValue;
+use crate::types::LogicalType;
 
-impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
+impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub fn bind_distinct(
         &mut self,
         children: LogicalPlan,

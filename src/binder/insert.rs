@@ -18,17 +18,17 @@ use crate::errors::DatabaseError;
 use crate::planner::operator::insert::InsertOperator;
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::operator::Operator;
-use crate::planner::{Childrens, LogicalPlan};
+use crate::planner::{Childrens, ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::tuple::Schema;
-use crate::types::value::DataValue;
+use crate::types::LogicalType;
 
-impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
+impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_insert_values(
         &mut self,
         table_name: TableName,
         schema_ref: Schema,
-        rows: Vec<Vec<DataValue>>,
+        rows: Vec<Vec<ExprRef>>,
         is_overwrite: bool,
         is_mapping_by_name: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
@@ -62,7 +62,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
 
     pub(crate) fn bind_values(
         &mut self,
-        rows: Vec<Vec<DataValue>>,
+        rows: Vec<Vec<ExprRef>>,
         schema_ref: Schema,
     ) -> LogicalPlan {
         LogicalPlan::new(

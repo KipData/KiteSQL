@@ -123,6 +123,7 @@ mod tests {
     use crate::planner::operator::aggregate::AggregateOperator;
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
+    use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, LogicalPlan};
     use crate::storage::memory::MemoryStorage;
     use crate::storage::Storage;
@@ -141,13 +142,13 @@ mod tests {
             .to_vec();
         let input = LogicalPlan::new(
             Operator::Values(ValuesOperator {
-                rows: vec![
+                rows: plan_arena.alloc_expression_rows(&[
                     vec![1.into(), 10.into()],
                     vec![1.into(), 20.into()],
                     vec![2.into(), 5.into()],
                     vec![2.into(), DataValue::Null],
                     vec![2.into(), 7.into()],
-                ],
+                ]),
                 schema_ref: columns.clone(),
             }),
             Childrens::None,

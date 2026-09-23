@@ -68,6 +68,9 @@ impl ExprVisitorMut for ConstantCalculator {
                 self.visit(arg_expr, arena)?;
 
                 if let ScalarExpression::Constant(unary_val) = arena.expression(*arg_expr) {
+                    if unary_val.has_parameter() {
+                        return Ok(false);
+                    }
                     let value = if let Some(evaluator) = evaluator {
                         evaluator.unary_eval(unary_val)
                     } else {
@@ -95,6 +98,9 @@ impl ExprVisitorMut for ConstantCalculator {
                     ScalarExpression::Constant(right_val),
                 ) = (arena.expression(*left_expr), arena.expression(*right_expr))
                 {
+                    if left_val.has_parameter() || right_val.has_parameter() {
+                        return Ok(false);
+                    }
                     let evaluator = binary_create(Cow::Borrowed(&ty), *op)?;
                     let left_val = left_val.clone().cast(&ty)?;
                     let right_val = right_val.clone().cast(&ty)?;
@@ -108,6 +114,9 @@ impl ExprVisitorMut for ConstantCalculator {
                 self.visit(arg_expr, arena)?;
 
                 if let ScalarExpression::Constant(value) = arena.expression(*arg_expr) {
+                    if value.has_parameter() {
+                        return Ok(false);
+                    }
                     let casted = value.clone().cast(ty)?;
                     *expr = ScalarExpression::Constant(casted);
                 }
@@ -560,21 +569,28 @@ impl ExprRef {
             ScalarExpression::TypeCast { expr, ty, .. } => {
                 expr.unpack_val(arena).and_then(|val| val.cast(ty).ok())
             }
-            ScalarExpression::IsNull { negated, expr } => Some(DataValue::Boolean(
-                expr.unpack_val(arena)?.is_null() != *negated,
-            )),
+            ScalarExpression::IsNull { negated, expr } => {
+                let value = expr.unpack_val(arena)?;
+                (!value.has_parameter()).then(|| DataValue::Boolean(value.is_null() != *negated))
+            }
             ScalarExpression::Unary {
                 expr,
                 op,
                 evaluator,
                 ty,
-            } => Some(if let Some(evaluator) = evaluator {
-                evaluator.unary_eval(&expr.unpack_val(arena)?)
-            } else {
-                unary_create(Cow::Borrowed(ty), *op)
-                    .ok()?
-                    .unary_eval(&expr.unpack_val(arena)?)
-            }),
+            } => {
+                let value = expr.unpack_val(arena)?;
+                if value.has_parameter() {
+                    return None;
+                }
+                Some(if let Some(evaluator) = evaluator {
+                    evaluator.unary_eval(&value)
+                } else {
+                    unary_create(Cow::Borrowed(ty), *op)
+                        .ok()?
+                        .unary_eval(&value)
+                })
+            }
             ScalarExpression::Binary {
                 left_expr,
                 right_expr,
@@ -584,6 +600,9 @@ impl ExprRef {
             } => {
                 let left = left_expr.unpack_val(arena)?.cast(ty).ok()?;
                 let right = right_expr.unpack_val(arena)?.cast(ty).ok()?;
+                if left.has_parameter() || right.has_parameter() {
+                    return None;
+                }
                 if let Some(evaluator) = evaluator {
                     evaluator.binary_eval(&left, &right)
                 } else {

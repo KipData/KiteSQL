@@ -15,13 +15,12 @@
 use crate::errors::DatabaseError;
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::planner::operator::values::ValuesOperator;
+use crate::planner::ExprRef;
 use crate::storage::Transaction;
 use crate::types::tuple::Schema;
-use crate::types::value::DataValue;
-use std::mem;
 
 pub struct Values {
-    rows: std::vec::IntoIter<Vec<DataValue>>,
+    rows: std::vec::IntoIter<Vec<ExprRef>>,
     schema_ref: Schema,
 }
 
@@ -55,15 +54,20 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values {
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut crate::planner::PlanArena<'a>,
     ) -> Result<(), DatabaseError> {
-        let Some(mut values) = self.rows.next() else {
+        let Some(expressions) = self.rows.next() else {
             arena.finish();
             return Ok(());
         };
 
-        for (i, value) in values.iter_mut().enumerate() {
+        let mut values = Vec::with_capacity(expressions.len());
+        for (i, expr) in expressions.into_iter().enumerate() {
             let ty = plan_arena.column(self.schema_ref[i]).datatype();
-
-            *value = mem::replace(value, DataValue::Null).cast(ty)?;
+            values.push(
+                plan_arena
+                    .expression(expr)
+                    .eval::<&crate::types::tuple::Tuple>(plan_arena, None)?
+                    .cast(ty)?,
+            );
         }
 
         let output = arena.result_tuple_mut();

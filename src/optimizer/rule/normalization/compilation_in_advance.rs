@@ -27,7 +27,7 @@ pub(crate) fn evaluator_bind_current(
     arena: &mut PlanArena,
 ) -> Result<(), DatabaseError> {
     let mut evaluator = BindEvaluator;
-    OperatorExprVisitorMut::new(&mut evaluator, arena).visit_operator(&mut plan.operator)
+    OperatorExprVisitorMut::new(&mut evaluator, arena).visit_operator(&mut plan.operator, None)
 }
 
 impl EvaluatorBind {

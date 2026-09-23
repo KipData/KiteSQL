@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::types::LogicalType;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -64,7 +65,7 @@ impl FromStr for ExtSource {
     }
 }
 
-impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
+impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub(super) fn bind_copy_to_file(
         &mut self,
         target: ExtSource,

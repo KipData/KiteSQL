@@ -95,6 +95,7 @@ mod tests {
     use crate::planner::operator::aggregate::AggregateOperator;
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
+    use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, LogicalPlan};
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
@@ -148,13 +149,13 @@ mod tests {
 
         let input = LogicalPlan::new(
             Operator::Values(ValuesOperator {
-                rows: vec![
+                rows: plan_arena.alloc_expression_rows(&[
                     vec![DataValue::Int32(1)],
                     vec![DataValue::Int32(1)],
                     vec![DataValue::Int32(2)],
                     vec![DataValue::Int32(2)],
                     vec![DataValue::Int32(3)],
-                ],
+                ]),
                 schema_ref: schema_ref.clone(),
             }),
             Childrens::None,
@@ -204,13 +205,13 @@ mod tests {
 
         let input = LogicalPlan::new(
             Operator::Values(ValuesOperator {
-                rows: vec![
+                rows: plan_arena.alloc_expression_rows(&[
                     vec![DataValue::Int32(1), DataValue::Int32(1)],
                     vec![DataValue::Int32(1), DataValue::Int32(1)],
                     vec![DataValue::Int32(1), DataValue::Int32(2)],
                     vec![DataValue::Int32(2), DataValue::Int32(1)],
                     vec![DataValue::Int32(2), DataValue::Int32(1)],
-                ],
+                ]),
                 schema_ref: schema_ref.clone(),
             }),
             Childrens::None,

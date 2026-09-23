@@ -18,11 +18,12 @@ pub mod kitesql_rocksdb;
 pub mod sqlite;
 
 use crate::TpccError;
-use kite_sql::db::Statement;
+use kite_sql::db::PreparedPlan;
 use kite_sql::types::tuple::Tuple;
 use kite_sql::types::value::DataValue;
+use kite_sql::types::LogicalType;
 
-pub type DbParam = (&'static str, DataValue);
+pub type DbParam = (usize, DataValue);
 
 pub trait SimpleExecutor {
     fn execute_batch(&mut self, sql: &str) -> Result<(), TpccError>;
@@ -82,27 +83,15 @@ pub trait BackendTransaction {
     fn commit(self) -> Result<(), TpccError>;
 }
 
-#[derive(Clone, Copy)]
-pub enum ColumnType {
-    Int8,
-    Int16,
-    Int32,
-    Int64,
-    Decimal,
-    Utf8,
-    DateTime,
-    NullableDateTime,
-}
-
 #[derive(Clone)]
 pub struct StatementSpec {
     pub sql: &'static str,
-    pub result_types: &'static [ColumnType],
+    pub result_types: Vec<LogicalType>,
+    pub parameters: Vec<(usize, LogicalType)>,
 }
 
-#[derive(Clone)]
-pub struct KiteSqlPreparedStatement {
-    pub statement: Statement,
+pub struct KiteSqlPreparedStatement<'a> {
+    pub plan: PreparedPlan<'a>,
     pub spec: StatementSpec,
 }
 
@@ -110,7 +99,7 @@ pub trait PreparedStatement {
     fn spec(&self) -> &StatementSpec;
 }
 
-impl PreparedStatement for KiteSqlPreparedStatement {
+impl PreparedStatement for KiteSqlPreparedStatement<'_> {
     fn spec(&self) -> &StatementSpec {
         &self.spec
     }

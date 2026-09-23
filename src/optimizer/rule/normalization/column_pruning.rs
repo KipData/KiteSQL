@@ -268,7 +268,7 @@ impl ColumnPruning {
             &mut PositionRemapper::new(removed_positions, remapped_exprs),
             arena,
         )
-        .visit_operator(operator)
+        .visit_operator(operator, None)
     }
 
     fn remap_exprs_after_child_change<'a>(

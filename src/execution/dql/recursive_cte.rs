@@ -326,6 +326,7 @@ mod tests {
     use crate::planner::operator::recursive_cte::RecursiveScanOperator;
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
+    use crate::planner::test::PlanArenaTestExt;
     use crate::planner::Childrens;
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
@@ -403,7 +404,7 @@ mod tests {
         let schema_ref = vec![column];
         let anchor = LogicalPlan::new(
             Operator::Values(ValuesOperator {
-                rows: vec![vec![DataValue::Int32(1)]],
+                rows: plan_arena.alloc_expression_rows(&[vec![DataValue::Int32(1)]]),
                 schema_ref: schema_ref.clone(),
             }),
             Childrens::None,

@@ -18,7 +18,7 @@ use super::{
     StatementSpec,
 };
 use crate::TpccError;
-use kite_sql::db::{prepare, DBTransaction, DataBaseBuilder, Database};
+use kite_sql::db::{DBTransaction, DataBaseBuilder, Database};
 use kite_sql::storage::lmdb::{LmdbStorage, LmdbTransaction as KiteSqlLmdbTransaction};
 use kite_sql::types::tuple::Tuple;
 
@@ -38,14 +38,13 @@ impl KiteSqlLmdbBackend {
     fn prepare_spec_groups(
         &self,
         specs: &[Vec<StatementSpec>],
-    ) -> Result<Vec<Vec<KiteSqlPreparedStatement>>, TpccError> {
+    ) -> Result<Vec<Vec<KiteSqlPreparedStatement<'_>>>, TpccError> {
         let mut groups = Vec::with_capacity(specs.len());
         for group in specs {
             let mut prepared = Vec::with_capacity(group.len());
             for spec in group {
-                let statement = prepare(spec.sql)?;
                 prepared.push(KiteSqlPreparedStatement {
-                    statement,
+                    plan: self.database.prepare(spec.sql, &spec.parameters)?,
                     spec: spec.clone(),
                 });
             }
@@ -63,7 +62,7 @@ impl KiteSqlLmdbBackend {
 
 impl BackendControl for KiteSqlLmdbBackend {
     type PreparedStatement<'a>
-        = KiteSqlPreparedStatement
+        = KiteSqlPreparedStatement<'a>
     where
         Self: 'a;
 
@@ -97,17 +96,17 @@ pub struct KiteSqlLmdbTransactionWrapper<'a> {
 impl<'a> KiteSqlLmdbTransactionWrapper<'a> {
     pub(crate) fn execute_raw<'b>(
         &'b mut self,
-        statement: &mut KiteSqlPreparedStatement,
+        statement: &mut KiteSqlPreparedStatement<'a>,
         params: &[DbParam],
     ) -> Result<KiteSqlTxnResult<'b, KiteSqlLmdbTransaction<'a>>, TpccError> {
         Ok(KiteSqlTxnResult::new(
-            self.inner.execute(&statement.statement, params)?,
+            self.inner.execute(&statement.plan, params)?,
         ))
     }
 }
 
 impl<'a> BackendTransaction for KiteSqlLmdbTransactionWrapper<'a> {
-    type PreparedStatement = KiteSqlPreparedStatement;
+    type PreparedStatement = KiteSqlPreparedStatement<'a>;
 
     fn execute_drain(
         &mut self,

@@ -243,7 +243,6 @@ impl_display_explain!(
     ScalarSubqueryOperator,
     FunctionScanOperator,
     LimitOperator,
-    ValuesOperator,
     DescribeOperator,
     InsertOperator,
     DeleteOperator,
@@ -657,6 +656,7 @@ mod tests {
     use crate::planner::operator::set_membership::SetMembershipKind;
     use crate::planner::operator::sort::SortField;
     use crate::planner::operator::values::ValuesOperator;
+    use crate::planner::test::PlanArenaTestExt;
     use crate::planner::ExprRef;
     use crate::planner::{Childrens, LogicalPlan, TableArenaCell};
     use crate::types::index::{IndexInfo, IndexMeta, IndexMetaRef, IndexType};
@@ -806,7 +806,7 @@ mod tests {
         let left = column("left", &mut arena);
         let right = column("right", &mut arena);
         let values = Operator::Values(ValuesOperator {
-            rows: vec![vec![DataValue::Int32(1), DataValue::Int32(2)]],
+            rows: arena.alloc_expression_rows(&[vec![DataValue::Int32(1), DataValue::Int32(2)]]),
             schema_ref: vec![left, right],
         });
 
@@ -1210,10 +1210,10 @@ mod tests {
             ),
             (
                 Operator::Values(ValuesOperator {
-                    rows: vec![
+                    rows: arena.alloc_expression_rows(&[
                         vec![DataValue::Int32(1), DataValue::Int32(2)],
                         vec![DataValue::Int32(3)],
-                    ],
+                    ]),
                     schema_ref: vec![id],
                 }),
                 "Values [1, 2], [3], RowsLen: 2",

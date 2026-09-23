@@ -69,6 +69,18 @@ pub enum IndexLookup {
     Probe,
 }
 
+impl IndexLookup {
+    pub(crate) fn bind_parameters(
+        &mut self,
+        params: &[(usize, DataValue)],
+    ) -> Result<(), DatabaseError> {
+        if let Self::Static(range) = self {
+            range.bind_parameters(params)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]
 pub struct IndexInfo {
     pub(crate) meta: IndexMetaRef,

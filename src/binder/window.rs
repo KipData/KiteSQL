@@ -24,7 +24,6 @@ use crate::planner::operator::window::WindowOperator;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::storage::Transaction;
-use crate::types::value::DataValue;
 use crate::types::LogicalType;
 
 struct WindowCollector {
@@ -97,7 +96,7 @@ struct WindowGroup {
     output_columns: Vec<ColumnRef>,
 }
 
-impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
+impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_window_function(
         &mut self,
         kind: WindowFunctionKind,

@@ -53,7 +53,7 @@ pub struct TableArenaCell {
 unsafe impl Send for TableArenaCell {}
 unsafe impl Sync for TableArenaCell {}
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PlanArena<'a> {
     table_arena: &'a TableArenaCell,
     #[cfg(debug_assertions)]
@@ -421,6 +421,18 @@ impl<'a> PlanArena<'a> {
             expressions: Vec::new(),
             plans: Vec::new(),
         }
+    }
+
+    pub(crate) fn fill_parameters(
+        &mut self,
+        params: &[(usize, crate::types::value::DataValue)],
+    ) -> Result<(), crate::errors::DatabaseError> {
+        for expression in &mut self.expressions {
+            if let ScalarExpression::Constant(value) = expression {
+                value.bind_parameters(params)?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn table_arena_cell(&self) -> &'a TableArenaCell {

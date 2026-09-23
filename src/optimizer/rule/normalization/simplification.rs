@@ -28,7 +28,7 @@ pub(crate) fn constant_calculation_current(
     arena: &mut crate::planner::PlanArena,
 ) -> Result<(), DatabaseError> {
     let mut calculator = ConstantCalculator::new(arena);
-    OperatorExprVisitorMut::new(&mut calculator, arena).visit_operator(&mut plan.operator)
+    OperatorExprVisitorMut::new(&mut calculator, arena).visit_operator(&mut plan.operator, None)
 }
 
 impl ConstantCalculation {

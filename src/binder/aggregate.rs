@@ -18,7 +18,7 @@ use crate::expression::visitor::{walk_expr, ExprVisitor};
 use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut};
 use crate::planner::{ExprRef, LogicalPlan, PlanArena};
 use crate::storage::Transaction;
-use crate::types::value::DataValue;
+use crate::types::LogicalType;
 use crate::{
     expression::ScalarExpression,
     planner::operator::{aggregate::AggregateOperator, sort::SortField},
@@ -40,7 +40,7 @@ impl ExprVisitor<PlanArena<'_>> for AggregateCallCollector<'_> {
     }
 }
 
-impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
+impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub fn bind_aggregate(
         &mut self,
         children: LogicalPlan,
@@ -401,7 +401,6 @@ mod tests {
     use crate::expression::{AliasType, BinaryOperator, ScalarExpression};
     use crate::planner::{ExprRef, PlanArena};
     use crate::storage::Storage;
-    use crate::types::value::DataValue;
     use crate::types::LogicalType;
 
     fn test_column(arena: &mut PlanArena, name: &str, ty: LogicalType) -> ColumnRef {
@@ -504,7 +503,7 @@ mod tests {
         let scala_functions = Default::default();
         let table_functions = Default::default();
         let transaction = tables.storage.transaction()?;
-        let args: [(&'static str, DataValue); 0] = [];
+        let args: [(usize, LogicalType); 0] = [];
         let mut binder = Binder::new(
             BinderContext::new(
                 &tables.table_cache,

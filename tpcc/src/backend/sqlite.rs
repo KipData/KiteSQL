@@ -13,15 +13,14 @@
 // limitations under the License.
 
 use super::{
-    BackendControl, BackendTransaction, ColumnType, DbParam, PreparedStatement, SimpleExecutor,
-    StatementSpec,
+    BackendControl, BackendTransaction, DbParam, PreparedStatement, SimpleExecutor, StatementSpec,
 };
 use crate::TpccError;
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use clap::ValueEnum;
 use kite_sql::types::tuple::Tuple;
 use kite_sql::types::value::{DataValue, Utf8Type};
-use kite_sql::types::CharLengthUnits;
+use kite_sql::types::{CharLengthUnits, LogicalType};
 use rust_decimal::Decimal;
 use sqlite::{Connection, State, Statement as SqliteStatement, Value};
 
@@ -133,7 +132,7 @@ impl<'a> SqliteTransaction<'a> {
     ) -> Result<SqliteResult<'b, 'a>, TpccError> {
         statement.statement.reset()?;
         bind_params(&mut statement.statement, params)?;
-        SqliteResult::new(&mut statement.statement, statement.spec.result_types)
+        SqliteResult::new(&mut statement.statement, &statement.spec.result_types)
     }
 }
 
@@ -209,20 +208,15 @@ impl<'a> BackendTransaction for SqliteTransaction<'a> {
 }
 
 fn bind_params(statement: &mut SqliteStatement<'_>, params: &[DbParam]) -> Result<(), TpccError> {
-    for (key, value) in params {
-        let sqlite_value = convert_value(value)?;
-        if let Some(index) = key.strip_prefix('?') {
-            let idx: usize = index.parse().map_err(|_| TpccError::InvalidParameter)?;
-            statement.bind((idx, sqlite_value.clone()))?;
-        } else {
-            statement.bind((key.as_ref(), sqlite_value.clone()))?;
-        }
+    for (id, value) in params {
+        statement.bind((*id, convert_value(value)?))?;
     }
     Ok(())
 }
 
 fn convert_value(value: &DataValue) -> Result<Value, TpccError> {
     Ok(match value {
+        DataValue::Parameter { .. } => return Err(TpccError::InvalidParameter),
         DataValue::Null => Value::Null,
         DataValue::Boolean(v) => Value::Integer(*v as i64),
         DataValue::Float32(v) => Value::Float(v.0 as f64),
@@ -321,13 +315,13 @@ fn normalize_sqlite_sql(sql: &str) -> Option<String> {
 
 pub struct SqliteResult<'stmt, 'conn> {
     statement: &'stmt mut SqliteStatement<'conn>,
-    column_types: &'static [ColumnType],
+    column_types: &'stmt [LogicalType],
 }
 
 impl<'stmt, 'conn> SqliteResult<'stmt, 'conn> {
     fn new(
         statement: &'stmt mut SqliteStatement<'conn>,
-        column_types: &'static [ColumnType],
+        column_types: &'stmt [LogicalType],
     ) -> Result<Self, TpccError> {
         Ok(Self {
             statement,
@@ -356,31 +350,33 @@ impl Iterator for SqliteResult<'_, '_> {
 
 fn convert_statement_row(
     statement: &SqliteStatement<'_>,
-    types: &[ColumnType],
+    types: &[LogicalType],
 ) -> Result<Tuple, TpccError> {
     let mut values = Vec::with_capacity(types.len());
     for (idx, column_type) in types.iter().enumerate() {
         let value = match column_type {
-            ColumnType::Int8 => DataValue::Int8(statement.read::<i64, _>(idx)? as i8),
-            ColumnType::Int16 => DataValue::Int16(statement.read::<i64, _>(idx)? as i16),
-            ColumnType::Int32 => DataValue::Int32(statement.read::<i64, _>(idx)? as i32),
-            ColumnType::Int64 => DataValue::Int64(statement.read::<i64, _>(idx)?),
-            ColumnType::Decimal => DataValue::Decimal(read_decimal(statement, idx)?),
-            ColumnType::Utf8 => DataValue::Utf8 {
+            LogicalType::Tinyint => DataValue::Int8(statement.read::<i64, _>(idx)? as i8),
+            LogicalType::Smallint => DataValue::Int16(statement.read::<i64, _>(idx)? as i16),
+            LogicalType::Integer => DataValue::Int32(statement.read::<i64, _>(idx)? as i32),
+            LogicalType::Bigint => DataValue::Int64(statement.read::<i64, _>(idx)?),
+            LogicalType::Decimal(..) => DataValue::Decimal(read_decimal(statement, idx)?),
+            LogicalType::Varchar(..) | LogicalType::Char(..) => DataValue::Utf8 {
                 value: statement.read::<String, _>(idx)?,
                 ty: Utf8Type::Variable(None),
                 unit: CharLengthUnits::Characters,
             },
-            ColumnType::DateTime => {
-                let text: String = statement.read(idx)?;
-                parse_datetime(&text)?
-            }
-            ColumnType::NullableDateTime => {
+            LogicalType::DateTime => {
                 let text: Option<String> = statement.read(idx)?;
                 match text {
                     Some(value) => parse_datetime(&value)?,
                     None => DataValue::Null,
                 }
+            }
+            _ => {
+                return Err(kite_sql::errors::DatabaseError::InvalidValue(format!(
+                    "unsupported TPCC result type: {column_type}"
+                ))
+                .into());
             }
         };
         values.push(value);

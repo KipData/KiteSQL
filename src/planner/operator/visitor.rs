@@ -203,6 +203,13 @@ impl<'a, V, A> OperatorExprVisitor<'a, V, A> {
 }
 
 impl<'a, V: ExprVisitor<A>, A: MetaArena> OperatorVisitor<'a> for OperatorExprVisitor<'_, V, A> {
+    fn visit_values(&mut self, op: &'a ValuesOperator) -> Result<(), DatabaseError> {
+        for expr in op.rows.iter().flatten() {
+            ExprVisitor::visit(self.visitor, *expr, self.arena)?;
+        }
+        Ok(())
+    }
+
     fn visit_aggregate(&mut self, op: &'a AggregateOperator) -> Result<(), DatabaseError> {
         for expr in op.agg_calls.iter().chain(&op.groupby_exprs) {
             ExprVisitor::visit(self.visitor, *expr, self.arena)?;
@@ -383,12 +390,12 @@ pub(crate) mod tests {
     };
     use crate::expression::visitor::{walk_expr, ExprVisitor};
     use crate::expression::window::{WindowFunction, WindowFunctionKind};
-    use crate::expression::ScalarExpression;
     use crate::function::numbers::Numbers;
     use crate::planner::operator::alter_table::change_column::NotNullChange;
     use crate::planner::operator::join::{JoinOperator, JoinType};
     use crate::planner::operator::mark_apply::MarkApplyOperator;
     use crate::planner::operator::set_membership::SetMembershipKind;
+    use crate::planner::test::PlanArenaTestExt;
     use crate::planner::ExprRef;
     use crate::planner::{Childrens, LogicalPlan};
     use crate::types::index::{IndexInfo, IndexMetaRef, IndexType};
@@ -414,9 +421,7 @@ pub(crate) mod tests {
     pub(crate) fn all_operators(
         arena: &mut crate::planner::PlanArena,
     ) -> Result<Vec<Operator>, DatabaseError> {
-        let expressions = (0_i32..=18)
-            .map(|value| arena.alloc_expression(ScalarExpression::from(value)))
-            .collect::<Vec<_>>();
+        let expressions = arena.alloc_expressions(0_i32..=18);
         let expr = |value: usize| expressions[value];
         let column_ref = ColumnRef::new(0);
         let column = ColumnCatalog::new(
@@ -481,7 +486,7 @@ pub(crate) mod tests {
                 offset: None,
             }),
             Operator::Values(ValuesOperator {
-                rows: vec![vec![DataValue::Int32(1)]],
+                rows: arena.alloc_expression_rows(&[vec![DataValue::Int32(1)]]),
                 schema_ref: vec![column_ref],
             }),
             Operator::Window(window::WindowOperator {
@@ -646,7 +651,7 @@ pub(crate) mod tests {
         for operator in &operators {
             visitor.visit_operator(operator)?;
         }
-        assert_eq!(counter.0, 20);
+        assert_eq!(counter.0, 21); // Includes the Values row expression.
 
         Ok(())
     }

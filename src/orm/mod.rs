@@ -220,7 +220,7 @@ impl<M, T> FieldSort<M, T> {
 pub trait BindOrmScalar<'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_scalar(
         self,
@@ -231,7 +231,7 @@ where
 impl<'bind, 'parent, 'arena, T, A, M, V> BindOrmScalar<'bind, 'parent, 'arena, T, A> for Field<M, V>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_scalar(
         self,
@@ -244,7 +244,7 @@ where
 impl<'bind, 'parent, 'arena, T, A> BindOrmScalar<'bind, 'parent, 'arena, T, A> for ScalarExpression
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_scalar(
         self,
@@ -258,7 +258,7 @@ impl<'bind, 'parent, 'arena, T, A> BindOrmScalar<'bind, 'parent, 'arena, T, A>
     for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_scalar(
         self,
@@ -272,7 +272,7 @@ where
 pub trait BindOrmSort<'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_sort<'scope>(
         self,
@@ -283,7 +283,7 @@ where
 impl<'bind, 'parent, 'arena, T, A, M, V> BindOrmSort<'bind, 'parent, 'arena, T, A> for Field<M, V>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_sort<'scope>(
         self,
@@ -297,7 +297,7 @@ impl<'bind, 'parent, 'arena, T, A, M, V> BindOrmSort<'bind, 'parent, 'arena, T, 
     for FieldSort<M, V>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_sort<'scope>(
         self,
@@ -313,7 +313,7 @@ where
 impl<'bind, 'parent, 'arena, T, A> BindOrmSort<'bind, 'parent, 'arena, T, A> for ScalarExpression
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_sort<'scope>(
         self,
@@ -326,7 +326,7 @@ where
 impl<'bind, 'parent, 'arena, T, A> BindOrmSort<'bind, 'parent, 'arena, T, A> for SortField
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_sort<'scope>(
         self,
@@ -340,7 +340,7 @@ impl<'bind, 'parent, 'arena, T, A> BindOrmSort<'bind, 'parent, 'arena, T, A>
     for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_sort<'scope>(
         self,
@@ -380,7 +380,7 @@ impl WindowSpec {
 impl<'bind, 'parent, 'arena, T, A> From<CtxExpression<'bind, 'parent, 'arena, T, A>> for ExprRef
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     fn from(expr: CtxExpression<'bind, 'parent, 'arena, T, A>) -> Self {
         expr.into_scalar()
@@ -418,7 +418,7 @@ where
 pub trait BindOrmScalarList<'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_scalar_list(
         self,
@@ -433,7 +433,7 @@ macro_rules! impl_bind_orm_scalar_list {
                 for ($($name,)+)
             where
                 Tx: Transaction,
-                Args: AsRef<[(&'static str, DataValue)]>,
+                Args: AsRef<[(usize, LogicalType)]>,
                 $($name: BindOrmScalar<'bind, 'parent, 'arena, Tx, Args>,)+
             {
                 #[allow(non_snake_case)]
@@ -485,7 +485,7 @@ macro_rules! impl_quantified_subquery_methods {
 struct ExprBindScopeHandle<'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     binder: NonNull<Binder<'bind, 'parent, T, A>>,
     arena: NonNull<PlanArena<'arena>>,
@@ -495,7 +495,7 @@ where
 impl<'bind, 'parent, 'arena, T, A> Clone for ExprBindScopeHandle<'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     fn clone(&self) -> Self {
         *self
@@ -505,14 +505,14 @@ where
 impl<'bind, 'parent, 'arena, T, A> Copy for ExprBindScopeHandle<'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
 }
 
 impl<'bind, 'parent, 'arena, T, A> ExprBindScopeHandle<'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     fn new<'ctx>(scope: &ExprBindScope<'ctx, 'bind, 'parent, 'arena, T, A>) -> Self {
         Self {
@@ -689,7 +689,7 @@ where
 pub struct CtxExpression<'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     expr: ExprRef,
     scope: ExprBindScopeHandle<'bind, 'parent, 'arena, T, A>,
@@ -698,7 +698,7 @@ where
 impl<'bind, 'parent, 'arena, T, A> CtxExpression<'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     pub fn into_scalar(self) -> ExprRef {
         self.expr
@@ -963,7 +963,7 @@ where
 impl<'bind, 'parent, 'arena, T, A> fmt::Debug for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.expr.fmt(f)
@@ -973,7 +973,7 @@ where
 impl<'bind, 'parent, 'arena, T, A> Clone for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     fn clone(&self) -> Self {
         Self {
@@ -986,7 +986,7 @@ where
 impl<'bind, 'parent, 'arena, T, A> PartialEq for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     fn eq(&self, other: &Self) -> bool {
         self.expr == other.expr
@@ -996,14 +996,14 @@ where
 impl<'bind, 'parent, 'arena, T, A> Eq for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
 }
 
 impl<'bind, 'parent, 'arena, T, A> Hash for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.expr.hash(state);
@@ -1013,16 +1013,16 @@ where
 impl<'bind, 'parent, 'arena, T, A> IntoOrmExpression for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     fn into_orm_expression(self) -> OrmExpression {
         OrmExpression::Bound(self.expr)
     }
 }
 
-fn bind_orm_context<E, F>(executor: E, build: F) -> Result<E::Iter, DatabaseError>
+fn bind_orm_context<'a, E, F>(executor: E, build: F) -> Result<E::Iter, DatabaseError>
 where
-    E: BindSource,
+    E: BindSource<'a>,
     F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
         &'ctx mut OrmContext<
             'ctx,
@@ -1030,20 +1030,22 @@ where
             'parent,
             'arena,
             E::Transaction,
-            &'static [(&'static str, DataValue)],
+            &'static [(usize, LogicalType)],
         >,
     ) -> Result<LogicalPlan, DatabaseError>,
 {
-    static EMPTY_BIND_PARAMS: &[(&str, DataValue)] = &[];
-    executor.execute(EMPTY_BIND_PARAMS, |binder, arena| {
-        let mut context = OrmContext { binder, arena };
-        build(&mut context)
+    static EMPTY_BIND_PARAMS: &[(usize, LogicalType)] = &[];
+    executor.execute(|state, tx| {
+        state.build_plan(EMPTY_BIND_PARAMS, tx, |binder, arena| {
+            let mut context = OrmContext { binder, arena };
+            build(&mut context)
+        })
     })
 }
 
-fn explain_orm_context<E, F>(executor: E, build: F) -> Result<String, DatabaseError>
+fn explain_orm_context<'a, E, F>(executor: E, build: F) -> Result<String, DatabaseError>
 where
-    E: BindSource,
+    E: BindSource<'a>,
     F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
         &'ctx mut OrmContext<
             'ctx,
@@ -1051,11 +1053,11 @@ where
             'parent,
             'arena,
             E::Transaction,
-            &'static [(&'static str, DataValue)],
+            &'static [(usize, LogicalType)],
         >,
     ) -> Result<LogicalPlan, DatabaseError>,
 {
-    static EMPTY_BIND_PARAMS: &[(&str, DataValue)] = &[];
+    static EMPTY_BIND_PARAMS: &[(usize, LogicalType)] = &[];
     executor.explain(EMPTY_BIND_PARAMS, |binder, arena| {
         let mut context = OrmContext { binder, arena };
         build(&mut context)
@@ -1070,7 +1072,7 @@ where
 pub struct OrmContext<'ctx, 'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'ctx mut Binder<'bind, 'parent, T, A>,
     arena: &'ctx mut PlanArena<'arena>,
@@ -1080,7 +1082,7 @@ where
 pub struct ExprBindScope<'ctx, 'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'ctx mut Binder<'bind, 'parent, T, A>,
     arena: &'ctx mut PlanArena<'arena>,
@@ -1089,7 +1091,7 @@ where
 pub struct UpdateBindScope<'ctx, 'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'ctx mut Binder<'bind, 'parent, T, A>,
     arena: &'ctx mut PlanArena<'arena>,
@@ -1100,7 +1102,7 @@ where
 impl<'ctx, 'bind, 'parent, 'arena, T, A> OrmContext<'ctx, 'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     pub fn from<'scope, M: Model>(
         &'scope mut self,
@@ -1321,7 +1323,7 @@ where
 impl<'ctx, 'bind, 'parent, 'arena, T, A> ExprBindScope<'ctx, 'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     fn handle(&self) -> ExprBindScopeHandle<'bind, 'parent, 'arena, T, A> {
         ExprBindScopeHandle::new(self)
@@ -1826,7 +1828,7 @@ where
 impl<'ctx, 'bind, 'parent, 'arena, T, A> UpdateBindScope<'ctx, 'bind, 'parent, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     pub fn set_value<M, V, D>(&mut self, field: Field<M, V>, value: D) -> Result<(), DatabaseError>
     where
@@ -1922,7 +1924,7 @@ impl<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>
     BindPlanFrom<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
     M: Model,
 {
     fn model_table_name(&self) -> Result<TableName, DatabaseError> {
@@ -2375,7 +2377,7 @@ impl<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>
     BindPlanSelectList<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
     M: Model,
 {
     fn expr_scope<'scope>(&'scope mut self) -> ExprBindScope<'scope, 'bind, 'parent, 'arena, T, A> {
@@ -2544,7 +2546,7 @@ pub trait Projection: FromQueryRow {
     ) -> Result<Vec<ExprRef>, DatabaseError>
     where
         T: Transaction,
-        A: AsRef<[(&'static str, DataValue)]>;
+        A: AsRef<[(usize, LogicalType)]>;
 }
 
 fn orm_table_alias(source: &QuerySource) -> Option<TableAliasInput> {
@@ -2562,7 +2564,7 @@ fn bind_orm_source<'bind, 'parent, 'arena, T, A>(
 ) -> Result<LogicalPlan, DatabaseError>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     let alias = orm_table_alias(&source);
     binder.bind_base_table_ref(join_type, source.table_name.as_str().into(), alias, arena)
@@ -2576,7 +2578,7 @@ fn bind_orm_target_column<'bind, 'parent, 'arena, T, A>(
 ) -> Result<ColumnRef, DatabaseError>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     match binder.bind_column_ref_by_name(None, column_name, Some(source_name), arena)? {
         ScalarExpression::ColumnRef { column, .. } => Ok(column),
@@ -2594,7 +2596,7 @@ fn bind_orm_insert_plan<'bind, 'parent, 'arena, T, A>(
 ) -> Result<LogicalPlan, DatabaseError>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     let table_name: TableName = table_name.into();
     let input_schema = input_plan.output_schema(arena).clone();
@@ -2662,7 +2664,7 @@ fn bind_orm_insert_model<'bind, 'parent, 'arena, T, A, M>(
 ) -> Result<LogicalPlan, DatabaseError>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
     M: Model,
 {
     let table_name: TableName = M::table_name().into();
@@ -2691,7 +2693,7 @@ where
             ));
         }
         schema_ref.push(column);
-        row.push(value);
+        row.push(arena.alloc_expression(ScalarExpression::Constant(value)));
     }
 
     binder.bind_insert_values(table_name, schema_ref, vec![row], false, true)
@@ -3335,24 +3337,31 @@ fn extract_projected_tuple<T: FromQueryTuple>(tuple: &mut Tuple) -> Result<T, Da
     T::from_query_tuple(tuple)
 }
 
-fn orm_analyze<E: BindSource, M: Model>(executor: E) -> Result<(), DatabaseError> {
+fn orm_analyze<'a, E: BindSource<'a>, M: Model>(executor: E) -> Result<(), DatabaseError> {
     executor
-        .execute(&[], |binder, arena| {
-            binder.bind_analyze(M::table_name().into(), arena)
+        .execute(|state, tx| {
+            state.build_plan(&[], tx, |binder, arena| {
+                binder.bind_analyze(M::table_name().into(), arena)
+            })
         })?
         .done()
 }
 
-fn orm_insert<E: BindSource, M: Model>(executor: E, model: &M) -> Result<(), DatabaseError> {
+fn orm_insert<'a, E: BindSource<'a>, M: Model>(
+    executor: E,
+    model: &M,
+) -> Result<(), DatabaseError> {
     let params = model.params();
     executor
-        .execute(&[], |binder, arena| {
-            bind_orm_insert_model::<_, _, M>(binder, params, arena)
+        .execute(|state, tx| {
+            state.build_plan(&[], tx, |binder, arena| {
+                bind_orm_insert_model::<_, _, M>(binder, params, arena)
+            })
         })?
         .done()
 }
 
-fn orm_get<E: BindSource, M: Model>(
+fn orm_get<'a, E: BindSource<'a>, M: Model>(
     executor: E,
     key: &M::PrimaryKey,
 ) -> Result<Option<M>, DatabaseError> {
@@ -3373,7 +3382,9 @@ fn orm_get<E: BindSource, M: Model>(
     })?)
 }
 
-fn orm_list<E: BindSource, M: Model>(executor: E) -> Result<OrmIter<E::Iter, M>, DatabaseError> {
+fn orm_list<'a, E: BindSource<'a>, M: Model>(
+    executor: E,
+) -> Result<OrmIter<E::Iter, M>, DatabaseError> {
     Ok(bind_orm_context(executor, |ctx| {
         let plan: LogicalPlan = ctx.from::<M>()?.finish()?;
         Ok(plan)

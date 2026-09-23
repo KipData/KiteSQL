@@ -101,6 +101,7 @@ mod tests {
     use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
+    use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, LogicalPlan};
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
@@ -117,7 +118,10 @@ mod tests {
         let schema_ref = vec![arena.alloc_column(ColumnCatalog::new(name.to_string(), true, desc))];
 
         LogicalPlan::new(
-            Operator::Values(ValuesOperator { rows, schema_ref }),
+            Operator::Values(ValuesOperator {
+                rows: arena.alloc_expression_rows(&rows),
+                schema_ref,
+            }),
             Childrens::None,
         )
     }

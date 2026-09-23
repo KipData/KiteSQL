@@ -1154,6 +1154,7 @@ pub trait Transaction: Sized {
 
     fn remove(&mut self, key: &[u8]) -> Result<(), DatabaseError>;
 
+    // TODO: Support reverse range iteration (upper to lower bound) for descending index scans.
     fn range<'txn, 'key>(
         &'txn self,
         min: Bound<&'key [u8]>,

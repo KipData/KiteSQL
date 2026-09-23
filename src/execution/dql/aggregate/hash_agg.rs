@@ -119,6 +119,7 @@ mod test {
     use crate::planner::operator::aggregate::AggregateOperator;
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
+    use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, LogicalPlan};
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::Storage;
@@ -147,7 +148,7 @@ mod test {
 
         let input = LogicalPlan::new(
             Operator::Values(ValuesOperator {
-                rows: vec![
+                rows: plan_arena.alloc_expression_rows(&[
                     vec![
                         DataValue::Int32(0),
                         DataValue::Int32(2),
@@ -168,7 +169,7 @@ mod test {
                         DataValue::Int32(2),
                         DataValue::Int32(3),
                     ],
-                ],
+                ]),
                 schema_ref: t1_schema.clone(),
             }),
             Childrens::None,

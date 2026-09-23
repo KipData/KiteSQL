@@ -132,6 +132,11 @@ pub enum Utf8Type {
 
 #[derive(Clone)]
 pub enum DataValue {
+    /// A typed placeholder used only while preparing a plan.
+    Parameter {
+        id: usize,
+        ty: LogicalType,
+    },
     Null,
     Boolean(bool),
     Float32(OrderedFloat<f32>),
@@ -279,6 +284,17 @@ impl PartialEq for DataValue {
         }
 
         match (self, other) {
+            (
+                Parameter {
+                    id: left,
+                    ty: left_ty,
+                },
+                Parameter {
+                    id: right,
+                    ty: right_ty,
+                },
+            ) => left == right && left_ty == right_ty,
+            (Parameter { .. }, _) => false,
             (Boolean(v1), Boolean(v2)) => v1.eq(v2),
             (Boolean(_), _) => false,
             (Float32(v1), Float32(v2)) => v1.eq(v2),
@@ -375,6 +391,7 @@ impl PartialOrd for DataValue {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         use DataValue::*;
         match (self, other) {
+            (Parameter { .. }, _) => None,
             (Boolean(v1), Boolean(v2)) => v1.partial_cmp(v2),
             (Boolean(_), _) => None,
             (Float32(v1), Float32(v2)) => v1.partial_cmp(v2),
@@ -441,6 +458,11 @@ impl Hash for DataValue {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         use DataValue::*;
         match self {
+            Parameter { id, ty } => {
+                19u8.hash(state);
+                id.hash(state);
+                ty.hash(state);
+            }
             Null => 0u8.hash(state),
             Boolean(v) => {
                 1u8.hash(state);
@@ -520,8 +542,109 @@ impl Hash for DataValue {
     }
 }
 impl DataValue {
+    /// Estimate bound selectivity using the complete index key type.
+    pub(crate) fn bound_selectivity(
+        min: std::ops::Bound<&Self>,
+        max: std::ops::Bound<&Self>,
+        key_type: &LogicalType,
+        distinct: f64,
+    ) -> f64 {
+        use std::ops::Bound;
+
+        match (min, max, key_type) {
+            (
+                Bound::Included(Self::Tuple(lower, lower_upper))
+                | Bound::Excluded(Self::Tuple(lower, lower_upper)),
+                Bound::Included(Self::Tuple(upper, upper_upper))
+                | Bound::Excluded(Self::Tuple(upper, upper_upper)),
+                LogicalType::Tuple(fields),
+            ) if !fields.is_empty() => {
+                if lower == upper
+                    && lower_upper == upper_upper
+                    && (matches!(min, Bound::Excluded(_)) || matches!(max, Bound::Excluded(_)))
+                {
+                    return 0.0;
+                }
+                // Approximate field NDV from full-key NDV; no per-field statistics.
+                let distinct = distinct.powf(1.0 / fields.len() as f64);
+                let mut divisor = 1.0;
+                for (i, field) in fields.iter().enumerate() {
+                    let (min, max, is_range) = match (lower.get(i), upper.get(i)) {
+                        (Some(lower), Some(upper)) => (
+                            Bound::Included(lower),
+                            Bound::Included(upper),
+                            lower != upper,
+                        ),
+                        (Some(lower), None) => (Bound::Included(lower), Bound::Unbounded, true),
+                        (None, Some(upper)) => (Bound::Unbounded, Bound::Included(upper), true),
+                        (None, None) => return 1.0 / divisor,
+                    };
+                    let selectivity = Self::bound_selectivity(min, max, field, distinct);
+                    if selectivity == 0.0 {
+                        return 0.0;
+                    }
+                    divisor /= selectivity;
+                    // Only the equal prefix and first differing field constrain
+                    // a lexicographic range. Missing fields delimit the prefix.
+                    if is_range {
+                        return 1.0 / divisor;
+                    }
+                }
+                1.0 / divisor
+            }
+            (Bound::Included(lower), Bound::Included(upper), _) if lower == upper => 1.0 / distinct,
+            (Bound::Unbounded, Bound::Unbounded, _) => 1.0,
+            // SQLite 3.45.3 whereRangeScanEst fallback: 1/4 for one bound,
+            // 1/64 for two. These are heuristics, not bucket estimates.
+            (Bound::Unbounded, _, _) | (_, Bound::Unbounded, _) => 1.0 / 4.0,
+            _ => 1.0 / 64.0,
+        }
+    }
+
+    pub(crate) fn parameter_id(placeholder: &str) -> Option<usize> {
+        let digits = placeholder.strip_prefix('$')?;
+        if digits.is_empty() || digits.starts_with('0') {
+            return None;
+        }
+        digits.parse().ok()
+    }
+
+    pub(crate) fn bind_parameters(
+        &mut self,
+        params: &[(usize, DataValue)],
+    ) -> Result<(), DatabaseError> {
+        match self {
+            DataValue::Parameter { id, ty } => {
+                let input = params
+                    .iter()
+                    .find_map(|(candidate, value)| (candidate == id).then_some(value));
+                if let Some(input) = input {
+                    *self = input.clone().cast(ty)?;
+                } else {
+                    return Err(DatabaseError::parameter_not_found(format!("${id}")));
+                }
+            }
+            DataValue::Tuple(values, _) => {
+                for value in values {
+                    value.bind_parameters(params)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub(crate) fn has_parameter(&self) -> bool {
+        match self {
+            DataValue::Parameter { .. } => true,
+            DataValue::Tuple(values, _) => values.iter().any(Self::has_parameter),
+            _ => false,
+        }
+    }
+
     pub(crate) fn serialized_len_hint(&self) -> usize {
         match self {
+            DataValue::Parameter { .. } => 0,
             DataValue::Null => 0,
             DataValue::Boolean(_) | DataValue::Int8(_) | DataValue::UInt8(_) => 1,
             DataValue::Int16(_) | DataValue::UInt16(_) => 2,
@@ -782,6 +905,7 @@ impl DataValue {
     #[inline]
     pub fn logical_type(&self) -> LogicalType {
         match self {
+            DataValue::Parameter { ty, .. } => ty.clone(),
             DataValue::Null => LogicalType::SqlNull,
             DataValue::Boolean(_) => LogicalType::Boolean,
             DataValue::Float32(_) => LogicalType::Float,
@@ -921,6 +1045,11 @@ impl DataValue {
         b.push_byte(not_null_tag);
 
         match self {
+            DataValue::Parameter { .. } => {
+                return Err(DatabaseError::InvalidValue(
+                    "unbound parameter reached storage encoding".to_string(),
+                ));
+            }
             DataValue::Null => (),
             DataValue::Int8(v) => encode_u!(b, *v as u8 ^ 0x80_u8),
             DataValue::Int16(v) => encode_u!(b, *v as u16 ^ 0x8000_u16),
@@ -1301,6 +1430,9 @@ impl DataValue {
         }
 
         match (self, to) {
+            (DataValue::Parameter { id, .. }, ty) => {
+                Ok(DataValue::Parameter { id, ty: ty.clone() })
+            }
             (DataValue::Null, _) => Ok(DataValue::Null),
             (DataValue::Utf8 { value, .. }, LogicalType::Char(len, unit)) => {
                 to_char(value, *len, *unit)
@@ -1622,6 +1754,7 @@ macro_rules! format_float_option {
 impl fmt::Display for DataValue {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
+            DataValue::Parameter { id, .. } => write!(f, "${id}")?,
             DataValue::Boolean(e) => write!(f, "{e}")?,
             DataValue::Float32(e) => format_float_option!(f, e)?,
             DataValue::Float64(e) => format_float_option!(f, e)?,
@@ -1691,6 +1824,7 @@ impl fmt::Display for DataValue {
 impl fmt::Debug for DataValue {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
+            DataValue::Parameter { ty, .. } => write!(f, "Parameter({self}: {ty})"),
             DataValue::Boolean(_) => write!(f, "Boolean({self})"),
             DataValue::Float32(_) => write!(f, "Float32({self})"),
             DataValue::Float64(_) => write!(f, "Float64({self})"),

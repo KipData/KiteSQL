@@ -34,6 +34,11 @@ fn to_py_err(err: impl ToString) -> PyErr {
 #[allow(deprecated)]
 fn data_value_to_py(py: Python<'_>, value: &DataValue) -> PyResult<PyObject> {
     let object = match value {
+        DataValue::Parameter { id, .. } => {
+            return Err(PyRuntimeError::new_err(format!(
+                "unbound parameter ${id} reached Python output"
+            )));
+        }
         DataValue::Null => py.None(),
         DataValue::Boolean(value) => value.into_py(py),
         DataValue::Float32(value) => value.0.into_py(py),

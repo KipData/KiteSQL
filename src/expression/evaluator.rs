@@ -46,7 +46,12 @@ impl ScalarExpression {
         tuple: Option<T>,
     ) -> Result<DataValue, DatabaseError> {
         match self {
-            ScalarExpression::Constant(val) => Ok(val.clone()),
+            ScalarExpression::Constant(val) => match val {
+                DataValue::Parameter { id, .. } => {
+                    Err(DatabaseError::parameter_not_found(format!("${id}")))
+                }
+                val => Ok(val.clone()),
+            },
             ScalarExpression::ColumnRef { position, .. } => {
                 let Some(tuple) = tuple else {
                     return Ok(DataValue::Null);
@@ -387,6 +392,7 @@ fn trim_string(value: &str, trim_what: &str, trim_where: Option<TrimWhereField>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::planner::test::PlanArenaTestExt;
 
     fn const_in(
         arena: &mut PlanArena,
@@ -394,11 +400,8 @@ mod tests {
         args: Vec<DataValue>,
         negated: bool,
     ) -> ExprRef {
-        let expr = arena.alloc_expression(ScalarExpression::Constant(expr));
-        let args = args
-            .into_iter()
-            .map(|value| arena.alloc_expression(ScalarExpression::Constant(value)))
-            .collect();
+        let expr = arena.alloc_expression(expr.into());
+        let args = arena.alloc_expressions(args);
         arena.alloc_expression(ScalarExpression::In {
             negated,
             expr,

@@ -16,11 +16,44 @@ use super::alter_table::change_column::DefaultChange;
 use super::*;
 use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::ExprVisitorMut;
-use crate::planner::PlanArena;
+use crate::planner::{Childrens, LogicalPlan, PlanArena};
 
 pub trait OperatorVisitorMut<'a>: Sized {
-    fn visit_operator(&mut self, operator: &'a mut Operator) -> Result<(), DatabaseError> {
-        walk_mut_operator(self, operator)
+    fn visit_plan(&mut self, plan: &'a mut LogicalPlan) -> Result<(), DatabaseError> {
+        let LogicalPlan {
+            operator,
+            physical_option,
+            childrens,
+            ..
+        } = plan;
+        self.visit_operator(operator, physical_option.as_mut())?;
+        match childrens.as_mut() {
+            Childrens::Only(child) => self.visit_plan(child),
+            Childrens::Twins { left, right } => {
+                self.visit_plan(left)?;
+                self.visit_plan(right)
+            }
+            Childrens::None => Ok(()),
+        }
+    }
+
+    fn visit_operator(
+        &mut self,
+        operator: &'a mut Operator,
+        physical_option: Option<&'a mut PhysicalOption>,
+    ) -> Result<(), DatabaseError> {
+        walk_mut_operator(self, operator)?;
+        if let Some(physical_option) = physical_option {
+            self.visit_physical_option(physical_option)?;
+        }
+        Ok(())
+    }
+
+    fn visit_physical_option(
+        &mut self,
+        _physical_option: &'a mut PhysicalOption,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
     }
 
     fn visit_dummy(&mut self) -> Result<(), DatabaseError> {
@@ -224,6 +257,13 @@ impl<'a, 'arena, V> OperatorExprVisitorMut<'a, 'arena, V> {
 }
 
 impl<'a, V: ExprVisitorMut> OperatorVisitorMut<'a> for OperatorExprVisitorMut<'_, '_, V> {
+    fn visit_values(&mut self, op: &'a mut ValuesOperator) -> Result<(), DatabaseError> {
+        for expr in op.rows.iter_mut().flatten() {
+            self.visitor.visit(expr, self.arena)?;
+        }
+        Ok(())
+    }
+
     fn visit_aggregate(&mut self, op: &'a mut AggregateOperator) -> Result<(), DatabaseError> {
         for expr in op.agg_calls.iter_mut().chain(&mut op.groupby_exprs) {
             ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
@@ -425,6 +465,43 @@ mod tests {
     }
 
     #[test]
+    fn visits_plan_children_and_physical_options() -> Result<(), DatabaseError> {
+        struct Counter {
+            operators: usize,
+            physical_options: usize,
+        }
+
+        impl<'a> OperatorVisitorMut<'a> for Counter {
+            fn visit_dummy(&mut self) -> Result<(), DatabaseError> {
+                self.operators += 1;
+                Ok(())
+            }
+
+            fn visit_physical_option(
+                &mut self,
+                _physical_option: &'a mut PhysicalOption,
+            ) -> Result<(), DatabaseError> {
+                self.physical_options += 1;
+                Ok(())
+            }
+        }
+
+        let mut child = LogicalPlan::new(Operator::Dummy, Childrens::None);
+        child.physical_option = Some(PhysicalOption::new(PlanImpl::Dummy, SortOption::None));
+        let mut plan = LogicalPlan::new(Operator::Dummy, Childrens::Only(Box::new(child)));
+        plan.physical_option = Some(PhysicalOption::new(PlanImpl::Dummy, SortOption::None));
+
+        let mut counter = Counter {
+            operators: 0,
+            physical_options: 0,
+        };
+        counter.visit_plan(&mut plan)?;
+        assert_eq!(counter.operators, 2);
+        assert_eq!(counter.physical_options, 2);
+        Ok(())
+    }
+
+    #[test]
     fn dispatches_all_variants_and_mutates_expressions() -> Result<(), DatabaseError> {
         struct NoopVisitor;
         impl OperatorVisitorMut<'_> for NoopVisitor {}
@@ -433,17 +510,17 @@ mod tests {
         let mut arena = PlanArena::new(&table_arena);
         let mut operators = all_operators(&mut arena)?;
         for operator in &mut operators {
-            NoopVisitor.visit_operator(operator)?;
+            NoopVisitor.visit_operator(operator, None)?;
         }
 
         let mut counter = IncrementConstants(0);
         {
             let mut visitor = OperatorExprVisitorMut::new(&mut counter, &mut arena);
             for operator in &mut operators {
-                visitor.visit_operator(operator)?;
+                visitor.visit_operator(operator, None)?;
             }
         }
-        assert_eq!(counter.0, 20);
+        assert_eq!(counter.0, 21); // Includes the Values row expression.
 
         Ok(())
     }
