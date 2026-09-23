@@ -584,7 +584,7 @@ impl Simplify {
 }
 
 impl ExprRef {
-    pub(crate) fn unpack_val(self, arena: &(dyn MetaArena + '_)) -> Option<DataValue> {
+    pub(crate) fn unpack_val<A: MetaArena + ?Sized>(self, arena: &A) -> Option<DataValue> {
         match arena.expression(self) {
             ScalarExpression::Constant(val) => Some(val.clone()),
             ScalarExpression::Alias { expr, .. } => expr.unpack_val(arena),
@@ -638,9 +638,9 @@ impl ExprRef {
         }
     }
 
-    pub(crate) fn unpack_bound_col(
+    pub(crate) fn unpack_bound_col<A: MetaArena + ?Sized>(
         self,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
         is_deep: bool,
     ) -> Option<(ColumnRef, usize)> {
         match arena.expression(self) {

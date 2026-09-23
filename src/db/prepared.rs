@@ -1,5 +1,5 @@
 use super::*;
-use crate::expression::range_detacher::RangeDetacher;
+use crate::expression::range_detacher::{IndexRangeColumn, RangeDetacher};
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::visitor_mut::OperatorVisitorMut;
 use crate::planner::operator::{PhysicalOption, PlanImpl, SortOption};
@@ -46,11 +46,11 @@ impl<'plan> OperatorVisitorMut<'plan> for ParameterBinder<'_> {
 }
 
 /// Extend the selected static index range using its bound residual predicate.
-struct SpecializeIndexRange<'a, 'p> {
-    arena: &'a mut (dyn MetaArena + 'p),
+struct SpecializeIndexRange<'a, A: MetaArena + ?Sized> {
+    arena: &'a mut A,
 }
 
-impl<'plan> OperatorVisitorMut<'plan> for SpecializeIndexRange<'_, '_> {
+impl<'plan, A: MetaArena + ?Sized> OperatorVisitorMut<'plan> for SpecializeIndexRange<'_, A> {
     fn visit_operator(
         &mut self,
         operator: &'plan mut Operator,
@@ -76,7 +76,7 @@ impl<'plan> OperatorVisitorMut<'plan> for SpecializeIndexRange<'_, '_> {
         else {
             return Ok(());
         };
-        let Some(range) = RangeDetacher::specialize_range(
+        let Some(range) = RangeDetacher::<IndexRangeColumn, A>::specialize_range(
             index.meta,
             original,
             params_predicate,

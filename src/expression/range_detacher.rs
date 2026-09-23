@@ -56,10 +56,10 @@ impl DetachedPredicate {
         }
     }
 
-    fn combine_residuals(
+    fn combine_residuals<A: MetaArena + ?Sized>(
         left: Option<ExprRef>,
         right: Option<ExprRef>,
-        arena: &mut (dyn MetaArena + '_),
+        arena: &mut A,
     ) -> Option<ExprRef> {
         match (left, right) {
             (Some(left), Some(right)) => Some(arena.alloc_expression(ScalarExpression::Binary {
@@ -253,7 +253,12 @@ impl Range {
 }
 
 pub trait RangeColumnMatcher {
-    fn matches(&self, table_name: &str, column_id: ColumnId, arena: &(dyn MetaArena + '_)) -> bool;
+    fn matches<A: MetaArena + ?Sized>(
+        &self,
+        table_name: &str,
+        column_id: ColumnId,
+        arena: &A,
+    ) -> bool;
 }
 
 pub struct IndexRangeColumn {
@@ -262,25 +267,34 @@ pub struct IndexRangeColumn {
 }
 
 impl RangeColumnMatcher for IndexRangeColumn {
-    fn matches(&self, table_name: &str, column_id: ColumnId, arena: &(dyn MetaArena + '_)) -> bool {
+    fn matches<A: MetaArena + ?Sized>(
+        &self,
+        table_name: &str,
+        column_id: ColumnId,
+        arena: &A,
+    ) -> bool {
         let index = arena.index(self.meta);
         table_name == index.table_name.as_ref()
             && index.column_ids.get(self.position) == Some(&column_id)
     }
 }
 
-pub struct RangeDetacher<'a, 'p, M: RangeColumnMatcher = IndexRangeColumn> {
+pub struct RangeDetacher<
+    'a,
+    M: RangeColumnMatcher = IndexRangeColumn,
+    A: MetaArena + ?Sized = dyn MetaArena + 'a,
+> {
     column: M,
-    arena: &'a mut (dyn MetaArena + 'p),
+    arena: &'a mut A,
 }
 
-impl<'a, 'p> RangeDetacher<'a, 'p, IndexRangeColumn> {
+impl<'a, A: MetaArena + ?Sized> RangeDetacher<'a, IndexRangeColumn, A> {
     pub(crate) fn specialize_range(
         meta: IndexMetaRef,
         original: &Range,
         predicate: ExprRef,
         prefix_len: usize,
-        arena: &'a mut (dyn MetaArena + 'p),
+        arena: &'a mut A,
     ) -> Result<Option<Range>, DatabaseError> {
         let index = arena.index(meta);
         if prefix_len >= index.column_ids.len() {
@@ -340,11 +354,7 @@ impl<'a, 'p> RangeDetacher<'a, 'p, IndexRangeColumn> {
         )
     }
 
-    pub(crate) fn for_index(
-        meta: IndexMetaRef,
-        position: usize,
-        arena: &'a mut (dyn MetaArena + 'p),
-    ) -> Self {
+    pub(crate) fn for_index(meta: IndexMetaRef, position: usize, arena: &'a mut A) -> Self {
         Self {
             column: IndexRangeColumn { meta, position },
             arena,
@@ -352,7 +362,7 @@ impl<'a, 'p> RangeDetacher<'a, 'p, IndexRangeColumn> {
     }
 }
 
-impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
+impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
     pub(crate) fn detach(
         &mut self,
         expr: ExprRef,
@@ -1136,22 +1146,18 @@ pub(crate) mod test_support {
     }
 
     impl RangeColumnMatcher for DirectRangeColumn<'_> {
-        fn matches(
+        fn matches<A: MetaArena + ?Sized>(
             &self,
             table_name: &str,
             column_id: ColumnId,
-            _arena: &(dyn MetaArena + '_),
+            _arena: &A,
         ) -> bool {
             table_name == self.table_name && column_id == *self.column_id
         }
     }
 
-    impl<'a, 'p> RangeDetacher<'a, 'p, DirectRangeColumn<'a>> {
-        pub(crate) fn new(
-            table_name: &'a str,
-            column_id: &'a ColumnId,
-            arena: &'a mut (dyn MetaArena + 'p),
-        ) -> Self {
+    impl<'a, A: MetaArena + ?Sized> RangeDetacher<'a, DirectRangeColumn<'a>, A> {
+        pub(crate) fn new(table_name: &'a str, column_id: &'a ColumnId, arena: &'a mut A) -> Self {
             Self {
                 column: DirectRangeColumn {
                     table_name,
