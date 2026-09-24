@@ -465,11 +465,17 @@ mod tests {
 
     #[test]
     fn composite_index_ranges_bind_for_each_execution() -> Result<(), DatabaseError> {
-        fn has_index_scan(plan: &LogicalPlan) -> bool {
+        fn index_range(plan: &LogicalPlan) -> Option<&Range> {
             plan.physical_option
                 .as_ref()
-                .is_some_and(|option| matches!(option.plan, PlanImpl::IndexScan(_)))
-                || plan.childrens.iter().any(has_index_scan)
+                .and_then(|option| match &option.plan {
+                    PlanImpl::IndexScan(info) => match &info.lookup {
+                        Some(IndexLookup::Static(range)) => Some(range),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .or_else(|| plan.childrens.iter().find_map(index_range))
         }
 
         let mut db = DataBaseBuilder::path(".")
@@ -487,7 +493,7 @@ mod tests {
                 (3, LogicalType::Integer),
             ],
         )?;
-        assert!(has_index_scan(&plan.plan));
+        assert!(index_range(&plan.plan).is_some());
         let mut iter = db.execute(
             &plan,
             [
@@ -517,6 +523,36 @@ mod tests {
         );
         assert!(iter.next_tuple(|_, _| ())?.is_none());
         iter.done()?;
+
+        // The lower bound is computed only after binding; it must still be
+        // intersected with the prepared upper bound instead of scanning the
+        // whole equality prefix and filtering rows afterwards.
+        let plan = db.prepare(
+            "select k from t where w=$1 and k<$2 and k>=($3-20)",
+            &[
+                (1, LogicalType::Integer),
+                (2, LogicalType::Integer),
+                (3, LogicalType::Integer),
+            ],
+        )?;
+        let (bound, _) = plan.bind_parameters(&[
+            (1, DataValue::Int32(2)),
+            (2, DataValue::Int32(5)),
+            (3, DataValue::Int32(22)),
+        ])?;
+        assert_eq!(
+            index_range(&bound),
+            Some(&Range::Scope {
+                min: Bound::Included(DataValue::Tuple(vec![
+                    DataValue::Int32(2),
+                    DataValue::Int32(2),
+                ])),
+                max: Bound::Excluded(DataValue::Tuple(vec![
+                    DataValue::Int32(2),
+                    DataValue::Int32(5),
+                ])),
+            })
+        );
         Ok(())
     }
 }

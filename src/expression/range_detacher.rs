@@ -617,7 +617,7 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                     BinaryOperator::And => {
                         let bound_eq = Bound::Included(eq);
                         let is_less = matches!(
-                            Self::bound_compared(&bound_eq, &min, true).unwrap_or({
+                            Self::bound_compared(&bound_eq, &min, false, false).unwrap_or({
                                 if matches!(min, Bound::Unbounded) {
                                     Ordering::Greater
                                 } else {
@@ -629,7 +629,7 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
 
                         if is_less
                             || matches!(
-                                Self::bound_compared(&bound_eq, &max, false),
+                                Self::bound_compared(&bound_eq, &max, true, true),
                                 Some(Ordering::Greater)
                             )
                         {
@@ -646,7 +646,7 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                             });
                         }
                         let bound_eq = Bound::Excluded(eq);
-                        let range = match Self::bound_compared(&bound_eq, &min, true) {
+                        let range = match Self::bound_compared(&bound_eq, &min, false, false) {
                             Some(Ordering::Less) => Range::SortedRanges(vec![
                                 Range::Eq(unpack_bound(bound_eq)),
                                 Range::Scope { min, max },
@@ -659,7 +659,7 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                                 ),
                                 max,
                             },
-                            _ => match Self::bound_compared(&bound_eq, &max, false) {
+                            _ => match Self::bound_compared(&bound_eq, &max, true, true) {
                                 Some(Ordering::Greater) => Range::SortedRanges(vec![
                                     Range::Scope { min, max },
                                     Range::Eq(unpack_bound(bound_eq)),
@@ -790,12 +790,12 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                     },
                 ) => {
                     if let Some(true) =
-                        Self::bound_compared(l_max, r_min, false).map(Ordering::is_lt)
+                        Self::bound_compared(l_max, r_min, true, false).map(Ordering::is_lt)
                     {
                         ranges.insert(*idx, binary.unwrap());
                         return ranges;
                     } else if let Some(true) =
-                        Self::bound_compared(l_min, r_max, true).map(Ordering::is_gt)
+                        Self::bound_compared(l_min, r_max, false, true).map(Ordering::is_gt)
                     {
                         *idx += 1;
                         continue;
@@ -813,11 +813,11 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                     let r_bound = Bound::Included(r_val.clone());
 
                     if let Some(true) =
-                        Self::bound_compared(l_max, &r_bound, false).map(Ordering::is_lt)
+                        Self::bound_compared(l_max, &r_bound, true, false).map(Ordering::is_lt)
                     {
                         ranges.insert(*idx, binary.unwrap());
                         return ranges;
-                    } else if Self::bound_compared(l_min, &r_bound, true)
+                    } else if Self::bound_compared(l_min, &r_bound, false, true)
                         .map(Ordering::is_gt)
                         .unwrap_or_else(|| op == BinaryOperator::Or)
                     {
@@ -849,14 +849,14 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                 ) => {
                     let l_bound = Bound::Included(l_val.clone());
 
-                    if Self::bound_compared(&l_bound, r_min, false)
+                    if Self::bound_compared(&l_bound, r_min, true, false)
                         .map(Ordering::is_lt)
                         .unwrap_or_else(|| op == BinaryOperator::Or)
                     {
                         ranges.insert(*idx, binary.unwrap());
                         return ranges;
                     } else if let Some(true) =
-                        Self::bound_compared(&l_bound, r_max, true).map(Ordering::is_gt)
+                        Self::bound_compared(&l_bound, r_max, false, true).map(Ordering::is_gt)
                     {
                         *idx += 1;
                         continue;
@@ -904,14 +904,14 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
         right_max: Bound<DataValue>,
     ) -> Range {
         if matches!(
-            Self::bound_compared(&left_max, &right_min, false),
+            Self::bound_compared(&left_max, &right_min, true, false),
             Some(Ordering::Less)
         ) || matches!(
-            Self::bound_compared(&right_max, &left_min, false),
+            Self::bound_compared(&right_max, &left_min, true, false),
             Some(Ordering::Less)
         ) {
             let (min_1, max_1, min_2, max_2) = if let Some(true) =
-                Self::bound_compared(&left_min, &right_min, true).map(Ordering::is_lt)
+                Self::bound_compared(&left_min, &right_min, false, false).map(Ordering::is_lt)
             {
                 (left_min, left_max, right_min, right_max)
             } else {
@@ -929,20 +929,20 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
             ]);
         }
         let min = if let Some(true) =
-            Self::bound_compared(&left_min, &right_min, true).map(Ordering::is_lt)
+            Self::bound_compared(&left_min, &right_min, false, false).map(Ordering::is_lt)
         {
             left_min
         } else {
             right_min
         };
         let max = if let Some(true) =
-            Self::bound_compared(&left_max, &right_max, false).map(Ordering::is_gt)
+            Self::bound_compared(&left_max, &right_max, true, true).map(Ordering::is_gt)
         {
             left_max
         } else {
             right_max
         };
-        match Self::bound_compared(&min, &max, matches!(min, Bound::Unbounded)) {
+        match Self::bound_compared(&min, &max, false, true) {
             Some(Ordering::Equal) => match min {
                 Bound::Included(val) => Range::Eq(val),
                 Bound::Excluded(_) => Range::Dummy,
@@ -961,8 +961,8 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
         right_min: Bound<DataValue>,
         right_max: Bound<DataValue>,
     ) -> Result<Range, (Range, Range)> {
-        let min_order = Self::bound_compared(&left_min, &right_min, true);
-        let max_order = Self::bound_compared(&left_max, &right_max, false);
+        let min_order = Self::bound_compared(&left_min, &right_min, false, false);
+        let max_order = Self::bound_compared(&left_max, &right_max, true, true);
         let (Some(min_order), Some(max_order)) = (min_order, max_order) else {
             return Err((
                 Range::Scope {
@@ -983,20 +983,18 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
             Ordering::Less => left_max,
             Ordering::Greater | Ordering::Equal => right_max,
         };
-        Ok(
-            match Self::bound_compared(&min, &max, matches!(min, Bound::Unbounded)) {
-                Some(Ordering::Greater) => Range::Dummy,
-                Some(Ordering::Equal) => match min {
-                    Bound::Included(val) => Range::Eq(val),
-                    Bound::Excluded(_) => Range::Dummy,
-                    Bound::Unbounded => Range::Scope {
-                        min: Bound::Unbounded,
-                        max: Bound::Unbounded,
-                    },
+        Ok(match Self::bound_compared(&min, &max, false, true) {
+            Some(Ordering::Greater) => Range::Dummy,
+            Some(Ordering::Equal) => match min {
+                Bound::Included(val) => Range::Eq(val),
+                Bound::Excluded(_) => Range::Dummy,
+                Bound::Unbounded => Range::Scope {
+                    min: Bound::Unbounded,
+                    max: Bound::Unbounded,
                 },
-                _ => Range::Scope { min, max },
             },
-        )
+            _ => Range::Scope { min, max },
+        })
     }
 
     fn matches_column(&self, col: ColumnRef) -> bool {
@@ -1012,8 +1010,30 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
     fn bound_compared(
         left_bound: &Bound<DataValue>,
         right_bound: &Bound<DataValue>,
-        is_min: bool,
+        left_is_upper: bool,
+        right_is_upper: bool,
     ) -> Option<Ordering> {
+        fn range_value_cmp(
+            left: &DataValue,
+            right: &DataValue,
+            left_is_upper: bool,
+            right_is_upper: bool,
+        ) -> Option<Ordering> {
+            match (left, right) {
+                (DataValue::Null, DataValue::Null) => Some(Ordering::Equal),
+                (DataValue::Null, _) => Some(Ordering::Greater),
+                (_, DataValue::Null) => Some(Ordering::Less),
+                (DataValue::Tuple(left), DataValue::Tuple(right)) => {
+                    crate::types::value::tuple_partial_cmp(
+                        left,
+                        right,
+                        left_is_upper,
+                        right_is_upper,
+                    )
+                }
+                _ => left.partial_cmp(right),
+            }
+        }
         fn is_min_then_reverse(is_min: bool, order: Ordering) -> Ordering {
             if is_min {
                 order
@@ -1021,24 +1041,25 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                 order.reverse()
             }
         }
-        fn range_value_cmp(left: &DataValue, right: &DataValue) -> Option<Ordering> {
-            match (left, right) {
-                (DataValue::Null, DataValue::Null) => Some(Ordering::Equal),
-                (DataValue::Null, _) => Some(Ordering::Greater),
-                (_, DataValue::Null) => Some(Ordering::Less),
-                _ => left.partial_cmp(right),
-            }
-        }
+        let is_min = !left_is_upper && !right_is_upper;
         match (left_bound, right_bound) {
             (Bound::Unbounded, Bound::Unbounded) => Some(Ordering::Equal),
-            (Bound::Unbounded, _) => Some(is_min_then_reverse(is_min, Ordering::Less)),
-            (_, Bound::Unbounded) => Some(is_min_then_reverse(is_min, Ordering::Greater)),
-            (Bound::Included(left), Bound::Included(right)) => range_value_cmp(left, right),
-            (Bound::Included(left), Bound::Excluded(right)) => range_value_cmp(left, right)
-                .map(|order| order.then(is_min_then_reverse(is_min, Ordering::Less))),
-            (Bound::Excluded(left), Bound::Excluded(right)) => range_value_cmp(left, right),
-            (Bound::Excluded(left), Bound::Included(right)) => range_value_cmp(left, right)
-                .map(|order| order.then(is_min_then_reverse(is_min, Ordering::Greater))),
+            (Bound::Unbounded, _) => Some(is_min_then_reverse(!left_is_upper, Ordering::Less)),
+            (_, Bound::Unbounded) => Some(is_min_then_reverse(!right_is_upper, Ordering::Greater)),
+            (Bound::Included(left), Bound::Included(right)) => {
+                range_value_cmp(left, right, left_is_upper, right_is_upper)
+            }
+            (Bound::Included(left), Bound::Excluded(right)) => {
+                range_value_cmp(left, right, left_is_upper, !right_is_upper)
+                    .map(|order| order.then(is_min_then_reverse(is_min, Ordering::Less)))
+            }
+            (Bound::Excluded(left), Bound::Excluded(right)) => {
+                range_value_cmp(left, right, !left_is_upper, !right_is_upper)
+            }
+            (Bound::Excluded(left), Bound::Included(right)) => {
+                range_value_cmp(left, right, !left_is_upper, right_is_upper)
+                    .map(|order| order.then(is_min_then_reverse(is_min, Ordering::Greater)))
+            }
         }
     }
 
@@ -2746,6 +2767,25 @@ mod test {
                 min: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(1)])),
                 max: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(1)])),
             })
+        );
+
+        let concrete = Range::Scope {
+            min: Bound::Included(DataValue::Tuple(vec![
+                DataValue::Int32(1),
+                DataValue::Int32(10),
+            ])),
+            max: Bound::Excluded(DataValue::Tuple(vec![
+                DataValue::Int32(1),
+                DataValue::Int32(20),
+            ])),
+        };
+        assert_eq!(
+            RangeDetacher::<IndexRangeColumn>::merge_binary(
+                BinaryOperator::And,
+                unbounded_suffix.unwrap(),
+                concrete.clone(),
+            ),
+            Ok(concrete)
         );
 
         assert!(suffix

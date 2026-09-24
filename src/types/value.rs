@@ -332,21 +332,33 @@ impl PartialEq for DataValue {
     }
 }
 
-fn tuple_partial_cmp(left: &[DataValue], right: &[DataValue]) -> Option<Ordering> {
+pub(crate) fn tuple_partial_cmp(
+    left: &[DataValue],
+    right: &[DataValue],
+    left_is_upper: bool,
+    right_is_upper: bool,
+) -> Option<Ordering> {
     let mut left_iter = left.iter();
     let mut right_iter = right.iter();
 
     loop {
-        match (left_iter.next(), right_iter.next()) {
-            (Some(left), Some(right)) => {
+        match (
+            left_iter.next(),
+            right_iter.next(),
+            left_is_upper,
+            right_is_upper,
+        ) {
+            (Some(left), Some(right), _, _) => {
                 let ordering = tuple_element_partial_cmp(left, right)?;
                 if ordering != Ordering::Equal {
                     return Some(ordering);
                 }
             }
-            (Some(_), None) => return Some(Ordering::Greater),
-            (None, Some(_)) => return Some(Ordering::Less),
-            (None, None) => return Some(Ordering::Equal),
+            (Some(_), None, _, true) => return Some(Ordering::Less),
+            (Some(_), None, _, false) => return Some(Ordering::Greater),
+            (None, Some(_), true, _) => return Some(Ordering::Greater),
+            (None, Some(_), false, _) => return Some(Ordering::Less),
+            (None, None, _, _) => return Some(Ordering::Equal),
         }
     }
 }
@@ -356,7 +368,9 @@ fn tuple_element_partial_cmp(left: &DataValue, right: &DataValue) -> Option<Orde
         (DataValue::Null, DataValue::Null) => Some(Ordering::Equal),
         (DataValue::Null, _) => Some(Ordering::Greater),
         (_, DataValue::Null) => Some(Ordering::Less),
-        (DataValue::Tuple(left), DataValue::Tuple(right)) => tuple_partial_cmp(left, right),
+        (DataValue::Tuple(left), DataValue::Tuple(right)) => {
+            tuple_partial_cmp(left, right, false, false)
+        }
         _ => left.partial_cmp(right),
     }
 }
@@ -404,7 +418,7 @@ impl PartialOrd for DataValue {
             (Decimal(v1), Decimal(v2)) => v1.partial_cmp(v2),
             #[cfg(feature = "decimal")]
             (Decimal(_), _) => None,
-            (Tuple(v1), Tuple(v2)) => tuple_partial_cmp(v1, v2),
+            (Tuple(v1), Tuple(v2)) => tuple_partial_cmp(v1, v2, false, false),
             (Tuple(..), _) => None,
         }
     }
