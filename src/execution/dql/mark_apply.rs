@@ -167,6 +167,7 @@ impl MarkApply {
                 plan_arena
                     .expression(*probe)
                     .eval(plan_arena, Some(left_tuple))
+                    .map(|value| value.into_owned())
             })
             .transpose()
     }
@@ -299,9 +300,9 @@ impl MarkApply {
         let values = SplitTupleRef::new(left_tuple, right_tuple);
 
         for predicate in predicates {
-            match plan_arena
+            match *plan_arena
                 .expression(*predicate)
-                .eval(plan_arena, Some(values))?
+                .eval(plan_arena, Some(&values))?
             {
                 DataValue::Boolean(true) => {}
                 DataValue::Boolean(false) | DataValue::Null => return Ok(false),
@@ -342,9 +343,9 @@ impl MarkApply {
             .ok_or(DatabaseError::InvalidType)?;
 
         for predicate in correlated_predicates {
-            match plan_arena
+            match *plan_arena
                 .expression(*predicate)
-                .eval(plan_arena, Some(values))?
+                .eval(plan_arena, Some(&values))?
             {
                 DataValue::Boolean(true) => {}
                 DataValue::Boolean(false) | DataValue::Null => return Ok(None),
@@ -355,7 +356,8 @@ impl MarkApply {
         Ok(Some(
             plan_arena
                 .expression(*probe_predicate)
-                .eval(plan_arena, Some(values))?,
+                .eval(plan_arena, Some(&values))?
+                .into_owned(),
         ))
     }
 }

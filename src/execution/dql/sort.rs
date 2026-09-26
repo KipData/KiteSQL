@@ -90,7 +90,12 @@ pub(crate) fn sort_tuples(
 
     for (x, SortField { expr, .. }) in sort_fields.iter().enumerate() {
         for (_, tuple) in tuples.iter() {
-            eval_values[x].push(plan_arena.expression(*expr).eval(plan_arena, Some(tuple))?);
+            eval_values[x].push(
+                plan_arena
+                    .expression(*expr)
+                    .eval(plan_arena, Some(tuple))?
+                    .into_owned(),
+            );
         }
     }
 

@@ -128,7 +128,7 @@ pub(crate) fn filter<T: TupleLike>(
     filter_expr: &ExprRef,
     plan_arena: &(dyn MetaArena + '_),
 ) -> Result<bool, DatabaseError> {
-    match &plan_arena
+    match &*plan_arena
         .expression(*filter_expr)
         .eval(plan_arena, Some(values as &dyn TupleLike))?
     {

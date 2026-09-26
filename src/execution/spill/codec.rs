@@ -35,7 +35,12 @@ impl SortRow {
     ) -> Result<Self, DatabaseError> {
         let sort_values = sort_fields
             .iter()
-            .map(|field| arena.expression(field.expr).eval(arena, Some(&tuple)))
+            .map(|field| {
+                arena
+                    .expression(field.expr)
+                    .eval(arena, Some(&tuple))
+                    .map(|v| v.into_owned())
+            })
             .collect::<Result<_, _>>()?;
         Ok(Self { sort_values, tuple })
     }

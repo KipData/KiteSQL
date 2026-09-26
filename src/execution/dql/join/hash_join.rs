@@ -135,7 +135,12 @@ impl HashJoin {
     ) -> Result<(), DatabaseError> {
         build_buf.clear();
         for expr in on_keys {
-            build_buf.push(plan_arena.expression(*expr).eval(plan_arena, Some(tuple))?);
+            build_buf.push(
+                plan_arena
+                    .expression(*expr)
+                    .eval(plan_arena, Some(tuple))?
+                    .into_owned(),
+            );
         }
         Ok(())
     }

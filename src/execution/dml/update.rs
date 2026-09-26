@@ -176,7 +176,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update {
                         let value = plan_arena
                             .expression(*expr)
                             .eval(plan_arena, Some(&tuple))?;
-                        tuple.values[i] = value;
+                        tuple.values[i] = value.into_owned();
                     }
                 }
 

@@ -632,7 +632,9 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
             let value = {
                 let input_values = &values[..base];
                 let current: &dyn TupleLike = input.unwrap_or(&input_values);
-                expr.expression(arena).eval(arena, Some(current))
+                expr.expression(arena)
+                    .eval(arena, Some(current))
+                    .map(|value| value.into_owned())
             };
             match value {
                 Ok(value) => values.push(value),

@@ -263,8 +263,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
                                 };
                                 let value = plan_arena
                                     .expression(*filter)
-                                    .eval(plan_arena, Some(values))?;
-                                match &value {
+                                    .eval(plan_arena, Some(&values))?;
+                                match &*value {
                                     DataValue::Boolean(true) => {
                                         let tuple = match self.ty {
                                             JoinType::RightOuter => Self::emit_tuple(

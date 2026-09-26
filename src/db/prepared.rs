@@ -3,8 +3,7 @@ use crate::expression::range_detacher::{IndexRangeColumn, RangeDetacher};
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::visitor_mut::OperatorVisitorMut;
 use crate::planner::operator::{PhysicalOption, PlanImpl, SortOption};
-use crate::planner::MetaArena;
-use crate::planner::ParamArena;
+use crate::planner::{ExprRef, MetaArena, ParamArena};
 use crate::types::index::IndexLookup;
 use crate::types::LogicalType;
 
@@ -101,6 +100,7 @@ impl<'plan, A: MetaArena + ?Sized> OperatorVisitorMut<'plan> for SpecializeIndex
 pub struct PreparedPlan<'db> {
     pub(crate) plan: LogicalPlan,
     pub(crate) arena: PlanArena<'db>,
+    parameter_expressions: Vec<ExprRef>,
 }
 
 impl<'db> PreparedPlan<'db> {
@@ -108,7 +108,7 @@ impl<'db> PreparedPlan<'db> {
         &self,
         params: &[(usize, DataValue)],
     ) -> Result<(LogicalPlan, ParamArena<'_>), DatabaseError> {
-        let mut arena = ParamArena::new(&self.arena, params)?;
+        let mut arena = ParamArena::new(&self.arena, &self.parameter_expressions, params)?;
         let mut plan = self.plan.clone();
         ParameterBinder { params }.visit_plan(&mut plan)?;
         SpecializeIndexRange { arena: &mut arena }.visit_plan(&mut plan)?;
@@ -165,7 +165,12 @@ impl<S: Storage> State<S> {
             binder.bind(statement, arena)
         })?;
         plan.output_schema(&mut arena);
-        Ok(PreparedPlan { plan, arena })
+        let parameter_expressions = arena.parameter_expressions();
+        Ok(PreparedPlan {
+            plan,
+            arena,
+            parameter_expressions,
+        })
     }
 }
 

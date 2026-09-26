@@ -129,7 +129,8 @@ impl Window {
         for (index, field) in self.sort_fields.iter().enumerate() {
             let value = plan_arena
                 .expression(field.expr)
-                .eval(plan_arena, Some(tuple))?;
+                .eval(plan_arena, Some(tuple))?
+                .into_owned();
             if self.state.started && self.state.sort_values[index] != value {
                 if index < self.partition_by_len {
                     boundary = Some(Boundary::Partition);

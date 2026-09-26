@@ -51,10 +51,14 @@ impl ScalarFunctionImpl for OctetLength {
     ) -> Result<DataValue, DatabaseError> {
         let mut value = arena.expression(exprs[0]).eval(arena, tuples)?;
         if !matches!(value.logical_type(), LogicalType::Varchar(_, _)) {
-            value = value.cast(&LogicalType::Varchar(None, CharLengthUnits::Characters))?;
+            value = std::borrow::Cow::Owned(
+                value
+                    .into_owned()
+                    .cast(&LogicalType::Varchar(None, CharLengthUnits::Characters))?,
+            );
         }
         let mut length: u64 = 0;
-        if let DataValue::Utf8 { value, ty, unit } = &mut value {
+        if let DataValue::Utf8 { value, ty, unit } = value.as_ref() {
             length = value.len() as u64;
         }
         Ok(DataValue::UInt64(length))

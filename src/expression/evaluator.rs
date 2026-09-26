@@ -29,41 +29,41 @@ use std::cmp::Ordering;
 
 macro_rules! eval_to_num {
     ($num_expr:expr, $arena:expr, $tuple:expr) => {
-        if let Some(num_i32) = $arena
-            .expression(*$num_expr)
-            .eval($arena, $tuple)?
-            .cast(&LogicalType::Integer)?
-            .i32()
+        if let Some(num_i32) = cast_cow(
+            $arena.expression(*$num_expr).eval($arena, $tuple)?,
+            &LogicalType::Integer,
+        )?
+        .i32()
         {
             num_i32
         } else {
-            return Ok(DataValue::Null);
+            return Ok(Cow::Owned(DataValue::Null));
         }
     };
 }
 
 impl ScalarExpression {
-    pub fn eval<T: TupleLike + Copy>(
-        &self,
-        arena: &(dyn MetaArena + '_),
-        tuple: Option<T>,
-    ) -> Result<DataValue, DatabaseError> {
+    pub fn eval<'a>(
+        &'a self,
+        arena: &'a (dyn MetaArena + '_),
+        tuple: Option<&'a dyn TupleLike>,
+    ) -> Result<Cow<'a, DataValue>, DatabaseError> {
         match self {
             ScalarExpression::Constant(val) => match val {
                 DataValue::Parameter { id, .. } => {
                     Err(DatabaseError::parameter_not_found(format!("${id}")))
                 }
-                val => Ok(val.clone()),
+                val => Ok(Cow::Borrowed(val)),
             },
             ScalarExpression::ColumnRef { position, .. } => {
                 let Some(tuple) = tuple else {
-                    return Ok(DataValue::Null);
+                    return Ok(Cow::Owned(DataValue::Null));
                 };
-                Ok(tuple.value_at(*position).clone())
+                Ok(Cow::Borrowed(tuple.value_at(*position)))
             }
             ScalarExpression::Alias { expr, alias } => {
                 let Some(tuple) = tuple else {
-                    return Ok(DataValue::Null);
+                    return Ok(Cow::Owned(DataValue::Null));
                 };
                 if let AliasType::Expr(inner_expr) = alias {
                     arena.expression(*inner_expr).eval(arena, Some(tuple))
@@ -76,7 +76,7 @@ impl ScalarExpression {
             } => {
                 let value = arena.expression(*expr).eval(arena, tuple)?;
                 if let Some(evaluator) = evaluator {
-                    evaluator.eval(&value)
+                    evaluator.eval(&value).map(Cow::Owned)
                 } else {
                     Ok(value)
                 }
@@ -94,13 +94,14 @@ impl ScalarExpression {
                     .as_ref()
                     .ok_or(DatabaseError::EvaluatorNotFound)?
                     .binary_eval(&left, &right)
+                    .map(Cow::Owned)
             }
             ScalarExpression::IsNull { expr, negated } => {
                 let mut is_null = arena.expression(*expr).eval(arena, tuple)?.is_null();
                 if *negated {
                     is_null = !is_null;
                 }
-                Ok(DataValue::Boolean(is_null))
+                Ok(Cow::Owned(DataValue::Boolean(is_null)))
             }
             ScalarExpression::In {
                 expr,
@@ -109,7 +110,7 @@ impl ScalarExpression {
             } => {
                 let value = arena.expression(*expr).eval(arena, tuple)?;
                 if value.is_null() {
-                    return Ok(DataValue::Null);
+                    return Ok(Cow::Owned(DataValue::Null));
                 }
 
                 let mut matched = false;
@@ -128,11 +129,11 @@ impl ScalarExpression {
                 }
 
                 if matched {
-                    Ok(DataValue::Boolean(!negated))
+                    Ok(Cow::Owned(DataValue::Boolean(!negated)))
                 } else if saw_null {
-                    Ok(DataValue::Null)
+                    Ok(Cow::Owned(DataValue::Null))
                 } else {
-                    Ok(DataValue::Boolean(*negated))
+                    Ok(Cow::Owned(DataValue::Boolean(*negated)))
                 }
             }
             ScalarExpression::Unary {
@@ -140,10 +141,12 @@ impl ScalarExpression {
             } => {
                 let value = arena.expression(*expr).eval(arena, tuple)?;
 
-                Ok(evaluator
-                    .as_ref()
-                    .ok_or(DatabaseError::EvaluatorNotFound)?
-                    .unary_eval(&value))
+                Ok(Cow::Owned(
+                    evaluator
+                        .as_ref()
+                        .ok_or(DatabaseError::EvaluatorNotFound)?
+                        .unary_eval(&value),
+                ))
             }
             ScalarExpression::AggCall { .. } => {
                 unreachable!("must use `NormalizationRuleImpl::ExpressionRemapper`")
@@ -163,26 +166,24 @@ impl ScalarExpression {
                     value.partial_cmp(&right).map(Ordering::is_le),
                 ) {
                     (Some(true), Some(true)) => true,
-                    (None, _) | (_, None) => return Ok(DataValue::Null),
+                    (None, _) | (_, None) => return Ok(Cow::Owned(DataValue::Null)),
                     _ => false,
                 };
                 if *negated {
                     is_between = !is_between;
                 }
-                Ok(DataValue::Boolean(is_between))
+                Ok(Cow::Owned(DataValue::Boolean(is_between)))
             }
             ScalarExpression::SubString {
                 expr,
                 for_expr,
                 from_expr,
             } => {
-                if let Some(mut string) = arena
-                    .expression(*expr)
-                    .eval(arena, tuple)?
-                    .cast(&LogicalType::Varchar(None, CharLengthUnits::Characters))?
-                    .utf8()
-                    .map(String::from)
-                {
+                let value = cast_cow(
+                    arena.expression(*expr).eval(arena, tuple)?,
+                    &LogicalType::Varchar(None, CharLengthUnits::Characters),
+                )?;
+                if let Some(mut string) = value.utf8().map(String::from) {
                     if let Some(from_expr) = from_expr {
                         let mut from = eval_to_num!(from_expr, arena, tuple).saturating_sub(1);
                         let len_i = string.len() as i32;
@@ -191,7 +192,7 @@ impl ScalarExpression {
                             from += len_i + 1;
                         }
                         if from > len_i {
-                            return Ok(DataValue::Null);
+                            return Ok(Cow::Owned(DataValue::Null));
                         }
                         string = string.split_off(from as usize);
                     }
@@ -201,77 +202,71 @@ impl ScalarExpression {
                         let _ = string.split_off(for_i);
                     }
 
-                    Ok(DataValue::Utf8 {
+                    Ok(Cow::Owned(DataValue::Utf8 {
                         value: string,
                         ty: Utf8Type::Variable(None),
                         unit: CharLengthUnits::Characters,
-                    })
+                    }))
                 } else {
-                    Ok(DataValue::Null)
+                    Ok(Cow::Owned(DataValue::Null))
                 }
             }
             ScalarExpression::Position { expr, in_expr } => {
-                let unpack = |expr: ExprRef| -> Result<String, DatabaseError> {
-                    Ok(arena
-                        .expression(expr)
-                        .eval(arena, tuple)?
-                        .cast(&LogicalType::Varchar(None, CharLengthUnits::Characters))?
+                let varchar = LogicalType::Varchar(None, CharLengthUnits::Characters);
+                let pattern = cast_cow(arena.expression(*expr).eval(arena, tuple)?, &varchar)?;
+                let string = cast_cow(arena.expression(*in_expr).eval(arena, tuple)?, &varchar)?;
+                Ok(Cow::Owned(DataValue::Int32(
+                    string
                         .utf8()
-                        .map(String::from)
-                        .unwrap_or("".to_owned()))
-                };
-                let pattern = unpack(*expr)?;
-                let str = unpack(*in_expr)?;
-                Ok(DataValue::Int32(
-                    str.find(&pattern).map(|pos| pos as i32 + 1).unwrap_or(0),
-                ))
+                        .unwrap_or("")
+                        .find(pattern.utf8().unwrap_or(""))
+                        .map(|pos| pos as i32 + 1)
+                        .unwrap_or(0),
+                )))
             }
             ScalarExpression::Trim {
                 expr,
                 trim_what_expr,
                 trim_where,
             } => {
-                if let Some(string) = arena
-                    .expression(*expr)
-                    .eval(arena, tuple)?
-                    .cast(&LogicalType::Varchar(None, CharLengthUnits::Characters))?
-                    .utf8()
-                {
+                let value = cast_cow(
+                    arena.expression(*expr).eval(arena, tuple)?,
+                    &LogicalType::Varchar(None, CharLengthUnits::Characters),
+                )?;
+                if let Some(string) = value.utf8() {
                     let mut trim_what = String::from(" ");
                     if let Some(trim_what_expr) = trim_what_expr {
-                        trim_what = arena
-                            .expression(*trim_what_expr)
-                            .eval(arena, tuple)?
-                            .cast(&LogicalType::Varchar(None, CharLengthUnits::Characters))?
-                            .utf8()
-                            .map(String::from)
-                            .unwrap_or_default();
+                        let value = cast_cow(
+                            arena.expression(*trim_what_expr).eval(arena, tuple)?,
+                            &LogicalType::Varchar(None, CharLengthUnits::Characters),
+                        )?;
+                        trim_what = value.utf8().unwrap_or("").to_owned();
                     }
                     let string_trimmed = trim_string(string, &trim_what, *trim_where);
 
-                    Ok(DataValue::Utf8 {
+                    Ok(Cow::Owned(DataValue::Utf8 {
                         value: string_trimmed,
                         ty: Utf8Type::Variable(None),
                         unit: CharLengthUnits::Characters,
-                    })
+                    }))
                 } else {
-                    Ok(DataValue::Null)
+                    Ok(Cow::Owned(DataValue::Null))
                 }
             }
             ScalarExpression::Tuple(exprs) => {
                 let mut values = Vec::with_capacity(exprs.len());
 
                 for expr in exprs {
-                    values.push(arena.expression(*expr).eval(arena, tuple)?);
+                    values.push(arena.expression(*expr).eval(arena, tuple)?.into_owned());
                 }
-                Ok(DataValue::Tuple(values))
+                Ok(Cow::Owned(DataValue::Tuple(values)))
             }
             ScalarExpression::ScalaFunction(ScalarFunction { inner, args, .. }) => {
                 let value = match tuple {
-                    Some(tuple) => inner.eval(args, arena, Some(&tuple as &dyn TupleLike))?,
+                    Some(tuple) => inner.eval(args, arena, Some(tuple))?,
                     None => inner.eval(args, arena, None)?,
                 };
-                value.cast(inner.return_type())
+                value.cast(inner.return_type()).map(Cow::Owned)
             }
             ScalarExpression::Empty => unreachable!(),
             ScalarExpression::If {
@@ -281,9 +276,9 @@ impl ScalarExpression {
                 ty,
             } => {
                 if arena.expression(*condition).eval(arena, tuple)?.is_true()? {
-                    arena.expression(*left_expr).eval(arena, tuple)?.cast(ty)
+                    cast_cow(arena.expression(*left_expr).eval(arena, tuple)?, ty)
                 } else {
-                    arena.expression(*right_expr).eval(arena, tuple)?.cast(ty)
+                    cast_cow(arena.expression(*right_expr).eval(arena, tuple)?, ty)
                 }
             }
             ScalarExpression::IfNull {
@@ -296,7 +291,7 @@ impl ScalarExpression {
                 if value.is_null() {
                     value = arena.expression(*right_expr).eval(arena, tuple)?;
                 }
-                value.cast(ty)
+                cast_cow(value, ty)
             }
             ScalarExpression::NullIf {
                 left_expr,
@@ -306,9 +301,9 @@ impl ScalarExpression {
                 let mut value = arena.expression(*left_expr).eval(arena, tuple)?;
 
                 if arena.expression(*right_expr).eval(arena, tuple)? == value {
-                    value = DataValue::Null;
+                    value = Cow::Owned(DataValue::Null);
                 }
-                value.cast(ty)
+                cast_cow(value, ty)
             }
             ScalarExpression::Coalesce { exprs, ty } => {
                 let mut value = None;
@@ -321,7 +316,7 @@ impl ScalarExpression {
                         break;
                     }
                 }
-                value.unwrap_or(DataValue::Null).cast(ty)
+                cast_cow(value.unwrap_or(Cow::Owned(DataValue::Null)), ty)
             }
             ScalarExpression::CaseWhen {
                 operand_expr,
@@ -339,7 +334,7 @@ impl ScalarExpression {
                     let mut when_value = arena.expression(*when_expr).eval(arena, tuple)?;
                     let is_true = if let Some(operand_value) = &operand_value {
                         let ty = operand_value.logical_type();
-                        when_value = when_value.cast(&ty)?;
+                        when_value = cast_cow(when_value, &ty)?;
                         let evaluator = binary_create(Cow::Owned(ty), BinaryOperator::Eq)?;
                         evaluator
                             .binary_eval(operand_value, &when_value)?
@@ -357,13 +352,24 @@ impl ScalarExpression {
                         result = Some(arena.expression(*expr).eval(arena, tuple)?);
                     }
                 }
-                result.unwrap_or(DataValue::Null).cast(ty)
+                cast_cow(result.unwrap_or(Cow::Owned(DataValue::Null)), ty)
             }
             ScalarExpression::TableFunction(_) => unreachable!(),
             ScalarExpression::WindowCall(_) => Err(DatabaseError::UnsupportedStmt(
                 "window calls must be evaluated by the window executor".to_string(),
             )),
         }
+    }
+}
+
+fn cast_cow<'a>(
+    value: Cow<'a, DataValue>,
+    ty: &LogicalType,
+) -> Result<Cow<'a, DataValue>, DatabaseError> {
+    if value.logical_type() == *ty {
+        Ok(value)
+    } else {
+        value.into_owned().cast(ty).map(Cow::Owned)
     }
 }
 
@@ -413,6 +419,114 @@ mod tests {
     }
 
     #[test]
+    fn eval_borrows_leaf_values_and_owns_binary_results() -> Result<(), DatabaseError> {
+        use crate::types::evaluator::binary_create;
+        use crate::types::tuple::Tuple;
+
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let value = DataValue::Int64(42);
+        let constant = arena.alloc_expression(ScalarExpression::Constant(value.clone()));
+        let column_ref = arena.alloc_column(crate::catalog::ColumnCatalog::new(
+            "value".to_owned(),
+            true,
+            crate::catalog::ColumnDesc::new(LogicalType::Bigint, None, false, None)?,
+        ));
+        let column = arena.alloc_expression(ScalarExpression::ColumnRef {
+            column: column_ref,
+            position: 0,
+        });
+        let sum = arena.alloc_expression(ScalarExpression::Binary {
+            op: BinaryOperator::Plus,
+            left_expr: constant,
+            right_expr: column,
+            evaluator: Some(binary_create(
+                Cow::Owned(LogicalType::Bigint),
+                BinaryOperator::Plus,
+            )?),
+            ty: LogicalType::Bigint,
+        });
+        let tuple = Tuple::new(None, vec![value.clone()]);
+        assert!(matches!(
+            arena.expression(constant).eval(&arena, Some(&tuple)),
+            Ok(Cow::Borrowed(_))
+        ));
+        assert!(matches!(
+            arena.expression(column).eval(&arena, Some(&tuple)),
+            Ok(Cow::Borrowed(_))
+        ));
+        assert_eq!(
+            arena.expression(sum).eval(&arena, Some(&tuple))?,
+            Cow::Owned(DataValue::Int64(84))
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn eval_borrows_passthrough_branches_and_owns_casts() -> Result<(), DatabaseError> {
+        use crate::types::evaluator::cast_create;
+        use crate::types::tuple::Tuple;
+
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let value = DataValue::Int32(7);
+        let column_ref = arena.alloc_column(crate::catalog::ColumnCatalog::new(
+            "value".to_owned(),
+            true,
+            crate::catalog::ColumnDesc::new(LogicalType::Integer, None, false, None)?,
+        ));
+        let column = arena.alloc_expression(ScalarExpression::ColumnRef {
+            column: column_ref,
+            position: 0,
+        });
+        let alias = arena.alloc_expression(ScalarExpression::Alias {
+            expr: column,
+            alias: AliasType::Name("alias".to_owned()),
+        });
+        let no_op_cast = arena.alloc_expression(ScalarExpression::TypeCast {
+            expr: column,
+            ty: LogicalType::Integer,
+            evaluator: None,
+        });
+        let condition =
+            arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(true)));
+        let null = arena.alloc_expression(ScalarExpression::Constant(DataValue::Null));
+        let if_expr = arena.alloc_expression(ScalarExpression::If {
+            condition,
+            left_expr: column,
+            right_expr: null,
+            ty: LogicalType::Integer,
+        });
+        let if_null = arena.alloc_expression(ScalarExpression::IfNull {
+            left_expr: null,
+            right_expr: column,
+            ty: LogicalType::Integer,
+        });
+        let coalesce = arena.alloc_expression(ScalarExpression::Coalesce {
+            exprs: vec![null, column],
+            ty: LogicalType::Integer,
+        });
+        let cast = arena.alloc_expression(ScalarExpression::TypeCast {
+            expr: column,
+            ty: LogicalType::Bigint,
+            evaluator: Some(cast_create(&LogicalType::Integer, &LogicalType::Bigint)?),
+        });
+        let tuple = Tuple::new(None, vec![value.clone()]);
+        for expr in [alias, no_op_cast, if_expr, if_null, coalesce] {
+            match arena.expression(expr).eval(&arena, Some(&tuple))? {
+                Cow::Borrowed(actual) => assert!(std::ptr::eq(actual, &tuple.values[0])),
+                Cow::Owned(_) => panic!("pass-through expression must borrow the column"),
+            }
+        }
+        assert_eq!(
+            arena.expression(cast).eval(&arena, Some(&tuple))?,
+            Cow::Owned(DataValue::Int64(7))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn in_eval_matches_even_if_null_appears_first() -> Result<(), DatabaseError> {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
@@ -424,7 +538,7 @@ mod tests {
         );
 
         assert_eq!(
-            arena.expression(expr).eval::<&[DataValue]>(&arena, None)?,
+            arena.expression(expr).eval(&arena, None)?.into_owned(),
             DataValue::Boolean(true)
         );
         Ok(())
@@ -442,7 +556,7 @@ mod tests {
         );
 
         assert_eq!(
-            arena.expression(expr).eval::<&[DataValue]>(&arena, None)?,
+            arena.expression(expr).eval(&arena, None)?.into_owned(),
             DataValue::Null
         );
         Ok(())
@@ -460,7 +574,7 @@ mod tests {
         );
 
         assert_eq!(
-            arena.expression(expr).eval::<&[DataValue]>(&arena, None)?,
+            arena.expression(expr).eval(&arena, None)?.into_owned(),
             DataValue::Boolean(false)
         );
         Ok(())

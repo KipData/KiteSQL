@@ -110,7 +110,8 @@ impl WindowFunction for Aggregate {
             unreachable!()
         };
         for (_, row) in &rows[peer.clone()] {
-            accumulator.update_value(&arena.expression(self.arg).eval(arena, Some(row))?)?;
+            accumulator
+                .update_value(arena.expression(self.arg).eval(arena, Some(row))?.as_ref())?;
         }
         accumulator.evaluate()?;
         let result = accumulator.result();

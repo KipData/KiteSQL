@@ -23,6 +23,7 @@ use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
+use std::borrow::Cow;
 
 pub struct StreamDistinctExecutor {
     groupby_exprs: Vec<ExprRef>,
@@ -67,7 +68,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor {
             let group_keys = self
                 .groupby_exprs
                 .iter()
-                .map(|expr| plan_arena.expression(*expr).eval(plan_arena, Some(tuple)))
+                .map(|expr| {
+                    plan_arena
+                        .expression(*expr)
+                        .eval(plan_arena, Some(tuple))
+                        .map(Cow::into_owned)
+                })
                 .try_collect()?;
 
             if self.last_keys.as_ref() != Some(&group_keys) {

@@ -84,7 +84,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor {
             let tuple = arena.result_tuple();
             let mut group_keys = Vec::with_capacity(self.groupby_exprs.len());
             for expr in &self.groupby_exprs {
-                group_keys.push(plan_arena.expression(*expr).eval(plan_arena, Some(tuple))?);
+                group_keys.push(
+                    plan_arena
+                        .expression(*expr)
+                        .eval(plan_arena, Some(tuple))?
+                        .into_owned(),
+                );
             }
 
             match &mut self.group_keys {

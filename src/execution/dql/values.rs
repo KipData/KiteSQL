@@ -76,7 +76,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values {
             output.values.push(
                 plan_arena
                     .expression(expr)
-                    .eval::<&Tuple>(plan_arena, None)?
+                    .eval(plan_arena, None)?
+                    .into_owned()
                     .cast(ty)?,
             );
         }

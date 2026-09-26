@@ -78,7 +78,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
                 let tuple = arena.result_tuple();
                 group_keys.clear();
                 for expr in &self.groupby_exprs {
-                    group_keys.push(plan_arena.expression(*expr).eval(plan_arena, Some(tuple))?);
+                    group_keys.push(
+                        plan_arena
+                            .expression(*expr)
+                            .eval(plan_arena, Some(tuple))?
+                            .into_owned(),
+                    );
                 }
 
                 if let Some(accs) = group_hash_accs.get_mut(group_keys.as_slice()) {

@@ -52,12 +52,20 @@ impl ScalarFunctionImpl for Lower {
     ) -> Result<DataValue, DatabaseError> {
         let mut value = arena.expression(exprs[0]).eval(arena, tuples)?;
         if !matches!(value.logical_type(), LogicalType::Varchar(_, _)) {
-            value = value.cast(&LogicalType::Varchar(None, CharLengthUnits::Characters))?;
+            value = std::borrow::Cow::Owned(
+                value
+                    .into_owned()
+                    .cast(&LogicalType::Varchar(None, CharLengthUnits::Characters))?,
+            );
         }
-        if let DataValue::Utf8 { value, ty, unit } = &mut value {
-            *value = value.to_lowercase();
-        }
-        Ok(value)
+        Ok(match value.as_ref() {
+            DataValue::Utf8 { value, ty, unit } => DataValue::Utf8 {
+                value: value.to_lowercase(),
+                ty: ty.clone(),
+                unit: *unit,
+            },
+            _ => value.into_owned(),
+        })
     }
 
     fn monotonicity(&self) -> Option<FuncMonotonicity> {
