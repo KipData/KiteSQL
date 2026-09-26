@@ -75,9 +75,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor {
                     arena.finish();
                     return Ok(());
                 };
-                let mut output = crate::types::tuple::Tuple::default();
-                write_aggregate_output(&mut output, mem::take(&mut self.accs), group_keys)?;
-                arena.produce_tuple(output);
+                write_aggregate_output(
+                    arena.result_tuple_mut(),
+                    mem::take(&mut self.accs),
+                    group_keys,
+                )?;
+                arena.resume();
                 return Ok(());
             }
 
@@ -106,9 +109,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor {
                     update_accumulators(&mut next_accs, &self.agg_calls, tuple, plan_arena)?;
                     mem::swap(current_keys, &mut group_keys);
                     let current_accs = mem::replace(&mut self.accs, next_accs);
-                    let mut output = crate::types::tuple::Tuple::default();
-                    write_aggregate_output(&mut output, current_accs, group_keys)?;
-                    arena.produce_tuple(output);
+                    write_aggregate_output(arena.result_tuple_mut(), current_accs, group_keys)?;
+                    arena.resume();
                     return Ok(());
                 }
             }

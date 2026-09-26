@@ -103,9 +103,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
             return Ok(());
         };
 
-        let mut output = crate::types::tuple::Tuple::default();
-        write_aggregate_output(&mut output, accs, group_keys)?;
-        arena.produce_tuple(output);
+        write_aggregate_output(arena.result_tuple_mut(), accs, group_keys)?;
+        arena.resume();
         Ok(())
     }
 }

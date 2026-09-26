@@ -80,7 +80,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor {
             }
         }
 
-        let mut output = crate::types::tuple::Tuple::default();
+        let output = arena.result_tuple_mut();
         output.pk = None;
         output.values.clear();
         output.values.reserve(accs.len());
@@ -89,7 +89,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor {
             output.values.push(acc.result_owned());
         }
         self.returned = true;
-        arena.produce_tuple(output);
+        arena.resume();
         Ok(())
     }
 }
