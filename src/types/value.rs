@@ -165,6 +165,80 @@ pub enum DataValue {
     Tuple(Vec<DataValue>),
 }
 
+/// A read-only view of a value, including an unmaterialized tuple slice.
+#[derive(Clone, Copy, Debug)]
+pub enum DataValueRef<'a> {
+    Value(&'a DataValue),
+    Tuple(&'a [DataValue]),
+}
+
+impl<'a> From<&'a DataValue> for DataValueRef<'a> {
+    fn from(value: &'a DataValue) -> Self {
+        Self::Value(value)
+    }
+}
+
+impl<'a> From<&'a [DataValue]> for DataValueRef<'a> {
+    fn from(values: &'a [DataValue]) -> Self {
+        Self::Tuple(values)
+    }
+}
+
+impl DataValueRef<'_> {
+    pub fn partial_cmp_with_bounds(
+        self,
+        other: Self,
+        left_is_upper: bool,
+        right_is_upper: bool,
+    ) -> Option<Ordering> {
+        match (self, other) {
+            (Self::Value(left), Self::Value(right)) => match (left, right) {
+                (DataValue::Tuple(left), DataValue::Tuple(right)) => {
+                    tuple_partial_cmp(left, right, left_is_upper, right_is_upper)
+                }
+                _ => left.partial_cmp(right),
+            },
+            (Self::Value(DataValue::Tuple(left)), Self::Tuple(right)) => {
+                tuple_partial_cmp(left, right, left_is_upper, right_is_upper)
+            }
+            (Self::Tuple(left), Self::Value(DataValue::Tuple(right))) => {
+                tuple_partial_cmp(left, right, left_is_upper, right_is_upper)
+            }
+            (Self::Tuple(left), Self::Tuple(right)) => {
+                tuple_partial_cmp(left, right, left_is_upper, right_is_upper)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn into_owned(self) -> DataValue {
+        match self {
+            Self::Value(value) => value.clone(),
+            Self::Tuple(values) => DataValue::Tuple(values.to_vec()),
+        }
+    }
+}
+
+impl PartialEq for DataValueRef<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Value(left), Self::Value(right)) => left == right,
+            (Self::Value(DataValue::Tuple(left)), Self::Tuple(right))
+            | (Self::Tuple(right), Self::Value(DataValue::Tuple(left))) => left == right,
+            (Self::Tuple(left), Self::Tuple(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for DataValueRef<'_> {}
+
+impl PartialOrd for DataValueRef<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        (*self).partial_cmp_with_bounds(*other, false, false)
+    }
+}
+
 pub trait IndexKeyMapping {
     fn target_len(&self, fields_len: usize) -> usize;
 
@@ -1821,6 +1895,7 @@ impl fmt::Debug for DataValue {
 mod test {
     use crate::errors::DatabaseError;
     use crate::storage::table_codec::{BumpBytes, NOTNULL_TAG, NULL_TAG};
+    use crate::types::value::DataValueRef;
     use crate::types::value::{DataValue, Utf8Type};
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
@@ -1831,6 +1906,32 @@ mod test {
     use rust_decimal::Decimal;
     use std::cmp::Ordering;
     use std::io::Cursor;
+
+    #[test]
+    fn borrowed_tuple_matches_owned_tuple_without_materialization() {
+        let values = [DataValue::Int32(1), DataValue::Null];
+        let owned = DataValue::Tuple(values.to_vec());
+        let view = DataValueRef::Tuple(&values);
+        assert_eq!(view, DataValueRef::Value(&owned));
+        assert_eq!(
+            view.partial_cmp(&DataValueRef::Value(&owned)),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(view.into_owned(), owned);
+    }
+
+    #[test]
+    fn tuple_prefix_and_non_tuple_comparisons_match_data_value() {
+        let short = [DataValue::Int32(1)];
+        let long = [DataValue::Int32(1), DataValue::Int32(2)];
+        let left = DataValueRef::Tuple(&short);
+        let right = DataValueRef::Tuple(&long);
+        assert_eq!(left.partial_cmp(&right), Some(Ordering::Less));
+        assert_eq!(right.partial_cmp(&left), Some(Ordering::Greater));
+        let scalar = DataValue::Int32(1);
+        assert_ne!(left, DataValueRef::Value(&scalar));
+        assert_eq!(left.partial_cmp(&DataValueRef::Value(&scalar)), None);
+    }
 
     fn utf8(value: &str) -> DataValue {
         DataValue::Utf8 {

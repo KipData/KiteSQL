@@ -182,8 +182,6 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update {
 
                 let new_pk =
                     Tuple::primary_projection(table_snapshot.primary_key_indices, &tuple.values);
-                tuple.pk = Some(new_pk.clone());
-
                 let primary_key_changed = new_pk != old_pk;
                 if primary_key_changed {
                     let mut state = arena.local_state(plan_arena);
@@ -211,6 +209,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update {
                     transaction.add_index(table_codec, &self.table_name, new_index, &new_pk)?;
                 }
 
+                tuple.pk = Some(new_pk);
                 let mut state = arena.local_state(plan_arena);
                 let (transaction, table_codec) = state.transaction_codec_mut();
                 transaction.append_tuple(

@@ -19,7 +19,7 @@ use crate::iter_ext::Itertools;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
 use crate::types::index::IndexMetaRef;
-use crate::types::value::DataValue;
+use crate::types::value::{DataValue, DataValueRef};
 use crate::types::{ColumnId, LogicalType};
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::borrow::Borrow;
@@ -32,14 +32,11 @@ use std::{fmt, mem};
 /// Tips: The NotEq case is ignored because it makes expression composition very complex
 /// - [`Range::Scope`]:
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
-pub enum Range {
-    Scope {
-        min: Bound<DataValue>,
-        max: Bound<DataValue>,
-    },
-    Eq(DataValue),
+pub enum Range<T = DataValue> {
+    Scope { min: Bound<T>, max: Bound<T> },
+    Eq(T),
     Dummy,
-    SortedRanges(Vec<Range>),
+    SortedRanges(Vec<Range<T>>),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
@@ -110,37 +107,93 @@ impl<T: Clone> TreeNode<T> {
     }
 }
 
-fn build_tree<I>(mut ranges: I) -> Option<TreeNode<DataValue>>
-where
-    I: Iterator + Clone,
-    I::Item: Borrow<Range>,
-{
-    fn build_subtree<I>(ranges: I, range: &Range) -> Option<TreeNode<DataValue>>
-    where
-        I: Iterator + Clone,
-        I::Item: Borrow<Range>,
-    {
-        let Range::Eq(value) = range else {
-            return None;
-        };
-        let mut child = TreeNode::new(Some(value.clone()));
-        let is_last = ranges.clone().next().is_none();
-        let subtree = build_tree(ranges)?;
-        if !subtree.children.is_empty() || is_last {
+pub(crate) enum EqRangeItem<'a, T> {
+    Eq(&'a DataValue),
+    Sorted(&'a [Range<T>]),
+}
+
+pub(crate) trait EqRangeInput<T: Borrow<DataValue>> {
+    fn len(&self) -> usize;
+    fn get(&self, level: usize) -> Option<EqRangeItem<'_, T>>;
+}
+
+impl<T: Borrow<DataValue>> EqRangeInput<T> for [Range<T>] {
+    fn len(&self) -> usize {
+        <[Range<T>]>::len(self)
+    }
+
+    fn get(&self, level: usize) -> Option<EqRangeItem<'_, T>> {
+        <[Range<T>]>::get(self, level).and_then(|range| match range {
+            Range::Eq(value) => Some(EqRangeItem::Eq(value.borrow())),
+            Range::SortedRanges(ranges) => Some(EqRangeItem::Sorted(ranges)),
+            _ => None,
+        })
+    }
+}
+
+impl<T: Borrow<DataValue>, const N: usize> EqRangeInput<T> for [Range<T>; N] {
+    fn len(&self) -> usize {
+        N
+    }
+
+    fn get(&self, level: usize) -> Option<EqRangeItem<'_, T>> {
+        <[Range<T>] as EqRangeInput<T>>::get(self, level)
+    }
+}
+
+impl<T: Borrow<DataValue>> EqRangeInput<T> for Vec<Range<T>> {
+    fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    fn get(&self, level: usize) -> Option<EqRangeItem<'_, T>> {
+        <[Range<T>] as EqRangeInput<T>>::get(self, level)
+    }
+}
+
+impl EqRangeInput<DataValue> for [DataValue] {
+    fn len(&self) -> usize {
+        <[DataValue]>::len(self)
+    }
+
+    fn get(&self, level: usize) -> Option<EqRangeItem<'_, DataValue>> {
+        <[DataValue]>::get(self, level).map(EqRangeItem::Eq)
+    }
+}
+
+fn build_tree<'a, T: Borrow<DataValue> + 'a, I: EqRangeInput<T> + ?Sized>(
+    ranges: &'a I,
+    current_level: usize,
+) -> Option<TreeNode<&'a DataValue>> {
+    fn build_subtree<'a, T: Borrow<DataValue> + 'a, I: EqRangeInput<T> + ?Sized>(
+        ranges: &'a I,
+        value: &'a DataValue,
+        current_level: usize,
+    ) -> Option<TreeNode<&'a DataValue>> {
+        let mut child = TreeNode::new(Some(value));
+        let subtree = build_tree(ranges, current_level + 1)?;
+        if !subtree.children.is_empty() || current_level == ranges.len() - 1 {
             child.add_child(subtree);
         }
         Some(child)
     }
 
     let mut root = TreeNode::new(None);
-    if let Some(range) = ranges.next() {
-        match range.borrow() {
-            Range::SortedRanges(child_ranges) => {
-                for range in child_ranges {
-                    root.children.push(build_subtree(ranges.clone(), range)?);
+    if current_level < ranges.len() {
+        match ranges.get(current_level)? {
+            EqRangeItem::Sorted(children) => {
+                for child in children {
+                    let Range::Eq(value) = child else {
+                        return None;
+                    };
+                    root.children
+                        .push(build_subtree(ranges, value.borrow(), current_level)?);
                 }
             }
-            range => root.children.push(build_subtree(ranges, range)?),
+            EqRangeItem::Eq(value) => {
+                root.children
+                    .push(build_subtree(ranges, value, current_level)?);
+            }
         }
     }
     Some(root)
@@ -190,13 +243,11 @@ impl Range {
         }
     }
 
-    pub(crate) fn combining_eqs<I>(&self, eqs: I) -> Option<Range>
-    where
-        I: IntoIterator,
-        I::IntoIter: Clone,
-        I::Item: Borrow<Range>,
-    {
-        fn merge_value(tuple: &[DataValue], value: DataValue) -> DataValue {
+    pub(crate) fn combining_eqs<T: Borrow<DataValue>, I: EqRangeInput<T> + ?Sized>(
+        &self,
+        eqs: &I,
+    ) -> Option<Range> {
+        fn merge_value(tuple: &[&DataValue], value: DataValue) -> DataValue {
             let mut merge_tuple = Vec::with_capacity(tuple.len() + 1);
             for value in tuple {
                 merge_tuple.push((*value).clone());
@@ -205,9 +256,9 @@ impl Range {
 
             DataValue::Tuple(merge_tuple)
         }
-        fn collect_tuple_range(result_ranges: &mut Vec<Range>, tuple: &[DataValue], range: Range) {
+        fn collect_tuple_range(result_ranges: &mut Vec<Range>, tuple: &[&DataValue], range: Range) {
             fn merge_value_on_bound(
-                tuple: &[DataValue],
+                tuple: &[&DataValue],
                 bound: Bound<DataValue>,
             ) -> Bound<DataValue> {
                 match bound {
@@ -238,7 +289,7 @@ impl Range {
             }
         }
 
-        let node = build_tree(eqs.into_iter())?;
+        let node = build_tree(eqs, 0)?;
         let mut combinations = Vec::new();
 
         node.enumeration(&mut Vec::new(), &mut combinations);
@@ -336,10 +387,7 @@ impl<'a, A: MetaArena + ?Sized> RangeDetacher<'a, IndexRangeColumn, A> {
             return Ok(None);
         }
         let constraint = if composite {
-            let Some(range) = detached
-                .range
-                .combining_eqs(prefix.iter().cloned().map(Range::Eq))
-            else {
+            let Some(range) = detached.range.combining_eqs(prefix) else {
                 return Ok(None);
             };
             range
@@ -810,7 +858,7 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                     }),
                     Range::Eq(r_val),
                 ) => {
-                    let r_bound = Bound::Included(r_val.clone());
+                    let r_bound = Bound::Included(r_val);
 
                     if let Some(true) =
                         Self::bound_compared(l_max, &r_bound, true, false).map(Ordering::is_lt)
@@ -847,7 +895,7 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                         max: r_max,
                     },
                 ) => {
-                    let l_bound = Bound::Included(l_val.clone());
+                    let l_bound = Bound::Included(l_val);
 
                     if Self::bound_compared(&l_bound, r_min, true, false)
                         .map(Ordering::is_lt)
@@ -1007,9 +1055,9 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
             .matches(table_name.as_ref(), column_id, self.arena)
     }
 
-    fn bound_compared(
-        left_bound: &Bound<DataValue>,
-        right_bound: &Bound<DataValue>,
+    fn bound_compared<L: Borrow<DataValue>, R: Borrow<DataValue>>(
+        left_bound: &Bound<L>,
+        right_bound: &Bound<R>,
         left_is_upper: bool,
         right_is_upper: bool,
     ) -> Option<Ordering> {
@@ -1023,15 +1071,11 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                 (DataValue::Null, DataValue::Null) => Some(Ordering::Equal),
                 (DataValue::Null, _) => Some(Ordering::Greater),
                 (_, DataValue::Null) => Some(Ordering::Less),
-                (DataValue::Tuple(left), DataValue::Tuple(right)) => {
-                    crate::types::value::tuple_partial_cmp(
-                        left,
-                        right,
-                        left_is_upper,
-                        right_is_upper,
-                    )
-                }
-                _ => left.partial_cmp(right),
+                _ => DataValueRef::Value(left).partial_cmp_with_bounds(
+                    DataValueRef::Value(right),
+                    left_is_upper,
+                    right_is_upper,
+                ),
             }
         }
         fn is_min_then_reverse(is_min: bool, order: Ordering) -> Ordering {
@@ -1047,19 +1091,28 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
             (Bound::Unbounded, _) => Some(is_min_then_reverse(!left_is_upper, Ordering::Less)),
             (_, Bound::Unbounded) => Some(is_min_then_reverse(!right_is_upper, Ordering::Greater)),
             (Bound::Included(left), Bound::Included(right)) => {
-                range_value_cmp(left, right, left_is_upper, right_is_upper)
+                range_value_cmp(left.borrow(), right.borrow(), left_is_upper, right_is_upper)
             }
-            (Bound::Included(left), Bound::Excluded(right)) => {
-                range_value_cmp(left, right, left_is_upper, !right_is_upper)
-                    .map(|order| order.then(is_min_then_reverse(is_min, Ordering::Less)))
-            }
-            (Bound::Excluded(left), Bound::Excluded(right)) => {
-                range_value_cmp(left, right, !left_is_upper, !right_is_upper)
-            }
-            (Bound::Excluded(left), Bound::Included(right)) => {
-                range_value_cmp(left, right, !left_is_upper, right_is_upper)
-                    .map(|order| order.then(is_min_then_reverse(is_min, Ordering::Greater)))
-            }
+            (Bound::Included(left), Bound::Excluded(right)) => range_value_cmp(
+                left.borrow(),
+                right.borrow(),
+                left_is_upper,
+                !right_is_upper,
+            )
+            .map(|order| order.then(is_min_then_reverse(is_min, Ordering::Less))),
+            (Bound::Excluded(left), Bound::Excluded(right)) => range_value_cmp(
+                left.borrow(),
+                right.borrow(),
+                !left_is_upper,
+                !right_is_upper,
+            ),
+            (Bound::Excluded(left), Bound::Included(right)) => range_value_cmp(
+                left.borrow(),
+                right.borrow(),
+                !left_is_upper,
+                right_is_upper,
+            )
+            .map(|order| order.then(is_min_then_reverse(is_min, Ordering::Greater))),
         }
     }
 
@@ -2733,6 +2786,20 @@ mod test {
             ]),
         ];
         let combined = suffix.combining_eqs(&prefixes).unwrap();
+        let first = DataValue::Int32(1);
+        let second = DataValue::Int32(2);
+        let borrowed = [Range::Eq(&first), Range::Eq(&second)];
+        assert_eq!(
+            suffix.combining_eqs(&borrowed),
+            suffix.combining_eqs(&[
+                Range::Eq(DataValue::Int32(1)),
+                Range::Eq(DataValue::Int32(2)),
+            ])
+        );
+        assert_eq!(
+            suffix.combining_eqs(&[DataValue::Int32(1), DataValue::Int32(2)][..]),
+            suffix.combining_eqs(&borrowed)
+        );
         assert!(matches!(combined, Range::SortedRanges(ref ranges) if ranges.len() == 2));
         assert!(prefixes[0].only_eq());
         assert!(prefixes[1].only_eq());
@@ -2789,7 +2856,7 @@ mod test {
         );
 
         assert!(suffix
-            .combining_eqs(&[Range::Scope {
+            .combining_eqs(&[Range::<DataValue>::Scope {
                 min: Bound::Unbounded,
                 max: Bound::Unbounded,
             }])

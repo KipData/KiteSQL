@@ -17,8 +17,8 @@ use darling::{FromDeriveInput, FromField, FromVariant};
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
 use syn::{
-    AngleBracketedGenericArguments, DeriveInput, Error, GenericArgument, PathArguments, Type,
-    TypePath,
+    parse_quote, AngleBracketedGenericArguments, DeriveInput, Error, GenericArgument,
+    PathArguments, Type, TypePath,
 };
 
 #[derive(Debug, FromDeriveInput)]
@@ -93,6 +93,13 @@ fn process_type(ty: &Type) -> TokenStream {
 pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
     let record_opts: SerializationOpts = SerializationOpts::from_derive_input(&ast)?;
     let struct_name = &record_opts.ident;
+    let mut generics = ast.generics.clone();
+    for param in generics.type_params_mut() {
+        param
+            .bounds
+            .push(parse_quote!(crate::serdes::ReferenceSerialization));
+    }
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     Ok(match record_opts.data {
         Data::Struct(data_struct) => {
@@ -126,7 +133,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             };
 
             quote! {
-                impl crate::serdes::ReferenceSerialization for #struct_name {
+                impl #impl_generics crate::serdes::ReferenceSerialization for #struct_name #ty_generics #where_clause {
                     fn encode<W: std::io::Write, A: crate::planner::MetaArena + ?Sized>(
                         &self,
                         writer: &mut W,
@@ -141,9 +148,9 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                         Ok(())
                     }
 
-                    fn decode<T: crate::storage::Transaction, R: std::io::Read, A: crate::planner::MetaArena + ?Sized>(
+                    fn decode<Tx: crate::storage::Transaction, R: std::io::Read, A: crate::planner::MetaArena + ?Sized>(
                         reader: &mut R,
-                        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
+                        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, Tx>>,
                         reference_tables: &crate::serdes::ReferenceTables,
                         arena: &mut A,
                     ) -> Result<Self, crate::errors::DatabaseError> {
@@ -207,7 +214,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             }
 
             quote! {
-                impl crate::serdes::ReferenceSerialization for #struct_name {
+                impl #impl_generics crate::serdes::ReferenceSerialization for #struct_name #ty_generics #where_clause {
                     fn encode<W: std::io::Write, A: crate::planner::MetaArena + ?Sized>(
                         &self,
                         writer: &mut W,
@@ -222,9 +229,9 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                         Ok(())
                     }
 
-                    fn decode<T: crate::storage::Transaction, R: std::io::Read, A: crate::planner::MetaArena + ?Sized>(
+                    fn decode<Tx: crate::storage::Transaction, R: std::io::Read, A: crate::planner::MetaArena + ?Sized>(
                         reader: &mut R,
-                        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
+                        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, Tx>>,
                         reference_tables: &crate::serdes::ReferenceTables,
                         arena: &mut A,
                     ) -> Result<Self, crate::errors::DatabaseError> {
