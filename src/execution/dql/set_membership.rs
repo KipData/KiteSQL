@@ -100,9 +100,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SetMembership {
                 return Ok(());
             }
 
-            let tuple = arena.materialize_tuple();
-            let matched = self.consume_right_match(&tuple);
-            arena.produce_tuple(tuple);
+            let matched = self.consume_right_match(arena.result_tuple());
             let should_emit = match self.kind {
                 SetMembershipKind::Except => !matched,
                 SetMembershipKind::Intersect => matched,

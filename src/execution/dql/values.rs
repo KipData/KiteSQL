@@ -18,7 +18,7 @@ use crate::planner::operator::values::ValuesOperator;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
 use crate::storage::Transaction;
-use crate::types::tuple::{Schema, Tuple};
+use crate::types::tuple::Schema;
 
 pub struct Values {
     rows: std::vec::IntoIter<ExprRef>,
@@ -70,7 +70,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values {
         self.remaining_rows -= 1;
         let width = self.schema_ref.len();
 
-        let mut output = Tuple::new(None, Vec::with_capacity(width));
+        let output = arena.result_tuple_mut();
+        output.pk = None;
+        output.values.clear();
         for (i, expr) in self.rows.by_ref().take(width).enumerate() {
             let ty = plan_arena.column(self.schema_ref[i]).datatype();
             output.values.push(
@@ -82,7 +84,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values {
             );
         }
 
-        arena.produce_tuple(output);
+        arena.resume();
         Ok(())
     }
 }

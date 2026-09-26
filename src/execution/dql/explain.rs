@@ -61,7 +61,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Explain {
         }
 
         let plan = self.plan.explain(plan_arena, 0);
-        let mut output = crate::types::tuple::Tuple::default();
+        let output = arena.result_tuple_mut();
         output.pk = None;
         output.values.clear();
         output.values.push(DataValue::Utf8 {
@@ -71,7 +71,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Explain {
         });
 
         self.emitted = true;
-        arena.produce_tuple(output);
+        arena.resume();
         Ok(())
     }
 }

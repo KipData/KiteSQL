@@ -64,9 +64,10 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarApply {
             arena.finish();
             return Ok(());
         }
-        let mut output = arena.materialize_tuple();
-        output.values.extend(right_tuple.values.iter().cloned());
-        arena.produce_tuple(output);
+        arena
+            .result_tuple_mut()
+            .values
+            .extend(right_tuple.values.iter().cloned());
         arena.resume();
         Ok(())
     }
