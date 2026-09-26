@@ -96,8 +96,8 @@ impl MarkApply {
         loop {
             if let Some((root, left)) = &mut self.join_input {
                 while arena.next_tuple(*root, plan_arena)? {
-                    let right = arena.materialize_tuple();
-                    if Self::predicates_matched(self.op.predicates(), left, &right, plan_arena)? {
+                    let right = arena.result_tuple();
+                    if Self::predicates_matched(self.op.predicates(), left, right, plan_arena)? {
                         let mut output = left.clone();
                         output.pk = output.pk.or_else(|| right.pk.clone());
                         output.values.extend(right.values.iter().cloned());
@@ -184,11 +184,11 @@ impl MarkApply {
             MarkApplyKind::Exists => {
                 let right_input = self.build_right_input(arena, plan_arena, probe);
                 while arena.next_tuple(right_input, plan_arena)? {
-                    let right_tuple = arena.materialize_tuple();
+                    let right_tuple = arena.result_tuple();
                     if Self::predicates_matched(
                         self.op.predicates(),
                         left_tuple,
-                        &right_tuple,
+                        right_tuple,
                         plan_arena,
                     )? {
                         return Ok(DataValue::Boolean(true));
@@ -202,10 +202,10 @@ impl MarkApply {
                         let right_input =
                             self.build_right_input(arena, plan_arena, Some(probe_value));
                         while arena.next_tuple(right_input, plan_arena)? {
-                            let right_tuple = arena.materialize_tuple();
+                            let right_tuple = arena.result_tuple();
                             if self.quantified_predicate_outcome(
                                 left_tuple,
-                                &right_tuple,
+                                right_tuple,
                                 plan_arena,
                             )? == QuantifiedPredicateOutcome::True
                             {
@@ -216,10 +216,10 @@ impl MarkApply {
                         let right_input =
                             self.build_right_input(arena, plan_arena, Some(DataValue::Null));
                         while arena.next_tuple(right_input, plan_arena)? {
-                            let right_tuple = arena.materialize_tuple();
+                            let right_tuple = arena.result_tuple();
                             if self.quantified_predicate_outcome(
                                 left_tuple,
-                                &right_tuple,
+                                right_tuple,
                                 plan_arena,
                             )? == QuantifiedPredicateOutcome::Null
                             {
@@ -264,8 +264,8 @@ impl MarkApply {
         let mut saw_null = false;
 
         while arena.next_tuple(right_input, plan_arena)? {
-            let right_tuple = arena.materialize_tuple();
-            match self.quantified_predicate_outcome(left_tuple, &right_tuple, plan_arena)? {
+            let right_tuple = arena.result_tuple();
+            match self.quantified_predicate_outcome(left_tuple, right_tuple, plan_arena)? {
                 QuantifiedPredicateOutcome::True => {
                     if matches!(quantifier, MarkApplyQuantifier::Any) {
                         return Ok(DataValue::Boolean(true));
