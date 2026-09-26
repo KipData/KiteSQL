@@ -16,20 +16,16 @@ use crate::errors::DatabaseError;
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
-use crate::iter_ext::Itertools;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::MetaArena;
 use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
-use crate::types::value::DataValue;
-use std::borrow::Cow;
 
 pub struct StreamDistinctExecutor {
     groupby_exprs: Vec<ExprRef>,
     input: ExecId,
-    last_keys: Option<Vec<DataValue>>,
-    scratch: Tuple,
+    last_keys: Option<Tuple>,
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor {
@@ -47,7 +43,6 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor {
             groupby_exprs: op.groupby_exprs,
             input,
             last_keys: None,
-            scratch: Tuple::default(),
         }))
     }
 }
@@ -60,27 +55,25 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor {
     ) -> Result<(), DatabaseError> {
         loop {
             if !arena.next_tuple(self.input, plan_arena)? {
-                arena.finish();
+                if let Some(last_keys) = self.last_keys.take() {
+                    drop(std::mem::replace(arena.result_tuple_mut(), last_keys));
+                    arena.resume();
+                } else {
+                    arena.finish();
+                }
                 return Ok(());
             }
-            self.scratch = arena.materialize_tuple();
-            let tuple = &self.scratch;
-            let group_keys = self
-                .groupby_exprs
-                .iter()
-                .map(|expr| {
-                    plan_arena
-                        .expression(*expr)
-                        .eval(plan_arena, Some(tuple))
-                        .map(Cow::into_owned)
-                })
-                .try_collect()?;
+            arena.rewrite(&self.groupby_exprs, plan_arena, None)?;
 
-            if self.last_keys.as_ref() != Some(&group_keys) {
-                self.last_keys = Some(group_keys.clone());
-                arena.produce_tuple(Tuple::new(tuple.pk.clone(), group_keys));
+            if let Some(last_keys) = &mut self.last_keys {
+                if last_keys.values == arena.result_tuple().values {
+                    continue;
+                }
+                std::mem::swap(last_keys, arena.result_tuple_mut());
+                arena.resume();
                 return Ok(());
             }
+            self.last_keys = Some(arena.materialize_tuple());
         }
     }
 }

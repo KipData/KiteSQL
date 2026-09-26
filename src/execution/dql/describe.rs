@@ -100,12 +100,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Describe {
         let default = describe_default(column, plan_arena);
         let mapping = column_ref.to_string();
 
-        let mut output = crate::types::tuple::Tuple::default();
+        let output = arena.result_tuple_mut();
         output.pk = None;
         output.values.clear();
         fill_describe_row(&mut output.values, column, default, mapping);
 
-        arena.produce_tuple(output);
+        arena.resume();
         Ok(())
     }
 }
