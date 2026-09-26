@@ -18,10 +18,7 @@ use crate::types::evaluator::DataValue;
 use std::cmp::Ordering;
 use std::hint;
 
-fn tuple_cmp(
-    (v1, v1_is_upper): (&Vec<DataValue>, &bool),
-    (v2, v2_is_upper): (&Vec<DataValue>, &bool),
-) -> Option<Ordering> {
+fn tuple_cmp(v1: &[DataValue], v2: &[DataValue]) -> Option<Ordering> {
     let mut order = Ordering::Equal;
     let mut v1_iter = v1.iter();
     let mut v2_iter = v2.iter();
@@ -29,20 +26,8 @@ fn tuple_cmp(
     while order == Ordering::Equal {
         order = match (v1_iter.next(), v2_iter.next()) {
             (Some(v1), Some(v2)) => v1.partial_cmp(v2)?,
-            (Some(_), None) => {
-                if *v2_is_upper {
-                    Ordering::Less
-                } else {
-                    Ordering::Greater
-                }
-            }
-            (None, Some(_)) => {
-                if *v1_is_upper {
-                    Ordering::Greater
-                } else {
-                    Ordering::Less
-                }
-            }
+            (Some(_), None) => Ordering::Greater,
+            (None, Some(_)) => Ordering::Less,
             (None, None) => break,
         }
     }
@@ -53,7 +38,7 @@ pub fn tuple_eq_binary_eval(
     right: &DataValue,
 ) -> Result<DataValue, DatabaseError> {
     Ok(match (left, right) {
-        (DataValue::Tuple(v1, ..), DataValue::Tuple(v2, ..)) => DataValue::Boolean(*v1 == *v2),
+        (DataValue::Tuple(v1), DataValue::Tuple(v2)) => DataValue::Boolean(*v1 == *v2),
         (DataValue::Null, DataValue::Boolean(_))
         | (DataValue::Boolean(_), DataValue::Null)
         | (DataValue::Null, DataValue::Null) => DataValue::Null,
@@ -65,7 +50,7 @@ pub fn tuple_not_eq_binary_eval(
     right: &DataValue,
 ) -> Result<DataValue, DatabaseError> {
     Ok(match (left, right) {
-        (DataValue::Tuple(v1, ..), DataValue::Tuple(v2, ..)) => DataValue::Boolean(*v1 != *v2),
+        (DataValue::Tuple(v1), DataValue::Tuple(v2)) => DataValue::Boolean(*v1 != *v2),
         (DataValue::Null, DataValue::Boolean(_))
         | (DataValue::Boolean(_), DataValue::Null)
         | (DataValue::Null, DataValue::Null) => DataValue::Null,
@@ -77,11 +62,9 @@ macro_rules! tuple_order_binary {
     ($name:ident, $is_order:ident) => {
         pub fn $name(left: &DataValue, right: &DataValue) -> Result<DataValue, DatabaseError> {
             Ok(match (left, right) {
-                (DataValue::Tuple(v1, is_upper1), DataValue::Tuple(v2, is_upper2)) => {
-                    tuple_cmp((v1, is_upper1), (v2, is_upper2))
-                        .map(|order| DataValue::Boolean(order.$is_order()))
-                        .unwrap_or(DataValue::Null)
-                }
+                (DataValue::Tuple(v1), DataValue::Tuple(v2)) => tuple_cmp(v1, v2)
+                    .map(|order| DataValue::Boolean(order.$is_order()))
+                    .unwrap_or(DataValue::Null),
                 (DataValue::Null, DataValue::Boolean(_))
                 | (DataValue::Boolean(_), DataValue::Null)
                 | (DataValue::Null, DataValue::Null) => DataValue::Null,
@@ -102,14 +85,14 @@ pub(crate) fn eval_tuple_cast(
 ) -> Result<DataValue, DatabaseError> {
     match value {
         DataValue::Null => Ok(DataValue::Null),
-        DataValue::Tuple(values, is_upper) => {
+        DataValue::Tuple(values) => {
             let mut casted = Vec::with_capacity(values.len());
 
             for (value, evaluator) in values.iter().zip(element_evaluators.iter()) {
                 casted.push(evaluator.eval(value)?);
             }
 
-            Ok(DataValue::Tuple(casted, *is_upper))
+            Ok(DataValue::Tuple(casted))
         }
         _ => unsafe { hint::unreachable_unchecked() },
     }
@@ -124,7 +107,7 @@ mod test {
     use crate::types::LogicalType;
 
     fn tuple(values: Vec<DataValue>) -> DataValue {
-        DataValue::Tuple(values, false)
+        DataValue::Tuple(values)
     }
 
     #[test]
@@ -133,7 +116,7 @@ mod test {
         let same = tuple(vec![DataValue::Int32(1), DataValue::Int32(2)]);
         let greater = tuple(vec![DataValue::Int32(1), DataValue::Int32(3)]);
         let shorter_lower = tuple(vec![DataValue::Int32(1)]);
-        let shorter_upper = DataValue::Tuple(vec![DataValue::Int32(1)], true);
+        let shorter_upper = tuple(vec![DataValue::Int32(1)]);
         let incomparable = tuple(vec![DataValue::Int32(1), DataValue::Boolean(true)]);
 
         assert_eq!(
@@ -165,7 +148,7 @@ mod test {
             DataValue::Boolean(true)
         );
         assert_eq!(
-            tuple_gt_binary_eval(&shorter_upper, &left).unwrap(),
+            tuple_lt_binary_eval(&shorter_upper, &left).unwrap(),
             DataValue::Boolean(true)
         );
         assert_eq!(
@@ -203,19 +186,16 @@ mod test {
 
         assert_eq!(
             evaluator
-                .eval(&DataValue::Tuple(
-                    vec![
-                        DataValue::Int32(1),
-                        DataValue::Utf8 {
-                            value: "2".to_string(),
-                            ty: crate::types::value::Utf8Type::Variable(None),
-                            unit: CharLengthUnits::Characters,
-                        },
-                    ],
-                    false,
-                ))
+                .eval(&DataValue::Tuple(vec![
+                    DataValue::Int32(1),
+                    DataValue::Utf8 {
+                        value: "2".to_string(),
+                        ty: crate::types::value::Utf8Type::Variable(None),
+                        unit: CharLengthUnits::Characters,
+                    },
+                ],))
                 .unwrap(),
-            DataValue::Tuple(vec![DataValue::Int64(1), DataValue::Int32(2)], false)
+            DataValue::Tuple(vec![DataValue::Int64(1), DataValue::Int32(2)])
         );
         assert_eq!(evaluator.eval(&DataValue::Null).unwrap(), DataValue::Null);
     }

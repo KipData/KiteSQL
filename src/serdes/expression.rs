@@ -20,7 +20,7 @@ use crate::storage::Transaction;
 use std::io::{Read, Write};
 
 impl ReferenceSerialization for ExprRef {
-    fn encode<W: Write, A: MetaArena>(
+    fn encode<W: Write, A: MetaArena + ?Sized>(
         &self,
         writer: &mut W,
         is_direct: bool,
@@ -32,7 +32,7 @@ impl ReferenceSerialization for ExprRef {
             .encode(writer, is_direct, reference_tables, arena)
     }
 
-    fn decode<T: Transaction, R: Read, A: MetaArena>(
+    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         context: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,

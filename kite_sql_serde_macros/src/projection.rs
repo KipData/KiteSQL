@@ -108,7 +108,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             ) -> ::std::result::Result<::std::vec::Vec<::kite_sql::planner::ExprRef>, ::kite_sql::errors::DatabaseError>
             where
                 T: ::kite_sql::storage::Transaction,
-                A: AsRef<[(&'static str, ::kite_sql::types::value::DataValue)]>,
+                A: AsRef<[(usize, ::kite_sql::types::LogicalType)]>,
             {
                 Ok(::std::vec![
                     #(#projection_exprs.into_scalar()),*

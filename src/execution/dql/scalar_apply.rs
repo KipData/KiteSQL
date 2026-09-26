@@ -18,9 +18,9 @@ use crate::execution::{
 };
 use crate::planner::operator::scalar_apply::ScalarApplyOperator;
 use crate::planner::LogicalPlan;
+use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
-use std::mem;
 
 pub struct ScalarApply {
     left_input: ExecId,
@@ -34,7 +34,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ScalarApply {
     fn into_executor(
         (_, left_input, right_input): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -52,7 +52,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarApply {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         Self::load_right_once(&mut self.cached_right, self.right_input, arena, plan_arena)?;
 
@@ -78,7 +78,7 @@ impl ScalarApply {
         cached_right: &mut Option<Tuple>,
         right_input: ExecId,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         if cached_right.is_none() {
             if !arena.next_tuple(right_input, plan_arena)? {
@@ -86,7 +86,7 @@ impl ScalarApply {
                     "scalar apply right input returned no rows".to_string(),
                 ));
             }
-            *cached_right = Some(mem::take(arena.result_tuple_mut()));
+            *cached_right = Some(arena.materialize_tuple());
         }
 
         Ok(())
@@ -101,6 +101,7 @@ mod tests {
     use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
+    use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, LogicalPlan};
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
@@ -117,7 +118,11 @@ mod tests {
         let schema_ref = vec![arena.alloc_column(ColumnCatalog::new(name.to_string(), true, desc))];
 
         LogicalPlan::new(
-            Operator::Values(ValuesOperator { rows, schema_ref }),
+            Operator::Values(ValuesOperator::new(
+                arena.alloc_expression_rows(&rows),
+                rows.len(),
+                schema_ref,
+            )),
             Childrens::None,
         )
     }

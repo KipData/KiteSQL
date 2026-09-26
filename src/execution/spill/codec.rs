@@ -15,6 +15,7 @@
 use super::SpillCodec;
 use crate::errors::DatabaseError;
 use crate::planner::operator::sort::SortField;
+use crate::planner::MetaArena;
 use crate::planner::PlanArena;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
@@ -30,11 +31,16 @@ impl SortRow {
     pub(crate) fn new(
         sort_fields: &[SortField],
         tuple: Tuple,
-        arena: &PlanArena<'_>,
+        arena: &(dyn MetaArena + '_),
     ) -> Result<Self, DatabaseError> {
         let sort_values = sort_fields
             .iter()
-            .map(|field| arena.expression(field.expr).eval(arena, Some(&tuple)))
+            .map(|field| {
+                arena
+                    .expression(field.expr)
+                    .eval(arena, Some(&tuple))
+                    .map(|v| v.into_owned())
+            })
             .collect::<Result<_, _>>()?;
         Ok(Self { sort_values, tuple })
     }
@@ -187,7 +193,7 @@ impl SpillCodec for Tuple {
 fn estimated_dynamic_value_size(value: &DataValue) -> usize {
     match value {
         DataValue::Utf8 { value, .. } => value.capacity(),
-        DataValue::Tuple(values, _) => values
+        DataValue::Tuple(values) => values
             .capacity()
             .saturating_mul(size_of::<DataValue>())
             .saturating_add(

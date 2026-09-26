@@ -17,6 +17,7 @@ use crate::expression::function::scala::FuncMonotonicity;
 use crate::expression::function::scala::ScalarFunctionImpl;
 use crate::expression::function::FunctionSummary;
 use crate::planner::ExprRef;
+use crate::planner::MetaArena;
 use crate::types::tuple::TupleLike;
 use crate::types::value::DataValue;
 use crate::types::CharLengthUnits;
@@ -44,15 +45,19 @@ impl ScalarFunctionImpl for CharLength {
     fn eval(
         &self,
         exprs: &[ExprRef],
-        arena: &crate::planner::PlanArena<'_>,
+        arena: &(dyn MetaArena + '_),
         tuples: Option<&dyn TupleLike>,
     ) -> Result<DataValue, DatabaseError> {
         let mut value = arena.expression(exprs[0]).eval(arena, tuples)?;
         if !matches!(value.logical_type(), LogicalType::Varchar(_, _)) {
-            value = value.cast(&LogicalType::Varchar(None, CharLengthUnits::Characters))?;
+            value = std::borrow::Cow::Owned(
+                value
+                    .into_owned()
+                    .cast(&LogicalType::Varchar(None, CharLengthUnits::Characters))?,
+            );
         }
         let mut length: u64 = 0;
-        if let DataValue::Utf8 { value, ty, unit } = &mut value {
+        if let DataValue::Utf8 { value, ty, unit } = value.as_ref() {
             length = value.chars().count() as u64;
         }
         Ok(DataValue::UInt64(length))

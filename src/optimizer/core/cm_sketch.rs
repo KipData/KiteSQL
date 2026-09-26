@@ -14,6 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::Range;
+use crate::planner::MetaArena;
 use crate::serdes::stable_hash::{StableHasher, CM_SKETCH_HASH_KEYS};
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use crate::storage::Transaction;
@@ -353,7 +354,7 @@ impl<K: Hash> CountMinSketch<K> {
 }
 
 impl<K> ReferenceSerialization for CountMinSketch<K> {
-    fn encode<W: Write, A: crate::planner::MetaArena>(
+    fn encode<W: Write, A: MetaArena + ?Sized>(
         &self,
         writer: &mut W,
         is_direct: bool,
@@ -374,7 +375,7 @@ impl<K> ReferenceSerialization for CountMinSketch<K> {
         Ok(())
     }
 
-    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
+    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,

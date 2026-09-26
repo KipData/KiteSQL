@@ -19,6 +19,7 @@ use crate::execution::{
 };
 use crate::iter_ext::Itertools;
 use crate::planner::operator::alter_table::add_column::AddColumnOperator;
+use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::index::{Index, IndexType};
 use crate::types::tuple_builder::TupleBuilder;
@@ -40,7 +41,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for AddColumn {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut crate::planner::PlanArena<'a>,
+        _plan_arena: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
@@ -53,7 +54,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for AddColumn {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         let table_cache = arena.table_cache();
         let Some(AddColumnOperator {
@@ -79,7 +80,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for AddColumn {
         };
         if column_exists {
             if if_not_exists {
-                TupleBuilder::build_result_into(arena.result_tuple_mut(), "1".to_string());
+                arena.produce_tuple(TupleBuilder::build_result("1".to_string()));
                 arena.resume();
                 return Ok(());
             }
@@ -143,14 +144,18 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for AddColumn {
                     default_for_index.as_ref(),
                     tuple.pk.as_ref(),
                 ) {
-                    let index = Index::new(*unique_index_id, value, IndexType::Unique);
+                    let index = Index::new(
+                        *unique_index_id,
+                        std::slice::from_ref(value),
+                        IndexType::Unique,
+                    );
                     transaction.add_index(table_codec, &table_name, index, tuple_id)?;
                 }
                 Ok(())
             },
         )?;
 
-        TupleBuilder::build_result_into(arena.result_tuple_mut(), "1".to_string());
+        arena.produce_tuple(TupleBuilder::build_result("1".to_string()));
         arena.resume();
         Ok(())
     }

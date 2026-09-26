@@ -14,12 +14,13 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, with_projection_tmp_value, DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext,
-    ExecutorNode, WriteExecutor,
+    build_read, DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode,
+    WriteExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::create_index::CreateIndexOperator;
 use crate::planner::LogicalPlan;
+use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::index::Index;
 use crate::types::tuple::Schema;
@@ -50,7 +51,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateIndex {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -71,7 +72,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateIndex {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         let Some(CreateIndexOperator {
             table_name,
@@ -137,15 +138,16 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateIndex {
             let Some(tuple_pk) = arena.result_tuple().pk.clone() else {
                 continue;
             };
-            with_projection_tmp_value(arena, plan_arena, None, &column_exprs, |arena, value| {
+            arena.rewrite(&column_exprs, plan_arena, None)?;
+            {
                 let mut state = arena.local_state(plan_arena);
-                let (transaction, table_codec) = state.transaction_codec_mut();
-                let index = Index::new(index_id, &value, ty);
-                transaction.add_index(table_codec, table_name.as_ref(), index, &tuple_pk)
-            })?;
+                let (values, transaction, table_codec) = state.index_values_transaction_codec_mut();
+                let index = Index::new(index_id, values, ty);
+                transaction.add_index(table_codec, table_name.as_ref(), index, &tuple_pk)?;
+            }
         }
 
-        TupleBuilder::build_result_into(arena.result_tuple_mut(), "1".to_string());
+        arena.produce_tuple(TupleBuilder::build_result("1".to_string()));
         arena.resume();
         Ok(())
     }

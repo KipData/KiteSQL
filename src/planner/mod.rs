@@ -28,13 +28,13 @@ use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
-pub(crate) use arena::PlanRef;
 pub use arena::{ExprRef, MetaArena, PlanArena, TableArena, TableArenaCell};
+pub(crate) use arena::{ParamArena, PlanRef};
 
 pub(crate) trait Explain {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, arena: &(dyn MetaArena + '_), f: &mut fmt::Formatter<'_>) -> fmt::Result;
 
-    fn explain<'a, 'p>(&'a self, arena: &'a PlanArena<'p>) -> ExplainDisplay<'a, 'p, Self>
+    fn explain<'a, 'p>(&'a self, arena: &'a (dyn MetaArena + 'p)) -> ExplainDisplay<'a, 'p, Self>
     where
         Self: Sized,
     {
@@ -44,7 +44,7 @@ pub(crate) trait Explain {
 
 pub(crate) struct ExplainDisplay<'a, 'p, T: ?Sized> {
     value: &'a T,
-    arena: &'a PlanArena<'p>,
+    arena: &'a (dyn MetaArena + 'p),
 }
 
 impl<T: Explain + ?Sized> fmt::Display for ExplainDisplay<'_, '_, T> {
@@ -56,7 +56,7 @@ impl<T: Explain + ?Sized> fmt::Display for ExplainDisplay<'_, '_, T> {
 pub(crate) fn fmt_explain_list<T: Explain>(
     values: &[T],
     separator: &str,
-    arena: &PlanArena<'_>,
+    arena: &(dyn MetaArena + '_),
     f: &mut fmt::Formatter<'_>,
 ) -> fmt::Result {
     for (index, value) in values.iter().enumerate() {
@@ -154,27 +154,10 @@ impl LogicalPlan {
 
     pub(crate) fn clone_plan(
         &self,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<LogicalPlan, DatabaseError> {
-        fn clone_expressions(
-            plan: &mut LogicalPlan,
-            cloner: &mut ExprCloner,
-            arena: &mut PlanArena<'_>,
-        ) -> Result<(), DatabaseError> {
-            OperatorExprVisitorMut::new(cloner, arena).visit_operator(&mut plan.operator)?;
-            match plan.childrens.as_mut() {
-                Childrens::Only(child) => clone_expressions(child, cloner, arena)?,
-                Childrens::Twins { left, right } => {
-                    clone_expressions(left, cloner, arena)?;
-                    clone_expressions(right, cloner, arena)?;
-                }
-                Childrens::None => {}
-            }
-            Ok(())
-        }
-
         let mut plan = self.clone();
-        clone_expressions(&mut plan, &mut ExprCloner, arena)?;
+        OperatorExprVisitorMut::new(&mut ExprCloner, arena).visit_plan(&mut plan)?;
         Ok(plan)
     }
 
@@ -203,7 +186,7 @@ impl LogicalPlan {
         f: &mut F,
     ) -> Result<(), DatabaseError>
     where
-        A: MetaArena,
+        A: MetaArena + ?Sized,
         F: FnMut(&crate::catalog::ColumnRef) + ?Sized,
     {
         self.operator
@@ -219,7 +202,7 @@ impl LogicalPlan {
 
     pub fn output_schema<'plan>(
         &'plan mut self,
-        arena: &mut PlanArena,
+        arena: &mut (dyn MetaArena + '_),
     ) -> &'plan crate::types::tuple::Schema {
         let LogicalPlan {
             operator,
@@ -230,7 +213,7 @@ impl LogicalPlan {
         output_schema.get_or_insert_with(|| Self::compute_output_schema(operator, childrens, arena))
     }
 
-    pub fn take_schema(&mut self, arena: &mut PlanArena) -> crate::types::tuple::Schema {
+    pub fn take_schema(&mut self, arena: &mut (dyn MetaArena + '_)) -> crate::types::tuple::Schema {
         let LogicalPlan {
             operator,
             childrens,
@@ -245,7 +228,7 @@ impl LogicalPlan {
     fn compute_output_schema(
         operator: &mut Operator,
         childrens: &mut Childrens,
-        arena: &mut PlanArena,
+        arena: &mut (dyn MetaArena + '_),
     ) -> crate::types::tuple::Schema {
         match operator {
             Operator::Filter(_)
@@ -357,7 +340,7 @@ impl LogicalPlan {
     }
 
     fn dummy_schema<const N: usize>(
-        arena: &mut PlanArena,
+        arena: &mut (dyn MetaArena + '_),
         names: [&str; N],
     ) -> crate::types::tuple::Schema {
         names
@@ -382,7 +365,7 @@ impl LogicalPlan {
         }
     }
 
-    pub fn explain(&self, arena: &mut PlanArena, indentation: usize) -> String {
+    pub fn explain(&self, arena: &mut (dyn MetaArena + '_), indentation: usize) -> String {
         format!(
             "{:indent$}{}",
             "",
@@ -393,7 +376,7 @@ impl LogicalPlan {
 }
 
 impl Explain for LogicalPlan {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, arena: &(dyn MetaArena + '_), f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.operator.fmt(arena, f)?;
 
         if let Some(physical_option) = &self.physical_option {
@@ -414,7 +397,7 @@ impl Clone for LogicalPlan {
             operator: self.operator.clone(),
             childrens: self.childrens.clone(),
             physical_option: self.physical_option.clone(),
-            output_schema: None,
+            output_schema: self.output_schema.clone(),
         }
     }
 }
@@ -438,7 +421,7 @@ impl Hash for LogicalPlan {
 }
 
 impl crate::serdes::ReferenceSerialization for LogicalPlan {
-    fn encode<W: std::io::Write, A: crate::planner::MetaArena>(
+    fn encode<W: std::io::Write, A: MetaArena + ?Sized>(
         &self,
         writer: &mut W,
         is_direct: bool,
@@ -468,7 +451,7 @@ impl crate::serdes::ReferenceSerialization for LogicalPlan {
         )
     }
 
-    fn decode<T: crate::storage::Transaction, R: std::io::Read, A: crate::planner::MetaArena>(
+    fn decode<T: crate::storage::Transaction, R: std::io::Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         context: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &crate::serdes::ReferenceTables,
@@ -668,3 +651,45 @@ mod tests {
     }
 }
 // GRCOV_EXCL_STOP
+
+#[cfg(test)]
+pub(crate) mod test {
+    use crate::expression::ScalarExpression;
+    use crate::planner::{ExprRef, PlanArena};
+
+    pub(crate) trait PlanArenaTestExt {
+        fn alloc_expressions<I, E>(&mut self, expressions: I) -> Vec<ExprRef>
+        where
+            I: IntoIterator<Item = E>,
+            E: Into<ScalarExpression>;
+
+        fn alloc_expression_rows<R, E>(&mut self, rows: &[R]) -> Vec<ExprRef>
+        where
+            R: AsRef<[E]>,
+            E: Clone + Into<ScalarExpression>;
+    }
+
+    impl PlanArenaTestExt for PlanArena<'_> {
+        fn alloc_expressions<I, E>(&mut self, expressions: I) -> Vec<ExprRef>
+        where
+            I: IntoIterator<Item = E>,
+            E: Into<ScalarExpression>,
+        {
+            expressions
+                .into_iter()
+                .map(|expression| self.alloc_expression(expression.into()))
+                .collect()
+        }
+
+        fn alloc_expression_rows<R, E>(&mut self, rows: &[R]) -> Vec<ExprRef>
+        where
+            R: AsRef<[E]>,
+            E: Clone + Into<ScalarExpression>,
+        {
+            rows.iter()
+                .flat_map(|row| row.as_ref().iter().cloned())
+                .map(|expression| self.alloc_expression(expression.into()))
+                .collect()
+        }
+    }
+}

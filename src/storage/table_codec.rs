@@ -27,7 +27,7 @@ use crate::storage::{TableCache, Transaction};
 use crate::types::index::{Index, IndexId, IndexMeta, IndexType, INDEX_ID_LEN};
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::{Tuple, TupleId};
-use crate::types::value::{DataValue, TupleMappingRef};
+use crate::types::value::{DataValue, IndexKeyMapping};
 use crate::types::LogicalType;
 use std::borrow::Borrow;
 use std::hash::{Hash, Hasher};
@@ -151,7 +151,7 @@ impl TableCodec {
             return Err(DatabaseError::not_null_column("primary key"));
         }
 
-        if let DataValue::Tuple(values, _) = &value {
+        if let DataValue::Tuple(values) = &value {
             for value in values {
                 Self::check_primary_key(value, indentation + 1)?
             }
@@ -307,7 +307,7 @@ impl TableCodec {
         table_name: &str,
         index_id: IndexId,
         index_meta: Option<&IndexMeta>,
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
@@ -401,7 +401,9 @@ impl TableCodec {
             lower.push(BOUND_MIN_TAG);
             lower.extend_from_slice(&index.id.to_le_bytes());
             lower.push(BOUND_MIN_TAG);
-            index.value.memcomparable_encode(lower)?;
+            for value in index.values {
+                value.memcomparable_encode(lower)?;
+            }
 
             if let Some(tuple_id) = tuple_id {
                 if matches!(index.ty, IndexType::Normal | IndexType::Composite) {
@@ -422,7 +424,7 @@ impl TableCodec {
         &mut self,
         col: &ColumnCatalog,
         encode_value: bool,
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         if let ColumnRelation::Table {
@@ -532,7 +534,7 @@ impl TableCodec {
         table_name: &str,
         index_id: IndexId,
         statistics_meta: Option<&StatisticsMetaRoot>,
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
@@ -556,7 +558,7 @@ impl TableCodec {
         table_name: &str,
         index_id: IndexId,
         sketch_meta: Option<&CountMinSketchMeta>,
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
@@ -581,7 +583,7 @@ impl TableCodec {
         index_id: IndexId,
         sketch_page: &CountMinSketchPage,
         encode_value: bool,
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
@@ -610,7 +612,7 @@ impl TableCodec {
         index_id: IndexId,
         ordinal: u32,
         bucket: Option<&Bucket>,
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
@@ -636,7 +638,7 @@ impl TableCodec {
         table_name: &str,
         index_id: IndexId,
         top_n: Option<&ColumnTopN>,
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
@@ -668,7 +670,7 @@ impl TableCodec {
     }
 
     /// Key: `View{BOUND_MIN_TAG}{ViewNameHash}` with encoded view payload.
-    pub fn with_view_value<R, A: MetaArena>(
+    pub fn with_view_value<R, A: MetaArena + ?Sized>(
         &mut self,
         view_name: &str,
         view: &View,
@@ -701,7 +703,7 @@ impl TableCodec {
         &mut self,
         table_name: &str,
         meta: Option<&TableMeta>,
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
@@ -766,14 +768,14 @@ impl TableCodec {
         index_meta: &IndexMeta,
         reference_tables: &mut ReferenceTables,
         value: &mut Bytes,
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
         index_meta.encode(value, true, reference_tables, arena)
     }
 
     pub fn decode_index_meta<T: Transaction>(
         bytes: &[u8],
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<IndexMeta, DatabaseError> {
         IndexMeta::decode::<T, _, _>(
             &mut Cursor::new(bytes),
@@ -783,14 +785,26 @@ impl TableCodec {
         )
     }
 
-    pub fn decode_index_key(
+    pub fn decode_index_key<M: IndexKeyMapping>(
         bytes: &[u8],
         ty: &LogicalType,
-        mapping: Option<TupleMappingRef<'_>>,
-    ) -> Result<DataValue, DatabaseError> {
+        mapping: &M,
+    ) -> Result<Vec<DataValue>, DatabaseError> {
         // Hash + TypeTag + Bound Min + Index Id Len + Bound Min
         let start = TUPLE_KEY_PREFIX_LEN + INDEX_ID_LEN + KEY_BOUND_LEN;
-        DataValue::memcomparable_decode_mapping(&mut Cursor::new(&bytes[start..]), ty, mapping)
+        let mut reader = Cursor::new(&bytes[start..]);
+        let types = match ty {
+            LogicalType::Tuple(types) => types.as_slice(),
+            ty => std::slice::from_ref(ty),
+        };
+        let mut values = vec![DataValue::Null; mapping.target_len(types.len())];
+        for (index_pos, ty) in types.iter().enumerate() {
+            let value = DataValue::memcomparable_decode(&mut reader, ty)?;
+            if let Some(scan_pos) = mapping.scan_index(index_pos) {
+                values[scan_pos] = value;
+            }
+        }
+        Ok(values)
     }
 
     pub fn decode_index(bytes: &[u8]) -> Result<TupleId, DatabaseError> {
@@ -801,7 +815,7 @@ impl TableCodec {
         col: &ColumnCatalog,
         reference_tables: &mut ReferenceTables,
         value: &mut Bytes,
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
         col.encode(value, true, reference_tables, arena)
     }
@@ -809,7 +823,7 @@ impl TableCodec {
     pub fn decode_column<T: Transaction, R: Read>(
         reader: &mut R,
         reference_tables: &ReferenceTables,
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<ColumnCatalog, DatabaseError> {
         // `TableCache` is not theoretically used in `table_collect` because `ColumnCatalog` should not depend on other Column
         ColumnCatalog::decode::<T, R, _>(reader, None, reference_tables, arena)
@@ -819,14 +833,14 @@ impl TableCodec {
         statistics_meta: &StatisticsMetaRoot,
         reference_tables: &mut ReferenceTables,
         value: &mut Bytes,
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
         statistics_meta.encode(value, true, reference_tables, arena)
     }
 
     pub fn decode_statistics_meta<T: Transaction>(
         bytes: &[u8],
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<StatisticsMetaRoot, DatabaseError> {
         StatisticsMetaRoot::decode::<T, _, _>(
             &mut Cursor::new(bytes),
@@ -840,14 +854,14 @@ impl TableCodec {
         sketch_meta: &CountMinSketchMeta,
         reference_tables: &mut ReferenceTables,
         value: &mut Bytes,
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
         sketch_meta.encode(value, true, reference_tables, arena)
     }
 
     pub fn decode_statistics_sketch_meta<T: Transaction>(
         bytes: &[u8],
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<CountMinSketchMeta, DatabaseError> {
         CountMinSketchMeta::decode::<T, _, _>(
             &mut Cursor::new(bytes),
@@ -861,14 +875,14 @@ impl TableCodec {
         sketch_page: &CountMinSketchPage,
         reference_tables: &mut ReferenceTables,
         value: &mut Bytes,
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
         sketch_page.encode(value, true, reference_tables, arena)
     }
 
     pub fn decode_statistics_sketch_page<T: Transaction>(
         bytes: &[u8],
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<CountMinSketchPage, DatabaseError> {
         CountMinSketchPage::decode::<T, _, _>(
             &mut Cursor::new(bytes),
@@ -882,7 +896,7 @@ impl TableCodec {
         bucket: &Bucket,
         reference_tables: &mut ReferenceTables,
         value: &mut Bytes,
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
         bucket.encode(value, true, reference_tables, arena)
     }
@@ -902,7 +916,7 @@ impl TableCodec {
 
     pub fn decode_statistics_bucket<T: Transaction>(
         bytes: &[u8],
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<Bucket, DatabaseError> {
         Bucket::decode::<T, _, _>(
             &mut Cursor::new(bytes),
@@ -916,14 +930,14 @@ impl TableCodec {
         top_n: &ColumnTopN,
         reference_tables: &mut ReferenceTables,
         value: &mut Bytes,
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
         top_n.encode(value, true, reference_tables, arena)
     }
 
     pub fn decode_statistics_top_n<T: Transaction>(
         bytes: &[u8],
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<ColumnTopN, DatabaseError> {
         ColumnTopN::decode::<T, _, _>(
             &mut Cursor::new(bytes),
@@ -948,7 +962,7 @@ impl TableCodec {
         view: &View,
         reference_tables: &mut ReferenceTables,
         bytes: &mut Bytes,
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
         bytes.clear();
         bytes.resize(4, 0u8);
@@ -969,7 +983,7 @@ impl TableCodec {
         drive: (&T, &TableCache),
         scala_functions: &ScalaFunctions,
         table_functions: &TableFunctions,
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<View, DatabaseError> {
         let mut cursor = Cursor::new(bytes);
         let reference_tables_pos = {
@@ -990,14 +1004,14 @@ impl TableCodec {
         meta: &TableMeta,
         reference_tables: &mut ReferenceTables,
         value: &mut Bytes,
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
         meta.encode(value, true, reference_tables, arena)
     }
 
     pub fn decode_root_table<T: Transaction>(
         bytes: &[u8],
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<TableMeta, DatabaseError> {
         let mut bytes = Cursor::new(bytes);
 
@@ -1586,7 +1600,7 @@ mod tests {
             let value = Arc::new(value);
             let index = Index::new(
                 index_id as u32,
-                &value,
+                std::slice::from_ref(&value),
                 IndexType::PrimaryKey { is_multiple: false },
             );
 
@@ -1639,7 +1653,7 @@ mod tests {
             let value = Arc::new(value);
             let index = Index::new(
                 index_id as u32,
-                &value,
+                std::slice::from_ref(&value),
                 IndexType::PrimaryKey { is_multiple: false },
             );
 

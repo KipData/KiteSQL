@@ -16,7 +16,7 @@ use crate::backend::dual::DualBackend;
 use crate::backend::kitesql_lmdb::KiteSqlLmdbBackend;
 use crate::backend::kitesql_rocksdb::{KiteSqlOptimisticRocksDbBackend, KiteSqlRocksDbBackend};
 use crate::backend::sqlite::{SqliteBackend, SqliteProfile};
-use crate::backend::{BackendControl, BackendTransaction, ColumnType, StatementSpec};
+use crate::backend::{BackendControl, BackendTransaction, StatementSpec};
 use crate::delivery::DeliveryTest;
 use crate::load::Load;
 use crate::new_ord::NewOrdTest;
@@ -28,6 +28,7 @@ use crate::utils::SeqGen;
 use clap::{Parser, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 use kite_sql::errors::DatabaseError;
+use kite_sql::types::LogicalType;
 #[cfg(all(unix, feature = "pprof"))]
 use pprof::ProfilerGuard;
 use rand::prelude::ThreadRng;
@@ -364,181 +365,209 @@ impl PprofSession {
 }
 
 fn statement_specs() -> Vec<Vec<StatementSpec>> {
+    use kite_sql::types::LogicalType::*;
     vec![
         vec![
             stmt(
                 "SELECT c.c_discount, c.c_last, c.c_credit, w.w_tax FROM customer AS c JOIN warehouse AS w ON c.c_w_id = w_id AND w.w_id = $1 AND c.c_w_id = $2 AND c.c_d_id = $3 AND c.c_id = $4",
-                &[ColumnType::Decimal, ColumnType::Utf8, ColumnType::Utf8, ColumnType::Decimal],
+                vec![Smallint, Smallint, Tinyint, Bigint],
+                vec![Decimal(None, None), Varchar(None, kite_sql::types::CharLengthUnits::Characters), Varchar(None, kite_sql::types::CharLengthUnits::Characters), Decimal(None, None)],
             ),
             stmt(
                 "SELECT c_discount, c_last, c_credit FROM customer WHERE c_w_id = $1 AND c_d_id = $2 AND c_id = $3",
-                &[ColumnType::Decimal, ColumnType::Utf8, ColumnType::Utf8],
+                vec![Smallint, Tinyint, Integer],
+                vec![Decimal(None, None), Varchar(None, kite_sql::types::CharLengthUnits::Characters), Varchar(None, kite_sql::types::CharLengthUnits::Characters)],
             ),
             stmt(
                 "SELECT w_tax FROM warehouse WHERE w_id = $1",
-                &[ColumnType::Decimal],
+                vec![Smallint],
+                vec![Decimal(None, None)],
             ),
             stmt(
                 "SELECT d_next_o_id, d_tax FROM district WHERE d_id = $1 AND d_w_id = $2",
-                &[ColumnType::Int32, ColumnType::Decimal],
+                vec![Tinyint, Smallint],
+                vec![Integer, Decimal(None, None)],
             ),
             stmt(
                 "UPDATE district SET d_next_o_id = $1 + 1 WHERE d_id = $2 AND d_w_id = $3",
-                &[],
+                vec![Integer, Tinyint, Smallint],
+                vec![],
             ),
             stmt(
                 "INSERT INTO orders (o_id, o_d_id, o_w_id, o_c_id, o_entry_d, o_ol_cnt, o_all_local) VALUES($1, $2, $3, $4, $5, $6, $7)",
-                &[],
+                vec![Integer, Tinyint, Smallint, Integer, DateTime, Tinyint, Tinyint],
+                vec![],
             ),
             stmt(
                 "INSERT INTO new_orders (no_o_id, no_d_id, no_w_id) VALUES ($1,$2,$3)",
-                &[],
+                vec![Integer, Tinyint, Smallint],
+                vec![],
             ),
             stmt(
                 "SELECT i_price, i_name, i_data FROM item WHERE i_id = $1",
-                &[ColumnType::Decimal, ColumnType::Utf8, ColumnType::Utf8],
+                vec![Integer],
+                vec![Decimal(None, None), Varchar(None, kite_sql::types::CharLengthUnits::Characters), Varchar(None, kite_sql::types::CharLengthUnits::Characters)],
             ),
             stmt(
                 "SELECT s_quantity, s_data, s_dist_01, s_dist_02, s_dist_03, s_dist_04, s_dist_05, s_dist_06, s_dist_07, s_dist_08, s_dist_09, s_dist_10 FROM stock WHERE s_i_id = $1 AND s_w_id = $2",
-                &[
-                    ColumnType::Int16,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
+                vec![Integer, Smallint],
+                vec![
+                    Smallint,
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
                 ],
             ),
             stmt(
                 "UPDATE stock SET s_quantity = $1 WHERE s_i_id = $2 AND s_w_id = $3",
-                &[],
+                vec![Smallint, Integer, Smallint],
+                vec![],
             ),
             stmt(
                 "INSERT INTO order_line (ol_o_id, ol_d_id, ol_w_id, ol_number, ol_i_id, ol_supply_w_id, ol_quantity, ol_amount, ol_dist_info) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-                &[],
+                vec![Integer, Tinyint, Smallint, Tinyint, Integer, Smallint, Tinyint, Decimal(None, None), Varchar(None, kite_sql::types::CharLengthUnits::Characters)],
+                vec![],
             ),
         ],
         vec![
             stmt(
                 "UPDATE warehouse SET w_ytd = w_ytd + $1 WHERE w_id = $2",
-                &[],
+                vec![Decimal(None, None), Smallint],
+                vec![],
             ),
             stmt(
                 "SELECT w_street_1, w_street_2, w_city, w_state, w_zip, w_name FROM warehouse WHERE w_id = $1",
-                &[
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
+                vec![Smallint],
+                vec![
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
                 ],
             ),
             stmt(
                 "UPDATE district SET d_ytd = d_ytd + $1 WHERE d_w_id = $2 AND d_id = $3",
-                &[],
+                vec![Decimal(None, None), Smallint, Tinyint],
+                vec![],
             ),
             stmt(
                 "SELECT d_street_1, d_street_2, d_city, d_state, d_zip, d_name FROM district WHERE d_w_id = $1 AND d_id = $2",
-                &[
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
+                vec![Smallint, Tinyint],
+                vec![
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
                 ],
             ),
             stmt(
                 "SELECT count(c_id) FROM customer WHERE c_w_id = $1 AND c_d_id = $2 AND c_last = $3",
-                &[ColumnType::Int32],
+                vec![Smallint, Tinyint, Varchar(None, kite_sql::types::CharLengthUnits::Characters)],
+                vec![Integer],
             ),
             stmt(
                 "SELECT c_id FROM customer WHERE c_w_id = $1 AND c_d_id = $2 AND c_last = $3 ORDER BY c_first",
-                &[ColumnType::Int32],
+                vec![Smallint, Tinyint, Varchar(None, kite_sql::types::CharLengthUnits::Characters)],
+                vec![Integer],
             ),
             stmt(
                 "SELECT c_first, c_middle, c_last, c_street_1, c_street_2, c_city, c_state, c_zip, c_phone, c_credit, c_credit_lim, c_discount, c_balance, c_since FROM customer WHERE c_w_id = $1 AND c_d_id = $2 AND c_id = $3",
-                &[
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Int64,
-                    ColumnType::Decimal,
-                    ColumnType::Decimal,
-                    ColumnType::DateTime,
+                vec![Smallint, Tinyint, Integer],
+                vec![
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Bigint,
+                    Decimal(None, None),
+                    Decimal(None, None),
+                    DateTime,
                 ],
             ),
             stmt(
                 "SELECT c_data FROM customer WHERE c_w_id = $1 AND c_d_id = $2 AND c_id = $3",
-                &[ColumnType::Utf8],
+                vec![Smallint, Tinyint, Integer],
+                vec![Varchar(None, kite_sql::types::CharLengthUnits::Characters)],
             ),
             stmt(
                 "UPDATE customer SET c_balance = $1, c_data = $2 WHERE c_w_id = $3 AND c_d_id = $4 AND c_id = $5",
-                &[],
+                vec![Decimal(None, None), Varchar(None, kite_sql::types::CharLengthUnits::Characters), Smallint, Tinyint, Integer],
+                vec![],
             ),
             stmt(
                 "UPDATE customer SET c_balance = $1 WHERE c_w_id = $2 AND c_d_id = $3 AND c_id = $4",
-                &[],
+                vec![Decimal(None, None), Smallint, Tinyint, Integer],
+                vec![],
             ),
             stmt(
                 "INSERT INTO history(h_c_d_id, h_c_w_id, h_c_id, h_d_id, h_w_id, h_date, h_amount, h_data) VALUES($1, $2, $3, $4, $5, $6, $7, $8)",
-                &[],
+                vec![Tinyint, Smallint, Integer, Tinyint, Smallint, TimeStamp(Some(6), false), Decimal(None, None), Varchar(None, kite_sql::types::CharLengthUnits::Characters)],
+                vec![],
             ),
         ],
         vec![
             // "SELECT count(c_id) FROM customer WHERE c_w_id = $1 AND c_d_id = $2 AND c_last = $3"
             stmt(
                 "SELECT count(c_id) FROM customer WHERE c_w_id = $1 AND c_d_id = $2 AND c_last = $3",
-                &[ColumnType::Int32],
+                vec![Smallint, Tinyint, Varchar(None, kite_sql::types::CharLengthUnits::Characters)],
+                vec![Integer],
             ),
             // "SELECT c_balance, c_first, c_middle, c_last FROM customer WHERE ... ORDER BY c_first"
             stmt(
                 "SELECT c_balance, c_first, c_middle, c_last FROM customer WHERE c_w_id = $1 AND c_d_id = $2 AND c_last = $3 ORDER BY c_first",
-                &[
-                    ColumnType::Decimal,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
+                vec![Smallint, Tinyint, Varchar(None, kite_sql::types::CharLengthUnits::Characters)],
+                vec![
+                    Decimal(None, None),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
                 ],
             ),
             // "SELECT c_balance, c_first, c_middle, c_last FROM customer WHERE c_w_id = $1 AND c_d_id = $2 AND c_id = $3"
             stmt(
                 "SELECT c_balance, c_first, c_middle, c_last FROM customer WHERE c_w_id = $1 AND c_d_id = $2 AND c_id = $3",
-                &[
-                    ColumnType::Decimal,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
-                    ColumnType::Utf8,
+                vec![Smallint, Tinyint, Integer],
+                vec![
+                    Decimal(None, None),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
+                    Varchar(None, kite_sql::types::CharLengthUnits::Characters),
                 ],
             ),
             // "SELECT o_id, o_entry_d, COALESCE(o_carrier_id,0) FROM orders ..."
             stmt(
                 "SELECT o_id, o_entry_d, COALESCE(o_carrier_id,0) FROM orders WHERE o_w_id = $1 AND o_d_id = $2 AND o_c_id = $3 AND o_id = (SELECT MAX(o_id) FROM orders WHERE o_w_id = $4 AND o_d_id = $5 AND o_c_id = $6)",
-                &[ColumnType::Int32, ColumnType::DateTime, ColumnType::Int32],
+                vec![Smallint, Tinyint, Integer, Smallint, Tinyint, Integer],
+                vec![Integer, DateTime, Integer],
             ),
             // "SELECT ol_i_id, ol_supply_w_id, ol_quantity, ol_amount, ol_delivery_d FROM order_line ..."
             stmt(
                 "SELECT ol_i_id, ol_supply_w_id, ol_quantity, ol_amount, ol_delivery_d FROM order_line WHERE ol_w_id = $1 AND ol_d_id = $2 AND ol_o_id = $3",
-                &[
-                    ColumnType::Int32,
-                    ColumnType::Int16,
-                    ColumnType::Int8,
-                    ColumnType::Decimal,
-                    ColumnType::NullableDateTime,
+                vec![Smallint, Tinyint, Integer],
+                vec![
+                    Integer,
+                    Smallint,
+                    Tinyint,
+                    Decimal(None, None),
+                    DateTime,
                 ],
             ),
         ],
@@ -546,59 +575,81 @@ fn statement_specs() -> Vec<Vec<StatementSpec>> {
             // "SELECT COALESCE(MIN(no_o_id),0) FROM new_orders WHERE no_d_id = $1 AND no_w_id = $2"
             stmt(
                 "SELECT COALESCE(MIN(no_o_id),0) FROM new_orders WHERE no_d_id = $1 AND no_w_id = $2",
-                &[ColumnType::Int32],
+                vec![Tinyint, Smallint],
+                vec![Integer],
             ),
             // "DELETE FROM new_orders WHERE no_o_id = $1 AND no_d_id = $2 AND no_w_id = $3"
             stmt(
                 "DELETE FROM new_orders WHERE no_o_id = $1 AND no_d_id = $2 AND no_w_id = $3",
-                &[],
+                vec![Integer, Tinyint, Smallint],
+                vec![],
             ),
             // "SELECT o_c_id FROM orders WHERE o_id = $1 AND o_d_id = $2 AND o_w_id = $3"
             stmt(
                 "SELECT o_c_id FROM orders WHERE o_id = $1 AND o_d_id = $2 AND o_w_id = $3",
-                &[ColumnType::Int32],
+                vec![Integer, Tinyint, Smallint],
+                vec![Integer],
             ),
             // "UPDATE orders SET o_carrier_id = $1 WHERE o_id = $2 AND o_d_id = $3 AND o_w_id = $4"
             stmt(
                 "UPDATE orders SET o_carrier_id = $1 WHERE o_id = $2 AND o_d_id = $3 AND o_w_id = $4",
-                &[],
+                vec![Tinyint, Integer, Tinyint, Smallint],
+                vec![],
             ),
             // "UPDATE order_line SET ol_delivery_d = $1 WHERE ol_o_id = $2 AND ol_d_id = $3 AND ol_w_id = $4"
             stmt(
                 "UPDATE order_line SET ol_delivery_d = $1 WHERE ol_o_id = $2 AND ol_d_id = $3 AND ol_w_id = $4",
-                &[],
+                vec![DateTime, Integer, Tinyint, Smallint],
+                vec![],
             ),
             // "SELECT SUM(ol_amount) FROM order_line WHERE ol_o_id = $1 AND ol_d_id = $2 AND ol_w_id = $3"
             stmt(
                 "SELECT SUM(ol_amount) FROM order_line WHERE ol_o_id = $1 AND ol_d_id = $2 AND ol_w_id = $3",
-                &[ColumnType::Decimal],
+                vec![Integer, Tinyint, Smallint],
+                vec![Decimal(None, None)],
             ),
             // "UPDATE customer SET c_balance = c_balance + $1 , c_delivery_cnt = c_delivery_cnt + 1 WHERE c_id = $2 ..."
             stmt(
                 "UPDATE customer SET c_balance = c_balance + $1 , c_delivery_cnt = c_delivery_cnt + 1 WHERE c_id = $2 AND c_d_id = $3 AND c_w_id = $4",
-                &[],
+                vec![Decimal(None, None), Integer, Tinyint, Smallint],
+                vec![],
             ),
         ],
         vec![
             // "SELECT d_next_o_id FROM district WHERE d_id = $1 AND d_w_id = $2"
             stmt(
                 "SELECT d_next_o_id FROM district WHERE d_id = $1 AND d_w_id = $2",
-                &[ColumnType::Int32],
+                vec![Tinyint, Smallint],
+                vec![Integer],
             ),
             stmt(
                 "SELECT DISTINCT ol_i_id FROM order_line WHERE ol_w_id = $1 AND ol_d_id = $2 AND ol_o_id < $3 AND ol_o_id >= ($4 - 20)",
-                &[ColumnType::Int32],
+                vec![Smallint, Tinyint, Integer, Integer],
+                vec![Integer],
             ),
             stmt(
                 "SELECT count(*) FROM stock WHERE s_w_id = $1 AND s_i_id = $2 AND s_quantity < $3",
-                &[ColumnType::Int32],
+                vec![Smallint, Integer, Smallint],
+                vec![Integer],
             ),
         ],
     ]
 }
 
-fn stmt(sql: &'static str, result_types: &'static [ColumnType]) -> StatementSpec {
-    StatementSpec { sql, result_types }
+fn stmt(
+    sql: &'static str,
+    parameter_types: Vec<LogicalType>,
+    result_types: Vec<LogicalType>,
+) -> StatementSpec {
+    StatementSpec {
+        sql,
+        parameters: parameter_types
+            .into_iter()
+            .enumerate()
+            .map(|(i, ty)| (i + 1, ty))
+            .collect(),
+        result_types,
+    }
 }
 
 fn print_summary_table(success: &[usize], late: &[usize], failure: &[usize], elapsed: Duration) {

@@ -26,13 +26,14 @@ use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
+use crate::planner::MetaArena;
 use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use bumpalo::Bump;
 use std::collections::HashMap;
-use std::mem::{self, transmute};
+use std::mem::transmute;
 
 pub struct HashJoin {
     state: HashJoinState,
@@ -130,11 +131,16 @@ impl HashJoin {
         on_keys: &[ExprRef],
         tuple: &Tuple,
         build_buf: &mut BumpVec<'_, DataValue>,
-        plan_arena: &crate::planner::PlanArena<'_>,
+        plan_arena: &(dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         build_buf.clear();
         for expr in on_keys {
-            build_buf.push(plan_arena.expression(*expr).eval(plan_arena, Some(tuple))?);
+            build_buf.push(
+                plan_arena
+                    .expression(*expr)
+                    .eval(plan_arena, Some(tuple))?
+                    .into_owned(),
+            );
         }
         Ok(())
     }
@@ -142,7 +148,7 @@ impl HashJoin {
     fn initialize_build<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         if !matches!(self.state, HashJoinState::Build) {
             return Ok(());
@@ -157,7 +163,7 @@ impl HashJoin {
         let mut build_count = 0usize;
 
         while arena.next_tuple(self.left_input, plan_arena)? {
-            let tuple = mem::take(arena.result_tuple_mut());
+            let tuple = arena.materialize_tuple();
             Self::eval_keys(&self.on_left_keys, &tuple, &mut build_buf, plan_arena)?;
 
             match build_map.get_mut(&build_buf) {
@@ -229,7 +235,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -260,7 +266,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashJoin {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         if let Some(err) = self.init_error.take() {
             return Err(err);
@@ -283,7 +289,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashJoin {
                             if !arena.next_tuple(self.right_input, plan_arena)? {
                                 break true;
                             }
-                            let tuple = mem::take(arena.result_tuple_mut());
+                            let tuple = arena.materialize_tuple();
                             Self::eval_keys(
                                 &self.on_right_keys,
                                 &tuple,
@@ -385,6 +391,7 @@ mod test {
     use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
+    use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, ExprRef, LogicalPlan};
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::Storage;
@@ -429,8 +436,8 @@ mod test {
         let on_keys = vec![(left_key, right_key)];
 
         let values_t1 = LogicalPlan::new(
-            Operator::Values(ValuesOperator {
-                rows: vec![
+            Operator::Values(ValuesOperator::new(
+                arena.alloc_expression_rows(&[
                     vec![
                         DataValue::Int32(0),
                         DataValue::Int32(2),
@@ -446,15 +453,16 @@ mod test {
                         DataValue::Int32(5),
                         DataValue::Int32(7),
                     ],
-                ],
-                schema_ref: t1_columns,
-            }),
+                ]),
+                3,
+                t1_columns,
+            )),
             Childrens::None,
         );
 
         let values_t2 = LogicalPlan::new(
-            Operator::Values(ValuesOperator {
-                rows: vec![
+            Operator::Values(ValuesOperator::new(
+                arena.alloc_expression_rows(&[
                     vec![
                         DataValue::Int32(0),
                         DataValue::Int32(2),
@@ -475,9 +483,10 @@ mod test {
                         DataValue::Int32(1),
                         DataValue::Int32(1),
                     ],
-                ],
-                schema_ref: t2_columns,
-            }),
+                ]),
+                4,
+                t2_columns,
+            )),
             Childrens::None,
         );
 
@@ -705,20 +714,22 @@ mod test {
         });
 
         let left = LogicalPlan::new(
-            Operator::Values(ValuesOperator {
-                rows: vec![
+            Operator::Values(ValuesOperator::new(
+                plan_arena.alloc_expression_rows(&[
                     vec![DataValue::Int32(2), DataValue::Int32(0)],
                     vec![DataValue::Int32(2), DataValue::Int32(5)],
-                ],
-                schema_ref: left_columns,
-            }),
+                ]),
+                2,
+                left_columns,
+            )),
             Childrens::None,
         );
         let right = LogicalPlan::new(
-            Operator::Values(ValuesOperator {
-                rows: vec![vec![DataValue::Int32(2)]],
-                schema_ref: right_columns,
-            }),
+            Operator::Values(ValuesOperator::new(
+                plan_arena.alloc_expression_rows(&[vec![DataValue::Int32(2)]]),
+                1,
+                right_columns,
+            )),
             Childrens::None,
         );
 

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+use crate::planner::MetaArena;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
@@ -44,7 +45,7 @@ const TAG_DECIMAL: u8 = 17;
 const TAG_TUPLE: u8 = 18;
 
 impl ReferenceSerialization for Utf8Type {
-    fn encode<W: Write, A: crate::planner::MetaArena>(
+    fn encode<W: Write, A: MetaArena + ?Sized>(
         &self,
         writer: &mut W,
         is_direct: bool,
@@ -63,7 +64,7 @@ impl ReferenceSerialization for Utf8Type {
         }
     }
 
-    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
+    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
@@ -95,6 +96,9 @@ impl DataValue {
         writer: &mut W,
     ) -> Result<(), DatabaseError> {
         match self {
+            DataValue::Parameter { .. } => Err(DatabaseError::InvalidValue(
+                "unbound parameter cannot be serialized".to_string(),
+            )),
             DataValue::Null => write_u8(writer, TAG_NULL),
             DataValue::Boolean(value) => {
                 write_u8(writer, TAG_BOOLEAN)?;
@@ -171,13 +175,13 @@ impl DataValue {
                 writer.write_all(&value.serialize())?;
                 Ok(())
             }
-            DataValue::Tuple(values, is_upper) => {
+            DataValue::Tuple(values) => {
                 write_u8(writer, TAG_TUPLE)?;
                 write_len(writer, values.len())?;
                 for value in values {
                     value.encode_reference_value(writer)?;
                 }
-                write_bool(writer, *is_upper)
+                Ok(())
             }
         }
     }
@@ -229,7 +233,7 @@ impl DataValue {
                 for _ in 0..len {
                     values.push(DataValue::decode_reference_value(reader)?);
                 }
-                Ok(DataValue::Tuple(values, read_bool(reader)?))
+                Ok(DataValue::Tuple(values))
             }
             tag => Err(DatabaseError::InvalidValue(format!(
                 "invalid data value tag: {tag}"
@@ -239,7 +243,7 @@ impl DataValue {
 }
 
 impl ReferenceSerialization for DataValue {
-    fn encode<W: Write, A: crate::planner::MetaArena>(
+    fn encode<W: Write, A: MetaArena + ?Sized>(
         &self,
         writer: &mut W,
         _: bool,
@@ -249,7 +253,7 @@ impl ReferenceSerialization for DataValue {
         self.encode_reference_value(writer)
     }
 
-    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
+    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         _: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         _: &ReferenceTables,
@@ -448,7 +452,7 @@ pub(crate) mod test {
             DataValue::Time64(78, 6, true),
             #[cfg(feature = "decimal")]
             DataValue::Decimal(Decimal::new(12345, 2)),
-            DataValue::Tuple(vec![DataValue::Null, DataValue::Int32(42)], false),
+            DataValue::Tuple(vec![DataValue::Null, DataValue::Int32(42)]),
         ];
 
         let mut reference_tables = ReferenceTables::new();
@@ -473,6 +477,18 @@ pub(crate) mod test {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn unbound_parameter_cannot_be_serialized() {
+        let parameter = DataValue::Parameter {
+            id: 1,
+            ty: crate::types::LogicalType::Integer,
+        };
+        let err = parameter
+            .encode_reference_value(&mut Vec::new())
+            .unwrap_err();
+        assert!(err.to_string().contains("unbound parameter"));
     }
 
     #[test]
@@ -503,9 +519,8 @@ pub(crate) mod test {
         assert_invalid_value(&time64, "invalid bool value");
 
         let mut tuple = vec![TAG_TUPLE];
-        tuple.extend(0u32.to_le_bytes());
-        tuple.push(2);
-        assert_invalid_value(&tuple, "invalid bool value");
+        tuple.extend(1u32.to_le_bytes());
+        assert_invalid_value(&tuple, "failed to fill whole buffer");
     }
 
     #[test]

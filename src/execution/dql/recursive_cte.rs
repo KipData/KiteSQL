@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::planner::PlanArena;
 // Copyright 2024 KipData/KiteSQL
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,7 +21,8 @@ use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::recursive_cte::RecursiveScanOperator;
-use crate::planner::{LogicalPlan, PlanArena};
+use crate::planner::LogicalPlan;
+use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use std::mem;
@@ -198,7 +201,10 @@ impl<'a, T: Transaction + 'a> RecursiveCte<'a, T> {
         }
     }
 
-    fn start_recursive(&mut self, plan_arena: &mut PlanArena<'a>) -> Result<bool, DatabaseError> {
+    fn start_recursive(
+        &mut self,
+        plan_arena: &mut (dyn MetaArena + 'a),
+    ) -> Result<bool, DatabaseError> {
         let Some(input) = mem::take(&mut self.working).into_input()? else {
             return Ok(false);
         };
@@ -224,7 +230,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for RecursiveCte<'a, T> {
     fn into_executor(
         (anchor_plan, recursive_plan): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -243,13 +249,13 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for RecursiveCte<'a, T> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         loop {
             match self.phase {
                 RecursivePhase::Anchor => {
                     while arena.next_tuple(self.anchor_input, plan_arena)? {
-                        self.next.push(mem::take(arena.result_tuple_mut()))?;
+                        self.next.push(arena.materialize_tuple())?;
                     }
                     self.working = mem::take(&mut self.next).finish()?;
                     self.phase = RecursivePhase::Output;
@@ -270,8 +276,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for RecursiveCte<'a, T> {
                         .recursive_arena
                         .next_tuple(self.recursive_root, plan_arena)?
                     {
-                        self.next
-                            .push(mem::take(self.recursive_arena.result_tuple_mut()))?;
+                        self.next.push(self.recursive_arena.materialize_tuple())?;
                     }
                     self.recursive_arena.reset_for_rebuild();
                     self.working = mem::take(&mut self.next).finish()?;
@@ -292,7 +297,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for RecursiveScan {
     fn into_executor(
         _input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut PlanArena<'a>,
+        _plan_arena: &mut (dyn MetaArena + 'a),
         _cache: ExecutionContext<'_>,
         _transaction: &T,
     ) -> ExecId {
@@ -305,7 +310,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for RecursiveScan {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut PlanArena<'a>,
+        _plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         match self.input.next().transpose()? {
             Some(tuple) => arena.produce_tuple(tuple),
@@ -326,6 +331,7 @@ mod tests {
     use crate::planner::operator::recursive_cte::RecursiveScanOperator;
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
+    use crate::planner::test::PlanArenaTestExt;
     use crate::planner::Childrens;
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
@@ -402,10 +408,11 @@ mod tests {
         ));
         let schema_ref = vec![column];
         let anchor = LogicalPlan::new(
-            Operator::Values(ValuesOperator {
-                rows: vec![vec![DataValue::Int32(1)]],
-                schema_ref: schema_ref.clone(),
-            }),
+            Operator::Values(ValuesOperator::new(
+                plan_arena.alloc_expression_rows(&[vec![DataValue::Int32(1)]]),
+                1,
+                schema_ref.clone(),
+            )),
             Childrens::None,
         );
         let scan = LogicalPlan::new(

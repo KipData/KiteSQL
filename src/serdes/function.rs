@@ -16,12 +16,13 @@ use crate::errors::DatabaseError;
 use crate::expression::function::scala::ArcScalarFunctionImpl;
 use crate::expression::function::table::ArcTableFunctionImpl;
 use crate::expression::function::FunctionSummary;
+use crate::planner::MetaArena;
 use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
 use crate::storage::Transaction;
 use std::io::{Read, Write};
 
 impl ReferenceSerialization for ArcScalarFunctionImpl {
-    fn encode<W: Write, A: crate::planner::MetaArena>(
+    fn encode<W: Write, A: MetaArena + ?Sized>(
         &self,
         writer: &mut W,
         is_direct: bool,
@@ -32,7 +33,7 @@ impl ReferenceSerialization for ArcScalarFunctionImpl {
             .encode(writer, is_direct, reference_tables, arena)
     }
 
-    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
+    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         context: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
@@ -57,7 +58,7 @@ impl ReferenceSerialization for ArcScalarFunctionImpl {
 }
 
 impl ReferenceSerialization for ArcTableFunctionImpl {
-    fn encode<W: Write, A: crate::planner::MetaArena>(
+    fn encode<W: Write, A: MetaArena + ?Sized>(
         &self,
         writer: &mut W,
         is_direct: bool,
@@ -68,7 +69,7 @@ impl ReferenceSerialization for ArcTableFunctionImpl {
             .encode(writer, is_direct, reference_tables, arena)
     }
 
-    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
+    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         context: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,

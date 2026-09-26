@@ -11,7 +11,7 @@ impl<S: Storage> Database<S> {
                 'parent,
                 'arena,
                 S::TransactionType<'_>,
-                &'static [(&'static str, DataValue)],
+                &'static [(usize, LogicalType)],
             >,
         ) -> Result<LogicalPlan, DatabaseError>,
     {
@@ -28,7 +28,7 @@ impl<S: Storage> Database<S> {
                 'parent,
                 'arena,
                 S::TransactionType<'_>,
-                &'static [(&'static str, DataValue)],
+                &'static [(usize, LogicalType)],
             >,
         ) -> Result<LogicalPlan, DatabaseError>,
     {
@@ -170,7 +170,7 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
                 'parent,
                 'arena,
                 S::TransactionType<'a>,
-                &'static [(&'static str, DataValue)],
+                &'static [(usize, LogicalType)],
             >,
         ) -> Result<LogicalPlan, DatabaseError>,
     {
@@ -187,7 +187,7 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
                 'parent,
                 'arena,
                 S::TransactionType<'a>,
-                &'static [(&'static str, DataValue)],
+                &'static [(usize, LogicalType)],
             >,
         ) -> Result<LogicalPlan, DatabaseError>,
     {

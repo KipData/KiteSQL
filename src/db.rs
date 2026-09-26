@@ -13,7 +13,9 @@
 // limitations under the License.
 
 #[cfg(feature = "parser")]
-pub use crate::binder::{prepare, prepare_all, Statement};
+mod prepared;
+#[cfg(feature = "parser")]
+pub use crate::binder::{prepare_all, Statement};
 use crate::binder::{Binder, BinderContext};
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
@@ -40,7 +42,7 @@ use crate::optimizer::rule::normalization::NormalizationRuleImpl;
 #[cfg(feature = "orm")]
 use crate::orm::FromQueryRow;
 use crate::planner::operator::Operator;
-use crate::planner::{LogicalPlan, PlanArena, TableArenaCell};
+use crate::planner::{LogicalPlan, MetaArena, PlanArena, TableArenaCell};
 #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
 use crate::storage::lmdb::{LmdbConfig, LmdbStorage};
 use crate::storage::memory::MemoryStorage;
@@ -53,6 +55,9 @@ use crate::storage::{
 };
 use crate::types::tuple::{Schema, SchemaView, Tuple};
 use crate::types::value::DataValue;
+use crate::types::LogicalType;
+#[cfg(feature = "parser")]
+pub use prepared::PreparedPlan;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::mem;
@@ -70,22 +75,23 @@ pub enum CatalogKind {
     TableFunction(Arc<dyn TableFunctionImpl>),
 }
 
-pub(crate) trait BindSource {
+pub(crate) trait BindSource<'a> {
     type Iter: ResultIter;
     type Transaction: Transaction;
 
-    fn execute<A, F>(self, params: A, build: F) -> Result<Self::Iter, DatabaseError>
+    type Storage: Storage;
+
+    fn execute<A: MetaArena + 'a, F>(self, build: F) -> Result<Self::Iter, DatabaseError>
     where
-        A: AsRef<[(&'static str, DataValue)]>,
-        F: for<'bind> FnOnce(
-            &mut Binder<'bind, '_, Self::Transaction, A>,
-            &mut PlanArena<'_>,
-        ) -> Result<LogicalPlan, DatabaseError>;
+        F: FnOnce(
+            &'a State<Self::Storage>,
+            &Self::Transaction,
+        ) -> Result<(LogicalPlan, A), DatabaseError>;
 
     #[cfg(feature = "orm")]
     fn explain<A, F>(self, params: A, build: F) -> Result<String, DatabaseError>
     where
-        A: AsRef<[(&'static str, DataValue)]>,
+        A: AsRef<[(usize, LogicalType)]>,
         F: for<'bind> FnOnce(
             &mut Binder<'bind, '_, Self::Transaction, A>,
             &mut PlanArena<'_>,
@@ -284,7 +290,7 @@ impl DataBaseBuilder {
             table_cache,
             view_cache,
             table_arena,
-            optimizer_pipeline: default_optimizer_pipeline(),
+            optimizer_pipeline: optimizer_pipeline(),
             histogram_buckets,
             _p: Default::default(),
         };
@@ -308,7 +314,7 @@ impl DataBaseBuilder {
     }
 }
 
-fn default_optimizer_pipeline() -> HepOptimizerPipeline {
+fn optimizer_pipeline() -> HepOptimizerPipeline {
     HepOptimizerPipeline::builder()
         .before_batch(
             "Column Pruning".to_string(),
@@ -331,7 +337,6 @@ fn default_optimizer_pipeline() -> HepOptimizerPipeline {
             vec![
                 NormalizationRuleImpl::PushPredicateThroughJoin,
                 NormalizationRuleImpl::PushJoinPredicateIntoScan,
-                NormalizationRuleImpl::PushPredicateIntoScan,
             ],
         )
         .before_batch(
@@ -358,6 +363,11 @@ fn default_optimizer_pipeline() -> HepOptimizerPipeline {
                 NormalizationRuleImpl::CollapseGroupByAgg,
                 NormalizationRuleImpl::CombineFilter,
             ],
+        )
+        .before_batch(
+            "Predicate Into Scan".to_string(),
+            HepBatchStrategy::fix_point_topdown(10),
+            vec![NormalizationRuleImpl::PushPredicateIntoScan],
         )
         .after_batch(
             "Parameterize Mark Apply".to_string(),
@@ -505,21 +515,20 @@ impl<S: Storage> State<S> {
         Ok(())
     }
 
-    pub(crate) fn build_plan<'a, 'txn, A: AsRef<[(&'static str, DataValue)]>, F>(
+    pub(crate) fn build_plan<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>, F>(
         &'a self,
         params: A,
-        transaction: &<S as Storage>::TransactionType<'txn>,
+        transaction: &T,
         build: F,
     ) -> Result<(LogicalPlan, PlanArena<'a>), DatabaseError>
     where
-        S: 'txn,
         F: for<'bind> FnOnce(
-            &mut Binder<'bind, '_, <S as Storage>::TransactionType<'txn>, A>,
+            &mut Binder<'bind, '_, T, A>,
             &mut PlanArena<'a>,
         ) -> Result<LogicalPlan, DatabaseError>,
     {
-        let mut plan_arena = PlanArena::new(self.table_arena());
-        let mut binder: Binder<'_, '_, <S as Storage>::TransactionType<'txn>, A> = Binder::new(
+        let mut arena = PlanArena::new(self.table_arena());
+        let mut binder = Binder::new(
             BinderContext::new(
                 self.table_cache(),
                 self.view_cache(),
@@ -530,63 +539,44 @@ impl<S: Storage> State<S> {
             &params,
             None,
         );
-        let source_plan = build(&mut binder, &mut plan_arena)?;
+        let source_plan = build(&mut binder, &mut arena)?;
         drop(binder);
-        let mut best_plan = self.optimizer_pipeline.instantiate(source_plan).find_best(
+        let mut plan = self.optimizer_pipeline.instantiate(source_plan).find_best(
             Some(&StatisticMetaLoader::new(self.meta_cache())),
-            &mut plan_arena,
+            &mut arena,
         )?;
 
-        if let Operator::Analyze(op) = &mut best_plan.operator {
+        if let Operator::Analyze(op) = &mut plan.operator {
             if op.histogram_buckets.is_none() {
                 op.histogram_buckets = self.histogram_buckets;
             }
         }
 
-        Ok((best_plan, plan_arena))
+        Ok((plan, arena))
     }
 
-    pub(crate) fn execute<'a, 'txn, A, F>(
+    pub(crate) fn execute<'a, 'txn, A: MetaArena + 'a>(
         &'a self,
         transaction: &'a mut S::TransactionType<'txn>,
-        params: A,
-        build: F,
-    ) -> Result<
-        (
-            Schema,
-            PlanArena<'a>,
-            Executor<'a, S::TransactionType<'txn>>,
-        ),
-        DatabaseError,
-    >
+        mut plan: LogicalPlan,
+        mut plan_arena: A,
+    ) -> Result<(Schema, A, Executor<'a, S::TransactionType<'txn>>), DatabaseError>
     where
         S: 'txn,
-        A: AsRef<[(&'static str, DataValue)]>,
-        F: for<'bind> FnOnce(
-            &mut Binder<'bind, '_, S::TransactionType<'txn>, A>,
-            &mut PlanArena<'a>,
-        ) -> Result<LogicalPlan, DatabaseError>,
     {
-        transaction.begin_statement_scope()?;
-        match (|| {
-            let (mut plan, mut plan_arena) = self.build_plan(params, transaction, build)?;
-            let schema = plan.take_schema(&mut plan_arena);
-            let mut arena = ExecArena::new();
-            let read_context = ExecutionContext::new(
-                &self.table_cache,
-                &self.view_cache,
-                &self.meta_cache,
-                &self.scala_functions,
-                &self.table_functions,
-            );
-            let root = build_write(&mut arena, &mut plan_arena, plan, read_context, transaction);
-            let executor = Executor::new(arena, root);
+        let schema = plan.take_schema(&mut plan_arena);
+        let mut arena = ExecArena::new();
+        let read_context = ExecutionContext::new(
+            &self.table_cache,
+            &self.view_cache,
+            &self.meta_cache,
+            &self.scala_functions,
+            &self.table_functions,
+        );
+        let root = build_write(&mut arena, &mut plan_arena, plan, read_context, transaction);
+        let executor = Executor::new(arena, root);
 
-            Ok((schema, plan_arena, executor))
-        })() {
-            Ok(result) => Ok(result),
-            Err(err) => Err(err),
-        }
+        Ok((schema, plan_arena, executor))
     }
 
     pub(crate) fn execute_mut<'a, 'txn, A, F>(
@@ -604,7 +594,7 @@ impl<S: Storage> State<S> {
     >
     where
         S: 'txn,
-        A: AsRef<[(&'static str, DataValue)]>,
+        A: AsRef<[(usize, LogicalType)]>,
         F: for<'bind> FnOnce(
             &mut Binder<'bind, '_, S::TransactionType<'txn>, A>,
             &mut PlanArena<'a>,
@@ -734,7 +724,7 @@ impl<S: Storage> Database<S> {
         build: F,
     ) -> Result<(), DatabaseError>
     where
-        A: AsRef<[(&'static str, DataValue)]>,
+        A: AsRef<[(usize, LogicalType)]>,
         F: for<'a, 'txn, 'bind> FnOnce(
             &mut Binder<'bind, '_, S::TransactionType<'txn>, A>,
             &mut PlanArena<'a>,
@@ -875,36 +865,36 @@ impl<S: Storage> Database<S> {
     }
 }
 
-impl<'a, S: Storage> BindSource for &'a Database<S> {
+impl<'a, S: Storage> BindSource<'a> for &'a Database<S> {
     type Iter = DatabaseIter<'a, S>;
     type Transaction = S::TransactionType<'a>;
 
-    fn execute<A, F>(self, params: A, build: F) -> Result<Self::Iter, DatabaseError>
+    type Storage = S;
+
+    fn execute<A: MetaArena + 'a, F>(self, build: F) -> Result<Self::Iter, DatabaseError>
     where
-        A: AsRef<[(&'static str, DataValue)]>,
-        F: for<'bind> FnOnce(
-            &mut Binder<'bind, '_, Self::Transaction, A>,
-            &mut PlanArena<'_>,
-        ) -> Result<LogicalPlan, DatabaseError>,
+        F: FnOnce(&'a State<S>, &Self::Transaction) -> Result<(LogicalPlan, A), DatabaseError>,
     {
         let transaction = Box::into_raw(Box::new(
             self.storage
                 .transaction_with_isolation(self.transaction_isolation)?,
         ));
-        let (schema, plan_arena, executor) =
-            match self
-                .state
-                .execute(unsafe { &mut *transaction }, params, build)
-            {
-                Ok(result) => result,
-                Err(err) => {
-                    unsafe { drop(Box::from_raw(transaction)) };
-                    return Err(err);
-                }
-            };
+        let result = (|| {
+            let transaction = unsafe { &mut *transaction };
+            transaction.begin_statement_scope()?;
+            let (plan, arena) = build(&self.state, transaction)?;
+            self.state.execute(transaction, plan, arena)
+        })();
+        let (schema, arena, executor) = match result {
+            Ok(result) => result,
+            Err(error) => {
+                unsafe { drop(Box::from_raw(transaction)) };
+                return Err(error);
+            }
+        };
         let inner = Box::into_raw(Box::new(TransactionIter::new(
             schema,
-            plan_arena,
+            Box::new(arena) as Box<dyn MetaArena + 'a>,
             executor,
             transaction,
         )));
@@ -914,7 +904,7 @@ impl<'a, S: Storage> BindSource for &'a Database<S> {
     #[cfg(feature = "orm")]
     fn explain<A, F>(self, params: A, build: F) -> Result<String, DatabaseError>
     where
-        A: AsRef<[(&'static str, DataValue)]>,
+        A: AsRef<[(usize, LogicalType)]>,
         F: for<'bind> FnOnce(
             &mut Binder<'bind, '_, Self::Transaction, A>,
             &mut PlanArena<'_>,
@@ -1093,25 +1083,25 @@ impl<'txn, S: Storage> DBTransaction<'txn, S> {
     }
 }
 
-impl<'a, 'txn, S: Storage> BindSource for &'a mut DBTransaction<'txn, S> {
+impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut DBTransaction<'txn, S> {
     type Iter = TransactionIter<'a, S::TransactionType<'txn>>;
     type Transaction = S::TransactionType<'txn>;
 
-    fn execute<A, F>(self, params: A, build: F) -> Result<Self::Iter, DatabaseError>
+    type Storage = S;
+
+    fn execute<A: MetaArena + 'a, F>(self, build: F) -> Result<Self::Iter, DatabaseError>
     where
-        A: AsRef<[(&'static str, DataValue)]>,
-        F: for<'bind> FnOnce(
-            &mut Binder<'bind, '_, Self::Transaction, A>,
-            &mut PlanArena<'_>,
-        ) -> Result<LogicalPlan, DatabaseError>,
+        F: FnOnce(&'a State<S>, &Self::Transaction) -> Result<(LogicalPlan, A), DatabaseError>,
     {
+        self.inner.begin_statement_scope()?;
+        let (plan, arena) = build(self.state, &self.inner)?;
         let transaction = std::ptr::from_mut(&mut self.inner);
-        let (schema, plan_arena, executor) =
+        let (schema, arena, executor) =
             self.state
-                .execute(unsafe { &mut *transaction }, params, build)?;
+                .execute(unsafe { &mut *transaction }, plan, arena)?;
         Ok(TransactionIter::new(
             schema,
-            plan_arena,
+            Box::new(arena) as Box<dyn MetaArena + 'a>,
             executor,
             transaction,
         ))
@@ -1120,7 +1110,7 @@ impl<'a, 'txn, S: Storage> BindSource for &'a mut DBTransaction<'txn, S> {
     #[cfg(feature = "orm")]
     fn explain<A, F>(self, params: A, build: F) -> Result<String, DatabaseError>
     where
-        A: AsRef<[(&'static str, DataValue)]>,
+        A: AsRef<[(usize, LogicalType)]>,
         F: for<'bind> FnOnce(
             &mut Binder<'bind, '_, Self::Transaction, A>,
             &mut PlanArena<'_>,
@@ -1133,19 +1123,19 @@ impl<'a, 'txn, S: Storage> BindSource for &'a mut DBTransaction<'txn, S> {
 }
 
 /// Raw result iterator returned by transaction execution APIs.
-pub struct TransactionIter<'a, T: Transaction + 'a> {
+pub struct TransactionIter<'a, T: Transaction + 'a, A: MetaArena + 'a = Box<dyn MetaArena + 'a>> {
     executor: Option<Executor<'a, T>>,
-    plan_arena: Option<PlanArena<'a>>,
+    plan_arena: Option<A>,
     schema: Schema,
     transaction: *mut T,
     statement_scope_active: bool,
     ddl_apply: Vec<DDLApply>,
 }
 
-impl<'a, T: Transaction + 'a> TransactionIter<'a, T> {
+impl<'a, T: Transaction + 'a, A: MetaArena + 'a> TransactionIter<'a, T, A> {
     pub(crate) fn new(
         schema: Schema,
-        plan_arena: PlanArena<'a>,
+        plan_arena: A,
         executor: Executor<'a, T>,
         transaction: *mut T,
     ) -> Self {
@@ -1216,7 +1206,9 @@ impl<'a, T: Transaction + 'a> TransactionIter<'a, T> {
         while self.next_tuple(|_, _| ())?.is_some() {}
         Ok(())
     }
+}
 
+impl<'a, T: Transaction + 'a> TransactionIter<'a, T, PlanArena<'a>> {
     fn done_with_ddl_apply(mut self) -> Result<(PlanArena<'a>, Vec<DDLApply>), DatabaseError> {
         while self.next_tuple(|_, _| ())?.is_some() {}
         Ok((
@@ -1228,13 +1220,13 @@ impl<'a, T: Transaction + 'a> TransactionIter<'a, T> {
     }
 }
 
-impl<T: Transaction> Drop for TransactionIter<'_, T> {
+impl<T: Transaction, A: MetaArena> Drop for TransactionIter<'_, T, A> {
     fn drop(&mut self) {
         let _ = self.finish_statement_scope();
     }
 }
 
-impl<T: Transaction> ResultIter for TransactionIter<'_, T> {
+impl<T: Transaction, A: MetaArena> ResultIter for TransactionIter<'_, T, A> {
     fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
         TransactionIter::schema(self, f)
     }
@@ -1452,7 +1444,7 @@ pub(crate) mod test {
         kite_sql.ddl("CREATE TABLE onecolumn (id INT PRIMARY KEY, x INT NULL)")?;
         kite_sql.ddl("CREATE TABLE empty (e_id INT PRIMARY KEY, x INT)")?;
 
-        let stmt = crate::db::prepare(
+        let stmt = crate::binder::parse_statement(
             "SELECT * FROM onecolumn AS a(aid, x) JOIN empty AS b(bid, y) ON a.x = b.y",
         )?;
         let transaction = kite_sql.storage.transaction()?;
@@ -1535,7 +1527,7 @@ pub(crate) mod test {
         kite_sql.ddl("CREATE TABLE onecolumn (id INT PRIMARY KEY, x INT NULL)")?;
         kite_sql.ddl("CREATE TABLE twocolumn (t_id INT PRIMARY KEY, x INT NULL, y INT NULL)")?;
 
-        let stmt = crate::db::prepare(
+        let stmt = crate::binder::parse_statement(
             "SELECT o.x, t.y FROM onecolumn o INNER JOIN twocolumn t ON (o.x=t.x AND t.y=53)",
         )?;
         let transaction = kite_sql.storage.transaction()?;
@@ -1645,7 +1637,7 @@ pub(crate) mod test {
             )?
             .done()?;
 
-        let stmt = crate::db::prepare(
+        let stmt = crate::binder::parse_statement(
             "SELECT o.x, t.y FROM onecolumn o INNER JOIN twocolumn t ON (o.x=t.x AND t.y=53)",
         )?;
         let transaction = kite_sql.storage.transaction()?;
@@ -1713,18 +1705,24 @@ pub(crate) mod test {
     #[test]
     fn test_prepare_statment() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path())
+            .histogram_buckets(2)
+            .build_rocksdb()?;
 
         kite_sql.ddl("create table t1 (a int primary key, b int)")?;
         kite_sql.run("insert into t1 values(0, 0)")?.done()?;
         kite_sql.run("insert into t1 values(1, 1)")?.done()?;
         kite_sql.run("insert into t1 values(2, 2)")?.done()?;
+        kite_sql.analyze("t1")?;
 
         // Filter
         {
-            let statement = crate::db::prepare("explain select * from t1 where b > $1")?;
+            let statement = kite_sql.prepare(
+                "explain select * from t1 where b > $1",
+                &[(1, LogicalType::Integer)],
+            )?;
 
-            let mut iter = kite_sql.execute(statement, &[("$1", DataValue::Int32(0))])?;
+            let mut iter = kite_sql.execute(&statement, &[(1, DataValue::Int32(0))])?;
 
             let row = next_tuple_owned(&mut iter)?.unwrap();
             let plan = row.values[0].utf8().unwrap();
@@ -1735,43 +1733,48 @@ pub(crate) mod test {
         }
         // Aggregate
         {
-            let statement = crate::db::prepare(
-                "explain select a + $1, max(b + $2) from t1 where b > $3 group by a + $4",
+            let statement = kite_sql.prepare(
+                "explain select a + $1, max(b + $2) from t1 where b > $3 group by a + $1",
+                &[
+                    (1, LogicalType::Integer),
+                    (2, LogicalType::Integer),
+                    (3, LogicalType::Integer),
+                ],
             )?;
 
             let mut iter = kite_sql.execute(
-                statement,
+                &statement,
                 &[
-                    ("$1", DataValue::Int32(0)),
-                    ("$2", DataValue::Int32(0)),
-                    ("$3", DataValue::Int32(1)),
-                    ("$4", DataValue::Int32(0)),
+                    (1, DataValue::Int32(0)),
+                    (2, DataValue::Int32(0)),
+                    (3, DataValue::Int32(1)),
+                    (4, DataValue::Int32(0)),
                 ],
             )?;
             let row = next_tuple_owned(&mut iter)?.unwrap();
             let plan = row.values[0].utf8().unwrap();
             assert_eq!(
                 plan,
-                "Projection [(t1.a + 0), Max((t1.b + 0))] [Project => (Sort Option: Follow)] Aggregate [Max((t1.b + 0))] -> Group By [(t1.a + 0)] [HashAggregate => (Sort Option: None)] Filter (t1.b > 1), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)]"
+                "Projection [(t1.a + $1), Max((t1.b + $2))] [Project => (Sort Option: Follow)] Aggregate [Max((t1.b + 0))] -> Group By [(t1.a + 0)] [HashAggregate => (Sort Option: None)] Filter (t1.b > 1), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)]"
             );
         }
         {
-            let statement = crate::db::prepare("explain select *, $1 from (select * from t1 where b > $2) left join (select * from t1 where a > $3) on a > $4")?;
+            let statement = kite_sql.prepare("explain select *, $1 from (select * from t1 where b > $2) left join (select * from t1 where a > $3) on a > $4", &[(1, LogicalType::Integer), (2, LogicalType::Integer), (3, LogicalType::Integer), (4, LogicalType::Integer)])?;
 
             let mut iter = kite_sql.execute(
-                statement,
+                &statement,
                 &[
-                    ("$1", DataValue::Int32(9)),
-                    ("$2", DataValue::Int32(0)),
-                    ("$3", DataValue::Int32(1)),
-                    ("$4", DataValue::Int32(0)),
+                    (1, DataValue::Int32(9)),
+                    (2, DataValue::Int32(0)),
+                    (3, DataValue::Int32(1)),
+                    (4, DataValue::Int32(0)),
                 ],
             )?;
             let row = next_tuple_owned(&mut iter)?.unwrap();
             let plan = row.values[0].utf8().unwrap();
             assert_eq!(
                 plan,
-                "Projection [t1.a, t1.b, t1.a, t1.b, 9] [Project => (Sort Option: Follow)] LeftOuter Join Where (t1.a > 0) [NestLoopJoin => (Sort Option: None)] Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] Filter (t1.b > 0), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)] Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] Filter (t1.a > 1), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)]"
+                "Projection [t1.a, t1.b, t1.a, t1.b, 9] [Project => (Sort Option: Follow)] LeftOuter Join Where (t1.a > 0) [NestLoopJoin => (Sort Option: None)] Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] Filter (t1.b > 0), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)] Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [IndexScan By pk_index => (1, +inf) => (Sort Option: OrderBy: (t1.a Asc Nulls Last) ignore_prefix_len: 0)]"
             );
         }
 

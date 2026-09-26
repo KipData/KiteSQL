@@ -15,7 +15,7 @@
 use crate::catalog::{ColumnCatalog, ColumnRef};
 use crate::errors::DatabaseError;
 use crate::iter_ext::Itertools;
-use crate::planner::PlanArena;
+use crate::planner::MetaArena;
 use crate::types::serialize::{TupleValueSerializable, TupleValueSerializableImpl};
 use crate::types::value::DataValue;
 use std::borrow::Borrow;
@@ -28,12 +28,12 @@ pub type Schema = Vec<ColumnRef>;
 
 pub struct SchemaView<'a, 'p> {
     schema: &'a Schema,
-    arena: &'a PlanArena<'p>,
+    arena: &'a (dyn MetaArena + 'p),
 }
 
 pub struct SchemaColumnIter<'a, 'p, 's> {
     columns: std::slice::Iter<'s, ColumnRef>,
-    arena: &'a PlanArena<'p>,
+    arena: &'a (dyn MetaArena + 'p),
 }
 
 impl<'a> Iterator for SchemaColumnIter<'a, '_, '_> {
@@ -45,7 +45,7 @@ impl<'a> Iterator for SchemaColumnIter<'a, '_, '_> {
 }
 
 impl<'a, 'p> SchemaView<'a, 'p> {
-    pub fn new(schema: &'a Schema, arena: &'a PlanArena<'p>) -> Self {
+    pub fn new(schema: &'a Schema, arena: &'a (dyn MetaArena + 'p)) -> Self {
         Self { schema, arena }
     }
 
@@ -265,10 +265,7 @@ impl Tuple {
 
     pub fn primary_projection(pk_indices: &[usize], values: &[DataValue]) -> TupleId {
         if pk_indices.len() > 1 {
-            DataValue::Tuple(
-                pk_indices.iter().map(|i| values[*i].clone()).collect_vec(),
-                false,
-            )
+            DataValue::Tuple(pk_indices.iter().map(|i| values[*i].clone()).collect_vec())
         } else {
             values[pk_indices[0]].clone()
         }
@@ -548,13 +545,10 @@ mod tests {
                 .map(|column| column.datatype().serializable())
                 .collect_vec();
             let mut multi_pk_tuple = tuples[0].clone();
-            multi_pk_tuple.pk = Some(DataValue::Tuple(
-                vec![
-                    multi_pk_tuple.values[4].clone(),
-                    multi_pk_tuple.values[2].clone(),
-                ],
-                false,
-            ));
+            multi_pk_tuple.pk = Some(DataValue::Tuple(vec![
+                multi_pk_tuple.values[4].clone(),
+                multi_pk_tuple.values[2].clone(),
+            ]));
 
             let mut tuple_3 = Tuple {
                 pk: multi_pk_tuple.pk.clone(),
@@ -696,7 +690,7 @@ mod tests {
         );
         assert_eq!(
             Tuple::primary_projection(&[0, 1], &tuple.values),
-            DataValue::Tuple(vec![DataValue::Null, DataValue::Int32(7)], false)
+            DataValue::Tuple(vec![DataValue::Null, DataValue::Int32(7)])
         );
     }
 }

@@ -16,7 +16,8 @@ use crate::catalog::ColumnRef;
 use crate::expression::window::WindowFunction;
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::SortOption;
-use crate::planner::{fmt_explain_list, Explain, PlanArena};
+use crate::planner::MetaArena;
+use crate::planner::{fmt_explain_list, Explain};
 use kite_sql_serde_macros::ReferenceSerialization;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
@@ -41,7 +42,11 @@ impl WindowOperator {
 }
 
 impl Explain for WindowOperator {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        arena: &(dyn MetaArena + '_),
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         let (partition_by, order_by) = self.sort_fields.split_at(self.partition_by_len);
         f.write_str("Window [")?;
         for (index, function) in self.functions.iter().enumerate() {

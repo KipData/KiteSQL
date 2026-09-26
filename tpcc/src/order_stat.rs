@@ -63,9 +63,9 @@ impl TpccTransaction for OrderStat {
             tx.with_query_one(
                 &mut statements[0],
                 &[
-                    ("$1", DataValue::Int16(args.w_id as i16)),
-                    ("$2", DataValue::Int8(args.d_id as i8)),
-                    ("$3", DataValue::from(args.c_last.clone())),
+                    (1, DataValue::Int16(args.w_id as i16)),
+                    (2, DataValue::Int8(args.d_id as i8)),
+                    (3, DataValue::from(args.c_last.clone())),
                 ],
                 &mut |tuple| {
                     name_cnt = tuple.values[0].i32().unwrap() as usize;
@@ -74,9 +74,9 @@ impl TpccTransaction for OrderStat {
             )?;
             // "SELECT c_balance, c_first, c_middle, c_last FROM customer WHERE c_w_id = ? AND c_d_id = ? AND c_last = ? ORDER BY c_first"
             let params = [
-                ("$1", DataValue::Int16(args.w_id as i16)),
-                ("$2", DataValue::Int8(args.d_id as i8)),
-                ("$3", DataValue::from(args.c_last.clone())),
+                (1, DataValue::Int16(args.w_id as i16)),
+                (2, DataValue::Int8(args.d_id as i8)),
+                (3, DataValue::from(args.c_last.clone())),
             ];
             if name_cnt % 2 == 1 {
                 name_cnt += 1;
@@ -103,9 +103,9 @@ impl TpccTransaction for OrderStat {
             tx.with_query_one(
                 &mut statements[2],
                 &[
-                    ("$1", DataValue::Int16(args.w_id as i16)),
-                    ("$2", DataValue::Int8(args.d_id as i8)),
-                    ("$3", DataValue::Int32(args.c_id as i32)),
+                    (1, DataValue::Int16(args.w_id as i16)),
+                    (2, DataValue::Int8(args.d_id as i8)),
+                    (3, DataValue::Int32(args.c_id as i32)),
                 ],
                 &mut |tuple| {
                     c_balance = tuple.values[0].decimal().unwrap();
@@ -119,12 +119,12 @@ impl TpccTransaction for OrderStat {
         };
         // "SELECT o_id, o_entry_d, COALESCE(o_carrier_id,0) FROM orders WHERE o_w_id = ? AND o_d_id = ? AND o_c_id = ? AND o_id = (SELECT MAX(o_id) FROM orders WHERE o_w_id = ? AND o_d_id = ? AND o_c_id = ?)"
         let params = [
-            ("$1", DataValue::Int16(args.w_id as i16)),
-            ("$2", DataValue::Int8(args.d_id as i8)),
-            ("$3", DataValue::Int32(args.c_id as i32)),
-            ("$4", DataValue::Int16(args.w_id as i16)),
-            ("$5", DataValue::Int8(args.d_id as i8)),
-            ("$6", DataValue::Int32(args.c_id as i32)),
+            (1, DataValue::Int16(args.w_id as i16)),
+            (2, DataValue::Int8(args.d_id as i8)),
+            (3, DataValue::Int32(args.c_id as i32)),
+            (4, DataValue::Int16(args.w_id as i16)),
+            (5, DataValue::Int8(args.d_id as i8)),
+            (6, DataValue::Int32(args.c_id as i32)),
         ];
         let mut o_id = 0;
         tx.with_query_one(&mut statements[3], &params, &mut |tuple| {
@@ -133,9 +133,9 @@ impl TpccTransaction for OrderStat {
         })?;
         // "SELECT ol_i_id, ol_supply_w_id, ol_quantity, ol_amount, ol_delivery_d FROM order_line WHERE ol_w_id = ? AND ol_d_id = ? AND ol_o_id = ?"
         let params = [
-            ("$1", DataValue::Int16(args.w_id as i16)),
-            ("$2", DataValue::Int8(args.d_id as i8)),
-            ("$3", DataValue::Int32(o_id)),
+            (1, DataValue::Int16(args.w_id as i16)),
+            (2, DataValue::Int8(args.d_id as i8)),
+            (3, DataValue::Int32(o_id)),
         ];
         tx.with_query_one(&mut statements[4], &params, &mut |_| Ok(()))?;
         // let ol_i_id = tuple.values[0].i32();

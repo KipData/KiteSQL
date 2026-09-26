@@ -52,7 +52,9 @@ mod update;
 mod window;
 
 #[cfg(feature = "parser")]
-pub use parser::{command_type, prepare, prepare_all, CommandType, Statement};
+pub(crate) use parser::parse_statement;
+#[cfg(feature = "parser")]
+pub use parser::{command_type, prepare_all, CommandType, Statement};
 #[cfg(feature = "orm")]
 pub use select::{BindPlanFrom, BindPlanSelectList};
 #[cfg(feature = "orm")]
@@ -69,7 +71,6 @@ use crate::planner::operator::mark_apply::MarkApplyQuantifier;
 use crate::planner::{ExprRef, LogicalPlan, PlanArena, PlanRef};
 use crate::storage::{TableCache, Transaction, ViewCache};
 use crate::types::tuple::Schema;
-use crate::types::value::DataValue;
 use crate::types::LogicalType;
 
 pub enum InputRefType {
@@ -612,7 +613,7 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
     }
 }
 
-pub struct Binder<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> {
+pub struct Binder<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> {
     pub(crate) context: BinderContext<'a, T>,
     pub(crate) args: &'a A,
     pub(crate) force_spill: bool,
@@ -621,7 +622,7 @@ pub struct Binder<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValu
     pub(crate) parent: Option<&'parent BinderContext<'a, T>>,
 }
 
-impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, 'parent, T, A> {
+impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'parent, T, A> {
     pub fn new(
         context: BinderContext<'a, T>,
         args: &'a A,

@@ -19,7 +19,7 @@ use super::{
 use crate::TpccError;
 use kite_sql::binder::{command_type, CommandType};
 use kite_sql::db::{
-    prepare, prepare_all, DBTransaction, DataBaseBuilder, Database, Statement, TransactionIter,
+    prepare_all, DBTransaction, DataBaseBuilder, Database, Statement, TransactionIter,
 };
 use kite_sql::storage::rocksdb::{OptimisticRocksStorage, RocksStorage};
 use kite_sql::storage::{Storage, Transaction};
@@ -57,14 +57,13 @@ impl<S: Storage> KiteSqlRocksBackend<S> {
     fn prepare_spec_groups(
         &self,
         specs: &[Vec<StatementSpec>],
-    ) -> Result<Vec<Vec<KiteSqlPreparedStatement>>, TpccError> {
+    ) -> Result<Vec<Vec<KiteSqlPreparedStatement<'_>>>, TpccError> {
         let mut groups = Vec::with_capacity(specs.len());
         for group in specs {
             let mut prepared = Vec::with_capacity(group.len());
             for spec in group {
-                let statement = prepare(spec.sql)?;
                 prepared.push(KiteSqlPreparedStatement {
-                    statement,
+                    plan: self.database.prepare(spec.sql, &spec.parameters)?,
                     spec: spec.clone(),
                 });
             }
@@ -82,7 +81,7 @@ impl<S: Storage> KiteSqlRocksBackend<S> {
 
 impl<S: Storage> BackendControl for KiteSqlRocksBackend<S> {
     type PreparedStatement<'a>
-        = KiteSqlPreparedStatement
+        = KiteSqlPreparedStatement<'a>
     where
         Self: 'a;
 
@@ -156,9 +155,7 @@ pub(crate) fn execute_kitesql_batch<S: Storage>(
     }
 
     let mut transaction = database.new_transaction()?;
-    for statement in statements {
-        transaction.execute(statement, &[])?.done()?;
-    }
+    transaction.run(sql)?.done()?;
     transaction.commit()?;
     Ok(())
 }
@@ -170,17 +167,17 @@ pub struct KiteSqlRocksTransaction<'a, S: Storage> {
 impl<'a, S: Storage> KiteSqlRocksTransaction<'a, S> {
     pub(crate) fn execute_raw<'b>(
         &'b mut self,
-        statement: &mut KiteSqlPreparedStatement,
+        statement: &'b mut KiteSqlPreparedStatement<'a>,
         params: &[DbParam],
     ) -> Result<KiteSqlTxnResult<'b, S::TransactionType<'a>>, TpccError> {
         Ok(KiteSqlTxnResult::new(
-            self.inner.execute(&statement.statement, params)?,
+            self.inner.execute(&statement.plan, params)?,
         ))
     }
 }
 
 impl<'a, S: Storage> BackendTransaction for KiteSqlRocksTransaction<'a, S> {
-    type PreparedStatement = KiteSqlPreparedStatement;
+    type PreparedStatement = KiteSqlPreparedStatement<'a>;
 
     fn execute_drain(
         &mut self,

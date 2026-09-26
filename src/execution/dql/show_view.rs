@@ -14,6 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
+use crate::planner::MetaArena;
 use crate::storage::{Transaction, ViewIter};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
@@ -28,7 +29,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ShowViews<'a, T> {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _: &mut crate::planner::PlanArena<'a>,
+        _: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
@@ -40,7 +41,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowViews<'a, T> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         if self.metas.is_none() {
             let context = arena.context();

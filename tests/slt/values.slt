@@ -69,3 +69,23 @@ SELECT t.y FROM (VALUES (10, 20), (30, 40)) AS t(x, y);
 ----
 20
 40
+
+statement ok
+ALTER TABLE t ADD COLUMN v INT NOT NULL DEFAULT 7;
+
+statement ok
+INSERT INTO t VALUES (4, DEFAULT), (4 + 1, 21), (10, DEFAULT), (10 + 1, 30);
+
+query II
+SELECT * FROM t ORDER BY x;
+----
+1 7
+2 7
+3 7
+4 7
+5 21
+10 7
+11 30
+
+statement ok
+DROP TABLE t;

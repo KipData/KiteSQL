@@ -18,12 +18,13 @@ use crate::execution::{
 };
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::LogicalPlan;
+use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use bumpalo::Bump;
 use std::cmp::Ordering;
-use std::mem::{self, transmute, MaybeUninit};
+use std::mem::{transmute, MaybeUninit};
 use std::ops::{Deref, DerefMut};
 
 pub(crate) type BumpVec<'bump, T> = bumpalo::collections::Vec<'bump, T>;
@@ -81,7 +82,7 @@ impl<T> DerefMut for NullableVec<'_, T> {
 pub(crate) fn sort_tuples(
     sort_fields: &[SortField],
     tuples: &mut NullableVec<'_, (usize, Tuple)>,
-    plan_arena: &crate::planner::PlanArena<'_>,
+    plan_arena: &(dyn MetaArena + '_),
 ) -> Result<(), DatabaseError> {
     // Extract the results of calculating SortFields to avoid double calculation
     // of data during comparison.
@@ -89,7 +90,12 @@ pub(crate) fn sort_tuples(
 
     for (x, SortField { expr, .. }) in sort_fields.iter().enumerate() {
         for (_, tuple) in tuples.iter() {
-            eval_values[x].push(plan_arena.expression(*expr).eval(plan_arena, Some(tuple))?);
+            eval_values[x].push(
+                plan_arena
+                    .expression(*expr)
+                    .eval(plan_arena, Some(tuple))?
+                    .into_owned(),
+            );
         }
     }
 
@@ -155,7 +161,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Sort {
     fn into_executor(
         (SortOperator { sort_fields }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -179,7 +185,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         loop {
             if let Some((_, tuple)) = self.rows.pop() {
@@ -188,7 +194,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort {
             }
             while arena.next_tuple(self.input, plan_arena)? {
                 let offset = self.rows.len();
-                self.rows.put((offset, mem::take(arena.result_tuple_mut())));
+                self.rows.put((offset, arena.materialize_tuple()));
             }
             if self.rows.is_empty() {
                 arena.finish();

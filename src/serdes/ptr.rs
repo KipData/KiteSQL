@@ -25,7 +25,7 @@ macro_rules! implement_ptr_serialization {
         where
             V: ReferenceSerialization,
         {
-            fn encode<W: Write, A: $crate::planner::MetaArena>(
+            fn encode<W: Write, A: $crate::planner::MetaArena + ?Sized>(
                 &self,
                 writer: &mut W,
                 is_direct: bool,
@@ -36,7 +36,7 @@ macro_rules! implement_ptr_serialization {
                     .encode(writer, is_direct, reference_tables, arena)
             }
 
-            fn decode<T: Transaction, R: Read, A: $crate::planner::MetaArena>(
+            fn decode<T: Transaction, R: Read, A: $crate::planner::MetaArena + ?Sized>(
                 reader: &mut R,
                 drive: Option<&$crate::serdes::ReferenceDecodeContext<'_, T>>,
                 reference_tables: &ReferenceTables,

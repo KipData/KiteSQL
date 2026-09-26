@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+use crate::planner::MetaArena;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use crate::storage::Transaction;
 use std::io::{Read, Write};
@@ -22,7 +23,7 @@ where
     A: ReferenceSerialization,
     B: ReferenceSerialization,
 {
-    fn encode<W: Write, AR: crate::planner::MetaArena>(
+    fn encode<W: Write, AR: MetaArena + ?Sized>(
         &self,
         writer: &mut W,
         is_direct: bool,
@@ -36,7 +37,7 @@ where
         Ok(())
     }
 
-    fn decode<T: Transaction, R: Read, AR: crate::planner::MetaArena>(
+    fn decode<T: Transaction, R: Read, AR: MetaArena + ?Sized>(
         reader: &mut R,
         drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,

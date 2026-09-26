@@ -645,6 +645,8 @@ macro_rules! numeric_binary_evaluator_definition {
                 right: &$crate::types::value::DataValue,
             ) -> Result<$crate::types::value::DataValue, $crate::errors::DatabaseError> {
                 Ok(match (left, right) {
+                    // Integer remainder by zero would panic; report NULL like division.
+                    ($compute_type(_), $compute_type(v2)) if *v2 == 0 => $crate::types::value::DataValue::Null,
                     ($compute_type(v1), $compute_type(v2)) => $compute_type(*v1 % *v2),
                     ($compute_type(_), $crate::types::value::DataValue::Null)
                     | ($crate::types::value::DataValue::Null, $compute_type(_))

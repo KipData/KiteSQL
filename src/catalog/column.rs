@@ -14,12 +14,13 @@
 
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
-use crate::planner::{ExprRef, PlanArena};
-use crate::types::tuple::Tuple;
+use crate::planner::ExprRef;
+use crate::planner::MetaArena;
 use crate::types::value::DataValue;
 use crate::types::CharLengthUnits;
 use crate::types::{ColumnId, LogicalType};
 use kite_sql_serde_macros::ReferenceSerialization;
+use std::borrow::Cow;
 use std::fmt;
 use std::hash::Hash;
 
@@ -174,12 +175,17 @@ impl ColumnCatalog {
 
     pub(crate) fn default_value(
         &self,
-        arena: &PlanArena<'_>,
+        arena: &(dyn MetaArena + '_),
     ) -> Result<Option<DataValue>, DatabaseError> {
         self.desc
             .default
             .as_ref()
-            .map(|expr| arena.expression(*expr).eval::<&Tuple>(arena, None))
+            .map(|expr| {
+                arena
+                    .expression(*expr)
+                    .eval(arena, None)
+                    .map(Cow::into_owned)
+            })
             .transpose()
     }
 

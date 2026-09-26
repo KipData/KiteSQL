@@ -45,7 +45,7 @@ use std::io;
 use std::io::{Read, Write};
 
 pub trait ReferenceSerialization {
-    fn encode<W: Write, A: MetaArena>(
+    fn encode<W: Write, A: MetaArena + ?Sized>(
         &self,
         writer: &mut W,
         is_direct: bool,
@@ -53,7 +53,7 @@ pub trait ReferenceSerialization {
         arena: &A,
     ) -> Result<(), DatabaseError>;
 
-    fn decode<T: Transaction, R: Read, A: MetaArena>(
+    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         context: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
@@ -179,9 +179,11 @@ impl ReferenceTables {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::errors::DatabaseError;
+    use crate::expression::range_detacher::Range;
     use crate::serdes::{ReferenceSerialization, ReferenceTables};
     use crate::storage::rocksdb::RocksTransaction;
-    use std::collections::BTreeMap;
+    use crate::types::value::DataValue;
+    use std::collections::{BTreeMap, Bound};
     use std::fmt::Debug;
     use std::io;
     use std::io::{Cursor, Seek, SeekFrom};
@@ -239,6 +241,22 @@ mod tests {
         source.insert("beta".to_string(), 29i32);
         assert_eq!(round_trip(source.clone())?, source);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_generic_range_serialization() -> Result<(), DatabaseError> {
+        let range = Range::SortedRanges(vec![
+            Range::Eq(DataValue::Int32(7)),
+            Range::Scope {
+                min: Bound::Included(DataValue::Int32(8)),
+                max: Bound::Excluded(DataValue::Int32(12)),
+            },
+            Range::SortedRanges(vec![Range::Dummy]),
+        ]);
+        assert_eq!(round_trip(range.clone())?, range);
+        let generic = Range::SortedRanges(vec![Range::Eq("prefix".to_string())]);
+        assert_eq!(round_trip(generic.clone())?, generic);
         Ok(())
     }
 

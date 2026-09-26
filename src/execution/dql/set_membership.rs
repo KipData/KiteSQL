@@ -18,10 +18,10 @@ use crate::execution::{
 };
 use crate::planner::operator::set_membership::SetMembershipKind;
 use crate::planner::LogicalPlan;
+use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use std::collections::HashMap;
-use std::mem;
 
 pub struct SetMembership {
     kind: SetMembershipKind,
@@ -55,7 +55,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SetMembership {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -82,13 +82,13 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SetMembership {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         if !self.built {
             while arena.next_tuple(self.right_input, plan_arena)? {
                 *self
                     .right_counts
-                    .entry(mem::take(arena.result_tuple_mut()))
+                    .entry(arena.materialize_tuple())
                     .or_insert(0) += 1;
             }
             self.built = true;

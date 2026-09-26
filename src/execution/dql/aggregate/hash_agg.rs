@@ -20,6 +20,7 @@ use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::aggregate::AggregateOperator;
+use crate::planner::MetaArena;
 use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
@@ -48,7 +49,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashAggExecutor {
             input,
         ): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -66,7 +67,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         if self.output.is_none() {
             let mut group_hash_accs: HashMap<Vec<DataValue>, Vec<Box<dyn Accumulator>>> =
@@ -77,7 +78,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
                 let tuple = arena.result_tuple();
                 group_keys.clear();
                 for expr in &self.groupby_exprs {
-                    group_keys.push(plan_arena.expression(*expr).eval(plan_arena, Some(tuple))?);
+                    group_keys.push(
+                        plan_arena
+                            .expression(*expr)
+                            .eval(plan_arena, Some(tuple))?
+                            .into_owned(),
+                    );
                 }
 
                 if let Some(accs) = group_hash_accs.get_mut(group_keys.as_slice()) {
@@ -119,6 +125,7 @@ mod test {
     use crate::planner::operator::aggregate::AggregateOperator;
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
+    use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, LogicalPlan};
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::Storage;
@@ -146,8 +153,8 @@ mod test {
         ];
 
         let input = LogicalPlan::new(
-            Operator::Values(ValuesOperator {
-                rows: vec![
+            Operator::Values(ValuesOperator::new(
+                plan_arena.alloc_expression_rows(&[
                     vec![
                         DataValue::Int32(0),
                         DataValue::Int32(2),
@@ -168,9 +175,10 @@ mod test {
                         DataValue::Int32(2),
                         DataValue::Int32(3),
                     ],
-                ],
-                schema_ref: t1_schema.clone(),
-            }),
+                ]),
+                4,
+                t1_schema.clone(),
+            )),
             Childrens::None,
         );
         let groupby_expr =

@@ -24,7 +24,6 @@ use crate::db::{BindSource, DBTransaction, Database, DatabaseIter, TransactionIt
 use crate::errors::{DatabaseError, SqlErrorSpan};
 use crate::expression;
 use crate::expression::agg::AggKind;
-use crate::expression::simplify::ConstantCalculator;
 use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::expression::window::WindowFunctionKind;
 use crate::expression::{AliasType, ScalarExpression, TypeCast};
@@ -37,6 +36,7 @@ use crate::planner::operator::project::ProjectOperator;
 use crate::planner::operator::recursive_cte::{RecursiveCteOperator, RecursiveScanOperator};
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::Operator;
+use crate::planner::MetaArena;
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::storage::{Storage, Transaction};
 use crate::types::value::{DataValue, Utf8Type};
@@ -54,7 +54,7 @@ pub(super) use sqlparser::ast::{
 #[cfg(feature = "copy")]
 pub(super) use sqlparser::ast::{CopyOption, CopySource, CopyTarget};
 use sqlparser::tokenizer::Span;
-use std::borrow::{Borrow, Cow};
+use std::borrow::Cow;
 use std::cmp;
 use std::slice;
 
@@ -138,7 +138,7 @@ pub fn command_type(stmt: &Statement) -> Result<CommandType, DatabaseError> {
 }
 
 /// Parses a single SQL statement into a reusable [`Statement`].
-pub fn prepare<T: AsRef<str>>(sql: T) -> Result<Statement, DatabaseError> {
+pub(crate) fn parse_statement<T: AsRef<str>>(sql: T) -> Result<Statement, DatabaseError> {
     let mut stmts = prepare_all(sql)?;
     stmts.pop().ok_or(DatabaseError::EmptyStatement)
 }
@@ -160,24 +160,19 @@ fn statement_mutates_catalog_or_statistics(statement: &Statement) -> Result<bool
 }
 
 impl<S: Storage> Database<S> {
-    /// Executes a prepared [`Statement`] inside a database-owned transaction.
-    pub fn execute<A, St>(
-        &self,
-        statement: St,
-        params: A,
-    ) -> Result<DatabaseIter<'_, S>, DatabaseError>
-    where
-        A: AsRef<[(&'static str, DataValue)]>,
-        St: Borrow<Statement>,
-    {
-        if statement_mutates_catalog_or_statistics(statement.borrow())? {
+    /// Bind parameters in a cloned arena and execute an already prepared plan.
+    pub fn execute<'a>(
+        &'a self,
+        prepared: &'a crate::db::PreparedPlan<'_>,
+        params: impl AsRef<[(usize, DataValue)]>,
+    ) -> Result<DatabaseIter<'a, S>, DatabaseError> {
+        if !std::ptr::eq(prepared.arena.table_arena_cell(), self.state.table_arena()) {
             return Err(DatabaseError::UnsupportedStmt(
-                "DDL and ANALYZE require `Database::ddl` or `Database::analyze`".to_string(),
+                "plan belongs to another database".into(),
             ));
         }
-        BindSource::execute(self, params, |binder, arena| {
-            binder.bind(statement.borrow(), arena)
-        })
+        let (plan, arena) = prepared.bind_parameters(params.as_ref())?;
+        BindSource::execute(self, |_, _| Ok((plan, arena)))
     }
 
     pub fn ddl<T: AsRef<str>>(&mut self, sql: T) -> Result<(), DatabaseError> {
@@ -240,18 +235,20 @@ impl<S: Storage> Database<S> {
         let mut statements = statements.into_iter().peekable();
 
         while let Some(statement) = statements.next() {
-            let (schema, plan_arena, executor) =
-                match self
+            let (schema, plan_arena, executor) = match (|| {
+                let tx = unsafe { &mut *transaction };
+                tx.begin_statement_scope()?;
+                let (plan, arena) = self
                     .state
-                    .execute(unsafe { &mut *transaction }, &[], |binder, arena| {
-                        binder.bind(&statement, arena)
-                    }) {
-                    Ok(result) => result,
-                    Err(err) => {
-                        unsafe { drop(Box::from_raw(transaction)) };
-                        return Err(err.with_sql_context(sql));
-                    }
-                };
+                    .build_plan(&[], tx, |binder, arena| binder.bind(&statement, arena))?;
+                self.state.execute(tx, plan, arena)
+            })() {
+                Ok(result) => result,
+                Err(err) => {
+                    unsafe { drop(Box::from_raw(transaction)) };
+                    return Err(err.with_sql_context(sql));
+                }
+            };
 
             if statements.peek().is_some() {
                 if let Err(err) =
@@ -263,7 +260,7 @@ impl<S: Storage> Database<S> {
             } else {
                 let inner = Box::into_raw(Box::new(TransactionIter::new(
                     schema,
-                    plan_arena,
+                    Box::new(plan_arena) as Box<dyn crate::planner::MetaArena>,
                     executor,
                     transaction,
                 )));
@@ -277,27 +274,19 @@ impl<S: Storage> Database<S> {
 }
 
 impl<'txn, S: Storage> DBTransaction<'txn, S> {
-    /// Executes a prepared [`Statement`] inside the current transaction.
-    pub fn execute<'a, A, St>(
+    /// Bind parameters in a cloned arena and execute an already prepared plan.
+    pub fn execute<'a>(
         &'a mut self,
-        statement: St,
-        params: A,
-    ) -> Result<TransactionIter<'a, S::TransactionType<'txn>>, DatabaseError>
-    where
-        A: AsRef<[(&'static str, DataValue)]>,
-        St: Borrow<Statement>,
-    {
-        if matches!(
-            command_type(statement.borrow())?,
-            CommandType::DDL | CommandType::Analyze
-        ) {
+        prepared: &'a crate::db::PreparedPlan<'txn>,
+        params: impl AsRef<[(usize, DataValue)]>,
+    ) -> Result<TransactionIter<'a, S::TransactionType<'txn>>, DatabaseError> {
+        if !std::ptr::eq(prepared.arena.table_arena_cell(), self.state.table_arena()) {
             return Err(DatabaseError::UnsupportedStmt(
-                "`DDL` and `ANALYZE` are not allowed to execute within a transaction".to_string(),
+                "plan belongs to another database".into(),
             ));
         }
-        BindSource::execute(self, params, |binder, arena| {
-            binder.bind(statement.borrow(), arena)
-        })
+        let (plan, arena) = prepared.bind_parameters(params.as_ref())?;
+        BindSource::execute(self, |_, _| Ok((plan, arena)))
     }
 
     /// Runs SQL inside the current transaction and returns the final result iterator.
@@ -307,26 +296,38 @@ impl<'txn, S: Storage> DBTransaction<'txn, S> {
     ) -> Result<TransactionIter<'a, S::TransactionType<'txn>>, DatabaseError> {
         let sql = sql.as_ref();
         let mut statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
+        for statement in &statements {
+            if statement_mutates_catalog_or_statistics(statement)? {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "DDL and ANALYZE are not allowed to execute within a transaction".into(),
+                )
+                .with_sql_context(sql));
+            }
+        }
         let last_statement = statements
             .pop()
             .ok_or_else(|| DatabaseError::EmptyStatement.with_sql_context(sql))?;
 
         for statement in statements {
-            self.execute(&statement, &[])
-                .map_err(|err| err.with_sql_context(sql))?
-                .done()
-                .map_err(|err| err.with_sql_context(sql))?;
+            BindSource::execute(&mut *self, |state, tx| {
+                state.build_plan(&[], tx, |binder, arena| binder.bind(&statement, arena))
+            })
+            .map_err(|err| err.with_sql_context(sql))?
+            .done()
+            .map_err(|err| err.with_sql_context(sql))?;
         }
 
-        self.execute(&last_statement, &[])
-            .map_err(|err| err.with_sql_context(sql))
+        BindSource::execute(self, |state, tx| {
+            state.build_plan(&[], tx, |binder, arena| binder.bind(&last_statement, arena))
+        })
+        .map_err(|err| err.with_sql_context(sql))
     }
 }
 
 struct BindStatementStart<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'s mut Binder<'a, 'b, T, A>,
     arena: &'s mut PlanArena<'arena>,
@@ -345,7 +346,7 @@ impl ExprVisitorMut for UpdateExprTargetRemapper<'_> {
         &mut self,
         column: &mut ColumnRef,
         position: &mut usize,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         let Some(target_position) = self
             .target_schema
@@ -365,7 +366,7 @@ impl ExprVisitorMut for UpdateExprTargetRemapper<'_> {
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindStatementStart<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     fn statement(self, stmt: &Statement) -> Result<BindStatementComplete, DatabaseError> {
         let span = stmt.span();
@@ -1007,7 +1008,7 @@ where
                     values_len,
                 ));
             }
-            source.schema().to_vec()
+            source.schema()[..values_len].to_vec()
         } else {
             let mut columns = Vec::with_capacity(idents.len());
             for ident in idents {
@@ -1026,64 +1027,25 @@ where
             }
             columns
         };
-        let mut rows = Vec::with_capacity(expr_rows.len());
-
+        let mut rows = Vec::with_capacity(expr_rows.len() * values_len);
         for expr_row in expr_rows {
             if expr_row.len() != values_len {
                 return Err(DatabaseError::ValuesLenMismatch(expr_row.len(), values_len));
             }
-            let mut row = Vec::with_capacity(expr_row.len());
-
             for (i, expr) in expr_row.iter().enumerate() {
-                let span = expr.span();
-                let mut expr_ref = self
-                    .binder
-                    .bind_expr(expr, self.arena)
-                    .map(|expr| self.arena.alloc_expression(expr))?;
-
-                ConstantCalculator::new(self.arena).visit(&mut expr_ref, self.arena)?;
-                let expression =
-                    std::mem::replace(self.arena.expression_mut(expr_ref), ScalarExpression::Empty);
-                match expression {
-                    ScalarExpression::Constant(mut value) => {
-                        let column = self.arena.column(schema_ref[i]);
-                        let ty = column.datatype();
-
-                        value = value.cast(ty)?;
-                        value.check_len(ty)?;
-                        if value.is_null() && !column.nullable() {
-                            return Err(attach_span_if_absent(
-                                DatabaseError::not_null_column(column.name().to_string()),
-                                span,
-                            ));
-                        }
-
-                        row.push(value);
-                    }
-                    ScalarExpression::Empty => {
-                        let column = self.arena.column(schema_ref[i]);
-                        let default_value = column
+                let expression = self.binder.bind_expr(expr, self.arena)?;
+                let expression = if matches!(expression, ScalarExpression::Empty) {
+                    ScalarExpression::Constant(
+                        self.arena
+                            .column(schema_ref[i])
                             .default_value(self.arena)?
-                            .ok_or(DatabaseError::DefaultNotExist)?;
-                        if default_value.is_null() && !column.nullable() {
-                            return Err(attach_span_if_absent(
-                                DatabaseError::not_null_column(column.name().to_string()),
-                                span,
-                            ));
-                        }
-                        row.push(default_value);
-                    }
-                    _ => {
-                        return Err(attach_span_if_absent(
-                            DatabaseError::UnsupportedStmt(
-                                "INSERT values must be constants or DEFAULT".to_string(),
-                            ),
-                            span,
-                        ))
-                    }
-                }
+                            .ok_or(DatabaseError::DefaultNotExist)?,
+                    )
+                } else {
+                    expression
+                };
+                rows.push(self.arena.alloc_expression(expression));
             }
-            rows.push(row);
         }
         self.binder.context.allow_default = false;
 
@@ -1091,6 +1053,7 @@ where
             table_name,
             schema_ref,
             rows,
+            expr_rows.len(),
             is_overwrite,
             is_mapping_by_name,
         )
@@ -1261,7 +1224,7 @@ where
                             match (names.next(), exprs.next()) {
                                 (Some(name), Some(expression)) => {
                                     let expression = std::mem::replace(
-                                        self.arena.expression_mut(expression),
+                                        &mut *self.arena.expression_mut(expression),
                                         ScalarExpression::Empty,
                                     );
                                     bind_assignment(self.binder, self.arena, name, expression)?
@@ -1371,7 +1334,7 @@ impl BindStatementComplete {
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanStart<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     #[allow(clippy::wrong_self_convention)]
     pub(crate) fn from_sql(
@@ -1404,7 +1367,7 @@ where
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanFrom<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn select_list_from_sql(
         self,
@@ -1421,7 +1384,7 @@ where
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanSelectList<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn where_sql(
         self,
@@ -1443,7 +1406,7 @@ where
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanFiltered<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn aggregate_sql(
         self,
@@ -1500,7 +1463,7 @@ where
 impl<'s, 'a: 'b, 'b, 'arena, T, A> super::select::BindPlanWindowed<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn distinct_sql(
         self,
@@ -1513,7 +1476,7 @@ where
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanProjected<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn select_into_sql(
         self,
@@ -1946,7 +1909,7 @@ fn copy_file_format(options: Vec<CopyOption>) -> Result<FileFormat, DatabaseErro
     })
 }
 
-impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, 'parent, T, A> {
+impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'parent, T, A> {
     fn bind_table_ref_sql(
         &mut self,
         from: &TableWithJoins,
@@ -2119,17 +2082,27 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 self.bind_binary_op_expr(left_expr, right_expr, op.clone().try_into()?, arena)
             }
             Expr::Value(v) => {
-                let value = if let Value::Placeholder(name) = &v.value {
-                    self.args
+                let value = if let Value::Placeholder(placeholder) = &v.value {
+                    let id = DataValue::parameter_id(placeholder).ok_or_else(|| {
+                        attach_span_if_absent(
+                            DatabaseError::InvalidValue(format!(
+                                "parameter must use the $<positive integer> form: {placeholder}"
+                            )),
+                            v,
+                        )
+                    })?;
+                    let ty = self
+                        .args
                         .as_ref()
                         .iter()
-                        .find_map(|(key, value)| (key == name).then(|| value.clone()))
+                        .find_map(|(candidate, ty)| (candidate == &id).then_some(ty))
                         .ok_or_else(|| {
                             attach_span_if_absent(
-                                DatabaseError::parameter_not_found(name.to_string()),
+                                DatabaseError::parameter_not_found(format!("${id}")),
                                 v,
                             )
-                        })?
+                        })?;
+                    DataValue::Parameter { id, ty: ty.clone() }
                 } else {
                     (&v.value)
                         .try_into()
@@ -2765,40 +2738,24 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
         let values_len = expr_rows[0].len();
 
         let mut inferred_types: Vec<Option<LogicalType>> = vec![None; values_len];
-        let mut rows = Vec::with_capacity(expr_rows.len());
+        let mut rows = Vec::with_capacity(expr_rows.len() * values_len);
 
         for expr_row in expr_rows {
             if expr_row.len() != values_len {
                 return Err(DatabaseError::ValuesLenMismatch(expr_row.len(), values_len));
             }
 
-            let mut row = Vec::with_capacity(values_len);
-
             for (col_index, expr) in expr_row.iter().enumerate() {
-                let mut expression = self
-                    .bind_expr(expr, arena)
-                    .map(|expr| arena.alloc_expression(expr))?;
-                ConstantCalculator::new(arena).visit(&mut expression, arena)?;
-
-                let expression =
-                    std::mem::replace(arena.expression_mut(expression), ScalarExpression::Empty);
-                if let ScalarExpression::Constant(value) = expression {
-                    let value_type = value.logical_type();
-
-                    inferred_types[col_index] = match &inferred_types[col_index] {
-                        Some(existing) => {
-                            Some(LogicalType::max_logical_type(existing, &value_type)?.into_owned())
-                        }
-                        None => Some(value_type),
-                    };
-
-                    row.push(value);
-                } else {
-                    return Err(DatabaseError::ColumnsEmpty);
-                }
+                let expression = self.bind_expr(expr, arena)?;
+                let value_type = expression.return_type(arena).into_owned();
+                inferred_types[col_index] = match &inferred_types[col_index] {
+                    Some(existing) => {
+                        Some(LogicalType::max_logical_type(existing, &value_type)?.into_owned())
+                    }
+                    None => Some(value_type),
+                };
+                rows.push(arena.alloc_expression(expression));
             }
-
-            rows.push(row);
         }
 
         let value_name = arena.temp_table();
@@ -2817,7 +2774,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
             })
             .collect::<Result<_, DatabaseError>>()?;
 
-        Ok(self.bind_values(rows, column_refs))
+        Ok(self.bind_values(rows, expr_rows.len(), column_refs))
     }
 
     fn bind_top_level_orderby(
@@ -3267,35 +3224,56 @@ mod tests {
     }
 
     #[test]
+    fn prepare_rejects_non_positional_parameters() -> Result<(), DatabaseError> {
+        let db = DataBaseBuilder::path(".").build_in_memory()?;
+        for placeholder in ["$0", "$01", "$name"] {
+            assert!(matches!(
+                db.prepare(
+                    &format!("select {placeholder}"),
+                    &[(1, LogicalType::Integer)]
+                ),
+                Err(DatabaseError::InvalidValue(_))
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_prepare_and_command_type_classification() -> Result<(), DatabaseError> {
         assert!(matches!(
             prepare_all(""),
             Err(DatabaseError::EmptyStatement)
         ));
-        assert_eq!(command_type(&prepare("select 1")?)?, CommandType::DQL);
         assert_eq!(
-            command_type(&prepare("create table t (id int primary key)")?)?,
+            command_type(&parse_statement("select 1")?)?,
+            CommandType::DQL
+        );
+        assert_eq!(
+            command_type(&parse_statement("create table t (id int primary key)")?)?,
             CommandType::DDL
         );
         assert_eq!(
-            command_type(&prepare("analyze table t")?)?,
+            command_type(&parse_statement("analyze table t")?)?,
             CommandType::Analyze
         );
         assert_eq!(
-            command_type(&prepare("insert into t values (1)")?)?,
+            command_type(&parse_statement("insert into t values (1)")?)?,
             CommandType::DML
         );
         assert_eq!(
-            command_type(&prepare("update t set id = 1")?)?,
+            command_type(&parse_statement("update t set id = 1")?)?,
             CommandType::DML
         );
-        assert_eq!(command_type(&prepare("delete from t")?)?, CommandType::DML);
         assert_eq!(
-            command_type(&prepare("truncate table t")?)?,
+            command_type(&parse_statement("delete from t")?)?,
+            CommandType::DML
+        );
+        assert_eq!(
+            command_type(&parse_statement("truncate table t")?)?,
             CommandType::DML
         );
 
-        let err = command_type(&prepare("start transaction")?).unwrap_err();
+        let err = command_type(&parse_statement("start transaction")?).unwrap_err();
         assert_unsupported(err, "START TRANSACTION");
 
         Ok(())
@@ -3304,11 +3282,10 @@ mod tests {
     #[test]
     fn test_database_entrypoints_reject_catalog_mutation() -> Result<(), DatabaseError> {
         let mut database = DataBaseBuilder::path(".").build_in_memory()?;
-        let params = &[] as &[(&'static str, DataValue)];
+        let params = &[] as &[(usize, LogicalType)];
 
-        let ddl = prepare("create table t (id int primary key)")?;
         assert_unsupported(
-            expect_err(database.execute(&ddl, params)),
+            expect_err(database.prepare("create table t (id int primary key)", params)),
             "DDL and ANALYZE",
         );
         assert_unsupported(
@@ -3317,11 +3294,10 @@ mod tests {
         );
         assert_unsupported(expect_err(database.ddl("select 1")), "`Database::ddl`");
 
-        let analyze = prepare("analyze table t")?;
-        let mut transaction = database.new_transaction()?;
+        let transaction = database.new_transaction()?;
         assert_unsupported(
-            expect_err(transaction.execute(&analyze, params)),
-            "not allowed to execute within a transaction",
+            expect_err(transaction.prepare("analyze table t", params)),
+            "DDL and ANALYZE",
         );
         transaction.commit()?;
 
@@ -3375,7 +3351,7 @@ mod tests {
             "only a single ALTER TABLE operation",
         );
 
-        let mut stmt = prepare("alter table t1 drop column c1")?;
+        let mut stmt = parse_statement("alter table t1 drop column c1")?;
         let Statement::AlterTable(alter) = &mut stmt else {
             unreachable!("expected alter table statement")
         };

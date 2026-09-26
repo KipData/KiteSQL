@@ -17,6 +17,7 @@ use crate::catalog::ColumnDesc;
 use crate::errors::DatabaseError;
 use crate::expression::function::table::TableFunctionImpl;
 use crate::expression::function::FunctionSummary;
+use crate::planner::MetaArena;
 use crate::planner::{ExprRef, TableArena};
 use crate::types::tuple::Schema;
 use crate::types::tuple::Tuple;
@@ -47,9 +48,9 @@ impl TableFunctionImpl for Numbers {
     fn eval(
         &self,
         args: &[ExprRef],
-        arena: &crate::planner::PlanArena<'_>,
+        arena: &(dyn MetaArena + '_),
     ) -> Result<Box<dyn Iterator<Item = Result<Tuple, DatabaseError>>>, DatabaseError> {
-        let mut value = arena.expression(args[0]).eval::<&Tuple>(arena, None)?;
+        let mut value = arena.expression(args[0]).eval(arena, None)?.into_owned();
 
         value = value.cast(&LogicalType::Integer)?;
         let num = value

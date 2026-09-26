@@ -20,6 +20,7 @@ use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::aggregate::AggregateOperator;
+use crate::planner::MetaArena;
 use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
@@ -47,7 +48,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamAggExecutor {
             input,
         ): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -66,7 +67,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         loop {
             if !arena.next_tuple(self.input, plan_arena)? {
@@ -86,7 +87,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor {
             let tuple = arena.result_tuple();
             let mut group_keys = Vec::with_capacity(self.groupby_exprs.len());
             for expr in &self.groupby_exprs {
-                group_keys.push(plan_arena.expression(*expr).eval(plan_arena, Some(tuple))?);
+                group_keys.push(
+                    plan_arena
+                        .expression(*expr)
+                        .eval(plan_arena, Some(tuple))?
+                        .into_owned(),
+                );
             }
 
             match &mut self.group_keys {
@@ -123,6 +129,7 @@ mod tests {
     use crate::planner::operator::aggregate::AggregateOperator;
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
+    use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, LogicalPlan};
     use crate::storage::memory::MemoryStorage;
     use crate::storage::Storage;
@@ -140,16 +147,17 @@ mod tests {
             })
             .to_vec();
         let input = LogicalPlan::new(
-            Operator::Values(ValuesOperator {
-                rows: vec![
+            Operator::Values(ValuesOperator::new(
+                plan_arena.alloc_expression_rows(&[
                     vec![1.into(), 10.into()],
                     vec![1.into(), 20.into()],
                     vec![2.into(), 5.into()],
                     vec![2.into(), DataValue::Null],
                     vec![2.into(), 7.into()],
-                ],
-                schema_ref: columns.clone(),
-            }),
+                ]),
+                5,
+                columns.clone(),
+            )),
             Childrens::None,
         );
         let group = plan_arena.alloc_expression(ScalarExpression::column_expr(columns[0], 0));
@@ -205,10 +213,7 @@ mod tests {
             ColumnDesc::new(LogicalType::Integer, None, false, None)?,
         ));
         let input = LogicalPlan::new(
-            Operator::Values(ValuesOperator {
-                rows: Vec::new(),
-                schema_ref: vec![column],
-            }),
+            Operator::Values(ValuesOperator::new(Vec::new(), 0, vec![column])),
             Childrens::None,
         );
         let operator = AggregateOperator {

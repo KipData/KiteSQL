@@ -304,6 +304,47 @@ select c2, c3 from t_cover where c1 = 2;
 statement ok
 drop table t_cover;
 
+statement ok
+create table tuple_bounds(w int, k int, primary key(w,k));
+
+statement ok
+insert into tuple_bounds values(1,1),(1,2),(1,3),(2,1),(2,2),(2,4);
+
+# Populate other prefixes for ANALYZE without changing the queried rows.
+statement ok
+insert into tuple_bounds select a.x + 3, b.x
+from (values (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)) as a(x)
+cross join (values (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)) as b(x);
+
+statement ok
+analyze table tuple_bounds;
+
+query T
+explain select k from tuple_bounds where w = 2 order by k;
+----
+Projection [tuple_bounds.k] [Project => (Sort Option: Follow)] TableScan tuple_bounds -> [tuple_bounds.w, tuple_bounds.k] [IndexScan By pk_index => [(2), (2)] Covered => (Sort Option: OrderBy: (tuple_bounds.w Asc Nulls Last, tuple_bounds.k Asc Nulls Last) ignore_prefix_len: 1)]
+
+query I
+select k from tuple_bounds where w = 2 order by k;
+----
+1
+2
+4
+
+query T
+explain select k from tuple_bounds where w = 1 and k >= 1 and k < 3 order by k;
+----
+Projection [tuple_bounds.k] [Project => (Sort Option: Follow)] TableScan tuple_bounds -> [tuple_bounds.w, tuple_bounds.k] [IndexScan By pk_index => [(1, 1), (1, 3)) Covered => (Sort Option: OrderBy: (tuple_bounds.w Asc Nulls Last, tuple_bounds.k Asc Nulls Last) ignore_prefix_len: 1)]
+
+query I
+select k from tuple_bounds where w = 1 and k >= 1 and k < 3 order by k;
+----
+1
+2
+
+statement ok
+drop table tuple_bounds;
+
 # Composite index range bounds
 # Composite equality-prefix bounds must include the complete matching prefix
 # and distinguish < / <= / > / >= when trailing index columns are present.

@@ -392,6 +392,31 @@ impl Histogram {
         self.equal_count(value, sketch).clamp(lower, entry.count())
     }
 
+    fn estimate_range_selectivity(&self, range: &Range) -> f64 {
+        let Some(bucket) = self.buckets.first() else {
+            return 0.0;
+        };
+        let key_type = bucket.upper.logical_type();
+        let distinct = self.distinct_values_len().max(1) as f64;
+        match range {
+            Range::Dummy => 0.0,
+            Range::Eq(value) => DataValue::bound_selectivity(
+                Bound::Included(value),
+                Bound::Included(value),
+                &key_type,
+                distinct,
+            ),
+            Range::Scope { min, max } => {
+                DataValue::bound_selectivity(min.as_ref(), max.as_ref(), &key_type, distinct)
+            }
+            Range::SortedRanges(ranges) => ranges
+                .iter()
+                .map(|range| self.estimate_range_selectivity(range))
+                .sum::<f64>()
+                .min(1.0),
+        }
+    }
+
     pub fn collect_count(
         &self,
         ranges: &[Range],
@@ -401,12 +426,26 @@ impl Histogram {
         if self.buckets.is_empty() || ranges.is_empty() {
             return Ok(0);
         }
+        if ranges.iter().any(Range::has_parameter) {
+            let selectivity = ranges
+                .iter()
+                .map(|range| self.estimate_range_selectivity(range))
+                .sum::<f64>()
+                .min(1.0);
+            let count = (self.values_len() as f64 * selectivity).ceil() as usize;
+            return Ok(if selectivity > 0.0 && self.values_len() > 0 {
+                count.max(1)
+            } else {
+                0
+            });
+        }
         let comparator = self.comparator()?;
 
         let mut count = 0;
         let mut binary_i = 0;
         let mut bucket_i = 0;
         let mut bucket_idxs = Vec::new();
+        let mut buf = Vec::new();
 
         while bucket_i < self.buckets.len() && binary_i < ranges.len() {
             let is_dummy = self._collect_count(
@@ -418,6 +457,7 @@ impl Histogram {
                 sketch,
                 top_n,
                 comparator,
+                &mut buf,
             )?;
             if is_dummy {
                 return Ok(0);
@@ -442,96 +482,8 @@ impl Histogram {
         sketch: &CountMinSketch<DataValue>,
         top_n: &ColumnTopN,
         comparator: &BoundComparator,
+        buf: &mut Vec<u8>,
     ) -> Result<bool, DatabaseError> {
-        let float_value = |value: &DataValue, prefix_len: usize| {
-            let value = match value.logical_type() {
-                LogicalType::Varchar(..) | LogicalType::Char(..) => match value {
-                    DataValue::Utf8 { value, .. } => {
-                        if prefix_len > value.len() {
-                            return Ok(0.0);
-                        }
-
-                        let mut val = 0u64;
-                        for (i, char) in value
-                            .get(prefix_len..prefix_len + 8)
-                            .unwrap()
-                            .chars()
-                            .enumerate()
-                        {
-                            if value.len() - prefix_len > i {
-                                val += (val << 8) + char as u64;
-                            } else {
-                                val += val << 8;
-                            }
-                        }
-
-                        Some(val as f64)
-                    }
-                    _ => unreachable!(),
-                },
-                LogicalType::Date
-                | LogicalType::DateTime
-                | LogicalType::Time(_)
-                | LogicalType::TimeStamp(_, _) => match value {
-                    DataValue::Date32(value) => DataValue::Int32(*value)
-                        .cast(&LogicalType::Double)?
-                        .double(),
-                    DataValue::Date64(value) => DataValue::Int64(*value)
-                        .cast(&LogicalType::Double)?
-                        .double(),
-                    DataValue::Time32(value, ..) => DataValue::UInt32(*value)
-                        .cast(&LogicalType::Double)?
-                        .double(),
-                    DataValue::Time64(value, ..) => DataValue::Int64(*value)
-                        .cast(&LogicalType::Double)?
-                        .double(),
-                    _ => unreachable!(),
-                },
-
-                LogicalType::SqlNull
-                | LogicalType::Boolean
-                | LogicalType::Tinyint
-                | LogicalType::UTinyint
-                | LogicalType::Smallint
-                | LogicalType::USmallint
-                | LogicalType::Integer
-                | LogicalType::UInteger
-                | LogicalType::Bigint
-                | LogicalType::UBigint
-                | LogicalType::Float
-                | LogicalType::Double
-                | LogicalType::Decimal(_, _) => value.clone().cast(&LogicalType::Double)?.double(),
-                LogicalType::Tuple(_) => match value {
-                    DataValue::Tuple(values, _) => {
-                        let mut float = 0.0;
-
-                        for (i, value) in values.iter().enumerate() {
-                            if !value.logical_type().is_numeric() {
-                                continue;
-                            }
-                            if let Some(f) =
-                                DataValue::clone(value).cast(&LogicalType::Double)?.double()
-                            {
-                                float += f / (10_i32.pow(i as u32) as f64);
-                            }
-                        }
-                        Some(float)
-                    }
-                    DataValue::Null => None,
-                    _ => unreachable!(),
-                },
-            }
-            .unwrap_or(0.0);
-            Ok::<f64, DatabaseError>(value)
-        };
-        let calc_fraction = |start: &DataValue, end: &DataValue, value: &DataValue| {
-            let prefix_len = start.common_prefix_length(end).unwrap_or(0);
-            Ok::<f64, DatabaseError>(
-                (float_value(value, prefix_len)? - float_value(start, prefix_len)?)
-                    / (float_value(end, prefix_len)? - float_value(start, prefix_len)?),
-            )
-        };
-
         let distinct_1 = OrderedFloat(1.0 / self.meta.number_of_distinct_value as f64);
 
         match &ranges[*binary_i] {
@@ -560,11 +512,12 @@ impl Histogram {
                     *bucket_i += 1;
                 } else if is_above(comparator, &bucket.lower, min, true)? {
                     let (temp_ratio, option) = match max {
-                        Bound::Included(val) => {
-                            (calc_fraction(&bucket.lower, &bucket.upper, val)?, None)
-                        }
+                        Bound::Included(val) => (
+                            encoded_fraction(&bucket.lower, &bucket.upper, val, true, buf)?,
+                            None,
+                        ),
                         Bound::Excluded(val) => (
-                            calc_fraction(&bucket.lower, &bucket.upper, val)?,
+                            encoded_fraction(&bucket.lower, &bucket.upper, val, true, buf)?,
                             endpoint_count(val, bucket, sketch),
                         ),
                         Bound::Unbounded => unreachable!(),
@@ -577,11 +530,12 @@ impl Histogram {
                     *bucket_i += 1;
                 } else if is_under(comparator, &bucket.upper, max, false)? {
                     let (temp_ratio, option) = match min {
-                        Bound::Included(val) => {
-                            (calc_fraction(&bucket.lower, &bucket.upper, val)?, None)
-                        }
+                        Bound::Included(val) => (
+                            encoded_fraction(&bucket.lower, &bucket.upper, val, false, buf)?,
+                            None,
+                        ),
                         Bound::Excluded(val) => (
-                            calc_fraction(&bucket.lower, &bucket.upper, val)?,
+                            encoded_fraction(&bucket.lower, &bucket.upper, val, false, buf)?,
                             endpoint_count(val, bucket, sketch),
                         ),
                         Bound::Unbounded => unreachable!(),
@@ -594,21 +548,23 @@ impl Histogram {
                     *bucket_i += 1;
                 } else {
                     let (temp_ratio_max, option_max) = match max {
-                        Bound::Included(val) => {
-                            (calc_fraction(&bucket.lower, &bucket.upper, val)?, None)
-                        }
+                        Bound::Included(val) => (
+                            encoded_fraction(&bucket.lower, &bucket.upper, val, true, buf)?,
+                            None,
+                        ),
                         Bound::Excluded(val) => (
-                            calc_fraction(&bucket.lower, &bucket.upper, val)?,
+                            encoded_fraction(&bucket.lower, &bucket.upper, val, true, buf)?,
                             endpoint_count(val, bucket, sketch),
                         ),
                         Bound::Unbounded => unreachable!(),
                     };
                     let (temp_ratio_min, option_min) = match min {
-                        Bound::Included(val) => {
-                            (calc_fraction(&bucket.lower, &bucket.upper, val)?, None)
-                        }
+                        Bound::Included(val) => (
+                            encoded_fraction(&bucket.lower, &bucket.upper, val, false, buf)?,
+                            None,
+                        ),
                         Bound::Excluded(val) => (
-                            calc_fraction(&bucket.lower, &bucket.upper, val)?,
+                            encoded_fraction(&bucket.lower, &bucket.upper, val, false, buf)?,
                             endpoint_count(val, bucket, sketch),
                         ),
                         Bound::Unbounded => unreachable!(),
@@ -642,6 +598,44 @@ impl Histogram {
     }
 }
 
+fn encoded_fraction(
+    start: &DataValue,
+    end: &DataValue,
+    value: &DataValue,
+    is_upper: bool,
+    buf: &mut Vec<u8>,
+) -> Result<f64, DatabaseError> {
+    buf.clear();
+    start.memcomparable_encode(buf)?;
+    let lower_end = buf.len();
+    end.memcomparable_encode(buf)?;
+    let upper_end = buf.len();
+    value.memcomparable_encode(buf)?;
+    if is_upper && matches!(value, DataValue::Tuple(_)) {
+        buf.push(crate::storage::table_codec::BOUND_MAX_TAG);
+    }
+    let lower = &buf[..lower_end];
+    let upper = &buf[lower_end..upper_end];
+    let key = &buf[upper_end..];
+    if key <= lower {
+        return Ok(0.0);
+    }
+    if key >= upper {
+        return Ok(1.0);
+    }
+    let prefix = lower.iter().zip(upper).take_while(|(a, b)| a == b).count();
+    // Subtract eight-byte integer coordinates before converting to f64, so
+    // nearby large keys retain their distance. Encoded distance is approximate.
+    let coordinate = |bytes: &[u8]| {
+        (0..8).fold(0u64, |value, i| {
+            (value << 8) | u64::from(bytes.get(prefix + i).copied().unwrap_or(0))
+        })
+    };
+    let lower = coordinate(lower);
+    let upper = coordinate(upper);
+    Ok((coordinate(key) - lower) as f64 / (upper - lower) as f64)
+}
+
 fn subtract_endpoint_count(count: usize, endpoint_count: usize) -> usize {
     if endpoint_count < count {
         count.saturating_sub(endpoint_count)
@@ -661,12 +655,7 @@ fn endpoint_count(
     debug_assert_eq!(bucket_key_type, bucket.upper.logical_type());
 
     if value.logical_type() == bucket_key_type {
-        match value {
-            DataValue::Tuple(values, true) => {
-                Some(sketch.estimate(&DataValue::Tuple(values.clone(), false)))
-            }
-            _ => Some(sketch.estimate(value)),
-        }
+        Some(sketch.estimate(value))
     } else {
         None
     }
@@ -910,6 +899,314 @@ mod tests {
             ]
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn parameterized_tuple_ranges_accumulate_prefix_selectivity() -> Result<(), DatabaseError> {
+        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        for value in 0..100 {
+            builder.append(DataValue::Tuple(vec![DataValue::Int32(value); 4]))?;
+        }
+        let (mut histogram, sketch, top_n) = builder.build(10)?;
+        // Fixed metadata isolates the heuristic from HLL estimation error.
+        histogram.meta.values_len = 10_000;
+        histogram.meta.number_of_distinct_value = 10_000;
+        let parameter = |id| DataValue::Parameter {
+            id,
+            ty: crate::types::LogicalType::Integer,
+        };
+        let prefix = vec![parameter(1), parameter(2)];
+        let scope = |lower, upper| Range::Scope {
+            min: Bound::Excluded(DataValue::Tuple(lower)),
+            max: Bound::Excluded(DataValue::Tuple(upper)),
+        };
+        assert_eq!(
+            histogram.collect_count(&[scope(prefix.clone(), prefix.clone())], &sketch, &top_n)?,
+            100
+        );
+        let longer = vec![parameter(1), parameter(2), parameter(3)];
+        assert_eq!(
+            histogram.collect_count(&[scope(longer.clone(), longer)], &sketch, &top_n)?,
+            10
+        );
+        let mut lower = prefix.clone();
+        lower.push(parameter(3));
+        let mut upper = prefix.clone();
+        upper.push(parameter(4));
+        assert_eq!(
+            histogram.collect_count(&[scope(lower.clone(), prefix)], &sketch, &top_n)?,
+            25
+        );
+        assert_eq!(
+            histogram.collect_count(&[scope(lower.clone(), upper.clone())], &sketch, &top_n)?,
+            2
+        );
+        let full = DataValue::Tuple(vec![parameter(1), parameter(2), parameter(3), parameter(4)]);
+        assert_eq!(
+            histogram.collect_count(&[Range::Eq(full.clone())], &sketch, &top_n)?,
+            1
+        );
+        assert_eq!(
+            histogram.collect_count(
+                &[Range::Scope {
+                    min: Bound::Excluded(full.clone()),
+                    max: Bound::Included(full),
+                }],
+                &sketch,
+                &top_n
+            )?,
+            0
+        );
+        // Equal trailing elements after the first differing element are not a prefix.
+        lower.push(parameter(5));
+        upper.push(parameter(5));
+        assert_eq!(
+            histogram.collect_count(&[scope(lower, upper)], &sketch, &top_n)?,
+            2
+        );
+        histogram.buckets[0].upper = DataValue::Tuple(vec![
+            DataValue::Tuple(vec![DataValue::Int32(0); 2]),
+            DataValue::Tuple(vec![DataValue::Int32(0); 2]),
+        ]);
+        let nested = vec![DataValue::Tuple(vec![parameter(1), parameter(2)])];
+        assert_eq!(
+            histogram.collect_count(&[scope(nested.clone(), nested)], &sketch, &top_n)?,
+            100
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn encoded_fraction_expected_ratios_by_type() -> Result<(), DatabaseError> {
+        use crate::types::value::Utf8Type;
+        use crate::types::CharLengthUnits;
+
+        #[allow(unused_mut)]
+        let mut cases: Vec<(&str, Vec<DataValue>)> = vec![
+            ("null", vec![DataValue::Null]),
+            (
+                "boolean",
+                vec![DataValue::Boolean(false), DataValue::Boolean(true)],
+            ),
+            ("i8", [-100, -50, 0, 50, 100].map(DataValue::Int8).to_vec()),
+            (
+                "i16",
+                [-100, -50, 0, 50, 100].map(DataValue::Int16).to_vec(),
+            ),
+            (
+                "i32",
+                [-100, -50, 0, 50, 100].map(DataValue::Int32).to_vec(),
+            ),
+            (
+                "i64",
+                [-100, -50, 0, 50, 100].map(DataValue::Int64).to_vec(),
+            ),
+            ("u8", [0, 50, 100, 150, 200].map(DataValue::UInt8).to_vec()),
+            (
+                "u16",
+                [0, 50, 100, 150, 200].map(DataValue::UInt16).to_vec(),
+            ),
+            (
+                "u32",
+                [0, 50, 100, 150, 200].map(DataValue::UInt32).to_vec(),
+            ),
+            (
+                "u64",
+                [0, 50, 100, 150, 200].map(DataValue::UInt64).to_vec(),
+            ),
+            (
+                "f32",
+                [1.0, 1.25, 1.5, 1.75, 2.0]
+                    .map(|v| DataValue::Float32(v.into()))
+                    .to_vec(),
+            ),
+            (
+                "f64",
+                [1.0, 1.25, 1.5, 1.75, 2.0]
+                    .map(|v| DataValue::Float64(v.into()))
+                    .to_vec(),
+            ),
+            (
+                "date",
+                [0, 50, 100, 150, 200].map(DataValue::Date32).to_vec(),
+            ),
+            (
+                "datetime",
+                [0, 50, 100, 150, 200].map(DataValue::Date64).to_vec(),
+            ),
+            (
+                "time32",
+                [0, 50, 100, 150, 200]
+                    .map(|v| DataValue::Time32(v, 0))
+                    .to_vec(),
+            ),
+            (
+                "time64",
+                [0, 50, 100, 150, 200]
+                    .map(|v| DataValue::Time64(v, 6, false))
+                    .to_vec(),
+            ),
+            (
+                "timestamp",
+                [0, 50, 100, 150, 200]
+                    .map(|v| DataValue::Time64(v, 6, true))
+                    .to_vec(),
+            ),
+            (
+                "varchar",
+                ["a", "b", "c", "d", "e"]
+                    .map(|v| DataValue::from(v.to_string()))
+                    .to_vec(),
+            ),
+            (
+                "char",
+                ["a", "b", "c", "d", "e"]
+                    .map(|v| DataValue::Utf8 {
+                        value: v.into(),
+                        ty: Utf8Type::Fixed(1),
+                        unit: CharLengthUnits::Characters,
+                    })
+                    .to_vec(),
+            ),
+            (
+                "unicode",
+                ["一", "丁", "丂", "七", "丄"]
+                    .map(|v| DataValue::from(v.to_string()))
+                    .to_vec(),
+            ),
+            (
+                "long string",
+                ["a", "b", "c", "d", "e"]
+                    .map(|v| DataValue::from(format!("{}{}", "prefix".repeat(20), v)))
+                    .to_vec(),
+            ),
+            (
+                "tuple",
+                [0, 50, 100, 150, 200]
+                    .map(|v| DataValue::Tuple(vec![DataValue::Int32(1), DataValue::Int32(v)]))
+                    .to_vec(),
+            ),
+            (
+                "nested tuple",
+                [0, 50, 100, 150, 200]
+                    .map(|v| DataValue::Tuple(vec![DataValue::Tuple(vec![DataValue::Int32(v)])]))
+                    .to_vec(),
+            ),
+            (
+                "i64 max",
+                (0..5).map(|v| DataValue::Int64(i64::MAX - 4 + v)).collect(),
+            ),
+            (
+                "u64 max",
+                (0..5)
+                    .map(|v| DataValue::UInt64(u64::MAX - 4 + v))
+                    .collect(),
+            ),
+        ];
+        #[cfg(feature = "decimal")]
+        cases.push((
+            "decimal",
+            [100, 125, 150, 175, 200]
+                .map(|v| DataValue::Decimal(rust_decimal::Decimal::new(v, 2)))
+                .to_vec(),
+        ));
+        let mut buf = Vec::new();
+        for (name, values) in &cases {
+            let expected: &[f64] = match *name {
+                "null" => &[0.0],
+                "boolean" => &[0.0, 1.0],
+                // Accepted encoded-space ratios, not numeric-space quartiles.
+                "decimal" => &[0.0, 0.59765625, 0.6953125, 0.79296875, 1.0],
+                _ => &[0.0, 0.25, 0.5, 0.75, 1.0],
+            };
+            let lower = values.first().unwrap();
+            let upper = values.last().unwrap();
+            let fractions = values
+                .iter()
+                .map(|value| super::encoded_fraction(lower, upper, value, false, &mut buf))
+                .collect::<Result<Vec<_>, _>>()?;
+            assert_eq!(fractions.len(), expected.len(), "{name}");
+            for (i, (actual, expected)) in fractions.iter().zip(expected).enumerate() {
+                assert!(
+                    (actual - expected).abs() <= 1e-12,
+                    "{name}[{i}]: expected {expected}, got {actual}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn tuple_interpolation_uses_encoded_order_and_prefix_markers() -> Result<(), DatabaseError> {
+        let tuple = |a, b| DataValue::Tuple(vec![DataValue::Int32(a), DataValue::Int32(b)]);
+        let mut buf = Vec::new();
+        let fraction =
+            super::encoded_fraction(&tuple(1, 0), &tuple(2, 0), &tuple(1, 100), false, &mut buf)?;
+        assert!((fraction - 100.0 / 256.0_f64.powi(5)).abs() <= 1e-20);
+        let lower = DataValue::Tuple(vec![DataValue::Int32(1)]);
+        let upper = DataValue::Tuple(vec![DataValue::Int32(1)]);
+        assert_eq!(
+            super::encoded_fraction(&tuple(1, 0), &tuple(2, 0), &lower, false, &mut buf)?,
+            0.0
+        );
+        assert_eq!(
+            super::encoded_fraction(&tuple(1, 0), &tuple(2, 0), &upper, true, &mut buf)?,
+            0.994140625
+        );
+        let string_tuple =
+            |s: &str| DataValue::Tuple(vec![DataValue::Int32(1), DataValue::from(s.to_string())]);
+        let fraction = super::encoded_fraction(
+            &string_tuple("Alice"),
+            &string_tuple("Zoe"),
+            &string_tuple("Bob"),
+            false,
+            &mut buf,
+        )?;
+        assert!((fraction - 0.04044539011559242).abs() <= 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn parameterized_range_count_uses_shape_and_ndv() -> Result<(), DatabaseError> {
+        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        for value in 0..1_000 {
+            builder.append(DataValue::Int32(value % 100))?;
+        }
+        let (histogram, sketch, top_n) = builder.build(10)?;
+        let parameter = |id| DataValue::Parameter {
+            id,
+            ty: crate::types::LogicalType::Integer,
+        };
+        for (range, expected) in [
+            (
+                Range::Eq(parameter(1)),
+                1_000usize.div_ceil(histogram.distinct_values_len()),
+            ),
+            (
+                Range::Scope {
+                    min: Bound::Included(parameter(1)),
+                    max: Bound::Unbounded,
+                },
+                250,
+            ),
+            (
+                Range::Scope {
+                    min: Bound::Included(parameter(1)),
+                    max: Bound::Excluded(parameter(2)),
+                },
+                16,
+            ),
+            (
+                Range::SortedRanges(vec![Range::Eq(parameter(1)), Range::Eq(parameter(2))]),
+                2 * 1_000usize.div_ceil(histogram.distinct_values_len()),
+            ),
+        ] {
+            assert_eq!(
+                histogram.collect_count(&[range], &sketch, &top_n)?,
+                expected
+            );
+        }
         Ok(())
     }
 
@@ -1216,21 +1513,21 @@ mod tests {
         let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
 
         for value in 0..15 {
-            builder.append(DataValue::Tuple(
-                vec![DataValue::Int32(value), DataValue::Int32(value)],
-                false,
-            ))?;
+            builder.append(DataValue::Tuple(vec![
+                DataValue::Int32(value),
+                DataValue::Int32(value),
+            ]))?;
         }
 
         let (histogram, mut sketch, top_n) = builder.build(5)?;
         let ranges = [Range::Scope {
-            min: Bound::Excluded(DataValue::Tuple(vec![DataValue::Int32(0)], false)),
-            max: Bound::Excluded(DataValue::Tuple(vec![DataValue::Int32(8)], true)),
+            min: Bound::Excluded(DataValue::Tuple(vec![DataValue::Int32(0)])),
+            max: Bound::Excluded(DataValue::Tuple(vec![DataValue::Int32(8)])),
         }];
         let clean_count = histogram.collect_count(&ranges, &sketch, &top_n)?;
 
-        sketch.increment(&DataValue::Tuple(vec![DataValue::Int32(0)], false));
-        sketch.increment(&DataValue::Tuple(vec![DataValue::Int32(8)], true));
+        sketch.increment(&DataValue::Tuple(vec![DataValue::Int32(0)]));
+        sketch.increment(&DataValue::Tuple(vec![DataValue::Int32(8)]));
 
         assert_eq!(
             histogram.collect_count(&ranges, &sketch, &top_n)?,
@@ -1243,8 +1540,8 @@ mod tests {
     #[test]
     fn test_endpoint_count_uses_only_full_histogram_keys() -> Result<(), DatabaseError> {
         let bucket = Bucket {
-            lower: DataValue::Tuple(vec![DataValue::Int32(0), DataValue::Int32(0)], false),
-            upper: DataValue::Tuple(vec![DataValue::Int32(10), DataValue::Int32(10)], false),
+            lower: DataValue::Tuple(vec![DataValue::Int32(0), DataValue::Int32(0)]),
+            upper: DataValue::Tuple(vec![DataValue::Int32(10), DataValue::Int32(10)]),
             count: 11,
         };
         let mut sketch = CountMinSketch::with_relative_error(
@@ -1252,9 +1549,9 @@ mod tests {
             ANALYZE_STATISTICS_RELATIVE_ERROR,
         )?;
 
-        let real_key = DataValue::Tuple(vec![DataValue::Int32(8), DataValue::Int32(8)], false);
-        let upper_bound = DataValue::Tuple(vec![DataValue::Int32(8), DataValue::Int32(8)], true);
-        let prefix_bound = DataValue::Tuple(vec![DataValue::Int32(8)], true);
+        let real_key = DataValue::Tuple(vec![DataValue::Int32(8), DataValue::Int32(8)]);
+        let upper_bound = DataValue::Tuple(vec![DataValue::Int32(8), DataValue::Int32(8)]);
+        let prefix_bound = DataValue::Tuple(vec![DataValue::Int32(8)]);
 
         sketch.increment(&real_key);
         sketch.increment(&prefix_bound);

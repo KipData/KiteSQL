@@ -16,18 +16,16 @@ use crate::errors::DatabaseError;
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
-use crate::iter_ext::Itertools;
 use crate::planner::operator::aggregate::AggregateOperator;
+use crate::planner::MetaArena;
 use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
-use crate::types::value::DataValue;
 
 pub struct StreamDistinctExecutor {
     groupby_exprs: Vec<ExprRef>,
     input: ExecId,
-    last_keys: Option<Vec<DataValue>>,
-    scratch: Tuple,
+    last_keys: Option<Tuple>,
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor {
@@ -36,7 +34,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor {
     fn into_executor(
         (op, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -45,7 +43,6 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor {
             groupby_exprs: op.groupby_exprs,
             input,
             last_keys: None,
-            scratch: Tuple::default(),
         }))
     }
 }
@@ -54,29 +51,29 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         loop {
             if !arena.next_tuple(self.input, plan_arena)? {
-                arena.finish();
+                if let Some(last_keys) = self.last_keys.take() {
+                    drop(std::mem::replace(arena.result_tuple_mut(), last_keys));
+                    arena.resume();
+                } else {
+                    arena.finish();
+                }
                 return Ok(());
             }
-            std::mem::swap(&mut self.scratch, arena.result_tuple_mut());
-            let tuple = &self.scratch;
-            let group_keys = self
-                .groupby_exprs
-                .iter()
-                .map(|expr| plan_arena.expression(*expr).eval(plan_arena, Some(tuple)))
-                .try_collect()?;
+            arena.rewrite(&self.groupby_exprs, plan_arena, None)?;
 
-            if self.last_keys.as_ref() != Some(&group_keys) {
-                self.last_keys = Some(group_keys.clone());
-                let output = arena.result_tuple_mut();
-                output.pk.clone_from(&tuple.pk);
-                output.values = group_keys;
+            if let Some(last_keys) = &mut self.last_keys {
+                if last_keys.values == arena.result_tuple().values {
+                    continue;
+                }
+                std::mem::swap(last_keys, arena.result_tuple_mut());
                 arena.resume();
                 return Ok(());
             }
+            self.last_keys = Some(arena.materialize_tuple());
         }
     }
 }
@@ -95,6 +92,7 @@ mod tests {
     use crate::planner::operator::aggregate::AggregateOperator;
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
+    use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, LogicalPlan};
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
@@ -147,16 +145,17 @@ mod tests {
             vec![plan_arena.alloc_column(ColumnCatalog::new("c1".to_string(), true, desc))];
 
         let input = LogicalPlan::new(
-            Operator::Values(ValuesOperator {
-                rows: vec![
+            Operator::Values(ValuesOperator::new(
+                plan_arena.alloc_expression_rows(&[
                     vec![DataValue::Int32(1)],
                     vec![DataValue::Int32(1)],
                     vec![DataValue::Int32(2)],
                     vec![DataValue::Int32(2)],
                     vec![DataValue::Int32(3)],
-                ],
-                schema_ref: schema_ref.clone(),
-            }),
+                ]),
+                5,
+                schema_ref.clone(),
+            )),
             Childrens::None,
         );
         let agg = AggregateOperator {
@@ -203,16 +202,17 @@ mod tests {
         ];
 
         let input = LogicalPlan::new(
-            Operator::Values(ValuesOperator {
-                rows: vec![
+            Operator::Values(ValuesOperator::new(
+                plan_arena.alloc_expression_rows(&[
                     vec![DataValue::Int32(1), DataValue::Int32(1)],
                     vec![DataValue::Int32(1), DataValue::Int32(1)],
                     vec![DataValue::Int32(1), DataValue::Int32(2)],
                     vec![DataValue::Int32(2), DataValue::Int32(1)],
                     vec![DataValue::Int32(2), DataValue::Int32(1)],
-                ],
-                schema_ref: schema_ref.clone(),
-            }),
+                ]),
+                5,
+                schema_ref.clone(),
+            )),
             Childrens::None,
         );
         let agg = AggregateOperator {

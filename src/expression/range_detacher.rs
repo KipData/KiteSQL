@@ -16,11 +16,13 @@ use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::{BinaryOperator, ScalarExpression};
 use crate::iter_ext::Itertools;
-use crate::planner::{ExprRef, PlanArena};
+use crate::planner::ExprRef;
+use crate::planner::MetaArena;
 use crate::types::index::IndexMetaRef;
-use crate::types::value::DataValue;
+use crate::types::value::{DataValue, DataValueRef};
 use crate::types::{ColumnId, LogicalType};
 use kite_sql_serde_macros::ReferenceSerialization;
+use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::collections::Bound;
 use std::fmt::Formatter;
@@ -30,14 +32,11 @@ use std::{fmt, mem};
 /// Tips: The NotEq case is ignored because it makes expression composition very complex
 /// - [`Range::Scope`]:
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
-pub enum Range {
-    Scope {
-        min: Bound<DataValue>,
-        max: Bound<DataValue>,
-    },
-    Eq(DataValue),
+pub enum Range<T = DataValue> {
+    Scope { min: Bound<T>, max: Bound<T> },
+    Eq(T),
     Dummy,
-    SortedRanges(Vec<Range>),
+    SortedRanges(Vec<Range<T>>),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
@@ -54,10 +53,10 @@ impl DetachedPredicate {
         }
     }
 
-    fn combine_residuals(
+    fn combine_residuals<A: MetaArena + ?Sized>(
         left: Option<ExprRef>,
         right: Option<ExprRef>,
-        arena: &mut PlanArena<'_>,
+        arena: &mut A,
     ) -> Option<ExprRef> {
         match (left, right) {
             (Some(left), Some(right)) => Some(arena.alloc_expression(ScalarExpression::Binary {
@@ -108,19 +107,71 @@ impl<T: Clone> TreeNode<T> {
     }
 }
 
-fn build_tree(ranges: &[Range], current_level: usize) -> Option<TreeNode<&DataValue>> {
-    fn build_subtree<'a>(
-        ranges: &'a [Range],
-        range: &'a Range,
+pub(crate) enum EqRangeItem<'a, T> {
+    Eq(&'a DataValue),
+    Sorted(&'a [Range<T>]),
+}
+
+pub(crate) trait EqRangeInput<T: Borrow<DataValue>> {
+    fn len(&self) -> usize;
+    fn get(&self, level: usize) -> Option<EqRangeItem<'_, T>>;
+}
+
+impl<T: Borrow<DataValue>> EqRangeInput<T> for [Range<T>] {
+    fn len(&self) -> usize {
+        <[Range<T>]>::len(self)
+    }
+
+    fn get(&self, level: usize) -> Option<EqRangeItem<'_, T>> {
+        <[Range<T>]>::get(self, level).and_then(|range| match range {
+            Range::Eq(value) => Some(EqRangeItem::Eq(value.borrow())),
+            Range::SortedRanges(ranges) => Some(EqRangeItem::Sorted(ranges)),
+            _ => None,
+        })
+    }
+}
+
+impl<T: Borrow<DataValue>, const N: usize> EqRangeInput<T> for [Range<T>; N] {
+    fn len(&self) -> usize {
+        N
+    }
+
+    fn get(&self, level: usize) -> Option<EqRangeItem<'_, T>> {
+        <[Range<T>] as EqRangeInput<T>>::get(self, level)
+    }
+}
+
+impl<T: Borrow<DataValue>> EqRangeInput<T> for Vec<Range<T>> {
+    fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    fn get(&self, level: usize) -> Option<EqRangeItem<'_, T>> {
+        <[Range<T>] as EqRangeInput<T>>::get(self, level)
+    }
+}
+
+impl EqRangeInput<DataValue> for [DataValue] {
+    fn len(&self) -> usize {
+        <[DataValue]>::len(self)
+    }
+
+    fn get(&self, level: usize) -> Option<EqRangeItem<'_, DataValue>> {
+        <[DataValue]>::get(self, level).map(EqRangeItem::Eq)
+    }
+}
+
+fn build_tree<'a, T: Borrow<DataValue> + 'a, I: EqRangeInput<T> + ?Sized>(
+    ranges: &'a I,
+    current_level: usize,
+) -> Option<TreeNode<&'a DataValue>> {
+    fn build_subtree<'a, T: Borrow<DataValue> + 'a, I: EqRangeInput<T> + ?Sized>(
+        ranges: &'a I,
+        value: &'a DataValue,
         current_level: usize,
     ) -> Option<TreeNode<&'a DataValue>> {
-        let value = match range {
-            Range::Eq(value) => value,
-            _ => return None,
-        };
         let mut child = TreeNode::new(Some(value));
         let subtree = build_tree(ranges, current_level + 1)?;
-
         if !subtree.children.is_empty() || current_level == ranges.len() - 1 {
             child.add_child(subtree);
         }
@@ -128,18 +179,20 @@ fn build_tree(ranges: &[Range], current_level: usize) -> Option<TreeNode<&DataVa
     }
 
     let mut root = TreeNode::new(None);
-
     if current_level < ranges.len() {
-        match &ranges[current_level] {
-            Range::SortedRanges(child_ranges) => {
-                for range in child_ranges.iter() {
+        match ranges.get(current_level)? {
+            EqRangeItem::Sorted(children) => {
+                for child in children {
+                    let Range::Eq(value) = child else {
+                        return None;
+                    };
                     root.children
-                        .push(build_subtree(ranges, range, current_level)?);
+                        .push(build_subtree(ranges, value.borrow(), current_level)?);
                 }
             }
-            range => {
+            EqRangeItem::Eq(value) => {
                 root.children
-                    .push(build_subtree(ranges, range, current_level)?);
+                    .push(build_subtree(ranges, value, current_level)?);
             }
         }
     }
@@ -147,6 +200,41 @@ fn build_tree(ranges: &[Range], current_level: usize) -> Option<TreeNode<&DataVa
 }
 
 impl Range {
+    pub(crate) fn bind_parameters(
+        &mut self,
+        params: &[(usize, DataValue)],
+    ) -> Result<(), DatabaseError> {
+        match self {
+            Self::Scope { min, max } => {
+                for bound in [min, max] {
+                    if let Bound::Included(value) | Bound::Excluded(value) = bound {
+                        value.bind_parameters(params)?;
+                    }
+                }
+            }
+            Self::Eq(value) => value.bind_parameters(params)?,
+            Self::SortedRanges(ranges) => {
+                for range in ranges {
+                    range.bind_parameters(params)?;
+                }
+            }
+            Self::Dummy => {}
+        }
+        Ok(())
+    }
+
+    pub(crate) fn has_parameter(&self) -> bool {
+        match self {
+            Self::Scope { min, max } => [min, max].into_iter().any(|bound| match bound {
+                Bound::Included(value) | Bound::Excluded(value) => value.has_parameter(),
+                Bound::Unbounded => false,
+            }),
+            Self::Eq(value) => value.has_parameter(),
+            Self::SortedRanges(ranges) => ranges.iter().any(Self::has_parameter),
+            Self::Dummy => false,
+        }
+    }
+
     pub(crate) fn only_eq(&self) -> bool {
         match self {
             Range::Eq(_) => true,
@@ -155,49 +243,43 @@ impl Range {
         }
     }
 
-    pub(crate) fn combining_eqs(&self, eqs: &[Range]) -> Option<Range> {
-        #[allow(clippy::map_clone)]
-        fn merge_value(tuple: &[&DataValue], is_upper: bool, value: DataValue) -> DataValue {
+    pub(crate) fn combining_eqs<T: Borrow<DataValue>, I: EqRangeInput<T> + ?Sized>(
+        &self,
+        eqs: &I,
+    ) -> Option<Range> {
+        fn merge_value(tuple: &[&DataValue], value: DataValue) -> DataValue {
             let mut merge_tuple = Vec::with_capacity(tuple.len() + 1);
             for value in tuple {
                 merge_tuple.push((*value).clone());
             }
             merge_tuple.push(value);
 
-            DataValue::Tuple(merge_tuple, is_upper)
+            DataValue::Tuple(merge_tuple)
         }
         fn collect_tuple_range(result_ranges: &mut Vec<Range>, tuple: &[&DataValue], range: Range) {
             fn merge_value_on_bound(
                 tuple: &[&DataValue],
-                is_upper: bool,
                 bound: Bound<DataValue>,
             ) -> Bound<DataValue> {
                 match bound {
-                    Bound::Included(v) => Bound::Included(merge_value(tuple, is_upper, v)),
-                    Bound::Excluded(v) => Bound::Excluded(merge_value(tuple, !is_upper, v)),
+                    Bound::Included(v) => Bound::Included(merge_value(tuple, v)),
+                    Bound::Excluded(v) => Bound::Excluded(merge_value(tuple, v)),
                     Bound::Unbounded => {
                         if tuple.is_empty() {
                             return Bound::Unbounded;
                         }
                         let values = tuple.iter().map(|v| (*v).clone()).collect_vec();
-                        // Excluding a lower equality prefix skips its entire key
-                        // range when storage encodes the exclusive bound. Start at
-                        // the prefix itself; the upper sentinel stays exclusive.
-                        if is_upper {
-                            Bound::Excluded(DataValue::Tuple(values, true))
-                        } else {
-                            Bound::Included(DataValue::Tuple(values, false))
-                        }
+                        Bound::Included(DataValue::Tuple(values))
                     }
                 }
             }
 
             match range {
                 Range::Scope { min, max } => result_ranges.push(Range::Scope {
-                    min: merge_value_on_bound(tuple, false, min),
-                    max: merge_value_on_bound(tuple, true, max),
+                    min: merge_value_on_bound(tuple, min),
+                    max: merge_value_on_bound(tuple, max),
                 }),
-                Range::Eq(v) => result_ranges.push(Range::Eq(merge_value(tuple, false, v))),
+                Range::Eq(v) => result_ranges.push(Range::Eq(merge_value(tuple, v))),
                 Range::Dummy => result_ranges.push(Range::Dummy),
                 Range::SortedRanges(mut ranges) => {
                     for range in &mut ranges {
@@ -222,7 +304,12 @@ impl Range {
 }
 
 pub trait RangeColumnMatcher {
-    fn matches(&self, table_name: &str, column_id: ColumnId, arena: &PlanArena<'_>) -> bool;
+    fn matches<A: MetaArena + ?Sized>(
+        &self,
+        table_name: &str,
+        column_id: ColumnId,
+        arena: &A,
+    ) -> bool;
 }
 
 pub struct IndexRangeColumn {
@@ -231,24 +318,91 @@ pub struct IndexRangeColumn {
 }
 
 impl RangeColumnMatcher for IndexRangeColumn {
-    fn matches(&self, table_name: &str, column_id: ColumnId, arena: &PlanArena<'_>) -> bool {
+    fn matches<A: MetaArena + ?Sized>(
+        &self,
+        table_name: &str,
+        column_id: ColumnId,
+        arena: &A,
+    ) -> bool {
         let index = arena.index(self.meta);
         table_name == index.table_name.as_ref()
             && index.column_ids.get(self.position) == Some(&column_id)
     }
 }
 
-pub struct RangeDetacher<'a, 'p, M: RangeColumnMatcher = IndexRangeColumn> {
+pub struct RangeDetacher<
+    'a,
+    M: RangeColumnMatcher = IndexRangeColumn,
+    A: MetaArena + ?Sized = dyn MetaArena + 'a,
+> {
     column: M,
-    arena: &'a mut PlanArena<'p>,
+    arena: &'a mut A,
 }
 
-impl<'a, 'p> RangeDetacher<'a, 'p, IndexRangeColumn> {
-    pub(crate) fn for_index(
+impl<'a, A: MetaArena + ?Sized> RangeDetacher<'a, IndexRangeColumn, A> {
+    pub(crate) fn specialize_range(
         meta: IndexMetaRef,
-        position: usize,
-        arena: &'a mut PlanArena<'p>,
-    ) -> Self {
+        original: &Range,
+        predicate: ExprRef,
+        prefix_len: usize,
+        arena: &'a mut A,
+    ) -> Result<Option<Range>, DatabaseError> {
+        let index = arena.index(meta);
+        if prefix_len >= index.column_ids.len() {
+            return Ok(None);
+        }
+        let composite = matches!(index.value_ty, LogicalType::Tuple(_));
+        let Range::Scope { min, max } = original else {
+            return Ok(None);
+        };
+        let prefix: &[DataValue] = if composite && prefix_len > 0 {
+            let (
+                Bound::Included(DataValue::Tuple(lower)) | Bound::Excluded(DataValue::Tuple(lower)),
+                Bound::Included(DataValue::Tuple(upper)) | Bound::Excluded(DataValue::Tuple(upper)),
+            ) = (min, max)
+            else {
+                return Ok(None);
+            };
+            let (Some(lower_prefix), Some(upper_prefix)) =
+                (lower.get(..prefix_len), upper.get(..prefix_len))
+            else {
+                return Ok(None);
+            };
+            if lower_prefix != upper_prefix
+                || (lower.len() == prefix_len && matches!(min, Bound::Excluded(_)))
+                || (upper.len() == prefix_len && matches!(max, Bound::Excluded(_)))
+            {
+                return Ok(None);
+            }
+            lower_prefix
+        } else {
+            &[]
+        };
+        let Ok(Some(detached)) = Self::for_index(meta, prefix_len, arena).detach(predicate) else {
+            return Ok(None);
+        };
+        // Only tighten a continuous range; leave equality, disjunction and empty
+        // ranges to the original lookup and residual Filter.
+        if !matches!(detached.range, Range::Scope { .. }) {
+            return Ok(None);
+        }
+        let constraint = if composite {
+            let Some(range) = detached.range.combining_eqs(prefix) else {
+                return Ok(None);
+            };
+            range
+        } else {
+            detached.range
+        };
+        Ok(
+            match Self::merge_binary(BinaryOperator::And, original.clone(), constraint) {
+                Ok(range) if !matches!(range, Range::Dummy) && &range != original => Some(range),
+                _ => None,
+            },
+        )
+    }
+
+    pub(crate) fn for_index(meta: IndexMetaRef, position: usize, arena: &'a mut A) -> Self {
         Self {
             column: IndexRangeColumn { meta, position },
             arena,
@@ -256,7 +410,7 @@ impl<'a, 'p> RangeDetacher<'a, 'p, IndexRangeColumn> {
     }
 }
 
-impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
+impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
     pub(crate) fn detach(
         &mut self,
         expr: ExprRef,
@@ -294,18 +448,27 @@ impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
                         let left = self.detach(left_expr)?;
                         let right = self.detach(right_expr)?;
                         let (range, residual) = match (left, right) {
-                            (Some(left_range), Some(right_range)) => {
-                                let Some(range) =
-                                    Self::merge_binary(op, left_range.range, right_range.range)
-                                else {
-                                    return Ok(None);
-                                };
-                                let residual = DetachedPredicate::combine_residuals(
-                                    left_range.residual,
-                                    right_range.residual,
-                                    self.arena,
-                                );
-                                (range, residual)
+                            (Some(left), Some(right)) => {
+                                let DetachedPredicate {
+                                    range: left_range,
+                                    residual: left_residual,
+                                } = left;
+                                let DetachedPredicate {
+                                    range: right_range,
+                                    residual: right_residual,
+                                } = right;
+
+                                match Self::merge_binary(op, left_range, right_range) {
+                                    Ok(range) => {
+                                        let residual = DetachedPredicate::combine_residuals(
+                                            left_residual,
+                                            right_residual,
+                                            self.arena,
+                                        );
+                                        (range, residual)
+                                    }
+                                    Err((left_range, _right_range)) => (left_range, Some(expr)),
+                                }
                             }
                             (Some(detached), None) => {
                                 let residual = DetachedPredicate::combine_residuals(
@@ -332,8 +495,7 @@ impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
                         let right = self.detach(right_expr)?;
                         if let (Some(left), Some(right)) = (left, right) {
                             if left.residual.is_none() && right.residual.is_none() {
-                                if let Some(range) = Self::merge_binary(op, left.range, right.range)
-                                {
+                                if let Ok(range) = Self::merge_binary(op, left.range, right.range) {
                                     return Ok(Some(DetachedPredicate::consumed(range)));
                                 }
                             }
@@ -406,7 +568,11 @@ impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
         })
     }
 
-    fn merge_binary(op: BinaryOperator, left_binary: Range, right_binary: Range) -> Option<Range> {
+    fn merge_binary(
+        op: BinaryOperator,
+        left_binary: Range,
+        right_binary: Range,
+    ) -> Result<Range, (Range, Range)> {
         fn process_exclude_bound_with_eq(
             bound: Bound<DataValue>,
             eq: &DataValue,
@@ -423,11 +589,24 @@ impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
                 bound => bound,
             }
         }
+
+        fn bounds_have_parameter(bounds: &[&Bound<DataValue>]) -> bool {
+            bounds.iter().any(|bound| match bound {
+                Bound::Included(value) | Bound::Excluded(value) => value.has_parameter(),
+                Bound::Unbounded => false,
+            })
+        }
+
         match (left_binary, right_binary) {
-            (Range::Dummy, binary) | (binary, Range::Dummy) => match op {
-                BinaryOperator::And => Some(Range::Dummy),
-                BinaryOperator::Or => Some(binary),
-                _ => None,
+            (Range::Dummy, binary) => match op {
+                BinaryOperator::And => Ok(Range::Dummy),
+                BinaryOperator::Or => Ok(binary),
+                _ => Err((Range::Dummy, binary)),
+            },
+            (binary, Range::Dummy) => match op {
+                BinaryOperator::And => Ok(Range::Dummy),
+                BinaryOperator::Or => Ok(binary),
+                _ => Err((binary, Range::Dummy)),
             },
             // e.g. c1 > 1 ? c1 < 2
             (
@@ -440,17 +619,44 @@ impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
                     max: right_max,
                 },
             ) => match op {
-                BinaryOperator::And => Some(Self::and_scope_merge(
-                    left_min, left_max, right_min, right_max,
+                BinaryOperator::And => {
+                    Self::and_scope_merge(left_min, left_max, right_min, right_max)
+                }
+                BinaryOperator::Or => {
+                    if bounds_have_parameter(&[&left_min, &left_max, &right_min, &right_max]) {
+                        Err((
+                            Range::Scope {
+                                min: left_min,
+                                max: left_max,
+                            },
+                            Range::Scope {
+                                min: right_min,
+                                max: right_max,
+                            },
+                        ))
+                    } else {
+                        Ok(Self::or_scope_merge(
+                            left_min, left_max, right_min, right_max,
+                        ))
+                    }
+                }
+                _ => Err((
+                    Range::Scope {
+                        min: left_min,
+                        max: left_max,
+                    },
+                    Range::Scope {
+                        min: right_min,
+                        max: right_max,
+                    },
                 )),
-                BinaryOperator::Or => Some(Self::or_scope_merge(
-                    left_min, left_max, right_min, right_max,
-                )),
-                _ => None,
             },
             // e.g. c1 > 1 ? c1 = 1
-            (Range::Scope { min, max }, Range::Eq(eq))
-            | (Range::Eq(eq), Range::Scope { min, max }) => {
+            (Range::Scope { min, max }, Range::Eq(eq)) => {
+                if bounds_have_parameter(&[&min, &max]) || eq.has_parameter() {
+                    return Err((Range::Scope { min, max }, Range::Eq(eq)));
+                }
+
                 let unpack_bound = |bound_eq: Bound<DataValue>| match bound_eq {
                     Bound::Included(val) | Bound::Excluded(val) => val,
                     _ => unreachable!(),
@@ -459,7 +665,7 @@ impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
                     BinaryOperator::And => {
                         let bound_eq = Bound::Included(eq);
                         let is_less = matches!(
-                            Self::bound_compared(&bound_eq, &min, true).unwrap_or({
+                            Self::bound_compared(&bound_eq, &min, false, false).unwrap_or({
                                 if matches!(min, Bound::Unbounded) {
                                     Ordering::Greater
                                 } else {
@@ -471,24 +677,24 @@ impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
 
                         if is_less
                             || matches!(
-                                Self::bound_compared(&bound_eq, &max, false),
+                                Self::bound_compared(&bound_eq, &max, true, true),
                                 Some(Ordering::Greater)
                             )
                         {
-                            return Some(Range::Dummy);
+                            return Ok(Range::Dummy);
                         }
-                        Some(Range::Eq(unpack_bound(bound_eq)))
+                        Ok(Range::Eq(unpack_bound(bound_eq)))
                     }
                     BinaryOperator::Or => {
                         if eq.is_null() {
-                            return Some(if matches!(min, Bound::Excluded(_)) {
+                            return Ok(if matches!(min, Bound::Excluded(_)) {
                                 Range::SortedRanges(vec![Range::Eq(eq), Range::Scope { min, max }])
                             } else {
                                 Range::Scope { min, max }
                             });
                         }
                         let bound_eq = Bound::Excluded(eq);
-                        let range = match Self::bound_compared(&bound_eq, &min, true) {
+                        let range = match Self::bound_compared(&bound_eq, &min, false, false) {
                             Some(Ordering::Less) => Range::SortedRanges(vec![
                                 Range::Eq(unpack_bound(bound_eq)),
                                 Range::Scope { min, max },
@@ -501,7 +707,7 @@ impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
                                 ),
                                 max,
                             },
-                            _ => match Self::bound_compared(&bound_eq, &max, false) {
+                            _ => match Self::bound_compared(&bound_eq, &max, true, true) {
                                 Some(Ordering::Greater) => Range::SortedRanges(vec![
                                     Range::Scope { min, max },
                                     Range::Eq(unpack_bound(bound_eq)),
@@ -517,30 +723,41 @@ impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
                                 _ => Range::Scope { min, max },
                             },
                         };
-                        Some(range)
+                        Ok(range)
                     }
-                    _ => None,
+                    _ => Err((Range::Scope { min, max }, Range::Eq(eq))),
                 }
             }
+            // e.g. c1 = 1 ? c1 > 1
+            (Range::Eq(eq), Range::Scope { min, max }) => {
+                Self::merge_binary(op, Range::Scope { min, max }, Range::Eq(eq))
+                    .map_err(|(right, left)| (left, right))
+            }
             // e.g. c1 > 1 ? (c1 = 1 or c1 = 2)
-            (Range::Scope { min, max }, Range::SortedRanges(ranges))
-            | (Range::SortedRanges(ranges), Range::Scope { min, max }) => {
+            (Range::Scope { min, max }, Range::SortedRanges(ranges)) => {
+                if bounds_have_parameter(&[&min, &max]) || ranges.iter().any(Range::has_parameter) {
+                    return Err((Range::Scope { min, max }, Range::SortedRanges(ranges)));
+                }
                 let merged_ranges =
                     Self::extract_merge_ranges(op, Some(Range::Scope { min, max }), ranges, &mut 0);
-
-                Some(Self::ranges2range(merged_ranges))
+                Ok(Self::ranges2range(merged_ranges))
+            }
+            // e.g. (c1 = 1 or c1 = 2) ? c1 > 1
+            (Range::SortedRanges(ranges), Range::Scope { min, max }) => {
+                Self::merge_binary(op, Range::Scope { min, max }, Range::SortedRanges(ranges))
+                    .map_err(|(right, left)| (left, right))
             }
             // e.g. c1 = 1 ? c1 = 2
             (Range::Eq(left_val), Range::Eq(right_val)) => {
-                if left_val.eq(&right_val) && matches!(op, BinaryOperator::And | BinaryOperator::Or)
-                {
-                    return Some(Range::Eq(left_val));
+                if left_val == right_val && matches!(op, BinaryOperator::And | BinaryOperator::Or) {
+                    return Ok(Range::Eq(left_val));
+                }
+                if left_val.has_parameter() || right_val.has_parameter() {
+                    return Err((Range::Eq(left_val), Range::Eq(right_val)));
                 }
                 match op {
-                    BinaryOperator::And => Some(Range::Dummy),
+                    BinaryOperator::And => Ok(Range::Dummy),
                     BinaryOperator::Or => {
-                        let mut ranges = Vec::new();
-
                         let (val_1, val_2) = if let Some(true) =
                             left_val.partial_cmp(&right_val).map(Ordering::is_gt)
                         {
@@ -548,31 +765,44 @@ impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
                         } else {
                             (left_val, right_val)
                         };
-                        ranges.push(Range::Eq(val_1));
-                        ranges.push(Range::Eq(val_2));
-                        Some(Range::SortedRanges(ranges))
+                        Ok(Range::SortedRanges(vec![
+                            Range::Eq(val_1),
+                            Range::Eq(val_2),
+                        ]))
                     }
-                    _ => None,
+                    _ => Err((Range::Eq(left_val), Range::Eq(right_val))),
                 }
             }
             // e.g. c1 = 1 ? (c1 = 1 or c1 = 2)
-            (Range::Eq(eq), Range::SortedRanges(ranges))
-            | (Range::SortedRanges(ranges), Range::Eq(eq)) => {
+            (Range::Eq(eq), Range::SortedRanges(ranges)) => {
+                if eq.has_parameter() || ranges.iter().any(Range::has_parameter) {
+                    return Err((Range::Eq(eq), Range::SortedRanges(ranges)));
+                }
                 let merged_ranges =
                     Self::extract_merge_ranges(op, Some(Range::Eq(eq)), ranges, &mut 0);
-
-                Some(Self::ranges2range(merged_ranges))
+                Ok(Self::ranges2range(merged_ranges))
+            }
+            // e.g. (c1 = 1 or c1 = 2) ? c1 = 1
+            (Range::SortedRanges(ranges), Range::Eq(eq)) => {
+                Self::merge_binary(op, Range::Eq(eq), Range::SortedRanges(ranges))
+                    .map_err(|(right, left)| (left, right))
             }
             // e.g. (c1 = 1 or c1 = 2) ? (c1 = 1 or c1 = 2)
             (Range::SortedRanges(left_ranges), Range::SortedRanges(mut right_ranges)) => {
+                if left_ranges.iter().any(Range::has_parameter)
+                    || right_ranges.iter().any(Range::has_parameter)
+                {
+                    return Err((
+                        Range::SortedRanges(left_ranges),
+                        Range::SortedRanges(right_ranges),
+                    ));
+                }
                 let mut idx = 0;
-
                 for left_range in left_ranges {
                     right_ranges =
                         Self::extract_merge_ranges(op, Some(left_range), right_ranges, &mut idx)
                 }
-
-                Some(Self::ranges2range(right_ranges))
+                Ok(Self::ranges2range(right_ranges))
             }
         }
     }
@@ -608,17 +838,17 @@ impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
                     },
                 ) => {
                     if let Some(true) =
-                        Self::bound_compared(l_max, r_min, false).map(Ordering::is_lt)
+                        Self::bound_compared(l_max, r_min, true, false).map(Ordering::is_lt)
                     {
                         ranges.insert(*idx, binary.unwrap());
                         return ranges;
                     } else if let Some(true) =
-                        Self::bound_compared(l_min, r_max, true).map(Ordering::is_gt)
+                        Self::bound_compared(l_min, r_max, false, true).map(Ordering::is_gt)
                     {
                         *idx += 1;
                         continue;
                     } else {
-                        binary = Self::merge_binary(op, binary.unwrap(), ranges.remove(*idx));
+                        binary = Self::merge_binary(op, binary.unwrap(), ranges.remove(*idx)).ok();
                     }
                 }
                 (
@@ -628,14 +858,14 @@ impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
                     }),
                     Range::Eq(r_val),
                 ) => {
-                    let r_bound = Bound::Included(r_val.clone());
+                    let r_bound = Bound::Included(r_val);
 
                     if let Some(true) =
-                        Self::bound_compared(l_max, &r_bound, false).map(Ordering::is_lt)
+                        Self::bound_compared(l_max, &r_bound, true, false).map(Ordering::is_lt)
                     {
                         ranges.insert(*idx, binary.unwrap());
                         return ranges;
-                    } else if Self::bound_compared(l_min, &r_bound, true)
+                    } else if Self::bound_compared(l_min, &r_bound, false, true)
                         .map(Ordering::is_gt)
                         .unwrap_or_else(|| op == BinaryOperator::Or)
                     {
@@ -644,7 +874,7 @@ impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
                     } else if r_val.is_null() {
                         let _ = ranges.remove(*idx);
                     } else {
-                        binary = Self::merge_binary(op, binary.unwrap(), ranges.remove(*idx));
+                        binary = Self::merge_binary(op, binary.unwrap(), ranges.remove(*idx)).ok();
                     }
                 }
                 (Some(Range::Eq(l_val)), Range::Eq(r_val)) => {
@@ -655,7 +885,7 @@ impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
                         *idx += 1;
                         continue;
                     } else {
-                        binary = Self::merge_binary(op, binary.unwrap(), ranges.remove(*idx));
+                        binary = Self::merge_binary(op, binary.unwrap(), ranges.remove(*idx)).ok();
                     }
                 }
                 (
@@ -665,23 +895,23 @@ impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
                         max: r_max,
                     },
                 ) => {
-                    let l_bound = Bound::Included(l_val.clone());
+                    let l_bound = Bound::Included(l_val);
 
-                    if Self::bound_compared(&l_bound, r_min, false)
+                    if Self::bound_compared(&l_bound, r_min, true, false)
                         .map(Ordering::is_lt)
                         .unwrap_or_else(|| op == BinaryOperator::Or)
                     {
                         ranges.insert(*idx, binary.unwrap());
                         return ranges;
                     } else if let Some(true) =
-                        Self::bound_compared(&l_bound, r_max, true).map(Ordering::is_gt)
+                        Self::bound_compared(&l_bound, r_max, false, true).map(Ordering::is_gt)
                     {
                         *idx += 1;
                         continue;
                     } else if l_val.is_null() {
                         binary = Some(ranges.remove(*idx));
                     } else {
-                        binary = Self::merge_binary(op, binary.unwrap(), ranges.remove(*idx));
+                        binary = Self::merge_binary(op, binary.unwrap(), ranges.remove(*idx)).ok();
                     }
                 }
                 (Some(Range::Dummy), _) => {
@@ -722,14 +952,14 @@ impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
         right_max: Bound<DataValue>,
     ) -> Range {
         if matches!(
-            Self::bound_compared(&left_max, &right_min, false),
+            Self::bound_compared(&left_max, &right_min, true, false),
             Some(Ordering::Less)
         ) || matches!(
-            Self::bound_compared(&right_max, &left_min, false),
+            Self::bound_compared(&right_max, &left_min, true, false),
             Some(Ordering::Less)
         ) {
             let (min_1, max_1, min_2, max_2) = if let Some(true) =
-                Self::bound_compared(&left_min, &right_min, true).map(Ordering::is_lt)
+                Self::bound_compared(&left_min, &right_min, false, false).map(Ordering::is_lt)
             {
                 (left_min, left_max, right_min, right_max)
             } else {
@@ -747,20 +977,20 @@ impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
             ]);
         }
         let min = if let Some(true) =
-            Self::bound_compared(&left_min, &right_min, true).map(Ordering::is_lt)
+            Self::bound_compared(&left_min, &right_min, false, false).map(Ordering::is_lt)
         {
             left_min
         } else {
             right_min
         };
         let max = if let Some(true) =
-            Self::bound_compared(&left_max, &right_max, false).map(Ordering::is_gt)
+            Self::bound_compared(&left_max, &right_max, true, true).map(Ordering::is_gt)
         {
             left_max
         } else {
             right_max
         };
-        match Self::bound_compared(&min, &max, matches!(min, Bound::Unbounded)) {
+        match Self::bound_compared(&min, &max, false, true) {
             Some(Ordering::Equal) => match min {
                 Bound::Included(val) => Range::Eq(val),
                 Bound::Excluded(_) => Range::Dummy,
@@ -778,22 +1008,30 @@ impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
         left_max: Bound<DataValue>,
         right_min: Bound<DataValue>,
         right_max: Bound<DataValue>,
-    ) -> Range {
-        let min = if let Some(true) =
-            Self::bound_compared(&left_min, &right_min, true).map(Ordering::is_gt)
-        {
-            left_min
-        } else {
-            right_min
+    ) -> Result<Range, (Range, Range)> {
+        let min_order = Self::bound_compared(&left_min, &right_min, false, false);
+        let max_order = Self::bound_compared(&left_max, &right_max, true, true);
+        let (Some(min_order), Some(max_order)) = (min_order, max_order) else {
+            return Err((
+                Range::Scope {
+                    min: left_min,
+                    max: left_max,
+                },
+                Range::Scope {
+                    min: right_min,
+                    max: right_max,
+                },
+            ));
         };
-        let max = if let Some(true) =
-            Self::bound_compared(&left_max, &right_max, false).map(Ordering::is_lt)
-        {
-            left_max
-        } else {
-            right_max
+        let min = match min_order {
+            Ordering::Greater => left_min,
+            Ordering::Less | Ordering::Equal => right_min,
         };
-        match Self::bound_compared(&min, &max, matches!(min, Bound::Unbounded)) {
+        let max = match max_order {
+            Ordering::Less => left_max,
+            Ordering::Greater | Ordering::Equal => right_max,
+        };
+        Ok(match Self::bound_compared(&min, &max, false, true) {
             Some(Ordering::Greater) => Range::Dummy,
             Some(Ordering::Equal) => match min {
                 Bound::Included(val) => Range::Eq(val),
@@ -804,7 +1042,7 @@ impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
                 },
             },
             _ => Range::Scope { min, max },
-        }
+        })
     }
 
     fn matches_column(&self, col: ColumnRef) -> bool {
@@ -817,11 +1055,29 @@ impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
             .matches(table_name.as_ref(), column_id, self.arena)
     }
 
-    fn bound_compared(
-        left_bound: &Bound<DataValue>,
-        right_bound: &Bound<DataValue>,
-        is_min: bool,
+    fn bound_compared<L: Borrow<DataValue>, R: Borrow<DataValue>>(
+        left_bound: &Bound<L>,
+        right_bound: &Bound<R>,
+        left_is_upper: bool,
+        right_is_upper: bool,
     ) -> Option<Ordering> {
+        fn range_value_cmp(
+            left: &DataValue,
+            right: &DataValue,
+            left_is_upper: bool,
+            right_is_upper: bool,
+        ) -> Option<Ordering> {
+            match (left, right) {
+                (DataValue::Null, DataValue::Null) => Some(Ordering::Equal),
+                (DataValue::Null, _) => Some(Ordering::Greater),
+                (_, DataValue::Null) => Some(Ordering::Less),
+                _ => DataValueRef::Value(left).partial_cmp_with_bounds(
+                    DataValueRef::Value(right),
+                    left_is_upper,
+                    right_is_upper,
+                ),
+            }
+        }
         fn is_min_then_reverse(is_min: bool, order: Ordering) -> Ordering {
             if is_min {
                 order
@@ -829,24 +1085,34 @@ impl<'a, 'p, M: RangeColumnMatcher> RangeDetacher<'a, 'p, M> {
                 order.reverse()
             }
         }
-        fn range_value_cmp(left: &DataValue, right: &DataValue) -> Option<Ordering> {
-            match (left, right) {
-                (DataValue::Null, DataValue::Null) => Some(Ordering::Equal),
-                (DataValue::Null, _) => Some(Ordering::Greater),
-                (_, DataValue::Null) => Some(Ordering::Less),
-                _ => left.partial_cmp(right),
-            }
-        }
+        let is_min = !left_is_upper && !right_is_upper;
         match (left_bound, right_bound) {
             (Bound::Unbounded, Bound::Unbounded) => Some(Ordering::Equal),
-            (Bound::Unbounded, _) => Some(is_min_then_reverse(is_min, Ordering::Less)),
-            (_, Bound::Unbounded) => Some(is_min_then_reverse(is_min, Ordering::Greater)),
-            (Bound::Included(left), Bound::Included(right)) => range_value_cmp(left, right),
-            (Bound::Included(left), Bound::Excluded(right)) => range_value_cmp(left, right)
-                .map(|order| order.then(is_min_then_reverse(is_min, Ordering::Less))),
-            (Bound::Excluded(left), Bound::Excluded(right)) => range_value_cmp(left, right),
-            (Bound::Excluded(left), Bound::Included(right)) => range_value_cmp(left, right)
-                .map(|order| order.then(is_min_then_reverse(is_min, Ordering::Greater))),
+            (Bound::Unbounded, _) => Some(is_min_then_reverse(!left_is_upper, Ordering::Less)),
+            (_, Bound::Unbounded) => Some(is_min_then_reverse(!right_is_upper, Ordering::Greater)),
+            (Bound::Included(left), Bound::Included(right)) => {
+                range_value_cmp(left.borrow(), right.borrow(), left_is_upper, right_is_upper)
+            }
+            (Bound::Included(left), Bound::Excluded(right)) => range_value_cmp(
+                left.borrow(),
+                right.borrow(),
+                left_is_upper,
+                !right_is_upper,
+            )
+            .map(|order| order.then(is_min_then_reverse(is_min, Ordering::Less))),
+            (Bound::Excluded(left), Bound::Excluded(right)) => range_value_cmp(
+                left.borrow(),
+                right.borrow(),
+                !left_is_upper,
+                !right_is_upper,
+            ),
+            (Bound::Excluded(left), Bound::Included(right)) => range_value_cmp(
+                left.borrow(),
+                right.borrow(),
+                !left_is_upper,
+                right_is_upper,
+            )
+            .map(|order| order.then(is_min_then_reverse(is_min, Ordering::Greater))),
         }
     }
 
@@ -954,17 +1220,18 @@ pub(crate) mod test_support {
     }
 
     impl RangeColumnMatcher for DirectRangeColumn<'_> {
-        fn matches(&self, table_name: &str, column_id: ColumnId, _arena: &PlanArena<'_>) -> bool {
+        fn matches<A: MetaArena + ?Sized>(
+            &self,
+            table_name: &str,
+            column_id: ColumnId,
+            _arena: &A,
+        ) -> bool {
             table_name == self.table_name && column_id == *self.column_id
         }
     }
 
-    impl<'a, 'p> RangeDetacher<'a, 'p, DirectRangeColumn<'a>> {
-        pub(crate) fn new(
-            table_name: &'a str,
-            column_id: &'a ColumnId,
-            arena: &'a mut PlanArena<'p>,
-        ) -> Self {
+    impl<'a, A: MetaArena + ?Sized> RangeDetacher<'a, DirectRangeColumn<'a>, A> {
+        pub(crate) fn new(table_name: &'a str, column_id: &'a ColumnId, arena: &'a mut A) -> Self {
             Self {
                 column: DirectRangeColumn {
                     table_name,
@@ -989,15 +1256,14 @@ mod test {
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::filter::FilterOperator;
     use crate::planner::operator::Operator;
-    use crate::planner::{ExprRef, LogicalPlan};
-    use crate::types::evaluator::binary_create;
+    use crate::planner::{ExprRef, LogicalPlan, MetaArena, PlanArena};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::ops::Bound;
 
     fn plan_filter(
         plan: LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena<'_>,
     ) -> Result<Option<FilterOperator>, DatabaseError> {
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
@@ -1015,7 +1281,7 @@ mod test {
     }
 
     fn test_column(
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut (dyn MetaArena + '_),
         table_name: &TableName,
         column_id: crate::types::ColumnId,
         name: &str,
@@ -1031,7 +1297,7 @@ mod test {
     }
 
     fn cmp_predicate(
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut (dyn MetaArena + '_),
         column: ColumnRef,
         op: BinaryOperator,
         value: i32,
@@ -1048,11 +1314,7 @@ mod test {
         })
     }
 
-    fn and_predicate(
-        arena: &mut crate::planner::PlanArena,
-        left: ExprRef,
-        right: ExprRef,
-    ) -> ExprRef {
+    fn and_predicate(arena: &mut (dyn MetaArena + '_), left: ExprRef, right: ExprRef) -> ExprRef {
         arena.alloc_expression(ScalarExpression::Binary {
             op: BinaryOperator::And,
             left_expr: left,
@@ -2147,110 +2409,82 @@ mod test {
             range,
             Some(Range::SortedRanges(vec![
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Null,
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Excluded(DataValue::Tuple(
-                        vec![DataValue::Int32(1), DataValue::Null, DataValue::Int32(1),],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(1),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Null,
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Excluded(DataValue::Tuple(
-                        vec![DataValue::Int32(1), DataValue::Null, DataValue::Int32(2),],
-                        true
-                    ))
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(2),
+                    ]))
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Excluded(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Excluded(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Excluded(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Excluded(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(2),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(2),
+                    ])),
                 },
             ]))
         );
@@ -2265,110 +2499,82 @@ mod test {
             range,
             Some(Range::SortedRanges(vec![
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![DataValue::Int32(1), DataValue::Null, DataValue::Int32(1),],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Null,
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![DataValue::Int32(1), DataValue::Null, DataValue::Int32(2),],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Null,
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(2),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                        ],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(2),
-                        ],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(2),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                    ])),
                 },
             ]))
         );
@@ -2383,124 +2589,88 @@ mod test {
             range,
             Some(Range::SortedRanges(vec![
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Null,
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Null,
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Null,
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Null,
-                            DataValue::Int32(2),
-                            DataValue::Int32(2),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Null,
+                        DataValue::Int32(2),
+                        DataValue::Int32(2),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(2),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(2),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                    ])),
                 },
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(2),
-                            DataValue::Int32(1),
-                        ],
-                        false
-                    )),
-                    max: Bound::Included(DataValue::Tuple(
-                        vec![
-                            DataValue::Int32(1),
-                            DataValue::Int32(2),
-                            DataValue::Int32(2),
-                            DataValue::Int32(2),
-                        ],
-                        true
-                    )),
+                    min: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(2),
+                        DataValue::Int32(1),
+                    ])),
+                    max: Bound::Included(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(2),
+                        DataValue::Int32(2),
+                        DataValue::Int32(2),
+                    ])),
                 },
             ]))
         )
@@ -2519,34 +2689,16 @@ mod test {
         assert_eq!(
             range,
             Some(Range::Scope {
-                min: Bound::Included(DataValue::Tuple(
-                    vec![
-                        DataValue::Int32(7),
-                        DataValue::Int32(10),
-                        DataValue::Int32(2)
-                    ],
-                    false
-                )),
-                max: Bound::Excluded(DataValue::Tuple(
-                    vec![DataValue::Int32(7), DataValue::Int32(10)],
-                    true
-                )),
+                min: Bound::Included(DataValue::Tuple(vec![
+                    DataValue::Int32(7),
+                    DataValue::Int32(10),
+                    DataValue::Int32(2)
+                ])),
+                max: Bound::Included(DataValue::Tuple(vec![
+                    DataValue::Int32(7),
+                    DataValue::Int32(10)
+                ])),
             })
-        );
-        let Range::Scope {
-            min: Bound::Included(min),
-            max: Bound::Excluded(max),
-        } = range.unwrap()
-        else {
-            unreachable!()
-        };
-        assert_eq!(
-            binary_create(
-                std::borrow::Cow::Owned(LogicalType::Tuple(vec![])),
-                BinaryOperator::Lt
-            )?
-            .binary_eval(&min, &max)?,
-            DataValue::Boolean(true)
         );
         Ok(())
     }
@@ -2563,7 +2715,7 @@ mod test {
                 gt_one.clone(),
                 Range::Eq(DataValue::Int32(1)),
             ),
-            Some(Range::Scope {
+            Ok(Range::Scope {
                 min: Bound::Included(DataValue::Int32(1)),
                 max: Bound::Unbounded,
             })
@@ -2574,7 +2726,7 @@ mod test {
                 gt_one,
                 Range::Eq(DataValue::Int32(1)),
             ),
-            Some(Range::Dummy)
+            Ok(Range::Dummy)
         );
 
         let disjoint = RangeDetacher::<IndexRangeColumn>::merge_binary(
@@ -2590,7 +2742,7 @@ mod test {
         );
         assert_eq!(
             disjoint,
-            Some(Range::SortedRanges(vec![
+            Ok(Range::SortedRanges(vec![
                 Range::Scope {
                     min: Bound::Included(DataValue::Int32(1)),
                     max: Bound::Included(DataValue::Int32(2)),
@@ -2600,6 +2752,23 @@ mod test {
                     max: Bound::Included(DataValue::Int32(5)),
                 },
             ]))
+        );
+
+        let left = Range::Eq(DataValue::Parameter {
+            id: 1,
+            ty: LogicalType::Integer,
+        });
+        let right = Range::Eq(DataValue::Parameter {
+            id: 2,
+            ty: LogicalType::Integer,
+        });
+        assert_eq!(
+            RangeDetacher::<IndexRangeColumn>::merge_binary(
+                BinaryOperator::And,
+                left.clone(),
+                right.clone(),
+            ),
+            Err((left, right))
         );
     }
 
@@ -2617,12 +2786,77 @@ mod test {
             ]),
         ];
         let combined = suffix.combining_eqs(&prefixes).unwrap();
+        let first = DataValue::Int32(1);
+        let second = DataValue::Int32(2);
+        let borrowed = [Range::Eq(&first), Range::Eq(&second)];
+        assert_eq!(
+            suffix.combining_eqs(&borrowed),
+            suffix.combining_eqs(&[
+                Range::Eq(DataValue::Int32(1)),
+                Range::Eq(DataValue::Int32(2)),
+            ])
+        );
+        assert_eq!(
+            suffix.combining_eqs(&[DataValue::Int32(1), DataValue::Int32(2)][..]),
+            suffix.combining_eqs(&borrowed)
+        );
         assert!(matches!(combined, Range::SortedRanges(ref ranges) if ranges.len() == 2));
         assert!(prefixes[0].only_eq());
         assert!(prefixes[1].only_eq());
 
+        let explicit_suffix = Range::Scope {
+            min: Bound::Included(DataValue::Int32(10)),
+            max: Bound::Excluded(DataValue::Int32(20)),
+        }
+        .combining_eqs(&[Range::Eq(DataValue::Int32(1))]);
+        assert_eq!(
+            explicit_suffix,
+            Some(Range::Scope {
+                min: Bound::Included(DataValue::Tuple(vec![
+                    DataValue::Int32(1),
+                    DataValue::Int32(10)
+                ],)),
+                max: Bound::Excluded(DataValue::Tuple(vec![
+                    DataValue::Int32(1),
+                    DataValue::Int32(20)
+                ],)),
+            })
+        );
+
+        let unbounded_suffix = Range::Scope {
+            min: Bound::Unbounded,
+            max: Bound::Unbounded,
+        }
+        .combining_eqs(&[Range::Eq(DataValue::Int32(1))]);
+        assert_eq!(
+            unbounded_suffix,
+            Some(Range::Scope {
+                min: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(1)])),
+                max: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(1)])),
+            })
+        );
+
+        let concrete = Range::Scope {
+            min: Bound::Included(DataValue::Tuple(vec![
+                DataValue::Int32(1),
+                DataValue::Int32(10),
+            ])),
+            max: Bound::Excluded(DataValue::Tuple(vec![
+                DataValue::Int32(1),
+                DataValue::Int32(20),
+            ])),
+        };
+        assert_eq!(
+            RangeDetacher::<IndexRangeColumn>::merge_binary(
+                BinaryOperator::And,
+                unbounded_suffix.unwrap(),
+                concrete.clone(),
+            ),
+            Ok(concrete)
+        );
+
         assert!(suffix
-            .combining_eqs(&[Range::Scope {
+            .combining_eqs(&[Range::<DataValue>::Scope {
                 min: Bound::Unbounded,
                 max: Bound::Unbounded,
             }])

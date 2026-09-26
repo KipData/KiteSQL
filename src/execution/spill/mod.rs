@@ -759,13 +759,10 @@ mod tests {
         let none = Option::<DataValue>::None;
         assert!(some.estimated_size() > none.estimated_size());
 
-        let nested = DataValue::Tuple(
-            vec![
-                DataValue::new_utf8("outer".to_string()),
-                DataValue::Tuple(vec![DataValue::new_utf8("inner".to_string())], false),
-            ],
-            false,
-        );
+        let nested = DataValue::Tuple(vec![
+            DataValue::new_utf8("outer".to_string()),
+            DataValue::Tuple(vec![DataValue::new_utf8("inner".to_string())]),
+        ]);
         assert!(nested.estimated_size() > std::mem::size_of::<DataValue>());
         Ok(())
     }
