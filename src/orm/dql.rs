@@ -1,6 +1,35 @@
 use super::*;
 
 impl<S: Storage> Database<S> {
+    /// Prepares an ORM-built plan once for repeated execution with positional parameters.
+    /// Use `e.param(id)` inside expression closures, then pass values to `execute`.
+    pub fn prepare<F>(
+        &self,
+        params: &[(usize, LogicalType)],
+        build: F,
+    ) -> Result<crate::db::PreparedPlan<'_>, DatabaseError>
+    where
+        F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
+            &'ctx mut OrmContext<
+                'ctx,
+                'bind,
+                'parent,
+                'arena,
+                S::TransactionType<'_>,
+                &[(usize, LogicalType)],
+            >,
+        ) -> Result<LogicalPlan, DatabaseError>,
+    {
+        let transaction = self
+            .storage
+            .transaction_with_isolation(self.transaction_isolation)?;
+        self.state
+            .prepare_plan_with(params, &transaction, |binder, arena| {
+                let mut context = OrmContext { binder, arena };
+                build(&mut context)
+            })
+    }
+
     /// Executes a binder-backed plan built inside a closure.
     pub fn bind<F>(&self, build: F) -> Result<DatabaseIter<'_, S>, DatabaseError>
     where
@@ -157,6 +186,31 @@ impl<S: Storage> Database<S> {
 }
 
 impl<'a, S: Storage> DBTransaction<'a, S> {
+    /// Prepares an ORM-built plan for repeated execution inside this transaction.
+    pub fn prepare<F>(
+        &self,
+        params: &[(usize, LogicalType)],
+        build: F,
+    ) -> Result<crate::db::PreparedPlan<'a>, DatabaseError>
+    where
+        F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
+            &'ctx mut OrmContext<
+                'ctx,
+                'bind,
+                'parent,
+                'arena,
+                S::TransactionType<'a>,
+                &[(usize, LogicalType)],
+            >,
+        ) -> Result<LogicalPlan, DatabaseError>,
+    {
+        self.state
+            .prepare_plan_with(params, &self.inner, |binder, arena| {
+                let mut context = OrmContext { binder, arena };
+                build(&mut context)
+            })
+    }
+
     /// Executes a binder-backed plan inside the current transaction.
     pub fn bind<F>(
         &mut self,

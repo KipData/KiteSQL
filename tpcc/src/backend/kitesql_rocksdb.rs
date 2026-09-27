@@ -63,7 +63,7 @@ impl<S: Storage> KiteSqlRocksBackend<S> {
             let mut prepared = Vec::with_capacity(group.len());
             for spec in group {
                 prepared.push(KiteSqlPreparedStatement {
-                    plan: self.database.prepare(spec.sql, &spec.parameters)?,
+                    plan: self.database.prepare_sql(spec.sql, &spec.parameters)?,
                     spec: spec.clone(),
                 });
             }

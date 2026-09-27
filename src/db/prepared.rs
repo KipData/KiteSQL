@@ -117,9 +117,25 @@ impl<'db> PreparedPlan<'db> {
 }
 
 impl<S: Storage> Database<S> {
-    /// Prepare a plan with explicit positional parameter types.
+    /// Executes an already prepared SQL or ORM plan with the supplied parameters.
+    pub fn execute<'a>(
+        &'a self,
+        prepared: &'a PreparedPlan<'_>,
+        params: impl AsRef<[(usize, DataValue)]>,
+    ) -> Result<DatabaseIter<'a, S>, DatabaseError> {
+        if !std::ptr::eq(prepared.arena.table_arena_cell(), self.state.table_arena()) {
+            return Err(DatabaseError::UnsupportedStmt(
+                "plan belongs to another database".into(),
+            ));
+        }
+        let (plan, arena) = prepared.bind_parameters(params.as_ref())?;
+        BindSource::execute(self, |_, _| Ok((plan, arena)))
+    }
+
+    /// Prepare SQL with explicit positional parameter types.
     /// Parameter values are supplied separately for each execution.
-    pub fn prepare(
+    #[cfg(feature = "parser")]
+    pub fn prepare_sql(
         &self,
         sql: &str,
         params: &[(usize, LogicalType)],
@@ -133,7 +149,23 @@ impl<S: Storage> Database<S> {
 }
 
 impl<'db, S: Storage> DBTransaction<'db, S> {
-    pub fn prepare(
+    /// Executes a prepared SQL or ORM plan inside this transaction.
+    pub fn execute<'a>(
+        &'a mut self,
+        prepared: &'a PreparedPlan<'db>,
+        params: impl AsRef<[(usize, DataValue)]>,
+    ) -> Result<TransactionIter<'a, S::TransactionType<'db>>, DatabaseError> {
+        if !std::ptr::eq(prepared.arena.table_arena_cell(), self.state.table_arena()) {
+            return Err(DatabaseError::UnsupportedStmt(
+                "plan belongs to another database".into(),
+            ));
+        }
+        let (plan, arena) = prepared.bind_parameters(params.as_ref())?;
+        BindSource::execute(self, |_, _| Ok((plan, arena)))
+    }
+
+    #[cfg(feature = "parser")]
+    pub fn prepare_sql(
         &self,
         sql: &str,
         params: &[(usize, LogicalType)],
@@ -144,6 +176,7 @@ impl<'db, S: Storage> DBTransaction<'db, S> {
 }
 
 impl<S: Storage> State<S> {
+    #[cfg(feature = "parser")]
     pub(crate) fn prepare_plan<'a, 'txn>(
         &'a self,
         statement: &Statement,
@@ -161,9 +194,24 @@ impl<S: Storage> State<S> {
                 "DDL and ANALYZE require ddl/analyze".into(),
             ));
         }
-        let (mut plan, mut arena) = self.build_plan(params, transaction, |binder, arena| {
+        self.prepare_plan_with(params, transaction, |binder, arena| {
             binder.bind(statement, arena)
-        })?;
+        })
+    }
+
+    pub(crate) fn prepare_plan_with<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>, F>(
+        &'a self,
+        params: A,
+        transaction: &T,
+        build: F,
+    ) -> Result<PreparedPlan<'a>, DatabaseError>
+    where
+        F: for<'bind> FnOnce(
+            &mut Binder<'bind, '_, T, A>,
+            &mut PlanArena<'a>,
+        ) -> Result<LogicalPlan, DatabaseError>,
+    {
+        let (mut plan, mut arena) = self.build_plan(params, transaction, build)?;
         plan.output_schema(&mut arena);
         let parameter_expressions = arena.parameter_expressions();
         Ok(PreparedPlan {
@@ -193,7 +241,7 @@ mod tests {
     #[test]
     fn prepare_caches_scalar_output_schema() -> Result<(), DatabaseError> {
         let db = DataBaseBuilder::path(".").build_in_memory()?;
-        let plan = db.prepare(
+        let plan = db.prepare_sql(
             "select (($1 * 3 + 7) % 97) + ($1 / 2)",
             &[(1, LogicalType::Bigint)],
         )?;
@@ -389,7 +437,7 @@ mod tests {
             .done()?;
         db.analyze("parameter_order")?;
 
-        let lower_bounds = db.prepare(
+        let lower_bounds = db.prepare_sql(
             "select id from parameter_order where id >= $1 and id >= $2 order by id",
             &[(1, LogicalType::Integer), (2, LogicalType::Integer)],
         )?;
@@ -406,7 +454,7 @@ mod tests {
         iter.done()?;
         assert_eq!(rows, vec![DataValue::Int32(3), DataValue::Int32(4)]);
 
-        let equalities = db.prepare(
+        let equalities = db.prepare_sql(
             "select id from parameter_order where id = $1 and id = $2",
             &[(1, LogicalType::Integer), (2, LogicalType::Integer)],
         )?;
@@ -433,7 +481,7 @@ mod tests {
     #[test]
     fn repeated_execution_and_null_do_not_stale_parameters() -> Result<(), DatabaseError> {
         let db = DataBaseBuilder::path(".").build_in_memory()?;
-        let plan = db.prepare(
+        let plan = db.prepare_sql(
             "values ($1 + $2), ($2)",
             &[(1, LogicalType::Integer), (2, LogicalType::Integer)],
         )?;
@@ -490,7 +538,7 @@ mod tests {
         db.run("insert into t values(1,1),(1,2),(1,3),(2,1),(2,2),(2,4)")?
             .done()?;
         db.analyze("t")?;
-        let plan = db.prepare(
+        let plan = db.prepare_sql(
             "select k from t where w=$1 and k >= $2 and k < $3 order by k",
             &[
                 (1, LogicalType::Integer),
@@ -532,7 +580,7 @@ mod tests {
         // The lower bound is computed only after binding; it must still be
         // intersected with the prepared upper bound instead of scanning the
         // whole equality prefix and filtering rows afterwards.
-        let plan = db.prepare(
+        let plan = db.prepare_sql(
             "select k from t where w=$1 and k<$2 and k>=($3-20)",
             &[
                 (1, LogicalType::Integer),

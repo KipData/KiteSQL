@@ -160,21 +160,6 @@ fn statement_mutates_catalog_or_statistics(statement: &Statement) -> Result<bool
 }
 
 impl<S: Storage> Database<S> {
-    /// Bind parameters in a cloned arena and execute an already prepared plan.
-    pub fn execute<'a>(
-        &'a self,
-        prepared: &'a crate::db::PreparedPlan<'_>,
-        params: impl AsRef<[(usize, DataValue)]>,
-    ) -> Result<DatabaseIter<'a, S>, DatabaseError> {
-        if !std::ptr::eq(prepared.arena.table_arena_cell(), self.state.table_arena()) {
-            return Err(DatabaseError::UnsupportedStmt(
-                "plan belongs to another database".into(),
-            ));
-        }
-        let (plan, arena) = prepared.bind_parameters(params.as_ref())?;
-        BindSource::execute(self, |_, _| Ok((plan, arena)))
-    }
-
     pub fn ddl<T: AsRef<str>>(&mut self, sql: T) -> Result<(), DatabaseError> {
         let sql = sql.as_ref();
         let statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
@@ -274,21 +259,6 @@ impl<S: Storage> Database<S> {
 }
 
 impl<'txn, S: Storage> DBTransaction<'txn, S> {
-    /// Bind parameters in a cloned arena and execute an already prepared plan.
-    pub fn execute<'a>(
-        &'a mut self,
-        prepared: &'a crate::db::PreparedPlan<'txn>,
-        params: impl AsRef<[(usize, DataValue)]>,
-    ) -> Result<TransactionIter<'a, S::TransactionType<'txn>>, DatabaseError> {
-        if !std::ptr::eq(prepared.arena.table_arena_cell(), self.state.table_arena()) {
-            return Err(DatabaseError::UnsupportedStmt(
-                "plan belongs to another database".into(),
-            ));
-        }
-        let (plan, arena) = prepared.bind_parameters(params.as_ref())?;
-        BindSource::execute(self, |_, _| Ok((plan, arena)))
-    }
-
     /// Runs SQL inside the current transaction and returns the final result iterator.
     pub fn run<'a, T: AsRef<str>>(
         &'a mut self,
@@ -3228,7 +3198,7 @@ mod tests {
         let db = DataBaseBuilder::path(".").build_in_memory()?;
         for placeholder in ["$0", "$01", "$name"] {
             assert!(matches!(
-                db.prepare(
+                db.prepare_sql(
                     &format!("select {placeholder}"),
                     &[(1, LogicalType::Integer)]
                 ),
@@ -3285,7 +3255,7 @@ mod tests {
         let params = &[] as &[(usize, LogicalType)];
 
         assert_unsupported(
-            expect_err(database.prepare("create table t (id int primary key)", params)),
+            expect_err(database.prepare_sql("create table t (id int primary key)", params)),
             "DDL and ANALYZE",
         );
         assert_unsupported(
@@ -3296,7 +3266,7 @@ mod tests {
 
         let transaction = database.new_transaction()?;
         assert_unsupported(
-            expect_err(transaction.prepare("analyze table t", params)),
+            expect_err(transaction.prepare_sql("analyze table t", params)),
             "DDL and ANALYZE",
         );
         transaction.commit()?;

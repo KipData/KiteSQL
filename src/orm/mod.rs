@@ -1384,6 +1384,23 @@ where
         self.wrap(ScalarExpression::Constant(value))
     }
 
+    /// References a positional parameter declared by `prepare`.
+    pub fn param(
+        &self,
+        id: usize,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        let ty = self
+            .handle()
+            .binder()
+            .args
+            .as_ref()
+            .iter()
+            .find(|(index, _)| *index == id)
+            .map(|(_, ty)| ty.clone())
+            .ok_or_else(|| DatabaseError::parameter_not_found(format!("${id}")))?;
+        Ok(self.wrap(ScalarExpression::Constant(DataValue::Parameter { id, ty })))
+    }
+
     pub fn alias(
         &self,
         expr: impl IntoOrmExpression,
@@ -3777,6 +3794,54 @@ mod tests {
             ))
         ));
 
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_orm_query_reuses_plan_and_binds_each_execution() -> Result<(), DatabaseError> {
+        let mut database = crate::db::DataBaseBuilder::path("./orm-unit-test").build_in_memory()?;
+        database.create_table::<OrmUnitUser>()?;
+        for (id, name) in [(1, "Alice"), (2, "Bob"), (3, "Cara")] {
+            database.insert(&OrmUnitUser {
+                id,
+                name: name.into(),
+                age: Some(18),
+            })?;
+        }
+        let types = [(1, LogicalType::Integer)];
+        assert!(matches!(
+            database.prepare(&types, |ctx| {
+                ctx.from::<OrmUnitUser>()?
+                    .filter(|e| e.column(OrmUnitUser::id())?.eq(e.param(2)?))?
+                    .finish()
+            }),
+            Err(DatabaseError::ParametersNotFound { .. })
+        ));
+        let plan = database.prepare(&types, |ctx| {
+            ctx.from::<OrmUnitUser>()?
+                .filter(|e| e.column(OrmUnitUser::id())?.eq(e.param(1)?))?
+                .finish()
+        })?;
+        for (id, expected) in [(1, "Alice"), (3, "Cara"), (2, "Bob")] {
+            let rows = database
+                .execute(&plan, [(1, DataValue::Int32(id))])?
+                .orm::<OrmUnitUser>()
+                .collect::<Result<Vec<_>, _>>()?;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].name, expected);
+        }
+        let mut tx = database.new_transaction()?;
+        let tx_plan = tx.prepare(&types, |ctx| {
+            ctx.from::<OrmUnitUser>()?
+                .filter(|e| e.column(OrmUnitUser::id())?.eq(e.param(1)?))?
+                .finish()
+        })?;
+        let rows = tx
+            .execute(&tx_plan, [(1, DataValue::Int32(2))])?
+            .orm::<OrmUnitUser>()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(rows[0].name, "Bob");
+        tx.commit()?;
         Ok(())
     }
 

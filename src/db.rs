@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(feature = "parser")]
+#[cfg(any(feature = "parser", feature = "orm"))]
 mod prepared;
 #[cfg(feature = "parser")]
 pub use crate::binder::{prepare_all, Statement};
@@ -56,7 +56,7 @@ use crate::storage::{
 use crate::types::tuple::{Schema, SchemaView, Tuple};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
-#[cfg(feature = "parser")]
+#[cfg(any(feature = "parser", feature = "orm"))]
 pub use prepared::PreparedPlan;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
@@ -1717,7 +1717,7 @@ pub(crate) mod test {
 
         // Filter
         {
-            let statement = kite_sql.prepare(
+            let statement = kite_sql.prepare_sql(
                 "explain select * from t1 where b > $1",
                 &[(1, LogicalType::Integer)],
             )?;
@@ -1733,7 +1733,7 @@ pub(crate) mod test {
         }
         // Aggregate
         {
-            let statement = kite_sql.prepare(
+            let statement = kite_sql.prepare_sql(
                 "explain select a + $1, max(b + $2) from t1 where b > $3 group by a + $1",
                 &[
                     (1, LogicalType::Integer),
@@ -1759,7 +1759,7 @@ pub(crate) mod test {
             );
         }
         {
-            let statement = kite_sql.prepare("explain select *, $1 from (select * from t1 where b > $2) left join (select * from t1 where a > $3) on a > $4", &[(1, LogicalType::Integer), (2, LogicalType::Integer), (3, LogicalType::Integer), (4, LogicalType::Integer)])?;
+            let statement = kite_sql.prepare_sql("explain select *, $1 from (select * from t1 where b > $2) left join (select * from t1 where a > $3) on a > $4", &[(1, LogicalType::Integer), (2, LogicalType::Integer), (3, LogicalType::Integer), (4, LogicalType::Integer)])?;
 
             let mut iter = kite_sql.execute(
                 &statement,
