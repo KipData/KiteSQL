@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::planner::PlanArena;
 // Copyright 2024 KipData/KiteSQL
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -86,7 +88,7 @@ use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::update::UpdateOperator;
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::operator::visitor::OperatorVisitor;
-use crate::planner::{fmt_explain_list, Explain, ExprRef, MetaArena, PlanArena};
+use crate::planner::{fmt_explain_list, Explain, ExprRef, MetaArena};
 use crate::types::index::{IndexInfo, IndexMetaRef};
 use kite_sql_serde_macros::ReferenceSerialization;
 
@@ -208,7 +210,11 @@ pub enum PlanImpl {
 }
 
 impl Explain for ColumnRef {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        arena: &(dyn MetaArena + '_),
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         let column = arena.column(*self);
         if let Some(table_name) = column.table_name() {
             write!(f, "{}.{}", table_name, column.name())
@@ -219,7 +225,11 @@ impl Explain for ColumnRef {
 }
 
 impl Explain for IndexMetaRef {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        arena: &(dyn MetaArena + '_),
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         f.write_str(&arena.index(*self).name)
     }
 }
@@ -229,7 +239,7 @@ macro_rules! impl_display_explain {
         $(
             $(#[$meta])*
             impl Explain for $ty {
-                fn fmt(&self, _arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                fn fmt(&self, _arena: &(dyn MetaArena + '_), f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                     std::fmt::Display::fmt(self, f)
                 }
             }
@@ -243,7 +253,6 @@ impl_display_explain!(
     ScalarSubqueryOperator,
     FunctionScanOperator,
     LimitOperator,
-    ValuesOperator,
     DescribeOperator,
     InsertOperator,
     DeleteOperator,
@@ -260,7 +269,11 @@ impl_display_explain!(
 );
 
 impl Explain for Operator {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        arena: &(dyn MetaArena + '_),
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         match self {
             Operator::Dummy => f.write_str("Dummy"),
             Operator::Aggregate(op) => Explain::fmt(op, arena, f),
@@ -308,12 +321,12 @@ impl Explain for Operator {
 }
 
 impl Operator {
-    pub fn visit_referenced_columns<A: MetaArena>(
+    pub fn visit_referenced_columns<A: MetaArena + ?Sized>(
         &self,
         arena: &A,
         f: &mut impl FnMut(&A, &ColumnRef) -> bool,
     ) -> Result<bool, DatabaseError> {
-        struct ReferencedColumnVisitor<'a, A, F> {
+        struct ReferencedColumnVisitor<'a, A: ?Sized, F> {
             arena: &'a A,
             f: &'a mut F,
             keep_going: bool,
@@ -321,7 +334,7 @@ impl Operator {
 
         impl<A, F> ExprVisitor<A> for ReferencedColumnVisitor<'_, A, F>
         where
-            A: MetaArena,
+            A: MetaArena + ?Sized,
             F: FnMut(&A, &ColumnRef) -> bool,
         {
             fn visit(&mut self, expr: ExprRef, arena: &A) -> Result<(), DatabaseError> {
@@ -341,7 +354,7 @@ impl Operator {
 
         impl<'operator, A, F> OperatorVisitor<'operator> for ReferencedColumnVisitor<'_, A, F>
         where
-            A: MetaArena,
+            A: MetaArena + ?Sized,
             F: FnMut(&A, &ColumnRef) -> bool,
         {
             fn visit_aggregate(
@@ -545,7 +558,7 @@ impl Operator {
 
     pub fn any_referenced_column(
         &self,
-        arena: &PlanArena,
+        arena: &(dyn MetaArena + '_),
         mut predicate: impl FnMut(&ColumnRef) -> bool,
     ) -> Result<bool, DatabaseError> {
         let mut found = false;
@@ -558,7 +571,7 @@ impl Operator {
 
     pub fn all_referenced_columns(
         &self,
-        arena: &PlanArena,
+        arena: &(dyn MetaArena + '_),
         mut predicate: impl FnMut(&ColumnRef) -> bool,
     ) -> Result<bool, DatabaseError> {
         let mut all = true;
@@ -571,7 +584,11 @@ impl Operator {
 }
 
 impl Explain for PlanImpl {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        arena: &(dyn MetaArena + '_),
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         match self {
             PlanImpl::Dummy => f.write_str("Dummy"),
             PlanImpl::SimpleAggregate => f.write_str("SimpleAggregate"),
@@ -613,7 +630,11 @@ impl Explain for PlanImpl {
 }
 
 impl Explain for SortOption {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        arena: &(dyn MetaArena + '_),
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         match self {
             SortOption::OrderBy {
                 fields,
@@ -630,7 +651,11 @@ impl Explain for SortOption {
 }
 
 impl Explain for PhysicalOption {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        arena: &(dyn MetaArena + '_),
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         write!(
             f,
             "{} => (Sort Option: {})",
@@ -657,6 +682,7 @@ mod tests {
     use crate::planner::operator::set_membership::SetMembershipKind;
     use crate::planner::operator::sort::SortField;
     use crate::planner::operator::values::ValuesOperator;
+    use crate::planner::test::PlanArenaTestExt;
     use crate::planner::ExprRef;
     use crate::planner::{Childrens, LogicalPlan, TableArenaCell};
     use crate::types::index::{IndexInfo, IndexMeta, IndexMetaRef, IndexType};
@@ -805,10 +831,11 @@ mod tests {
         let mut arena = PlanArena::new(&table_arena);
         let left = column("left", &mut arena);
         let right = column("right", &mut arena);
-        let values = Operator::Values(ValuesOperator {
-            rows: vec![vec![DataValue::Int32(1), DataValue::Int32(2)]],
-            schema_ref: vec![left, right],
-        });
+        let values = Operator::Values(ValuesOperator::new(
+            arena.alloc_expression_rows(&[vec![DataValue::Int32(1), DataValue::Int32(2)]]),
+            1,
+            vec![left, right],
+        ));
 
         assert!(values.any_referenced_column(&arena, |column| *column == right)?);
         assert!(
@@ -1209,14 +1236,15 @@ mod tests {
                 "Describe users",
             ),
             (
-                Operator::Values(ValuesOperator {
-                    rows: vec![
-                        vec![DataValue::Int32(1), DataValue::Int32(2)],
+                Operator::Values(ValuesOperator::new(
+                    arena.alloc_expression_rows(&[
+                        vec![DataValue::Int32(1)],
                         vec![DataValue::Int32(3)],
-                    ],
-                    schema_ref: vec![id],
-                }),
-                "Values [1, 2], [3], RowsLen: 2",
+                    ]),
+                    2,
+                    vec![id],
+                )),
+                "Values [1], [3], RowsLen: 2",
             ),
             (
                 Operator::Analyze(AnalyzeOperator {

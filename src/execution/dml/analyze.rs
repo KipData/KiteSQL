@@ -15,8 +15,8 @@
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, with_projection_tmp_value, DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext,
-    ExecutorNode, WriteExecutor,
+    build_read, DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode,
+    WriteExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::iter_ext::Itertools;
@@ -24,6 +24,7 @@ use crate::optimizer::core::histogram::{HistogramBuilder, ANALYZE_STATISTICS_REL
 use crate::optimizer::core::statistics_meta::StatisticsMeta;
 use crate::planner::operator::analyze::AnalyzeOperator;
 use crate::planner::LogicalPlan;
+use crate::planner::MetaArena;
 use crate::storage::{table_codec::TableCodec, Transaction};
 use crate::types::index::IndexId;
 use crate::types::value::{DataValue, Utf8Type};
@@ -66,7 +67,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -86,7 +87,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Analyze {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         let Some(input) = self.input.take() else {
             arena.finish();
@@ -102,10 +103,13 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Analyze {
                 .indexes()
                 .map(|index| {
                     let index = plan_arena.index(*index);
+                    let index_id = index.id;
+                    let builder = HistogramBuilder::new(index, ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+                    let exprs = index.column_exprs(table).collect::<Result<Vec<_>, _>>()?;
                     Ok(State {
-                        index_id: index.id,
-                        exprs: index.column_exprs(table, plan_arena)?,
-                        builder: HistogramBuilder::new(index, ANALYZE_STATISTICS_RELATIVE_ERROR)?,
+                        index_id,
+                        exprs,
+                        builder,
                         histogram_buckets: self.histogram_buckets,
                     })
                 })
@@ -113,10 +117,15 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Analyze {
         };
 
         while arena.next_tuple(input, plan_arena)? {
+            let tuple = arena.materialize_tuple();
             for State { exprs, builder, .. } in builders.iter_mut() {
-                with_projection_tmp_value(arena, plan_arena, None, exprs, |_, value| {
-                    builder.append(value)
-                })?;
+                arena.rewrite(exprs, plan_arena, Some(&tuple))?;
+                let key = arena.materialize_tuple().values;
+                let value = match <[DataValue; 1]>::try_from(key) {
+                    Ok([value]) => value,
+                    Err(key) => DataValue::Tuple(key),
+                };
+                builder.append(value)?;
             }
         }
         let mut state = arena.local_state(plan_arena);
@@ -130,10 +139,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Analyze {
             plan_arena,
         )?;
 
-        let output = arena.result_tuple_mut();
-        output.pk = None;
-        output.values = values;
-        arena.resume();
+        arena.produce_tuple(crate::types::tuple::Tuple::new(None, values));
         Ok(())
     }
 }
@@ -152,7 +158,7 @@ impl Analyze {
         applies: &mut Vec<DDLApply>,
         transaction: &mut U,
         table_codec: &mut TableCodec,
-        plan_arena: &crate::planner::PlanArena<'_>,
+        plan_arena: &(dyn MetaArena + '_),
     ) -> Result<Vec<DataValue>, DatabaseError> {
         let mut values = Vec::with_capacity(builders.len());
 

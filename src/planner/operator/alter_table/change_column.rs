@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use crate::catalog::TableName;
-use crate::planner::{Explain, ExprRef, PlanArena};
+use crate::planner::MetaArena;
+use crate::planner::{Explain, ExprRef};
 use crate::types::LogicalType;
 use kite_sql_serde_macros::ReferenceSerialization;
 
@@ -42,7 +43,11 @@ pub struct ChangeColumnOperator {
 }
 
 impl Explain for ChangeColumnOperator {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        arena: &(dyn MetaArena + '_),
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         write!(
             f,
             "Change {} -> {}.{} ({}, ",

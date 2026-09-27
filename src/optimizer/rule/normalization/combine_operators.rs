@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::expression::visitor_mut::ExprVisitorMut;
+use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut};
 use crate::expression::{BinaryOperator, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child};
@@ -21,6 +21,7 @@ use crate::optimizer::rule::normalization::strip_alias;
 use crate::planner::operator::filter::FilterOperator;
 use crate::planner::operator::project::ProjectOperator;
 use crate::planner::operator::Operator;
+use crate::planner::MetaArena;
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::types::LogicalType;
 use std::mem;
@@ -59,7 +60,7 @@ fn rewrite_column_position(
             &mut self,
             _column: &mut crate::catalog::ColumnRef,
             position: &mut usize,
-            _arena: &mut PlanArena<'_>,
+            _arena: &mut (dyn MetaArena + '_),
         ) -> Result<(), DatabaseError> {
             *position = self.0;
             Ok(())
@@ -149,6 +150,75 @@ impl NormalizationRule for CollapseProject {
     }
 }
 
+// Removing a project must preserve every input slot; renaming is allowed.
+fn can_remove_project(
+    op: &ProjectOperator,
+    childrens: &mut Childrens,
+    arena: &mut PlanArena<'_>,
+) -> bool {
+    let Childrens::Only(input) = childrens else {
+        return false;
+    };
+    let schema = input.output_schema(arena);
+    if op.exprs.len() != schema.len() {
+        return false;
+    }
+    for (i, expr) in op.exprs.iter().enumerate() {
+        let mut source_expr = *expr;
+        while let ScalarExpression::Alias { expr, .. } = arena.expression(source_expr) {
+            source_expr = *expr;
+        }
+        let ScalarExpression::ColumnRef {
+            column: source_column,
+            ..
+        } = arena.expression(source_expr)
+        else {
+            return false;
+        };
+        let ScalarExpression::ColumnRef {
+            position: execution_position,
+            ..
+        } = arena.expression(strip_alias(*expr, arena))
+        else {
+            return false;
+        };
+        if *source_column != schema[i] || *execution_position != i {
+            return false;
+        }
+    }
+    true
+}
+
+struct ProjectionSubstitution<'a>(&'a [ExprRef]);
+
+impl ExprVisitorMut for ProjectionSubstitution<'_> {
+    fn visit(
+        &mut self,
+        expr: &mut ExprRef,
+        arena: &mut (dyn MetaArena + '_),
+    ) -> Result<(), DatabaseError> {
+        if let ScalarExpression::ColumnRef { position, .. } = arena.expression(*expr) {
+            let Some(source) = self.0.get(*position) else {
+                return Err(DatabaseError::InvalidValue(
+                    "invalid projection slot".into(),
+                ));
+            };
+            *expr = source.clone_expression(arena)?;
+            return Ok(());
+        }
+        walk_mut_expr(self, expr, arena)
+    }
+
+    fn visit_alias(
+        &mut self,
+        expr: &mut ExprRef,
+        _: &mut crate::expression::AliasType,
+        arena: &mut (dyn MetaArena + '_),
+    ) -> Result<(), DatabaseError> {
+        self.visit(expr, arena)
+    }
+}
+
 /// Combine two adjacent filter operators into one.
 pub struct CombineFilter;
 
@@ -165,7 +235,7 @@ impl NormalizationRule for CombineFilter {
                 return Ok(false);
             }
         };
-        let parent_filter = parent_filter;
+        let mut parent_filter = parent_filter;
 
         let cursor = match only_child_mut(plan) {
             Some(child) => child,
@@ -175,6 +245,7 @@ impl NormalizationRule for CombineFilter {
             }
         };
 
+        let mut changed = false;
         loop {
             match &mut cursor.operator {
                 Operator::Filter(child_op) => {
@@ -192,11 +263,21 @@ impl NormalizationRule for CombineFilter {
                         ty: LogicalType::Boolean,
                     });
                     child_op.having = having || child_op.having;
+                    child_op.is_optimized = false;
 
                     return Ok(replace_with_only_child(plan));
                 }
-                Operator::Project(project_op) if is_passthrough_project(project_op, arena) => {
+                Operator::Project(project_op) => {
+                    if !can_remove_project(project_op, &mut cursor.childrens, arena) {
+                        plan.operator = Operator::Filter(parent_filter);
+                        return Ok(changed);
+                    }
+                    let mut predicate = parent_filter.predicate.clone_expression(arena)?;
+                    ProjectionSubstitution(&project_op.exprs).visit(&mut predicate, arena)?;
+                    parent_filter.predicate = predicate;
+                    parent_filter.is_optimized = false;
                     if replace_with_only_child(cursor) {
+                        changed = true;
                         continue;
                     }
                     plan.operator = Operator::Filter(parent_filter);
@@ -204,7 +285,7 @@ impl NormalizationRule for CombineFilter {
                 }
                 _ => {
                     plan.operator = Operator::Filter(parent_filter);
-                    return Ok(false);
+                    return Ok(changed);
                 }
             }
         }
@@ -375,6 +456,25 @@ mod tests {
         assert!(matches!(
             plan.childrens.pop_only().operator,
             Operator::Dummy
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_combine_filter_keeps_reordered_projection() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table()?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let plan = table_state.plan_with_arena("select * from t1 c where c.c1 > 1", &mut arena)?;
+        let mut filter = plan.childrens.pop_only();
+        if let Childrens::Only(child) = filter.childrens.as_mut() {
+            if let Operator::Project(project) = &mut child.operator {
+                project.exprs.reverse();
+            }
+        }
+        assert!(!super::CombineFilter.apply(&mut filter, &mut arena)?);
+        assert!(matches!(
+            filter.childrens.pop_only().operator,
+            Operator::Project(_)
         ));
         Ok(())
     }

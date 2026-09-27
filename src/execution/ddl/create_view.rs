@@ -17,6 +17,7 @@ use crate::execution::{
     DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
 };
 use crate::planner::operator::create_view::CreateViewOperator;
+use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
 
@@ -36,7 +37,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateView {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut crate::planner::PlanArena<'a>,
+        _plan_arena: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
@@ -49,7 +50,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateView {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         let Some(CreateViewOperator { view, or_replace }) = self.op.take() else {
             arena.finish();
@@ -60,7 +61,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateView {
         let view = transaction.create_view(table_codec, plan_arena, view, or_replace)?;
         arena.push_ddl_apply(DDLApply::upsert_view(view));
 
-        TupleBuilder::build_result_into(arena.result_tuple_mut(), view_name);
+        arena.produce_tuple(TupleBuilder::build_result(view_name));
         arena.resume();
         Ok(())
     }

@@ -17,6 +17,7 @@ use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::planner::LogicalPlan;
+use crate::planner::MetaArena;
 use crate::storage::Transaction;
 pub struct Union {
     left_plan: LogicalPlan,
@@ -44,7 +45,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Union {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -71,7 +72,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Union {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         if self.reading_left {
             if arena.next_tuple(self.left_input, plan_arena)? {

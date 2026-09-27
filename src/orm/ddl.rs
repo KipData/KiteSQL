@@ -96,7 +96,7 @@ impl<S: Storage> Database<S> {
                 'parent,
                 'arena,
                 S::TransactionType<'_>,
-                &'static [(&'static str, DataValue)],
+                &'static [(usize, LogicalType)],
             >,
         ) -> Result<LogicalPlan, DatabaseError>,
     {
@@ -117,7 +117,7 @@ impl<S: Storage> Database<S> {
                 'parent,
                 'arena,
                 S::TransactionType<'_>,
-                &'static [(&'static str, DataValue)],
+                &'static [(usize, LogicalType)],
             >,
         ) -> Result<LogicalPlan, DatabaseError>,
     {
@@ -487,11 +487,11 @@ where
             'parent,
             'arena,
             S::TransactionType<'_>,
-            &'static [(&'static str, DataValue)],
+            &'static [(usize, LogicalType)],
         >,
     ) -> Result<LogicalPlan, DatabaseError>,
 {
-    static EMPTY_ORM_PARAMS: &[(&str, DataValue)] = &[];
+    static EMPTY_ORM_PARAMS: &[(usize, LogicalType)] = &[];
     let view_name = view_name.to_string();
     database.execute_mut("ORM CREATE VIEW", EMPTY_ORM_PARAMS, move |binder, arena| {
         let mut context = OrmContext { binder, arena };

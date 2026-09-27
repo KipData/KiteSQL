@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use super::{Operator, PlanImpl};
-use crate::planner::{Childrens, Explain, ExprRef, LogicalPlan, PlanArena};
+use crate::planner::MetaArena;
+use crate::planner::{Childrens, Explain, ExprRef, LogicalPlan};
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::fmt::Formatter;
@@ -82,13 +83,13 @@ impl JoinOperator {
 }
 
 impl Explain for JoinOperator {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, arena: &(dyn MetaArena + '_), f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} Join{}", self.join_type, self.on.explain(arena))
     }
 }
 
 impl Explain for JoinCondition {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, arena: &(dyn MetaArena + '_), f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             JoinCondition::On { on, filter } => {
                 if !on.is_empty() {

@@ -21,7 +21,7 @@ use crate::types::ColumnId;
 use std::io::{Read, Write};
 
 impl ReferenceSerialization for ColumnRef {
-    fn encode<W: Write, A: MetaArena>(
+    fn encode<W: Write, A: MetaArena + ?Sized>(
         &self,
         writer: &mut W,
         is_direct: bool,
@@ -33,7 +33,7 @@ impl ReferenceSerialization for ColumnRef {
             .encode(writer, is_direct, reference_tables, arena)
     }
 
-    fn decode<T: Transaction, R: Read, A: MetaArena>(
+    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         drive: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
@@ -62,7 +62,7 @@ impl ReferenceSerialization for ColumnRef {
 }
 
 impl ReferenceSerialization for ColumnRelation {
-    fn encode<W: Write, A: MetaArena>(
+    fn encode<W: Write, A: MetaArena + ?Sized>(
         &self,
         writer: &mut W,
         is_direct: bool,
@@ -94,7 +94,7 @@ impl ReferenceSerialization for ColumnRelation {
         Ok(())
     }
 
-    fn decode<T: Transaction, R: Read, A: MetaArena>(
+    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         drive: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,

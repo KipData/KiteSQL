@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+use crate::planner::MetaArena;
 use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
 use crate::storage::Transaction;
 use crate::types::evaluator::{
@@ -22,7 +23,7 @@ use crate::types::evaluator::{
 use std::io::{Read, Write};
 
 impl ReferenceSerialization for BinaryEvaluatorParams {
-    fn encode<W: Write, A: crate::planner::MetaArena>(
+    fn encode<W: Write, A: MetaArena + ?Sized>(
         &self,
         writer: &mut W,
         is_direct: bool,
@@ -38,7 +39,7 @@ impl ReferenceSerialization for BinaryEvaluatorParams {
         }
     }
 
-    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
+    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         context: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
@@ -57,7 +58,7 @@ impl ReferenceSerialization for BinaryEvaluatorParams {
 }
 
 impl ReferenceSerialization for CastEvaluatorParams {
-    fn encode<W: Write, A: crate::planner::MetaArena>(
+    fn encode<W: Write, A: MetaArena + ?Sized>(
         &self,
         writer: &mut W,
         is_direct: bool,
@@ -94,7 +95,7 @@ impl ReferenceSerialization for CastEvaluatorParams {
         }
     }
 
-    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
+    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         context: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
@@ -148,7 +149,7 @@ impl ReferenceSerialization for CastEvaluatorParams {
 }
 
 impl ReferenceSerialization for UnaryEvaluatorRef {
-    fn encode<W: Write, A: crate::planner::MetaArena>(
+    fn encode<W: Write, A: MetaArena + ?Sized>(
         &self,
         writer: &mut W,
         is_direct: bool,
@@ -158,7 +159,7 @@ impl ReferenceSerialization for UnaryEvaluatorRef {
         self.pos.encode(writer, is_direct, reference_tables, arena)
     }
 
-    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
+    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         context: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
@@ -174,7 +175,7 @@ impl ReferenceSerialization for UnaryEvaluatorRef {
 }
 
 impl ReferenceSerialization for BinaryEvaluatorRef {
-    fn encode<W: Write, A: crate::planner::MetaArena>(
+    fn encode<W: Write, A: MetaArena + ?Sized>(
         &self,
         writer: &mut W,
         is_direct: bool,
@@ -187,7 +188,7 @@ impl ReferenceSerialization for BinaryEvaluatorRef {
             .encode(writer, is_direct, reference_tables, arena)
     }
 
-    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
+    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         context: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
@@ -201,7 +202,7 @@ impl ReferenceSerialization for BinaryEvaluatorRef {
 }
 
 impl ReferenceSerialization for CastEvaluatorRef {
-    fn encode<W: Write, A: crate::planner::MetaArena>(
+    fn encode<W: Write, A: MetaArena + ?Sized>(
         &self,
         writer: &mut W,
         is_direct: bool,
@@ -214,7 +215,7 @@ impl ReferenceSerialization for CastEvaluatorRef {
             .encode(writer, is_direct, reference_tables, arena)
     }
 
-    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
+    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         context: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,

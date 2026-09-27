@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::planner::MetaArena;
 use crate::{
     expression::ScalarExpression,
     planner::{
@@ -22,7 +23,6 @@ use crate::{
         },
         operator::{join::JoinType, table_scan::TableScanOperator},
     },
-    types::value::DataValue,
 };
 use std::{borrow::Cow, collections::HashSet};
 
@@ -55,7 +55,7 @@ impl ExprVisitorMut for RightSidePositionGlobalizer<'_> {
         &mut self,
         column: &mut ColumnRef,
         position: &mut usize,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         if self
             .right_schema
@@ -84,7 +84,7 @@ impl ExprVisitorMut for SplitScopePositionRebinder<'_> {
         &mut self,
         column: &mut ColumnRef,
         position: &mut usize,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         if let Some(left_position) = self
             .left_schema
@@ -113,7 +113,7 @@ impl ExprVisitorMut for MarkerPositionGlobalizer<'_> {
         &mut self,
         column: &mut ColumnRef,
         position: &mut usize,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         if arena.same_column(*column, *self.output_column) {
             *position = self.left_len;
@@ -131,7 +131,7 @@ impl<'a> ProjectionOutputBinder<'a> {
         Self { project_exprs }
     }
 
-    fn output_ref(&mut self, expr: ExprRef, arena: &mut PlanArena<'_>) -> Option<ScalarExpression> {
+    fn output_ref(&mut self, expr: ExprRef, arena: &mut dyn MetaArena) -> Option<ScalarExpression> {
         self.project_exprs
             .iter()
             .position(|candidate| {
@@ -151,7 +151,7 @@ impl ExprVisitorMut for ProjectionOutputBinder<'_> {
     fn visit(
         &mut self,
         expr: &mut ExprRef,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         if let Some(output_ref) = self.output_ref(*expr, arena) {
             *expr = arena.alloc_expression(output_ref);
@@ -164,7 +164,7 @@ impl ExprVisitorMut for ProjectionOutputBinder<'_> {
 pub(crate) struct BindPlanStart<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) binder: &'s mut Binder<'a, 'b, T, A>,
     pub(crate) arena: &'s mut crate::planner::PlanArena<'arena>,
@@ -173,7 +173,7 @@ where
 pub struct BindPlanFrom<'s, 'a, 'b, 'arena, T, A, M = ()>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) binder: &'s mut Binder<'a, 'b, T, A>,
     pub(crate) arena: &'s mut crate::planner::PlanArena<'arena>,
@@ -184,7 +184,7 @@ where
 pub struct BindPlanSelectList<'s, 'a, 'b, 'arena, T, A, M = ()>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) binder: &'s mut Binder<'a, 'b, T, A>,
     pub(crate) arena: &'s mut crate::planner::PlanArena<'arena>,
@@ -196,7 +196,7 @@ where
 pub(crate) struct BindPlanFiltered<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     pub(super) binder: &'s mut Binder<'a, 'b, T, A>,
     pub(super) arena: &'s mut crate::planner::PlanArena<'arena>,
@@ -207,7 +207,7 @@ where
 pub(crate) struct BindPlanAggregated<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'s mut Binder<'a, 'b, T, A>,
     arena: &'s mut crate::planner::PlanArena<'arena>,
@@ -220,7 +220,7 @@ where
 pub(crate) struct BindPlanHaving<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'s mut Binder<'a, 'b, T, A>,
     arena: &'s mut crate::planner::PlanArena<'arena>,
@@ -232,7 +232,7 @@ where
 pub(crate) struct BindPlanWindowed<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'s mut Binder<'a, 'b, T, A>,
     arena: &'s mut crate::planner::PlanArena<'arena>,
@@ -244,7 +244,7 @@ where
 pub(crate) struct BindPlanDistinct<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'s mut Binder<'a, 'b, T, A>,
     arena: &'s mut crate::planner::PlanArena<'arena>,
@@ -256,7 +256,7 @@ where
 pub(crate) struct BindPlanSorted<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'s mut Binder<'a, 'b, T, A>,
     arena: &'s mut crate::planner::PlanArena<'arena>,
@@ -267,7 +267,7 @@ where
 pub(crate) struct BindPlanProjected<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     plan: LogicalPlan,
     _marker: std::marker::PhantomData<(&'s (), &'a (), &'b (), &'arena (), T, A)>,
@@ -292,7 +292,7 @@ pub(crate) enum JoinConstraintInput {
 impl<'s, 'a: 'b, 'b, 'arena, T, A, M> BindPlanFrom<'s, 'a, 'b, 'arena, T, A, M>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     #[cfg(feature = "orm")]
     pub(crate) fn typed<N>(self) -> BindPlanFrom<'s, 'a, 'b, 'arena, T, A, N> {
@@ -344,7 +344,7 @@ where
 impl<'s, 'a: 'b, 'b, 'arena, T, A, M> BindPlanSelectList<'s, 'a, 'b, 'arena, T, A, M>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     #[cfg(feature = "orm")]
     pub(crate) fn set_select_list(mut self, select_list: Vec<ExprRef>) -> Self {
@@ -453,7 +453,7 @@ where
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanStart<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     #[allow(clippy::wrong_self_convention)]
     pub(crate) fn from_plan(
@@ -472,7 +472,7 @@ where
 impl<'s, 'a: 'b, 'b, 'arena, T, A, M> BindPlanSelectList<'s, 'a, 'b, 'arena, T, A, M>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn filter_expr(
         mut self,
@@ -496,7 +496,7 @@ where
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanFiltered<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn aggregate<O>(
         mut self,
@@ -571,7 +571,7 @@ where
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanAggregated<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn having(
         mut self,
@@ -593,7 +593,7 @@ where
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanHaving<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn window(
         mut self,
@@ -618,7 +618,7 @@ where
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanWindowed<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn distinct(
         mut self,
@@ -651,7 +651,7 @@ where
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanDistinct<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn order_by(
         mut self,
@@ -672,7 +672,7 @@ where
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanSorted<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn project(
         mut self,
@@ -693,7 +693,7 @@ where
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanProjected<'s, 'a, 'b, 'arena, T, A>
 where
     T: Transaction,
-    A: AsRef<[(&'static str, DataValue)]>,
+    A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn insert_into(
         mut self,
@@ -720,7 +720,7 @@ impl BindPlanComplete {
     }
 }
 
-impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'a, 'b, T, A> {
+impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b, T, A> {
     pub(crate) fn build_plan<'s, 'arena>(
         &'s mut self,
         arena: &'s mut crate::planner::PlanArena<'arena>,
@@ -841,7 +841,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                 &mut self,
                 column: &mut ColumnRef,
                 position: &mut usize,
-                arena: &mut PlanArena<'_>,
+                arena: &mut (dyn MetaArena + '_),
             ) -> Result<(), DatabaseError> {
                 if let Some(output) = self.appended_outputs.iter().find(|output| {
                     *position == output.child_position && arena.same_column(*column, output.column)
@@ -1973,7 +1973,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
 
         for expr in select_items {
             let mut expression =
-                std::mem::replace(arena.expression_mut(*expr), ScalarExpression::Empty);
+                std::mem::replace(&mut *arena.expression_mut(*expr), ScalarExpression::Empty);
             if let ScalarExpression::ColumnRef { column, .. } = &mut expression {
                 let _ = table_force_nullable
                     .iter()

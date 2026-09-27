@@ -19,6 +19,7 @@ use crate::execution::{
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
+use crate::planner::MetaArena;
 use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 pub struct SimpleAggExecutor {
@@ -33,7 +34,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SimpleAggExecutor {
     fn into_executor(
         (AggregateOperator { agg_calls, .. }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -50,7 +51,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         if self.returned {
             arena.finish();

@@ -14,7 +14,8 @@
 
 use crate::errors::DatabaseError;
 use crate::expression::function::FunctionSummary;
-use crate::planner::{ExprRef, PlanArena};
+use crate::planner::ExprRef;
+use crate::planner::MetaArena;
 use crate::types::tuple::TupleLike;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
@@ -64,7 +65,7 @@ pub trait ScalarFunctionImpl: Debug + Send + Sync {
     fn eval(
         &self,
         args: &[ExprRef],
-        arena: &PlanArena<'_>,
+        arena: &(dyn MetaArena + '_),
         tuple: Option<&dyn TupleLike>,
     ) -> Result<DataValue, DatabaseError>;
 

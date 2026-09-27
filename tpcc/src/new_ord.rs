@@ -88,10 +88,10 @@ impl TpccTransaction for NewOrd {
             tx.with_query_one(
                 &mut statements[0],
                 &[
-                    ("$1", DataValue::Int16(args.w_id as i16)),
-                    ("$2", DataValue::Int16(args.w_id as i16)),
-                    ("$3", DataValue::Int8(args.d_id as i8)),
-                    ("$4", DataValue::Int64(args.c_id as i64)),
+                    (1, DataValue::Int16(args.w_id as i16)),
+                    (2, DataValue::Int16(args.w_id as i16)),
+                    (3, DataValue::Int8(args.d_id as i8)),
+                    (4, DataValue::Int64(args.c_id as i64)),
                 ],
                 &mut |tuple| {
                     c_discount = tuple.values[0].decimal().unwrap();
@@ -111,9 +111,9 @@ impl TpccTransaction for NewOrd {
             tx.with_query_one(
                 &mut statements[1],
                 &[
-                    ("$1", DataValue::Int16(args.w_id as i16)),
-                    ("$2", DataValue::Int8(args.d_id as i8)),
-                    ("$3", DataValue::Int32(args.c_id as i32)),
+                    (1, DataValue::Int16(args.w_id as i16)),
+                    (2, DataValue::Int8(args.d_id as i8)),
+                    (3, DataValue::Int32(args.c_id as i32)),
                 ],
                 &mut |tuple| {
                     c_discount = tuple.values[0].decimal().unwrap();
@@ -126,7 +126,7 @@ impl TpccTransaction for NewOrd {
             let mut w_tax = Decimal::default();
             tx.with_query_one(
                 &mut statements[2],
-                &[("$1", DataValue::Int16(args.w_id as i16))],
+                &[(1, DataValue::Int16(args.w_id as i16))],
                 &mut |tuple| {
                     w_tax = tuple.values[0].decimal().unwrap();
                     Ok(())
@@ -141,8 +141,8 @@ impl TpccTransaction for NewOrd {
         tx.with_query_one(
             &mut statements[3],
             &[
-                ("$1", DataValue::Int8(args.d_id as i8)),
-                ("$2", DataValue::Int16(args.w_id as i16)),
+                (1, DataValue::Int8(args.d_id as i8)),
+                (2, DataValue::Int16(args.w_id as i16)),
             ],
             &mut |tuple| {
                 d_next_o_id = tuple.values[0].i32().unwrap();
@@ -154,9 +154,9 @@ impl TpccTransaction for NewOrd {
         tx.execute_drain(
             &mut statements[4],
             &[
-                ("$1", DataValue::Int32(d_next_o_id)),
-                ("$2", DataValue::Int8(args.d_id as i8)),
-                ("$3", DataValue::Int16(args.w_id as i16)),
+                (1, DataValue::Int32(d_next_o_id)),
+                (2, DataValue::Int8(args.d_id as i8)),
+                (3, DataValue::Int16(args.w_id as i16)),
             ],
         )?;
         let o_id = d_next_o_id;
@@ -164,22 +164,22 @@ impl TpccTransaction for NewOrd {
         tx.execute_drain(
             &mut statements[5],
             &[
-                ("$1", DataValue::Int32(o_id)),
-                ("$2", DataValue::Int8(args.d_id as i8)),
-                ("$3", DataValue::Int16(args.w_id as i16)),
-                ("$4", DataValue::Int32(args.c_id as i32)),
-                ("$5", DataValue::from(&now)),
-                ("$6", DataValue::Int8(args.o_ol_cnt as i8)),
-                ("$7", DataValue::Int8(args.o_all_local as i8)),
+                (1, DataValue::Int32(o_id)),
+                (2, DataValue::Int8(args.d_id as i8)),
+                (3, DataValue::Int16(args.w_id as i16)),
+                (4, DataValue::Int32(args.c_id as i32)),
+                (5, DataValue::from(&now)),
+                (6, DataValue::Int8(args.o_ol_cnt as i8)),
+                (7, DataValue::Int8(args.o_all_local as i8)),
             ],
         )?;
         // "INSERT INTO new_orders (no_o_id, no_d_id, no_w_id) VALUES (?,?,?)"
         tx.execute_drain(
             &mut statements[6],
             &[
-                ("$1", DataValue::Int32(o_id)),
-                ("$2", DataValue::Int8(args.d_id as i8)),
-                ("$3", DataValue::Int16(args.w_id as i16)),
+                (1, DataValue::Int32(o_id)),
+                (2, DataValue::Int8(args.d_id as i8)),
+                (3, DataValue::Int16(args.w_id as i16)),
             ],
         )?;
         let mut ol_num_seq = vec![0; MAX_NUM_ITEMS];
@@ -210,7 +210,7 @@ impl TpccTransaction for NewOrd {
             let ol_i_id = args.item_id[ol_num_seq[ol_number - 1]];
             let ol_quantity = args.qty[ol_num_seq[ol_number - 1]];
             // "SELECT i_price, i_name, i_data FROM item WHERE i_id = ?"
-            let params = [("$1", DataValue::Int32(ol_i_id as i32))];
+            let params = [(1, DataValue::Int32(ol_i_id as i32))];
             let mut i_price = Decimal::default();
             let mut i_name = String::new();
             let mut i_data = String::new();
@@ -226,8 +226,8 @@ impl TpccTransaction for NewOrd {
 
             // "SELECT s_quantity, s_data, s_dist_01, s_dist_02, s_dist_03, s_dist_04, s_dist_05, s_dist_06, s_dist_07, s_dist_08, s_dist_09, s_dist_10 FROM stock WHERE s_i_id = ? AND s_w_id = ? FOR UPDATE"
             let params = [
-                ("$1", DataValue::Int32(ol_i_id as i32)),
-                ("$2", DataValue::Int16(ol_supply_w_id as i16)),
+                (1, DataValue::Int32(ol_i_id as i32)),
+                (2, DataValue::Int16(ol_supply_w_id as i16)),
             ];
             let mut s_quantity = 0;
             let mut s_data = String::new();
@@ -276,9 +276,9 @@ impl TpccTransaction for NewOrd {
             };
             // "UPDATE stock SET s_quantity = ? WHERE s_i_id = ? AND s_w_id = ?"
             let params = [
-                ("$1", DataValue::Int16(s_quantity)),
-                ("$2", DataValue::Int32(ol_i_id as i32)),
-                ("$3", DataValue::Int16(ol_supply_w_id as i16)),
+                (1, DataValue::Int16(s_quantity)),
+                (2, DataValue::Int32(ol_i_id as i32)),
+                (3, DataValue::Int16(ol_supply_w_id as i16)),
             ];
             tx.execute_drain(&mut statements[9], &params)?;
 
@@ -294,15 +294,15 @@ impl TpccTransaction for NewOrd {
             amt[ol_num_seq[ol_number - 1]] = ol_amount;
             // "INSERT INTO order_line (ol_o_id, ol_d_id, ol_w_id, ol_number, ol_i_id, ol_supply_w_id, ol_quantity, ol_amount, ol_dist_info) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
             let params = [
-                ("$1", DataValue::Int32(o_id)),
-                ("$2", DataValue::Int8(args.d_id as i8)),
-                ("$3", DataValue::Int16(args.w_id as i16)),
-                ("$4", DataValue::Int8(ol_number as i8)),
-                ("$5", DataValue::Int32(ol_i_id as i32)),
-                ("$6", DataValue::Int16(ol_supply_w_id as i16)),
-                ("$7", DataValue::Int8(ol_quantity as i8)),
-                ("$8", DataValue::Decimal(ol_amount.round_dp(2))),
-                ("$9", DataValue::from(ol_dist_info)),
+                (1, DataValue::Int32(o_id)),
+                (2, DataValue::Int8(args.d_id as i8)),
+                (3, DataValue::Int16(args.w_id as i16)),
+                (4, DataValue::Int8(ol_number as i8)),
+                (5, DataValue::Int32(ol_i_id as i32)),
+                (6, DataValue::Int16(ol_supply_w_id as i16)),
+                (7, DataValue::Int8(ol_quantity as i8)),
+                (8, DataValue::Decimal(ol_amount.round_dp(2))),
+                (9, DataValue::from(ol_dist_info)),
             ];
             tx.execute_drain(&mut statements[10], &params)?;
         }

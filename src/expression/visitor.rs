@@ -26,7 +26,7 @@ use crate::types::evaluator::{BinaryEvaluatorRef, CastEvaluatorRef, UnaryEvaluat
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 
-pub trait ExprVisitor<A: MetaArena>: Sized {
+pub trait ExprVisitor<A: MetaArena + ?Sized>: Sized {
     fn visit(&mut self, expr: ExprRef, arena: &A) -> Result<(), DatabaseError> {
         if !self.visit_expression_ref(expr, arena)? {
             return Ok(());
@@ -287,7 +287,7 @@ pub trait ExprVisitor<A: MetaArena>: Sized {
     }
 }
 
-pub fn walk_expr<A: MetaArena, V: ExprVisitor<A>>(
+pub fn walk_expr<A: MetaArena + ?Sized, V: ExprVisitor<A>>(
     visitor: &mut V,
     expr: ExprRef,
     arena: &A,

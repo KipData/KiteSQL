@@ -15,11 +15,11 @@
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, with_projection_tmp_value, ExecArena, ExecId, ExecNode, ExecutionContext,
-    ExecutorNode, WriteExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
 };
 use crate::planner::operator::delete::DeleteOperator;
 use crate::planner::LogicalPlan;
+use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::index::Index;
 use crate::types::tuple_builder::TupleBuilder;
@@ -46,7 +46,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Delete {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -66,7 +66,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Delete {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         let Some(input) = self.input.take() else {
             arena.finish();
@@ -85,7 +85,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Delete {
                     Ok((
                         index_meta.id,
                         index_meta.ty,
-                        index_meta.column_exprs(table, plan_arena)?,
+                        index_meta
+                            .column_exprs(table)
+                            .collect::<Result<Vec<_>, _>>()?,
                     ))
                 })
                 .collect::<Result<Vec<_>, DatabaseError>>()?
@@ -97,17 +99,13 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Delete {
                 continue;
             };
 
+            let tuple = arena.materialize_tuple();
             for (index_id, index_ty, exprs) in index_templates.iter() {
-                with_projection_tmp_value(arena, plan_arena, None, exprs, |arena, value| {
-                    let mut state = arena.local_state(plan_arena);
-                    let (transaction, table_codec) = state.transaction_codec_mut();
-                    transaction.del_index(
-                        table_codec,
-                        &self.table_name,
-                        &Index::new(*index_id, &value, *index_ty),
-                        &tuple_id,
-                    )
-                })?;
+                arena.rewrite(exprs, plan_arena, Some(&tuple))?;
+                let mut state = arena.local_state(plan_arena);
+                let (values, transaction, table_codec) = state.index_values_transaction_codec_mut();
+                let index = Index::new(*index_id, values, *index_ty);
+                transaction.del_index(table_codec, &self.table_name, &index, &tuple_id)?;
             }
 
             let mut state = arena.local_state(plan_arena);
@@ -116,7 +114,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Delete {
             deleted_count += 1;
         }
 
-        TupleBuilder::build_result_into(arena.result_tuple_mut(), deleted_count.to_string());
+        arena.produce_tuple(TupleBuilder::build_result(deleted_count.to_string()));
         arena.resume();
         Ok(())
     }

@@ -14,7 +14,8 @@
 
 use super::Operator;
 use crate::planner::operator::sort::SortField;
-use crate::planner::{fmt_explain_list, Childrens, Explain, LogicalPlan, PlanArena};
+use crate::planner::MetaArena;
+use crate::planner::{fmt_explain_list, Childrens, Explain, LogicalPlan};
 use kite_sql_serde_macros::ReferenceSerialization;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
@@ -43,7 +44,11 @@ impl TopKOperator {
 }
 
 impl Explain for TopKOperator {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        arena: &(dyn MetaArena + '_),
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         write!(f, "Top {}, ", self.limit)?;
         if let Some(offset) = self.offset {
             write!(f, "Offset {offset}, ")?;

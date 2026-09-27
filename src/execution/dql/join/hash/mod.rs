@@ -24,7 +24,8 @@ use crate::execution::dql::join::hash::left_join::LeftJoinState;
 use crate::execution::dql::join::hash::right_join::RightJoinState;
 use crate::execution::dql::join::hash_join::BuildState;
 use crate::execution::dql::sort::BumpVec;
-use crate::planner::{ExprRef, PlanArena};
+use crate::planner::ExprRef;
+use crate::planner::MetaArena;
 use crate::types::tuple::{Tuple, TupleLike};
 use crate::types::value::DataValue;
 use std::collections::hash_map::IntoIter as HashMapIntoIter;
@@ -55,14 +56,14 @@ pub(crate) trait JoinProbeState {
         probe_state: &mut ProbeState,
         build_state: Option<&mut BuildState>,
         filter_expr: Option<&ExprRef>,
-        plan_arena: &PlanArena<'_>,
+        plan_arena: &(dyn MetaArena + '_),
     ) -> Result<Option<Tuple>, DatabaseError>;
 
     fn left_drop_next(
         &mut self,
         _left_drop_state: &mut LeftDropState,
         _filter_expr: Option<&ExprRef>,
-        _plan_arena: &PlanArena<'_>,
+        _plan_arena: &(dyn MetaArena + '_),
     ) -> Result<Option<Tuple>, DatabaseError> {
         Ok(None)
     }
@@ -81,7 +82,7 @@ impl JoinProbeState for JoinProbeStateImpl {
         probe_state: &mut ProbeState,
         build_state: Option<&mut BuildState>,
         filter_expr: Option<&ExprRef>,
-        plan_arena: &PlanArena<'_>,
+        plan_arena: &(dyn MetaArena + '_),
     ) -> Result<Option<Tuple>, DatabaseError> {
         match self {
             JoinProbeStateImpl::Inner(state) => {
@@ -103,7 +104,7 @@ impl JoinProbeState for JoinProbeStateImpl {
         &mut self,
         left_drop_state: &mut LeftDropState,
         filter_expr: Option<&ExprRef>,
-        plan_arena: &PlanArena<'_>,
+        plan_arena: &(dyn MetaArena + '_),
     ) -> Result<Option<Tuple>, DatabaseError> {
         match self {
             JoinProbeStateImpl::Inner(state) => {
@@ -125,9 +126,9 @@ impl JoinProbeState for JoinProbeStateImpl {
 pub(crate) fn filter<T: TupleLike>(
     values: &T,
     filter_expr: &ExprRef,
-    plan_arena: &PlanArena<'_>,
+    plan_arena: &(dyn MetaArena + '_),
 ) -> Result<bool, DatabaseError> {
-    match &plan_arena
+    match &*plan_arena
         .expression(*filter_expr)
         .eval(plan_arena, Some(values as &dyn TupleLike))?
     {

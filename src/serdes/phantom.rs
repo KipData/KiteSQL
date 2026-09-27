@@ -13,13 +13,14 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+use crate::planner::MetaArena;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use crate::storage::Transaction;
 use std::io::{Read, Write};
 use std::marker::PhantomData;
 
 impl<V> ReferenceSerialization for PhantomData<V> {
-    fn encode<W: Write, A: crate::planner::MetaArena>(
+    fn encode<W: Write, A: MetaArena + ?Sized>(
         &self,
         _: &mut W,
         _: bool,
@@ -29,7 +30,7 @@ impl<V> ReferenceSerialization for PhantomData<V> {
         Ok(())
     }
 
-    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
+    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
         _: &mut R,
         _: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         _: &ReferenceTables,

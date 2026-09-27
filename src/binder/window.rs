@@ -22,9 +22,9 @@ use crate::planner::operator::sort::SortField;
 use crate::planner::operator::sort::SortOperator;
 use crate::planner::operator::window::WindowOperator;
 use crate::planner::operator::Operator;
+use crate::planner::MetaArena;
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::storage::Transaction;
-use crate::types::value::DataValue;
 use crate::types::LogicalType;
 
 struct WindowCollector {
@@ -35,7 +35,7 @@ impl ExprVisitorMut for WindowCollector {
     fn visit(
         &mut self,
         expr: &mut ExprRef,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         let ScalarExpression::WindowCall(window) = arena.expression(*expr) else {
             return walk_mut_expr(self, expr, arena);
@@ -51,7 +51,7 @@ impl ExprVisitorMut for WindowCollector {
 
         let output_name = expr.output_name(arena);
         let ScalarExpression::WindowCall(window) =
-            std::mem::replace(arena.expression_mut(*expr), ScalarExpression::Empty)
+            std::mem::replace(&mut *arena.expression_mut(*expr), ScalarExpression::Empty)
         else {
             unreachable!()
         };
@@ -76,7 +76,7 @@ impl ExprVisitorMut for WindowOutputBinder<'_> {
         &mut self,
         column: &mut ColumnRef,
         position: &mut usize,
-        _arena: &mut PlanArena<'_>,
+        _arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         if let Some(output_position) = self
             .groups
@@ -97,7 +97,7 @@ struct WindowGroup {
     output_columns: Vec<ColumnRef>,
 }
 
-impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
+impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_window_function(
         &mut self,
         kind: WindowFunctionKind,

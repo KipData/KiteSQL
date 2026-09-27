@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use crate::planner::operator::Operator;
-use crate::planner::{fmt_explain_list, Childrens, Explain, ExprRef, LogicalPlan, PlanArena};
+use crate::planner::MetaArena;
+use crate::planner::{fmt_explain_list, Childrens, Explain, ExprRef, LogicalPlan};
 use kite_sql_serde_macros::ReferenceSerialization;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
@@ -45,7 +46,11 @@ impl AggregateOperator {
 }
 
 impl Explain for AggregateOperator {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        arena: &(dyn MetaArena + '_),
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         f.write_str("Aggregate [")?;
         fmt_explain_list(&self.agg_calls, ", ", arena, f)?;
         f.write_str("]")?;

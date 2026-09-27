@@ -12,32 +12,47 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::iter_ext::Itertools;
+use crate::planner::MetaArena;
+use crate::planner::{fmt_explain_list, Explain, ExprRef};
 use crate::types::tuple::Schema;
-use crate::types::value::DataValue;
 use kite_sql_serde_macros::ReferenceSerialization;
-use std::fmt;
-use std::fmt::Formatter;
+use std::fmt::{self, Formatter};
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct ValuesOperator {
-    pub rows: Vec<Vec<DataValue>>,
+    pub(crate) rows: Vec<ExprRef>,
+    pub(crate) row_count: usize,
     pub schema_ref: Schema,
 }
 
-impl fmt::Display for ValuesOperator {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let columns = self
-            .rows
-            .iter()
-            .map(|row| {
-                let row_string = row.iter().map(|value| format!("{value}")).join(", ");
-                format!("[{row_string}]")
-            })
-            .join(", ");
+impl ValuesOperator {
+    pub fn new(rows: Vec<ExprRef>, row_count: usize, schema_ref: Schema) -> Self {
+        assert_eq!(
+            Some(rows.len()),
+            row_count.checked_mul(schema_ref.len()),
+            "VALUES row width must match its schema"
+        );
+        Self {
+            rows,
+            row_count,
+            schema_ref,
+        }
+    }
+}
 
-        write!(f, "Values {}, RowsLen: {}", columns, self.rows.len())?;
-
-        Ok(())
+impl Explain for ValuesOperator {
+    fn fmt(&self, arena: &(dyn MetaArena + '_), f: &mut Formatter) -> fmt::Result {
+        f.write_str("Values ")?;
+        let width = self.schema_ref.len();
+        for i in 0..self.row_count {
+            let row = &self.rows[i * width..(i + 1) * width];
+            if i != 0 {
+                f.write_str(", ")?;
+            }
+            f.write_str("[")?;
+            fmt_explain_list(row, ", ", arena, f)?;
+            f.write_str("]")?;
+        }
+        write!(f, ", RowsLen: {}", self.row_count)
     }
 }

@@ -20,7 +20,7 @@ use crate::expression::function::table::TableFunction;
 use crate::expression::visitor::{walk_expr, ExprVisitor};
 use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::planner::operator::sort::SortField;
-use crate::planner::{Explain, ExprRef, MetaArena, PlanArena};
+use crate::planner::{Explain, ExprRef, MetaArena};
 use crate::types::evaluator::{
     binary_create, cast_create, unary_create, BinaryEvaluatorRef, CastEvaluatorRef,
     UnaryEvaluatorRef,
@@ -283,7 +283,7 @@ impl ExprVisitorMut for BindEvaluator {
         expr: &mut ExprRef,
         ty: &mut LogicalType,
         evaluator: &mut Option<CastEvaluatorRef>,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         self.visit(expr, arena)?;
         let from = expr.return_type(arena);
@@ -302,7 +302,7 @@ impl ExprVisitorMut for BindEvaluator {
         expr: &mut ExprRef,
         evaluator: &mut Option<UnaryEvaluatorRef>,
         _ty: &mut LogicalType,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         self.visit(expr, arena)?;
 
@@ -329,7 +329,7 @@ impl ExprVisitorMut for BindEvaluator {
         right_expr: &mut ExprRef,
         evaluator: &mut Option<BinaryEvaluatorRef>,
         _ty: &mut LogicalType,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         self.visit(left_expr, arena)?;
         self.visit(right_expr, arena)?;
@@ -351,14 +351,14 @@ pub struct HasCountStar {
     pub value: bool,
 }
 
-impl ExprVisitor<PlanArena<'_>> for HasCountStar {
+impl ExprVisitor<dyn MetaArena + '_> for HasCountStar {
     fn visit_agg(
         &mut self,
         _distinct: bool,
         _kind: &AggKind,
         args: &[ExprRef],
         _ty: &LogicalType,
-        arena: &PlanArena<'_>,
+        arena: &(dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         if args.len() == 1 {
             if let ScalarExpression::Constant(value) = arena.expression(args[0]) {
@@ -368,7 +368,7 @@ impl ExprVisitor<PlanArena<'_>> for HasCountStar {
         Ok(())
     }
 
-    fn visit(&mut self, expr: ExprRef, arena: &PlanArena<'_>) -> Result<(), DatabaseError> {
+    fn visit(&mut self, expr: ExprRef, arena: &(dyn MetaArena + '_)) -> Result<(), DatabaseError> {
         if !self.value {
             walk_expr(self, expr, arena)?;
         }
@@ -377,19 +377,19 @@ impl ExprVisitor<PlanArena<'_>> for HasCountStar {
 }
 
 pub trait TypeCast: Sized {
-    fn return_type<'a>(&'a self, arena: &'a PlanArena<'_>) -> Cow<'a, LogicalType>;
+    fn return_type<'a>(&'a self, arena: &'a (dyn MetaArena + '_)) -> Cow<'a, LogicalType>;
 
     fn into_expr(
         self,
         ty: LogicalType,
         evaluator: CastEvaluatorRef,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Self;
 
     fn type_cast(
         self,
         ty: Cow<'_, LogicalType>,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<Self, DatabaseError> {
         let from = self.return_type(arena);
         if from.as_ref() == ty.as_ref() {
@@ -401,7 +401,7 @@ pub trait TypeCast: Sized {
 }
 
 impl TypeCast for ScalarExpression {
-    fn return_type<'a>(&'a self, arena: &'a PlanArena<'_>) -> Cow<'a, LogicalType> {
+    fn return_type<'a>(&'a self, arena: &'a (dyn MetaArena + '_)) -> Cow<'a, LogicalType> {
         match self {
             ScalarExpression::Constant(value) => Cow::Owned(value.logical_type()),
             ScalarExpression::ColumnRef { column, .. } => {
@@ -445,7 +445,7 @@ impl TypeCast for ScalarExpression {
         self,
         ty: LogicalType,
         evaluator: CastEvaluatorRef,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Self {
         ScalarExpression::TypeCast {
             expr: arena.alloc_expression(self),
@@ -456,7 +456,7 @@ impl TypeCast for ScalarExpression {
 }
 
 impl TypeCast for ExprRef {
-    fn return_type<'a>(&'a self, arena: &'a PlanArena<'_>) -> Cow<'a, LogicalType> {
+    fn return_type<'a>(&'a self, arena: &'a (dyn MetaArena + '_)) -> Cow<'a, LogicalType> {
         arena.expression(*self).return_type(arena)
     }
 
@@ -464,7 +464,7 @@ impl TypeCast for ExprRef {
         self,
         ty: LogicalType,
         evaluator: CastEvaluatorRef,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Self {
         arena.alloc_expression(ScalarExpression::TypeCast {
             expr: self,
@@ -481,10 +481,10 @@ impl ScalarExpression {
 }
 
 impl Explain for ExprRef {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, arena: &dyn MetaArena, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fn write_exprs(
             exprs: &[ExprRef],
-            arena: &PlanArena<'_>,
+            arena: &(dyn MetaArena + '_),
             f: &mut fmt::Formatter<'_>,
         ) -> fmt::Result {
             for (index, expr) in exprs.iter().enumerate() {
@@ -731,20 +731,20 @@ impl ExprRef {
         SortField::from(self).nulls_last()
     }
 
-    pub(crate) fn eq_ignore_colref_pos(self, other: ExprRef, arena: &PlanArena) -> bool {
+    pub(crate) fn eq_ignore_colref_pos(self, other: ExprRef, arena: &(dyn MetaArena + '_)) -> bool {
         eq_col::eq_ignore_colref_pos(self, other, arena)
     }
 
     pub(crate) fn clone_expression(
         self,
-        arena: &mut PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<ExprRef, DatabaseError> {
         let mut cloned = self;
         crate::expression::visitor_mut::ExprCloner.visit(&mut cloned, arena)?;
         Ok(cloned)
     }
 
-    pub fn unpack_alias(self, arena: &impl MetaArena) -> ExprRef {
+    pub fn unpack_alias(self, arena: &(impl MetaArena + ?Sized)) -> ExprRef {
         if let ScalarExpression::Alias {
             alias: AliasType::Expr(expr),
             ..
@@ -758,25 +758,29 @@ impl ExprRef {
         }
     }
 
-    pub fn unpack_alias_ref<'a, A: MetaArena>(self, arena: &'a A) -> &'a ScalarExpression {
+    pub fn unpack_alias_ref<'a, A: MetaArena + ?Sized>(self, arena: &'a A) -> &'a ScalarExpression {
         arena.expression(self.unpack_alias(arena))
     }
 
     pub fn any_referenced_column(
         self,
-        arena: &PlanArena,
-        mut predicate: impl FnMut(&PlanArena, &ColumnRef) -> bool,
+        arena: &(dyn MetaArena + '_),
+        mut predicate: impl FnMut(&(dyn MetaArena + '_), &ColumnRef) -> bool,
     ) -> Result<bool, DatabaseError> {
         struct ColumnRefVisitor<'a, 'arena, F> {
             f: &'a mut F,
             any: bool,
-            arena: &'a PlanArena<'arena>,
+            arena: &'a (dyn MetaArena + 'arena),
         }
 
-        impl<F: FnMut(&PlanArena, &ColumnRef) -> bool> ExprVisitor<PlanArena<'_>>
+        impl<F: FnMut(&(dyn MetaArena + '_), &ColumnRef) -> bool> ExprVisitor<dyn MetaArena + '_>
             for ColumnRefVisitor<'_, '_, F>
         {
-            fn visit(&mut self, expr: ExprRef, arena: &PlanArena<'_>) -> Result<(), DatabaseError> {
+            fn visit(
+                &mut self,
+                expr: ExprRef,
+                arena: &(dyn MetaArena + '_),
+            ) -> Result<(), DatabaseError> {
                 if !self.any {
                     walk_expr(self, expr, arena)?;
                 }
@@ -800,19 +804,23 @@ impl ExprRef {
 
     pub fn all_referenced_columns(
         self,
-        arena: &PlanArena,
-        mut predicate: impl FnMut(&PlanArena, &ColumnRef) -> bool,
+        arena: &(dyn MetaArena + '_),
+        mut predicate: impl FnMut(&(dyn MetaArena + '_), &ColumnRef) -> bool,
     ) -> Result<bool, DatabaseError> {
         struct ColumnRefVisitor<'a, 'arena, F> {
             f: &'a mut F,
             all: bool,
-            arena: &'a PlanArena<'arena>,
+            arena: &'a (dyn MetaArena + 'arena),
         }
 
-        impl<F: FnMut(&PlanArena, &ColumnRef) -> bool> ExprVisitor<PlanArena<'_>>
+        impl<F: FnMut(&(dyn MetaArena + '_), &ColumnRef) -> bool> ExprVisitor<dyn MetaArena + '_>
             for ColumnRefVisitor<'_, '_, F>
         {
-            fn visit(&mut self, expr: ExprRef, arena: &PlanArena<'_>) -> Result<(), DatabaseError> {
+            fn visit(
+                &mut self,
+                expr: ExprRef,
+                arena: &(dyn MetaArena + '_),
+            ) -> Result<(), DatabaseError> {
                 if self.all {
                     walk_expr(self, expr, arena)?;
                 }
@@ -834,12 +842,16 @@ impl ExprRef {
         Ok(visitor.all)
     }
 
-    pub fn has_agg_call(self, arena: &PlanArena<'_>) -> Result<bool, DatabaseError> {
+    pub fn has_agg_call(self, arena: &(dyn MetaArena + '_)) -> Result<bool, DatabaseError> {
         struct AggCallChecker {
             has_agg: bool,
         }
-        impl ExprVisitor<PlanArena<'_>> for AggCallChecker {
-            fn visit(&mut self, expr: ExprRef, arena: &PlanArena<'_>) -> Result<(), DatabaseError> {
+        impl ExprVisitor<dyn MetaArena + '_> for AggCallChecker {
+            fn visit(
+                &mut self,
+                expr: ExprRef,
+                arena: &(dyn MetaArena + '_),
+            ) -> Result<(), DatabaseError> {
                 if self.has_agg {
                     return Ok(());
                 }
@@ -851,7 +863,7 @@ impl ExprRef {
                 _kind: &AggKind,
                 args: &[ExprRef],
                 _ty: &LogicalType,
-                arena: &PlanArena<'_>,
+                arena: &(dyn MetaArena + '_),
             ) -> Result<(), DatabaseError> {
                 for arg in args {
                     self.visit(*arg, arena)?;
@@ -865,11 +877,15 @@ impl ExprRef {
         Ok(checker.has_agg)
     }
 
-    pub fn has_window_call(self, arena: &PlanArena<'_>) -> Result<bool, DatabaseError> {
+    pub fn has_window_call(self, arena: &(dyn MetaArena + '_)) -> Result<bool, DatabaseError> {
         struct WindowCallChecker(bool);
 
-        impl ExprVisitor<PlanArena<'_>> for WindowCallChecker {
-            fn visit(&mut self, expr: ExprRef, arena: &PlanArena<'_>) -> Result<(), DatabaseError> {
+        impl ExprVisitor<dyn MetaArena + '_> for WindowCallChecker {
+            fn visit(
+                &mut self,
+                expr: ExprRef,
+                arena: &(dyn MetaArena + '_),
+            ) -> Result<(), DatabaseError> {
                 if !self.0 {
                     walk_expr(self, expr, arena)?;
                 }
@@ -879,7 +895,7 @@ impl ExprRef {
             fn visit_window(
                 &mut self,
                 _window: &window::WindowCall,
-                _arena: &PlanArena<'_>,
+                _arena: &(dyn MetaArena + '_),
             ) -> Result<(), DatabaseError> {
                 self.0 = true;
                 Ok(())
@@ -891,11 +907,11 @@ impl ExprRef {
         Ok(checker.0)
     }
 
-    pub fn output_name(self, arena: &PlanArena) -> String {
+    pub fn output_name(self, arena: &(dyn MetaArena + '_)) -> String {
         self.explain(arena).to_string()
     }
 
-    pub fn output_column_ref(self, arena: &mut PlanArena) -> ColumnRef {
+    pub fn output_column_ref(self, arena: &mut (dyn MetaArena + '_)) -> ColumnRef {
         match arena.expression(self) {
             ScalarExpression::ColumnRef { column, .. } => *column,
             ScalarExpression::Alias {
@@ -1013,7 +1029,7 @@ mod test {
     use crate::expression::{AliasType, BinaryOperator, ScalarExpression, UnaryOperator};
     use crate::function::current_date::CurrentDate;
     use crate::function::numbers::Numbers;
-    use crate::planner::{ExprRef, PlanArena, TableArenaCell};
+    use crate::planner::{ExprRef, MetaArena, PlanArena, TableArenaCell};
     use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::rocksdb::RocksTransaction;
@@ -1033,7 +1049,7 @@ mod test {
             expr: ScalarExpression,
             drive: Option<&ReferenceDecodeContext<'_, RocksTransaction>>,
             reference_tables: &mut ReferenceTables,
-            arena: &mut PlanArena,
+            arena: &mut (dyn MetaArena + '_),
         ) -> Result<(), DatabaseError> {
             let expr = arena.alloc_expression(expr);
             expr.encode(cursor, false, reference_tables, arena)?;

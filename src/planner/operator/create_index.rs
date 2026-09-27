@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use crate::catalog::{ColumnRef, TableName};
-use crate::planner::{fmt_explain_list, Explain, PlanArena};
+use crate::planner::MetaArena;
+use crate::planner::{fmt_explain_list, Explain};
 use crate::types::index::IndexType;
 use kite_sql_serde_macros::ReferenceSerialization;
 
@@ -28,7 +29,11 @@ pub struct CreateIndexOperator {
 }
 
 impl Explain for CreateIndexOperator {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        arena: &(dyn MetaArena + '_),
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         write!(f, "Create Index On {} -> [", self.table_name)?;
         fmt_explain_list(&self.columns, ", ", arena, f)?;
         write!(f, "], If Not Exists: {}", self.if_not_exists)

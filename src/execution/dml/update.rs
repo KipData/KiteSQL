@@ -15,21 +15,18 @@
 use crate::catalog::{ColumnRef, TableName};
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, with_projection_tmp_value, ExecArena, ExecId, ExecNode, ExecutionContext,
-    ExecutorNode, WriteExecutor,
+    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
 };
 use crate::iter_ext::Itertools;
 use crate::planner::operator::update::UpdateOperator;
+use crate::planner::MetaArena;
 use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::index::{Index, IndexMeta, IndexType};
 use crate::types::tuple::{Schema, Tuple};
 use crate::types::tuple_builder::TupleBuilder;
 use crate::types::ColumnId;
-use std::{
-    collections::{HashMap, HashSet},
-    mem,
-};
+use std::collections::{HashMap, HashSet};
 
 pub struct Update {
     table_name: TableName,
@@ -65,7 +62,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Update {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -104,7 +101,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         let Some(input) = self.input.take() else {
             arena.finish();
@@ -149,7 +146,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update {
             while arena.next_tuple(input, plan_arena)? {
                 let mut is_overwrite = true;
 
-                let Some(old_pk) = arena.result_tuple().pk.clone() else {
+                let mut tuple = arena.materialize_tuple();
+                let Some(old_pk) = tuple.pk.clone() else {
                     continue;
                 };
 
@@ -166,10 +164,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update {
                         continue;
                     }
 
-                    with_projection_tmp_value(arena, plan_arena, None, exprs, |_, value| {
-                        old_index_values.push((index_offset, value));
-                        Ok(())
-                    })?;
+                    arena.rewrite(exprs, plan_arena, Some(&tuple))?;
+                    let values = arena.materialize_tuple().values;
+                    old_index_values.push((index_offset, values));
                 }
                 for (i, column) in self.input_schema.iter().enumerate() {
                     let Some(column_id) = plan_arena.column(*column).id() else {
@@ -178,17 +175,13 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update {
                     if let Some(expr) = exprs_map.get(&column_id) {
                         let value = plan_arena
                             .expression(*expr)
-                            .eval(plan_arena, Some(arena.result_tuple()))?;
-                        arena.result_tuple_mut().values[i] = value;
+                            .eval(plan_arena, Some(&tuple))?;
+                        tuple.values[i] = value.into_owned();
                     }
                 }
 
-                let new_pk = Tuple::primary_projection(
-                    table_snapshot.primary_key_indices,
-                    &arena.result_tuple().values,
-                );
-                arena.result_tuple_mut().pk = Some(new_pk.clone());
-
+                let new_pk =
+                    Tuple::primary_projection(table_snapshot.primary_key_indices, &tuple.values);
                 let primary_key_changed = new_pk != old_pk;
                 if primary_key_changed {
                     let mut state = arena.local_state(plan_arena);
@@ -202,26 +195,21 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update {
                     let index_meta = plan_arena.index(*index_meta);
                     let index_id = index_meta.id;
                     let index_ty = index_meta.ty;
-                    with_projection_tmp_value(arena, plan_arena, None, exprs, |arena, value| {
-                        if !primary_key_changed && old_value == value {
-                            return Ok(());
-                        }
+                    arena.rewrite(exprs, plan_arena, Some(&tuple))?;
+                    let mut state = arena.local_state(plan_arena);
+                    let (values, transaction, table_codec) =
+                        state.index_values_transaction_codec_mut();
+                    if !primary_key_changed && old_value == values {
+                        continue;
+                    }
 
-                        let mut state = arena.local_state(plan_arena);
-                        let (transaction, table_codec) = state.transaction_codec_mut();
-                        let old_index = Index::new(index_id, &old_value, index_ty);
-                        transaction.del_index(
-                            table_codec,
-                            &self.table_name,
-                            &old_index,
-                            &old_pk,
-                        )?;
-                        let new_index = Index::new(index_id, &value, index_ty);
-                        transaction.add_index(table_codec, &self.table_name, new_index, &new_pk)
-                    })?;
+                    let old_index = Index::new(index_id, &old_value, index_ty);
+                    let new_index = Index::new(index_id, values, index_ty);
+                    transaction.del_index(table_codec, &self.table_name, &old_index, &old_pk)?;
+                    transaction.add_index(table_codec, &self.table_name, new_index, &new_pk)?;
                 }
 
-                let tuple = mem::take(arena.result_tuple_mut());
+                tuple.pk = Some(new_pk);
                 let mut state = arena.local_state(plan_arena);
                 let (transaction, table_codec) = state.transaction_codec_mut();
                 transaction.append_tuple(
@@ -234,11 +222,11 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update {
                 updated_count += 1;
             }
 
-            TupleBuilder::build_result_into(arena.result_tuple_mut(), updated_count.to_string());
+            arena.produce_tuple(TupleBuilder::build_result(updated_count.to_string()));
             arena.resume();
             Ok(())
         } else {
-            TupleBuilder::build_result_into(arena.result_tuple_mut(), "0".to_string());
+            arena.produce_tuple(TupleBuilder::build_result("0".to_string()));
             arena.resume();
             Ok(())
         }

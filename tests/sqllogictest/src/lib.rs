@@ -32,37 +32,36 @@ impl DB for SQLBase {
         println!("|— Input SQL: {}", sql);
         let mut statements = prepare_all(sql)?.into_iter().peekable();
 
-        while let Some(statement) = statements.next() {
+        let output = loop {
+            let Some(statement) = statements.next() else {
+                break DBOutput::StatementComplete(0);
+            };
             let is_last = statements.peek().is_none();
             match command_type(&statement)? {
                 CommandType::DDL => {
                     self.db.ddl(statement.to_string())?;
                     if is_last {
-                        println!(" |— time spent: {:?}", start.elapsed());
-                        return Ok(DBOutput::StatementComplete(0));
+                        break DBOutput::StatementComplete(0);
                     }
                 }
                 CommandType::Analyze => {
                     execute_analyze_statement(&mut self.db, &statement)?;
                     if is_last {
-                        println!(" |— time spent: {:?}", start.elapsed());
-                        return Ok(DBOutput::StatementComplete(0));
+                        break DBOutput::StatementComplete(0);
                     }
                 }
                 _ => {
-                    let iter = (&self.db).execute(statement, &[])?;
+                    let iter = self.db.run(statement.to_string())?;
                     if is_last {
-                        let output = collect_output(iter)?;
-                        println!(" |— time spent: {:?}", start.elapsed());
-                        return Ok(output);
+                        break collect_output(iter)?;
                     }
                     iter.done()?;
                 }
             }
-        }
+        };
 
         println!(" |— time spent: {:?}", start.elapsed());
-        Ok(DBOutput::StatementComplete(0))
+        Ok(output)
     }
 }
 

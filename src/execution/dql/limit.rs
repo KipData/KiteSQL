@@ -18,6 +18,7 @@ use crate::execution::{
 };
 use crate::planner::operator::limit::LimitOperator;
 use crate::planner::LogicalPlan;
+use crate::planner::MetaArena;
 use crate::storage::Transaction;
 pub struct Limit {
     offset: Option<usize>,
@@ -33,7 +34,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Limit {
     fn into_executor(
         (LimitOperator { offset, limit }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -52,7 +53,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Limit {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         let offset = self.offset.unwrap_or(0);
         let limit = self.limit.unwrap_or(usize::MAX);

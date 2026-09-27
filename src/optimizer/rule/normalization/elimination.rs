@@ -770,11 +770,35 @@ mod tests {
         let mut arena = crate::planner::PlanArena::new(&table_arena);
         let c1 = make_sort_field(&mut arena, "c1");
         let c2 = make_sort_field(&mut arena, "c2");
-        let mut plan = build_plan(&mut arena, vec![c2.clone()], vec![c1, c2.clone()], 1);
-        super::mark_sort_preserving_indexes(&mut plan, &[c2], &arena)?;
-        let rule = EliminateRedundantSort;
-
-        assert!(rule.apply(&mut plan, &mut arena)?);
+        for lookup in [
+            None,
+            Some(IndexLookup::Static(Range::Eq(DataValue::Parameter {
+                id: 1,
+                ty: LogicalType::Integer,
+            }))),
+        ] {
+            let mut plan = build_plan(
+                &mut arena,
+                vec![c2.clone()],
+                vec![c1.clone(), c2.clone()],
+                1,
+            );
+            let Childrens::Only(filter) = plan.childrens.as_mut() else {
+                panic!("expected filter")
+            };
+            let Childrens::Only(leaf) = filter.childrens.as_mut() else {
+                panic!("expected index scan")
+            };
+            if let Some(PhysicalOption {
+                plan: PlanImpl::IndexScan(info),
+                ..
+            }) = &mut leaf.physical_option
+            {
+                info.lookup = lookup;
+            }
+            super::mark_sort_preserving_indexes(&mut plan, &[c2.clone()], &arena)?;
+            assert!(EliminateRedundantSort.apply(&mut plan, &mut arena)?);
+        }
         Ok(())
     }
 

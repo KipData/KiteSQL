@@ -18,6 +18,7 @@ use crate::execution::{
 };
 use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyOperator, MarkApplyQuantifier};
 use crate::planner::LogicalPlan;
+use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::index::RuntimeIndexProbe;
 use crate::types::tuple::{SplitTupleRef, Tuple};
@@ -31,39 +32,43 @@ enum QuantifiedPredicateOutcome {
     Skip,
 }
 
-pub struct MarkApply<'a, T: Transaction + 'a> {
+pub struct MarkApply {
     op: MarkApplyOperator,
     right_input_plan: LogicalPlan,
     left_input: ExecId,
+    right_pos: ExecId,
     // Retain a streaming inner input across next_tuple calls, not its result rows.
-    join_input: Option<(Box<ExecArena<'a, T>>, ExecId, Tuple)>,
+    join_input: Option<(ExecId, Tuple)>,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for MarkApply<'a, T> {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for MarkApply {
     type Input = (MarkApplyOperator, LogicalPlan, LogicalPlan);
 
     fn into_executor(
         (op, left_input, right_input): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
         let left_input = build_read(arena, plan_arena, left_input, cache, transaction);
+        let right_pos = arena.nodes.position();
+        build_read(arena, plan_arena, right_input.clone(), cache, transaction);
         arena.push(ExecNode::MarkApply(Self {
             op,
             right_input_plan: right_input,
             left_input,
+            right_pos,
             join_input: None,
         }))
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply<'a, T> {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         if matches!(self.op.kind, MarkApplyKind::InnerJoin) {
             return self.next_join_tuple(arena, plan_arena);
@@ -73,7 +78,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply<'a, T> {
             return Ok(());
         }
 
-        let mut left_tuple = arena.result_tuple().clone();
+        let mut left_tuple = arena.materialize_tuple();
         let marker = self.mark_value(arena, plan_arena, &left_tuple)?;
 
         left_tuple.values.push(marker);
@@ -82,16 +87,16 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply<'a, T> {
     }
 }
 
-impl<'a, T: Transaction + 'a> MarkApply<'a, T> {
-    fn next_join_tuple(
+impl MarkApply {
+    fn next_join_tuple<'a, T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         loop {
-            if let Some((inner, root, left)) = &mut self.join_input {
-                while inner.next_tuple(*root, plan_arena)? {
-                    let right = inner.result_tuple();
+            if let Some((root, left)) = &mut self.join_input {
+                while arena.next_tuple(*root, plan_arena)? {
+                    let right = arena.result_tuple();
                     if Self::predicates_matched(self.op.predicates(), left, right, plan_arena)? {
                         let mut output = left.clone();
                         output.pk = output.pk.or_else(|| right.pk.clone());
@@ -106,17 +111,10 @@ impl<'a, T: Transaction + 'a> MarkApply<'a, T> {
                 arena.finish();
                 return Ok(());
             }
-            let left: Tuple = arena.result_tuple().clone();
+            let left: Tuple = arena.materialize_tuple();
             let value = self.parameterized_probe_value(&left, plan_arena)?;
-            let mut inner = self
-                .join_input
-                .take()
-                .map(|(inner, _, _)| inner)
-                .unwrap_or_else(|| Box::new(ExecArena::new()));
-            inner.reset_for_rebuild();
-            inner.init_context(arena.context(), arena.transaction());
-            let root = self.build_right_input(&mut inner, plan_arena, value);
-            self.join_input = Some((inner, root, left));
+            let root = self.build_right_input(arena, plan_arena, value);
+            self.join_input = Some((root, left));
         }
     }
 
@@ -139,12 +137,13 @@ impl<'a, T: Transaction + 'a> MarkApply<'a, T> {
         }
     }
 
-    fn build_right_input(
+    fn build_right_input<'a, T: Transaction + 'a>(
         &self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         param_value: Option<DataValue>,
     ) -> ExecId {
+        arena.nodes.seek(self.right_pos);
         if let Some(probe) = self.runtime_probe_for(param_value) {
             arena.push_runtime_probe(probe);
         }
@@ -157,37 +156,10 @@ impl<'a, T: Transaction + 'a> MarkApply<'a, T> {
         )
     }
 
-    fn with_right_input<R>(
-        &self,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
-        param_value: Option<DataValue>,
-        f: impl FnOnce(
-            &mut ExecArena<'a, T>,
-            &mut crate::planner::PlanArena<'a>,
-            ExecId,
-        ) -> Result<R, DatabaseError>,
-    ) -> Result<R, DatabaseError> {
-        let depth_before = arena.runtime_probe_depth();
-        let right_input = self.build_right_input(arena, plan_arena, param_value);
-        let result = f(arena, plan_arena, right_input);
-
-        let depth_after = arena.runtime_probe_depth();
-        debug_assert!(
-            depth_after == depth_before || depth_after == depth_before + 1,
-            "parameterized right input should consume at most one runtime probe"
-        );
-        if depth_after > depth_before {
-            let _ = arena.pop_runtime_probe();
-        }
-
-        result
-    }
-
     fn parameterized_probe_value(
         &self,
         left_tuple: &Tuple,
-        plan_arena: &crate::planner::PlanArena<'_>,
+        plan_arena: &(dyn MetaArena + '_),
     ) -> Result<Option<DataValue>, DatabaseError> {
         self.op
             .parameterized_probe()
@@ -195,119 +167,96 @@ impl<'a, T: Transaction + 'a> MarkApply<'a, T> {
                 plan_arena
                     .expression(*probe)
                     .eval(plan_arena, Some(left_tuple))
+                    .map(|value| value.into_owned())
             })
             .transpose()
     }
 
-    fn mark_value(
+    fn mark_value<'a, T: Transaction + 'a>(
         &self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         left_tuple: &Tuple,
     ) -> Result<DataValue, DatabaseError> {
+        let probe = self.parameterized_probe_value(left_tuple, plan_arena)?;
         match self.op.kind {
             MarkApplyKind::InnerJoin => unreachable!("inner join streams tuples"),
-            MarkApplyKind::Exists => self.with_right_input(
-                arena,
-                plan_arena,
-                self.parameterized_probe_value(left_tuple, plan_arena)?,
-                |arena, plan_arena, right_input| {
-                    while arena.next_tuple(right_input, plan_arena)? {
-                        let right_tuple = arena.result_tuple();
-                        if Self::predicates_matched(
-                            self.op.predicates(),
-                            left_tuple,
-                            right_tuple,
-                            plan_arena,
-                        )? {
-                            return Ok(DataValue::Boolean(true));
-                        }
+            MarkApplyKind::Exists => {
+                let right_input = self.build_right_input(arena, plan_arena, probe);
+                while arena.next_tuple(right_input, plan_arena)? {
+                    let right_tuple = arena.result_tuple();
+                    if Self::predicates_matched(
+                        self.op.predicates(),
+                        left_tuple,
+                        right_tuple,
+                        plan_arena,
+                    )? {
+                        return Ok(DataValue::Boolean(true));
                     }
-
-                    Ok(DataValue::Boolean(false))
-                },
-            ),
+                }
+                Ok(DataValue::Boolean(false))
+            }
             MarkApplyKind::Quantified(MarkApplyQuantifier::Any) => {
                 if let Some(probe_value) = self.parameterized_probe_value(left_tuple, plan_arena)? {
                     if !probe_value.is_null() {
-                        if self.with_right_input(
-                            arena,
-                            plan_arena,
-                            Some(probe_value),
-                            |arena, plan_arena, right_input| {
-                                while arena.next_tuple(right_input, plan_arena)? {
-                                    let right_tuple = arena.result_tuple();
-                                    if self.quantified_predicate_outcome(
-                                        left_tuple,
-                                        right_tuple,
-                                        plan_arena,
-                                    )? == QuantifiedPredicateOutcome::True
-                                    {
-                                        return Ok(true);
-                                    }
-                                }
-
-                                Ok(false)
-                            },
-                        )? {
-                            return Ok(DataValue::Boolean(true));
+                        let right_input =
+                            self.build_right_input(arena, plan_arena, Some(probe_value));
+                        while arena.next_tuple(right_input, plan_arena)? {
+                            let right_tuple = arena.result_tuple();
+                            if self.quantified_predicate_outcome(
+                                left_tuple,
+                                right_tuple,
+                                plan_arena,
+                            )? == QuantifiedPredicateOutcome::True
+                            {
+                                return Ok(DataValue::Boolean(true));
+                            }
                         }
 
-                        if self.with_right_input(
-                            arena,
-                            plan_arena,
-                            Some(DataValue::Null),
-                            |arena, plan_arena, right_input| {
-                                while arena.next_tuple(right_input, plan_arena)? {
-                                    let right_tuple = arena.result_tuple();
-                                    if self.quantified_predicate_outcome(
-                                        left_tuple,
-                                        right_tuple,
-                                        plan_arena,
-                                    )? == QuantifiedPredicateOutcome::Null
-                                    {
-                                        return Ok(true);
-                                    }
-                                }
-
-                                Ok(false)
-                            },
-                        )? {
-                            return Ok(DataValue::Null);
+                        let right_input =
+                            self.build_right_input(arena, plan_arena, Some(DataValue::Null));
+                        while arena.next_tuple(right_input, plan_arena)? {
+                            let right_tuple = arena.result_tuple();
+                            if self.quantified_predicate_outcome(
+                                left_tuple,
+                                right_tuple,
+                                plan_arena,
+                            )? == QuantifiedPredicateOutcome::Null
+                            {
+                                return Ok(DataValue::Null);
+                            }
                         }
 
                         return Ok(DataValue::Boolean(false));
                     }
                 }
 
-                self.with_right_input(arena, plan_arena, None, |arena, plan_arena, right_input| {
-                    self.scan_quantified_right_input(
-                        arena,
-                        plan_arena,
-                        right_input,
-                        MarkApplyQuantifier::Any,
-                        left_tuple,
-                    )
-                })
+                let right_input = self.build_right_input(arena, plan_arena, None);
+                self.scan_quantified_right_input(
+                    arena,
+                    plan_arena,
+                    right_input,
+                    MarkApplyQuantifier::Any,
+                    left_tuple,
+                )
             }
             MarkApplyKind::Quantified(MarkApplyQuantifier::All) => {
-                self.with_right_input(arena, plan_arena, None, |arena, plan_arena, right_input| {
-                    self.scan_quantified_right_input(
-                        arena,
-                        plan_arena,
-                        right_input,
-                        MarkApplyQuantifier::All,
-                        left_tuple,
-                    )
-                })
+                let right_input = self.build_right_input(arena, plan_arena, None);
+                self.scan_quantified_right_input(
+                    arena,
+                    plan_arena,
+                    right_input,
+                    MarkApplyQuantifier::All,
+                    left_tuple,
+                )
             }
         }
     }
 
-    fn scan_quantified_right_input(
+    fn scan_quantified_right_input<'a, T: Transaction + 'a>(
         &self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         right_input: ExecId,
         quantifier: MarkApplyQuantifier,
         left_tuple: &Tuple,
@@ -346,14 +295,14 @@ impl<'a, T: Transaction + 'a> MarkApply<'a, T> {
         predicates: &[crate::planner::ExprRef],
         left_tuple: &Tuple,
         right_tuple: &Tuple,
-        plan_arena: &crate::planner::PlanArena<'_>,
+        plan_arena: &(dyn MetaArena + '_),
     ) -> Result<bool, DatabaseError> {
         let values = SplitTupleRef::new(left_tuple, right_tuple);
 
         for predicate in predicates {
-            match plan_arena
+            match *plan_arena
                 .expression(*predicate)
-                .eval(plan_arena, Some(values))?
+                .eval(plan_arena, Some(&values))?
             {
                 DataValue::Boolean(true) => {}
                 DataValue::Boolean(false) | DataValue::Null => return Ok(false),
@@ -368,9 +317,9 @@ impl<'a, T: Transaction + 'a> MarkApply<'a, T> {
         &self,
         left_tuple: &Tuple,
         right_tuple: &Tuple,
-        plan_arena: &crate::planner::PlanArena<'_>,
+        plan_arena: &(dyn MetaArena + '_),
     ) -> Result<QuantifiedPredicateOutcome, DatabaseError> {
-        match self.eval_predicates(left_tuple, right_tuple, plan_arena)? {
+        match self.eval_predicates(left_tuple, &right_tuple, plan_arena)? {
             Some(DataValue::Boolean(true)) => Ok(QuantifiedPredicateOutcome::True),
             Some(DataValue::Boolean(false)) => Ok(QuantifiedPredicateOutcome::False),
             Some(DataValue::Null) => Ok(QuantifiedPredicateOutcome::Null),
@@ -383,7 +332,7 @@ impl<'a, T: Transaction + 'a> MarkApply<'a, T> {
         &self,
         left_tuple: &Tuple,
         right_tuple: &Tuple,
-        plan_arena: &crate::planner::PlanArena<'_>,
+        plan_arena: &(dyn MetaArena + '_),
     ) -> Result<Option<DataValue>, DatabaseError> {
         let values = SplitTupleRef::new(left_tuple, right_tuple);
         // probe_predicate is in predicate, always first
@@ -394,9 +343,9 @@ impl<'a, T: Transaction + 'a> MarkApply<'a, T> {
             .ok_or(DatabaseError::InvalidType)?;
 
         for predicate in correlated_predicates {
-            match plan_arena
+            match *plan_arena
                 .expression(*predicate)
-                .eval(plan_arena, Some(values))?
+                .eval(plan_arena, Some(&values))?
             {
                 DataValue::Boolean(true) => {}
                 DataValue::Boolean(false) | DataValue::Null => return Ok(None),
@@ -407,7 +356,8 @@ impl<'a, T: Transaction + 'a> MarkApply<'a, T> {
         Ok(Some(
             plan_arena
                 .expression(*probe_predicate)
-                .eval(plan_arena, Some(values))?,
+                .eval(plan_arena, Some(&values))?
+                .into_owned(),
         ))
     }
 }
@@ -420,6 +370,7 @@ mod tests {
     use crate::expression::{BinaryOperator, ScalarExpression};
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
+    use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, ExprRef, LogicalPlan};
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
@@ -447,7 +398,11 @@ mod tests {
             .collect();
 
         LogicalPlan::new(
-            Operator::Values(ValuesOperator { rows, schema_ref }),
+            Operator::Values(ValuesOperator::new(
+                arena.alloc_expression_rows(&rows),
+                rows.len(),
+                schema_ref,
+            )),
             Childrens::None,
         )
     }
@@ -512,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn inner_join_apply_emits_all_matches_and_reuses_inner_arena() -> Result<(), DatabaseError> {
+    fn inner_join_apply_emits_all_matches_and_reuses_right_slots() -> Result<(), DatabaseError> {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
         let mut left = build_values(
@@ -547,43 +502,38 @@ mod tests {
             plan_arena.alloc_expression(ScalarExpression::column_expr(right_schema[1], 2));
         let probe = plan_arena.alloc_expression(ScalarExpression::column_expr(left_column, 0));
         let mut op = MarkApplyOperator::new_inner_join(vec![equality, residual], probe);
-        // Values supplies the inner rows directly; there is no IndexScan to consume a probe.
+        // Values has no parameterized IndexScan to consume a runtime probe.
         op.set_parameterized_probe(None);
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
         let cache = crate::execution::empty_context(&table_cache, &view_cache, &meta_cache);
         let mut arena = ExecArena::new();
         arena.init_context(cache, &transaction);
-        let left_input = build_read(&mut arena, &mut plan_arena, left, cache, &transaction);
-        let mut exec = MarkApply {
-            op,
-            right_input_plan: right,
-            left_input,
-            join_input: None,
-        };
-        let mut inner_address = None;
+        let root = <MarkApply as ReadExecutor<_>>::into_executor(
+            (op, left, right),
+            &mut arena,
+            &mut plan_arena,
+            cache,
+            &transaction,
+        );
+        let address = arena.nodes.items.as_ptr();
+        let count = arena.nodes.items.len();
+        assert_eq!(count, 3);
         for _ in 0..4 {
-            exec.next_tuple(&mut arena, &mut plan_arena)?;
+            assert!(arena.next_tuple(root, &mut plan_arena)?);
             assert_eq!(
-                arena.result_tuple().values,
+                arena.materialize_tuple().values,
                 vec![
                     DataValue::Int32(2),
                     DataValue::Int32(2),
                     DataValue::Boolean(true)
                 ]
             );
-            let (inner, _, _) = exec.join_input.as_ref().expect("active inner scan");
-            let address = &**inner as *const _;
-            assert_eq!(*inner_address.get_or_insert(address), address);
-            assert_eq!(
-                inner.nodes.len(),
-                1,
-                "inner executors must not accumulate per outer row"
-            );
-            assert_eq!(inner.runtime_probe_depth(), 0);
+            assert_eq!(arena.nodes.items.as_ptr(), address);
+            assert_eq!(arena.nodes.items.len(), count);
+            assert_eq!(arena.runtime_probe_depth(), 0);
         }
-        exec.next_tuple(&mut arena, &mut plan_arena)?;
-        assert!(exec.join_input.is_none(), "all outer rows exhausted");
+        assert!(!arena.next_tuple(root, &mut plan_arena)?);
         Ok(())
     }
 
@@ -609,7 +559,7 @@ mod tests {
         op.set_parameterized_probe(None);
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
-        let mut executor = execute_input::<_, MarkApply<_>>(
+        let mut executor = execute_input::<_, MarkApply>(
             (op, left, right),
             crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
@@ -644,7 +594,10 @@ mod tests {
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
-        let tuples = try_collect(execute_input::<_, MarkApply<_>>(
+        let context = crate::execution::empty_context(&table_cache, &view_cache, &meta_cache);
+        let mut arena = ExecArena::new();
+        arena.init_context(context, &transaction);
+        let root = <MarkApply as ReadExecutor<_>>::into_executor(
             (
                 MarkApplyOperator::new_exists(
                     build_marker_column(&mut plan_arena),
@@ -653,10 +606,21 @@ mod tests {
                 left,
                 right,
             ),
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
-            plan_arena,
+            &mut arena,
+            &mut plan_arena,
+            context,
             &transaction,
-        ))?;
+        );
+        let count = arena.nodes.items.len();
+        let address = arena.nodes.items.as_ptr();
+        assert_eq!(count, 3);
+        let mut tuples = Vec::new();
+        while arena.next_tuple(root, &mut plan_arena)? {
+            tuples.push(arena.materialize_tuple());
+            assert_eq!(arena.nodes.items.len(), count);
+            assert_eq!(arena.nodes.items.as_ptr(), address);
+            assert_eq!(arena.runtime_probe_depth(), 0);
+        }
 
         assert_eq!(
             tuples
@@ -695,7 +659,7 @@ mod tests {
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
-        let tuples = try_collect(execute_input::<_, MarkApply<_>>(
+        let tuples = try_collect(execute_input::<_, MarkApply>(
             (
                 MarkApplyOperator::new_exists(
                     build_marker_column(&mut plan_arena),
@@ -776,10 +740,11 @@ mod tests {
             &transaction,
         );
 
-        let exec: MarkApply<crate::storage::rocksdb::RocksTransaction> = MarkApply {
+        let exec: MarkApply = MarkApply {
             op,
             right_input_plan: right,
             left_input: 0,
+            right_pos: arena.nodes.position(),
             join_input: None,
         };
         let left_tuple = Tuple::new(None, vec![DataValue::Int32(2), DataValue::Int32(1)]);
@@ -828,10 +793,11 @@ mod tests {
             &transaction,
         );
 
-        let exec: MarkApply<crate::storage::rocksdb::RocksTransaction> = MarkApply {
+        let exec: MarkApply = MarkApply {
             op,
             right_input_plan: right,
             left_input: 0,
+            right_pos: arena.nodes.position(),
             join_input: None,
         };
         let left_tuple = Tuple::new(None, vec![DataValue::Int32(2)]);
@@ -880,10 +846,11 @@ mod tests {
             &transaction,
         );
 
-        let exec: MarkApply<crate::storage::rocksdb::RocksTransaction> = MarkApply {
+        let exec: MarkApply = MarkApply {
             op,
             right_input_plan: right,
             left_input: 0,
+            right_pos: arena.nodes.position(),
             join_input: None,
         };
         let left_tuple = Tuple::new(None, vec![DataValue::Null]);
@@ -924,7 +891,7 @@ mod tests {
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
-        let tuples = try_collect(execute_input::<_, MarkApply<_>>(
+        let tuples = try_collect(execute_input::<_, MarkApply>(
             (
                 MarkApplyOperator::new_in(build_marker_column(&mut plan_arena), vec![predicate]),
                 left,
@@ -972,7 +939,7 @@ mod tests {
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
-        let tuples = try_collect(execute_input::<_, MarkApply<_>>(
+        let tuples = try_collect(execute_input::<_, MarkApply>(
             (
                 MarkApplyOperator::new_in(build_marker_column(&mut plan_arena), vec![predicate]),
                 left,
@@ -1040,7 +1007,7 @@ mod tests {
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
-        let tuples = try_collect(execute_input::<_, MarkApply<_>>(
+        let tuples = try_collect(execute_input::<_, MarkApply>(
             (
                 MarkApplyOperator::new_in(
                     build_marker_column(&mut plan_arena),

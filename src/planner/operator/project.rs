@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::planner::{fmt_explain_list, Explain, ExprRef, PlanArena};
+use crate::planner::MetaArena;
+use crate::planner::{fmt_explain_list, Explain, ExprRef};
 use kite_sql_serde_macros::ReferenceSerialization;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
@@ -21,7 +22,11 @@ pub struct ProjectOperator {
 }
 
 impl Explain for ProjectOperator {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        arena: &(dyn MetaArena + '_),
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         f.write_str("Projection [")?;
         fmt_explain_list(&self.exprs, ", ", arena, f)?;
         f.write_str("]")

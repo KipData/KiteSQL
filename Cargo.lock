@@ -1089,7 +1089,7 @@ dependencies = [
 
 [[package]]
 name = "kite_sql"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "bumpalo",
  "chrono",
@@ -1118,7 +1118,7 @@ dependencies = [
 
 [[package]]
 name = "kite_sql_serde_macros"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "darling",
  "proc-macro2",

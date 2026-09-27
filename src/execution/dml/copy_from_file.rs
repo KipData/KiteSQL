@@ -19,6 +19,7 @@ use crate::execution::{
 };
 use crate::iter_ext::Itertools;
 use crate::planner::operator::copy_from_file::CopyFromFileOperator;
+use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
 use std::fs::File;
@@ -40,7 +41,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CopyFromFile {
     fn into_executor(
         input: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut crate::planner::PlanArena<'a>,
+        _plan_arena: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
@@ -53,7 +54,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyFromFile {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         let Some(op) = self.op.take() else {
             arena.finish();
@@ -111,7 +112,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyFromFile {
             size += 1;
         }
 
-        TupleBuilder::build_result_into(arena.result_tuple_mut(), size.to_string());
+        arena.produce_tuple(TupleBuilder::build_result(size.to_string()));
         arena.resume();
         Ok(())
     }
@@ -125,6 +126,7 @@ mod tests {
     use crate::db::{CatalogKind, DataBaseBuilder};
     use crate::errors::DatabaseError;
     use crate::storage::Storage;
+    use crate::types::tuple::TupleLike;
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
     use std::io::Write;
@@ -196,7 +198,7 @@ mod tests {
         let result = executor
             .next_tuple()?
             .expect("copy from file should yield once");
-        assert_eq!(result.values[0].to_string(), "2");
+        assert_eq!(result.value_at(0).to_string(), "2");
 
         Ok(())
     }

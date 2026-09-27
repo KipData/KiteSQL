@@ -48,8 +48,8 @@ impl TpccTransaction for Slev {
         tx.with_query_one(
             &mut statements[0],
             &[
-                ("$1", DataValue::Int8(args.d_id as i8)),
-                ("$2", DataValue::Int16(args.w_id as i16)),
+                (1, DataValue::Int8(args.d_id as i8)),
+                (2, DataValue::Int16(args.w_id as i16)),
             ],
             &mut |tuple| {
                 d_next_o_id = tuple.values[0].i32().unwrap();
@@ -61,10 +61,10 @@ impl TpccTransaction for Slev {
         tx.with_query_all(
             &mut statements[1],
             &[
-                ("$1", DataValue::Int16(args.w_id as i16)),
-                ("$2", DataValue::Int8(args.d_id as i8)),
-                ("$3", DataValue::Int32(d_next_o_id)),
-                ("$4", DataValue::Int32(d_next_o_id)),
+                (1, DataValue::Int16(args.w_id as i16)),
+                (2, DataValue::Int8(args.d_id as i8)),
+                (3, DataValue::Int32(d_next_o_id)),
+                (4, DataValue::Int32(d_next_o_id)),
             ],
             &mut |tuple| {
                 item_ids.push(tuple.values[0].i32().unwrap());
@@ -77,9 +77,9 @@ impl TpccTransaction for Slev {
             tx.with_query_one(
                 &mut statements[2],
                 &[
-                    ("$1", DataValue::Int16(args.w_id as i16)),
-                    ("$2", DataValue::Int32(item_id)),
-                    ("$3", DataValue::Int16(args.level as i16)),
+                    (1, DataValue::Int16(args.w_id as i16)),
+                    (2, DataValue::Int32(item_id)),
+                    (3, DataValue::Int16(args.level as i16)),
                 ],
                 &mut |tuple| {
                     _low_stock += tuple.values[0].i32().unwrap();

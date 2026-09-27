@@ -20,7 +20,7 @@ use crate::types::index::{IndexMeta, IndexMetaRef};
 use std::io::{Read, Write};
 
 impl ReferenceSerialization for IndexMetaRef {
-    fn encode<W: Write, A: MetaArena>(
+    fn encode<W: Write, A: MetaArena + ?Sized>(
         &self,
         writer: &mut W,
         is_direct: bool,
@@ -32,7 +32,7 @@ impl ReferenceSerialization for IndexMetaRef {
             .encode(writer, is_direct, reference_tables, arena)
     }
 
-    fn decode<T: Transaction, R: Read, A: MetaArena>(
+    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         drive: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,

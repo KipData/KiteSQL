@@ -31,13 +31,13 @@ use crate::optimizer::core::cm_sketch::{
 };
 use crate::optimizer::core::statistics_meta::StatisticsMeta;
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
-use crate::planner::{MetaArena, PlanArena, TableArenaCell};
+use crate::planner::{MetaArena, TableArenaCell};
 use crate::serdes::ReferenceTables;
 use crate::storage::table_codec::{Bytes, StatisticsCodecType, TableCodec, BOUND_MAX_TAG};
 use crate::types::index::{Index, IndexId, IndexMeta, IndexMetaRef, IndexType};
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::{Tuple, TupleId};
-use crate::types::value::{DataValue, TupleMappingRef};
+use crate::types::value::{DataValue, OrderedMapping, TupleMappingRef};
 use crate::types::{ColumnId, LogicalType};
 use std::borrow::{Borrow, Cow};
 use std::collections::{Bound, HashMap};
@@ -76,7 +76,7 @@ impl Display for TransactionIsolationLevel {
 
 pub(crate) fn index_value_type(
     table: &TableCatalog,
-    arena: &impl MetaArena,
+    arena: &(impl MetaArena + ?Sized),
     column_ids: &[ColumnId],
 ) -> Result<LogicalType, DatabaseError> {
     let mut value_types = Vec::with_capacity(column_ids.len());
@@ -177,7 +177,7 @@ pub trait Transaction: Sized {
     fn read<'a>(
         &'a self,
         table_codec: &mut TableCodec,
-        arena: &PlanArena,
+        arena: &(dyn MetaArena + '_),
         table_cache: &TableCache,
         table_name: TableName,
         bounds: Bounds,
@@ -208,7 +208,7 @@ pub trait Transaction: Sized {
     fn read_by_index<'a, R>(
         &'a self,
         table_cache: &TableCache,
-        arena: &PlanArena<'a>,
+        arena: &(dyn MetaArena + 'a),
         table_name: TableName,
         (offset_option, limit_option): Bounds,
         columns: Vec<ColumnRef>,
@@ -277,7 +277,7 @@ pub trait Transaction: Sized {
     fn create_deserializers(
         columns: &[ColumnRef],
         table: &TableCatalog,
-        arena: &PlanArena,
+        arena: &(dyn MetaArena + '_),
         with_pk: bool,
     ) -> Vec<TupleValueSerializableImpl> {
         let mut pk_len = if with_pk {
@@ -319,7 +319,7 @@ pub trait Transaction: Sized {
     fn add_index_meta(
         &mut self,
         table_codec: &mut TableCodec,
-        plan_arena: &mut PlanArena,
+        plan_arena: &mut (dyn MetaArena + '_),
         table_name: &TableName,
         index_name: String,
         column_ids: Vec<ColumnId>,
@@ -422,7 +422,7 @@ pub trait Transaction: Sized {
     fn rewrite_table_metadata(
         &mut self,
         table_codec: &mut TableCodec,
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
         table: &TableCatalog,
     ) -> Result<(), DatabaseError> {
         let table_name = table.name().clone();
@@ -454,7 +454,7 @@ pub trait Transaction: Sized {
     fn change_column(
         &mut self,
         table_codec: &mut TableCodec,
-        plan_arena: &mut PlanArena,
+        plan_arena: &mut (dyn MetaArena + '_),
         table_name: &TableName,
         old_column_name: &str,
         new_column_name: &str,
@@ -548,7 +548,7 @@ pub trait Transaction: Sized {
     fn add_column(
         &mut self,
         table_codec: &mut TableCodec,
-        plan_arena: &mut PlanArena,
+        plan_arena: &mut (dyn MetaArena + '_),
         table_name: &TableName,
         column: &ColumnCatalog,
         if_not_exists: bool,
@@ -597,7 +597,7 @@ pub trait Transaction: Sized {
     fn drop_column(
         &mut self,
         table_codec: &mut TableCodec,
-        plan_arena: &mut PlanArena,
+        plan_arena: &mut (dyn MetaArena + '_),
         table_name: &TableName,
         column_name: &str,
     ) -> Result<TableCatalog, DatabaseError> {
@@ -637,7 +637,7 @@ pub trait Transaction: Sized {
     fn create_view(
         &mut self,
         table_codec: &mut TableCodec,
-        arena: &PlanArena,
+        arena: &(dyn MetaArena + '_),
         view: View,
         or_replace: bool,
     ) -> Result<View, DatabaseError> {
@@ -656,7 +656,7 @@ pub trait Transaction: Sized {
     fn create_table(
         &mut self,
         table_codec: &mut TableCodec,
-        plan_arena: &mut PlanArena,
+        plan_arena: &mut (dyn MetaArena + '_),
         table_name: TableName,
         columns: Vec<ColumnCatalog>,
         if_not_exists: bool,
@@ -740,7 +740,7 @@ pub trait Transaction: Sized {
     fn drop_index(
         &mut self,
         table_codec: &mut TableCodec,
-        plan_arena: &mut PlanArena,
+        plan_arena: &mut (dyn MetaArena + '_),
         table_name: TableName,
         index_name: &str,
         if_exists: bool,
@@ -790,7 +790,7 @@ pub trait Transaction: Sized {
     fn drop_table(
         &mut self,
         table_codec: &mut TableCodec,
-        plan_arena: &mut PlanArena,
+        plan_arena: &mut (dyn MetaArena + '_),
         table_name: TableName,
         if_exists: bool,
     ) -> Result<bool, DatabaseError> {
@@ -908,7 +908,7 @@ pub trait Transaction: Sized {
     fn load_table(
         &self,
         table_codec: &mut TableCodec,
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
         table_name: TableName,
     ) -> Result<Option<TableCatalog>, DatabaseError> {
         self.table_collect(table_codec, &table_name, arena)?
@@ -934,7 +934,7 @@ pub trait Transaction: Sized {
         table_codec: &mut TableCodec,
         table_name: &TableName,
         statistics_meta: StatisticsMeta,
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
         let index_id = statistics_meta.index_id();
         let (root, buckets, cm_sketch, top_n) = statistics_meta.into_parts();
@@ -991,7 +991,7 @@ pub trait Transaction: Sized {
         table_codec: &mut TableCodec,
         table_name: &str,
         index_id: IndexId,
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<Option<StatisticsMeta>, DatabaseError> {
         table_codec.with_statistics_index_bound(table_name, index_id, |min, max| {
             let mut iter = self.range(Bound::Included(min), Bound::Included(max))?;
@@ -1060,7 +1060,7 @@ pub trait Transaction: Sized {
         &self,
         table_codec: &mut TableCodec,
         table_name: &TableName,
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<Option<(Vec<ColumnCatalog>, Vec<IndexMeta>)>, DatabaseError> {
         table_codec.with_table_bound(table_name, |table_min, table_max| {
             let mut column_iter =
@@ -1092,7 +1092,7 @@ pub trait Transaction: Sized {
     fn create_index_meta_from_column(
         &mut self,
         table_codec: &mut TableCodec,
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
         table: &mut TableCatalog,
     ) -> Result<(), DatabaseError> {
         let table_name = table.name.clone();
@@ -1154,6 +1154,7 @@ pub trait Transaction: Sized {
 
     fn remove(&mut self, key: &[u8]) -> Result<(), DatabaseError>;
 
+    // TODO: Support reverse range iteration (upper to lower bound) for descending index scans.
     fn range<'txn, 'key>(
         &'txn self,
         min: Bound<&'key [u8]>,
@@ -1241,6 +1242,14 @@ fn encode_bound_key(buffer: &mut Bytes, key: &[u8], is_upper: bool) {
     buffer.extend_from_slice(key);
     if is_upper {
         buffer.push(BOUND_MAX_TAG);
+    }
+}
+
+#[inline]
+fn index_values(value: &DataValue) -> &[DataValue] {
+    match value {
+        DataValue::Tuple(values) => values,
+        value => std::slice::from_ref(value),
     }
 }
 
@@ -1538,12 +1547,11 @@ impl<T: Transaction> IndexImpl<T> for PrimaryKeyIndexImpl {
         table_codec: &mut TableCodec,
         params: &IndexImplParams<T>,
         value: &DataValue,
-        _: bool,
+        is_upper: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
         table_codec.with_tuple_unchecked(params.table_name.as_ref(), value, None, |key, _| {
-            out.clear();
-            out.extend_from_slice(key);
+            encode_bound_key(out, key, is_upper);
             Ok(())
         })
     }
@@ -1585,7 +1593,11 @@ impl<T: Transaction> IndexImpl<T> for UniqueIndexImpl {
         _: &mut Bytes,
         _: &mut Bytes,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
-        let index = Index::new(params.index_meta().id, value, IndexType::Unique);
+        let index = Index::new(
+            params.index_meta().id,
+            index_values(value),
+            IndexType::Unique,
+        );
         let Some(bytes) =
             table_codec.with_index(params.table_name.as_ref(), &index, None, |key, _| {
                 params.tx.get_borrowed(key)
@@ -1609,7 +1621,11 @@ impl<T: Transaction> IndexImpl<T> for UniqueIndexImpl {
         _: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
-        let index = Index::new(params.index_meta().id, value, IndexType::Unique);
+        let index = Index::new(
+            params.index_meta().id,
+            index_values(value),
+            IndexType::Unique,
+        );
 
         table_codec.with_index(params.table_name.as_ref(), &index, None, |key, _| {
             out.clear();
@@ -1659,7 +1675,11 @@ impl<T: Transaction> IndexImpl<T> for NormalIndexImpl {
         is_upper: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
-        let index = Index::new(params.index_meta().id, value, IndexType::Normal);
+        let index = Index::new(
+            params.index_meta().id,
+            index_values(value),
+            IndexType::Normal,
+        );
         table_codec.with_index(params.table_name.as_ref(), &index, None, |key, _| {
             encode_bound_key(out, key, is_upper);
             Ok(())
@@ -1707,7 +1727,11 @@ impl<T: Transaction> IndexImpl<T> for CompositeIndexImpl {
         is_upper: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
-        let index = Index::new(params.index_meta().id, value, IndexType::Composite);
+        let index = Index::new(
+            params.index_meta().id,
+            index_values(value),
+            IndexType::Composite,
+        );
         table_codec.with_index(params.table_name.as_ref(), &index, None, |key, _| {
             encode_bound_key(out, key, is_upper);
             Ok(())
@@ -1724,11 +1748,12 @@ impl<T: Transaction> IndexImpl<T> for CoveredIndexImpl {
         value: &[u8],
         params: &IndexImplParams<T>,
     ) -> Result<(), DatabaseError> {
-        let mapping = params
-            .cover_mapping
-            .as_ref()
-            .map(|mapping| mapping.as_ref());
-        let key = TableCodec::decode_index_key(key, params.value_ty(), mapping)?;
+        let key = match &params.cover_mapping {
+            Some(mapping) => {
+                TableCodec::decode_index_key(key, params.value_ty(), &mapping.as_ref())?
+            }
+            None => TableCodec::decode_index_key(key, params.value_ty(), &OrderedMapping)?,
+        };
 
         let tuple_id = if params.with_pk {
             Some(TableCodec::decode_index(value)?)
@@ -1736,10 +1761,7 @@ impl<T: Transaction> IndexImpl<T> for CoveredIndexImpl {
             None
         };
         tuple.pk = tuple_id;
-        tuple.values = match key {
-            DataValue::Tuple(vals, _) => vals,
-            v => vec![v],
-        };
+        tuple.values = key;
         Ok(())
     }
 
@@ -1771,7 +1793,11 @@ impl<T: Transaction> IndexImpl<T> for CoveredIndexImpl {
         is_upper: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
-        let index = Index::new(params.index_meta().id, value, params.index_meta().ty);
+        let index = Index::new(
+            params.index_meta().id,
+            index_values(value),
+            params.index_meta().ty,
+        );
         table_codec.with_index(params.table_name.as_ref(), &index, None, |key, _| {
             encode_bound_key(out, key, is_upper);
             Ok(())
@@ -2062,7 +2088,7 @@ pub struct TableIter<'a, T: Transaction + 'a> {
 impl<T: Transaction> TableIter<'_, T> {
     pub fn try_next(
         &mut self,
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<Option<TableMeta>, DatabaseError> {
         let Some((_, value)) = self.iter.try_next()? else {
             return Ok(None);
@@ -2576,15 +2602,27 @@ mod test {
         let indexes = [
             (
                 Arc::new(DataValue::Int32(0)),
-                Index::new(1, &tuples[0].values[2], IndexType::Normal),
+                Index::new(
+                    1,
+                    std::slice::from_ref(&tuples[0].values[2]),
+                    IndexType::Normal,
+                ),
             ),
             (
                 Arc::new(DataValue::Int32(1)),
-                Index::new(1, &tuples[1].values[2], IndexType::Normal),
+                Index::new(
+                    1,
+                    std::slice::from_ref(&tuples[1].values[2]),
+                    IndexType::Normal,
+                ),
             ),
             (
                 Arc::new(DataValue::Int32(2)),
-                Index::new(1, &tuples[2].values[2], IndexType::Normal),
+                Index::new(
+                    1,
+                    std::slice::from_ref(&tuples[2].values[2]),
+                    IndexType::Normal,
+                ),
             ),
         ];
         for (tuple_id, index) in indexes.iter().cloned() {
@@ -2710,7 +2748,11 @@ mod test {
             setup_tx.add_index(
                 &mut table_codec,
                 "t1",
-                Index::new(index_id, &initial_tuple.values[2], IndexType::Normal),
+                Index::new(
+                    index_id,
+                    std::slice::from_ref(&initial_tuple.values[2]),
+                    IndexType::Normal,
+                ),
                 initial_tuple.pk.as_ref().unwrap(),
             )?;
             setup_tx.append_tuple(&mut table_codec, "t1", &initial_tuple, &serializers, false)?;
@@ -2748,13 +2790,21 @@ mod test {
         writer_tx.del_index(
             &mut table_codec,
             "t1",
-            &Index::new(index_id, &initial_tuple.values[2], IndexType::Normal),
+            &Index::new(
+                index_id,
+                std::slice::from_ref(&initial_tuple.values[2]),
+                IndexType::Normal,
+            ),
             initial_tuple.pk.as_ref().unwrap(),
         )?;
         writer_tx.add_index(
             &mut table_codec,
             "t1",
-            Index::new(index_id, &updated_tuple.values[2], IndexType::Normal),
+            Index::new(
+                index_id,
+                std::slice::from_ref(&updated_tuple.values[2]),
+                IndexType::Normal,
+            ),
             updated_tuple.pk.as_ref().unwrap(),
         )?;
         writer_tx.append_tuple(&mut table_codec, "t1", &updated_tuple, &serializers, true)?;

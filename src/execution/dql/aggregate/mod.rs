@@ -29,8 +29,9 @@ use crate::execution::dql::aggregate::sum::{DistinctSumAccumulator, SumAccumulat
 use crate::expression::agg::AggKind;
 use crate::expression::ScalarExpression;
 use crate::iter_ext::Itertools;
-use crate::planner::{ExprRef, PlanArena};
-use crate::types::tuple::Tuple;
+use crate::planner::ExprRef;
+use crate::planner::MetaArena;
+use crate::types::tuple::{Tuple, TupleLike};
 use crate::types::value::DataValue;
 use std::borrow::Cow;
 
@@ -70,7 +71,7 @@ pub(crate) fn create_accumulator(
 #[inline]
 pub(crate) fn create_accumulators(
     exprs: &[ExprRef],
-    arena: &PlanArena<'_>,
+    arena: &(dyn MetaArena + '_),
 ) -> Result<Vec<Box<dyn Accumulator>>, DatabaseError> {
     exprs
         .iter()
@@ -89,8 +90,8 @@ pub(crate) fn create_accumulators(
 pub(crate) fn update_accumulators(
     accs: &mut [Box<dyn Accumulator>],
     agg_calls: &[ExprRef],
-    tuple: &Tuple,
-    arena: &PlanArena<'_>,
+    tuple: &dyn TupleLike,
+    arena: &(dyn MetaArena + '_),
 ) -> Result<(), DatabaseError> {
     for (acc, expr) in accs.iter_mut().zip(agg_calls.iter()) {
         let ScalarExpression::AggCall { args, .. } = arena.expression(*expr) else {

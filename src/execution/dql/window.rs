@@ -20,10 +20,10 @@ use crate::expression::window::WindowFunctionKind;
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::window::WindowOperator;
 use crate::planner::LogicalPlan;
+use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
-use std::mem;
 
 mod function;
 
@@ -82,7 +82,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Window {
     fn into_executor(
         (operator, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -123,13 +123,14 @@ impl Window {
     fn update_keys(
         &mut self,
         tuple: &Tuple,
-        plan_arena: &crate::planner::PlanArena<'_>,
+        plan_arena: &(dyn MetaArena + '_),
     ) -> Result<Option<Boundary>, DatabaseError> {
         let mut boundary = (!self.state.started).then_some(Boundary::Partition);
         for (index, field) in self.sort_fields.iter().enumerate() {
             let value = plan_arena
                 .expression(field.expr)
-                .eval(plan_arena, Some(tuple))?;
+                .eval(plan_arena, Some(tuple))?
+                .into_owned();
             if self.state.started && self.state.sort_values[index] != value {
                 if index < self.partition_by_len {
                     boundary = Some(Boundary::Partition);
@@ -152,10 +153,7 @@ impl Window {
         Ok(())
     }
 
-    fn eval_functions(
-        &mut self,
-        plan_arena: &crate::planner::PlanArena<'_>,
-    ) -> Result<(), DatabaseError> {
+    fn eval_functions(&mut self, plan_arena: &(dyn MetaArena + '_)) -> Result<(), DatabaseError> {
         if self.state.buffered.is_empty() {
             return Ok(());
         }
@@ -183,7 +181,7 @@ impl Window {
         &mut self,
         tuple: Tuple,
         boundary: Option<Boundary>,
-        plan_arena: &crate::planner::PlanArena<'_>,
+        plan_arena: &(dyn MetaArena + '_),
     ) -> Result<bool, DatabaseError> {
         let boundary = match boundary {
             Some(boundary) => Some(boundary),
@@ -223,7 +221,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Window {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         let mut output_ready = true;
         loop {
@@ -241,7 +239,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Window {
             let (tuple, boundary) = if let Some((tuple, boundary)) = self.state.pending.take() {
                 (tuple, Some(boundary))
             } else if arena.next_tuple(self.input, plan_arena)? {
-                (mem::take(arena.result_tuple_mut()), None)
+                (arena.materialize_tuple(), None)
             } else {
                 self.eval_functions(plan_arena)?;
                 self.input_exhausted = true;

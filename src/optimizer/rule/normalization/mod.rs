@@ -22,6 +22,7 @@ use crate::optimizer::rule::normalization::combine_operators::{
 };
 use crate::optimizer::rule::normalization::compilation_in_advance::EvaluatorBind;
 use crate::planner::operator::Operator;
+use crate::planner::MetaArena;
 
 use crate::optimizer::rule::normalization::min_max_top_k::MinMaxToTopK;
 use crate::optimizer::rule::normalization::pushdown_limit::{
@@ -280,7 +281,7 @@ impl ExprVisitorMut for PositionRemapper<'_, '_> {
     fn visit_expression_ref(
         &mut self,
         expr: &mut ExprRef,
-        _arena: &mut crate::planner::PlanArena<'_>,
+        _arena: &mut (dyn MetaArena + '_),
     ) -> Result<bool, DatabaseError> {
         Ok(self.visited.insert(*expr))
     }
@@ -289,7 +290,7 @@ impl ExprVisitorMut for PositionRemapper<'_, '_> {
         &mut self,
         _column: &mut crate::catalog::ColumnRef,
         position: &mut usize,
-        _arena: &mut crate::planner::PlanArena<'_>,
+        _arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         remap_position(position, self.removed_positions);
         Ok(())
@@ -299,7 +300,7 @@ impl ExprVisitorMut for PositionRemapper<'_, '_> {
         &mut self,
         expr: &mut ExprRef,
         alias: &mut AliasType,
-        arena: &mut crate::planner::PlanArena<'_>,
+        arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         match alias {
             AliasType::Expr(alias_expr) => self.visit(alias_expr, arena),

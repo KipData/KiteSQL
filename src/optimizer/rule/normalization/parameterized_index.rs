@@ -23,6 +23,7 @@ use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyOperator, Mar
 use crate::planner::operator::project::ProjectOperator;
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
+use crate::planner::MetaArena;
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::types::index::{IndexLookup, IndexType};
 use crate::types::tuple::Schema;
@@ -66,7 +67,7 @@ fn find_parameterized_probe(
     predicates: &[ExprRef],
     left_schema: &Schema,
     right_schema: &Schema,
-    arena: &crate::planner::PlanArena,
+    arena: &dyn MetaArena,
 ) -> Result<Option<(ColumnRef, ExprRef)>, DatabaseError> {
     match kind {
         MarkApplyKind::Exists => {
@@ -94,7 +95,7 @@ fn extract_parameterized_probe(
     predicate: ExprRef,
     left_schema: &Schema,
     right_schema: &Schema,
-    arena: &crate::planner::PlanArena,
+    arena: &dyn MetaArena,
 ) -> Result<Option<(ColumnRef, ExprRef)>, DatabaseError> {
     match predicate.unpack_alias_ref(arena) {
         ScalarExpression::Binary {
@@ -129,7 +130,7 @@ fn extract_parameterized_probe_side(
     left_expr: ExprRef,
     left_schema: &Schema,
     right_schema: &Schema,
-    arena: &crate::planner::PlanArena,
+    arena: &dyn MetaArena,
 ) -> Result<Option<(ColumnRef, ExprRef)>, DatabaseError> {
     let Some((right_column, _)) = right_expr
         .unpack_alias(arena)
@@ -158,7 +159,7 @@ fn extract_parameterized_probe_side(
 fn parameterize_right_subtree(
     plan: &mut LogicalPlan,
     right_column: &ColumnRef,
-    arena: &crate::planner::PlanArena,
+    arena: &dyn MetaArena,
 ) -> bool {
     if matches!(plan.operator, Operator::TableScan(_)) {
         let index_info = {
@@ -203,7 +204,7 @@ fn parameterize_right_subtree(
 fn pick_parameterized_index_position(
     scan_op: &TableScanOperator,
     right_column: &ColumnRef,
-    arena: &crate::planner::PlanArena,
+    arena: &dyn MetaArena,
 ) -> Option<usize> {
     let right_column = arena.column(*right_column);
     let column_id = right_column.id()?;
@@ -235,11 +236,7 @@ fn index_priority(index_type: IndexType) -> usize {
     }
 }
 
-fn schema_contains_column(
-    schema: &Schema,
-    column: &ColumnRef,
-    arena: &crate::planner::PlanArena,
-) -> bool {
+fn schema_contains_column(schema: &Schema, column: &ColumnRef, arena: &dyn MetaArena) -> bool {
     schema
         .iter()
         .any(|candidate| arena.same_column(*candidate, *column))

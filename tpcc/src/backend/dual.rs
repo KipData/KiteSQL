@@ -28,7 +28,7 @@ pub struct DualBackend {
 }
 
 pub struct DualPreparedStatement<'a> {
-    kitesql: KiteSqlPreparedStatement,
+    kitesql: KiteSqlPreparedStatement<'a>,
     sqlite: SqlitePreparedStatement<'a>,
     spec: StatementSpec,
 }

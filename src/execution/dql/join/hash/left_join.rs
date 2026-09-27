@@ -18,7 +18,8 @@ use crate::execution::dql::join::hash::{
 };
 use crate::execution::dql::join::hash_join::BuildState;
 use crate::execution::dql::join::RowBitmap;
-use crate::planner::{ExprRef, PlanArena};
+use crate::planner::ExprRef;
+use crate::planner::MetaArena;
 use crate::types::tuple::{SplitTupleRef, Tuple};
 use crate::types::value::DataValue;
 
@@ -34,7 +35,7 @@ impl JoinProbeState for LeftJoinState {
         probe_state: &mut ProbeState,
         build_state: Option<&mut BuildState>,
         filter_expr: Option<&ExprRef>,
-        plan_arena: &PlanArena<'_>,
+        plan_arena: &(dyn MetaArena + '_),
     ) -> Result<Option<Tuple>, DatabaseError> {
         if probe_state.is_keys_has_null {
             probe_state.finished = true;
@@ -82,7 +83,7 @@ impl JoinProbeState for LeftJoinState {
         &mut self,
         left_drop_state: &mut LeftDropState,
         _filter_expr: Option<&ExprRef>,
-        _plan_arena: &PlanArena<'_>,
+        _plan_arena: &(dyn MetaArena + '_),
     ) -> Result<Option<Tuple>, DatabaseError> {
         let full_schema_len = self.right_schema_len + self.left_schema_len;
 

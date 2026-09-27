@@ -13,13 +13,14 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+use crate::planner::MetaArena;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use crate::storage::Transaction;
 use crate::types::CharLengthUnits;
 use std::io::{Read, Write};
 
 impl ReferenceSerialization for CharLengthUnits {
-    fn encode<W: Write, A: crate::planner::MetaArena>(
+    fn encode<W: Write, A: MetaArena + ?Sized>(
         &self,
         writer: &mut W,
         is_direct: bool,
@@ -35,7 +36,7 @@ impl ReferenceSerialization for CharLengthUnits {
         Ok(())
     }
 
-    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
+    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         _: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         _: &ReferenceTables,

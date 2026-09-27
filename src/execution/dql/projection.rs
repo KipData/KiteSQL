@@ -17,6 +17,7 @@ use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::project::ProjectOperator;
+use crate::planner::MetaArena;
 use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 
@@ -31,7 +32,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Projection {
     fn into_executor(
         (ProjectOperator { exprs }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
@@ -44,22 +45,14 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut crate::planner::PlanArena<'a>,
+        plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         if !arena.next_tuple(self.input, plan_arena)? {
             arena.finish();
             return Ok(());
         }
 
-        arena.with_projection_tmp(|arena, projection_tmp| {
-            let tuple = arena.result_tuple();
-            projection_tmp.reserve(self.exprs.len());
-            for expr in self.exprs.iter() {
-                projection_tmp.push(plan_arena.expression(*expr).eval(plan_arena, Some(tuple))?);
-            }
-            std::mem::swap(&mut arena.result_tuple_mut().values, projection_tmp);
-            Ok::<_, DatabaseError>(())
-        })?;
+        arena.rewrite(&self.exprs, plan_arena, None)?;
         arena.resume();
         Ok(())
     }

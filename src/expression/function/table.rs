@@ -14,7 +14,8 @@
 
 use crate::errors::DatabaseError;
 use crate::expression::function::FunctionSummary;
-use crate::planner::{ExprRef, PlanArena, TableArena};
+use crate::planner::MetaArena;
+use crate::planner::{ExprRef, TableArena};
 use crate::types::tuple::{Schema, Tuple};
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt::Debug;
@@ -62,7 +63,7 @@ pub trait TableFunctionImpl: Debug + Send + Sync {
     fn eval(
         &self,
         args: &[ExprRef],
-        arena: &PlanArena<'_>,
+        arena: &(dyn MetaArena + '_),
     ) -> Result<Box<dyn Iterator<Item = Result<Tuple, DatabaseError>>>, DatabaseError>;
 
     fn summary(&self) -> &FunctionSummary;

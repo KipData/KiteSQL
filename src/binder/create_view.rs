@@ -21,9 +21,9 @@ use crate::planner::operator::create_view::CreateViewOperator;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, ExprRef, LogicalPlan};
 use crate::storage::Transaction;
-use crate::types::value::DataValue;
+use crate::types::LogicalType;
 
-impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A> {
+impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_create_view(
         &mut self,
         view_name: TableName,

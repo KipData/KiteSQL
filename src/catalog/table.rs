@@ -62,7 +62,7 @@ impl TableCatalog {
     pub(crate) fn get_unique_index(
         &self,
         col_id: &ColumnId,
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
     ) -> Option<IndexMetaRef> {
         self.indexes.iter().copied().find(|meta| {
             let meta = arena.index(*meta);
@@ -121,14 +121,17 @@ impl TableCatalog {
 
     pub(crate) fn dml_snapshot(
         &self,
-        arena: &mut PlanArena,
+        arena: &(dyn MetaArena + '_),
     ) -> Result<DmlTableSnapshot<'_>, DatabaseError> {
         let index_metas = self
             .indexes()
             .map(|index_meta| {
                 Ok((
                     *index_meta,
-                    arena.index(*index_meta).column_exprs(self, arena)?,
+                    arena
+                        .index(*index_meta)
+                        .column_exprs(self)
+                        .collect::<Result<Vec<_>, _>>()?,
                 ))
             })
             .collect::<Result<Vec<_>, DatabaseError>>()?;
@@ -145,7 +148,7 @@ impl TableCatalog {
     pub(crate) fn add_column(
         &mut self,
         mut col: ColumnCatalog,
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<ColumnId, DatabaseError> {
         if self.column_idxs.contains_key(col.name()) {
             return Err(DatabaseError::DuplicateColumn(col.name().to_string()));
@@ -176,7 +179,7 @@ impl TableCatalog {
         name: String,
         column_ids: Vec<ColumnId>,
         ty: IndexType,
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<IndexMetaRef, DatabaseError> {
         for index in self.indexes.iter() {
             if arena.index(*index).name == name {
@@ -224,7 +227,7 @@ impl TableCatalog {
     pub fn new(
         name: TableName,
         columns: Vec<ColumnCatalog>,
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<TableCatalog, DatabaseError> {
         if columns.is_empty() {
             return Err(DatabaseError::ColumnsEmpty);
@@ -254,7 +257,7 @@ impl TableCatalog {
 
     fn build_primary_key_type(
         primary_keys: &[(usize, ColumnRef)],
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
     ) -> LogicalType {
         if primary_keys.len() == 1 {
             arena.column(primary_keys[0].1).datatype().clone()
@@ -272,7 +275,7 @@ impl TableCatalog {
         name: TableName,
         column_catalogs: I,
         indexes: I2,
-        arena: &mut impl MetaArena,
+        arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<TableCatalog, DatabaseError>
     where
         I: Iterator<Item = ColumnCatalog>,
@@ -332,7 +335,7 @@ impl TableCatalog {
 
     fn build_primary_keys(
         columns: &[ColumnRef],
-        arena: &impl MetaArena,
+        arena: &(impl MetaArena + ?Sized),
     ) -> (Vec<(usize, ColumnRef)>, Vec<usize>) {
         let mut primary_keys = Vec::new();
         let mut primary_key_indices = Vec::new();

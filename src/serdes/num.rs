@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+use crate::planner::MetaArena;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use crate::storage::Transaction;
 use std::io::Read;
@@ -23,7 +24,7 @@ use std::mem::size_of;
 macro_rules! implement_num_serialization {
     ($struct_name:ident) => {
         impl ReferenceSerialization for $struct_name {
-            fn encode<W: Write, A: $crate::planner::MetaArena>(
+            fn encode<W: Write, A: $crate::planner::MetaArena + ?Sized>(
                 &self,
                 writer: &mut W,
                 _: bool,
@@ -35,7 +36,7 @@ macro_rules! implement_num_serialization {
                 Ok(())
             }
 
-            fn decode<T: Transaction, R: Read, A: $crate::planner::MetaArena>(
+            fn decode<T: Transaction, R: Read, A: $crate::planner::MetaArena + ?Sized>(
                 reader: &mut R,
                 _: Option<&$crate::serdes::ReferenceDecodeContext<'_, T>>,
                 _: &ReferenceTables,
@@ -63,7 +64,7 @@ implement_num_serialization!(f32);
 implement_num_serialization!(f64);
 
 impl ReferenceSerialization for usize {
-    fn encode<W: Write, A: crate::planner::MetaArena>(
+    fn encode<W: Write, A: MetaArena + ?Sized>(
         &self,
         writer: &mut W,
         is_direct: bool,
@@ -73,7 +74,7 @@ impl ReferenceSerialization for usize {
         (*self as u32).encode(writer, is_direct, reference_tables, arena)
     }
 
-    fn decode<T: Transaction, R: Read, A: crate::planner::MetaArena>(
+    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
@@ -86,6 +87,7 @@ impl ReferenceSerialization for usize {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod test {
     use crate::errors::DatabaseError;
+    use crate::planner::MetaArena;
     use crate::serdes::{ReferenceSerialization, ReferenceTables};
     use crate::storage::rocksdb::RocksTransaction;
     use std::io::{Cursor, Seek, SeekFrom};

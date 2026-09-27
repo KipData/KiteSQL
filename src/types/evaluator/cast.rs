@@ -1272,7 +1272,7 @@ mod test {
             (
                 CAST_TUPLE * CAST_TYPE_STRIDE + CAST_TUPLE,
                 CastEvaluatorParams::Unit,
-                DataValue::Tuple(vec![DataValue::Int32(1)], false),
+                DataValue::Tuple(vec![DataValue::Int32(1)]),
             ),
             (u16::MAX, CastEvaluatorParams::Unit, DataValue::Int32(1)),
         ];
@@ -1847,7 +1847,7 @@ mod test {
     #[test]
     fn test_cast_create_dispatches_tuple_and_rejects_unsupported_casts() -> Result<(), DatabaseError>
     {
-        let tuple = DataValue::Tuple(vec![DataValue::Int32(1), utf8("2")], false);
+        let tuple = DataValue::Tuple(vec![DataValue::Int32(1), utf8("2")]);
         assert_eq!(
             cast_eval(
                 LogicalType::Tuple(vec![
@@ -1857,7 +1857,7 @@ mod test {
                 LogicalType::Tuple(vec![LogicalType::Bigint, LogicalType::Integer]),
                 &tuple,
             )?,
-            DataValue::Tuple(vec![DataValue::Int64(1), DataValue::Int32(2)], false)
+            DataValue::Tuple(vec![DataValue::Int64(1), DataValue::Int32(2)])
         );
 
         assert!(matches!(

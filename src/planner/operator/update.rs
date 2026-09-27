@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use crate::catalog::{ColumnRef, TableName};
-use crate::planner::{Explain, ExprRef, PlanArena};
+use crate::planner::MetaArena;
+use crate::planner::{Explain, ExprRef};
 use kite_sql_serde_macros::ReferenceSerialization;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
@@ -23,7 +24,11 @@ pub struct UpdateOperator {
 }
 
 impl Explain for UpdateOperator {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        arena: &(dyn MetaArena + '_),
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         write!(f, "Update {} set ", self.table_name)?;
         for (index, (column, expr)) in self.value_exprs.iter().enumerate() {
             if index > 0 {

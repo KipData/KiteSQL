@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::planner::{Childrens, Explain, ExprRef, LogicalPlan, PlanArena};
+use crate::planner::MetaArena;
+use crate::planner::{Childrens, Explain, ExprRef, LogicalPlan};
 use kite_sql_serde_macros::ReferenceSerialization;
 
 use super::Operator;
@@ -38,7 +39,11 @@ impl FilterOperator {
 }
 
 impl Explain for FilterOperator {
-    fn fmt(&self, arena: &PlanArena<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(
+        &self,
+        arena: &(dyn MetaArena + '_),
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
         write!(
             f,
             "Filter {}, Is Having: {}",
