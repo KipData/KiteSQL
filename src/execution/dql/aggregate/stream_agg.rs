@@ -20,23 +20,24 @@ use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::aggregate::AggregateOperator;
+use crate::planner::ExprRef;
+use crate::planner::LogicalPlan;
 use crate::planner::MetaArena;
-use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
 use std::mem;
 
 // The optimizer selects this executor only when equal group keys are contiguous in the input.
-pub struct StreamAggExecutor {
-    agg_calls: Vec<ExprRef>,
-    groupby_exprs: Vec<ExprRef>,
+pub struct StreamAggExecutor<'a> {
+    agg_calls: &'a [ExprRef],
+    groupby_exprs: &'a [ExprRef],
     group_keys: Option<Vec<DataValue>>,
     accs: Vec<Box<dyn Accumulator>>,
     input: ExecId,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamAggExecutor {
-    type Input = (AggregateOperator, LogicalPlan);
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamAggExecutor<'a> {
+    type Input = (&'a AggregateOperator, &'a LogicalPlan);
 
     fn into_executor(
         (
@@ -63,7 +64,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamAggExecutor {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -86,7 +87,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor {
 
             let tuple = arena.result_tuple();
             let mut group_keys = Vec::with_capacity(self.groupby_exprs.len());
-            for expr in &self.groupby_exprs {
+            for expr in self.groupby_exprs {
                 group_keys.push(
                     plan_arena
                         .expression(*expr)
@@ -97,16 +98,16 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor {
 
             match &mut self.group_keys {
                 None => {
-                    self.accs = create_accumulators(&self.agg_calls, plan_arena)?;
-                    update_accumulators(&mut self.accs, &self.agg_calls, tuple, plan_arena)?;
+                    self.accs = create_accumulators(self.agg_calls, plan_arena)?;
+                    update_accumulators(&mut self.accs, self.agg_calls, tuple, plan_arena)?;
                     self.group_keys = Some(group_keys);
                 }
                 Some(current_keys) if current_keys == &group_keys => {
-                    update_accumulators(&mut self.accs, &self.agg_calls, tuple, plan_arena)?;
+                    update_accumulators(&mut self.accs, self.agg_calls, tuple, plan_arena)?;
                 }
                 Some(current_keys) => {
-                    let mut next_accs = create_accumulators(&self.agg_calls, plan_arena)?;
-                    update_accumulators(&mut next_accs, &self.agg_calls, tuple, plan_arena)?;
+                    let mut next_accs = create_accumulators(self.agg_calls, plan_arena)?;
+                    update_accumulators(&mut next_accs, self.agg_calls, tuple, plan_arena)?;
                     mem::swap(current_keys, &mut group_keys);
                     let current_accs = mem::replace(&mut self.accs, next_accs);
                     write_aggregate_output(arena.result_tuple_mut(), current_accs, group_keys)?;
@@ -187,7 +188,7 @@ mod tests {
         let transaction = storage.transaction()?;
 
         let rows = try_collect(execute_input::<_, StreamAggExecutor>(
-            (operator, input),
+            (&operator, &input),
             empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &transaction,
@@ -231,7 +232,7 @@ mod tests {
         let transaction = storage.transaction()?;
 
         let rows = try_collect(execute_input::<_, StreamAggExecutor>(
-            (operator, input),
+            (&operator, &input),
             empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &transaction,

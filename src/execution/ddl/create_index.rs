@@ -24,73 +24,53 @@ use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::index::Index;
 use crate::types::tuple::Schema;
-use crate::types::tuple_builder::TupleBuilder;
 use crate::types::ColumnId;
 
-pub struct CreateIndex {
-    op: Option<CreateIndexOperator>,
+pub struct CreateIndex<'a> {
+    op: &'a CreateIndexOperator,
     input_schema: Schema,
-    input_plan: LogicalPlan,
     input: ExecId,
 }
 
-impl From<(CreateIndexOperator, LogicalPlan)> for CreateIndex {
-    fn from((op, input): (CreateIndexOperator, LogicalPlan)) -> Self {
-        Self {
-            op: Some(op),
-            input_schema: Default::default(),
-            input_plan: input,
-            input: 0,
-        }
-    }
-}
-
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateIndex {
-    type Input = Self;
+impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateIndex<'a> {
+    type Input = (&'a CreateIndexOperator, &'a LogicalPlan);
 
     fn into_executor(
-        input: Self::Input,
+        (op, input_plan): Self::Input,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let mut executor = input;
-        executor.input_schema = executor.input_plan.take_schema(plan_arena);
-        executor.input = build_read(
-            arena,
-            plan_arena,
-            executor.input_plan.take(),
-            cache,
-            transaction,
-        );
-        arena.push(ExecNode::CreateIndex(executor))
+        let input_schema = input_plan.read_schema().clone();
+        let input = build_read(arena, plan_arena, input_plan, cache, transaction);
+        arena.push(ExecNode::CreateIndex(CreateIndex {
+            op,
+            input_schema,
+            input,
+        }))
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateIndex {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
-        let Some(CreateIndexOperator {
+        let CreateIndexOperator {
             table_name,
             index_name,
             columns,
             if_not_exists,
             ty,
-        }) = self.op.take()
-        else {
-            arena.finish();
-            return Ok(());
-        };
+        } = self.op;
 
-        if if_not_exists
-            && arena.table_cache().get(&table_name).is_some_and(|table| {
+        if *if_not_exists
+            && arena.table_cache().get(table_name).is_some_and(|table| {
                 table
                     .indexes()
-                    .any(|index| plan_arena.index(*index).name == index_name)
+                    .any(|index| plan_arena.index(*index).name == *index_name)
             })
         {
             arena.finish();
@@ -98,7 +78,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateIndex {
         }
 
         let (column_ids, column_exprs): (Vec<ColumnId>, Vec<ScalarExpression>) = columns
-            .into_iter()
+            .iter()
+            .copied()
             .filter_map(|column| {
                 plan_arena.column(column).id().and_then(|id| {
                     self.input_schema
@@ -113,10 +94,10 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateIndex {
             let (table, index_id) = transaction.add_index_meta(
                 table_codec,
                 plan_arena,
-                &table_name,
-                index_name,
+                table_name,
+                index_name.clone(),
                 column_ids,
-                ty,
+                *ty,
             )?;
             arena.push_ddl_apply(DDLApply::upsert_table(table, false));
             Ok(index_id)
@@ -124,7 +105,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateIndex {
         let index_id = match index_id_result {
             Ok(index_id) => index_id,
             Err(DatabaseError::DuplicateIndex(index_name)) => {
-                if if_not_exists {
+                if *if_not_exists {
                     arena.finish();
                     return Ok(());
                 } else {
@@ -142,13 +123,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateIndex {
             {
                 let mut state = arena.local_state(plan_arena);
                 let (values, transaction, table_codec) = state.index_values_transaction_codec_mut();
-                let index = Index::new(index_id, values, ty);
+                let index = Index::new(index_id, values, *ty);
                 transaction.add_index(table_codec, table_name.as_ref(), index, &tuple_pk)?;
             }
         }
 
-        arena.produce_tuple(TupleBuilder::build_result("1".to_string()));
-        arena.resume();
+        arena.finish();
         Ok(())
     }
 }

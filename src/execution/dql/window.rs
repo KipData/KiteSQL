@@ -66,18 +66,18 @@ impl WindowState {
     }
 }
 
-pub struct Window {
+pub struct Window<'a> {
     state: WindowState,
     retention: Retention,
-    sort_fields: Vec<SortField>,
+    sort_fields: &'a [SortField],
     partition_by_len: usize,
     functions: Vec<Box<dyn WindowFunction>>,
     input_exhausted: bool,
     input: ExecId,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Window {
-    type Input = (WindowOperator, LogicalPlan);
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Window<'a> {
+    type Input = (&'a WindowOperator, &'a LogicalPlan);
 
     fn into_executor(
         (operator, input): Self::Input,
@@ -98,20 +98,22 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Window {
             .any(|function| matches!(function.kind, WindowFunctionKind::Aggregate(_)));
         let retention = if !has_aggregate {
             Retention::Row
-        } else if sort_fields.len() == partition_by_len {
+        } else if sort_fields.len() == *partition_by_len {
             Retention::Partition
         } else {
             Retention::Peer
         };
         let functions = window_functions
-            .into_iter()
-            .map(|function| function::new(function.kind, function.args, function.ty))
+            .iter()
+            .map(|function| {
+                function::new(function.kind, function.args.clone(), function.ty.clone())
+            })
             .collect();
         arena.push(ExecNode::Window(Window {
             state: WindowState::default(),
             retention,
             sort_fields,
-            partition_by_len,
+            partition_by_len: *partition_by_len,
             functions,
             input_exhausted: false,
             input,
@@ -119,7 +121,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Window {
     }
 }
 
-impl Window {
+impl<'a> Window<'a> {
     fn update_keys(
         &mut self,
         tuple: &Tuple,
@@ -217,7 +219,7 @@ impl Window {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Window {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Window<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -269,12 +271,12 @@ mod tests {
         ))
     }
 
-    fn window(
+    fn window<'a>(
         retention: Retention,
-        sort_fields: Vec<SortField>,
+        sort_fields: &'a [SortField],
         partition_by_len: usize,
         functions: Vec<Box<dyn WindowFunction>>,
-    ) -> Window {
+    ) -> Window<'a> {
         Window {
             state: WindowState::default(),
             retention,
@@ -296,12 +298,13 @@ mod tests {
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
         let partition = column(&mut plan_arena, 0);
         let order = column(&mut plan_arena, 1);
+        let sort_fields = [
+            SortField::from(partition).asc(),
+            SortField::from(order).asc(),
+        ];
         let mut window = window(
             Retention::Row,
-            vec![
-                SortField::from(partition).asc(),
-                SortField::from(order).asc(),
-            ],
+            &sort_fields,
             1,
             vec![
                 function::new(
@@ -326,12 +329,13 @@ mod tests {
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
         let partition = column(&mut plan_arena, 0);
         let value = column(&mut plan_arena, 1);
+        let sort_fields = [
+            SortField::from(partition).asc(),
+            SortField::from(value).asc(),
+        ];
         let mut window = window(
             Retention::Peer,
-            vec![
-                SortField::from(partition).asc(),
-                SortField::from(value).asc(),
-            ],
+            &sort_fields,
             1,
             vec![function::new(
                 WindowFunctionKind::Aggregate(AggKind::Sum),
@@ -353,9 +357,10 @@ mod tests {
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
         let partition = column(&mut plan_arena, 0);
         let value = column(&mut plan_arena, 1);
+        let sort_fields = [SortField::from(partition).asc()];
         let mut window = window(
             Retention::Partition,
-            vec![SortField::from(partition).asc()],
+            &sort_fields,
             1,
             vec![function::new(
                 WindowFunctionKind::Aggregate(AggKind::Sum),

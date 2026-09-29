@@ -19,63 +19,50 @@ use crate::execution::{
 use crate::planner::operator::create_table::CreateTableOperator;
 use crate::planner::MetaArena;
 use crate::storage::Transaction;
-use crate::types::tuple_builder::TupleBuilder;
 
-pub struct CreateTable {
-    op: Option<CreateTableOperator>,
+pub struct CreateTable<'a> {
+    op: &'a CreateTableOperator,
 }
 
-impl From<CreateTableOperator> for CreateTable {
-    fn from(op: CreateTableOperator) -> Self {
-        CreateTable { op: Some(op) }
-    }
-}
-
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateTable {
-    type Input = Self;
+impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateTable<'a> {
+    type Input = &'a CreateTableOperator;
 
     fn into_executor(
-        input: Self::Input,
+        op: Self::Input,
         arena: &mut ExecArena<'a, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        let executor = input;
-        arena.push(ExecNode::CreateTable(executor))
+        arena.push(ExecNode::CreateTable(CreateTable { op }))
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateTable {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateTable<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
-        let Some(CreateTableOperator {
+        let CreateTableOperator {
             table_name,
             columns,
             if_not_exists,
-        }) = self.op.take()
-        else {
-            arena.finish();
-            return Ok(());
-        };
+        } = self.op;
 
         let (transaction, table_codec) = arena.transaction_codec_mut();
         let table = transaction.create_table(
             table_codec,
             plan_arena,
             table_name.clone(),
-            columns,
-            if_not_exists,
+            columns.clone(),
+            *if_not_exists,
         )?;
         if let Some(table) = table {
             arena.push_ddl_apply(DDLApply::upsert_table(table, false));
         }
 
-        arena.produce_tuple(TupleBuilder::build_result(format!("{table_name}")));
-        arena.resume();
+        arena.finish();
         Ok(())
     }
 }

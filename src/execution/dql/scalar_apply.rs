@@ -29,7 +29,7 @@ pub struct ScalarApply {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ScalarApply {
-    type Input = (ScalarApplyOperator, LogicalPlan, LogicalPlan);
+    type Input = (&'a ScalarApplyOperator, &'a LogicalPlan, &'a LogicalPlan);
 
     fn into_executor(
         (_, left_input, right_input): Self::Input,
@@ -54,12 +54,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarApply {
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
-        Self::load_right_once(&mut self.cached_right, self.right_input, arena, plan_arena)?;
-
-        let right_tuple = self
-            .cached_right
-            .as_ref()
-            .expect("scalar apply right tuple initialized");
+        let right_tuple =
+            Self::load_right_once(&mut self.cached_right, self.right_input, arena, plan_arena)?;
         if !arena.next_tuple(self.left_input, plan_arena)? {
             arena.finish();
             return Ok(());
@@ -74,22 +70,23 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarApply {
 }
 
 impl ScalarApply {
-    fn load_right_once<'a, T: Transaction + 'a>(
-        cached_right: &mut Option<Tuple>,
+    fn load_right_once<'a, 'c, T: Transaction + 'a>(
+        cached_right: &'c mut Option<Tuple>,
         right_input: ExecId,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
-    ) -> Result<(), DatabaseError> {
-        if cached_right.is_none() {
-            if !arena.next_tuple(right_input, plan_arena)? {
-                return Err(DatabaseError::InvalidValue(
-                    "scalar apply right input returned no rows".to_string(),
-                ));
+    ) -> Result<&'c Tuple, DatabaseError> {
+        match cached_right {
+            Some(tuple) => Ok(tuple),
+            None => {
+                if !arena.next_tuple(right_input, plan_arena)? {
+                    return Err(DatabaseError::InvalidValue(
+                        "scalar apply right input returned no rows".to_string(),
+                    ));
+                }
+                Ok(cached_right.insert(arena.materialize_tuple()))
             }
-            *cached_right = Some(arena.materialize_tuple());
         }
-
-        Ok(())
     }
 }
 
@@ -151,7 +148,7 @@ mod tests {
     fn scalar_apply_repeats_scalar_result_for_each_left_row() -> Result<(), DatabaseError> {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
-        let left = build_values(
+        let mut left = build_values(
             &mut plan_arena,
             "left_c1",
             vec![
@@ -159,7 +156,7 @@ mod tests {
                 vec![crate::types::value::DataValue::Int32(2)],
             ],
         );
-        let right = ScalarSubqueryOperator::build(build_values(
+        let mut right = ScalarSubqueryOperator::build(build_values(
             &mut plan_arena,
             "right_c1",
             vec![vec![crate::types::value::DataValue::Int32(7)]],
@@ -167,8 +164,10 @@ mod tests {
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
+        left.populate_output_schema_recursive(&mut plan_arena);
+        right.populate_output_schema_recursive(&mut plan_arena);
         let tuples = try_collect(execute_input::<_, ScalarApply>(
-            (ScalarApplyOperator, left, right),
+            (&ScalarApplyOperator, &left, &right),
             crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &transaction,
@@ -195,12 +194,12 @@ mod tests {
     fn scalar_apply_repeats_null_scalar_result_for_each_left_row() -> Result<(), DatabaseError> {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
-        let left = build_values(
+        let mut left = build_values(
             &mut plan_arena,
             "left_c1",
             vec![vec![DataValue::Int32(1)], vec![DataValue::Int32(2)]],
         );
-        let right = ScalarSubqueryOperator::build(build_values(
+        let mut right = ScalarSubqueryOperator::build(build_values(
             &mut plan_arena,
             "right_c1",
             vec![vec![DataValue::Null]],
@@ -208,8 +207,10 @@ mod tests {
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
+        left.populate_output_schema_recursive(&mut plan_arena);
+        right.populate_output_schema_recursive(&mut plan_arena);
         let tuples = try_collect(execute_input::<_, ScalarApply>(
-            (ScalarApplyOperator, left, right),
+            (&ScalarApplyOperator, &left, &right),
             crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &transaction,

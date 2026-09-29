@@ -148,15 +148,15 @@ pub(crate) fn compare_sort_keys<'a>(
     Ordering::Equal
 }
 
-pub struct Sort {
+pub struct Sort<'a> {
     rows: NullableVec<'static, (usize, Tuple)>,
     _arena: Box<Bump>,
-    sort_fields: Vec<SortField>,
+    sort_fields: &'a [SortField],
     input: ExecId,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Sort {
-    type Input = (SortOperator, LogicalPlan);
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Sort<'a> {
+    type Input = (&'a SortOperator, &'a LogicalPlan);
 
     fn into_executor(
         (SortOperator { sort_fields }, input): Self::Input,
@@ -181,7 +181,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Sort {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -200,7 +200,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort {
                 arena.finish();
                 return Ok(());
             }
-            sort_tuples(&self.sort_fields, &mut self.rows, plan_arena)?;
+            sort_tuples(self.sort_fields, &mut self.rows, plan_arena)?;
             self.rows.reverse();
         }
     }

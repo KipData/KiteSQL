@@ -42,7 +42,7 @@ use crate::optimizer::rule::normalization::NormalizationRuleImpl;
 #[cfg(feature = "orm")]
 use crate::orm::FromQueryRow;
 use crate::planner::operator::Operator;
-use crate::planner::{LogicalPlan, MetaArena, PlanArena, TableArenaCell};
+use crate::planner::{LogicalPlan, MetaArena, PlanArena, PlanInput, PlanKeeper, TableArenaCell};
 #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
 use crate::storage::lmdb::{LmdbConfig, LmdbStorage};
 use crate::storage::memory::MemoryStorage;
@@ -81,12 +81,12 @@ pub(crate) trait BindSource<'a> {
 
     type Storage: Storage;
 
-    fn execute<A: MetaArena + 'a, F>(self, build: F) -> Result<Self::Iter, DatabaseError>
+    fn execute<P: Into<PlanInput<'a>>, A: MetaArena + 'a, F>(
+        self,
+        build: F,
+    ) -> Result<Self::Iter, DatabaseError>
     where
-        F: FnOnce(
-            &'a State<Self::Storage>,
-            &Self::Transaction,
-        ) -> Result<(LogicalPlan, A), DatabaseError>;
+        F: FnOnce(&'a State<Self::Storage>, &Self::Transaction) -> Result<(P, A), DatabaseError>;
 
     #[cfg(feature = "orm")]
     fn explain<A, F>(self, params: A, build: F) -> Result<String, DatabaseError>
@@ -551,6 +551,7 @@ impl<S: Storage> State<S> {
                 op.histogram_buckets = self.histogram_buckets;
             }
         }
+        plan.populate_output_schema_recursive(&mut arena);
 
         Ok((plan, arena))
     }
@@ -558,13 +559,15 @@ impl<S: Storage> State<S> {
     pub(crate) fn execute<'a, 'txn, A: MetaArena + 'a>(
         &'a self,
         transaction: &'a mut S::TransactionType<'txn>,
-        mut plan: LogicalPlan,
+        plan: PlanInput<'a>,
         mut plan_arena: A,
     ) -> Result<(Schema, A, Executor<'a, S::TransactionType<'txn>>), DatabaseError>
     where
         S: 'txn,
     {
-        let schema = plan.take_schema(&mut plan_arena);
+        let keeper = PlanKeeper::new(plan);
+        let plan = keeper.plan();
+        let schema = plan.read_schema().clone();
         let mut arena = ExecArena::new();
         let read_context = ExecutionContext::new(
             &self.table_cache,
@@ -574,7 +577,7 @@ impl<S: Storage> State<S> {
             &self.table_functions,
         );
         let root = build_write(&mut arena, &mut plan_arena, plan, read_context, transaction);
-        let executor = Executor::new(arena, root);
+        let executor = Executor::new(arena, root, keeper);
 
         Ok((schema, plan_arena, executor))
     }
@@ -636,7 +639,10 @@ impl<S: Storage> State<S> {
             }
         }
 
-        let schema = plan.take_schema(&mut plan_arena);
+        plan.populate_output_schema_recursive(&mut plan_arena);
+        let keeper = PlanKeeper::new(PlanInput::Owned(plan));
+        let plan = keeper.plan();
+        let schema = plan.read_schema().clone();
         let mut arena = ExecArena::new();
         let cache = ExecutionContext::new(
             table_cache,
@@ -646,7 +652,7 @@ impl<S: Storage> State<S> {
             table_functions,
         );
         let root = build_write(&mut arena, &mut plan_arena, plan, cache, transaction);
-        let executor = Executor::new(arena, root);
+        let executor = Executor::new(arena, root, keeper);
 
         Ok((schema, plan_arena, executor))
     }
@@ -871,9 +877,12 @@ impl<'a, S: Storage> BindSource<'a> for &'a Database<S> {
 
     type Storage = S;
 
-    fn execute<A: MetaArena + 'a, F>(self, build: F) -> Result<Self::Iter, DatabaseError>
+    fn execute<P: Into<PlanInput<'a>>, A: MetaArena + 'a, F>(
+        self,
+        build: F,
+    ) -> Result<Self::Iter, DatabaseError>
     where
-        F: FnOnce(&'a State<S>, &Self::Transaction) -> Result<(LogicalPlan, A), DatabaseError>,
+        F: FnOnce(&'a State<S>, &Self::Transaction) -> Result<(P, A), DatabaseError>,
     {
         let transaction = Box::into_raw(Box::new(
             self.storage
@@ -883,7 +892,7 @@ impl<'a, S: Storage> BindSource<'a> for &'a Database<S> {
             let transaction = unsafe { &mut *transaction };
             transaction.begin_statement_scope()?;
             let (plan, arena) = build(&self.state, transaction)?;
-            self.state.execute(transaction, plan, arena)
+            self.state.execute(transaction, plan.into(), arena)
         })();
         let (schema, arena, executor) = match result {
             Ok(result) => result,
@@ -1089,16 +1098,19 @@ impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut DBTransaction<'txn, S> {
 
     type Storage = S;
 
-    fn execute<A: MetaArena + 'a, F>(self, build: F) -> Result<Self::Iter, DatabaseError>
+    fn execute<P: Into<PlanInput<'a>>, A: MetaArena + 'a, F>(
+        self,
+        build: F,
+    ) -> Result<Self::Iter, DatabaseError>
     where
-        F: FnOnce(&'a State<S>, &Self::Transaction) -> Result<(LogicalPlan, A), DatabaseError>,
+        F: FnOnce(&'a State<S>, &Self::Transaction) -> Result<(P, A), DatabaseError>,
     {
         self.inner.begin_statement_scope()?;
         let (plan, arena) = build(self.state, &self.inner)?;
         let transaction = std::ptr::from_mut(&mut self.inner);
         let (schema, arena, executor) =
             self.state
-                .execute(unsafe { &mut *transaction }, plan, arena)?;
+                .execute(unsafe { &mut *transaction }, plan.into(), arena)?;
         Ok(TransactionIter::new(
             schema,
             Box::new(arena) as Box<dyn MetaArena + 'a>,
@@ -1774,7 +1786,7 @@ pub(crate) mod test {
             let plan = row.values[0].utf8().unwrap();
             assert_eq!(
                 plan,
-                "Projection [t1.a, t1.b, t1.a, t1.b, 9] [Project => (Sort Option: Follow)] LeftOuter Join Where (t1.a > 0) [NestLoopJoin => (Sort Option: None)] Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] Filter (t1.b > 0), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)] Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [IndexScan By pk_index => (1, +inf) => (Sort Option: OrderBy: (t1.a Asc Nulls Last) ignore_prefix_len: 0)]"
+                "Projection [t1.a, t1.b, t1.a, t1.b, 9] [Project => (Sort Option: Follow)] LeftOuter Join Where (t1.a > 0) [NestLoopJoin => (Sort Option: None)] Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] Filter (t1.b > 0), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)] Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [IndexScan By pk_index => ($3, +inf) => (Sort Option: OrderBy: (t1.a Asc Nulls Last) ignore_prefix_len: 0)]"
             );
         }
 

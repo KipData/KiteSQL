@@ -17,19 +17,20 @@ use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::aggregate::AggregateOperator;
+use crate::planner::ExprRef;
+use crate::planner::LogicalPlan;
 use crate::planner::MetaArena;
-use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 
-pub struct StreamDistinctExecutor {
-    groupby_exprs: Vec<ExprRef>,
+pub struct StreamDistinctExecutor<'a> {
+    groupby_exprs: &'a [ExprRef],
     input: ExecId,
     last_keys: Option<Tuple>,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor {
-    type Input = (AggregateOperator, LogicalPlan);
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor<'a> {
+    type Input = (&'a AggregateOperator, &'a LogicalPlan);
 
     fn into_executor(
         (op, input): Self::Input,
@@ -40,14 +41,14 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor {
     ) -> ExecId {
         let input = build_read(arena, plan_arena, input, cache, transaction);
         arena.push(ExecNode::StreamDistinct(StreamDistinctExecutor {
-            groupby_exprs: op.groupby_exprs,
+            groupby_exprs: &op.groupby_exprs,
             input,
             last_keys: None,
         }))
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -63,7 +64,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor {
                 }
                 return Ok(());
             }
-            arena.rewrite(&self.groupby_exprs, plan_arena, None)?;
+            arena.rewrite(self.groupby_exprs, plan_arena, None)?;
 
             if let Some(last_keys) = &mut self.last_keys {
                 if last_keys.values == arena.result_tuple().values {
@@ -168,14 +169,14 @@ mod tests {
         };
         let plan = LogicalPlan::new(Operator::Aggregate(agg), Childrens::Only(Box::new(input)));
         let plan = optimize_exprs(plan, &mut plan_arena)?;
-        let Operator::Aggregate(agg) = plan.operator else {
+        let Operator::Aggregate(agg) = &plan.operator else {
             unreachable!()
         };
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, StreamDistinctExecutor>(
-            (agg, plan.childrens.pop_only()),
+            (agg, plan.childrens.iter().next().unwrap()),
             crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &transaction,
@@ -226,14 +227,14 @@ mod tests {
         };
         let plan = LogicalPlan::new(Operator::Aggregate(agg), Childrens::Only(Box::new(input)));
         let plan = optimize_exprs(plan, &mut plan_arena)?;
-        let Operator::Aggregate(agg) = plan.operator else {
+        let Operator::Aggregate(agg) = &plan.operator else {
             unreachable!()
         };
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, StreamDistinctExecutor>(
-            (agg, plan.childrens.pop_only()),
+            (agg, plan.childrens.iter().next().unwrap()),
             crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &transaction,

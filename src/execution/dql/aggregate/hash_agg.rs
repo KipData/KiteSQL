@@ -20,8 +20,9 @@ use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::aggregate::AggregateOperator;
+use crate::planner::ExprRef;
+use crate::planner::LogicalPlan;
 use crate::planner::MetaArena;
-use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
 use std::collections::hash_map::IntoIter as HashMapIntoIter;
@@ -29,15 +30,15 @@ use std::collections::HashMap;
 
 type HashAggOutput = HashMapIntoIter<Vec<DataValue>, Vec<Box<dyn Accumulator>>>;
 
-pub struct HashAggExecutor {
-    agg_calls: Vec<ExprRef>,
-    groupby_exprs: Vec<ExprRef>,
+pub struct HashAggExecutor<'a> {
+    agg_calls: &'a [ExprRef],
+    groupby_exprs: &'a [ExprRef],
     input: ExecId,
     output: Option<HashAggOutput>,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashAggExecutor {
-    type Input = (AggregateOperator, LogicalPlan);
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashAggExecutor<'a> {
+    type Input = (&'a AggregateOperator, &'a LogicalPlan);
 
     fn into_executor(
         (
@@ -63,7 +64,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashAggExecutor {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -77,7 +78,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
             while arena.next_tuple(self.input, plan_arena)? {
                 let tuple = arena.result_tuple();
                 group_keys.clear();
-                for expr in &self.groupby_exprs {
+                for expr in self.groupby_exprs {
                     group_keys.push(
                         plan_arena
                             .expression(*expr)
@@ -87,10 +88,10 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor {
                 }
 
                 if let Some(accs) = group_hash_accs.get_mut(group_keys.as_slice()) {
-                    update_accumulators(accs, &self.agg_calls, tuple, plan_arena)?;
+                    update_accumulators(accs, self.agg_calls, tuple, plan_arena)?;
                 } else {
-                    let mut accs = create_accumulators(&self.agg_calls, plan_arena)?;
-                    update_accumulators(&mut accs, &self.agg_calls, tuple, plan_arena)?;
+                    let mut accs = create_accumulators(self.agg_calls, plan_arena)?;
+                    update_accumulators(&mut accs, self.agg_calls, tuple, plan_arena)?;
                     group_hash_accs.insert(group_keys.clone(), accs);
                 }
             }
@@ -211,11 +212,11 @@ mod test {
             .instantiate(plan)
             .find_best(None, &mut plan_arena)?;
 
-        let Operator::Aggregate(op) = plan.operator else {
+        let Operator::Aggregate(op) = &plan.operator else {
             unreachable!()
         };
         let tuples = try_collect(execute_input::<_, HashAggExecutor>(
-            (op, plan.childrens.pop_only()),
+            (op, plan.childrens.iter().next().unwrap()),
             crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &transaction,

@@ -21,52 +21,40 @@ use crate::iter_ext::Itertools;
 use crate::planner::operator::alter_table::change_column::{ChangeColumnOperator, NotNullChange};
 use crate::planner::MetaArena;
 use crate::storage::Transaction;
-use crate::types::tuple_builder::TupleBuilder;
 
-pub struct ChangeColumn {
-    op: Option<ChangeColumnOperator>,
+pub struct ChangeColumn<'a> {
+    op: &'a ChangeColumnOperator,
 }
 
-impl From<ChangeColumnOperator> for ChangeColumn {
-    fn from(op: ChangeColumnOperator) -> Self {
-        Self { op: Some(op) }
-    }
-}
-
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for ChangeColumn {
-    type Input = Self;
+impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for ChangeColumn<'a> {
+    type Input = &'a ChangeColumnOperator;
 
     fn into_executor(
-        input: Self::Input,
+        op: Self::Input,
         arena: &mut ExecArena<'a, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        let executor = input;
-        arena.push(ExecNode::ChangeColumn(executor))
+        arena.push(ExecNode::ChangeColumn(ChangeColumn { op }))
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ChangeColumn {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         let table_cache = arena.table_cache();
-        let Some(ChangeColumnOperator {
+        let ChangeColumnOperator {
             table_name,
             old_column_name,
             new_column_name,
             data_type,
             default_change,
             not_null_change,
-        }) = self.op.take()
-        else {
-            arena.finish();
-            return Ok(());
-        };
+        } = self.op;
 
         let (old_schema, pk_ty, column_index, old_column_type, old_column_id, affected_index_name) = {
             let table_catalog = arena
@@ -98,7 +86,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ChangeColumn {
                 affected_index_name,
             )
         };
-        let needs_data_rewrite = old_column_type != data_type;
+        let needs_data_rewrite = &old_column_type != data_type;
         let needs_not_null_validation = matches!(not_null_change, NotNullChange::Set);
 
         if needs_data_rewrite {
@@ -121,7 +109,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ChangeColumn {
             rewrite_table_in_batches(
                 transaction,
                 table_codec,
-                &table_name,
+                table_name,
                 &pk_ty,
                 old_schema.len(),
                 || {
@@ -156,7 +144,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ChangeColumn {
             visit_table_in_batches(
                 transaction,
                 table_codec,
-                &table_name,
+                table_name,
                 &pk_ty,
                 old_schema.len(),
                 || {
@@ -178,19 +166,18 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ChangeColumn {
             let table = transaction.change_column(
                 table_codec,
                 plan_arena,
-                &table_name,
-                &old_column_name,
-                &new_column_name,
-                &data_type,
-                &default_change,
-                &not_null_change,
+                table_name,
+                old_column_name,
+                new_column_name,
+                data_type,
+                default_change,
+                not_null_change,
             )?;
             DDLApply::upsert_table(table, true)
         };
         arena.push_ddl_apply(apply);
 
-        arena.produce_tuple(TupleBuilder::build_result(format!("{table_name}")));
-        arena.resume();
+        arena.finish();
         Ok(())
     }
 }

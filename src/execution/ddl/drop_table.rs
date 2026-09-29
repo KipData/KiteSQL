@@ -19,57 +19,44 @@ use crate::execution::{
 use crate::planner::operator::drop_table::DropTableOperator;
 use crate::planner::MetaArena;
 use crate::storage::Transaction;
-use crate::types::tuple_builder::TupleBuilder;
 
-pub struct DropTable {
-    op: Option<DropTableOperator>,
+pub struct DropTable<'a> {
+    op: &'a DropTableOperator,
 }
 
-impl From<DropTableOperator> for DropTable {
-    fn from(op: DropTableOperator) -> Self {
-        DropTable { op: Some(op) }
-    }
-}
-
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropTable {
-    type Input = Self;
+impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropTable<'a> {
+    type Input = &'a DropTableOperator;
 
     fn into_executor(
-        input: Self::Input,
+        op: Self::Input,
         arena: &mut ExecArena<'a, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        let executor = input;
-        arena.push(ExecNode::DropTable(executor))
+        arena.push(ExecNode::DropTable(DropTable { op }))
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropTable {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropTable<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
-        let Some(DropTableOperator {
+        let DropTableOperator {
             table_name,
             if_exists,
-        }) = self.op.take()
-        else {
-            arena.finish();
-            return Ok(());
-        };
+        } = self.op;
 
         let (transaction, table_codec) = arena.transaction_codec_mut();
-        if transaction.drop_table(table_codec, plan_arena, table_name.clone(), if_exists)? {
+        if transaction.drop_table(table_codec, plan_arena, table_name.clone(), *if_exists)? {
             arena.push_ddl_apply(DDLApply::DropTable {
                 name: table_name.clone(),
             });
         }
 
-        arena.produce_tuple(TupleBuilder::build_result(format!("{table_name}")));
-        arena.resume();
+        arena.finish();
         Ok(())
     }
 }

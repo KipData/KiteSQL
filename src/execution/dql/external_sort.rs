@@ -43,14 +43,14 @@ impl Run {
     }
 }
 
-pub struct ExternalSort {
+pub struct ExternalSort<'a> {
     rows: Option<SpillReader<SortRow>>,
-    sort_fields: Vec<SortField>,
+    sort_fields: &'a [SortField],
     input: ExecId,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ExternalSort {
-    type Input = (SortOperator, LogicalPlan);
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ExternalSort<'a> {
+    type Input = (&'a SortOperator, &'a LogicalPlan);
 
     fn into_executor(
         (SortOperator { sort_fields }, input): Self::Input,
@@ -68,7 +68,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ExternalSort {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ExternalSort {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ExternalSort<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -89,7 +89,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ExternalSort {
             // cached sort values, which are evaluated once here and spilled through every merge
             // pass. By default R <= 1,024 and B is about 1 MiB; one oversized row makes this a
             // soft bound.
-            let sort_fields = &self.sort_fields;
+            let sort_fields = self.sort_fields;
             let mut rows = SpillVec::new().on_flush(move |rows| sort_segment(sort_fields, rows));
             let mut runs = Vec::new();
             while arena.next_tuple(self.input, plan_arena)? {
@@ -98,7 +98,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ExternalSort {
                     runs.push(Run::new(segment, 1));
                 }
             }
-            self.rows = Some(finish_sort(rows, runs, &self.sort_fields, MERGE_FAN_IN)?);
+            self.rows = Some(finish_sort(rows, runs, self.sort_fields, MERGE_FAN_IN)?);
         }
     }
 }

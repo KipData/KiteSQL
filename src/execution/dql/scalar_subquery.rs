@@ -29,16 +29,16 @@ pub struct ScalarSubquery {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ScalarSubquery {
-    type Input = (ScalarSubqueryOperator, LogicalPlan);
+    type Input = (&'a ScalarSubqueryOperator, &'a LogicalPlan);
 
     fn into_executor(
-        (_, mut input): Self::Input,
+        (_, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let value_count = input.output_schema(plan_arena).len();
+        let value_count = input.read_schema().len();
         let input = build_read(arena, plan_arena, input, cache, transaction);
         arena.push(ExecNode::ScalarSubquery(Self {
             input,

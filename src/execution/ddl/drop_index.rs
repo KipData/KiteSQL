@@ -19,48 +19,36 @@ use crate::execution::{
 use crate::planner::operator::drop_index::DropIndexOperator;
 use crate::planner::MetaArena;
 use crate::storage::Transaction;
-use crate::types::tuple_builder::TupleBuilder;
 
-pub struct DropIndex {
-    op: Option<DropIndexOperator>,
+pub struct DropIndex<'a> {
+    op: &'a DropIndexOperator,
 }
 
-impl From<DropIndexOperator> for DropIndex {
-    fn from(op: DropIndexOperator) -> Self {
-        Self { op: Some(op) }
-    }
-}
-
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropIndex {
-    type Input = Self;
+impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropIndex<'a> {
+    type Input = &'a DropIndexOperator;
 
     fn into_executor(
-        input: Self::Input,
+        op: Self::Input,
         arena: &mut ExecArena<'a, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        let executor = input;
-        arena.push(ExecNode::DropIndex(executor))
+        arena.push(ExecNode::DropIndex(DropIndex { op }))
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropIndex {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropIndex<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
-        let Some(DropIndexOperator {
+        let DropIndexOperator {
             table_name,
             index_name,
             if_exists,
-        }) = self.op.take()
-        else {
-            arena.finish();
-            return Ok(());
-        };
+        } = self.op;
 
         let dropped = {
             let (transaction, table_codec) = arena.transaction_codec_mut();
@@ -68,8 +56,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropIndex {
                 table_codec,
                 plan_arena,
                 table_name.clone(),
-                &index_name,
-                if_exists,
+                index_name,
+                *if_exists,
             )?
         };
         if let Some((table, index_id)) = dropped {
@@ -80,8 +68,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropIndex {
             });
         }
 
-        arena.produce_tuple(TupleBuilder::build_result(index_name.to_string()));
-        arena.resume();
+        arena.finish();
         Ok(())
     }
 }

@@ -22,50 +22,38 @@ use crate::planner::operator::alter_table::add_column::AddColumnOperator;
 use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::index::{Index, IndexType};
-use crate::types::tuple_builder::TupleBuilder;
 use crate::types::value::DataValue;
 
-pub struct AddColumn {
-    op: Option<AddColumnOperator>,
+pub struct AddColumn<'a> {
+    op: &'a AddColumnOperator,
 }
 
-impl From<AddColumnOperator> for AddColumn {
-    fn from(op: AddColumnOperator) -> Self {
-        Self { op: Some(op) }
-    }
-}
-
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for AddColumn {
-    type Input = Self;
+impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for AddColumn<'a> {
+    type Input = &'a AddColumnOperator;
 
     fn into_executor(
-        input: Self::Input,
+        op: Self::Input,
         arena: &mut ExecArena<'a, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        let executor = input;
-        arena.push(ExecNode::AddColumn(executor))
+        arena.push(ExecNode::AddColumn(AddColumn { op }))
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for AddColumn {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         let table_cache = arena.table_cache();
-        let Some(AddColumnOperator {
+        let AddColumnOperator {
             table_name,
             column,
             if_not_exists,
-        }) = self.op.take()
-        else {
-            arena.finish();
-            return Ok(());
-        };
+        } = self.op;
 
         let (old_schema, pk_ty, column_exists) = {
             let table_catalog = arena
@@ -79,9 +67,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for AddColumn {
             )
         };
         if column_exists {
-            if if_not_exists {
-                arena.produce_tuple(TupleBuilder::build_result("1".to_string()));
-                arena.resume();
+            if *if_not_exists {
+                arena.finish();
                 return Ok(());
             }
             return Err(DatabaseError::DuplicateColumn(column.name().to_string()));
@@ -94,9 +81,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for AddColumn {
             let (table, col_id) = transaction.add_column(
                 table_codec,
                 plan_arena,
-                &table_name,
-                &column,
-                if_not_exists,
+                table_name,
+                column,
+                *if_not_exists,
             )?;
             let unique_meta = if column.desc().is_unique() {
                 table
@@ -116,7 +103,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for AddColumn {
         rewrite_table_in_batches(
             transaction,
             table_codec,
-            &table_name,
+            table_name,
             &pk_ty,
             old_schema.len(),
             || {
@@ -149,14 +136,13 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for AddColumn {
                         std::slice::from_ref(value),
                         IndexType::Unique,
                     );
-                    transaction.add_index(table_codec, &table_name, index, tuple_id)?;
+                    transaction.add_index(table_codec, table_name, index, tuple_id)?;
                 }
                 Ok(())
             },
         )?;
 
-        arena.produce_tuple(TupleBuilder::build_result("1".to_string()));
-        arena.resume();
+        arena.finish();
         Ok(())
     }
 }

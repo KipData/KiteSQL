@@ -15,7 +15,7 @@
 use crate::binder::copy::ExtSource;
 use crate::catalog::TableName;
 use crate::planner::MetaArena;
-use crate::planner::{fmt_explain_list, Explain, PlanArena};
+use crate::planner::{fmt_explain_list, Explain};
 use crate::types::tuple::Schema;
 use kite_sql_serde_macros::ReferenceSerialization;
 

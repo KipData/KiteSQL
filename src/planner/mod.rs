@@ -14,6 +14,7 @@
 
 mod arena;
 pub mod operator;
+mod plan_keeper;
 
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
@@ -30,6 +31,7 @@ use std::hash::{Hash, Hasher};
 
 pub use arena::{ExprRef, MetaArena, PlanArena, TableArena, TableArenaCell};
 pub(crate) use arena::{ParamArena, PlanRef};
+pub(crate) use plan_keeper::{PlanInput, PlanKeeper};
 
 pub(crate) trait Explain {
     fn fmt(&self, arena: &(dyn MetaArena + '_), f: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -83,6 +85,20 @@ impl Childrens {
         ChildrensIter {
             inner: self,
             pos: 0,
+        }
+    }
+
+    pub(crate) fn only(&self) -> &LogicalPlan {
+        match self {
+            Childrens::Only(plan) => plan,
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) fn twins(&self) -> (&LogicalPlan, &LogicalPlan) {
+        match self {
+            Childrens::Twins { left, right } => (left, right),
+            _ => unreachable!(),
         }
     }
 
@@ -213,18 +229,6 @@ impl LogicalPlan {
         output_schema.get_or_insert_with(|| Self::compute_output_schema(operator, childrens, arena))
     }
 
-    pub fn take_schema(&mut self, arena: &mut (dyn MetaArena + '_)) -> crate::types::tuple::Schema {
-        let LogicalPlan {
-            operator,
-            childrens,
-            output_schema,
-            ..
-        } = self;
-        output_schema
-            .take()
-            .unwrap_or_else(|| Self::compute_output_schema(operator, childrens, arena))
-    }
-
     fn compute_output_schema(
         operator: &mut Operator,
         childrens: &mut Childrens,
@@ -347,6 +351,24 @@ impl LogicalPlan {
             .into_iter()
             .map(|name| arena.alloc_dummy(name))
             .collect()
+    }
+
+    pub(crate) fn read_schema(&self) -> &crate::types::tuple::Schema {
+        self.output_schema
+            .as_ref()
+            .expect("output schema must be computed before it is read")
+    }
+
+    pub(crate) fn populate_output_schema_recursive(&mut self, arena: &mut (dyn MetaArena + '_)) {
+        match self.childrens.as_mut() {
+            Childrens::Only(child) => child.populate_output_schema_recursive(arena),
+            Childrens::Twins { left, right } => {
+                left.populate_output_schema_recursive(arena);
+                right.populate_output_schema_recursive(arena);
+            }
+            Childrens::None => (),
+        }
+        self.output_schema(arena);
     }
 
     pub fn reset_output_schema_cache(&mut self) {

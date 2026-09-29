@@ -181,13 +181,13 @@ pub trait Transaction: Sized {
         table_cache: &TableCache,
         table_name: TableName,
         bounds: Bounds,
-        columns: Vec<ColumnRef>,
+        columns: &[ColumnRef],
         with_pk: bool,
     ) -> Result<TupleIter<'a, Self>, DatabaseError> {
         let table = self
             .table(table_cache, table_name.clone())?
             .ok_or(DatabaseError::TableNotFound)?;
-        let deserializers = Self::create_deserializers(&columns, table, arena, with_pk);
+        let deserializers = Self::create_deserializers(columns, table, arena, with_pk);
         let pk_ty = with_pk.then(|| table.primary_keys_type().clone());
         let offset = bounds.0.unwrap_or(0);
 
@@ -211,15 +211,15 @@ pub trait Transaction: Sized {
         arena: &(dyn MetaArena + 'a),
         table_name: TableName,
         (offset_option, limit_option): Bounds,
-        columns: Vec<ColumnRef>,
+        columns: &[ColumnRef],
         index_meta: IndexMetaRef,
         ranges: R,
         with_pk: bool,
-        covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
-        cover_mapping_indices: Option<Vec<usize>>,
+        covered_deserializers: Option<&'a [TupleValueSerializableImpl]>,
+        cover_mapping_indices: Option<&[usize]>,
     ) -> Result<IndexIter<'a, Self>, DatabaseError>
     where
-        R: Into<IndexRanges>,
+        R: Into<IndexRanges<'a>>,
     {
         let index_meta_ref = index_meta;
         let index_meta = arena.index(index_meta_ref);
@@ -243,13 +243,17 @@ pub trait Transaction: Sized {
 
                 (
                     IndexImplEnum::Covered(CoveredIndexImpl),
-                    deserializers,
+                    Cow::Borrowed(deserializers),
                     cover_mapping,
                 )
             }
             _ => {
-                let deserializers = Self::create_deserializers(&columns, table, arena, with_pk);
-                (IndexImplEnum::instance(index_meta.ty), deserializers, None)
+                let deserializers = Self::create_deserializers(columns, table, arena, with_pk);
+                (
+                    IndexImplEnum::instance(index_meta.ty),
+                    Cow::Owned(deserializers),
+                    None,
+                )
             }
         };
         let total_len = table.columns_len();
@@ -1336,7 +1340,7 @@ struct TupleMapping {
 }
 
 impl TupleMapping {
-    fn new(scan_to_index: Vec<usize>, tuple_len: usize) -> Self {
+    fn new(scan_to_index: &[usize], tuple_len: usize) -> Self {
         let mut index_to_scan = vec![usize::MAX; tuple_len];
 
         for (scan_idx, index_idx) in scan_to_index.iter().enumerate() {
@@ -1357,7 +1361,7 @@ struct IndexImplParams<'a, T: Transaction> {
     index_meta: IndexMetaRef,
     meta_arena: &'a dyn MetaArena,
     table_name: TableName,
-    deserializers: Vec<TupleValueSerializableImpl>,
+    deserializers: Cow<'a, [TupleValueSerializableImpl]>,
     total_len: usize,
     tx: &'a T,
     cover_mapping: Option<TupleMapping>,
@@ -1388,7 +1392,7 @@ impl<T: Transaction> IndexImplParams<'_, T> {
             };
             TableCodec::decode_tuple_into(
                 tuple,
-                &self.deserializers,
+                &self.deserializers[..],
                 Some(tuple_id.clone()),
                 bytes.as_ref(),
                 self.total_len,
@@ -1500,7 +1504,7 @@ impl<T: Transaction> IndexImpl<T> for PrimaryKeyIndexImpl {
         let tuple_id = TableCodec::decode_tuple_key(key, &params.index_meta().pk_ty)?;
         TableCodec::decode_tuple_into(
             tuple,
-            &params.deserializers,
+            &params.deserializers[..],
             Some(tuple_id),
             value,
             params.total_len,
@@ -1527,7 +1531,7 @@ impl<T: Transaction> IndexImpl<T> for PrimaryKeyIndexImpl {
                 };
                 TableCodec::decode_tuple_into(
                     tuple,
-                    &params.deserializers,
+                    &params.deserializers[..],
                     Some(tuple_id.clone()),
                     bytes.as_ref(),
                     params.total_len,
@@ -1872,45 +1876,61 @@ impl<'a, T: Transaction + 'a> Iter for TupleIter<'a, T> {
     }
 }
 
-enum IndexRangesInner {
-    One(Range),
-    Many(Vec<Range>),
+enum RangeSource<'r> {
+    Borrowed(&'r [Range]),
+    Owned(Range),
 }
 
-pub struct IndexRanges {
-    inner: IndexRangesInner,
-    next_idx: usize,
+pub struct IndexRanges<'r> {
+    source: RangeSource<'r>,
+    next: usize,
 }
 
-impl IndexRanges {
-    fn next(&mut self) -> Option<&Range> {
-        let range = match &self.inner {
-            IndexRangesInner::One(range) => (self.next_idx == 0).then_some(range),
-            IndexRangesInner::Many(ranges) => ranges.get(self.next_idx),
+impl IndexRanges<'_> {
+    pub(crate) fn next(&mut self) -> Option<&Range> {
+        let ranges = match &self.source {
+            RangeSource::Borrowed(ranges) => ranges,
+            RangeSource::Owned(Range::SortedRanges(ranges)) => ranges.as_slice(),
+            RangeSource::Owned(range) => std::slice::from_ref(range),
         };
-
-        if range.is_some() {
-            self.next_idx += 1;
-        }
-
-        range
+        let range = ranges.get(self.next)?;
+        self.next += 1;
+        Some(range)
     }
 }
 
-impl From<Vec<Range>> for IndexRanges {
-    fn from(value: Vec<Range>) -> Self {
-        Self {
-            inner: IndexRangesInner::Many(value),
-            next_idx: 0,
+impl<'r> From<&'r [Range]> for IndexRanges<'r> {
+    fn from(ranges: &'r [Range]) -> Self {
+        IndexRanges {
+            source: RangeSource::Borrowed(ranges),
+            next: 0,
         }
     }
 }
 
-impl From<Range> for IndexRanges {
-    fn from(value: Range) -> Self {
-        Self {
-            inner: IndexRangesInner::One(value),
-            next_idx: 0,
+impl<'r> From<&'r Range> for IndexRanges<'r> {
+    fn from(range: &'r Range) -> Self {
+        match range {
+            Range::SortedRanges(ranges) => ranges.as_slice().into(),
+            range => std::slice::from_ref(range).into(),
+        }
+    }
+}
+
+impl From<Range> for IndexRanges<'_> {
+    fn from(range: Range) -> Self {
+        IndexRanges {
+            source: RangeSource::Owned(range),
+            next: 0,
+        }
+    }
+}
+
+impl<'r> From<Cow<'r, Range>> for IndexRanges<'r> {
+    fn from(range: Cow<'r, Range>) -> Self {
+        match range {
+            Cow::Borrowed(range) => range.into(),
+            Cow::Owned(range) => range.into(),
         }
     }
 }
@@ -1950,7 +1970,7 @@ pub struct IndexIter<'a, T: Transaction> {
     bounds: IterBounds,
     params: IndexImplParams<'a, T>,
     inner: IndexImplEnum,
-    ranges: IndexRanges,
+    ranges: IndexRanges<'a>,
     state: IndexIterState<'a, T>,
     encode_min_buffer: Bytes,
     encode_max_buffer: Bytes,
@@ -2333,7 +2353,7 @@ mod test {
                 &table_cache,
                 "t1".to_string().into(),
                 (None, None),
-                full_columns(&table_cache),
+                &full_columns(&table_cache),
                 true,
             )?;
 
@@ -2371,7 +2391,7 @@ mod test {
                 &table_cache,
                 "t1".to_string().into(),
                 (None, None),
-                full_columns(&table_cache),
+                &full_columns(&table_cache),
                 true,
             )?;
 
@@ -2559,12 +2579,12 @@ mod test {
                 plan_arena,
                 "t1".to_string().into(),
                 (None, None),
-                full_columns(table_cache),
+                &full_columns(table_cache),
                 index_meta,
-                vec![Range::Scope {
+                &[Range::Scope {
                     min: Bound::Unbounded,
                     max: Bound::Unbounded,
-                }],
+                }][..],
                 true,
                 None,
                 None,

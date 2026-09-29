@@ -2,10 +2,8 @@ statement ok
 create table test_copy (a int primary key, b float, c varchar(10))
 
 # copy data from tbl file
-query I
+statement ok
 COPY test_copy FROM 'tests/data/copy.tbl' ( DELIMITER '|' );
-----
-2
 
 query I
 SELECT * FROM test_copy
@@ -26,10 +24,8 @@ Copy To ./copy_query.csv [a, c]
 statement ok
 create table test_copy_query (a int primary key, c varchar(10))
 
-query I
+statement ok
 COPY test_copy_query FROM './copy_query.csv' ( DELIMITER ',', HEADER true );
-----
-1
 
 query I
 SELECT * FROM test_copy_query

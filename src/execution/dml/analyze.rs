@@ -33,57 +33,45 @@ use std::fmt::{self, Formatter};
 
 const DEFAULT_NUM_OF_BUCKETS: usize = 100;
 
-pub struct Analyze {
-    table_name: TableName,
-    input_plan: LogicalPlan,
+pub struct Analyze<'a> {
+    table_name: &'a TableName,
     input: Option<ExecId>,
     histogram_buckets: Option<usize>,
 }
 
-impl From<(AnalyzeOperator, LogicalPlan)> for Analyze {
-    fn from(
+impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze<'a> {
+    type Input = (&'a AnalyzeOperator, &'a LogicalPlan);
+
+    fn into_executor(
         (
             AnalyzeOperator {
                 table_name,
-                index_metas,
                 histogram_buckets,
+                ..
             },
-            input,
-        ): (AnalyzeOperator, LogicalPlan),
-    ) -> Self {
-        let _ = index_metas;
-        Analyze {
-            table_name,
-            input_plan: input,
-            input: None,
-            histogram_buckets,
-        }
-    }
-}
-
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze {
-    type Input = Self;
-
-    fn into_executor(
-        input: Self::Input,
+            input_plan,
+        ): Self::Input,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let mut executor = input;
-        executor.input = Some(build_read(
+        let input = Some(build_read(
             arena,
             plan_arena,
-            executor.input_plan.take(),
+            input_plan,
             cache,
             transaction,
         ));
-        arena.push(ExecNode::Analyze(executor))
+        arena.push(ExecNode::Analyze(Analyze {
+            table_name,
+            input,
+            histogram_buckets: *histogram_buckets,
+        }))
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Analyze {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -131,7 +119,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Analyze {
         let mut state = arena.local_state(plan_arena);
         let (transaction, table_codec, ddl_apply) = state.write_transaction_codec_ddl_apply_mut();
         let values = Self::persist_statistics_meta(
-            &self.table_name,
+            self.table_name,
             builders,
             ddl_apply,
             transaction,
@@ -151,7 +139,7 @@ struct State {
     histogram_buckets: Option<usize>,
 }
 
-impl Analyze {
+impl<'a> Analyze<'a> {
     fn persist_statistics_meta<U: Transaction>(
         table_name: &TableName,
         builders: Vec<State>,

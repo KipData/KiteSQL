@@ -24,65 +24,55 @@ use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::tuple_builder::TupleBuilder;
 
-pub struct CopyToFile {
-    op: CopyToFileOperator,
-    input_plan: LogicalPlan,
+pub struct CopyToFile<'a> {
+    op: &'a CopyToFileOperator,
     column_names: Vec<String>,
     input: Option<ExecId>,
 }
 
-impl From<(CopyToFileOperator, LogicalPlan)> for CopyToFile {
-    fn from((op, input): (CopyToFileOperator, LogicalPlan)) -> Self {
-        CopyToFile {
-            op,
-            input_plan: input,
-            column_names: Default::default(),
-            input: None,
-        }
-    }
-}
-
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for CopyToFile {
-    type Input = Self;
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for CopyToFile<'a> {
+    type Input = (&'a CopyToFileOperator, &'a LogicalPlan);
 
     fn into_executor(
-        input: Self::Input,
+        (op, input_plan): Self::Input,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let mut executor = input;
-        executor.column_names = executor
-            .input_plan
-            .take_schema(plan_arena)
-            .into_iter()
-            .map(|column| plan_arena.column(column).name().to_string())
+        let column_names = input_plan
+            .read_schema()
+            .iter()
+            .map(|column| plan_arena.column(*column).name().to_string())
             .collect_vec();
-        executor.input = Some(build_read(
+        let input = Some(build_read(
             arena,
             plan_arena,
-            executor.input_plan.take(),
+            input_plan,
             cache,
             transaction,
         ));
-        arena.push(ExecNode::CopyToFile(executor))
+        arena.push(ExecNode::CopyToFile(CopyToFile {
+            op,
+            column_names,
+            input,
+        }))
     }
 }
 
-impl CopyToFile {
+impl CopyToFile<'_> {
     fn create_writer(&self) -> Result<csv::Writer<std::fs::File>, DatabaseError> {
-        let mut writer = match self.op.target.format {
+        let mut writer = match &self.op.target.format {
             FileFormat::Csv {
                 delimiter,
                 quote,
                 header,
                 ..
             } => csv::WriterBuilder::new()
-                .delimiter(delimiter as u8)
-                .quote(quote as u8)
-                .has_headers(header)
-                .from_path(self.op.target.path.clone())?,
+                .delimiter(*delimiter as u8)
+                .quote(*quote as u8)
+                .has_headers(*header)
+                .from_path(&self.op.target.path)?,
         };
 
         if let FileFormat::Csv { header: true, .. } = self.op.target.format {
@@ -93,7 +83,7 @@ impl CopyToFile {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyToFile {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyToFile<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -170,19 +160,11 @@ mod tests {
             .table(db.state.table_cache(), "t1".to_string().into())?
             .unwrap();
 
-        let executor = CopyToFile {
-            op: op.clone(),
-            input_plan: TableScanOperator::build(
-                "t1".to_string().into(),
-                table,
-                true,
-                &mut plan_arena,
-            )?,
-            column_names: Default::default(),
-            input: None,
-        };
-        let mut executor = crate::execution::execute(
-            executor,
+        let mut input_plan =
+            TableScanOperator::build("t1".to_string().into(), table, true, &mut plan_arena)?;
+        input_plan.populate_output_schema_recursive(&mut plan_arena);
+        let mut executor = crate::execution::execute_input::<_, CopyToFile>(
+            (&op, &input_plan),
             crate::execution::test_utils::empty_context(
                 db.state.table_cache(),
                 db.state.view_cache(),

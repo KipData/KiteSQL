@@ -200,22 +200,22 @@ fn build_tree<'a, T: Borrow<DataValue> + 'a, I: EqRangeInput<T> + ?Sized>(
 }
 
 impl Range {
-    pub(crate) fn bind_parameters(
-        &mut self,
-        params: &[(usize, DataValue)],
-    ) -> Result<(), DatabaseError> {
+    pub(crate) fn bind_parameters<'p, F>(&mut self, get: &F) -> Result<(), DatabaseError>
+    where
+        F: Fn(usize) -> Option<&'p DataValue>,
+    {
         match self {
             Self::Scope { min, max } => {
                 for bound in [min, max] {
                     if let Bound::Included(value) | Bound::Excluded(value) = bound {
-                        value.bind_parameters(params)?;
+                        value.bind_parameters(get)?;
                     }
                 }
             }
-            Self::Eq(value) => value.bind_parameters(params)?,
+            Self::Eq(value) => value.bind_parameters(get)?,
             Self::SortedRanges(ranges) => {
                 for range in ranges {
-                    range.bind_parameters(params)?;
+                    range.bind_parameters(get)?;
                 }
             }
             Self::Dummy => {}

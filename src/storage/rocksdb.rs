@@ -916,7 +916,7 @@ mod test {
             &table_cache,
             "test".to_string().into(),
             (Some(1), Some(1)),
-            read_columns,
+            &read_columns,
             true,
         )?;
 
@@ -967,26 +967,26 @@ mod test {
             .columns()
             .map(|column| plan_arena.column(*column).datatype().serializable())
             .collect_vec();
+        let ranges = [
+            Range::Eq(DataValue::Int32(0)),
+            Range::Scope {
+                min: Bound::Included(DataValue::Int32(2)),
+                max: Bound::Included(DataValue::Int32(4)),
+            },
+        ];
         let mut iter: IndexIter<'_, _> = IndexIter {
             bounds: IterBounds::new(0, None),
             params: IndexImplParams {
                 index_meta,
                 meta_arena: plan_arena.table_arena_cell().borrow(),
                 table_name: table.name.clone(),
-                deserializers,
+                deserializers: std::borrow::Cow::Owned(deserializers),
                 total_len: table.columns_len(),
                 tx: &transaction,
                 cover_mapping: None,
                 with_pk: true,
             },
-            ranges: vec![
-                Range::Eq(DataValue::Int32(0)),
-                Range::Scope {
-                    min: Bound::Included(DataValue::Int32(2)),
-                    max: Bound::Included(DataValue::Int32(4)),
-                },
-            ]
-            .into(),
+            ranges: (&ranges[..]).into(),
             state: IndexIterState::Init,
             inner: IndexImplEnum::PrimaryKey(PrimaryKeyIndexImpl),
             encode_min_buffer: Vec::new(),
@@ -1026,12 +1026,12 @@ mod test {
                     &plan_arena,
                     "t1".to_string().into(),
                     (Some(0), Some(1)),
-                    table.columns().cloned().collect(),
+                    &table.columns().cloned().collect::<Vec<_>>(),
                     table.indexes[0],
-                    vec![Range::Scope {
+                    &[Range::Scope {
                         min: Bound::Excluded(DataValue::Int32(0)),
                         max: Bound::Unbounded,
-                    }],
+                    }][..],
                     true,
                     None,
                     None,
@@ -1054,12 +1054,12 @@ mod test {
                     &plan_arena,
                     "t1".to_string().into(),
                     (Some(0), Some(1)),
-                    columns,
+                    &columns,
                     table.indexes[0],
-                    vec![Range::Scope {
+                    &[Range::Scope {
                         min: Bound::Excluded(DataValue::Int32(3)),
                         max: Bound::Unbounded,
-                    }],
+                    }][..],
                     true,
                     None,
                     None,
@@ -1103,19 +1103,20 @@ mod test {
             .ok_or(DatabaseError::InvalidIndex)?;
         let c1_deserializer = vec![plan_arena.column(c1_column).datatype().serializable()];
 
+        let c1_ranges = [Range::Scope {
+            min: Bound::Excluded(DataValue::Int32(0)),
+            max: Bound::Excluded(DataValue::Int32(10)),
+        }];
         let mut iter = transaction.read_by_index(
             kite_sql.state.table_cache(),
             &plan_arena,
             "t1".to_string().into(),
             (None, None),
-            vec![c1_column],
+            &[c1_column],
             idx_c1,
-            vec![Range::Scope {
-                min: Bound::Excluded(DataValue::Int32(0)),
-                max: Bound::Excluded(DataValue::Int32(10)),
-            }],
+            &c1_ranges[..],
             false,
-            Some(c1_deserializer),
+            Some(&c1_deserializer),
             None,
         )?;
 
@@ -1208,15 +1209,15 @@ mod test {
             &plan_arena,
             "t1".to_string().into(),
             (None, None),
-            reordered_columns,
+            &reordered_columns,
             composite_index,
-            vec![Range::Scope {
+            &[Range::Scope {
                 min: Bound::Unbounded,
                 max: Bound::Unbounded,
-            }],
+            }][..],
             false,
-            Some(reordered_deserializers),
-            Some(cover_mapping),
+            Some(&reordered_deserializers),
+            Some(&cover_mapping),
         )?;
         let first_tuple = crate::storage::next_tuple_for_test(&mut iter)?.unwrap();
         assert_eq!(
@@ -1227,6 +1228,7 @@ mod test {
 
         let target_pk = DataValue::Int32(3);
         let covered_value = DataValue::Int32(4);
+        let covered_ranges = [Range::Eq(covered_value.clone())];
         let mut table_codec = TableCodec::default();
         transaction.remove_tuple(&mut table_codec, "t1", &target_pk)?;
 
@@ -1235,11 +1237,11 @@ mod test {
             &plan_arena,
             "t1".to_string().into(),
             (Some(0), Some(1)),
-            columns,
+            &columns,
             unique_index,
-            vec![Range::Eq(covered_value.clone())],
+            &covered_ranges[..],
             false,
-            Some(covered_deserializers),
+            Some(&covered_deserializers),
             None,
         )?;
 
@@ -1265,15 +1267,15 @@ mod test {
             &plan_arena,
             "t1".to_string().into(),
             (None, None),
-            pk_columns,
+            &pk_columns,
             pk_index,
-            vec![Range::Scope {
+            &[Range::Scope {
                 min: Bound::Unbounded,
                 max: Bound::Unbounded,
-            }],
+            }][..],
             false,
-            Some(pk_deserializers),
-            Some(vec![0]),
+            Some(&pk_deserializers),
+            Some(&[0]),
         )?;
         let mut row_count = 0;
         while let Some(tuple) = crate::storage::next_tuple_for_test(&mut iter)? {

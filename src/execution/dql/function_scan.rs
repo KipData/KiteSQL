@@ -20,22 +20,22 @@ use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 
-pub struct FunctionScan {
-    table_function: TableFunction,
+pub struct FunctionScan<'a> {
+    table_function: &'a TableFunction,
     iter: Option<Box<dyn Iterator<Item = Result<Tuple, DatabaseError>>>>,
 }
 
-impl From<FunctionScanOperator> for FunctionScan {
-    fn from(op: FunctionScanOperator) -> Self {
+impl<'a> From<&'a FunctionScanOperator> for FunctionScan<'a> {
+    fn from(op: &'a FunctionScanOperator) -> Self {
         FunctionScan {
-            table_function: op.table_function,
+            table_function: &op.table_function,
             iter: None,
         }
     }
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for FunctionScan {
-    type Input = Self;
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for FunctionScan<'a> {
+    type Input = &'a FunctionScanOperator;
 
     fn into_executor(
         input: Self::Input,
@@ -44,19 +44,19 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for FunctionScan {
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        let executor = input;
+        let executor = FunctionScan::from(input);
         arena.push(ExecNode::FunctionScan(executor))
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for FunctionScan {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for FunctionScan<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         if self.iter.is_none() {
-            let TableFunction { args, catalog } = &self.table_function;
+            let TableFunction { args, catalog } = self.table_function;
             self.iter = Some(catalog.inner.eval(args, plan_arena)?);
         }
 

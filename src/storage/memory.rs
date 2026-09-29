@@ -239,7 +239,7 @@ mod wasm_tests {
             &table_cache,
             "test".to_string().into(),
             (Some(1), Some(1)),
-            read_columns,
+            &read_columns,
             true,
         )?;
 
@@ -274,12 +274,12 @@ mod wasm_tests {
             &plan_arena,
             table_name,
             (Some(0), None),
-            table.columns().cloned().collect(),
+            &table.columns().cloned().collect::<Vec<_>>(),
             pk_index,
-            vec![Range::Scope {
+            &[Range::Scope {
                 min: Bound::Excluded(DataValue::Int32(0)),
                 max: Bound::Included(DataValue::Int32(2)),
-            }],
+            }][..],
             true,
             None,
             None,
@@ -384,7 +384,7 @@ mod native_tests {
             &table_cache,
             "test".to_string().into(),
             (Some(1), Some(1)),
-            read_columns,
+            &read_columns,
             true,
         )?;
 
@@ -419,12 +419,12 @@ mod native_tests {
             &plan_arena,
             table_name,
             (Some(0), None),
-            table.columns().cloned().collect(),
+            &table.columns().cloned().collect::<Vec<_>>(),
             pk_index,
-            vec![Range::Scope {
+            &[Range::Scope {
                 min: Bound::Excluded(DataValue::Int32(0)),
                 max: Bound::Included(DataValue::Int32(2)),
-            }],
+            }][..],
             true,
             None,
             None,

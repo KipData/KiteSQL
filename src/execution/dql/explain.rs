@@ -20,22 +20,13 @@ use crate::storage::Transaction;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
 
-pub struct Explain {
-    plan: LogicalPlan,
+pub struct Explain<'a> {
+    plan: &'a LogicalPlan,
     emitted: bool,
 }
 
-impl From<LogicalPlan> for Explain {
-    fn from(plan: LogicalPlan) -> Self {
-        Explain {
-            plan,
-            emitted: false,
-        }
-    }
-}
-
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Explain {
-    type Input = Self;
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Explain<'a> {
+    type Input = &'a LogicalPlan;
 
     fn into_executor(
         input: Self::Input,
@@ -44,12 +35,14 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Explain {
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        let executor = input;
-        arena.push(ExecNode::Explain(executor))
+        arena.push(ExecNode::Explain(Explain {
+            plan: input,
+            emitted: false,
+        }))
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Explain {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Explain<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,

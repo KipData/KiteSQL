@@ -1,99 +1,10 @@
 use super::*;
-use crate::expression::range_detacher::{IndexRangeColumn, RangeDetacher};
-use crate::planner::operator::table_scan::TableScanOperator;
-use crate::planner::operator::visitor_mut::OperatorVisitorMut;
+#[cfg(test)]
 use crate::planner::operator::{PhysicalOption, PlanImpl, SortOption};
-use crate::planner::{ExprRef, MetaArena, ParamArena};
+use crate::planner::{ExprRef, ParamArena, PlanInput};
+#[cfg(test)]
 use crate::types::index::IndexLookup;
 use crate::types::LogicalType;
-
-struct ParameterBinder<'a> {
-    params: &'a [(usize, DataValue)],
-}
-
-impl ParameterBinder<'_> {
-    fn bind_index_infos(
-        &self,
-        index_infos: &mut [crate::types::index::IndexInfo],
-    ) -> Result<(), DatabaseError> {
-        for info in index_infos {
-            if let Some(lookup) = &mut info.lookup {
-                lookup.bind_parameters(self.params)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-impl<'plan> OperatorVisitorMut<'plan> for ParameterBinder<'_> {
-    fn visit_table_scan(
-        &mut self,
-        TableScanOperator { index_infos, .. }: &'plan mut TableScanOperator,
-    ) -> Result<(), DatabaseError> {
-        self.bind_index_infos(index_infos)
-    }
-
-    fn visit_physical_option(
-        &mut self,
-        physical_option: &'plan mut PhysicalOption,
-    ) -> Result<(), DatabaseError> {
-        if let PlanImpl::IndexScan(info) = &mut physical_option.plan {
-            self.bind_index_infos(std::slice::from_mut(info))?;
-        }
-        Ok(())
-    }
-}
-
-/// Extend the selected static index range using its bound residual predicate.
-struct SpecializeIndexRange<'a, A: MetaArena + ?Sized> {
-    arena: &'a mut A,
-}
-
-impl<'plan, A: MetaArena + ?Sized> OperatorVisitorMut<'plan> for SpecializeIndexRange<'_, A> {
-    fn visit_operator(
-        &mut self,
-        operator: &'plan mut Operator,
-        physical_option: Option<&'plan mut PhysicalOption>,
-    ) -> Result<(), DatabaseError> {
-        let Operator::TableScan(scan) = operator else {
-            return Ok(());
-        };
-        let Some(option) = physical_option else {
-            return Ok(());
-        };
-        let PlanImpl::IndexScan(index) = &mut option.plan else {
-            return Ok(());
-        };
-        let (Some(params_predicate), Some(IndexLookup::Static(original))) =
-            (index.residual_predicate, &index.lookup)
-        else {
-            return Ok(());
-        };
-        let SortOption::OrderBy {
-            ignore_prefix_len, ..
-        } = &index.sort_option
-        else {
-            return Ok(());
-        };
-        let Some(range) = RangeDetacher::<IndexRangeColumn, A>::specialize_range(
-            index.meta,
-            original,
-            params_predicate,
-            *ignore_prefix_len,
-            self.arena,
-        )?
-        else {
-            return Ok(());
-        };
-        index.lookup = Some(IndexLookup::Static(range));
-        for candidate in &mut scan.index_infos {
-            if candidate.meta == index.meta {
-                candidate.lookup = index.lookup.clone();
-            }
-        }
-        Ok(())
-    }
-}
 
 /// A bound and optimized reusable plan.
 #[derive(Clone)]
@@ -107,12 +18,8 @@ impl<'db> PreparedPlan<'db> {
     pub(crate) fn bind_parameters(
         &self,
         params: &[(usize, DataValue)],
-    ) -> Result<(LogicalPlan, ParamArena<'_>), DatabaseError> {
-        let mut arena = ParamArena::new(&self.arena, &self.parameter_expressions, params)?;
-        let mut plan = self.plan.clone();
-        ParameterBinder { params }.visit_plan(&mut plan)?;
-        SpecializeIndexRange { arena: &mut arena }.visit_plan(&mut plan)?;
-        Ok((plan, arena))
+    ) -> Result<ParamArena<'_>, DatabaseError> {
+        ParamArena::new(&self.arena, &self.parameter_expressions, params)
     }
 }
 
@@ -128,8 +35,10 @@ impl<S: Storage> Database<S> {
                 "plan belongs to another database".into(),
             ));
         }
-        let (plan, arena) = prepared.bind_parameters(params.as_ref())?;
-        BindSource::execute(self, |_, _| Ok((plan, arena)))
+        let arena = prepared.bind_parameters(params.as_ref())?;
+        BindSource::execute(self, |_, _| {
+            Ok((PlanInput::Borrowed(&prepared.plan), arena))
+        })
     }
 
     /// Prepare SQL with explicit positional parameter types.
@@ -160,8 +69,10 @@ impl<'db, S: Storage> DBTransaction<'db, S> {
                 "plan belongs to another database".into(),
             ));
         }
-        let (plan, arena) = prepared.bind_parameters(params.as_ref())?;
-        BindSource::execute(self, |_, _| Ok((plan, arena)))
+        let arena = prepared.bind_parameters(params.as_ref())?;
+        BindSource::execute(self, |_, _| {
+            Ok((PlanInput::Borrowed(&prepared.plan), arena))
+        })
     }
 
     #[cfg(feature = "parser")]
@@ -211,8 +122,7 @@ impl<S: Storage> State<S> {
             &mut PlanArena<'a>,
         ) -> Result<LogicalPlan, DatabaseError>,
     {
-        let (mut plan, mut arena) = self.build_plan(params, transaction, build)?;
-        plan.output_schema(&mut arena);
+        let (plan, mut arena) = self.build_plan(params, transaction, build)?;
         let parameter_expressions = arena.parameter_expressions();
         Ok(PreparedPlan {
             plan,
@@ -387,7 +297,7 @@ mod tests {
                 having: false,
                 is_optimized: true,
             };
-            let mut plan = LogicalPlan::new(
+            let plan = LogicalPlan::new(
                 Operator::Filter(filter.clone()),
                 Childrens::Only(Box::new(scan)),
             );
@@ -395,20 +305,50 @@ mod tests {
             if should_change {
                 expected_index.lookup = Some(IndexLookup::Static(expected.clone()));
             }
-            SpecializeIndexRange { arena: &mut arena }.visit_plan(&mut plan)?;
-            assert_eq!(plan.operator, Operator::Filter(filter));
-            let child = plan.childrens.pop_only();
-            let option = child.physical_option.unwrap();
-            assert_eq!(
-                option.plan,
-                PlanImpl::IndexScan(Box::new(expected_index.clone()))
-            );
-            assert_eq!(option.sort_option(), &sort);
-            let Operator::TableScan(scan) = child.operator else {
+            let Childrens::Only(scan) = plan.childrens.as_ref() else {
                 panic!("expected scan")
             };
-            assert_eq!(scan.index_infos[0], expected_index);
-            assert_eq!(scan.index_infos[1], other);
+            let Operator::TableScan(scan_op) = &scan.operator else {
+                panic!("expected table scan")
+            };
+            let Some(PhysicalOption {
+                plan: PlanImpl::IndexScan(info),
+                ..
+            }) = &scan.physical_option
+            else {
+                panic!("expected index scan")
+            };
+            if !matches!(info.lookup, Some(IndexLookup::Static(_))) {
+                continue;
+            }
+            let mut execution_arena = crate::execution::ExecArena::<
+                <crate::storage::memory::MemoryStorage as Storage>::TransactionType<'_>,
+            >::new();
+            let executor = crate::execution::dql::index_scan::IndexScan::new(
+                scan_op,
+                info,
+                info.lookup.as_ref().expect("lookup"),
+            );
+            let ranges = executor.ranges(&mut execution_arena, &mut arena)?;
+            let expected_range = match &expected_index.lookup {
+                Some(IndexLookup::Static(range)) => range,
+                _ => unreachable!(),
+            };
+            if let IndexLookup::Static(original) = index.lookup.as_ref().unwrap() {
+                let want = if should_change {
+                    expected_range
+                } else {
+                    original
+                };
+                let mut ranges = ranges;
+                assert_eq!(ranges.next(), Some(want));
+            }
+            assert_eq!(
+                scan.physical_option.as_ref().unwrap().plan,
+                PlanImpl::IndexScan(Box::new(index.clone()))
+            );
+            assert_eq!(scan.physical_option.as_ref().unwrap().sort_option(), &sort);
+            assert_eq!(plan.operator, Operator::Filter(filter));
             assert_eq!(
                 arena.expression(boundary),
                 &ScalarExpression::Binary {
@@ -588,13 +528,39 @@ mod tests {
                 (3, LogicalType::Integer),
             ],
         )?;
-        let (bound, _) = plan.bind_parameters(&[
+        let mut bound_arena = plan.bind_parameters(&[
             (1, DataValue::Int32(2)),
             (2, DataValue::Int32(5)),
             (3, DataValue::Int32(22)),
         ])?;
+        fn find_scan(plan: &LogicalPlan) -> Option<&LogicalPlan> {
+            matches!(plan.operator, Operator::TableScan(_))
+                .then_some(plan)
+                .or_else(|| plan.childrens.iter().find_map(find_scan))
+        }
+        let scan = find_scan(&plan.plan).expect("table scan");
+        let Operator::TableScan(scan_op) = &scan.operator else {
+            unreachable!()
+        };
+        let Some(PhysicalOption {
+            plan: PlanImpl::IndexScan(info),
+            ..
+        }) = &scan.physical_option
+        else {
+            panic!("expected index scan")
+        };
+        let mut execution_arena = crate::execution::ExecArena::<
+            <crate::storage::memory::MemoryStorage as Storage>::TransactionType<'_>,
+        >::new();
+        let ranges = crate::execution::dql::index_scan::IndexScan::new(
+            scan_op,
+            info,
+            info.lookup.as_ref().expect("lookup"),
+        )
+        .ranges(&mut execution_arena, &mut bound_arena)?;
+        let mut ranges = ranges;
         assert_eq!(
-            index_range(&bound),
+            ranges.next(),
             Some(&Range::Scope {
                 min: Bound::Included(DataValue::Tuple(vec![
                     DataValue::Int32(2),

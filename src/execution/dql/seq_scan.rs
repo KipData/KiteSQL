@@ -19,31 +19,21 @@ use crate::planner::MetaArena;
 use crate::storage::{Iter, Transaction, TupleIter};
 
 pub(crate) struct SeqScan<'a, T: Transaction + 'a> {
-    op: Option<TableScanOperator>,
+    op: &'a TableScanOperator,
     iter: Option<TupleIter<'a, T>>,
 }
 
-impl<'a, T: Transaction + 'a> From<TableScanOperator> for SeqScan<'a, T> {
-    fn from(op: TableScanOperator) -> Self {
-        SeqScan {
-            op: Some(op),
-            iter: None,
-        }
-    }
-}
-
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SeqScan<'a, T> {
-    type Input = Self;
+    type Input = &'a TableScanOperator;
 
     fn into_executor(
-        input: Self::Input,
+        op: Self::Input,
         arena: &mut ExecArena<'a, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        let executor = input;
-        arena.push(ExecNode::SeqScan(executor))
+        arena.push(ExecNode::SeqScan(SeqScan { op, iter: None }))
     }
 }
 
@@ -53,37 +43,30 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SeqScan<'a, T> {
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
-        if self.iter.is_none() {
-            let Some(TableScanOperator {
-                table_name,
-                columns,
-                limit,
-                with_pk,
-                ..
-            }) = self.op.take()
-            else {
-                arena.finish();
-                return Ok(());
-            };
-            let state = arena.local_state(plan_arena);
-            self.iter = Some(state.transaction().read(
-                state.table_codec,
-                state.plan_arena,
-                state.context.table_cache,
-                table_name,
-                limit,
-                columns,
-                with_pk,
-            )?);
-        }
-
         let state = arena.local_state(plan_arena);
-        if self
-            .iter
-            .as_mut()
-            .expect("seq scan iterator initialized")
-            .next_tuple_into(state.table_codec, &mut state.result.tuple)?
-        {
+        let iter = match &mut self.iter {
+            Some(iter) => iter,
+            None => {
+                let TableScanOperator {
+                    table_name,
+                    columns,
+                    limit,
+                    with_pk,
+                    ..
+                } = self.op;
+                self.iter.insert(state.transaction().read(
+                    state.table_codec,
+                    state.plan_arena,
+                    state.context.table_cache,
+                    table_name.clone(),
+                    *limit,
+                    columns,
+                    *with_pk,
+                )?)
+            }
+        };
+
+        if iter.next_tuple_into(state.table_codec, &mut state.result.tuple)? {
             arena.resume();
         } else {
             arena.finish();

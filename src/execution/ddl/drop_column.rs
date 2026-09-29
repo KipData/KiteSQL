@@ -21,49 +21,37 @@ use crate::iter_ext::Itertools;
 use crate::planner::operator::alter_table::drop_column::DropColumnOperator;
 use crate::planner::MetaArena;
 use crate::storage::Transaction;
-use crate::types::tuple_builder::TupleBuilder;
 
-pub struct DropColumn {
-    op: Option<DropColumnOperator>,
+pub struct DropColumn<'a> {
+    op: &'a DropColumnOperator,
 }
 
-impl From<DropColumnOperator> for DropColumn {
-    fn from(op: DropColumnOperator) -> Self {
-        Self { op: Some(op) }
-    }
-}
-
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropColumn {
-    type Input = Self;
+impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropColumn<'a> {
+    type Input = &'a DropColumnOperator;
 
     fn into_executor(
-        input: Self::Input,
+        op: Self::Input,
         arena: &mut ExecArena<'a, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        let executor = input;
-        arena.push(ExecNode::DropColumn(executor))
+        arena.push(ExecNode::DropColumn(DropColumn { op }))
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropColumn {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropColumn<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
         let table_cache = arena.table_cache();
-        let Some(DropColumnOperator {
+        let DropColumnOperator {
             table_name,
             column_name,
             if_exists,
-        }) = self.op.take()
-        else {
-            arena.finish();
-            return Ok(());
-        };
+        } = self.op;
 
         let (old_schema, pk_ty, column_info) = {
             let table_catalog = arena
@@ -96,7 +84,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropColumn {
                 rewrite_table_in_batches(
                     transaction,
                     table_codec,
-                    &table_name,
+                    table_name,
                     &pk_ty,
                     old_schema.len(),
                     || {
@@ -121,12 +109,11 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropColumn {
             {
                 let (transaction, table_codec) = arena.transaction_codec_mut();
                 let table =
-                    transaction.drop_column(table_codec, plan_arena, &table_name, &column_name)?;
+                    transaction.drop_column(table_codec, plan_arena, table_name, column_name)?;
                 arena.push_ddl_apply(DDLApply::upsert_table(table, true));
             }
 
-            arena.produce_tuple(TupleBuilder::build_result("1".to_string()));
-            arena.resume();
+            arena.finish();
             Ok(())
         } else if !if_exists {
             Err(DatabaseError::column_not_found(column_name))

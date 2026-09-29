@@ -175,7 +175,7 @@ enum RecursivePhase {
 }
 
 pub struct RecursiveCte<'a, T: Transaction + 'a> {
-    recursive_plan: LogicalPlan,
+    recursive_plan: &'a LogicalPlan,
     anchor_input: ExecId,
     recursive_arena: ExecArena<'a, T>,
     recursive_root: ExecId,
@@ -187,7 +187,7 @@ pub struct RecursiveCte<'a, T: Transaction + 'a> {
 impl<'a, T: Transaction + 'a> RecursiveCte<'a, T> {
     fn new(
         anchor_input: ExecId,
-        recursive_plan: LogicalPlan,
+        recursive_plan: &'a LogicalPlan,
         recursive_arena: ExecArena<'a, T>,
     ) -> Self {
         Self {
@@ -216,7 +216,7 @@ impl<'a, T: Transaction + 'a> RecursiveCte<'a, T> {
         self.recursive_root = build_read(
             &mut self.recursive_arena,
             plan_arena,
-            self.recursive_plan.clone(),
+            self.recursive_plan,
             cache,
             transaction,
         );
@@ -225,7 +225,7 @@ impl<'a, T: Transaction + 'a> RecursiveCte<'a, T> {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for RecursiveCte<'a, T> {
-    type Input = (LogicalPlan, LogicalPlan);
+    type Input = (&'a LogicalPlan, &'a LogicalPlan);
 
     fn into_executor(
         (anchor_plan, recursive_plan): Self::Input,
@@ -292,7 +292,7 @@ pub struct RecursiveScan {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for RecursiveScan {
-    type Input = RecursiveScanOperator;
+    type Input = &'a RecursiveScanOperator;
 
     fn into_executor(
         _input: Self::Input,
@@ -333,6 +333,7 @@ mod tests {
     use crate::planner::operator::Operator;
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::Childrens;
+    use crate::planner::LogicalPlan;
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
     use crate::types::evaluator::binary_create;
@@ -458,7 +459,7 @@ mod tests {
         let view_cache = ViewCache::default();
         let meta_cache = StatisticsMetaCache::default();
         let tuples = try_collect(execute_input::<_, RecursiveCte<'_, _>>(
-            (anchor, recursive),
+            (&anchor, &recursive),
             empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &transaction,

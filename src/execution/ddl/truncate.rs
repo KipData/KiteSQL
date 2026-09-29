@@ -19,49 +19,37 @@ use crate::execution::{
 use crate::planner::operator::truncate::TruncateOperator;
 use crate::planner::MetaArena;
 use crate::storage::Transaction;
-use crate::types::tuple_builder::TupleBuilder;
 
-pub struct Truncate {
-    op: Option<TruncateOperator>,
+pub struct Truncate<'a> {
+    op: &'a TruncateOperator,
 }
 
-impl From<TruncateOperator> for Truncate {
-    fn from(op: TruncateOperator) -> Self {
-        Truncate { op: Some(op) }
-    }
-}
-
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Truncate {
-    type Input = Self;
+impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Truncate<'a> {
+    type Input = &'a TruncateOperator;
 
     fn into_executor(
-        input: Self::Input,
+        op: Self::Input,
         arena: &mut ExecArena<'a, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        let executor = input;
-        arena.push(ExecNode::Truncate(executor))
+        arena.push(ExecNode::Truncate(Truncate { op }))
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Truncate {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Truncate<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
-        let Some(TruncateOperator { table_name }) = self.op.take() else {
-            arena.finish();
-            return Ok(());
-        };
+        let TruncateOperator { table_name } = self.op;
         let mut state = arena.local_state(plan_arena);
         let (transaction, table_codec) = state.transaction_codec_mut();
-        transaction.drop_data(table_codec, &table_name)?;
+        transaction.drop_data(table_codec, table_name)?;
 
-        arena.produce_tuple(TupleBuilder::build_result(format!("{table_name}")));
-        arena.resume();
+        arena.finish();
         Ok(())
     }
 }

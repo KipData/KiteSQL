@@ -24,16 +24,16 @@ pub struct ShowViews<'a, T: Transaction + 'a> {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ShowViews<'a, T> {
-    type Input = Self;
+    type Input = ();
 
     fn into_executor(
-        input: Self::Input,
+        _: Self::Input,
         arena: &mut ExecArena<'a, T>,
         _: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::ShowViews(input))
+        arena.push(ExecNode::ShowViews(ShowViews { metas: None }))
     }
 }
 

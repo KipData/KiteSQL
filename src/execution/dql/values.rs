@@ -20,30 +20,30 @@ use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::tuple::Schema;
 
-pub struct Values {
-    rows: std::vec::IntoIter<ExprRef>,
+pub struct Values<'a> {
+    rows: std::slice::Iter<'a, ExprRef>,
     remaining_rows: usize,
-    schema_ref: Schema,
+    schema_ref: &'a Schema,
 }
 
-impl From<ValuesOperator> for Values {
+impl<'a> From<&'a ValuesOperator> for Values<'a> {
     fn from(
         ValuesOperator {
             rows,
             row_count,
             schema_ref,
-        }: ValuesOperator,
+        }: &'a ValuesOperator,
     ) -> Self {
         Values {
-            rows: rows.into_iter(),
-            remaining_rows: row_count,
+            rows: rows.iter(),
+            remaining_rows: *row_count,
             schema_ref,
         }
     }
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Values {
-    type Input = Self;
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Values<'a> {
+    type Input = &'a ValuesOperator;
 
     fn into_executor(
         input: Self::Input,
@@ -52,12 +52,12 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Values {
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        let executor = input;
+        let executor = Values::from(input);
         arena.push(ExecNode::Values(executor))
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -77,7 +77,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values {
             let ty = plan_arena.column(self.schema_ref[i]).datatype();
             output.values.push(
                 plan_arena
-                    .expression(expr)
+                    .expression(*expr)
                     .eval(plan_arena, None)?
                     .into_owned()
                     .cast(ty)?,
