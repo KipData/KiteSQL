@@ -15,8 +15,8 @@
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::Bytes;
 use crate::storage::{
-    bytes_bound_as_slice, owned_bound, InnerIter, KeyValueRef, Storage, Transaction,
-    TransactionIsolationLevel,
+    bounds_contain, bytes_bound_as_slice, owned_bound, InnerIter, KeyValueRef, Storage,
+    Transaction, TransactionIsolationLevel,
 };
 use lmdb::{
     Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, RoCursor, RwTransaction,
@@ -25,7 +25,6 @@ use lmdb::{
 use std::collections::Bound;
 use std::fmt::{self, Display, Formatter};
 use std::fs;
-use std::ops::RangeBounds;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -207,18 +206,18 @@ impl Scan {
 
     fn before_start(&self, key: &[u8]) -> bool {
         if self.reverse {
-            !(Bound::Unbounded, self.start()).contains(key)
+            !bounds_contain(Bound::Unbounded, self.start(), key)
         } else {
-            !(self.start(), Bound::Unbounded).contains(key)
+            !bounds_contain(self.start(), Bound::Unbounded, key)
         }
     }
 
     fn contains(&self, key: &[u8]) -> bool {
-        (
+        bounds_contain(
             bytes_bound_as_slice(&self.range.0),
             bytes_bound_as_slice(&self.range.1),
+            key,
         )
-            .contains(key)
     }
 
     fn next<'txn, C: Cursor<'txn>>(

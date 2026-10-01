@@ -1240,6 +1240,10 @@ pub(crate) fn reuse_bound_as_excluded(bound: &mut Bound<Bytes>, key: &[u8]) {
     *bound = Bound::Excluded(bytes);
 }
 
+pub(crate) fn bounds_contain(min: Bound<&[u8]>, max: Bound<&[u8]>, key: &[u8]) -> bool {
+    std::ops::RangeBounds::<[u8]>::contains(&(min, max), key)
+}
+
 pub(crate) fn bytes_bound_as_slice(bound: &Bound<Bytes>) -> Bound<&[u8]> {
     match bound {
         Bound::Included(bytes) => Bound::Included(bytes.as_slice()),
@@ -2208,8 +2212,6 @@ impl<T: Transaction> ViewIter<'_, T> {
 pub(crate) fn check_range_rev_matches_range<T: Transaction>(
     tx: &mut T,
 ) -> Result<(), DatabaseError> {
-    use std::ops::RangeBounds;
-
     fn keys<I: InnerIter>(mut iter: I) -> Result<Vec<Vec<u8>>, DatabaseError> {
         let mut keys = Vec::new();
         while let Some((key, _)) = iter.try_next()? {
@@ -2265,7 +2267,7 @@ pub(crate) fn check_range_rev_matches_range<T: Transaction>(
             }
             let mut expected: Vec<Vec<u8>> = data
                 .iter()
-                .filter(|key| (*min, *max).contains(key.as_slice()))
+                .filter(|key| bounds_contain(*min, *max, key.as_slice()))
                 .cloned()
                 .collect();
             assert_eq!(
@@ -2309,8 +2311,6 @@ pub(crate) fn check_explicit_transaction_does_not_rescan_own_writes<S: Storage>(
 
 #[cfg(test)]
 pub(crate) fn check_remove_range<T: Transaction>(tx: &mut T) -> Result<(), DatabaseError> {
-    use std::ops::RangeBounds;
-
     let data: Vec<[u8; 4]> = (0u32..3000).map(u32::to_be_bytes).collect();
     let [k0, k1, k10, k2500, k2999, k5000] = [0u32, 1, 10, 2500, 2999, 5000].map(u32::to_be_bytes);
     type Case<'a> = (Bound<&'a [u8]>, Bound<&'a [u8]>);
@@ -2336,7 +2336,7 @@ pub(crate) fn check_remove_range<T: Transaction>(tx: &mut T) -> Result<(), Datab
         }
         let expected: Vec<Vec<u8>> = data
             .iter()
-            .filter(|key| !(min, max).contains(key.as_slice()))
+            .filter(|key| !bounds_contain(min, max, key.as_slice()))
             .map(|key| key.to_vec())
             .collect();
         assert_eq!(remaining, expected, "min={min:?} max={max:?}");
