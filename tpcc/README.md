@@ -50,12 +50,12 @@ Local 720-second comparison on the machine above:
 
 | Backend | TpmC | New-Order p90 (µs) | Payment p90 (µs) | Order-Status p90 (µs) | Delivery p90 (µs) | Stock-Level p90 (µs) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| KiteSQL LMDB | 160879 | 310 | 80 | 153 | 424 | 334 |
-| KiteSQL RocksDB | 48355 | 449 | 252 | 232 | 11127 | 712 |
-| SQLite balanced | 65349 | 283 | 67 | 48 | 334 | 468 |
-| SQLite practical | 61975 | 339 | 66 | 40 | 429 | 335 |
+| KiteSQL LMDB | 159616 | 315 | 81 | 44 | 435 | 332 |
+| KiteSQL RocksDB | 48035 | 459 | 258 | 200 | 11055 | 704 |
+| SQLite balanced | 67102 | 283 | 67 | 48 | 338 | 473 |
+| SQLite practical | 67153 | 336 | 66 | 41 | 427 | 339 |
 
-- Run dates: `2026-09-30`; results: `2026-09-30_05-27-55`. Latency is measured in microseconds and includes commit.
+- Run dates: `2026-10-01`; results: `2026-10-01_17-12-31`. Latency is measured in microseconds and includes commit.
 - Every row is pinned to `cpu8`, the highest-frequency P-core on this machine (5.4 GHz).
 - All rows use `--num-ware 1`, `--max-retry 5`, and TPCC's default 720-second measure time.
 - SQLite rows use the `balanced` and `practical` profiles respectively.
