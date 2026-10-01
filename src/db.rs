@@ -431,6 +431,27 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
         .build()
 }
 
+fn statement_stamp<T: Transaction>(
+    transaction: &mut T,
+    plan: &LogicalPlan,
+) -> Result<u64, DatabaseError> {
+    let scans_and_writes = match &plan.operator {
+        Operator::Insert(_) => !matches!(plan.childrens.only().operator, Operator::Values(_)),
+        Operator::Update(_)
+        | Operator::AddColumn(_)
+        | Operator::ChangeColumn(_)
+        | Operator::DropColumn(_)
+        | Operator::CreateIndex(_)
+        | Operator::Analyze(_) => true,
+        _ => false,
+    };
+    if scans_and_writes {
+        transaction.next_statement_stamp()
+    } else {
+        Ok(0)
+    }
+}
+
 pub(crate) struct State<S> {
     scala_functions: ScalaFunctions,
     table_functions: TableFunctions,
@@ -569,6 +590,7 @@ impl<S: Storage> State<S> {
         let plan = keeper.plan();
         let schema = plan.read_schema().clone();
         let mut arena = ExecArena::new();
+        arena.set_statement_stamp(statement_stamp(transaction, plan)?);
         let read_context = ExecutionContext::new(
             &self.table_cache,
             &self.view_cache,
@@ -644,6 +666,7 @@ impl<S: Storage> State<S> {
         let plan = keeper.plan();
         let schema = plan.read_schema().clone();
         let mut arena = ExecArena::new();
+        arena.set_statement_stamp(statement_stamp(transaction, plan)?);
         let cache = ExecutionContext::new(
             table_cache,
             view_cache,

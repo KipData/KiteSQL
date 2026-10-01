@@ -202,13 +202,16 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update<'a> {
                 tuple.pk = Some(new_pk);
                 let mut state = arena.local_state(plan_arena);
                 let (transaction, table_codec) = state.transaction_codec_mut();
-                transaction.append_tuple(
-                    table_codec,
-                    self.table_name,
-                    &tuple,
-                    &serializers,
-                    is_overwrite,
-                )?;
+                let stamp = if is_overwrite { 0 } else { table_codec.stamp() };
+                table_codec.with_stamp(stamp, |table_codec| {
+                    transaction.append_tuple(
+                        table_codec,
+                        self.table_name,
+                        &tuple,
+                        &serializers,
+                        is_overwrite,
+                    )
+                })?;
                 updated_count += 1;
             }
 

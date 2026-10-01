@@ -44,6 +44,7 @@ const KEY_TYPE_TAG_LEN: usize = 1;
 const KEY_BOUND_LEN: usize = 1;
 const TUPLE_KEY_PREFIX_LEN: usize = TABLE_NAME_HASH_LEN + KEY_TYPE_TAG_LEN + KEY_BOUND_LEN;
 const STATISTICS_BUCKET_ORD_LEN: usize = 4;
+const STAMP_LEN: usize = 8;
 
 static ROOT_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"Root".to_vec());
 static VIEW_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"View".to_vec());
@@ -58,6 +59,7 @@ type TupleValueWriter<'a> = &'a mut dyn FnMut(&Tuple, &mut Bytes) -> Result<(), 
 pub struct TableCodec {
     buffers: [Bytes; 2],
     reference_tables: ReferenceTables,
+    stamp: u64,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -123,6 +125,39 @@ impl StatisticsCodecType {
 }
 
 impl TableCodec {
+    pub(crate) fn set_stamp(&mut self, stamp: u64) {
+        self.stamp = stamp;
+    }
+
+    pub(crate) fn stamp(&self) -> u64 {
+        self.stamp
+    }
+
+    pub(crate) fn with_stamp<R>(&mut self, stamp: u64, f: impl FnOnce(&mut Self) -> R) -> R {
+        let prev = std::mem::replace(&mut self.stamp, stamp);
+        let result = f(self);
+        self.stamp = prev;
+        result
+    }
+
+    pub(crate) fn is_own_write(&self, value: &[u8]) -> bool {
+        self.stamp != 0
+            && value
+                .len()
+                .checked_sub(STAMP_LEN)
+                .is_some_and(|n| value[n..] == self.stamp.to_le_bytes())
+    }
+
+    pub(crate) fn strip_stamp(value: &[u8]) -> Result<&[u8], DatabaseError> {
+        value
+            .len()
+            .checked_sub(STAMP_LEN)
+            .map(|n| &value[..n])
+            .ok_or_else(|| {
+                DatabaseError::InvalidValue("value is missing its statement stamp".into())
+            })
+    }
+
     #[inline]
     fn clear_buffers(&mut self) {
         self.buffers[CodecSlot::S0.index()].clear();
@@ -270,6 +305,7 @@ impl TableCodec {
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
+        let stamp = self.stamp;
         self.with_table_hash_buffers(table_name, |lower, table_hash, value, _| {
             Self::write_key_prefix(lower, CodecType::Tuple, table_hash);
             lower.push(BOUND_MIN_TAG);
@@ -277,6 +313,7 @@ impl TableCodec {
 
             if let Some((tuple, serializers)) = tuple_value {
                 serializers(tuple, value)?;
+                value.extend_from_slice(&stamp.to_le_bytes());
             }
 
             f(lower.as_slice(), value.as_slice())
@@ -396,6 +433,7 @@ impl TableCodec {
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
+        let stamp = self.stamp;
         self.with_table_hash_buffers(table_name, |lower, table_hash, value, _| {
             Self::write_key_prefix(lower, CodecType::Index, table_hash);
             lower.push(BOUND_MIN_TAG);
@@ -413,6 +451,7 @@ impl TableCodec {
 
             if let Some(tuple_id) = tuple_id {
                 tuple_id.encode_reference_value(&mut *value)?;
+                value.extend_from_slice(&stamp.to_le_bytes());
             }
 
             f(lower.as_slice(), value.as_slice())
@@ -761,7 +800,7 @@ impl TableCodec {
         S: Borrow<TupleValueSerializableImpl>,
     {
         tuple.pk = tuple_id;
-        tuple.deserialize_from_into(deserializers, bytes, total_len)
+        tuple.deserialize_from_into(deserializers, Self::strip_stamp(bytes)?, total_len)
     }
 
     fn encode_index_meta_value_into(
@@ -808,7 +847,7 @@ impl TableCodec {
     }
 
     pub fn decode_index(bytes: &[u8]) -> Result<TupleId, DatabaseError> {
-        DataValue::decode_reference_value(&mut Cursor::new(bytes))
+        DataValue::decode_reference_value(&mut Cursor::new(Self::strip_stamp(bytes)?))
     }
 
     fn encode_column_value_into(
@@ -1070,13 +1109,17 @@ mod tests {
             Some(DataValue::Int32(0)),
             vec![DataValue::Int32(0), DataValue::Decimal(Decimal::new(1, 0))],
         );
-        let mut bytes = Vec::new();
-        expected.serialize_to(
-            &[
-                LogicalType::Integer.serializable(),
-                LogicalType::Decimal(None, None).serializable(),
-            ],
-            &mut bytes,
+        let serializers = [
+            LogicalType::Integer.serializable(),
+            LogicalType::Decimal(None, None).serializable(),
+        ];
+        let mut write_value =
+            |tuple: &Tuple, value: &mut Bytes| tuple.serialize_to(&serializers, value);
+        let bytes = TableCodec::default().with_tuple(
+            "t1",
+            &DataValue::Int32(0),
+            Some((&expected, &mut write_value)),
+            |_, value| Ok(value.to_vec()),
         )?;
         let deserializers = table_catalog
             .columns()
@@ -1276,8 +1319,10 @@ mod tests {
     #[test]
     fn test_table_codec_index() -> Result<(), DatabaseError> {
         let tuple_id = DataValue::Int32(0);
-        let mut bytes = Vec::new();
-        tuple_id.encode_reference_value(&mut bytes)?;
+        let index = Index::new(0, &[], IndexType::Unique);
+        let bytes =
+            TableCodec::default()
+                .with_index("t1", &index, Some(&tuple_id), |_, value| Ok(value.to_vec()))?;
 
         assert_eq!(TableCodec::decode_index(&bytes)?, tuple_id);
 

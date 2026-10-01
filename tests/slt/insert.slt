@@ -124,3 +124,25 @@ insert into t3_decimal (id, v1) values (2, -10);
 
 statement ok
 drop table t3_decimal;
+
+statement ok
+create table t_insert_self(id int primary key, v int not null)
+
+statement ok
+insert into t_insert_self values (1,1), (2,2), (3,3)
+
+statement ok
+insert into t_insert_self select id + 1000, v from t_insert_self where id < 3000
+
+query I
+select id from t_insert_self order by id
+----
+1
+2
+3
+1001
+1002
+1003
+
+statement ok
+drop table t_insert_self

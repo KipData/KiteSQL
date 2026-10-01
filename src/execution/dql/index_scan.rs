@@ -80,7 +80,7 @@ impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
                 range = Cow::Owned(specialized);
             }
         }
-        Ok(range.into())
+        Ok(IndexRanges::from(range).reversed(info.is_reverse()))
     }
 }
 

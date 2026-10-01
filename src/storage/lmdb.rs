@@ -15,17 +15,17 @@
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::Bytes;
 use crate::storage::{
-    bytes_bound_as_slice, owned_bound, reuse_bound_as_excluded, InnerIter, KeyValueRef, Storage,
-    Transaction, TransactionIsolationLevel,
+    bytes_bound_as_slice, owned_bound, InnerIter, KeyValueRef, Storage, Transaction,
+    TransactionIsolationLevel,
 };
 use lmdb::{
     Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, RoCursor, RwTransaction,
     Transaction as _, WriteFlags,
 };
-use std::cmp::Ordering;
 use std::collections::Bound;
 use std::fmt::{self, Display, Formatter};
 use std::fs;
+use std::ops::RangeBounds;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -133,7 +133,11 @@ impl Storage for LmdbStorage {
         self.validate_transaction_isolation(isolation)?;
         let tx = self.env.begin_rw_txn()?;
 
-        Ok(LmdbTransaction { tx, db: self.db })
+        Ok(LmdbTransaction {
+            tx,
+            db: self.db,
+            statements: 0,
+        })
     }
 
     fn default_transaction_isolation(&self) -> TransactionIsolationLevel {
@@ -161,45 +165,115 @@ impl Storage for LmdbStorage {
 pub struct LmdbTransaction<'env> {
     tx: RwTransaction<'env>,
     db: Database,
+    statements: u64,
 }
 
 pub struct LmdbIter<'txn> {
-    _cursor: RoCursor<'txn>,
-    iter: lmdb::Iter<'txn>,
-    pending: Option<(&'txn [u8], &'txn [u8])>,
-    max: Bound<Bytes>,
-    done: bool,
+    cursor: RoCursor<'txn>,
+    scan: Scan,
 }
 
-impl LmdbIter<'_> {
-    fn next_visible(&mut self) -> Option<(&[u8], &[u8])> {
-        if let Some(entry) = self.pending.take() {
-            if within_upper_bound(entry.0, bytes_bound_as_slice(&self.max)) {
-                return Some(entry);
-            }
-            self.done = true;
-            return None;
-        }
+struct Scan {
+    step: Step,
+    range: BytesRange,
+    reverse: bool,
+}
 
-        if let Some((key, value)) = self.iter.next() {
-            if !within_upper_bound(key, bytes_bound_as_slice(&self.max)) {
-                self.done = true;
-                return None;
-            }
-            return Some((key, value));
-        }
+enum Step {
+    Seek,
+    Last,
+    Move,
+    Done,
+}
 
-        self.done = true;
-        None
+type BytesRange = (Bound<Bytes>, Bound<Bytes>);
+
+impl Scan {
+    fn new(min: Bound<&[u8]>, max: Bound<&[u8]>, reverse: bool) -> Self {
+        Self {
+            step: Step::Seek,
+            range: (owned_bound(min), owned_bound(max)),
+            reverse,
+        }
+    }
+
+    fn start(&self) -> Bound<&[u8]> {
+        if self.reverse {
+            bytes_bound_as_slice(&self.range.1)
+        } else {
+            bytes_bound_as_slice(&self.range.0)
+        }
+    }
+
+    fn before_start(&self, key: &[u8]) -> bool {
+        if self.reverse {
+            !(Bound::Unbounded, self.start()).contains(key)
+        } else {
+            !(self.start(), Bound::Unbounded).contains(key)
+        }
+    }
+
+    fn contains(&self, key: &[u8]) -> bool {
+        (
+            bytes_bound_as_slice(&self.range.0),
+            bytes_bound_as_slice(&self.range.1),
+        )
+            .contains(key)
+    }
+
+    fn next<'txn, C: Cursor<'txn>>(
+        &mut self,
+        cursor: &C,
+    ) -> Result<Option<KeyValueRef<'txn>>, DatabaseError> {
+        loop {
+            let (key, op) = match self.step {
+                Step::Seek => match self.start() {
+                    Bound::Included(key) | Bound::Excluded(key) => {
+                        (Some(key), lmdb_sys::MDB_SET_RANGE)
+                    }
+                    Bound::Unbounded if self.reverse => (None, lmdb_sys::MDB_LAST),
+                    Bound::Unbounded => (None, lmdb_sys::MDB_FIRST),
+                },
+                Step::Last => (None, lmdb_sys::MDB_LAST),
+                Step::Move if self.reverse => (None, lmdb_sys::MDB_PREV),
+                Step::Move => (None, lmdb_sys::MDB_NEXT),
+                Step::Done => return Ok(None),
+            };
+            let positioning = !matches!(self.step, Step::Move);
+            let Some(entry) = cursor_get(cursor, key, op)? else {
+                self.step = if self.reverse && key.is_some() && matches!(self.step, Step::Seek) {
+                    Step::Last
+                } else {
+                    Step::Done
+                };
+                continue;
+            };
+            self.step = Step::Move;
+            if self.contains(entry.0) {
+                return Ok(Some(entry));
+            }
+            if !(positioning && self.before_start(entry.0)) {
+                self.step = Step::Done;
+            }
+        }
     }
 }
 
 impl InnerIter for LmdbIter<'_> {
     fn try_next(&mut self) -> Result<Option<KeyValueRef<'_>>, DatabaseError> {
-        if self.done {
-            return Ok(None);
-        }
-        Ok(self.next_visible())
+        self.scan.next(&self.cursor)
+    }
+}
+
+fn cursor_get<'txn, C: Cursor<'txn>>(
+    cursor: &C,
+    key: Option<&[u8]>,
+    op: lmdb_sys::MDB_cursor_op,
+) -> Result<Option<KeyValueRef<'txn>>, lmdb::Error> {
+    match cursor.get(key, None, op) {
+        Ok((key, value)) => Ok(Some((key.unwrap_or_default(), value))),
+        Err(lmdb::Error::NotFound) => Ok(None),
+        Err(err) => Err(err),
     }
 }
 
@@ -213,6 +287,24 @@ impl Transaction for LmdbTransaction<'_> {
         = LmdbIter<'a>
     where
         Self: 'a;
+
+    type RevIterType<'a>
+        = LmdbIter<'a>
+    where
+        Self: 'a;
+    fn next_statement_stamp(&mut self) -> Result<u64, DatabaseError> {
+        const STATEMENT_BITS: u32 = 20;
+        self.statements += 1;
+        // SAFETY: `self.tx` is a live transaction handle owned by this value.
+        let txn_id = unsafe { lmdb_sys::mdb_txn_id(self.tx.txn()) } as u64;
+        if self.statements >= 1 << STATEMENT_BITS || txn_id >= 1 << (u64::BITS - STATEMENT_BITS) {
+            return Err(DatabaseError::InvalidValue(
+                "statement stamps exhausted".into(),
+            ));
+        }
+        Ok((txn_id << STATEMENT_BITS) | self.statements)
+    }
+
     fn get_borrowed<'a>(
         &'a self,
         key: &[u8],
@@ -242,106 +334,35 @@ impl Transaction for LmdbTransaction<'_> {
         min: Bound<&'key [u8]>,
         max: Bound<&'key [u8]>,
     ) -> Result<Self::IterType<'txn>, DatabaseError> {
-        let mut cursor = self.tx.open_ro_cursor(self.db)?;
-        let (pending, done) = initial_entry(&mut cursor, &min)?;
-        let iter = cursor.iter();
-
         Ok(LmdbIter {
-            _cursor: cursor,
-            iter,
-            pending,
-            max: owned_bound(max),
-            done,
+            cursor: self.tx.open_ro_cursor(self.db)?,
+            scan: Scan::new(min, max, false),
+        })
+    }
+
+    fn range_rev<'txn, 'key>(
+        &'txn self,
+        min: Bound<&'key [u8]>,
+        max: Bound<&'key [u8]>,
+    ) -> Result<Self::RevIterType<'txn>, DatabaseError> {
+        Ok(LmdbIter {
+            cursor: self.tx.open_ro_cursor(self.db)?,
+            scan: Scan::new(min, max, true),
         })
     }
 
     fn remove_range(&mut self, min: Bound<&[u8]>, max: Bound<&[u8]>) -> Result<(), DatabaseError> {
         let mut cursor = self.tx.open_rw_cursor(self.db)?;
-        let mut lower = owned_bound(min);
-        let mut seek_key = Bytes::new();
-
-        loop {
-            let entry = cursor_seek(&mut cursor, &lower, &mut seek_key)?;
-            let Some((key, _)) = entry else {
-                return Ok(());
-            };
-            if !within_upper_bound(key, max) {
-                return Ok(());
-            }
-
-            reuse_bound_as_excluded(&mut lower, key);
+        let mut scan = Scan::new(min, max, false);
+        while scan.next(&cursor)?.is_some() {
             cursor.del(WriteFlags::empty())?;
         }
+        Ok(())
     }
 
     fn commit(self) -> Result<(), DatabaseError> {
         self.tx.commit()?;
         Ok(())
-    }
-}
-
-fn initial_entry<'txn>(
-    cursor: &mut RoCursor<'txn>,
-    min: &Bound<&[u8]>,
-) -> Result<(Option<KeyValueRef<'txn>>, bool), lmdb::Error> {
-    match min {
-        Bound::Unbounded => Ok((None, false)),
-        Bound::Included(min) => match cursor.get(Some(*min), None, lmdb_sys::MDB_SET_RANGE) {
-            Ok((key, value)) => Ok((Some((key.unwrap_or_default(), value)), false)),
-            Err(lmdb::Error::NotFound) => Ok((None, true)),
-            Err(err) => Err(err),
-        },
-        Bound::Excluded(min) => match cursor.get(Some(*min), None, lmdb_sys::MDB_SET_RANGE) {
-            Ok((key, value)) => {
-                let key = key.unwrap_or_default();
-                if key == *min {
-                    Ok((None, false))
-                } else {
-                    Ok((Some((key, value)), false))
-                }
-            }
-            Err(lmdb::Error::NotFound) => Ok((None, true)),
-            Err(err) => Err(err),
-        },
-    }
-}
-
-fn cursor_seek<'txn>(
-    cursor: &mut lmdb::RwCursor<'txn>,
-    lower: &Bound<Bytes>,
-    seek_key: &mut Bytes,
-) -> Result<Option<KeyValueRef<'txn>>, lmdb::Error> {
-    match lower {
-        Bound::Unbounded => match cursor.get(None, None, lmdb_sys::MDB_FIRST) {
-            Ok((key, value)) => Ok(Some((key.unwrap_or_default(), value))),
-            Err(lmdb::Error::NotFound) => Ok(None),
-            Err(err) => Err(err),
-        },
-        Bound::Included(min) => {
-            match cursor.get(Some(min.as_slice()), None, lmdb_sys::MDB_SET_RANGE) {
-                Ok((key, value)) => Ok(Some((key.unwrap_or_default(), value))),
-                Err(lmdb::Error::NotFound) => Ok(None),
-                Err(err) => Err(err),
-            }
-        }
-        Bound::Excluded(min) => {
-            seek_key.clear();
-            seek_key.extend_from_slice(min.as_slice());
-            seek_key.push(0);
-            match cursor.get(Some(seek_key.as_slice()), None, lmdb_sys::MDB_SET_RANGE) {
-                Ok((key, value)) => Ok(Some((key.unwrap_or_default(), value))),
-                Err(lmdb::Error::NotFound) => Ok(None),
-                Err(err) => Err(err),
-            }
-        }
-    }
-}
-
-fn within_upper_bound(key: &[u8], max: Bound<&[u8]>) -> bool {
-    match max {
-        Bound::Included(max) => key.cmp(max) != Ordering::Greater,
-        Bound::Excluded(max) => key.cmp(max) == Ordering::Less,
-        Bound::Unbounded => true,
     }
 }
 
@@ -374,6 +395,31 @@ mod tests {
         let tuple = iter.next_tuple(|_, tuple| tuple.clone()).unwrap().unwrap();
         assert_eq!(tuple.values[0].to_string(), "20");
         iter.done().unwrap();
+    }
+
+    #[test]
+    fn lmdb_remove_range() {
+        use crate::storage::Storage;
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let storage = LmdbStorage::new(temp_dir.path().join("kite_sql.lmdb")).unwrap();
+        let mut transaction = storage.transaction().unwrap();
+        crate::storage::check_remove_range(&mut transaction).unwrap();
+    }
+
+    #[test]
+    fn lmdb_range_rev_matches_range() {
+        use crate::storage::Storage;
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let storage = LmdbStorage::new(temp_dir.path().join("kite_sql.lmdb")).unwrap();
+        let mut transaction = storage.transaction().unwrap();
+        crate::storage::check_range_rev_matches_range(&mut transaction).unwrap();
+    }
+
+    #[test]
+    fn explicit_transaction_does_not_rescan_own_writes() {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let db = DataBaseBuilder::path(temp_dir.path()).build_lmdb().unwrap();
+        crate::storage::check_explicit_transaction_does_not_rescan_own_writes(db).unwrap();
     }
 
     #[test]

@@ -446,6 +446,7 @@ impl Storage for OptimisticRocksStorage {
             isolation,
             current_snapshot: matches!(isolation, TransactionIsolationLevel::RepeatableRead)
                 .then(|| self.inner.snapshot()),
+            statements: 0,
         })
     }
 
@@ -493,6 +494,7 @@ impl Storage for RocksStorage {
             isolation,
             current_snapshot: matches!(isolation, TransactionIsolationLevel::RepeatableRead)
                 .then(|| self.inner.snapshot()),
+            statements: 0,
         })
     }
 
@@ -563,6 +565,7 @@ pub struct OptimisticRocksTransaction<'db> {
     tx: rocksdb::Transaction<'db, OptimisticTransactionDB>,
     isolation: TransactionIsolationLevel,
     current_snapshot: Option<SnapshotWithThreadMode<'db, OptimisticTransactionDB>>,
+    statements: u64,
 }
 
 pub struct RocksTransaction<'db> {
@@ -570,6 +573,32 @@ pub struct RocksTransaction<'db> {
     tx: rocksdb::Transaction<'db, TransactionDB<rocksdb::MultiThreaded>>,
     isolation: TransactionIsolationLevel,
     current_snapshot: Option<SnapshotWithThreadMode<'db, TransactionDB<rocksdb::MultiThreaded>>>,
+    statements: u64,
+}
+
+extern "C" {
+    fn rocksdb_snapshot_get_sequence_number(snapshot: *const std::ffi::c_void) -> u64;
+}
+
+fn statement_stamp<D: rocksdb::DBAccess>(
+    db: &D,
+    statements: &mut u64,
+) -> Result<u64, DatabaseError> {
+    const STATEMENT_BITS: u32 = 12;
+    *statements += 1;
+    // SAFETY: the snapshot is created on `db`, only read, and released before returning.
+    let sequence = unsafe {
+        let snapshot = db.create_snapshot();
+        let sequence = rocksdb_snapshot_get_sequence_number(snapshot.cast());
+        db.release_snapshot(snapshot);
+        sequence
+    };
+    if *statements >= 1 << STATEMENT_BITS || sequence >= 1 << (u64::BITS - STATEMENT_BITS) {
+        return Err(DatabaseError::InvalidValue(
+            "statement stamps exhausted".into(),
+        ));
+    }
+    Ok((sequence << STATEMENT_BITS) | *statements)
 }
 
 fn build_read_options<D: rocksdb::DBAccess>(
@@ -595,6 +624,15 @@ macro_rules! impl_transaction {
                 = $iter<'storage, 'iter>
             where
                 Self: 'iter;
+
+            type RevIterType<'iter>
+                = $iter<'storage, 'iter>
+            where
+                Self: 'iter;
+            fn next_statement_stamp(&mut self) -> Result<u64, DatabaseError> {
+                statement_stamp(self.db, &mut self.statements)
+            }
+
             fn begin_statement_scope(&mut self) -> Result<(), DatabaseError> {
                 if self.isolation == TransactionIsolationLevel::ReadCommitted {
                     self.current_snapshot = Some(self.db.snapshot());
@@ -640,20 +678,7 @@ macro_rules! impl_transaction {
                 max: Bound<&'key [u8]>,
             ) -> Result<Self::IterType<'a>, DatabaseError> {
                 let mut read_opts = build_read_options(self.current_snapshot.as_ref());
-                if let (
-                    Bound::Included(min_bytes) | Bound::Excluded(min_bytes),
-                    Bound::Included(max_bytes) | Bound::Excluded(max_bytes),
-                ) = (&min, &max)
-                {
-                    let len = min_bytes
-                        .iter()
-                        .zip(max_bytes.iter())
-                        .take_while(|(x, y)| x == y)
-                        .count();
-                    if len >= ROCKSDB_FIXED_PREFIX_LEN {
-                        read_opts.set_prefix_same_as_start(true);
-                    }
-                }
+                set_prefix_same_as_start(&mut read_opts, min, max);
                 set_iterate_upper_bound(&mut read_opts, max);
 
                 let mut iter = self.tx.raw_iterator_opt(read_opts);
@@ -670,8 +695,35 @@ macro_rules! impl_transaction {
 
                 Ok($iter {
                     iter,
-                    advanced: false,
-                    done: false,
+                    step: Step::Current(Direction::Forward),
+                })
+            }
+
+            #[inline]
+            fn range_rev<'a, 'key>(
+                &'a self,
+                min: Bound<&'key [u8]>,
+                max: Bound<&'key [u8]>,
+            ) -> Result<Self::RevIterType<'a>, DatabaseError> {
+                let mut read_opts = build_read_options(self.current_snapshot.as_ref());
+                set_prefix_same_as_start(&mut read_opts, min, max);
+                set_iterate_lower_bound(&mut read_opts, min);
+
+                let mut iter = self.tx.raw_iterator_opt(read_opts);
+                match &max {
+                    Bound::Included(bytes) => iter.seek_for_prev(*bytes),
+                    Bound::Excluded(bytes) => {
+                        iter.seek_for_prev(*bytes);
+                        if iter.key() == Some(*bytes) {
+                            iter.prev();
+                        }
+                    }
+                    Bound::Unbounded => iter.seek_to_last(),
+                }
+
+                Ok($iter {
+                    iter,
+                    step: Step::Current(Direction::Reverse),
                 })
             }
 
@@ -688,14 +740,13 @@ impl_transaction!(OptimisticRocksTransaction, OptimisticRocksIter);
 
 pub struct OptimisticRocksIter<'txn, 'iter> {
     iter: DBRawIteratorWithThreadMode<'iter, rocksdb::Transaction<'txn, OptimisticTransactionDB>>,
-    advanced: bool,
-    done: bool,
+    step: Step,
 }
 
 impl InnerIter for OptimisticRocksIter<'_, '_> {
     #[inline]
     fn try_next(&mut self) -> Result<Option<crate::storage::KeyValueRef<'_>>, DatabaseError> {
-        next(&mut self.iter, &mut self.advanced, &mut self.done)
+        next(&mut self.iter, &mut self.step)
     }
 }
 
@@ -704,14 +755,45 @@ pub struct RocksIter<'txn, 'iter> {
         'iter,
         rocksdb::Transaction<'txn, TransactionDB<rocksdb::MultiThreaded>>,
     >,
-    advanced: bool,
-    done: bool,
+    step: Step,
 }
 
 impl InnerIter for RocksIter<'_, '_> {
     #[inline]
     fn try_next(&mut self) -> Result<Option<crate::storage::KeyValueRef<'_>>, DatabaseError> {
-        next(&mut self.iter, &mut self.advanced, &mut self.done)
+        next(&mut self.iter, &mut self.step)
+    }
+}
+
+#[inline]
+fn set_prefix_same_as_start(read_opts: &mut ReadOptions, min: Bound<&[u8]>, max: Bound<&[u8]>) {
+    if let (
+        Bound::Included(min_bytes) | Bound::Excluded(min_bytes),
+        Bound::Included(max_bytes) | Bound::Excluded(max_bytes),
+    ) = (min, max)
+    {
+        let len = min_bytes
+            .iter()
+            .zip(max_bytes.iter())
+            .take_while(|(x, y)| x == y)
+            .count();
+        if len >= ROCKSDB_FIXED_PREFIX_LEN {
+            read_opts.set_prefix_same_as_start(true);
+        }
+    }
+}
+
+#[inline]
+fn set_iterate_lower_bound(read_opts: &mut ReadOptions, lower: Bound<&[u8]>) {
+    match lower {
+        Bound::Included(bytes) => read_opts.set_iterate_lower_bound(bytes),
+        Bound::Excluded(bytes) => {
+            let mut inclusive_lower = Vec::with_capacity(bytes.len() + 1);
+            inclusive_lower.extend_from_slice(bytes);
+            inclusive_lower.push(0);
+            read_opts.set_iterate_lower_bound(inclusive_lower);
+        }
+        Bound::Unbounded => {}
     }
 }
 
@@ -729,32 +811,47 @@ fn set_iterate_upper_bound(read_opts: &mut ReadOptions, upper: Bound<&[u8]>) {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Step {
+    Current(Direction),
+    Advance(Direction),
+    Done,
+}
+
+#[derive(Clone, Copy)]
+enum Direction {
+    Forward,
+    Reverse,
+}
+
 #[inline]
 fn next<'a, D: rocksdb::DBAccess>(
     iter: &'a mut DBRawIteratorWithThreadMode<'_, D>,
-    advanced: &mut bool,
-    done: &mut bool,
+    step: &mut Step,
 ) -> Result<Option<crate::storage::KeyValueRef<'a>>, DatabaseError> {
-    if *done {
-        return Ok(None);
-    }
-    if *advanced {
-        iter.next();
-    }
-    if !iter.valid() {
-        *done = true;
-        iter.status()?;
-        return Ok(None);
-    }
-
-    let Some((key, value)) = iter.item() else {
-        *done = true;
-        iter.status()?;
-        return Ok(None);
+    let direction = match *step {
+        Step::Current(direction) => direction,
+        Step::Advance(Direction::Forward) => {
+            iter.next();
+            Direction::Forward
+        }
+        Step::Advance(Direction::Reverse) => {
+            iter.prev();
+            Direction::Reverse
+        }
+        Step::Done => return Ok(None),
     };
-
-    *advanced = true;
-    Ok(Some((key, value)))
+    match iter.item() {
+        Some(item) => {
+            *step = Step::Advance(direction);
+            Ok(Some(item))
+        }
+        None => {
+            *step = Step::Done;
+            iter.status()?;
+            Ok(None)
+        }
+    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -806,6 +903,40 @@ mod test {
         let _ = metrics.block_cache_hit_rate();
 
         Ok(())
+    }
+
+    #[test]
+    fn explicit_transaction_does_not_rescan_own_writes() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        crate::storage::check_explicit_transaction_does_not_rescan_own_writes(
+            crate::db::DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?,
+        )?;
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        crate::storage::check_explicit_transaction_does_not_rescan_own_writes(
+            crate::db::DataBaseBuilder::path(temp_dir.path()).build_optimistic()?,
+        )
+    }
+
+    #[test]
+    fn test_rocksdb_remove_range() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let storage = RocksStorage::new(temp_dir.path())?;
+        let mut transaction = storage.transaction()?;
+        crate::storage::check_remove_range(&mut transaction)
+    }
+
+    #[test]
+    fn test_rocksdb_range_rev_matches_range() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let storage = RocksStorage::new(temp_dir.path().join("pessimistic"))?;
+        let mut transaction = storage.transaction()?;
+        crate::storage::check_range_rev_matches_range(&mut transaction)?;
+
+        let storage = crate::storage::rocksdb::OptimisticRocksStorage::new(
+            temp_dir.path().join("optimistic"),
+        )?;
+        let mut transaction = storage.transaction()?;
+        crate::storage::check_range_rev_matches_range(&mut transaction)
     }
 
     #[test]
@@ -985,6 +1116,7 @@ mod test {
                 tx: &transaction,
                 cover_mapping: None,
                 with_pk: true,
+                reverse: false,
             },
             ranges: (&ranges[..]).into(),
             state: IndexIterState::Init,

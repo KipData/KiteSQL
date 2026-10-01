@@ -499,6 +499,10 @@ impl<'b, 'a, T: Transaction + 'a> ExecArenaLocalState<'b, 'a, T> {
 }
 
 impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
+    pub(crate) fn set_statement_stamp(&mut self, stamp: u64) {
+        self.table_codec.set_stamp(stamp);
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             nodes: ExecNodes {

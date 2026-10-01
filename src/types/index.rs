@@ -143,6 +143,24 @@ impl<'a> Index<'a> {
     }
 }
 
+impl IndexInfo {
+    pub(crate) fn is_reverse(&self) -> bool {
+        matches!(
+            &self.sort_option,
+            SortOption::OrderBy { fields, .. } if fields.first().is_some_and(|field| !field.asc)
+        )
+    }
+
+    pub(crate) fn reverse_order(&mut self) {
+        if let SortOption::OrderBy { fields, .. } = &mut self.sort_option {
+            for field in fields {
+                field.asc = !field.asc;
+                field.nulls_first = !field.nulls_first;
+            }
+        }
+    }
+}
+
 impl Explain for IndexInfo {
     fn fmt(&self, arena: &dyn MetaArena, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{} => ", self.meta.explain(arena))?;
@@ -150,6 +168,9 @@ impl Explain for IndexInfo {
             Some(IndexLookup::Static(range)) => write!(f, "{range}")?,
             Some(IndexLookup::Probe) => f.write_str("Probe ?")?,
             None => f.write_str("EMPTY")?,
+        }
+        if self.is_reverse() {
+            f.write_str(" Reverse")?;
         }
         if self.covered_deserializers.is_some() {
             f.write_str(" Covered")?;

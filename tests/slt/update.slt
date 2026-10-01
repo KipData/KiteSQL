@@ -101,3 +101,24 @@ select id, b, c from t_update_idx where b = 10
 
 statement ok
 drop table t_update_idx
+
+statement ok
+create table t_update_pk(id int primary key, v int not null)
+
+statement ok
+insert into t_update_pk values (1,1), (2,2), (3,3), (4,4), (5,5)
+
+statement ok
+update t_update_pk set id = id + 1000 where id > 3 and id < 3000
+
+query I
+select id from t_update_pk order by id
+----
+1
+2
+3
+1004
+1005
+
+statement ok
+drop table t_update_pk
