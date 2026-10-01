@@ -32,17 +32,17 @@ enum QuantifiedPredicateOutcome {
     Skip,
 }
 
-pub struct MarkApply {
-    op: MarkApplyOperator,
-    right_input_plan: LogicalPlan,
+pub struct MarkApply<'a> {
+    op: &'a MarkApplyOperator,
+    right_input_plan: &'a LogicalPlan,
     left_input: ExecId,
     right_pos: ExecId,
     // Retain a streaming inner input across next_tuple calls, not its result rows.
     join_input: Option<(ExecId, Tuple)>,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for MarkApply {
-    type Input = (MarkApplyOperator, LogicalPlan, LogicalPlan);
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for MarkApply<'a> {
+    type Input = (&'a MarkApplyOperator, &'a LogicalPlan, &'a LogicalPlan);
 
     fn into_executor(
         (op, left_input, right_input): Self::Input,
@@ -53,7 +53,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for MarkApply {
     ) -> ExecId {
         let left_input = build_read(arena, plan_arena, left_input, cache, transaction);
         let right_pos = arena.nodes.position();
-        build_read(arena, plan_arena, right_input.clone(), cache, transaction);
+        build_read(arena, plan_arena, right_input, cache, transaction);
         arena.push(ExecNode::MarkApply(Self {
             op,
             right_input_plan: right_input,
@@ -64,7 +64,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for MarkApply {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -87,8 +87,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply {
     }
 }
 
-impl MarkApply {
-    fn next_join_tuple<'a, T: Transaction + 'a>(
+impl<'a> MarkApply<'a> {
+    fn next_join_tuple<T: Transaction + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
@@ -137,7 +137,7 @@ impl MarkApply {
         }
     }
 
-    fn build_right_input<'a, T: Transaction + 'a>(
+    fn build_right_input<T: Transaction + 'a>(
         &self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
@@ -150,7 +150,7 @@ impl MarkApply {
         build_read(
             arena,
             plan_arena,
-            self.right_input_plan.clone(),
+            self.right_input_plan,
             arena.context(),
             arena.transaction(),
         )
@@ -172,7 +172,7 @@ impl MarkApply {
             .transpose()
     }
 
-    fn mark_value<'a, T: Transaction + 'a>(
+    fn mark_value<T: Transaction + 'a>(
         &self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
@@ -253,7 +253,7 @@ impl MarkApply {
         }
     }
 
-    fn scan_quantified_right_input<'a, T: Transaction + 'a>(
+    fn scan_quantified_right_input<T: Transaction + 'a>(
         &self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
@@ -319,7 +319,7 @@ impl MarkApply {
         right_tuple: &Tuple,
         plan_arena: &(dyn MetaArena + '_),
     ) -> Result<QuantifiedPredicateOutcome, DatabaseError> {
-        match self.eval_predicates(left_tuple, &right_tuple, plan_arena)? {
+        match self.eval_predicates(left_tuple, right_tuple, plan_arena)? {
             Some(DataValue::Boolean(true)) => Ok(QuantifiedPredicateOutcome::True),
             Some(DataValue::Boolean(false)) => Ok(QuantifiedPredicateOutcome::False),
             Some(DataValue::Null) => Ok(QuantifiedPredicateOutcome::Null),
@@ -510,7 +510,7 @@ mod tests {
         let mut arena = ExecArena::new();
         arena.init_context(cache, &transaction);
         let root = <MarkApply as ReadExecutor<_>>::into_executor(
-            (op, left, right),
+            (&op, &left, &right),
             &mut arena,
             &mut plan_arena,
             cache,
@@ -560,7 +560,7 @@ mod tests {
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
         let mut executor = execute_input::<_, MarkApply>(
-            (op, left, right),
+            (&op, &left, &right),
             crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &transaction,
@@ -591,6 +591,8 @@ mod tests {
         let right_column = right.output_schema(&mut plan_arena)[0];
 
         let predicate = build_equality_predicate(&mut plan_arena, left_column, 0, right_column, 1)?;
+        let op =
+            MarkApplyOperator::new_exists(build_marker_column(&mut plan_arena), vec![predicate]);
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
@@ -598,14 +600,7 @@ mod tests {
         let mut arena = ExecArena::new();
         arena.init_context(context, &transaction);
         let root = <MarkApply as ReadExecutor<_>>::into_executor(
-            (
-                MarkApplyOperator::new_exists(
-                    build_marker_column(&mut plan_arena),
-                    vec![predicate],
-                ),
-                left,
-                right,
-            ),
+            (&op, &left, &right),
             &mut arena,
             &mut plan_arena,
             context,
@@ -656,18 +651,13 @@ mod tests {
         let right_column = right.output_schema(&mut plan_arena)[0];
 
         let predicate = build_equality_predicate(&mut plan_arena, left_column, 0, right_column, 1)?;
+        let op =
+            MarkApplyOperator::new_exists(build_marker_column(&mut plan_arena), vec![predicate]);
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, MarkApply>(
-            (
-                MarkApplyOperator::new_exists(
-                    build_marker_column(&mut plan_arena),
-                    vec![predicate],
-                ),
-                left,
-                right,
-            ),
+            (&op, &left, &right),
             crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &transaction,
@@ -741,8 +731,8 @@ mod tests {
         );
 
         let exec: MarkApply = MarkApply {
-            op,
-            right_input_plan: right,
+            op: &op,
+            right_input_plan: &right,
             left_input: 0,
             right_pos: arena.nodes.position(),
             join_input: None,
@@ -794,8 +784,8 @@ mod tests {
         );
 
         let exec: MarkApply = MarkApply {
-            op,
-            right_input_plan: right,
+            op: &op,
+            right_input_plan: &right,
             left_input: 0,
             right_pos: arena.nodes.position(),
             join_input: None,
@@ -847,8 +837,8 @@ mod tests {
         );
 
         let exec: MarkApply = MarkApply {
-            op,
-            right_input_plan: right,
+            op: &op,
+            right_input_plan: &right,
             left_input: 0,
             right_pos: arena.nodes.position(),
             join_input: None,
@@ -893,9 +883,9 @@ mod tests {
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, MarkApply>(
             (
-                MarkApplyOperator::new_in(build_marker_column(&mut plan_arena), vec![predicate]),
-                left,
-                right,
+                &MarkApplyOperator::new_in(build_marker_column(&mut plan_arena), vec![predicate]),
+                &left,
+                &right,
             ),
             crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
@@ -941,9 +931,9 @@ mod tests {
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, MarkApply>(
             (
-                MarkApplyOperator::new_in(build_marker_column(&mut plan_arena), vec![predicate]),
-                left,
-                right,
+                &MarkApplyOperator::new_in(build_marker_column(&mut plan_arena), vec![predicate]),
+                &left,
+                &right,
             ),
             crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
@@ -1009,12 +999,12 @@ mod tests {
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, MarkApply>(
             (
-                MarkApplyOperator::new_in(
+                &MarkApplyOperator::new_in(
                     build_marker_column(&mut plan_arena),
                     vec![probe_predicate, correlated_predicate],
                 ),
-                left,
-                right,
+                &left,
+                &right,
             ),
             crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,

@@ -19,17 +19,18 @@ use crate::execution::{
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
+use crate::planner::ExprRef;
+use crate::planner::LogicalPlan;
 use crate::planner::MetaArena;
-use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
-pub struct SimpleAggExecutor {
-    agg_calls: Vec<ExprRef>,
+pub struct SimpleAggExecutor<'a> {
+    agg_calls: &'a [ExprRef],
     input: ExecId,
     returned: bool,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SimpleAggExecutor {
-    type Input = (AggregateOperator, LogicalPlan);
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SimpleAggExecutor<'a> {
+    type Input = (&'a AggregateOperator, &'a LogicalPlan);
 
     fn into_executor(
         (AggregateOperator { agg_calls, .. }, input): Self::Input,
@@ -47,7 +48,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SimpleAggExecutor {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -58,7 +59,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor {
             return Ok(());
         }
 
-        let mut accs = create_accumulators(&self.agg_calls, plan_arena)?;
+        let mut accs = create_accumulators(self.agg_calls, plan_arena)?;
 
         while arena.next_tuple(self.input, plan_arena)? {
             let tuple = arena.result_tuple();

@@ -20,51 +20,28 @@ use crate::planner::LogicalPlan;
 use crate::planner::MetaArena;
 use crate::storage::Transaction;
 pub struct Union {
-    left_plan: LogicalPlan,
-    right_plan: LogicalPlan,
     left_input: ExecId,
     right_input: ExecId,
     reading_left: bool,
 }
 
-impl From<(LogicalPlan, LogicalPlan)> for Union {
-    fn from((left_input, right_input): (LogicalPlan, LogicalPlan)) -> Self {
-        Union {
-            left_plan: left_input,
-            right_plan: right_input,
-            left_input: 0,
-            right_input: 0,
-            reading_left: true,
-        }
-    }
-}
-
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Union {
-    type Input = Self;
+    type Input = (&'a LogicalPlan, &'a LogicalPlan);
 
     fn into_executor(
-        input: Self::Input,
+        (left_plan, right_plan): Self::Input,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let mut executor = input;
-        executor.left_input = build_read(
-            arena,
-            plan_arena,
-            executor.left_plan.take(),
-            cache,
-            transaction,
-        );
-        executor.right_input = build_read(
-            arena,
-            plan_arena,
-            executor.right_plan.take(),
-            cache,
-            transaction,
-        );
-        arena.push(ExecNode::Union(executor))
+        let left_input = build_read(arena, plan_arena, left_plan, cache, transaction);
+        let right_input = build_read(arena, plan_arena, right_plan, cache, transaction);
+        arena.push(ExecNode::Union(Union {
+            left_input,
+            right_input,
+            reading_left: true,
+        }))
     }
 }
 

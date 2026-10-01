@@ -25,56 +25,31 @@ use std::collections::HashMap;
 
 pub struct SetMembership {
     kind: SetMembershipKind,
-    left_plan: LogicalPlan,
-    right_plan: LogicalPlan,
     left_input: ExecId,
     right_input: ExecId,
     right_counts: HashMap<Tuple, usize>,
     built: bool,
 }
 
-impl From<(SetMembershipKind, LogicalPlan, LogicalPlan)> for SetMembership {
-    fn from(
-        (kind, left_input, right_input): (SetMembershipKind, LogicalPlan, LogicalPlan),
-    ) -> Self {
-        SetMembership {
-            kind,
-            left_plan: left_input,
-            right_plan: right_input,
-            left_input: 0,
-            right_input: 0,
-            right_counts: HashMap::new(),
-            built: false,
-        }
-    }
-}
-
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SetMembership {
-    type Input = Self;
+    type Input = (SetMembershipKind, &'a LogicalPlan, &'a LogicalPlan);
 
     fn into_executor(
-        input: Self::Input,
+        (kind, left_plan, right_plan): Self::Input,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let mut executor = input;
-        executor.left_input = build_read(
-            arena,
-            plan_arena,
-            executor.left_plan.take(),
-            cache,
-            transaction,
-        );
-        executor.right_input = build_read(
-            arena,
-            plan_arena,
-            executor.right_plan.take(),
-            cache,
-            transaction,
-        );
-        arena.push(ExecNode::SetMembership(executor))
+        let left_input = build_read(arena, plan_arena, left_plan, cache, transaction);
+        let right_input = build_read(arena, plan_arena, right_plan, cache, transaction);
+        arena.push(ExecNode::SetMembership(SetMembership {
+            kind,
+            left_input,
+            right_input,
+            right_counts: HashMap::new(),
+            built: false,
+        }))
     }
 }
 

@@ -15,12 +15,12 @@
 use kite_sql::binder::{command_type, CommandType};
 use kite_sql::db::{prepare_all, Database, DatabaseIter, Statement};
 use kite_sql::errors::DatabaseError;
-use kite_sql::storage::rocksdb::RocksStorage;
+use kite_sql::storage::lmdb::LmdbStorage;
 use sqllogictest::{DBOutput, DefaultColumnType, DB};
 use std::time::Instant;
 
 pub struct SQLBase {
-    pub db: Database<RocksStorage>,
+    pub db: Database<LmdbStorage>,
 }
 
 impl DB for SQLBase {
@@ -66,7 +66,7 @@ impl DB for SQLBase {
 }
 
 fn collect_output(
-    mut iter: DatabaseIter<'_, RocksStorage>,
+    mut iter: DatabaseIter<'_, LmdbStorage>,
 ) -> Result<DBOutput<DefaultColumnType>, DatabaseError> {
     let types = vec![DefaultColumnType::Any; iter.schema(|schema| schema.len())];
     let mut rows = Vec::new();
@@ -88,7 +88,7 @@ fn collect_output(
 }
 
 fn execute_analyze_statement(
-    db: &mut Database<RocksStorage>,
+    db: &mut Database<LmdbStorage>,
     statement: &Statement,
 ) -> Result<(), DatabaseError> {
     let Statement::Analyze(analyze) = statement else {

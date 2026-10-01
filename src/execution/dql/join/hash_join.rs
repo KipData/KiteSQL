@@ -26,8 +26,9 @@ use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
+use crate::planner::ExprRef;
+use crate::planner::LogicalPlan;
 use crate::planner::MetaArena;
-use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
@@ -43,8 +44,6 @@ pub struct HashJoin {
     filter: Option<ExprRef>,
     left_schema_len: usize,
     right_schema_len: usize,
-    left_input_plan: LogicalPlan,
-    right_input_plan: LogicalPlan,
     left_input: ExecId,
     right_input: ExecId,
     bump: Box<Bump>,
@@ -66,18 +65,19 @@ enum HashJoinState {
     End,
 }
 
-impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for HashJoin {
-    fn from(
-        (JoinOperator { on, join_type, .. }, left_input, right_input): (
-            JoinOperator,
-            LogicalPlan,
-            LogicalPlan,
-        ),
+impl HashJoin {
+    fn new(
+        JoinOperator { on, join_type, .. }: &JoinOperator,
+        left_schema_len: usize,
+        right_schema_len: usize,
+        left_input: ExecId,
+        right_input: ExecId,
     ) -> Self {
         let ((on_left_keys, on_right_keys), filter_expr) = match on {
-            JoinCondition::On { on, filter } => (on.into_iter().unzip(), filter),
+            JoinCondition::On { on, filter } => (on.iter().copied().unzip(), *filter),
             JoinCondition::None => ((vec![], vec![]), None),
         };
+        let join_type = *join_type;
 
         let init_error = if join_type == JoinType::Cross {
             Some(DatabaseError::UnsupportedStmt(
@@ -97,12 +97,10 @@ impl From<(JoinOperator, LogicalPlan, LogicalPlan)> for HashJoin {
             on_left_keys,
             on_right_keys,
             filter: filter_expr,
-            left_schema_len: 0,
-            right_schema_len: 0,
-            left_input_plan: left_input,
-            right_input_plan: right_input,
-            left_input: 0,
-            right_input: 0,
+            left_schema_len,
+            right_schema_len,
+            left_input,
+            right_input,
             bump: Box::<Bump>::default(),
             init_error,
         }
@@ -230,33 +228,25 @@ pub(crate) struct BuildState {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
-    type Input = Self;
+    type Input = (&'a JoinOperator, &'a LogicalPlan, &'a LogicalPlan);
 
     fn into_executor(
-        input: Self::Input,
+        (op, left_plan, right_plan): Self::Input,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let mut executor = input;
-        let left_schema_len = executor.left_input_plan.output_schema(plan_arena).len();
-        let right_schema_len = executor.right_input_plan.output_schema(plan_arena).len();
-        executor.left_schema_len = left_schema_len;
-        executor.right_schema_len = right_schema_len;
-        executor.left_input = build_read(
-            arena,
-            plan_arena,
-            executor.left_input_plan.take(),
-            cache,
-            transaction,
-        );
-        executor.right_input = build_read(
-            arena,
-            plan_arena,
-            executor.right_input_plan.take(),
-            cache,
-            transaction,
+        let left_schema_len = left_plan.read_schema().len();
+        let right_schema_len = right_plan.read_schema().len();
+        let left_input = build_read(arena, plan_arena, left_plan, cache, transaction);
+        let right_input = build_read(arena, plan_arena, right_plan, cache, transaction);
+        let executor = HashJoin::new(
+            op,
+            left_schema_len,
+            right_schema_len,
+            left_input,
+            right_input,
         );
         arena.push(ExecNode::HashJoin(executor))
     }
@@ -524,9 +514,11 @@ mod test {
         let Operator::Join(op) = plan.operator else {
             unreachable!()
         };
-        let (left, right) = plan.childrens.pop_twins();
-        let executor = crate::execution::execute(
-            HashJoin::from((op, left, right)),
+        let (mut left, mut right) = plan.childrens.pop_twins();
+        left.populate_output_schema_recursive(&mut plan_arena);
+        right.populate_output_schema_recursive(&mut plan_arena);
+        let executor = crate::execution::execute_input::<_, HashJoin>(
+            (&op, &left, &right),
             crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &transaction,
@@ -582,11 +574,12 @@ mod test {
         let Operator::Join(op) = plan.operator else {
             unreachable!()
         };
-        let (left, right) = plan.childrens.pop_twins();
+        let (mut left, mut right) = plan.childrens.pop_twins();
+        left.populate_output_schema_recursive(&mut plan_arena);
+        right.populate_output_schema_recursive(&mut plan_arena);
         {
-            let executor = HashJoin::from((op.clone(), left.clone(), right.clone()));
-            let tuples = try_collect(crate::execution::execute(
-                executor,
+            let tuples = try_collect(crate::execution::execute_input::<_, HashJoin>(
+                (&op, &left, &right),
                 crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
                 plan_arena,
                 &transaction,
@@ -646,9 +639,11 @@ mod test {
         let Operator::Join(op) = plan.operator else {
             unreachable!()
         };
-        let (left, right) = plan.childrens.pop_twins();
-        let executor = crate::execution::execute(
-            HashJoin::from((op, left, right)),
+        let (mut left, mut right) = plan.childrens.pop_twins();
+        left.populate_output_schema_recursive(&mut plan_arena);
+        right.populate_output_schema_recursive(&mut plan_arena);
+        let executor = crate::execution::execute_input::<_, HashJoin>(
+            (&op, &left, &right),
             crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &transaction,
@@ -753,9 +748,11 @@ mod test {
         let Operator::Join(op) = plan.operator else {
             unreachable!()
         };
-        let (left, right) = plan.childrens.pop_twins();
-        let executor = crate::execution::execute(
-            HashJoin::from((op, left, right)),
+        let (mut left, mut right) = plan.childrens.pop_twins();
+        left.populate_output_schema_recursive(&mut plan_arena);
+        right.populate_output_schema_recursive(&mut plan_arena);
+        let executor = crate::execution::execute_input::<_, HashJoin>(
+            (&op, &left, &right),
             crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &transaction,
@@ -806,9 +803,11 @@ mod test {
         let Operator::Join(op) = plan.operator else {
             unreachable!()
         };
-        let (left, right) = plan.childrens.pop_twins();
-        let executor = crate::execution::execute(
-            HashJoin::from((op, left, right)),
+        let (mut left, mut right) = plan.childrens.pop_twins();
+        left.populate_output_schema_recursive(&mut plan_arena);
+        right.populate_output_schema_recursive(&mut plan_arena);
+        let executor = crate::execution::execute_input::<_, HashJoin>(
+            (&op, &left, &right),
             crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             plan_arena,
             &transaction,

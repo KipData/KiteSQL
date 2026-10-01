@@ -15,15 +15,17 @@
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::Bytes;
 use crate::storage::{
-    EmptyStorageMetrics, InnerIter, Storage, Transaction, TransactionIsolationLevel,
+    bytes_bound_as_slice, owned_bound, EmptyStorageMetrics, InnerIter, Storage, Transaction,
+    TransactionIsolationLevel,
 };
-use std::cell::{Ref, RefCell};
-use std::collections::{BTreeMap, Bound, VecDeque};
+use std::cell::{Cell, Ref, RefCell};
+use std::collections::{BTreeMap, Bound};
 use std::rc::Rc;
 
 #[derive(Clone, Default)]
 pub struct MemoryStorage {
     inner: Rc<RefCell<BTreeMap<Vec<u8>, Vec<u8>>>>,
+    statements: Rc<Cell<u64>>,
 }
 
 impl MemoryStorage {
@@ -47,6 +49,7 @@ impl Storage for MemoryStorage {
         self.validate_transaction_isolation(isolation)?;
         Ok(MemoryTransaction {
             inner: self.inner.clone(),
+            statements: self.statements.clone(),
         })
     }
 
@@ -57,11 +60,20 @@ impl Storage for MemoryStorage {
 
 pub struct MemoryTransaction {
     inner: Rc<RefCell<BTreeMap<Vec<u8>, Vec<u8>>>>,
+    statements: Rc<Cell<u64>>,
 }
 
-pub struct MemoryIter {
-    entries: VecDeque<(Bytes, Bytes)>,
-    current: Option<(Bytes, Bytes)>,
+pub struct MemoryIter<'txn> {
+    map: &'txn RefCell<BTreeMap<Vec<u8>, Vec<u8>>>,
+    position: Position,
+    range: (Bound<Bytes>, Bound<Bytes>),
+    reverse: bool,
+}
+
+enum Position {
+    Start,
+    After(Bytes),
+    Done,
 }
 
 pub struct MemoryValue<'a> {
@@ -74,14 +86,64 @@ impl AsRef<[u8]> for MemoryValue<'_> {
     }
 }
 
-impl InnerIter for MemoryIter {
-    fn try_next(&mut self) -> Result<Option<crate::storage::KeyValueRef<'_>>, DatabaseError> {
-        self.current = self.entries.pop_front();
+impl<'txn> MemoryIter<'txn> {
+    fn new(
+        map: &'txn RefCell<BTreeMap<Vec<u8>, Vec<u8>>>,
+        min: Bound<&[u8]>,
+        max: Bound<&[u8]>,
+        reverse: bool,
+    ) -> Self {
+        Self {
+            map,
+            position: Position::Start,
+            range: (owned_bound(min), owned_bound(max)),
+            reverse,
+        }
+    }
+}
 
-        Ok(self
-            .current
-            .as_ref()
-            .map(|(key, value)| (key.as_slice(), value.as_slice())))
+impl InnerIter for MemoryIter<'_> {
+    fn try_next(&mut self) -> Result<Option<crate::storage::KeyValueRef<'_>>, DatabaseError> {
+        let (mut min, mut max) = (
+            bytes_bound_as_slice(&self.range.0),
+            bytes_bound_as_slice(&self.range.1),
+        );
+        match &self.position {
+            Position::Start => {}
+            Position::After(key) if self.reverse => max = Bound::Excluded(key),
+            Position::After(key) => min = Bound::Excluded(key),
+            Position::Done => return Ok(None),
+        }
+
+        let map = self.map.borrow();
+        let mut range = map.range::<[u8], _>((min, max));
+        let entry = if self.reverse {
+            range.next_back()
+        } else {
+            range.next()
+        };
+        let Some((key, value)) = entry else {
+            self.position = Position::Done;
+            return Ok(None);
+        };
+        let value: *const [u8] = value.as_slice();
+        match &mut self.position {
+            Position::After(buf) => {
+                buf.clear();
+                buf.extend_from_slice(key);
+            }
+            position => *position = Position::After(key.clone()),
+        }
+        drop(map);
+
+        let Position::After(key) = &self.position else {
+            unreachable!()
+        };
+        // SAFETY: the value lives in its own heap allocation owned by the map entry. The map is
+        // only mutated through the same single-threaded transaction, and callers consume the
+        // returned slice before issuing the next write, so the allocation is still alive and
+        // unmodified for as long as the slice is used (the same contract as LMDB cursors).
+        Ok(Some((key.as_slice(), unsafe { &*value })))
     }
 }
 
@@ -92,9 +154,20 @@ impl Transaction for MemoryTransaction {
         Self: 'a;
 
     type IterType<'a>
-        = MemoryIter
+        = MemoryIter<'a>
     where
         Self: 'a;
+
+    type RevIterType<'a>
+        = MemoryIter<'a>
+    where
+        Self: 'a;
+    fn next_statement_stamp(&mut self) -> Result<u64, DatabaseError> {
+        let stamp = self.statements.get() + 1;
+        self.statements.set(stamp);
+        Ok(stamp)
+    }
+
     fn get_borrowed<'a>(
         &'a self,
         key: &[u8],
@@ -122,27 +195,15 @@ impl Transaction for MemoryTransaction {
         min: Bound<&'key [u8]>,
         max: Bound<&'key [u8]>,
     ) -> Result<Self::IterType<'txn>, DatabaseError> {
-        let map = self.inner.borrow();
-        let start = match &min {
-            Bound::Included(b) => Bound::Included(*b),
-            Bound::Excluded(b) => Bound::Excluded(*b),
-            Bound::Unbounded => Bound::Unbounded,
-        };
-        let end = match &max {
-            Bound::Included(b) => Bound::Included(*b),
-            Bound::Excluded(b) => Bound::Excluded(*b),
-            Bound::Unbounded => Bound::Unbounded,
-        };
+        Ok(MemoryIter::new(&self.inner, min, max, false))
+    }
 
-        let entries = map
-            .range::<[u8], _>((start, end))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        Ok(MemoryIter {
-            entries,
-            current: None,
-        })
+    fn range_rev<'txn, 'key>(
+        &'txn self,
+        min: Bound<&'key [u8]>,
+        max: Bound<&'key [u8]>,
+    ) -> Result<Self::RevIterType<'txn>, DatabaseError> {
+        Ok(MemoryIter::new(&self.inner, min, max, true))
     }
 
     fn commit(self) -> Result<(), DatabaseError> {
@@ -239,7 +300,7 @@ mod wasm_tests {
             &table_cache,
             "test".to_string().into(),
             (Some(1), Some(1)),
-            read_columns,
+            &read_columns,
             true,
         )?;
 
@@ -274,12 +335,12 @@ mod wasm_tests {
             &plan_arena,
             table_name,
             (Some(0), None),
-            table.columns().cloned().collect(),
+            &table.columns().cloned().collect::<Vec<_>>(),
             pk_index,
-            vec![Range::Scope {
+            &[Range::Scope {
                 min: Bound::Excluded(DataValue::Int32(0)),
                 max: Bound::Included(DataValue::Int32(2)),
-            }],
+            }][..],
             true,
             None,
             None,
@@ -308,6 +369,26 @@ mod native_tests {
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::collections::Bound;
+
+    #[test]
+    fn memory_explicit_transaction_does_not_rescan_own_writes() -> Result<(), DatabaseError> {
+        let db = crate::db::DataBaseBuilder::path(".").build_in_memory()?;
+        crate::storage::check_explicit_transaction_does_not_rescan_own_writes(db)
+    }
+
+    #[test]
+    fn memory_remove_range() -> Result<(), DatabaseError> {
+        let storage = MemoryStorage::new();
+        let mut transaction = storage.transaction()?;
+        crate::storage::check_remove_range(&mut transaction)
+    }
+
+    #[test]
+    fn memory_range_rev_matches_range() -> Result<(), DatabaseError> {
+        let storage = MemoryStorage::new();
+        let mut transaction = storage.transaction()?;
+        crate::storage::check_range_rev_matches_range(&mut transaction)
+    }
 
     #[test]
     fn memory_storage_roundtrip() -> Result<(), DatabaseError> {
@@ -384,7 +465,7 @@ mod native_tests {
             &table_cache,
             "test".to_string().into(),
             (Some(1), Some(1)),
-            read_columns,
+            &read_columns,
             true,
         )?;
 
@@ -419,12 +500,12 @@ mod native_tests {
             &plan_arena,
             table_name,
             (Some(0), None),
-            table.columns().cloned().collect(),
+            &table.columns().cloned().collect::<Vec<_>>(),
             pk_index,
-            vec![Range::Scope {
+            &[Range::Scope {
                 min: Bound::Excluded(DataValue::Int32(0)),
                 max: Bound::Included(DataValue::Int32(2)),
-            }],
+            }][..],
             true,
             None,
             None,

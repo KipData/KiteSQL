@@ -226,7 +226,7 @@ impl<S: Storage> Database<S> {
                 let (plan, arena) = self
                     .state
                     .build_plan(&[], tx, |binder, arena| binder.bind(&statement, arena))?;
-                self.state.execute(tx, plan, arena)
+                self.state.execute(tx, plan.into(), arena)
             })() {
                 Ok(result) => result,
                 Err(err) => {

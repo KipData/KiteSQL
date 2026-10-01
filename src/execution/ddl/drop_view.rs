@@ -19,57 +19,44 @@ use crate::execution::{
 use crate::planner::operator::drop_view::DropViewOperator;
 use crate::planner::MetaArena;
 use crate::storage::Transaction;
-use crate::types::tuple_builder::TupleBuilder;
 
-pub struct DropView {
-    op: Option<DropViewOperator>,
+pub struct DropView<'a> {
+    op: &'a DropViewOperator,
 }
 
-impl From<DropViewOperator> for DropView {
-    fn from(op: DropViewOperator) -> Self {
-        DropView { op: Some(op) }
-    }
-}
-
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropView {
-    type Input = Self;
+impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropView<'a> {
+    type Input = &'a DropViewOperator;
 
     fn into_executor(
-        input: Self::Input,
+        op: Self::Input,
         arena: &mut ExecArena<'a, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        let executor = input;
-        arena.push(ExecNode::DropView(executor))
+        arena.push(ExecNode::DropView(DropView { op }))
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropView {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropView<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
         _: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
-        let Some(DropViewOperator {
+        let DropViewOperator {
             view_name,
             if_exists,
-        }) = self.op.take()
-        else {
-            arena.finish();
-            return Ok(());
-        };
+        } = self.op;
 
         let (transaction, table_codec) = arena.transaction_codec_mut();
-        if transaction.drop_view(table_codec, view_name.clone(), if_exists)? {
+        if transaction.drop_view(table_codec, view_name.clone(), *if_exists)? {
             arena.push_ddl_apply(DDLApply::DropView {
                 name: view_name.clone(),
             });
         }
 
-        arena.produce_tuple(TupleBuilder::build_result(format!("{view_name}")));
-        arena.resume();
+        arena.finish();
         Ok(())
     }
 }

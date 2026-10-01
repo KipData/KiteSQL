@@ -29,7 +29,7 @@ pub struct Limit {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Limit {
-    type Input = (LimitOperator, LogicalPlan);
+    type Input = (&'a LimitOperator, &'a LogicalPlan);
 
     fn into_executor(
         (LimitOperator { offset, limit }, input): Self::Input,
@@ -40,8 +40,8 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Limit {
     ) -> ExecId {
         let input = build_read(arena, plan_arena, input, cache, transaction);
         arena.push(ExecNode::Limit(Limit {
-            offset,
-            limit,
+            offset: *offset,
+            limit: *limit,
             input,
             skipped: 0,
             emitted: 0,

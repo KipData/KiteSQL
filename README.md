@@ -29,31 +29,16 @@
 </p>
 
 ## Introduction
-**KiteSQL** is a lightweight embedded relational database for Rust, inspired by **MyRocks** and **SQLite** and fully written in Rust. It is designed to work not only as a SQL engine, but also as a Rust-native data API that can be embedded directly into applications without relying on external services or heavyweight infrastructure.
+**KiteSQL** is a lightweight embedded relational database written in Rust, inspired by **MyRocks** and **SQLite**. It runs inside your application with no external service: execute SQL directly, or use typed ORM models, migrations, and builder-style queries.
 
-KiteSQL supports direct SQL execution, typed ORM models, schema migration, and builder-style queries, so you can combine relational power with an API surface that feels natural in Rust. On native targets, KiteSQL ships with both RocksDB-backed and LMDB-backed persistent storage builders, plus an in-memory builder for tests and temporary workloads.
+- Most of the SQL 2016 syntax
+- All metadata and data stored in KV storage (RocksDB, LMDB, or in-memory)
+- Typed ORM with schema migration (`orm` feature), see [`src/orm/README.md`](src/orm/README.md)
+- WebAssembly and Python bindings
 
-## Key Features
-- A lightweight embedded SQL database fully rewritten in Rust
-- A Rust-native relational API alongside direct SQL execution
-- Typed ORM models with migrations and a lightweight typed query/mutation builder
-- Higher write speed with an application-friendly embedding model
-- All metadata and actual data in KV storage, with no intermediate stateful service layer
-- Extensible storage integration for customized workloads
-- Supports most of the SQL 2016 syntax
-- Ships a WebAssembly build for JavaScript runtimes
+👉 [More features](docs/features.md)
 
-#### 👉[check more](docs/features.md)
-
-## ORM
-KiteSQL includes a built-in ORM behind the `orm` feature flag. With `#[derive(Model)]`, you can define typed models and get tuple mapping, schema creation, migration support, projections, set queries, and builder-style query/mutation workflows.
-
-### Schema Migration
-Model changes are part of the normal workflow. KiteSQL ORM can help evolve tables for common schema updates, including adding, dropping, renaming, and changing columns, so many migrations can stay close to the Rust model definition instead of being managed as hand-written SQL.
-
-For the full ORM guide, see [`src/orm/README.md`](src/orm/README.md).
-
-## Examples
+## Example
 
 ```rust
 use kite_sql::db::DataBaseBuilder;
@@ -63,13 +48,10 @@ use kite_sql::Model;
 
 #[derive(Default, Debug, PartialEq, Model)]
 #[model(table = "users")]
-#[model(index(name = "users_name_age_idx", columns = "name, age"))]
 struct User {
     #[model(primary_key)]
     id: i32,
-    #[model(unique, varchar = 128)]
-    email: String,
-    #[model(rename = "user_name", varchar = 64)]
+    #[model(varchar = 64)]
     name: String,
     #[model(default = "18", index)]
     age: Option<i32>,
@@ -77,40 +59,12 @@ struct User {
 
 fn main() -> Result<(), DatabaseError> {
     let mut database = DataBaseBuilder::path("./data").build_rocksdb()?;
-    // Or: let database = DataBaseBuilder::path("./data").build_lmdb()?;
-
     database.migrate::<User>()?;
 
     database.insert_many([
-        User {
-            id: 1,
-            email: "alice@example.com".to_string(),
-            name: "Alice".to_string(),
-            age: Some(18),
-        },
-        User {
-            id: 2,
-            email: "bob@example.com".to_string(),
-            name: "Bob".to_string(),
-            age: Some(24),
-        },
+        User { id: 1, name: "Alice".to_string(), age: Some(18) },
+        User { id: 2, name: "Bob".to_string(), age: Some(24) },
     ])?;
-
-    database
-        .bind(|ctx| {
-            ctx.mutate::<User>()?
-                .filter(|e| e.column(User::id())?.eq(1))?
-                .update(|u| u.set_value(User::age(), Some(19)))
-        })?
-        .done()?;
-
-    database
-        .bind(|ctx| {
-            ctx.mutate::<User>()?
-                .filter(|e| e.column(User::id())?.eq(2))?
-                .delete()
-        })?
-        .done()?;
 
     let users = database
         .bind(|ctx| {
@@ -118,101 +72,75 @@ fn main() -> Result<(), DatabaseError> {
                 .filter(|e| e.column(User::age())?.gte(18))?
                 .project_scalars((User::id(), User::name()))?
                 .order_by(User::name())?
-                .limit(10)?
                 .finish()
         })?
         .project_tuple::<(i32, String)>();
-
     for user in users {
         println!("{:?}", user?);
     }
 
-    // For ad-hoc or more SQL-shaped workloads, `run(...)` is still available.
-
+    // Plain SQL works too.
+    database.run("select count(*) from users")?.done()?;
     Ok(())
 }
 ```
 
+More: [hello_world](examples/hello_world.rs), [transaction](examples/transaction.rs).
+
 ## Storage Backends
-- `build_rocksdb()` opens a persistent RocksDB-backed database.
-- `build_lmdb()` opens a persistent LMDB-backed database.
-- `build_in_memory()` opens an in-memory database for tests, examples, and temporary workloads.
-- `build_optimistic()` is available on native targets when you specifically want optimistic transactions on top of RocksDB.
-- `Database::checkpoint(path)` creates a local consistent snapshot when the selected storage backend supports it.
-- Transaction isolation is documented in [`docs/transaction-isolation.md`](docs/transaction-isolation.md).
-- Cargo features:
-  - `rocksdb` is enabled by default
-  - `parser` is enabled by default and provides the SQL parser frontend
-  - `spill` optionally enables spill-backed external sorting and aggregation
-  - `spill` and `wasm` are mutually exclusive
-  - `lmdb` is optional
-  - `unsafe_txdb_checkpoint` enables experimental checkpoint support for RocksDB `TransactionDB`
-  - `cargo check --no-default-features --features lmdb` builds an LMDB-only native configuration
+| Builder | Storage |
+| --- | --- |
+| `build_rocksdb()` | RocksDB (default feature `rocksdb`), stronger for write-heavy workloads |
+| `build_lmdb()` | LMDB (feature `lmdb`), stronger for read-heavy workloads |
+| `build_in_memory()` | In-memory, for tests and temporary data |
+| `build_optimistic()` | RocksDB with optimistic transactions |
 
-On native targets, `LMDB` shines when reads dominate, while `RocksDB` is usually the stronger choice when writes do.
-Checkpoint support and feature-gating details are documented in [docs/features.md](docs/features.md).
+Feature flags, checkpoints, and transaction isolation: [docs/features.md](docs/features.md), [docs/transaction-isolation.md](docs/transaction-isolation.md).
 
-## Shell
-- Run `cargo run --bin kitesql-shell` to open the local interactive shell.
-- Use `cargo run --bin kitesql-shell -- --path ./tmp/kitesql-shell-data` to point to a custom RocksDB directory.
-- Use `cargo run --bin kitesql-shell -- -e "select current_timestamp"` for a quick one-shot check.
-- In interactive mode, end SQL statements with `;`; an empty line also executes the buffered statement.
-- Supported metacommands include `.help`, `.quit`, `.tables`, `.views`, and `.schema <name>`.
+## Shell, WebAssembly, Python
 
-👉**more examples**
-- [hello_world](examples/hello_world.rs)
-- [transaction](examples/transaction.rs)
+### Shell
+```bash
+cargo run --bin kitesql-shell
+cargo run --bin kitesql-shell -- -e "select 1"
+```
+Type `.help` for metacommands.
 
-
-## WebAssembly
-- Build: `wasm-pack build --release --target nodejs` (outputs to `./pkg`; use `--target web` or `--target bundler` for browser/bundler setups).
-- Usage:
+### WebAssembly
+```bash
+wasm-pack build --release --target nodejs
+```
 ```js
 import { WasmDatabase } from "./pkg/kite_sql.js";
 
 const db = new WasmDatabase();
 await db.ddl("create table demo(id int primary key, v int)");
-await db.execute("insert into demo values (1, 2), (2, 4)");
-const rows = db.run("select * from demo").rows();
-console.log(rows.map((r) => r.values.map((v) => v.Int32 ?? v)));
+console.log(db.run("select * from demo").rows());
 ```
-- In Node.js, provide a small `localStorage` shim if you enable statistics-related features (see `examples/wasm_index_usage.test.mjs`).
 
-## Python (PyO3)
-- Enable bindings with Cargo feature `python`.
-- Constructor is explicit: `Database(path, backend="rocksdb")`; use `backend="lmdb"` to open LMDB. In-memory usage is `Database.in_memory()`.
-- Minimal usage:
+### Python
+Requires the `python` feature.
 ```python
 import kite_sql
 
-db = kite_sql.Database.in_memory()
+db = kite_sql.Database.in_memory()  # or Database(path, backend="lmdb")
 db.execute("create table demo(id int primary key, v int)")
-db.execute("insert into demo values (1, 2), (2, 4)")
-for row in db.run("select * from demo"):
-    print(row["values"])
+print(list(db.run("select * from demo")))
 ```
 
 ## TPC-C
-Run `make tpcc` (or `cargo run -p tpcc --release`) to execute the benchmark against the default KiteSQL storage. Use `--backend rocksdb` or `--backend lmdb` to compare the two persistent backends directly.  
-Run `make tpcc-dual` to mirror every TPCC statement to an in-memory SQLite database alongside KiteSQL and assert the two engines return identical results; this target runs for 60 seconds (`--measure-time 60`). Use `cargo run -p tpcc --release -- --backend dual --measure-time <secs>` for a custom duration.
+`make tpcc` runs the benchmark (`--backend rocksdb|lmdb`); `make tpcc-dual` cross-checks every statement against SQLite.
 
-- i9-13900HX
-- 32.0 GB
-- KIOXIA-EXCERIA PLUS G3 SSD
-- Tips: TPC-C currently only supports single thread
+720-second single-thread run on an i9-13900HX (32 GB, KIOXIA EXCERIA PLUS G3), every backend pinned to the same P-core. Latencies are p90 in µs, including commit.
 
-Recent stable-run 720-second local comparison on the machine above:
-
-| Backend | TpmC | New-Order p90 (µs) | Payment p90 (µs) | Order-Status p90 (µs) | Delivery p90 (µs) | Stock-Level p90 (µs) |
+| Backend | TpmC | New-Order | Payment | Order-Status | Delivery | Stock-Level |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| KiteSQL LMDB | 134909 | 360 | 94 | 147 | 503 | 466 |
-| KiteSQL RocksDB | 43866 | 521 | 289 | 269 | 11711 | 902 |
-| SQLite balanced | 49200 | 304 | 74 | 53 | 375 | 518 |
-| SQLite practical | 43385 | 368 | 74 | 44 | 482 | 386 |
+| KiteSQL LMDB | 159616 | 315 | 81 | 44 | 435 | 332 |
+| KiteSQL RocksDB | 48035 | 459 | 258 | 200 | 11055 | 704 |
+| SQLite balanced | 67102 | 283 | 67 | 48 | 338 | 473 |
+| SQLite practical | 67153 | 336 | 66 | 41 | 427 | 339 |
 
-These rows are from the local run on `2026-09-27`; latencies are in microseconds and include transaction commit.
-
-#### 👉[check more](tpcc/README.md)
+👉 [Details and how to reproduce](tpcc/README.md)
 
 ## Roadmap
 - Get [SQL 2016](https://github.com/KipData/KiteSQL/issues/130) mostly supported

@@ -46,10 +46,10 @@ pub struct Describe {
     cursor: usize,
 }
 
-impl From<DescribeOperator> for Describe {
-    fn from(op: DescribeOperator) -> Self {
+impl From<&DescribeOperator> for Describe {
+    fn from(op: &DescribeOperator) -> Self {
         Describe {
-            table_name: op.table_name,
+            table_name: op.table_name.clone(),
             columns: None,
             cursor: 0,
         }
@@ -57,7 +57,7 @@ impl From<DescribeOperator> for Describe {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Describe {
-    type Input = Self;
+    type Input = &'a DescribeOperator;
 
     fn into_executor(
         input: Self::Input,
@@ -66,7 +66,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Describe {
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        let executor = input;
+        let executor = Describe::from(input);
         arena.push(ExecNode::Describe(executor))
     }
 }

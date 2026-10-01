@@ -17,8 +17,9 @@ use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::filter::FilterOperator;
+use crate::planner::ExprRef;
+use crate::planner::LogicalPlan;
 use crate::planner::MetaArena;
-use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 pub struct Filter {
     predicate: ExprRef,
@@ -26,7 +27,7 @@ pub struct Filter {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Filter {
-    type Input = (FilterOperator, LogicalPlan);
+    type Input = (&'a FilterOperator, &'a LogicalPlan);
 
     fn into_executor(
         (FilterOperator { predicate, .. }, input): Self::Input,
@@ -36,7 +37,10 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Filter {
         transaction: &T,
     ) -> ExecId {
         let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::Filter(Filter { predicate, input }))
+        arena.push(ExecNode::Filter(Filter {
+            predicate: *predicate,
+            input,
+        }))
     }
 }
 

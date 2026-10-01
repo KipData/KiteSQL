@@ -31,16 +31,16 @@ impl Default for Dummy {
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Dummy {
-    type Input = Self;
+    type Input = ();
 
     fn into_executor(
-        input: Self::Input,
+        _: Self::Input,
         arena: &mut ExecArena<'a, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        let executor = input;
+        let executor = Dummy::default();
         arena.push(ExecNode::Dummy(executor))
     }
 }

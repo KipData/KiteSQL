@@ -14,63 +14,87 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
-use crate::expression::range_detacher::Range;
+use crate::expression::range_detacher::{IndexRangeColumn, Range, RangeDetacher};
 use crate::planner::operator::table_scan::TableScanOperator;
+use crate::planner::operator::SortOption;
 use crate::planner::MetaArena;
 use crate::storage::{IndexIter, IndexRanges, Iter, Transaction};
-use crate::types::index::{IndexLookup, IndexMetaRef, RuntimeIndexProbe};
-use crate::types::serialize::TupleValueSerializableImpl;
+use crate::types::index::{IndexInfo, IndexLookup, RuntimeIndexProbe};
+use std::borrow::Cow;
 
 pub(crate) struct IndexScan<'a, T: Transaction + 'a> {
-    op: Option<TableScanOperator>,
-    index_by: IndexMetaRef,
-    lookup: Option<IndexLookup>,
-    covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
-    cover_mapping: Option<Vec<usize>>,
+    op: &'a TableScanOperator,
+    info: &'a IndexInfo,
+    lookup: &'a IndexLookup,
     iter: Option<IndexIter<'a, T>>,
 }
 
-impl<'a, T: Transaction + 'a>
-    From<(
-        TableScanOperator,
-        IndexMetaRef,
-        IndexLookup,
-        Option<Vec<TupleValueSerializableImpl>>,
-        Option<Vec<usize>>,
-    )> for IndexScan<'a, T>
-{
-    fn from(
-        (op, index_by, lookup, covered_deserializers, cover_mapping): (
-            TableScanOperator,
-            IndexMetaRef,
-            IndexLookup,
-            Option<Vec<TupleValueSerializableImpl>>,
-            Option<Vec<usize>>,
-        ),
+impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
+    pub(crate) fn new(
+        op: &'a TableScanOperator,
+        info: &'a IndexInfo,
+        lookup: &'a IndexLookup,
     ) -> Self {
-        IndexScan {
-            op: Some(op),
-            index_by,
-            lookup: Some(lookup),
-            covered_deserializers,
-            cover_mapping,
+        Self {
+            op,
+            info,
+            lookup,
             iter: None,
         }
+    }
+
+    pub(crate) fn ranges(
+        &self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut (dyn MetaArena + 'a),
+    ) -> Result<IndexRanges<'a>, DatabaseError> {
+        let info = self.info;
+        let mut range = match self.lookup {
+            IndexLookup::Static(range) => Cow::Borrowed(range),
+            IndexLookup::Probe => Cow::Owned(match arena.pop_runtime_probe() {
+                RuntimeIndexProbe::Eq(value) => Range::Eq(value),
+                RuntimeIndexProbe::Scope { min, max } => Range::Scope { min, max },
+            }),
+        };
+
+        if plan_arena.has_bound_params() && range.has_parameter() {
+            let plan_arena = &*plan_arena;
+            range
+                .to_mut()
+                .bind_parameters(&|id| plan_arena.bound_param(id))?;
+        }
+        if let (
+            Some(predicate),
+            SortOption::OrderBy {
+                ignore_prefix_len, ..
+            },
+        ) = (info.residual_predicate, &info.sort_option)
+        {
+            if let Some(specialized) = RangeDetacher::<IndexRangeColumn, _>::specialize_range(
+                info.meta,
+                &range,
+                predicate,
+                *ignore_prefix_len,
+                plan_arena,
+            )? {
+                range = Cow::Owned(specialized);
+            }
+        }
+        Ok(IndexRanges::from(range).reversed(info.is_reverse()))
     }
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for IndexScan<'a, T> {
-    type Input = Self;
+    type Input = (&'a TableScanOperator, &'a IndexInfo, &'a IndexLookup);
 
     fn into_executor(
-        input: Self::Input,
+        (op, info, lookup): Self::Input,
         arena: &mut ExecArena<'a, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        let executor = input;
-        arena.push(ExecNode::IndexScan(executor))
+        arena.push(ExecNode::IndexScan(IndexScan::new(op, info, lookup)))
     }
 }
 
@@ -80,61 +104,39 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for IndexScan<'a, T> {
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
-        if self.iter.is_none() {
-            let Some(TableScanOperator {
-                table_name,
-                columns,
-                limit,
-                with_pk,
-                ..
-            }) = self.op.take()
-            else {
-                arena.finish();
-                return Ok(());
-            };
-            let ranges = Self::ranges_from_lookup(
-                self.lookup.take().expect("index scan lookup initialized"),
-                arena,
-            );
-            let state = arena.local_state(plan_arena);
-            self.iter = Some(state.transaction().read_by_index(
-                state.context.table_cache,
-                state.plan_arena,
-                table_name,
-                limit,
-                columns,
-                self.index_by,
-                ranges,
-                with_pk,
-                self.covered_deserializers.take(),
-                self.cover_mapping.take(),
-            )?);
-        }
+        let iter = match &mut self.iter {
+            Some(iter) => iter,
+            None => {
+                let ranges = self.ranges(arena, plan_arena)?;
+                let TableScanOperator {
+                    table_name,
+                    columns,
+                    limit,
+                    with_pk,
+                    ..
+                } = self.op;
+                let state = arena.local_state(plan_arena);
+                self.iter.insert(state.transaction().read_by_index(
+                    state.context.table_cache,
+                    state.plan_arena,
+                    table_name.clone(),
+                    *limit,
+                    columns,
+                    self.info.meta,
+                    ranges,
+                    *with_pk,
+                    self.info.covered_deserializers.as_deref(),
+                    self.info.cover_mapping.as_deref(),
+                )?)
+            }
+        };
 
         let state = arena.local_state(plan_arena);
-        if self
-            .iter
-            .as_mut()
-            .expect("index scan iterator initialized")
-            .next_tuple_into(state.table_codec, &mut state.result.tuple)?
-        {
+        if iter.next_tuple_into(state.table_codec, &mut state.result.tuple)? {
             arena.resume();
         } else {
             arena.finish();
         }
         Ok(())
-    }
-}
-
-impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
-    fn ranges_from_lookup(lookup: IndexLookup, arena: &mut ExecArena<'a, T>) -> IndexRanges {
-        match lookup {
-            IndexLookup::Static(Range::SortedRanges(ranges)) => ranges.into(),
-            IndexLookup::Static(range) => range.into(),
-            IndexLookup::Probe => match arena.pop_runtime_probe() {
-                RuntimeIndexProbe::Eq(value) => Range::Eq(value).into(),
-                RuntimeIndexProbe::Scope { min, max } => Range::Scope { min, max }.into(),
-            },
-        }
     }
 }

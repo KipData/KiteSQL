@@ -667,24 +667,20 @@ impl DataValue {
         digits.parse().ok()
     }
 
-    pub(crate) fn bind_parameters(
-        &mut self,
-        params: &[(usize, DataValue)],
-    ) -> Result<(), DatabaseError> {
+    pub(crate) fn bind_parameters<'p, F>(&mut self, get: &F) -> Result<(), DatabaseError>
+    where
+        F: Fn(usize) -> Option<&'p DataValue>,
+    {
         match self {
             DataValue::Parameter { id, ty } => {
-                let input = params
-                    .iter()
-                    .find_map(|(candidate, value)| (candidate == id).then_some(value));
-                if let Some(input) = input {
-                    *self = input.clone().cast(ty)?;
-                } else {
+                let Some(input) = get(*id) else {
                     return Err(DatabaseError::parameter_not_found(format!("${id}")));
-                }
+                };
+                *self = input.clone().cast(ty)?;
             }
             DataValue::Tuple(values) => {
                 for value in values {
-                    value.bind_parameters(params)?;
+                    value.bind_parameters(get)?;
                 }
             }
             _ => {}

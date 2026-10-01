@@ -10,9 +10,13 @@ Use the Python runner for local performance comparisons:
 ./scripts/run_tpcc_stable.py --build
 ```
 
-It runs the same four variants, but waits before each variant until the machine has enough consecutive stable samples:
+It runs the same four variants, pins TPCC to one CPU, and waits before each variant until the machine has enough consecutive stable samples.
 
-- CPU temperature is at or below `--cool-temp-c` (default `65.0`).
+TPCC runs as a single worker, so its speed depends on the core it lands on. On hybrid CPUs (P-cores and E-cores) an unpinned run can differ by 30-60% depending on scheduler placement. The runner therefore pins every variant, including its background threads, to the strongest core by default: the one with the highest `cpuinfo_max_freq`, lowest id on ties, skipping the physical core of `cpu0`. On hybrid CPUs this is a P-core, and on CPUs with Turbo Boost Max 3.0 it is one of the favored P-cores. Use `--cpu <n>` to choose one or `--no-cpu-pin` to disable pinning. The chosen CPU is recorded in `summary.md`.
+
+The runner waits until:
+
+- CPU temperature is at or below `--cool-temp-c` (default `70.0`).
 - CPU usage is at or below `--idle-cpu-percent` (default `20.0`).
 - At least `--min-cooldown-sec` seconds have passed after the previous variant (default `300`).
 - The state remains stable for `--stable-samples` samples (default `3`, sampled every `10s`).
@@ -46,12 +50,13 @@ Local 720-second comparison on the machine above:
 
 | Backend | TpmC | New-Order p90 (µs) | Payment p90 (µs) | Order-Status p90 (µs) | Delivery p90 (µs) | Stock-Level p90 (µs) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| KiteSQL LMDB | 134909 | 360 | 94 | 147 | 503 | 466 |
-| KiteSQL RocksDB | 43866 | 521 | 289 | 269 | 11711 | 902 |
-| SQLite balanced | 49200 | 304 | 74 | 53 | 375 | 518 |
-| SQLite practical | 43385 | 368 | 74 | 44 | 482 | 386 |
+| KiteSQL LMDB | 159616 | 315 | 81 | 44 | 435 | 332 |
+| KiteSQL RocksDB | 48035 | 459 | 258 | 200 | 11055 | 704 |
+| SQLite balanced | 67102 | 283 | 67 | 48 | 338 | 473 |
+| SQLite practical | 67153 | 336 | 66 | 41 | 427 | 339 |
 
-- Run dates: `2026-09-27`; results: `2026-09-27_00-14-16`. Latency is measured in microseconds and includes commit.
+- Run dates: `2026-10-01`; results: `2026-10-01_17-12-31`. Latency is measured in microseconds and includes commit.
+- Every row is pinned to `cpu8`, the highest-frequency P-core on this machine (5.4 GHz).
 - All rows use `--num-ware 1`, `--max-retry 5`, and TPCC's default 720-second measure time.
 - SQLite rows use the `balanced` and `practical` profiles respectively.
 

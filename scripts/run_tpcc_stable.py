@@ -64,7 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--measure-time", type=int, default=None)
     parser.add_argument("--tpcc-max-retry", type=int, default=5)
     parser.add_argument("--duplicate-retry", type=int, default=1)
-    parser.add_argument("--cool-temp-c", type=float, default=65.0)
+    parser.add_argument("--cool-temp-c", type=float, default=70.0)
     parser.add_argument("--idle-cpu-percent", type=float, default=20.0)
     parser.add_argument("--min-cooldown-sec", type=int, default=300)
     parser.add_argument("--stable-samples", type=int, default=3)
@@ -72,11 +72,75 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-wait-sec", type=int, default=7200)
     parser.add_argument("--skip-health-check", action="store_true")
     parser.add_argument(
+        "--cpu",
+        type=int,
+        help="Pin TPCC to this CPU. Defaults to the core with the highest max frequency.",
+    )
+    parser.add_argument(
+        "--variants",
+        help="Comma-separated subset of variants to run (default: all).",
+    )
+    parser.add_argument(
+        "--no-cpu-pin",
+        action="store_true",
+        help="Let the scheduler place TPCC on any CPU.",
+    )
+    parser.add_argument(
         "--build",
         action="store_true",
         help="Run `cargo build -p tpcc --release` before the benchmark matrix.",
     )
     return parser.parse_args()
+
+
+def parse_cpu_list(text: str) -> list[int]:
+    cpus: list[int] = []
+    for part in text.strip().split(","):
+        if not part:
+            continue
+        if "-" in part:
+            start, end = part.split("-", 1)
+            cpus.extend(range(int(start), int(end) + 1))
+        else:
+            cpus.append(int(part))
+    return cpus
+
+
+def read_cpu_list(path: str) -> list[int]:
+    try:
+        return parse_cpu_list(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+
+
+def cpu_max_freq(cpu: int) -> int:
+    try:
+        return int(
+            Path(f"/sys/devices/system/cpu/cpu{cpu}/cpufreq/cpuinfo_max_freq").read_text(
+                encoding="utf-8"
+            )
+        )
+    except (OSError, ValueError):
+        return 0
+
+
+def default_pinned_cpu() -> int | None:
+    cpus = read_cpu_list("/sys/devices/system/cpu/online")
+    if not cpus:
+        return None
+    cpu0_siblings = set(
+        read_cpu_list("/sys/devices/system/cpu/cpu0/topology/thread_siblings_list")
+    ) or {0}
+    candidates = [cpu for cpu in cpus if cpu not in cpu0_siblings] or cpus
+    return max(candidates, key=lambda cpu: (cpu_max_freq(cpu), -cpu))
+
+
+def resolve_pinned_cpu(args: argparse.Namespace) -> int | None:
+    if args.no_cpu_pin:
+        return None
+    if args.cpu is not None:
+        return args.cpu
+    return default_pinned_cpu()
 
 
 def read_proc_stat() -> tuple[int, int] | None:
@@ -371,8 +435,20 @@ def run_variant(
         append_line(log_file, f"$ {quote_cmd(cmd)}")
         append_line(log_file)
 
+        if args.pinned_cpu is not None:
+            append_line(log_file, f"[runner] pinned to cpu {args.pinned_cpu}")
+        pinned_cpu = args.pinned_cpu
+        preexec = (
+            (lambda: os.sched_setaffinity(0, {pinned_cpu})) if pinned_cpu is not None else None
+        )
         with log_file.open("a", encoding="utf-8", errors="replace") as file:
-            proc = subprocess.run(cmd, cwd=ROOT_DIR, stdout=file, stderr=subprocess.STDOUT)
+            proc = subprocess.run(
+                cmd,
+                cwd=ROOT_DIR,
+                stdout=file,
+                stderr=subprocess.STDOUT,
+                preexec_fn=preexec,
+            )
 
         if proc.returncode == 0:
             break
@@ -434,6 +510,11 @@ def write_summary_header(args: argparse.Namespace, summary_file: Path) -> None:
                 f"- Measure time: {measure}",
                 f"- Binary: `{args.binary}`",
                 (
+                    f"- CPU pin: cpu {args.pinned_cpu}"
+                    if args.pinned_cpu is not None
+                    else "- CPU pin: none (scheduler placement)"
+                ),
+                (
                     "- Machine gates: "
                     f"temp<={args.cool_temp_c:.1f}C, "
                     f"cpu<={args.idle_cpu_percent:.1f}%, "
@@ -455,6 +536,7 @@ def main() -> int:
     args = parse_args()
     args.binary = args.binary.resolve()
     args.tmp_dir = args.tmp_dir.resolve()
+    args.pinned_cpu = resolve_pinned_cpu(args)
     result_dir = (
         args.result_dir.resolve()
         if args.result_dir is not None
@@ -475,11 +557,20 @@ def main() -> int:
         )
         return 1
 
+    variants = VARIANTS
+    if args.variants:
+        names = {name.strip() for name in args.variants.split(",") if name.strip()}
+        unknown = sorted(names - {variant.name for variant in VARIANTS})
+        if unknown:
+            print(f"unknown variants: {', '.join(unknown)}", file=sys.stderr)
+            return 2
+        variants = [variant for variant in VARIANTS if variant.name in names]
+
     write_summary_header(args, summary_file)
 
     previous_finished_at: float | None = None
     try:
-        for variant in VARIANTS:
+        for variant in variants:
             previous_finished_at = run_variant(
                 args, variant, log_dir, summary_file, previous_finished_at
             )

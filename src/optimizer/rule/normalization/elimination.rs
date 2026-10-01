@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+use crate::expression::ScalarExpression;
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child, wrap_child_with};
 use crate::planner::operator::limit::LimitOperator;
@@ -44,7 +45,7 @@ impl NormalizationRule for EliminateRedundantSort {
             None => return Ok(false),
         };
         mark_sort_preserving_indexes(child, &sort_fields, arena)?;
-        let can_remove = ensure_order(child, &sort_fields, arena);
+        let can_remove = ensure_order(child, &sort_fields, true, arena);
 
         if !can_remove {
             return Ok(false);
@@ -188,7 +189,10 @@ pub(crate) fn apply_scan_order_hint(
         return Ok(());
     }
     for index_info in scan_op.index_infos.iter_mut() {
-        if hint_covers(required, &index_info.sort_option, arena) {
+        if hint_covers(required, &index_info.sort_option, arena)
+            || (matches!(hint, OrderHintKind::SortElimination)
+                && hint_covers_reversed(required, &index_info.sort_option, arena))
+        {
             let covered = hint_len(required);
             match hint {
                 OrderHintKind::SortElimination => {
@@ -230,6 +234,19 @@ fn hint_covers(
         ScanOrderHint::GroupBy(groupby_exprs) => covers(groupby_exprs, provided, |expr, field| {
             field.asc && !field.nulls_first && expr.eq_ignore_colref_pos(field.expr, arena)
         }),
+    }
+}
+
+fn hint_covers_reversed(
+    required: ScanOrderHint<'_>,
+    provided: &SortOption,
+    arena: &crate::planner::PlanArena,
+) -> bool {
+    match required {
+        ScanOrderHint::SortFields(fields) => covers(fields, provided, |required, provided| {
+            sort_field_matches_reversed(required, provided, arena)
+        }),
+        ScanOrderHint::GroupBy(_) => false,
     }
 }
 
@@ -275,7 +292,7 @@ impl NormalizationRule for UseStreamAggregate {
             Some(child) => child,
             None => return Ok(false),
         };
-        if !ensure_order(child, &required, arena) {
+        if !ensure_order(child, &required, false, arena) {
             return Ok(false);
         }
 
@@ -353,16 +370,32 @@ pub(crate) fn apply_annotated_post_rules(
 fn ensure_order(
     plan: &mut LogicalPlan,
     required: &[SortField],
+    allow_reverse: bool,
     arena: &crate::planner::PlanArena,
 ) -> bool {
     if let Some(PhysicalOption {
         plan: PlanImpl::IndexScan(index_info),
-        ..
-    }) = plan.physical_option.as_ref()
+        sort_option,
+    }) = plan.physical_option.as_mut()
     {
         if covers(required, &index_info.sort_option, |required, provided| {
             sort_field_matches(required, provided, arena)
         }) {
+            return true;
+        }
+        let scan_limited = matches!(
+            &plan.operator,
+            Operator::TableScan(scan) if scan.limit != (None, None)
+        );
+        if allow_reverse
+            && !scan_limited
+            && !index_info.is_reverse()
+            && covers(required, &index_info.sort_option, |required, provided| {
+                sort_field_matches_reversed(required, provided, arena)
+            })
+        {
+            index_info.reverse_order();
+            *sort_option = index_info.sort_option.clone();
             return true;
         }
     }
@@ -377,8 +410,11 @@ fn ensure_order(
                 );
             }
             SortOption::Follow => {
+                // Limit keeps the first N rows in scan order. Reversing the scan below it
+                // would keep the last N rows instead, changing the result set.
+                let allow_reverse = allow_reverse && !matches!(plan.operator, Operator::Limit(_));
                 if let Childrens::Only(child) = plan.childrens.as_mut() {
-                    if ensure_order(child, required, arena) {
+                    if ensure_order(child, required, allow_reverse, arena) {
                         return true;
                     }
                 }
@@ -398,6 +434,23 @@ fn sort_field_matches(
     required.asc == provided.asc
         && required.nulls_first == provided.nulls_first
         && required.expr.eq_ignore_colref_pos(provided.expr, arena)
+}
+
+fn sort_field_matches_reversed(
+    required: &SortField,
+    provided: &SortField,
+    arena: &crate::planner::PlanArena,
+) -> bool {
+    required.asc != provided.asc
+        && (required.nulls_first != provided.nulls_first || !expr_nullable(required.expr, arena))
+        && required.expr.eq_ignore_colref_pos(provided.expr, arena)
+}
+
+fn expr_nullable(expr: ExprRef, arena: &crate::planner::PlanArena) -> bool {
+    match arena.expression(expr) {
+        ScalarExpression::ColumnRef { column, .. } => arena.column(*column).nullable(),
+        _ => true,
+    }
 }
 
 pub(crate) fn covers<T>(
@@ -449,6 +502,7 @@ mod tests {
     use crate::optimizer::core::rule::NormalizationRule;
     use crate::planner::operator::aggregate::AggregateOperator;
     use crate::planner::operator::filter::FilterOperator;
+    use crate::planner::operator::limit::LimitOperator;
     use crate::planner::operator::sort::{SortField, SortOperator};
     use crate::planner::operator::table_scan::TableScanOperator;
     use crate::planner::operator::top_k::TopKOperator;
@@ -761,6 +815,88 @@ mod tests {
             }
             _ => unreachable!("expected limit operator after removing topk"),
         }
+        Ok(())
+    }
+
+    fn desc_topk_plan(
+        arena: &mut crate::planner::PlanArena,
+        nullable: bool,
+    ) -> (LogicalPlan, SortField) {
+        let mut column = ColumnCatalog::new_dummy("c1".to_string());
+        column.set_nullable(nullable);
+        let column = arena.alloc_column(column);
+        let index_field = SortField::new(
+            arena.alloc_expression(ScalarExpression::column_expr(column, 0)),
+            true,
+            false,
+        );
+        let required = SortField::new(index_field.expr, false, false);
+        let mut plan = build_plan(arena, vec![required.clone()], vec![index_field], 0);
+        plan.operator = Operator::TopK(TopKOperator {
+            sort_fields: vec![required.clone()],
+            limit: 1,
+            offset: None,
+        });
+        (plan, required)
+    }
+
+    fn scan_is_reverse(plan: &LogicalPlan) -> bool {
+        let mut plan = plan;
+        loop {
+            if let Some(PhysicalOption {
+                plan: PlanImpl::IndexScan(info),
+                ..
+            }) = &plan.physical_option
+            {
+                return info.is_reverse();
+            }
+            match plan.childrens.as_ref() {
+                Childrens::Only(child) => plan = child,
+                _ => return false,
+            }
+        }
+    }
+
+    #[test]
+    fn remove_desc_topk_by_reversing_non_null_index() -> Result<(), DatabaseError> {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = crate::planner::PlanArena::new(&table_arena);
+        let (mut plan, _) = desc_topk_plan(&mut arena, false);
+
+        assert!(EliminateRedundantSort.apply(&mut plan, &mut arena)?);
+        assert!(matches!(plan.operator, Operator::Limit(_)));
+        assert!(scan_is_reverse(&plan));
+        Ok(())
+    }
+
+    #[test]
+    fn keep_desc_topk_on_nullable_index() -> Result<(), DatabaseError> {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = crate::planner::PlanArena::new(&table_arena);
+        let (mut plan, _) = desc_topk_plan(&mut arena, true);
+
+        assert!(!EliminateRedundantSort.apply(&mut plan, &mut arena)?);
+        assert!(matches!(plan.operator, Operator::TopK(_)));
+        assert!(!scan_is_reverse(&plan));
+        Ok(())
+    }
+
+    #[test]
+    fn keep_desc_topk_when_limit_is_below() -> Result<(), DatabaseError> {
+        let table_arena = crate::planner::TableArenaCell::default();
+        let mut arena = crate::planner::PlanArena::new(&table_arena);
+        let (mut plan, _) = desc_topk_plan(&mut arena, false);
+        let Childrens::Only(filter) = plan.childrens.as_mut() else {
+            unreachable!()
+        };
+        filter.operator = Operator::Limit(LimitOperator {
+            offset: None,
+            limit: Some(3),
+        });
+        filter.physical_option = Some(PhysicalOption::new(PlanImpl::Limit, SortOption::Follow));
+
+        assert!(!EliminateRedundantSort.apply(&mut plan, &mut arena)?);
+        assert!(!scan_is_reverse(&plan));
         Ok(())
     }
 

@@ -157,7 +157,7 @@ pub enum SortOption {
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct PhysicalOption {
     pub plan: PlanImpl,
-    sort_option: SortOption,
+    pub(crate) sort_option: SortOption,
 }
 
 impl PhysicalOption {

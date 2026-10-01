@@ -1,10 +1,8 @@
 statement ok
 create table alter_large (id int primary key, v1 int, v2 int)
 
-query I
+statement ok
 copy alter_large from 'tests/data/row_20000.csv' ( DELIMITER '|' );
-----
-20000
 
 query I
 select count(*) from alter_large

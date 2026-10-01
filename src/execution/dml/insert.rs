@@ -29,57 +29,46 @@ use crate::types::value::DataValue;
 use crate::types::ColumnId;
 use std::collections::HashMap;
 
-pub struct Insert {
-    table_name: TableName,
+pub struct Insert<'a> {
+    table_name: &'a TableName,
     input_schema: Schema,
-    input_plan: LogicalPlan,
     input: Option<ExecId>,
     is_overwrite: bool,
     is_mapping_by_name: bool,
 }
 
-impl From<(InsertOperator, LogicalPlan)> for Insert {
-    fn from(
+impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert<'a> {
+    type Input = (&'a InsertOperator, &'a LogicalPlan);
+
+    fn into_executor(
         (
             InsertOperator {
                 table_name,
                 is_overwrite,
                 is_mapping_by_name,
             },
-            input,
-        ): (InsertOperator, LogicalPlan),
-    ) -> Self {
-        Insert {
-            table_name,
-            input_schema: Default::default(),
-            input_plan: input,
-            input: None,
-            is_overwrite,
-            is_mapping_by_name,
-        }
-    }
-}
-
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert {
-    type Input = Self;
-
-    fn into_executor(
-        input: Self::Input,
+            input_plan,
+        ): Self::Input,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let mut executor = input;
-        executor.input_schema = executor.input_plan.take_schema(plan_arena);
-        executor.input = Some(build_read(
+        let input_schema = input_plan.read_schema().clone();
+        let input = Some(build_read(
             arena,
             plan_arena,
-            executor.input_plan.take(),
+            input_plan,
             cache,
             transaction,
         ));
-        arena.push(ExecNode::Insert(executor))
+        arena.push(ExecNode::Insert(Insert {
+            table_name,
+            input_schema,
+            input,
+            is_overwrite: *is_overwrite,
+            is_mapping_by_name: *is_mapping_by_name,
+        }))
     }
 }
 
@@ -89,11 +78,11 @@ enum MappingKey<'a> {
     Id(Option<ColumnId>),
 }
 
-impl Insert {
-    fn column_key<'a>(
-        column: &'a crate::catalog::ColumnCatalog,
+impl Insert<'_> {
+    fn column_key<'c>(
+        column: &'c crate::catalog::ColumnCatalog,
         is_mapping_by_name: bool,
-    ) -> MappingKey<'a> {
+    ) -> MappingKey<'c> {
         if is_mapping_by_name {
             MappingKey::Name(column.name())
         } else {
@@ -102,7 +91,7 @@ impl Insert {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -173,13 +162,13 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert {
                     let (values, transaction, table_codec) =
                         state.index_values_transaction_codec_mut();
                     let index = Index::new(index_meta.id, values, index_meta.ty);
-                    transaction.add_index(table_codec, &self.table_name, index, tuple_id)?;
+                    transaction.add_index(table_codec, self.table_name, index, tuple_id)?;
                 }
                 let mut state = arena.local_state(plan_arena);
                 let (transaction, table_codec) = state.transaction_codec_mut();
                 transaction.append_tuple(
                     table_codec,
-                    &self.table_name,
+                    self.table_name,
                     &tuple,
                     &serializers,
                     self.is_overwrite,

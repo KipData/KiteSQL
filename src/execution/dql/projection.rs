@@ -17,17 +17,18 @@ use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::project::ProjectOperator;
+use crate::planner::ExprRef;
+use crate::planner::LogicalPlan;
 use crate::planner::MetaArena;
-use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 
-pub struct Projection {
-    exprs: Vec<ExprRef>,
+pub struct Projection<'a> {
+    exprs: &'a [ExprRef],
     input: ExecId,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Projection {
-    type Input = (ProjectOperator, LogicalPlan);
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Projection<'a> {
+    type Input = (&'a ProjectOperator, &'a LogicalPlan);
 
     fn into_executor(
         (ProjectOperator { exprs }, input): Self::Input,
@@ -41,7 +42,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Projection {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -52,7 +53,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection {
             return Ok(());
         }
 
-        arena.rewrite(&self.exprs, plan_arena, None)?;
+        arena.rewrite(self.exprs, plan_arena, None)?;
         arena.resume();
         Ok(())
     }

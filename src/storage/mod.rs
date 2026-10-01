@@ -162,6 +162,14 @@ pub trait Transaction: Sized {
     where
         Self: 'a;
 
+    type RevIterType<'a>: InnerIter
+    where
+        Self: 'a;
+
+    fn next_statement_stamp(&mut self) -> Result<u64, DatabaseError> {
+        Ok(0)
+    }
+
     fn begin_statement_scope(&mut self) -> Result<(), DatabaseError> {
         Ok(())
     }
@@ -181,13 +189,13 @@ pub trait Transaction: Sized {
         table_cache: &TableCache,
         table_name: TableName,
         bounds: Bounds,
-        columns: Vec<ColumnRef>,
+        columns: &[ColumnRef],
         with_pk: bool,
     ) -> Result<TupleIter<'a, Self>, DatabaseError> {
         let table = self
             .table(table_cache, table_name.clone())?
             .ok_or(DatabaseError::TableNotFound)?;
-        let deserializers = Self::create_deserializers(&columns, table, arena, with_pk);
+        let deserializers = Self::create_deserializers(columns, table, arena, with_pk);
         let pk_ty = with_pk.then(|| table.primary_keys_type().clone());
         let offset = bounds.0.unwrap_or(0);
 
@@ -211,15 +219,15 @@ pub trait Transaction: Sized {
         arena: &(dyn MetaArena + 'a),
         table_name: TableName,
         (offset_option, limit_option): Bounds,
-        columns: Vec<ColumnRef>,
+        columns: &[ColumnRef],
         index_meta: IndexMetaRef,
         ranges: R,
         with_pk: bool,
-        covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
-        cover_mapping_indices: Option<Vec<usize>>,
+        covered_deserializers: Option<&'a [TupleValueSerializableImpl]>,
+        cover_mapping_indices: Option<&[usize]>,
     ) -> Result<IndexIter<'a, Self>, DatabaseError>
     where
-        R: Into<IndexRanges>,
+        R: Into<IndexRanges<'a>>,
     {
         let index_meta_ref = index_meta;
         let index_meta = arena.index(index_meta_ref);
@@ -243,16 +251,21 @@ pub trait Transaction: Sized {
 
                 (
                     IndexImplEnum::Covered(CoveredIndexImpl),
-                    deserializers,
+                    Cow::Borrowed(deserializers),
                     cover_mapping,
                 )
             }
             _ => {
-                let deserializers = Self::create_deserializers(&columns, table, arena, with_pk);
-                (IndexImplEnum::instance(index_meta.ty), deserializers, None)
+                let deserializers = Self::create_deserializers(columns, table, arena, with_pk);
+                (
+                    IndexImplEnum::instance(index_meta.ty),
+                    Cow::Owned(deserializers),
+                    None,
+                )
             }
         };
         let total_len = table.columns_len();
+        let ranges = ranges.into();
 
         Ok(IndexIter {
             bounds: IterBounds::new(offset, limit_option),
@@ -265,9 +278,10 @@ pub trait Transaction: Sized {
                 tx: self,
                 cover_mapping,
                 with_pk,
+                reverse: ranges.reverse,
             },
             inner,
-            ranges: ranges.into(),
+            ranges,
             state: IndexIterState::Init,
             encode_min_buffer: Bytes::new(),
             encode_max_buffer: Bytes::new(),
@@ -355,7 +369,9 @@ pub trait Transaction: Sized {
         table_codec.with_index(table_name, &index, Some(tuple_id), |key, value| {
             if matches!(index.ty, IndexType::Unique) {
                 if let Some(bytes) = self.get_borrowed(key)? {
-                    return if bytes.as_ref() != value {
+                    return if TableCodec::strip_stamp(bytes.as_ref())?
+                        != TableCodec::strip_stamp(value)?
+                    {
                         Err(DatabaseError::DuplicateUniqueValue)
                     } else {
                         Ok(())
@@ -1154,12 +1170,17 @@ pub trait Transaction: Sized {
 
     fn remove(&mut self, key: &[u8]) -> Result<(), DatabaseError>;
 
-    // TODO: Support reverse range iteration (upper to lower bound) for descending index scans.
     fn range<'txn, 'key>(
         &'txn self,
         min: Bound<&'key [u8]>,
         max: Bound<&'key [u8]>,
     ) -> Result<Self::IterType<'txn>, DatabaseError>;
+
+    fn range_rev<'txn, 'key>(
+        &'txn self,
+        min: Bound<&'key [u8]>,
+        max: Bound<&'key [u8]>,
+    ) -> Result<Self::RevIterType<'txn>, DatabaseError>;
 
     fn remove_range(&mut self, min: Bound<&[u8]>, max: Bound<&[u8]>) -> Result<(), DatabaseError> {
         const DELETE_BATCH_SIZE: usize = 1024;
@@ -1217,6 +1238,10 @@ pub(crate) fn reuse_bound_as_excluded(bound: &mut Bound<Bytes>, key: &[u8]) {
     bytes.clear();
     bytes.extend_from_slice(key);
     *bound = Bound::Excluded(bytes);
+}
+
+pub(crate) fn bounds_contain(min: Bound<&[u8]>, max: Bound<&[u8]>, key: &[u8]) -> bool {
+    std::ops::RangeBounds::<[u8]>::contains(&(min, max), key)
 }
 
 pub(crate) fn bytes_bound_as_slice(bound: &Bound<Bytes>) -> Bound<&[u8]> {
@@ -1336,7 +1361,7 @@ struct TupleMapping {
 }
 
 impl TupleMapping {
-    fn new(scan_to_index: Vec<usize>, tuple_len: usize) -> Self {
+    fn new(scan_to_index: &[usize], tuple_len: usize) -> Self {
         let mut index_to_scan = vec![usize::MAX; tuple_len];
 
         for (scan_idx, index_idx) in scan_to_index.iter().enumerate() {
@@ -1357,11 +1382,12 @@ struct IndexImplParams<'a, T: Transaction> {
     index_meta: IndexMetaRef,
     meta_arena: &'a dyn MetaArena,
     table_name: TableName,
-    deserializers: Vec<TupleValueSerializableImpl>,
+    deserializers: Cow<'a, [TupleValueSerializableImpl]>,
     total_len: usize,
     tx: &'a T,
     cover_mapping: Option<TupleMapping>,
     with_pk: bool,
+    reverse: bool,
 }
 
 impl<T: Transaction> IndexImplParams<'_, T> {
@@ -1388,7 +1414,7 @@ impl<T: Transaction> IndexImplParams<'_, T> {
             };
             TableCodec::decode_tuple_into(
                 tuple,
-                &self.deserializers,
+                &self.deserializers[..],
                 Some(tuple_id.clone()),
                 bytes.as_ref(),
                 self.total_len,
@@ -1401,7 +1427,36 @@ impl<T: Transaction> IndexImplParams<'_, T> {
 enum IndexResult<'a, T: Transaction + 'a> {
     Hit,
     Miss,
-    Scope(T::IterType<'a>),
+    Scope(RangeIter<'a, T>),
+}
+
+pub enum RangeIter<'a, T: Transaction + 'a> {
+    Forward(T::IterType<'a>),
+    Reverse(T::RevIterType<'a>),
+}
+
+impl<'a, T: Transaction + 'a> RangeIter<'a, T> {
+    fn open(
+        tx: &'a T,
+        min: Bound<&[u8]>,
+        max: Bound<&[u8]>,
+        reverse: bool,
+    ) -> Result<Self, DatabaseError> {
+        Ok(if reverse {
+            RangeIter::Reverse(tx.range_rev(min, max)?)
+        } else {
+            RangeIter::Forward(tx.range(min, max)?)
+        })
+    }
+}
+
+impl<'a, T: Transaction + 'a> InnerIter for RangeIter<'a, T> {
+    fn try_next(&mut self) -> Result<Option<KeyValueRef<'_>>, DatabaseError> {
+        match self {
+            RangeIter::Forward(iter) => iter.try_next(),
+            RangeIter::Reverse(iter) => iter.try_next(),
+        }
+    }
 }
 
 impl<T: Transaction> IndexImpl<T> for IndexImplEnum {
@@ -1500,7 +1555,7 @@ impl<T: Transaction> IndexImpl<T> for PrimaryKeyIndexImpl {
         let tuple_id = TableCodec::decode_tuple_key(key, &params.index_meta().pk_ty)?;
         TableCodec::decode_tuple_into(
             tuple,
-            &params.deserializers,
+            &params.deserializers[..],
             Some(tuple_id),
             value,
             params.total_len,
@@ -1527,7 +1582,7 @@ impl<T: Transaction> IndexImpl<T> for PrimaryKeyIndexImpl {
                 };
                 TableCodec::decode_tuple_into(
                     tuple,
-                    &params.deserializers,
+                    &params.deserializers[..],
                     Some(tuple_id.clone()),
                     bytes.as_ref(),
                     params.total_len,
@@ -1819,9 +1874,11 @@ fn eq_to_res_scope<'a, T: Transaction + 'a>(
     index_impl.bound_key(table_codec, params, value, false, encode_min)?;
     index_impl.bound_key(table_codec, params, value, true, encode_max)?;
 
-    let iter = params.tx.range(
+    let iter = RangeIter::open(
+        params.tx,
         Bound::Included(encode_min.as_slice()),
         Bound::Included(encode_max.as_slice()),
+        params.reverse,
     )?;
     Ok(IndexResult::Scope(iter))
 }
@@ -1837,17 +1894,13 @@ pub struct TupleIter<'a, T: Transaction + 'a> {
 impl<'a, T: Transaction + 'a> Iter for TupleIter<'a, T> {
     fn next_tuple_into(
         &mut self,
-        _: &mut TableCodec,
+        table_codec: &mut TableCodec,
         tuple: &mut Tuple,
     ) -> Result<bool, DatabaseError> {
-        while self.bounds.consume_offset() {
-            if self.iter.try_next()?.is_none() {
-                return Ok(false);
-            }
-        }
-
-        #[allow(clippy::never_loop)]
         while let Some((key, value)) = self.iter.try_next()? {
+            if table_codec.is_own_write(value) || self.bounds.consume_offset() {
+                continue;
+            }
             if self.bounds.limit_reached() {
                 return Ok(false);
             }
@@ -1872,45 +1925,74 @@ impl<'a, T: Transaction + 'a> Iter for TupleIter<'a, T> {
     }
 }
 
-enum IndexRangesInner {
-    One(Range),
-    Many(Vec<Range>),
+enum RangeSource<'r> {
+    Borrowed(&'r [Range]),
+    Owned(Range),
 }
 
-pub struct IndexRanges {
-    inner: IndexRangesInner,
-    next_idx: usize,
+pub struct IndexRanges<'r> {
+    source: RangeSource<'r>,
+    next: usize,
+    reverse: bool,
 }
 
-impl IndexRanges {
-    fn next(&mut self) -> Option<&Range> {
-        let range = match &self.inner {
-            IndexRangesInner::One(range) => (self.next_idx == 0).then_some(range),
-            IndexRangesInner::Many(ranges) => ranges.get(self.next_idx),
+impl IndexRanges<'_> {
+    pub(crate) fn reversed(mut self, reverse: bool) -> Self {
+        self.reverse = reverse;
+        self
+    }
+
+    pub(crate) fn next(&mut self) -> Option<&Range> {
+        let ranges = match &self.source {
+            RangeSource::Borrowed(ranges) => ranges,
+            RangeSource::Owned(Range::SortedRanges(ranges)) => ranges.as_slice(),
+            RangeSource::Owned(range) => std::slice::from_ref(range),
         };
-
-        if range.is_some() {
-            self.next_idx += 1;
-        }
-
-        range
+        let idx = if self.reverse {
+            ranges.len().checked_sub(self.next + 1)?
+        } else {
+            self.next
+        };
+        let range = ranges.get(idx)?;
+        self.next += 1;
+        Some(range)
     }
 }
 
-impl From<Vec<Range>> for IndexRanges {
-    fn from(value: Vec<Range>) -> Self {
-        Self {
-            inner: IndexRangesInner::Many(value),
-            next_idx: 0,
+impl<'r> From<&'r [Range]> for IndexRanges<'r> {
+    fn from(ranges: &'r [Range]) -> Self {
+        IndexRanges {
+            source: RangeSource::Borrowed(ranges),
+            next: 0,
+            reverse: false,
         }
     }
 }
 
-impl From<Range> for IndexRanges {
-    fn from(value: Range) -> Self {
-        Self {
-            inner: IndexRangesInner::One(value),
-            next_idx: 0,
+impl<'r> From<&'r Range> for IndexRanges<'r> {
+    fn from(range: &'r Range) -> Self {
+        match range {
+            Range::SortedRanges(ranges) => ranges.as_slice().into(),
+            range => std::slice::from_ref(range).into(),
+        }
+    }
+}
+
+impl From<Range> for IndexRanges<'_> {
+    fn from(range: Range) -> Self {
+        IndexRanges {
+            source: RangeSource::Owned(range),
+            next: 0,
+            reverse: false,
+        }
+    }
+}
+
+impl<'r> From<Cow<'r, Range>> for IndexRanges<'r> {
+    fn from(range: Cow<'r, Range>) -> Self {
+        match range {
+            Cow::Borrowed(range) => range.into(),
+            Cow::Owned(range) => range.into(),
         }
     }
 }
@@ -1950,7 +2032,7 @@ pub struct IndexIter<'a, T: Transaction> {
     bounds: IterBounds,
     params: IndexImplParams<'a, T>,
     inner: IndexImplEnum,
-    ranges: IndexRanges,
+    ranges: IndexRanges<'a>,
     state: IndexIterState<'a, T>,
     encode_min_buffer: Bytes,
     encode_max_buffer: Bytes,
@@ -1958,7 +2040,7 @@ pub struct IndexIter<'a, T: Transaction> {
 
 pub enum IndexIterState<'a, T: Transaction + 'a> {
     Init,
-    Range(T::IterType<'a>),
+    Range(RangeIter<'a, T>),
     Over,
 }
 
@@ -2003,10 +2085,13 @@ impl<T: Transaction> Iter for IndexIter<'_, T> {
                             )?;
 
                             let tx = self.params.tx;
+                            let reverse = self.params.reverse;
                             let open_iter = move |bound_min: &[u8], bound_max: &[u8]| {
-                                tx.range(
+                                RangeIter::open(
+                                    tx,
                                     fill_default_bound(encode_min, bound_min),
                                     fill_default_bound(encode_max, bound_max),
+                                    reverse,
                                 )
                             };
                             let iter = if matches!(index_meta.ty, IndexType::PrimaryKey { .. }) {
@@ -2047,7 +2132,7 @@ impl<T: Transaction> Iter for IndexIter<'_, T> {
                 }
                 IndexIterState::Range(iter) => {
                     while let Some((key, value)) = iter.try_next()? {
-                        if self.bounds.consume_offset() {
+                        if table_codec.is_own_write(value) || self.bounds.consume_offset() {
                             continue;
                         }
                         self.bounds.consume_limit();
@@ -2121,6 +2206,142 @@ impl<T: Transaction> ViewIter<'_, T> {
             self.table_arena.borrow_mut(),
         )?))
     }
+}
+
+#[cfg(test)]
+pub(crate) fn check_range_rev_matches_range<T: Transaction>(
+    tx: &mut T,
+) -> Result<(), DatabaseError> {
+    fn keys<I: InnerIter>(mut iter: I) -> Result<Vec<Vec<u8>>, DatabaseError> {
+        let mut keys = Vec::new();
+        while let Some((key, _)) = iter.try_next()? {
+            keys.push(key.to_vec());
+        }
+        Ok(keys)
+    }
+
+    let data: Vec<Vec<u8>> = [
+        &b"a"[..],
+        b"prefix0000\x01",
+        b"prefix0000\x03",
+        b"prefix0000\x03\x00",
+        b"prefix0000\x05",
+        b"prefix0001\x01",
+        b"z",
+    ]
+    .iter()
+    .map(|key| key.to_vec())
+    .collect();
+    for key in &data {
+        tx.set(key, b"v")?;
+    }
+    let probes: Vec<&[u8]> = vec![
+        b"a",
+        b"prefix0000\x00",
+        b"prefix0000\x01",
+        b"prefix0000\x02",
+        b"prefix0000\x03",
+        b"prefix0000\x05",
+        b"prefix0000\x06",
+        b"prefix0001\x01",
+        b"z",
+        b"zz",
+    ];
+    let mut bounds = vec![(None, Bound::Unbounded)];
+    for (rank, probe) in probes.iter().enumerate() {
+        bounds.push((Some(rank), Bound::Included(*probe)));
+        bounds.push((Some(rank), Bound::Excluded(*probe)));
+    }
+    for (min_rank, min) in &bounds {
+        for (max_rank, max) in &bounds {
+            let valid = match (min_rank, max_rank) {
+                (Some(lo), Some(hi)) => {
+                    lo < hi
+                        || (lo == hi
+                            && matches!((min, max), (Bound::Included(_), Bound::Included(_))))
+                }
+                _ => true,
+            };
+            if !valid {
+                continue;
+            }
+            let mut expected: Vec<Vec<u8>> = data
+                .iter()
+                .filter(|key| bounds_contain(*min, *max, key.as_slice()))
+                .cloned()
+                .collect();
+            assert_eq!(
+                keys(tx.range(*min, *max)?)?,
+                expected,
+                "min={min:?} max={max:?}"
+            );
+            expected.reverse();
+            let actual = keys(tx.range_rev(*min, *max)?)?;
+            assert_eq!(actual, expected, "min={min:?} max={max:?}");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn check_explicit_transaction_does_not_rescan_own_writes<S: Storage>(
+    mut db: crate::db::Database<S>,
+) -> Result<(), DatabaseError> {
+    db.ddl("create table t (id int primary key, v int not null)")?;
+    let mut tx = db.new_transaction()?;
+    tx.run("insert into t values (1,1), (2,2), (3,3), (4,4), (5,5)")?
+        .done()?;
+    tx.run("update t set id = id + 1000 where id > 3 and id < 3000")?
+        .done()?;
+    tx.run("insert into t select id + 1000, v from t where id < 3000")?
+        .done()?;
+    let mut iter = tx.run("select id from t order by id")?;
+    let mut ids = Vec::new();
+    while let Some(id) = iter.next_tuple(|_, tuple| tuple.values[0].clone())? {
+        ids.push(id);
+    }
+    iter.done()?;
+    tx.commit()?;
+    let expected = [1, 2, 3, 1001, 1002, 1003, 1004, 1005, 2004, 2005]
+        .map(DataValue::Int32)
+        .to_vec();
+    assert_eq!(ids, expected);
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn check_remove_range<T: Transaction>(tx: &mut T) -> Result<(), DatabaseError> {
+    let data: Vec<[u8; 4]> = (0u32..3000).map(u32::to_be_bytes).collect();
+    let [k0, k1, k10, k2500, k2999, k5000] = [0u32, 1, 10, 2500, 2999, 5000].map(u32::to_be_bytes);
+    type Case<'a> = (Bound<&'a [u8]>, Bound<&'a [u8]>);
+    let cases: [Case; 7] = [
+        (Bound::Unbounded, Bound::Unbounded),
+        (Bound::Included(&k10), Bound::Excluded(&k2500)),
+        (Bound::Excluded(&k10), Bound::Included(&k2500)),
+        (Bound::Included(&k0), Bound::Included(&k0)),
+        (Bound::Excluded(&k2999), Bound::Unbounded),
+        (Bound::Unbounded, Bound::Excluded(&k1)),
+        (Bound::Included(&k5000), Bound::Unbounded),
+    ];
+    for (min, max) in cases {
+        for key in &data {
+            tx.set(key, &[7; 64])?;
+        }
+        tx.remove_range(min, max)?;
+
+        let mut iter = tx.range(Bound::Unbounded, Bound::Unbounded)?;
+        let mut remaining = Vec::new();
+        while let Some((key, _)) = iter.try_next()? {
+            remaining.push(key.to_vec());
+        }
+        let expected: Vec<Vec<u8>> = data
+            .iter()
+            .filter(|key| !bounds_contain(min, max, key.as_slice()))
+            .map(|key| key.to_vec())
+            .collect();
+        assert_eq!(remaining, expected, "min={min:?} max={max:?}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2333,7 +2554,7 @@ mod test {
                 &table_cache,
                 "t1".to_string().into(),
                 (None, None),
-                full_columns(&table_cache),
+                &full_columns(&table_cache),
                 true,
             )?;
 
@@ -2371,7 +2592,7 @@ mod test {
                 &table_cache,
                 "t1".to_string().into(),
                 (None, None),
-                full_columns(&table_cache),
+                &full_columns(&table_cache),
                 true,
             )?;
 
@@ -2559,12 +2780,12 @@ mod test {
                 plan_arena,
                 "t1".to_string().into(),
                 (None, None),
-                full_columns(table_cache),
+                &full_columns(table_cache),
                 index_meta,
-                vec![Range::Scope {
+                &[Range::Scope {
                     min: Bound::Unbounded,
                     max: Bound::Unbounded,
-                }],
+                }][..],
                 true,
                 None,
                 None,

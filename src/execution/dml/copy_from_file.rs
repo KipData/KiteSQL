@@ -25,41 +25,31 @@ use crate::types::tuple_builder::TupleBuilder;
 use std::fs::File;
 use std::io::BufReader;
 
-pub struct CopyFromFile {
-    op: Option<CopyFromFileOperator>,
+pub struct CopyFromFile<'a> {
+    op: &'a CopyFromFileOperator,
 }
 
-impl From<CopyFromFileOperator> for CopyFromFile {
-    fn from(op: CopyFromFileOperator) -> Self {
-        CopyFromFile { op: Some(op) }
-    }
-}
-
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CopyFromFile {
-    type Input = Self;
+impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CopyFromFile<'a> {
+    type Input = &'a CopyFromFileOperator;
 
     fn into_executor(
-        input: Self::Input,
+        op: Self::Input,
         arena: &mut ExecArena<'a, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        let executor = input;
-        arena.push(ExecNode::CopyFromFile(executor))
+        arena.push(ExecNode::CopyFromFile(CopyFromFile { op }))
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyFromFile {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyFromFile<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
-        let Some(op) = self.op.take() else {
-            arena.finish();
-            return Ok(());
-        };
+        let op = self.op;
         let column_types = op
             .schema_ref
             .iter()
@@ -76,25 +66,24 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyFromFile {
             .ok_or(DatabaseError::TableNotFound)?;
         let table_name = table.name().to_string();
 
-        let file = File::open(op.source.path)?;
+        let file = File::open(&op.source.path)?;
         let mut buf_reader = BufReader::new(file);
-        let mut reader = match op.source.format {
+        let mut reader = match &op.source.format {
             FileFormat::Csv {
                 delimiter,
                 quote,
                 escape,
                 header,
             } => csv::ReaderBuilder::new()
-                .delimiter(delimiter as u8)
-                .quote(quote as u8)
+                .delimiter(*delimiter as u8)
+                .quote(*quote as u8)
                 .escape(escape.map(|c| c as u8))
-                .has_headers(header)
+                .has_headers(*header)
                 .from_reader(&mut buf_reader),
         };
 
         let column_count = op.schema_ref.len();
         let tuple_builder = TupleBuilder::new(column_types, Some(table.primary_key_indices()));
-        let mut size = 0_usize;
 
         for record in reader.records() {
             let record = record?;
@@ -109,11 +98,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyFromFile {
             let mut state = arena.local_state(plan_arena);
             let (transaction, table_codec) = state.transaction_codec_mut();
             transaction.append_tuple(table_codec, &table_name, &chunk, &serializers, false)?;
-            size += 1;
         }
 
-        arena.produce_tuple(TupleBuilder::build_result(size.to_string()));
-        arena.resume();
+        arena.finish();
         Ok(())
     }
 }
@@ -126,7 +113,6 @@ mod tests {
     use crate::db::{CatalogKind, DataBaseBuilder};
     use crate::errors::DatabaseError;
     use crate::storage::Storage;
-    use crate::types::tuple::TupleLike;
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
     use std::io::Write;
@@ -184,8 +170,8 @@ mod tests {
         };
 
         let transaction = db.storage.transaction()?;
-        let mut executor = crate::execution::execute_mut(
-            CopyFromFile::from(op),
+        let mut executor = crate::execution::execute_input_mut::<_, CopyFromFile>(
+            &op,
             crate::execution::test_utils::empty_context(
                 db.state.table_cache(),
                 db.state.view_cache(),
@@ -195,10 +181,16 @@ mod tests {
             &transaction,
         );
 
-        let result = executor
-            .next_tuple()?
-            .expect("copy from file should yield once");
-        assert_eq!(result.value_at(0).to_string(), "2");
+        assert!(executor.next_tuple()?.is_none());
+        drop(executor);
+        transaction.commit()?;
+
+        let mut iter = db.run("select count(*) from test_copy")?;
+        let count = iter
+            .next_tuple(|_, tuple| tuple.values[0].to_string())?
+            .expect("count row");
+        assert_eq!(count, "2");
+        iter.done()?;
 
         Ok(())
     }

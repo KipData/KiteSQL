@@ -145,6 +145,14 @@ pub trait MetaArena {
         panic!("parent expressions are immutable")
     }
 
+    fn has_bound_params(&self) -> bool {
+        false
+    }
+
+    fn bound_param(&self, _id: usize) -> Option<&DataValue> {
+        None
+    }
+
     fn alloc_dummy(&mut self, name: &str) -> ColumnRef {
         self.table_arena_cell().borrow().alloc_dummy(name)
     }
@@ -191,6 +199,12 @@ impl<A: MetaArena + ?Sized> MetaArena for Box<A> {
         Self: 'a,
     {
         (**self).table_arena_cell()
+    }
+    fn has_bound_params(&self) -> bool {
+        (**self).has_bound_params()
+    }
+    fn bound_param(&self, id: usize) -> Option<&DataValue> {
+        (**self).bound_param(id)
     }
     fn alloc_column(&mut self, column: ColumnCatalog) -> ColumnRef {
         (**self).alloc_column(column)
@@ -562,7 +576,11 @@ impl<'a> PlanArena<'a> {
     ) -> Result<(), crate::errors::DatabaseError> {
         for expression in &mut self.expressions {
             if let ScalarExpression::Constant(value) = &mut *(ArenaExprMut { expr: expression }) {
-                value.bind_parameters(params)?;
+                value.bind_parameters(&|id| {
+                    params
+                        .iter()
+                        .find_map(|(candidate, value)| (*candidate == id).then_some(value))
+                })?;
             }
         }
         Ok(())
@@ -825,7 +843,7 @@ impl MetaArena for PlanArena<'_> {
 /// Execution-local parameter values and temporary expressions over an immutable plan arena.
 pub(crate) struct ParamArena<'a> {
     parent: &'a PlanArena<'a>,
-    expressions: Vec<ArenaExpr>,
+    expressions: Vec<(Option<usize>, ArenaExpr)>,
     parameter_count: usize,
     parent_end: usize,
 }
@@ -839,12 +857,19 @@ impl<'a> ParamArena<'a> {
         let mut expressions = Vec::with_capacity(parameter_expressions.len());
         for (slot, &expr_ref) in parameter_expressions.iter().enumerate() {
             debug_assert_eq!(parent.arena_expression(expr_ref).param, Some(slot));
-            let ScalarExpression::Constant(value) = parent.expression(expr_ref) else {
-                unreachable!("parameter expression must be a constant");
+            let ScalarExpression::Constant(value @ DataValue::Parameter { id, .. }) =
+                parent.expression(expr_ref)
+            else {
+                unreachable!("parameter expression must be a single parameter constant");
             };
+            let id = *id;
             let mut value = value.clone();
-            value.bind_parameters(params)?;
-            expressions.push(ArenaExpr::new(ScalarExpression::Constant(value)));
+            value.bind_parameters(&|id| {
+                params
+                    .iter()
+                    .find_map(|(candidate, value)| (*candidate == id).then_some(value))
+            })?;
+            expressions.push((Some(id), ArenaExpr::new(ScalarExpression::Constant(value))));
         }
         Ok(Self {
             parent,
@@ -862,6 +887,17 @@ impl MetaArena for ParamArena<'_> {
     {
         self.parent.table_arena_cell()
     }
+    fn has_bound_params(&self) -> bool {
+        true
+    }
+    fn bound_param(&self, id: usize) -> Option<&DataValue> {
+        self.expressions
+            .iter()
+            .find_map(|(slot, expr)| match (slot, &expr.expression) {
+                (Some(slot), ScalarExpression::Constant(value)) if *slot == id => Some(value),
+                _ => None,
+            })
+    }
     fn column(&self, column: ColumnRef) -> &ColumnCatalog {
         self.parent.column(column)
     }
@@ -878,14 +914,16 @@ impl MetaArena for ParamArena<'_> {
         if expr.pos() < self.parent_end {
             let parent = self.parent.arena_expression(expr);
             return match parent.param {
-                Some(slot) => &self.expressions[slot].expression,
+                Some(slot) => &self.expressions[slot].1.expression,
                 None => &parent.expression,
             };
         }
-        &self.expressions[self.parameter_count + expr.pos() - self.parent_end].expression
+        &self.expressions[self.parameter_count + expr.pos() - self.parent_end]
+            .1
+            .expression
     }
     fn expression_mut(&mut self, expr: ExprRef) -> ArenaExprMut<'_> {
-        let index = if expr.pos() < self.parent_end {
+        let expr = if expr.pos() < self.parent_end {
             self.parent
                 .arena_expression(expr)
                 .param
@@ -894,12 +932,12 @@ impl MetaArena for ParamArena<'_> {
             self.parameter_count + expr.pos() - self.parent_end
         };
         ArenaExprMut {
-            expr: &mut self.expressions[index],
+            expr: &mut self.expressions[expr].1,
         }
     }
     fn alloc_expression(&mut self, expression: ScalarExpression) -> ExprRef {
         let id = ExprRef::new(self.parent_end + self.expressions.len() - self.parameter_count);
-        self.expressions.push(ArenaExpr::new(expression));
+        self.expressions.push((None, ArenaExpr::new(expression)));
         id
     }
     fn alloc_column(&mut self, _: ColumnCatalog) -> ColumnRef {
@@ -951,11 +989,10 @@ mod tests {
         let mut parent = PlanArena::new(&root);
         let id = parent.alloc_expression(ScalarExpression::Constant(DataValue::Int32(1)));
         assert_eq!(parent.arena_expression(id).param, None);
-        *parent.expression_mut(id) =
-            ScalarExpression::Constant(DataValue::Tuple(vec![DataValue::Parameter {
-                id: 1,
-                ty: LogicalType::Integer,
-            }]));
+        *parent.expression_mut(id) = ScalarExpression::Constant(DataValue::Parameter {
+            id: 1,
+            ty: LogicalType::Integer,
+        });
         let parameter_expressions = parent.parameter_expressions();
         assert_eq!(parent.arena_expression(id).param, Some(0));
         {
@@ -963,7 +1000,7 @@ mod tests {
                 ParamArena::new(&parent, &parameter_expressions, &[(1, DataValue::Int32(7))])?;
             assert_eq!(
                 bound.expression(id),
-                &ScalarExpression::Constant(DataValue::Tuple(vec![DataValue::Int32(7)]))
+                &ScalarExpression::Constant(DataValue::Int32(7))
             );
         }
         *parent.expression_mut(id) = ScalarExpression::Constant(DataValue::Int32(2));

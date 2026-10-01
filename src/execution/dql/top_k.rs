@@ -93,17 +93,17 @@ fn top_sort<'a>(
     Ok(())
 }
 
-pub struct TopK {
+pub struct TopK<'a> {
     output: Option<std::iter::Skip<BTreeSetIntoIter<CmpItem<'static>>>>,
     arena: Box<Bump>,
-    sort_fields: Vec<SortField>,
+    sort_fields: &'a [SortField],
     limit: usize,
     offset: Option<usize>,
     input: ExecId,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for TopK {
-    type Input = (TopKOperator, LogicalPlan);
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for TopK<'a> {
+    type Input = (&'a TopKOperator, &'a LogicalPlan);
 
     fn into_executor(
         (
@@ -124,14 +124,14 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for TopK {
             output: None,
             arena: Box::<Bump>::default(),
             sort_fields,
-            limit,
-            offset,
+            limit: *limit,
+            offset: *offset,
             input,
         }))
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for TopK {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for TopK<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -145,7 +145,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for TopK {
             while arena.next_tuple(self.input, plan_arena)? {
                 top_sort(
                     &self.arena,
-                    &self.sort_fields,
+                    self.sort_fields,
                     &mut set,
                     arena.materialize_tuple(),
                     keep_count,

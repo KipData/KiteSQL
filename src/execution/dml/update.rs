@@ -19,8 +19,9 @@ use crate::execution::{
 };
 use crate::iter_ext::Itertools;
 use crate::planner::operator::update::UpdateOperator;
+use crate::planner::ExprRef;
+use crate::planner::LogicalPlan;
 use crate::planner::MetaArena;
-use crate::planner::{ExprRef, LogicalPlan};
 use crate::storage::Transaction;
 use crate::types::index::{Index, IndexMeta, IndexType};
 use crate::types::tuple::{Schema, Tuple};
@@ -28,58 +29,47 @@ use crate::types::tuple_builder::TupleBuilder;
 use crate::types::ColumnId;
 use std::collections::{HashMap, HashSet};
 
-pub struct Update {
-    table_name: TableName,
-    value_exprs: Vec<(ColumnRef, ExprRef)>,
+pub struct Update<'a> {
+    table_name: &'a TableName,
+    value_exprs: &'a [(ColumnRef, ExprRef)],
     input_schema: Schema,
-    input_plan: LogicalPlan,
     input: Option<ExecId>,
 }
 
-impl From<(UpdateOperator, LogicalPlan)> for Update {
-    fn from(
+impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Update<'a> {
+    type Input = (&'a UpdateOperator, &'a LogicalPlan);
+
+    fn into_executor(
         (
             UpdateOperator {
                 table_name,
                 value_exprs,
             },
-            input,
-        ): (UpdateOperator, LogicalPlan),
-    ) -> Self {
-        Update {
-            table_name,
-            value_exprs,
-            input_schema: Default::default(),
-            input_plan: input,
-            input: None,
-        }
-    }
-}
-
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Update {
-    type Input = Self;
-
-    fn into_executor(
-        input: Self::Input,
+            input_plan,
+        ): Self::Input,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let mut executor = input;
-        executor.input_schema = executor.input_plan.take_schema(plan_arena);
-        executor.input = Some(build_read(
+        let input_schema = input_plan.read_schema().clone();
+        let input = Some(build_read(
             arena,
             plan_arena,
-            executor.input_plan.take(),
+            input_plan,
             cache,
             transaction,
         ));
-        arena.push(ExecNode::Update(executor))
+        arena.push(ExecNode::Update(Update {
+            table_name,
+            value_exprs,
+            input_schema,
+            input,
+        }))
     }
 }
 
-impl Update {
+impl Update<'_> {
     fn index_needs_update(
         index_meta: &IndexMeta,
         updated_column_ids: &HashSet<ColumnId>,
@@ -97,7 +87,7 @@ impl Update {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update<'a> {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -110,7 +100,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update {
 
         let mut exprs_map = HashMap::with_capacity(self.value_exprs.len());
         let mut updated_column_ids = HashSet::with_capacity(self.value_exprs.len());
-        for (column, expr) in self.value_exprs.drain(..) {
+        for &(column, expr) in self.value_exprs {
             let column = plan_arena.column(column);
             let column_id = column
                 .id()
@@ -186,7 +176,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update {
                 if primary_key_changed {
                     let mut state = arena.local_state(plan_arena);
                     let (transaction, table_codec) = state.transaction_codec_mut();
-                    transaction.remove_tuple(table_codec, &self.table_name, &old_pk)?;
+                    transaction.remove_tuple(table_codec, self.table_name, &old_pk)?;
                     is_overwrite = false;
                 }
 
@@ -205,20 +195,23 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update {
 
                     let old_index = Index::new(index_id, &old_value, index_ty);
                     let new_index = Index::new(index_id, values, index_ty);
-                    transaction.del_index(table_codec, &self.table_name, &old_index, &old_pk)?;
-                    transaction.add_index(table_codec, &self.table_name, new_index, &new_pk)?;
+                    transaction.del_index(table_codec, self.table_name, &old_index, &old_pk)?;
+                    transaction.add_index(table_codec, self.table_name, new_index, &new_pk)?;
                 }
 
                 tuple.pk = Some(new_pk);
                 let mut state = arena.local_state(plan_arena);
                 let (transaction, table_codec) = state.transaction_codec_mut();
-                transaction.append_tuple(
-                    table_codec,
-                    &self.table_name,
-                    &tuple,
-                    &serializers,
-                    is_overwrite,
-                )?;
+                let stamp = if is_overwrite { 0 } else { table_codec.stamp() };
+                table_codec.with_stamp(stamp, |table_codec| {
+                    transaction.append_tuple(
+                        table_codec,
+                        self.table_name,
+                        &tuple,
+                        &serializers,
+                        is_overwrite,
+                    )
+                })?;
                 updated_count += 1;
             }
 
