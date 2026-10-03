@@ -117,6 +117,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update<'a> {
                 .map(|table| table.dml_snapshot(plan_arena))
                 .transpose()?
         };
+        let mut updated_count = 0;
+
         if let Some(table_snapshot) = table_snapshot {
             let updates_primary_key = table_snapshot.primary_key_indices.iter().any(|index| {
                 table_snapshot
@@ -128,10 +130,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update<'a> {
             let serializers = self
                 .input_schema
                 .iter()
-                .map(|column| plan_arena.column(*column).datatype().serializable())
+                .map(|column: &ColumnRef| plan_arena.column(*column).datatype().serializable())
                 .collect_vec();
-
-            let mut updated_count = 0;
 
             while arena.next_tuple(input, plan_arena)? {
                 let mut is_overwrite = true;
@@ -141,10 +141,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update<'a> {
                     continue;
                 };
 
-                let mut old_index_values = Vec::new();
-                for (index_offset, (index_meta, exprs)) in
-                    table_snapshot.index_metas.iter().enumerate()
-                {
+                for (index_meta, exprs) in table_snapshot.index_metas.iter() {
                     let index_meta = plan_arena.index(*index_meta);
                     if !Self::index_needs_update(
                         index_meta,
@@ -155,8 +152,11 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update<'a> {
                     }
 
                     arena.rewrite(exprs, plan_arena, Some(&tuple))?;
-                    let values = arena.materialize_tuple().values;
-                    old_index_values.push((index_offset, values));
+                    let mut state = arena.local_state(plan_arena);
+                    let (values, transaction, table_codec) =
+                        state.index_values_transaction_codec_mut();
+                    let old_index = Index::new(index_meta.id, values, index_meta.ty);
+                    transaction.del_index(table_codec, self.table_name, &old_index, &old_pk)?;
                 }
                 for (i, column) in self.input_schema.iter().enumerate() {
                     let Some(column_id) = plan_arena.column(*column).id() else {
@@ -180,22 +180,20 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update<'a> {
                     is_overwrite = false;
                 }
 
-                for (index_offset, old_value) in old_index_values {
-                    let (index_meta, exprs) = &table_snapshot.index_metas[index_offset];
+                for (index_meta, exprs) in table_snapshot.index_metas.iter() {
                     let index_meta = plan_arena.index(*index_meta);
-                    let index_id = index_meta.id;
-                    let index_ty = index_meta.ty;
+                    if !Self::index_needs_update(
+                        index_meta,
+                        &updated_column_ids,
+                        updates_primary_key,
+                    ) {
+                        continue;
+                    }
                     arena.rewrite(exprs, plan_arena, Some(&tuple))?;
                     let mut state = arena.local_state(plan_arena);
                     let (values, transaction, table_codec) =
                         state.index_values_transaction_codec_mut();
-                    if !primary_key_changed && old_value == values {
-                        continue;
-                    }
-
-                    let old_index = Index::new(index_id, &old_value, index_ty);
-                    let new_index = Index::new(index_id, values, index_ty);
-                    transaction.del_index(table_codec, self.table_name, &old_index, &old_pk)?;
+                    let new_index = Index::new(index_meta.id, values, index_meta.ty);
                     transaction.add_index(table_codec, self.table_name, new_index, &new_pk)?;
                 }
 
@@ -214,14 +212,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update<'a> {
                 })?;
                 updated_count += 1;
             }
-
-            arena.produce_tuple(TupleBuilder::build_result(updated_count.to_string()));
-            arena.resume();
-            Ok(())
-        } else {
-            arena.produce_tuple(TupleBuilder::build_result("0".to_string()));
-            arena.resume();
-            Ok(())
         }
+        arena.produce_tuple(TupleBuilder::build_result(updated_count.to_string()));
+        arena.resume();
+        Ok(())
     }
 }

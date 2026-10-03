@@ -95,7 +95,6 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
             (unique_meta, DDLApply::upsert_table(table, false))
         };
         arena.push_ddl_apply(apply);
-        let default_for_index = default_value.clone();
 
         let mut state = arena.local_state(plan_arena);
         let plan_arena = state.plan_arena;
@@ -128,7 +127,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
             |transaction, table_codec, tuple| {
                 if let (Some(unique_index_id), Some(value), Some(tuple_id)) = (
                     unique_index_id.as_ref(),
-                    default_for_index.as_ref(),
+                    default_value.as_ref(),
                     tuple.pk.as_ref(),
                 ) {
                     let index = Index::new(

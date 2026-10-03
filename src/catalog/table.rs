@@ -125,6 +125,9 @@ impl TableCatalog {
     ) -> Result<DmlTableSnapshot<'_>, DatabaseError> {
         let index_metas = self
             .indexes()
+            .filter(|index_meta| {
+                !matches!(arena.index(**index_meta).ty, IndexType::PrimaryKey { .. })
+            })
             .map(|index_meta| {
                 Ok((
                     *index_meta,

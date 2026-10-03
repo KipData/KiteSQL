@@ -55,8 +55,6 @@ impl JoinProbeState for LeftJoinState {
                 let full_values =
                     SplitTupleRef::from_slices(values, &probe_state.probe_tuple.values);
                 if !filter(&full_values, filter_expr, plan_arena)? {
-                    probe_state.has_filtered = true;
-                    self.bits.insert(*i);
                     continue;
                 }
             }
@@ -66,15 +64,13 @@ impl JoinProbeState for LeftJoinState {
                     .chain(probe_state.probe_tuple.values.iter())
                     .cloned(),
             );
-            build_state.is_used = true;
+            self.bits.insert(*i);
             return Ok(Some(Tuple::new(
                 pk.as_ref().or(probe_state.probe_tuple.pk.as_ref()).cloned(),
                 full_values,
             )));
         }
 
-        build_state.is_used = !probe_state.has_filtered;
-        build_state.has_filted = probe_state.has_filtered;
         probe_state.finished = true;
         Ok(None)
     }
@@ -88,12 +84,9 @@ impl JoinProbeState for LeftJoinState {
         let full_schema_len = self.right_schema_len + self.left_schema_len;
 
         loop {
-            if let Some(LeftDropTuples {
-                tuples, has_filted, ..
-            }) = left_drop_state.current.as_mut()
-            {
+            if let Some(LeftDropTuples { tuples }) = left_drop_state.current.as_mut() {
                 for (i, mut left_tuple) in tuples.by_ref() {
-                    if !self.bits.contains(i) && *has_filted {
+                    if self.bits.contains(i) {
                         continue;
                     }
                     left_tuple.values.resize(full_schema_len, DataValue::Null);
@@ -106,12 +99,8 @@ impl JoinProbeState for LeftJoinState {
                 return Ok(None);
             };
 
-            if state.is_used {
-                continue;
-            }
             left_drop_state.current = Some(LeftDropTuples {
                 tuples: state.tuples.into_iter(),
-                has_filted: state.has_filted,
             });
         }
     }

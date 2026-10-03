@@ -21,6 +21,7 @@ use crate::iter_ext::Itertools;
 use crate::planner::operator::copy_from_file::CopyFromFileOperator;
 use crate::planner::MetaArena;
 use crate::storage::Transaction;
+use crate::types::tuple::Tuple;
 use crate::types::tuple_builder::TupleBuilder;
 use std::fs::File;
 use std::io::BufReader;
@@ -85,16 +86,16 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyFromFile<'a> {
         let column_count = op.schema_ref.len();
         let tuple_builder = TupleBuilder::new(column_types, Some(table.primary_key_indices()));
 
-        for record in reader.records() {
-            let record = record?;
-
+        let mut record = csv::StringRecord::new();
+        let mut chunk = Tuple::new(None, Vec::with_capacity(column_count));
+        while reader.read_record(&mut record)? {
             if !(record.len() == column_count
                 || record.len() == column_count + 1 && record.get(column_count) == Some(""))
             {
                 return Err(DatabaseError::MisMatch("columns", "values"));
             }
 
-            let chunk = tuple_builder.build_with_row(record.iter())?;
+            tuple_builder.build_with_row(&mut chunk, record.iter().take(column_count))?;
             let mut state = arena.local_state(plan_arena);
             let (transaction, table_codec) = state.transaction_codec_mut();
             transaction.append_tuple(table_codec, &table_name, &chunk, &serializers, false)?;

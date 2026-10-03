@@ -53,12 +53,14 @@ impl<'a> TupleBuilder<'a> {
 
     pub fn build_with_row<'b>(
         &self,
+        tuple: &mut Tuple,
         row: impl IntoIterator<Item = &'b str>,
-    ) -> Result<Tuple, DatabaseError> {
-        let mut values = Vec::with_capacity(self.column_types.len());
+    ) -> Result<(), DatabaseError> {
+        tuple.pk = None;
+        tuple.values.clear();
 
         for (i, value) in row.into_iter().enumerate() {
-            values.push(
+            tuple.values.push(
                 DataValue::Utf8 {
                     value: value.to_string(),
                     ty: Utf8Type::Variable(None),
@@ -67,15 +69,15 @@ impl<'a> TupleBuilder<'a> {
                 .cast(&self.column_types[i])?,
             );
         }
-        if values.len() != self.column_types.len() {
+        if tuple.values.len() != self.column_types.len() {
             return Err(DatabaseError::MisMatch("types", "values"));
         }
 
-        let pk = self
+        tuple.pk = self
             .pk_indices
-            .map(|indices| Tuple::primary_projection(indices, &values));
+            .map(|indices| Tuple::primary_projection(indices, &tuple.values));
 
-        Ok(Tuple::new(pk, values))
+        Ok(())
     }
 }
 
@@ -103,7 +105,7 @@ mod tests {
             ],
             Some(&pk_indices),
         );
-        let tuple = builder.build_with_row(["7", "kite"]).unwrap();
+        builder.build_with_row(&mut tuple, ["7", "kite"]).unwrap();
         assert_eq!(
             tuple.pk,
             Some(DataValue::Tuple(vec![
@@ -117,7 +119,7 @@ mod tests {
         );
 
         assert!(matches!(
-            builder.build_with_row(["7"]),
+            builder.build_with_row(&mut tuple, ["7"]),
             Err(DatabaseError::MisMatch("types", "values"))
         ));
     }

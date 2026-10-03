@@ -44,9 +44,9 @@ impl JoinProbeState for FullJoinState {
             }
             probe_state.emitted_unmatched = true;
             probe_state.finished = true;
-            return Ok(Some(Self::full_right_row(
+            return Ok(Some(Self::take_full_right_row(
                 self.left_schema_len,
-                &probe_state.probe_tuple,
+                &mut probe_state.probe_tuple,
             )));
         }
 
@@ -57,13 +57,13 @@ impl JoinProbeState for FullJoinState {
             }
             probe_state.emitted_unmatched = true;
             probe_state.finished = true;
-            return Ok(Some(Self::full_right_row(
+            return Ok(Some(Self::take_full_right_row(
                 self.left_schema_len,
-                &probe_state.probe_tuple,
+                &mut probe_state.probe_tuple,
             )));
         };
 
-        if probe_state.index < build_state.tuples.len() {
+        while probe_state.index < build_state.tuples.len() {
             let (i, Tuple { values, pk }) = &build_state.tuples[probe_state.index];
             probe_state.index += 1;
 
@@ -71,12 +71,7 @@ impl JoinProbeState for FullJoinState {
                 let full_values =
                     SplitTupleRef::from_slices(values, &probe_state.probe_tuple.values);
                 if !filter(&full_values, filter_expr, plan_arena)? {
-                    probe_state.has_filtered = true;
-                    self.bits.insert(*i);
-                    return Ok(Some(Self::full_right_row(
-                        self.left_schema_len,
-                        &probe_state.probe_tuple,
-                    )));
+                    continue;
                 }
             }
             let full_values = Vec::from_iter(
@@ -85,17 +80,22 @@ impl JoinProbeState for FullJoinState {
                     .chain(probe_state.probe_tuple.values.iter())
                     .cloned(),
             );
-            build_state.is_used = true;
-            build_state.has_filted = probe_state.has_filtered;
+            self.bits.insert(*i);
+            probe_state.produced = true;
             return Ok(Some(Tuple::new(
                 pk.as_ref().or(probe_state.probe_tuple.pk.as_ref()).cloned(),
                 full_values,
             )));
         }
 
-        build_state.is_used = !probe_state.has_filtered;
-        build_state.has_filted = probe_state.has_filtered;
         probe_state.finished = true;
+        if !probe_state.produced && !probe_state.emitted_unmatched {
+            probe_state.emitted_unmatched = true;
+            return Ok(Some(Self::take_full_right_row(
+                self.left_schema_len,
+                &mut probe_state.probe_tuple,
+            )));
+        }
         Ok(None)
     }
 
@@ -108,12 +108,9 @@ impl JoinProbeState for FullJoinState {
         let full_schema_len = self.right_schema_len + self.left_schema_len;
 
         loop {
-            if let Some(LeftDropTuples {
-                tuples, has_filted, ..
-            }) = left_drop_state.current.as_mut()
-            {
+            if let Some(LeftDropTuples { tuples }) = left_drop_state.current.as_mut() {
                 for (i, mut left_tuple) in tuples.by_ref() {
-                    if !self.bits.contains(i) && *has_filted {
+                    if self.bits.contains(i) {
                         continue;
                     }
                     left_tuple.values.resize(full_schema_len, DataValue::Null);
@@ -126,25 +123,20 @@ impl JoinProbeState for FullJoinState {
                 return Ok(None);
             };
 
-            if state.is_used {
-                continue;
-            }
             left_drop_state.current = Some(LeftDropTuples {
                 tuples: state.tuples.into_iter(),
-                has_filted: state.has_filted,
             });
         }
     }
 }
 
 impl FullJoinState {
-    pub(crate) fn full_right_row(left_schema_len: usize, probe_tuple: &Tuple) -> Tuple {
-        let full_values = Vec::from_iter(
-            (0..left_schema_len)
-                .map(|_| DataValue::Null)
-                .chain(probe_tuple.values.iter().cloned()),
-        );
-
-        Tuple::new(probe_tuple.pk.clone(), full_values)
+    pub(crate) fn take_full_right_row(left_schema_len: usize, probe_tuple: &mut Tuple) -> Tuple {
+        let mut tuple = std::mem::take(probe_tuple);
+        tuple
+            .values
+            .resize(tuple.values.len() + left_schema_len, DataValue::Null);
+        tuple.values.rotate_right(left_schema_len);
+        tuple
     }
 }

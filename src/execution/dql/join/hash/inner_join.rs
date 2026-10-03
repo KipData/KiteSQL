@@ -39,7 +39,6 @@ impl JoinProbeState for InnerJoinState {
             return Ok(None);
         };
 
-        build_state.is_used = true;
         while probe_state.index < build_state.tuples.len() {
             let (_, Tuple { values, pk }) = &build_state.tuples[probe_state.index];
             probe_state.index += 1;

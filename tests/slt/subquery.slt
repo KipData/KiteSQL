@@ -499,3 +499,54 @@ drop table users;
 
 statement ok
 drop table orders;
+
+# ScalarApply must preserve its cached first result while validating scalar cardinality.
+statement ok
+create table scalar_eof (id int primary key, v int, keep_row boolean);
+
+statement ok
+insert into scalar_eof values (1, 10, true), (2, 20, false), (3, 30, false);
+
+query I
+select (select v from scalar_eof where keep_row = true);
+----
+10
+
+query I
+select (select v from scalar_eof where keep_row = true order by v desc);
+----
+10
+
+query I
+select coalesce((select v from scalar_eof where id < 0), -1);
+----
+-1
+
+statement error
+select (select v from scalar_eof where id <= 2);
+
+# Reuse the validated scalar result for every outer row, even when checking EOF
+# scans later rows that fail the inner filter.
+query II
+select outer_row.id, (select v from scalar_eof where keep_row = true)
+from scalar_eof outer_row order by outer_row.id;
+----
+1 10
+2 10
+3 10
+
+query II
+select outer_row.id, (select v from scalar_eof where id < 0)
+from scalar_eof outer_row order by outer_row.id;
+----
+1 null
+2 null
+3 null
+
+# Validate before accepting the cached scalar, including a single outer-row limit.
+statement error
+select outer_row.id, (select v from scalar_eof where id <= 2)
+from scalar_eof outer_row order by outer_row.id limit 1;
+
+statement ok
+drop table scalar_eof;

@@ -92,7 +92,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor<'a> {
                 } else {
                     let mut accs = create_accumulators(self.agg_calls, plan_arena)?;
                     update_accumulators(&mut accs, self.agg_calls, tuple, plan_arena)?;
-                    group_hash_accs.insert(group_keys.clone(), accs);
+                    group_hash_accs.insert(std::mem::take(&mut group_keys), accs);
                 }
             }
 

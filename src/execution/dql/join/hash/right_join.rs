@@ -39,9 +39,9 @@ impl JoinProbeState for RightJoinState {
             }
             probe_state.emitted_unmatched = true;
             probe_state.finished = true;
-            return Ok(Some(FullJoinState::full_right_row(
+            return Ok(Some(FullJoinState::take_full_right_row(
                 self.left_schema_len,
-                &probe_state.probe_tuple,
+                &mut probe_state.probe_tuple,
             )));
         }
 
@@ -52,9 +52,9 @@ impl JoinProbeState for RightJoinState {
             }
             probe_state.emitted_unmatched = true;
             probe_state.finished = true;
-            return Ok(Some(FullJoinState::full_right_row(
+            return Ok(Some(FullJoinState::take_full_right_row(
                 self.left_schema_len,
-                &probe_state.probe_tuple,
+                &mut probe_state.probe_tuple,
             )));
         };
 
@@ -66,7 +66,6 @@ impl JoinProbeState for RightJoinState {
                 let full_values =
                     SplitTupleRef::from_slices(values, &probe_state.probe_tuple.values);
                 if !filter(&full_values, filter_expr, plan_arena)? {
-                    probe_state.has_filtered = true;
                     continue;
                 }
             }
@@ -77,23 +76,18 @@ impl JoinProbeState for RightJoinState {
                     .cloned(),
             );
             probe_state.produced = true;
-            build_state.is_used = true;
-            build_state.has_filted = probe_state.has_filtered;
             return Ok(Some(Tuple::new(
                 pk.as_ref().or(probe_state.probe_tuple.pk.as_ref()).cloned(),
                 full_values,
             )));
         }
 
-        build_state.is_used = probe_state.produced;
-        build_state.has_filted = probe_state.has_filtered;
-
         if !probe_state.produced && !probe_state.emitted_unmatched {
             probe_state.emitted_unmatched = true;
             probe_state.finished = true;
-            return Ok(Some(FullJoinState::full_right_row(
+            return Ok(Some(FullJoinState::take_full_right_row(
                 self.left_schema_len,
-                &probe_state.probe_tuple,
+                &mut probe_state.probe_tuple,
             )));
         }
 

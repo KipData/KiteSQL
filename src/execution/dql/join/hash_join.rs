@@ -166,8 +166,9 @@ impl HashJoin {
 
             match build_map.get_mut(&build_buf) {
                 None => {
+                    let key = std::mem::replace(&mut build_buf, BumpVec::new_in(&self.bump));
                     build_map.insert(
-                        Self::own_bump_vec(build_buf.clone()),
+                        Self::own_bump_vec(key),
                         BuildState {
                             tuples: vec![(build_count, tuple)],
                             ..Default::default()
@@ -223,8 +224,6 @@ impl HashJoin {
 #[derive(Default, Debug)]
 pub(crate) struct BuildState {
     pub(crate) tuples: Vec<(usize, Tuple)>,
-    pub(crate) is_used: bool,
-    pub(crate) has_filted: bool,
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
@@ -290,7 +289,6 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashJoin {
                                 is_keys_has_null: probe_buf.iter().any(DataValue::is_null),
                                 probe_tuple: tuple,
                                 index: 0,
-                                has_filtered: false,
                                 produced: false,
                                 finished: false,
                                 emitted_unmatched: false,

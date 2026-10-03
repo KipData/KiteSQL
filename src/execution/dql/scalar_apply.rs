@@ -84,7 +84,13 @@ impl ScalarApply {
                         "scalar apply right input returned no rows".to_string(),
                     ));
                 }
-                Ok(cached_right.insert(arena.materialize_tuple()))
+                let first = arena.materialize_tuple();
+                if arena.next_tuple(right_input, plan_arena)? {
+                    return Err(DatabaseError::InvalidValue(
+                        "scalar apply right input returned more than one row".to_string(),
+                    ));
+                }
+                Ok(cached_right.insert(first))
             }
         }
     }
@@ -187,6 +193,46 @@ mod tests {
             ]
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn scalar_subquery_checks_cardinality_on_second_call() -> Result<(), DatabaseError> {
+        for rows in [
+            vec![],
+            vec![vec![DataValue::Int32(7)]],
+            vec![vec![DataValue::Int32(7)], vec![DataValue::Int32(8)]],
+        ] {
+            let row_count = rows.len();
+            let table_arena = crate::planner::TableArenaCell::default();
+            let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
+            let mut input = build_values(&mut plan_arena, "right_c1", rows);
+            input.populate_output_schema_recursive(&mut plan_arena);
+            let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
+            let transaction = storage.transaction()?;
+            let mut executor =
+                execute_input::<_, crate::execution::dql::scalar_subquery::ScalarSubquery>(
+                    (&ScalarSubqueryOperator, &input),
+                    crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+                    plan_arena,
+                    &transaction,
+                );
+            let expected = if row_count == 0 {
+                DataValue::Null
+            } else {
+                DataValue::Int32(7)
+            };
+            assert_eq!(executor.next_tuple()?.unwrap().values, vec![expected]);
+            if row_count > 1 {
+                assert!(
+                    matches!(executor.next_tuple(), Err(DatabaseError::InvalidValue(message))
+                    if message == "scalar subquery returned more than one row")
+                );
+            } else {
+                assert!(executor.next_tuple()?.is_none());
+                assert!(executor.next_tuple()?.is_none());
+            }
+        }
         Ok(())
     }
 

@@ -156,6 +156,7 @@ pub struct LogicalPlan {
     pub(crate) childrens: Box<Childrens>,
     pub(crate) physical_option: Option<PhysicalOption>,
     output_schema: Option<crate::types::tuple::Schema>,
+    exec_capacity_hint: usize,
 }
 
 impl LogicalPlan {
@@ -165,6 +166,7 @@ impl LogicalPlan {
             childrens: Box::new(childrens),
             physical_option: None,
             output_schema: None,
+            exec_capacity_hint: 0,
         }
     }
 
@@ -359,20 +361,30 @@ impl LogicalPlan {
             .expect("output schema must be computed before it is read")
     }
 
+    pub(crate) fn exec_capacity_hint(&self) -> usize {
+        self.exec_capacity_hint
+    }
+
     pub(crate) fn populate_output_schema_recursive(&mut self, arena: &mut (dyn MetaArena + '_)) {
-        match self.childrens.as_mut() {
-            Childrens::Only(child) => child.populate_output_schema_recursive(arena),
+        let child_nodes = match self.childrens.as_mut() {
+            Childrens::Only(child) => {
+                child.populate_output_schema_recursive(arena);
+                child.exec_capacity_hint
+            }
             Childrens::Twins { left, right } => {
                 left.populate_output_schema_recursive(arena);
                 right.populate_output_schema_recursive(arena);
+                left.exec_capacity_hint + right.exec_capacity_hint
             }
-            Childrens::None => (),
-        }
+            Childrens::None => 0,
+        };
+        self.exec_capacity_hint = 1 + child_nodes;
         self.output_schema(arena);
     }
 
     pub fn reset_output_schema_cache(&mut self) {
         self.output_schema = None;
+        self.exec_capacity_hint = 0;
     }
 
     pub fn reset_output_schema_cache_recursive(&mut self) {
@@ -420,6 +432,7 @@ impl Clone for LogicalPlan {
             childrens: self.childrens.clone(),
             physical_option: self.physical_option.clone(),
             output_schema: self.output_schema.clone(),
+            exec_capacity_hint: self.exec_capacity_hint,
         }
     }
 }
@@ -504,6 +517,7 @@ impl crate::serdes::ReferenceSerialization for LogicalPlan {
             childrens,
             physical_option,
             output_schema: None,
+            exec_capacity_hint: 0,
         })
     }
 }

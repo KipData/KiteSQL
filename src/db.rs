@@ -589,7 +589,7 @@ impl<S: Storage> State<S> {
         let keeper = PlanKeeper::new(plan);
         let plan = keeper.plan();
         let schema = plan.read_schema().clone();
-        let mut arena = ExecArena::new();
+        let mut arena = ExecArena::with_capacity(plan.exec_capacity_hint());
         arena.set_statement_stamp(statement_stamp(transaction, plan)?);
         let read_context = ExecutionContext::new(
             &self.table_cache,
@@ -665,7 +665,7 @@ impl<S: Storage> State<S> {
         let keeper = PlanKeeper::new(PlanInput::Owned(plan));
         let plan = keeper.plan();
         let schema = plan.read_schema().clone();
-        let mut arena = ExecArena::new();
+        let mut arena = ExecArena::with_capacity(plan.exec_capacity_hint());
         arena.set_statement_stamp(statement_stamp(transaction, plan)?);
         let cache = ExecutionContext::new(
             table_cache,
