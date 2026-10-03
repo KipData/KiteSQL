@@ -54,14 +54,19 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarSubquery {
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<(), DatabaseError> {
+        let has_next = arena.next_tuple(self.input, plan_arena)?;
         if self.returned {
+            if has_next {
+                return Err(DatabaseError::InvalidValue(
+                    "scalar subquery returned more than one row".to_string(),
+                ));
+            }
             arena.finish();
             return Ok(());
         }
         self.returned = true;
 
-        let has_first = arena.next_tuple(self.input, plan_arena)?;
-        if !has_first {
+        if !has_next {
             let output = arena.result_tuple_mut();
             output.pk = None;
             output.values.clear();
@@ -70,12 +75,6 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarSubquery {
                 .extend((0..self.value_count).map(|_| DataValue::Null));
             arena.resume();
             return Ok(());
-        }
-
-        if arena.next_tuple(self.input, plan_arena)? {
-            return Err(DatabaseError::InvalidValue(
-                "scalar subquery returned more than one row".to_string(),
-            ));
         }
 
         arena.resume();

@@ -223,8 +223,6 @@ impl HashJoin {
 #[derive(Default, Debug)]
 pub(crate) struct BuildState {
     pub(crate) tuples: Vec<(usize, Tuple)>,
-    pub(crate) is_used: bool,
-    pub(crate) has_filted: bool,
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
@@ -290,7 +288,6 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashJoin {
                                 is_keys_has_null: probe_buf.iter().any(DataValue::is_null),
                                 probe_tuple: tuple,
                                 index: 0,
-                                has_filtered: false,
                                 produced: false,
                                 finished: false,
                                 emitted_unmatched: false,

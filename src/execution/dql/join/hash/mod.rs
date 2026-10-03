@@ -34,7 +34,6 @@ pub(crate) struct ProbeState {
     pub(crate) is_keys_has_null: bool,
     pub(crate) probe_tuple: Tuple,
     pub(crate) index: usize,
-    pub(crate) has_filtered: bool,
     pub(crate) produced: bool,
     pub(crate) finished: bool,
     pub(crate) emitted_unmatched: bool,
@@ -47,7 +46,6 @@ pub(crate) struct LeftDropState {
 
 pub(crate) struct LeftDropTuples {
     pub(crate) tuples: std::vec::IntoIter<(usize, Tuple)>,
-    pub(crate) has_filted: bool,
 }
 
 pub(crate) trait JoinProbeState {

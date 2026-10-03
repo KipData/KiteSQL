@@ -106,3 +106,44 @@ select v1 as a from t order by a
 
 statement ok
 drop table t
+
+# TopK retains duplicate keys and handles replacement followed by equal keys.
+statement ok
+create table tk_duplicates (id int primary key, k int);
+
+statement ok
+insert into tk_duplicates values (1, 9), (2, 1), (3, 1), (4, 1), (5, 0), (6, 0), (7, null), (8, null);
+
+query I
+select k from tk_duplicates order by k asc nulls last limit 4;
+----
+0
+0
+1
+1
+
+query I
+select k from tk_duplicates order by k asc nulls last limit 3 offset 1;
+----
+0
+1
+1
+
+query I
+select k from tk_duplicates order by k desc nulls last limit 4;
+----
+9
+1
+1
+1
+
+query I
+select coalesce(k, -1) from tk_duplicates order by k asc nulls first limit 4;
+----
+-1
+-1
+0
+0
+
+statement ok
+drop table tk_duplicates;
